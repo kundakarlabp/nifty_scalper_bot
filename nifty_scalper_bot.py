@@ -1,4 +1,4 @@
-# nifty_scalper_bot.py (Final version)
+# nifty_scalper_bot.py (Live Market Order Version with SL/TP Handling)
 import time
 import requests
 from kiteconnect import KiteConnect
@@ -27,7 +27,7 @@ def get_ltp(symbol):
     except:
         return None
 
-# --- Signal Logic (Dummy) ---
+# --- Dummy Signal Logic (Replace with real logic) ---
 def generate_signal():
     now = datetime.now().strftime("%H:%M:%S")
     return {
@@ -46,40 +46,55 @@ def generate_signal():
         "timestamp": now
     }
 
-# --- GTT Order Handling ---
-def place_gtt_order(trade_type, strike, entry, sl, tp):
+# --- Order Placement Logic ---
+def place_market_order(trade_type, strike):
     try:
-        symbol = f"NIFTY{strike}CE" if "CE" in trade_type else f"NIFTY{strike}PE"
-        trigger_value = entry  # must be provided
-
-        gtt_params = {
-            "tradingsymbol": symbol,
-            "exchange": kite.EXCHANGE_NFO,
-            "trigger_type": kite.GTT_TYPE_OCO,
-            "trigger_values": [sl, tp],
-            "last_price": entry,
-            "orders": [
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity": QUANTITY,
-                    "price": tp,
-                    "order_type": kite.ORDER_TYPE_LIMIT,
-                    "product": kite.PRODUCT_MIS
-                },
-                {
-                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
-                    "quantity": QUANTITY,
-                    "price": sl,
-                    "order_type": kite.ORDER_TYPE_LIMIT,
-                    "product": kite.PRODUCT_MIS
-                }
-            ]
-        }
-
-        response = kite.place_gtt(**gtt_params)
-        return symbol, response['trigger_id']
+        tradingsymbol = f"NIFTY{strike}CE" if "CE" in trade_type else f"NIFTY{strike}PE"
+        order = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=tradingsymbol,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=QUANTITY,
+            order_type=kite.ORDER_TYPE_MARKET,
+            product=kite.PRODUCT_MIS
+        )
+        return tradingsymbol, order['order_id']
     except Exception as e:
-        return None, f"❌ GTT Failed: {str(e)}"
+        return None, f"❌ Order Failed: {str(e)}"
+
+def place_exit_orders(tradingsymbol, target, sl):
+    try:
+        ltp = get_ltp(tradingsymbol)
+        if not ltp:
+            return None, None
+
+        tp_order = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=tradingsymbol,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=QUANTITY,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=target,
+            product=kite.PRODUCT_MIS
+        )
+
+        sl_order = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=tradingsymbol,
+            transaction_type=kite.TRANSACTION_TYPE_SELL,
+            quantity=QUANTITY,
+            order_type=kite.ORDER_TYPE_SL,
+            trigger_price=sl,
+            price=sl,
+            product=kite.PRODUCT_MIS
+        )
+        return tp_order['order_id'], sl_order['order_id']
+    except Exception as e:
+        send_telegram(f"❌ Exit Order Failed: {str(e)}")
+        return None, None
 
 # --- Real-Time Bot Loop ---
 if __name__ == "__main__":
@@ -97,34 +112,19 @@ if __name__ == "__main__":
             )
             send_telegram(msg)
 
-            symbol, gtt_id = place_gtt_order(
-                signal["type"], signal["strike"], signal["price"], signal["sl"], signal["target"]
-            )
-            send_telegram(f"📤 GTT Placed: {symbol} ID: {gtt_id}")
-
+            symbol, order_id = place_market_order(signal["type"], signal["strike"])
             if symbol:
+                tp_id, sl_id = place_exit_orders(symbol, signal["target"], signal["sl"])
+                send_telegram(f"📤 Entry: {symbol} Order ID: {order_id}\n🎯 TP Order ID: {tp_id} | 🛑 SL Order ID: {sl_id}")
                 active_trade = {
                     "symbol": symbol,
-                    "gtt_id": gtt_id,
-                    "entry": signal["price"],
-                    "sl": signal["sl"],
-                    "tp": signal["target"]
+                    "tp": signal['target'],
+                    "sl": signal['sl'],
+                    "tp_id": tp_id,
+                    "sl_id": sl_id
                 }
                 last_signal = signal
 
-        # Real-time adjustment (mock logic)
-        if active_trade:
-            ltp = get_ltp(active_trade["symbol"])
-            if ltp:
-                new_tp = round(ltp + 15, 1)
-                new_sl = round(ltp - 10, 1)
-                if new_tp > active_trade["tp"] or new_sl > active_trade["sl"]:
-                    try:
-                        kite.delete_gtt(active_trade["gtt_id"])
-                        symbol, gtt_id = place_gtt_order("BUY CE", int(active_trade["symbol"][5:-2]), ltp, new_sl, new_tp)
-                        active_trade.update({"gtt_id": gtt_id, "sl": new_sl, "tp": new_tp})
-                        send_telegram(f"🔁 GTT Modified: SL={new_sl} TP={new_tp} for {symbol}")
-                    except Exception as e:
-                        send_telegram(f"⚠️ GTT Update Failed: {e}")
+        # Modify SL/TP dynamically (optional logic can be added)
 
         time.sleep(3)
