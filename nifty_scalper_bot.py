@@ -14,12 +14,11 @@ QUANTITY = 50
 kite = KiteConnect(api_key=API_KEY)
 kite.set_access_token(ACCESS_TOKEN)
 
-# --- Telegram Alert ---
+# --- Utilities ---
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
-# --- Get Live Price ---
 def get_ltp(symbol):
     try:
         quote = kite.ltp([symbol])
@@ -27,7 +26,7 @@ def get_ltp(symbol):
     except:
         return None
 
-# --- Signal Generator (dummy logic) ---
+# --- Dummy Signal Logic (replace with real strategy later) ---
 def generate_signal():
     now = datetime.now().strftime("%H:%M:%S")
     return {
@@ -46,7 +45,7 @@ def generate_signal():
         "timestamp": now
     }
 
-# --- Place Zerodha GTT Order ---
+# --- GTT Order Handling ---
 def place_gtt_order(trade_type, strike, entry, sl, tp):
     try:
         symbol = f"NIFTY{strike}CE" if "CE" in trade_type else f"NIFTY{strike}PE"
@@ -54,10 +53,23 @@ def place_gtt_order(trade_type, strike, entry, sl, tp):
             "tradingsymbol": symbol,
             "exchange": kite.EXCHANGE_NFO,
             "trigger_type": kite.GTT_TYPE_OCO,
+            "trigger_values": [entry],  # ✅ Required field
             "last_price": entry,
             "orders": [
-                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": QUANTITY, "price": tp, "order_type": kite.ORDER_TYPE_LIMIT, "product": kite.PRODUCT_MIS},
-                {"transaction_type": kite.TRANSACTION_TYPE_SELL, "quantity": QUANTITY, "price": sl, "order_type": kite.ORDER_TYPE_LIMIT, "product": kite.PRODUCT_MIS}
+                {
+                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                    "quantity": QUANTITY,
+                    "price": tp,
+                    "order_type": kite.ORDER_TYPE_LIMIT,
+                    "product": kite.PRODUCT_MIS
+                },
+                {
+                    "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                    "quantity": QUANTITY,
+                    "price": sl,
+                    "order_type": kite.ORDER_TYPE_LIMIT,
+                    "product": kite.PRODUCT_MIS
+                }
             ]
         }
         response = kite.place_gtt(**gtt_params)
@@ -65,7 +77,7 @@ def place_gtt_order(trade_type, strike, entry, sl, tp):
     except Exception as e:
         return None, f"❌ GTT Failed: {str(e)}"
 
-# --- Main Loop ---
+# --- Bot Loop ---
 if __name__ == "__main__":
     last_signal = None
     active_trade = None
@@ -94,7 +106,7 @@ if __name__ == "__main__":
                 }
                 last_signal = signal
 
-        # SL/TP Auto-Review & Update
+        # SL/TP Optimization
         if active_trade:
             ltp = get_ltp(active_trade["symbol"])
             if ltp:
