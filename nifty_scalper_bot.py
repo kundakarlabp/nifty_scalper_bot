@@ -1,3 +1,4 @@
+# nifty_scalper_bot.py (Final version)
 import time
 import requests
 from kiteconnect import KiteConnect
@@ -26,7 +27,7 @@ def get_ltp(symbol):
     except:
         return None
 
-# --- Dummy Signal Logic (replace with real strategy later) ---
+# --- Signal Logic (Dummy) ---
 def generate_signal():
     now = datetime.now().strftime("%H:%M:%S")
     return {
@@ -49,11 +50,13 @@ def generate_signal():
 def place_gtt_order(trade_type, strike, entry, sl, tp):
     try:
         symbol = f"NIFTY{strike}CE" if "CE" in trade_type else f"NIFTY{strike}PE"
+        trigger_value = entry  # must be provided
+
         gtt_params = {
             "tradingsymbol": symbol,
             "exchange": kite.EXCHANGE_NFO,
             "trigger_type": kite.GTT_TYPE_OCO,
-            "trigger_values": [entry],  # ✅ Required field
+            "trigger_values": [trigger_value],
             "last_price": entry,
             "orders": [
                 {
@@ -72,12 +75,13 @@ def place_gtt_order(trade_type, strike, entry, sl, tp):
                 }
             ]
         }
+
         response = kite.place_gtt(**gtt_params)
         return symbol, response['trigger_id']
     except Exception as e:
         return None, f"❌ GTT Failed: {str(e)}"
 
-# --- Bot Loop ---
+# --- Real-Time Bot Loop ---
 if __name__ == "__main__":
     last_signal = None
     active_trade = None
@@ -87,13 +91,15 @@ if __name__ == "__main__":
 
         if signal['confidence'] >= 9 and signal != last_signal and not active_trade:
             msg = (
-                f"📈 {signal['type']} {signal['strike']} — ₹{signal['price']} 🎯{signal['target']} | 🛑{signal['sl']}\n"
+                f"\n📈 {signal['type']} {signal['strike']} — ₹{signal['price']} 🎯{signal['target']} | 🛑{signal['sl']}\n"
                 f"⭐ {signal['confidence']}/10 | {signal['reason']}\n"
                 f"📊 OI{signal['oi']} | Δ{signal['delta']} | Θ{signal['theta']} | IV {signal['iv']} | Exp: {signal['expiry']}"
             )
             send_telegram(msg)
 
-            symbol, gtt_id = place_gtt_order(signal["type"], signal["strike"], signal["price"], signal["sl"], signal["target"])
+            symbol, gtt_id = place_gtt_order(
+                signal["type"], signal["strike"], signal["price"], signal["sl"], signal["target"]
+            )
             send_telegram(f"📤 GTT Placed: {symbol} ID: {gtt_id}")
 
             if symbol:
@@ -106,7 +112,7 @@ if __name__ == "__main__":
                 }
                 last_signal = signal
 
-        # SL/TP Optimization
+        # Real-time adjustment (mock logic)
         if active_trade:
             ltp = get_ltp(active_trade["symbol"])
             if ltp:
@@ -118,7 +124,7 @@ if __name__ == "__main__":
                         symbol, gtt_id = place_gtt_order("BUY CE", int(active_trade["symbol"][5:-2]), ltp, new_sl, new_tp)
                         active_trade.update({"gtt_id": gtt_id, "sl": new_sl, "tp": new_tp})
                         send_telegram(f"🔁 GTT Modified: SL={new_sl} TP={new_tp} for {symbol}")
-                    except:
-                        pass
+                    except Exception as e:
+                        send_telegram(f"⚠️ GTT Update Failed: {e}")
 
         time.sleep(3)
