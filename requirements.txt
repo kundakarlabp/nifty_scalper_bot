@@ -11,4 +11,8 @@ python-telegram-bot
 waitress
 matplotlib
 seaborn
+<<<<<<< HEAD
 TA-Lib
+=======
+TA-Lib
+>>>>>>> 52dc2af26624875a0b3d73279a5f7087db44fb54
