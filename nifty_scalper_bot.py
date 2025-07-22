@@ -188,14 +188,3 @@ if __name__ == '__main__':
     while True:
         controller.auto_trade()
         time.sleep(300)
-@app.route('/')
-def home():
-    return """
-    <h1>Nifty Scalper Bot is Live 🎉</h1>
-    <p>Available endpoints:</p>
-    <ul>
-        <li><a href="/status">/status</a></li>
-        <li><a href="/trade (use POST)">/trade</a></li>
-    </ul>
-    <p>Use <code>curl -X POST https://nifty-scalper-bot.onrender.com/trade</code> to trigger a trade.</p>
-    """
