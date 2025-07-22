@@ -1,2 +1,10 @@
-kiteconnect
-requests
+python-telegram-bot==13.7
+kiteconnect>=3.9.0,<4.0
+pandas
+numpy>=1.24.0,<1.27
+yfinance
+scikit-learn
+scipy
+ccxt
+talib
+python-dotenv
