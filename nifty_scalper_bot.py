@@ -183,7 +183,8 @@ def status():
 
 if __name__ == '__main__':
     from waitress import serve
-    Thread(target=lambda: serve(app, host='0.0.0.0', port=8080), daemon=True).start()
+    port = int(os.getenv('PORT', 10000))
+    Thread(target=lambda: serve(app, host='0.0.0.0', port=port), daemon=True).start()
     while True:
         controller.auto_trade()
         time.sleep(300)
