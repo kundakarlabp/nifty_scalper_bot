@@ -25,7 +25,8 @@ import telegram
 from telegram.ext import Updater, CommandHandler
 
 app = Flask(__name__)
-redis_conn = Redis()
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+redis_conn = Redis.from_url(redis_url)
 task_queue = Queue(connection=redis_conn)
 
 # ================================
