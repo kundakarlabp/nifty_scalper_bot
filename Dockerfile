@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y \
     tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and build TA-Lib C library (fix for compilation errors)
-RUN wget -q http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+# Download and build TA-Lib C library from GitHub
+RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
     ./configure --prefix=/usr/local && \
@@ -25,17 +25,19 @@ RUN wget -q http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz &&
 # Set library path
 ENV LD_LIBRARY_PATH /usr/local/lib:$LD_LIBRARY_PATH
 
-# Copy requirements
+# Copy requirements.txt
 COPY requirements.txt .
 
-# Upgrade pip and install Python packages
+# Upgrade pip and install numpy first (pin to avoid TA-Lib issues)
 RUN pip install --upgrade pip && \
+    pip install "numpy<2.0.0" && \
+    pip install --no-cache-dir TA-Lib && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the app
 COPY . .
 
-# Expose port
+# Expose the port Render expects
 EXPOSE 10000
 
 # Start the app
