@@ -13,7 +13,7 @@ RUN pip install --upgrade pip && \\
 # Copy the rest of the app
 COPY . .
 
-# Expose the port Render expects
+# Expose port
 EXPOSE 10000
 
 # Start the app
