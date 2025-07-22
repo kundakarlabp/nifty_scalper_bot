@@ -4,11 +4,10 @@ redis
 pandas
 numpy
 scikit-learn
-keras
 tensorflow-cpu
 kiteconnect
 python-telegram-bot
 waitress
 matplotlib
 seaborn
-TA-Lib
+pandas-ta==0.3.14b0
