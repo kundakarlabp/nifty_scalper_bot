@@ -1,4 +1,4 @@
-tensorflow-cpu
+tensorflow-cpu>=2.9.0
 numpy==1.23.5
 pandas
 flask
