@@ -1,16 +1,16 @@
-# Use official Python 3.10 image (compatible with your .python-version)
+# Use official Python 3.10 image
 FROM python:3.10
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for TA-Lib (this is the key step!)
+# Install system dependencies for TA-Lib
 RUN apt-get update && apt-get install -y \
     build-essential \
     libta-lib-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements.txt first
+# Copy requirements.txt
 COPY requirements.txt .
 
 # Upgrade pip and install Python packages
