@@ -1,4 +1,4 @@
-# nifty_scalper_bot.py - Final Optimized Version
+# nifty_scalper_bot.py - Final Fix: RQ-Compatible Task Queue
 import os
 import time
 import logging
@@ -16,14 +16,14 @@ import telegram
 from telegram.ext import Updater, CommandHandler
 
 # ================================
-# Flask & Redis Setup
+# Flask & Redis
 # ================================
 app = Flask(__name__)
 redis_conn = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'), decode_responses=True)
 task_queue = Queue(connection=redis_conn)
 
 # ================================
-# SignalEngine – AI & Indicators
+# SignalEngine - AI & Indicators
 # ================================
 class SignalEngine:
     def __init__(self):
@@ -38,26 +38,38 @@ class SignalEngine:
         df['macd'] = macd['MACD_12_26_9']
         df['macdsignal'] = macd['SIGNAL_12_26_9']
         df['adx'] = ta.adx(df['High'], df['Low'], df['Close'])['ADX_14']
-        df['mfi'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
+        df['mfi'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'])
         df['bb_upper'] = ta.bbands(df['Close'], length=20)['BBU_20_2.0']
         df['bb_lower'] = ta.bbands(df['Close'], length=20)['BBL_20_2.0']
         return df
 
     def generate_signal(self, df):
         df = self.compute_indicators(df)
-        df.dropna(inplace=True)
         last = df.iloc[-1]
-        score = sum([
+        close = last['Close']
+
+        buy_ce_score = sum([
             (last['ema_9'] > last['ema_21']) * 1.0,
-            (last['rsi'] < 30) * 0.8,
+            (last['rsi'] < 35) * 0.8,
             (last['macd'] > last['macdsignal']) * 0.7,
             (last['adx'] > 25) * 0.5,
-            (last['mfi'] < 20) * 0.5
+            (last['mfi'] < 20) * 0.5,
+            (close > last['bb_lower']) * 0.3
         ])
-        return score
+
+        buy_pe_score = sum([
+            (last['ema_9'] < last['ema_21']) * 1.0,
+            (last['rsi'] > 65) * 0.8,
+            (last['macd'] < last['macdsignal']) * 0.7,
+            (last['adx'] > 25) * 0.5,
+            (last['mfi'] > 80) * 0.5,
+            (close < last['bb_upper']) * 0.3
+        ])
+
+        return buy_ce_score, buy_pe_score
 
 # ================================
-# BotController – Trading Logic
+# BotController - Trading Logic
 # ================================
 class BotController:
     def __init__(self):
@@ -77,6 +89,7 @@ class BotController:
         self.logger = self.setup_logging()
         self.updater = Updater(token=self.config['TELEGRAM_BOT_TOKEN'], use_context=True)
         self.register_commands()
+        self.register_telegram_webhook()
 
     def setup_logging(self):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -132,7 +145,8 @@ class BotController:
         if self.current_trade:
             context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="⚠️ Already in a trade!")
             return
-        task_queue.enqueue(self.auto_trade)
+        # Enqueue a top-level function, not self.auto_trade
+        task_queue.enqueue(auto_trade_job)
         context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="🔍 Looking for trade...")
 
     def cmd_exit(self, update, context):
@@ -164,33 +178,6 @@ class BotController:
         except:
             context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="❌ Usage: /tp 210")
 
-    def auto_trade(self):
-        if not self.is_market_hours():
-            return
-        if self.current_trade:
-            return
-        try:
-            df = self.kite.historical_data(260105, datetime.now() - timedelta(days=5), datetime.now(), '5minute')
-            df = pd.DataFrame(df)
-            score = self.engine.generate_signal(df)
-            entry = df['close'].iloc[-1]
-            sl = entry * 0.97
-            tp = entry * 1.05
-
-            if score > 0.7:
-                self.current_trade = {
-                    'symbol': 'NIFTY22500CE',
-                    'entry': entry,
-                    'sl': sl,
-                    'tp': tp,
-                    'pnl': 0,
-                    'highest': entry,
-                    'timestamp': datetime.now().isoformat()
-                }
-                self.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text=f"📈 BUY CE – ₹{entry:.2f}\n🎯 TP: {tp:.2f}\n🛑 SL: {sl:.2f}")
-        except Exception as e:
-            self.logger.error(f"Auto-trade error: {e}")
-
     def exit_trade(self):
         if not self.current_trade:
             return
@@ -198,36 +185,112 @@ class BotController:
         self.current_trade = None
         self.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="✅ Trade exited.")
 
-    def monitor_trade_with_trailing_sl(self):
-        while True:
-            time.sleep(60)  # Check every 60 seconds
-            if not self.current_trade or not self.is_market_hours():
-                continue
-            try:
-                ticker = self.kite.ltp(self.current_trade['symbol'])
-                last_price = ticker[self.current_trade['symbol']]['last_price']
-                new_high = max(self.current_trade['highest'], last_price)
-                trailing_sl = new_high * 0.97
-                self.current_trade['highest'] = new_high
-                self.current_trade['sl'] = trailing_sl
-
-                if last_price <= trailing_sl:
-                    self.exit_trade()
-                    self.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text=f"🛑 Trailing SL Hit! Price: {last_price:.2f}")
-                else:
-                    self.current_trade['pnl'] = (last_price - self.current_trade['entry']) * 75
-            except Exception as e:
-                self.logger.error(f"Monitor error: {e}")
-
     def is_market_hours(self):
         now = datetime.now().time()
-        return datetime.strptime("09:15", "%H:%M").time() <= now <= datetime.strptime("15:30", "%H:%M").time()
+        market_open = datetime.strptime("09:15", "%H:%M").time()
+        market_close = datetime.strptime("15:30", "%H:%M").time()
+        return market_open <= now <= market_close
+
+# ================================
+# Top-Level Functions (RQ-Compatible)
+# ================================
+def auto_trade_job():
+    """Top-level function that RQ can enqueue"""
+    if not controller.is_market_hours():
+        return
+    if controller.current_trade:
+        return
+    try:
+        df = controller.kite.historical_data(260105, datetime.now() - timedelta(days=5), datetime.now(), '5minute')
+        df = pd.DataFrame(df)
+        buy_ce_score, buy_pe_score = controller.engine.generate_signal(df)
+        entry = df['close'].iloc[-1]
+
+        if buy_ce_score > 0.7:
+            sl = entry * 0.97
+            tp = entry * 1.05
+            controller.current_trade = {
+                'symbol': 'NIFTY22500CE',
+                'entry': entry,
+                'sl': sl,
+                'tp': tp,
+                'pnl': 0,
+                'highest': entry,
+                'type': 'CE',
+                'timestamp': datetime.now().isoformat()
+            }
+            controller.bot.send_message(
+                chat_id=controller.config['TELEGRAM_CHAT_ID'],
+                text=f"📈 BUY CE — ₹{entry:.2f}\n🎯 TP: {tp:.2f}\n🛑 SL: {sl:.2f}"
+            )
+        elif buy_pe_score > 0.7:
+            sl = entry * 1.03
+            tp = entry * 0.95
+            controller.current_trade = {
+                'symbol': 'NIFTY22500PE',
+                'entry': entry,
+                'sl': sl,
+                'tp': tp,
+                'pnl': 0,
+                'lowest': entry,
+                'type': 'PE',
+                'timestamp': datetime.now().isoformat()
+            }
+            controller.bot.send_message(
+                chat_id=controller.config['TELEGRAM_CHAT_ID'],
+                text=f"📉 BUY PE — ₹{entry:.2f}\n🎯 TP: {tp:.2f}\n🛑 SL: {sl:.2f}"
+            )
+    except Exception as e:
+        controller.logger.error(f"Auto-trade error: {e}")
+
+def monitor_trade_with_trailing_sl():
+    while True:
+        time.sleep(60)
+        if not controller.current_trade or not controller.is_market_hours():
+            continue
+        try:
+            symbol = controller.current_trade['symbol']
+            ticker = controller.kite.quote(f"NFO:{symbol}")
+            last_price = ticker[f"NFO:{symbol}"]["last_price"]
+
+            if controller.current_trade['type'] == 'CE':
+                new_high = max(controller.current_trade['highest'], last_price)
+                trailing_sl = new_high * 0.97
+                controller.current_trade['highest'] = new_high
+                controller.current_trade['sl'] = trailing_sl
+
+                if last_price <= trailing_sl:
+                    controller.exit_trade()
+                    controller.bot.send_message(
+                        chat_id=controller.config['TELEGRAM_CHAT_ID'],
+                        text=f"🛑 Trailing SL Hit! Price: {last_price:.2f}"
+                    )
+                else:
+                    controller.current_trade['pnl'] = (last_price - controller.current_trade['entry']) * 75
+
+            elif controller.current_trade['type'] == 'PE':
+                new_low = min(controller.current_trade['lowest'], last_price)
+                trailing_sl = new_low * 1.03
+                controller.current_trade['lowest'] = new_low
+                controller.current_trade['sl'] = trailing_sl
+
+                if last_price >= trailing_sl:
+                    controller.exit_trade()
+                    controller.bot.send_message(
+                        chat_id=controller.config['TELEGRAM_CHAT_ID'],
+                        text=f"🛑 Trailing SL Hit! Price: {last_price:.2f}"
+                    )
+                else:
+                    controller.current_trade['pnl'] = (controller.current_trade['entry'] - last_price) * 75
+
+        except Exception as e:
+            controller.logger.error(f"Monitor error: {e}")
 
 # ================================
 # Initialize Everything
 # ================================
 controller = BotController()
-Thread(target=controller.monitor_trade_with_trailing_sl, daemon=True).start()
+Thread(target=monitor_trade_with_trailing_sl, daemon=True).start()
 
 # ================================
 # Auto-Scheduler (Every 1 Minute)
@@ -235,8 +298,8 @@ Thread(target=controller.monitor_trade_with_trailing_sl, daemon=True).start()
 def run_scheduler():
     while True:
         if controller.is_market_hours() and controller.current_trade is None:
-            task_queue.enqueue(controller.auto_trade)
-        time.sleep(60)  # Every 1 minute
+            task_queue.enqueue(auto_trade_job)
+        time.sleep(60)
 
 Thread(target=run_scheduler, daemon=True).start()
 
@@ -251,14 +314,15 @@ def home():
 def trigger_trade():
     if controller.current_trade:
         return jsonify({'status': 'Already in trade'})
-    job = task_queue.enqueue(controller.auto_trade)
+    job = task_queue.enqueue(auto_trade_job)
     return jsonify({'status': 'Trade queued', 'job_id': job.id})
 
 @app.route('/status', methods=['GET'])
 def status():
     return jsonify({
         'trades': len(controller.trade_logs),
-        'current_trade': controller.current_trade
+        'current_trade': controller.current_trade,
+        'market_hours': controller.is_market_hours()
     })
 
 # ================================
