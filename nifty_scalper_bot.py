@@ -1,4 +1,4 @@
-# nifty_scalper_bot.py – Final Optimized Version
+# nifty_scalper_bot.py - Final Optimized Version
 import os
 import time
 import logging
@@ -65,7 +65,7 @@ class BotController:
             'ZERODHA_API_KEY': os.getenv('ZERODHA_API_KEY'),
             'ZERODHA_ACCESS_TOKEN': os.getenv('ZERODHA_ACCESS_TOKEN'),
             'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN'),
-            'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID'),
+            'TELEGRAM_CHAT_ID': int(os.getenv('TELEGRAM_CHAT_ID')),
             'DRY_RUN': os.getenv('DRY_RUN', 'true').lower() == 'true'
         }
         self.kite = KiteConnect(api_key=self.config['ZERODHA_API_KEY'])
@@ -77,7 +77,6 @@ class BotController:
         self.logger = self.setup_logging()
         self.updater = Updater(token=self.config['TELEGRAM_BOT_TOKEN'], use_context=True)
         self.register_commands()
-        self.register_telegram_webhook()
 
     def setup_logging(self):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -90,10 +89,20 @@ class BotController:
         dp.add_handler(CommandHandler('export', self.cmd_export))
         dp.add_handler(CommandHandler('trade', self.cmd_trade))
         dp.add_handler(CommandHandler('exit', self.cmd_exit))
+        dp.add_handler(CommandHandler('sl', self.cmd_sl))
+        dp.add_handler(CommandHandler('tp', self.cmd_tp))
         self.updater.start_polling()
 
     def cmd_start(self, update, context):
-        context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="🤖 Nifty Scalper Bot is Live!\n\nUse /trade, /exit, /summary")
+        msg = "🤖 Nifty Scalper Bot is Live!\n\n" \
+              "Commands:\n" \
+              "/trade – Start a trade\n" \
+              "/exit – Exit current trade\n" \
+              "/sl 190 – Set stop-loss\n" \
+              "/tp 210 – Set take-profit\n" \
+              "/summary – Show P&L chart\n" \
+              "/export – Export trade history"
+        context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text=msg)
 
     def cmd_summary(self, update, context):
         if not self.trade_logs:
@@ -132,6 +141,28 @@ class BotController:
             return
         self.exit_trade()
         context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="✅ Trade exited manually.")
+
+    def cmd_sl(self, update, context):
+        if not self.current_trade:
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="❌ No active trade.")
+            return
+        try:
+            new_sl = float(context.args[0])
+            self.current_trade['sl'] = new_sl
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text=f"📉 SL updated to {new_sl}")
+        except:
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="❌ Usage: /sl 190")
+
+    def cmd_tp(self, update, context):
+        if not self.current_trade:
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="❌ No active trade.")
+            return
+        try:
+            new_tp = float(context.args[0])
+            self.current_trade['tp'] = new_tp
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text=f"🎯 TP updated to {new_tp}")
+        except:
+            context.bot.send_message(chat_id=self.config['TELEGRAM_CHAT_ID'], text="❌ Usage: /tp 210")
 
     def auto_trade(self):
         if not self.is_market_hours():
@@ -199,6 +230,17 @@ controller = BotController()
 Thread(target=controller.monitor_trade_with_trailing_sl, daemon=True).start()
 
 # ================================
+# Auto-Scheduler (Every 1 Minute)
+# ================================
+def run_scheduler():
+    while True:
+        if controller.is_market_hours() and controller.current_trade is None:
+            task_queue.enqueue(controller.auto_trade)
+        time.sleep(60)  # Every 1 minute
+
+Thread(target=run_scheduler, daemon=True).start()
+
+# ================================
 # Flask Routes
 # ================================
 @app.route('/')
@@ -207,6 +249,8 @@ def home():
 
 @app.route('/trade', methods=['POST'])
 def trigger_trade():
+    if controller.current_trade:
+        return jsonify({'status': 'Already in trade'})
     job = task_queue.enqueue(controller.auto_trade)
     return jsonify({'status': 'Trade queued', 'job_id': job.id})
 
