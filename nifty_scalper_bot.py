@@ -1,4 +1,3 @@
-
 # nifty_scalper_bot.py - Production Ready Automatic Trading Bot with IST Timezone
 import os
 import time
@@ -652,47 +651,49 @@ class BotController:
                     'close': prices,
                     'volume': np.random.randint(1000, 10000, len(dates))
                 })
-                return df
                 
+                return df
         except Exception as e:
             self.logger.error(f"Market data error: {e}")
             return None
 
     def _check_daily_limits(self) -> bool:
         """Check if daily trading limits are exceeded"""
-        ist_now = get_ist_now()
-        today = ist_now.date()
+        today = get_ist_now().date()
         today_trades = [t for t in self.trade_logs if self._parse_ist_timestamp(t['timestamp']).date() == today]
         today_pnl = sum([t.get('pnl', 0) for t in today_trades])
         
-        # Check trade count limit
         if len(today_trades) >= self.config['MAX_TRADES_PER_DAY']:
             self._send_message(self.config['TELEGRAM_CHAT_ID'], 
-                f"🚫 Daily trade limit reached ({self.config['MAX_TRADES_PER_DAY']})")
+                             f"🚫 Daily trade limit reached ({self.config['MAX_TRADES_PER_DAY']})")
             return False
             
-        # Check loss limit
         if today_pnl <= -self.config['MAX_LOSS_PER_DAY']:
             self._send_message(self.config['TELEGRAM_CHAT_ID'], 
-                f"🚫 Daily loss limit reached (₹{self.config['MAX_LOSS_PER_DAY']})")
+                             f"🚫 Daily loss limit reached (₹{self.config['MAX_LOSS_PER_DAY']})")
             return False
             
         return True
-    def get_next_expiry():
-    """Returns the next weekly expiry date string in format '25JUL' for options symbol"""
-    today = get_ist_now().date()
-    weekday = today.weekday()  # Monday = 0 ... Sunday = 6
 
-    # Move to next Thursday
-    days_ahead = (3 - weekday + 7) % 7
-    if days_ahead == 0:
-        days_ahead = 7  # if today is Thursday, pick next Thursday
-
-    expiry_date = today + timedelta(days=days_ahead)
-    day = expiry_date.strftime('%d')
-    month = expiry_date.strftime('%b').upper()
-
-    return f"{day}{month}"
+    def _get_nifty_expiry(self) -> str:
+        """
+        Calculates the Nifty weekly expiry string in the correct format.
+        Nifty weekly options expire on Thursdays.
+        """
+        now = get_ist_now()
+        today = now.date()
+        
+        # Find the next Thursday (weekday() == 3)
+        days_ahead = (3 - today.weekday() + 7) % 7
+        
+        # If today is Thursday but after market close, use next week's expiry
+        if days_ahead == 0 and now.time() > datetime.strptime("15:30", "%H:%M").time():
+            days_ahead = 7
+            
+        expiry_date = today + timedelta(days=days_ahead)
+        
+        # Format: YYMMMDD (e.g., 25JUL31 for July 31, 2025)
+        return expiry_date.strftime('%y%b%d').upper()
 
     def _execute_trade(self, trade_type: str, entry_price: float, score: float) -> bool:
         """Execute a trade with proper risk management"""
@@ -700,19 +701,23 @@ class BotController:
             with trade_lock:
                 # Calculate strike price
                 strike = self._get_nearest_strike(entry_price)
-                expiry = get_next_expiry()
+                
+                # Get the calculated expiry string
+                expiry = self._get_nifty_expiry()
+                
                 symbol = f"NIFTY{expiry}{strike}{trade_type}"
                 
-                # Calculate SL and TP
+                # Calculate stop loss and take profit
                 if trade_type == 'CE':
-                    sl = entry_price * 0.97  # 3% SL
-                    tp = entry_price * 1.06  # 6% TP
-                else:
-                    sl = entry_price * 1.03  # 3% SL
-                    tp = entry_price * 0.94  # 6% TP
-                    
-                # Create trade record with IST timestamp
+                    sl = entry_price * 0.97  # 3% stop loss
+                    tp = entry_price * 1.06  # 6% take profit
+                else:  # PE
+                    sl = entry_price * 1.03  # 3% stop loss
+                    tp = entry_price * 0.94  # 6% take profit
+                
                 ist_now = get_ist_now()
+                
+                # Create trade object
                 self.current_trade = {
                     'symbol': symbol,
                     'entry': entry_price,
@@ -722,12 +727,12 @@ class BotController:
                     'score': score,
                     'timestamp': ist_now.isoformat(),
                     'pnl': 0,
-                    'highest': entry_price if trade_type == 'CE' else entry_price,
-                    'lowest': entry_price if trade_type == 'PE' else entry_price,
+                    'highest': entry_price,
+                    'lowest': entry_price,
                     'quantity': self.config['TRADE_QUANTITY']
                 }
                 
-                # Place actual order if not in dry run
+                # Execute order if not in dry run mode
                 if not self.config['DRY_RUN'] and self.kite:
                     try:
                         order_id = self.kite.place_order(
@@ -740,22 +745,24 @@ class BotController:
                             variety=self.kite.VARIETY_REGULAR
                         )
                         self.current_trade['order_id'] = order_id
-                        self.logger.info(f"Order placed: {order_id}")
+                        self.logger.info(f"Order placed: {order_id} for {symbol}")
                     except Exception as e:
                         self.logger.error(f"Order placement failed: {e}")
+                        self._send_message(self.config['TELEGRAM_CHAT_ID'], 
+                                         f"❌ Order failed for {symbol}. Reason: {e}")
                         self.current_trade = None
                         return False
                 
                 # Send notification
-                notification = f"📈 {'🟢 BUY CE' if trade_type == 'CE' else '🔴 BUY PE'}\n\n" \
-                              f"🎯 Symbol: {symbol}\n" \
-                              f"💰 Entry: ₹{entry_price:.2f}\n" \
-                              f"📊 Score: {score:.2f}\n" \
-                              f"🎯 Target: ₹{tp:.2f}\n" \
-                              f"🛡️ Stop Loss: ₹{sl:.2f}\n" \
-                              f"📦 Quantity: {self.config['TRADE_QUANTITY']}\n" \
-                              f"🕐 Time: {ist_now.strftime('%H:%M:%S IST')}\n" \
-                              f"🧪 Mode: {'DRY RUN' if self.config['DRY_RUN'] else 'LIVE'}"
+                notification = f"📈 {'🟢 BUY CE' if trade_type == 'CE' else '🔴 BUY PE'}\n\n"
+                notification += f"🎯 Symbol: {symbol}\n"
+                notification += f"💰 Entry: ₹{entry_price:.2f}\n"
+                notification += f"📊 Score: {score:.2f}\n"
+                notification += f"🎯 Target: ₹{tp:.2f}\n"
+                notification += f"🛡️ Stop Loss: ₹{sl:.2f}\n"
+                notification += f"📦 Quantity: {self.config['TRADE_QUANTITY']}\n"
+                notification += f"🕐 Time: {ist_now.strftime('%H:%M:%S IST')}\n"
+                notification += f"🧪 Mode: {'DRY RUN' if self.config['DRY_RUN'] else 'LIVE'}"
                 
                 self._send_message(self.config['TELEGRAM_CHAT_ID'], notification)
                 self.logger.info(f"Trade executed: {symbol} at {entry_price}")
@@ -767,78 +774,75 @@ class BotController:
             return False
 
     def _get_nearest_strike(self, price: float) -> int:
-        """Get nearest option strike price"""
+        """Get nearest strike price (rounded to nearest 50)"""
         return int(round(price / 50) * 50)
 
     def is_market_hours(self) -> bool:
-        """Check if market is open (Indian Standard Time)"""
+        """Check if market is currently open"""
         ist_now = get_ist_now()
         
         # Check if it's a weekday (Monday=0, Sunday=6)
         if ist_now.weekday() > 4:  # Saturday or Sunday
             return False
-            
-        current_time = ist_now.time()
+        
+        # Check market hours (9:15 AM to 3:30 PM IST)
         market_open = datetime.strptime("09:15", "%H:%M").time()
         market_close = datetime.strptime("15:30", "%H:%M").time()
         
-        return market_open <= current_time <= market_close
+        return market_open <= ist_now.time() <= market_close
 
     def exit_trade(self, reason: str = "Manual exit"):
-        """Exit current trade with P&L calculation"""
+        """Exit current trade and calculate P&L"""
         if not self.current_trade:
             return
             
         try:
             with trade_lock:
-                # Calculate final P&L (simplified for dry run)
+                # Calculate P&L
                 if self.config['DRY_RUN'] or not self.kite:
-                    # Simulate some P&L for dry run
+                    # Simulate P&L for dry run
                     import random
                     pnl_factor = random.uniform(-0.05, 0.08)  # -5% to +8%
                     self.current_trade['pnl'] = self.current_trade['entry'] * self.config['TRADE_QUANTITY'] * pnl_factor
                     self.current_trade['exit_price'] = self.current_trade['entry'] * (1 + pnl_factor)
                 else:
-                    # Get actual market price
-                    symbol = self.current_trade['symbol']
+                    # Get real market price
                     try:
-                        ticker = self.kite.quote(f"NFO:{symbol}")
-                        last_price = ticker[f"NFO:{symbol}"]["last_price"]
+                        ticker = self.kite.quote(f"NFO:{self.current_trade['symbol']}")
+                        last_price = ticker[f"NFO:{self.current_trade['symbol']}"]["last_price"]
                         
-                        if self.current_trade['type'] == 'CE':
-                            self.current_trade['pnl'] = (last_price - self.current_trade['entry']) * self.config['TRADE_QUANTITY']
-                        else:
-                            self.current_trade['pnl'] = (self.current_trade['entry'] - last_price) * self.config['TRADE_QUANTITY']
-                            
+                        # Calculate P&L based on trade type
+                        pnl_multiplier = 1 if self.current_trade['type'] == 'CE' else -1
+                        self.current_trade['pnl'] = (last_price - self.current_trade['entry']) * self.config['TRADE_QUANTITY'] * pnl_multiplier
                         self.current_trade['exit_price'] = last_price
                     except Exception as e:
                         self.logger.error(f"Price fetch error during exit: {e}")
                         self.current_trade['pnl'] = 0
                         self.current_trade['exit_price'] = self.current_trade['entry']
-                    
-                # Complete trade record with IST timestamp
+                
+                # Update trade record
                 ist_now = get_ist_now()
                 self.current_trade['exit_time'] = ist_now.isoformat()
                 self.current_trade['exit_reason'] = reason
                 
-                # Log trade
+                # Add to trade logs
                 self.trade_logs.append(self.current_trade.copy())
                 
-                # Send notification
+                # Send exit notification
                 pnl = self.current_trade['pnl']
-                pnl_emoji = "💰" if pnl > 0 else "💸" if pnl < 0 else "➖"
+                pnl_emoji = "💚" if pnl > 0 else "❤️" if pnl < 0 else "💛"
                 
-                notification = f"✅ Trade Closed\n\n" \
-                              f"🎯 Symbol: {self.current_trade['symbol']}\n" \
-                              f"📊 Entry: ₹{self.current_trade['entry']:.2f}\n" \
-                              f"📊 Exit: ₹{self.current_trade['exit_price']:.2f}\n" \
-                              f"{pnl_emoji} P&L: ₹{pnl:.2f}\n" \
-                              f"📝 Reason: {reason}\n" \
-                              f"⏱️ Duration: {self._get_trade_duration()}\n" \
-                              f"🕐 Exit Time: {ist_now.strftime('%H:%M:%S IST')}"
+                exit_msg = f"📉 TRADE CLOSED {pnl_emoji}\n\n"
+                exit_msg += f"🎯 Symbol: {self.current_trade['symbol']}\n"
+                exit_msg += f"💰 Entry: ₹{self.current_trade['entry']:.2f}\n"
+                exit_msg += f"🚪 Exit: ₹{self.current_trade['exit_price']:.2f}\n"
+                exit_msg += f"💸 P&L: ₹{pnl:.2f}\n"
+                exit_msg += f"📝 Reason: {reason}\n"
+                exit_msg += f"🕐 Duration: {self._calculate_trade_duration()}\n"
+                exit_msg += f"🧪 Mode: {'DRY RUN' if self.config['DRY_RUN'] else 'LIVE'}"
                 
-                self._send_message(self.config['TELEGRAM_CHAT_ID'], notification)
-                self.logger.info(f"Trade closed: {self.current_trade['symbol']}, P&L: {pnl:.2f}")
+                self._send_message(self.config['TELEGRAM_CHAT_ID'], exit_msg)
+                self.logger.info(f"Trade exited: {self.current_trade['symbol']} P&L: ₹{pnl:.2f}")
                 
                 # Clear current trade
                 self.current_trade = None
@@ -846,261 +850,222 @@ class BotController:
         except Exception as e:
             self.logger.error(f"Exit trade error: {e}")
 
-    def _get_trade_duration(self) -> str:
-        """Get formatted trade duration"""
-        if not self.current_trade:
-            return "N/A"
-            
+    def _calculate_trade_duration(self) -> str:
+        """Calculate trade duration"""
         try:
+            if not self.current_trade:
+                return "Unknown"
+                
             entry_time = self._parse_ist_timestamp(self.current_trade['timestamp'])
-            duration = get_ist_now() - entry_time
-            return str(duration).split('.')[0]  # Remove microseconds
-        except:
-            return "N/A"
-
-    def shutdown(self):
-        """Graceful shutdown"""
-        self.logger.info("Shutting down bot...")
-        
-        # Exit any open trade
-        if self.current_trade:
-            self.exit_trade("Bot shutdown")
+            exit_time = get_ist_now()
+            duration = exit_time - entry_time
             
-        # Stop Telegram updater
-        if self.updater:
-            self.updater.stop()
+            hours = duration.seconds // 3600
+            minutes = (duration.seconds % 3600) // 60
             
-        # Set shutdown event
-        shutdown_event.set()
-        
-        self.logger.info("Bot shutdown complete")
-
-# ================================
-# Trading Functions (moved outside main)
-# ================================
-
-def auto_trade_job(controller):
-    """Automatically find and execute trades"""
-    try:
-        if not controller.is_market_hours():
-            return
-            
-        if controller.current_trade:
-            controller.logger.debug("Trade already active, skipping auto-trade")
-            return
-            
-        # Check daily limits
-        if not controller._check_daily_limits():
-            return
-            
-        # Get market data
-        df = controller._get_market_data()
-        if df is None:
-            return
-            
-        # Generate signals
-        buy_ce_score, buy_pe_score = controller.engine.generate_signal(df)
-        entry_price = df['close'].iloc[-1]
-        
-        # Execute trade if signal is strong enough
-        if buy_ce_score >= controller.config['SIGNAL_THRESHOLD'] and buy_ce_score > buy_pe_score:
-            controller._execute_trade('CE', entry_price, buy_ce_score)
-        elif buy_pe_score >= controller.config['SIGNAL_THRESHOLD']:
-            controller._execute_trade('PE', entry_price, buy_pe_score)
-            
-    except Exception as e:
-        controller.logger.error(f"Auto-trade job error: {e}")
-
-def monitor_trades(controller):
-    """Continuously monitor open trades for exits"""
-    while not shutdown_event.is_set():
-        try:
-            time.sleep(30)  # Check every 30 seconds
-            
-            if not controller.current_trade or not controller.is_market_hours():
-                continue
-                
-            # Get current price (simplified for dry run)
-            if controller.config['DRY_RUN'] or not controller.kite:
-                # Simulate price movement
-                import random
-                price_change = random.uniform(-0.02, 0.02)  # ±2%
-                current_price = controller.current_trade['entry'] * (1 + price_change)
+            if hours > 0:
+                return f"{hours}h {minutes}m"
             else:
-                # Get actual price
-                try:
-                    symbol = controller.current_trade['symbol']
-                    ticker = controller.kite.quote(f"NFO:{symbol}")
-                    current_price = ticker[f"NFO:{symbol}"]["last_price"]
-                except Exception as e:
-                    controller.logger.error(f"Price fetch error: {e}")
-                    continue
+                return f"{minutes}m"
+        except:
+            return "Unknown"
+
+    def monitor_trade(self):
+        """Monitor active trade for stop loss and take profit"""
+        if not self.current_trade:
+            return
             
-            # Update P&L and tracking
-            with trade_lock:
-                trade = controller.current_trade
-                if not trade:
-                    continue
-                    
-                if trade['type'] == 'CE':
-                    trade['pnl'] = (current_price - trade['entry']) * controller.config['TRADE_QUANTITY']
-                    trade['highest'] = max(trade['highest'], current_price)
-                else:
-                    trade['pnl'] = (trade['entry'] - current_price) * controller.config['TRADE_QUANTITY']
-                    trade['lowest'] = min(trade['lowest'], current_price)
-                
-                # Check exit conditions
-                exit_reason = None
-                
-                # Stop Loss
-                if ((trade['type'] == 'CE' and current_price <= trade['sl']) or 
-                    (trade['type'] == 'PE' and current_price >= trade['sl'])):
-                    exit_reason = "Stop Loss Hit"
-                    
-                # Take Profit
-                elif ((trade['type'] == 'CE' and current_price >= trade['tp']) or 
-                      (trade['type'] == 'PE' and current_price <= trade['tp'])):
-                    exit_reason = "Take Profit Hit"
-                    
-                # Trailing Stop Loss (3% from highest/lowest)
-                elif (trade['type'] == 'CE' and current_price <= trade['highest'] * 0.97):
-                    exit_reason = "Trailing Stop Loss"
-                elif (trade['type'] == 'PE' and current_price >= trade['lowest'] * 1.03):
-                    exit_reason = "Trailing Stop Loss"
-                    
-                # Time-based exit (if trade is open for more than 4 hours)
-                entry_time = controller._parse_ist_timestamp(trade['timestamp'])
-                if get_ist_now() - entry_time > timedelta(hours=4):
-                    exit_reason = "Time-based Exit"
-                    
-                # Exit if condition met
-                if exit_reason:
-                    controller.exit_trade(exit_reason)
+        try:
+            if self.config['DRY_RUN'] or not self.kite:
+                # Simulate price movement for dry run
+                import random
+                price_change = random.uniform(-0.02, 0.02)  # -2% to +2%
+                current_price = self.current_trade['entry'] * (1 + price_change)
+            else:
+                # Get real market price
+                try:
+                    ticker = self.kite.quote(f"NFO:{self.current_trade['symbol']}")
+                    current_price = ticker[f"NFO:{self.current_trade['symbol']}"]["last_price"]
+                except Exception as e:
+                    self.logger.error(f"Price monitoring error: {e}")
+                    return
+            
+            # Update highest/lowest prices
+            self.current_trade['highest'] = max(self.current_trade['highest'], current_price)
+            self.current_trade['lowest'] = min(self.current_trade['lowest'], current_price)
+            
+            # Check stop loss and take profit
+            sl = self.current_trade['sl']
+            tp = self.current_trade['tp']
+            
+            if self.current_trade['type'] == 'CE':
+                if current_price <= sl:
+                    self.exit_trade("Stop loss hit")
+                elif current_price >= tp:
+                    self.exit_trade("Take profit hit")
+            else:  # PE
+                if current_price >= sl:
+                    self.exit_trade("Stop loss hit")
+                elif current_price <= tp:
+                    self.exit_trade("Take profit hit")
                     
         except Exception as e:
-            controller.logger.error(f"Trade monitoring error: {e}")
-            time.sleep(60)  # Wait longer on error
+            self.logger.error(f"Trade monitoring error: {e}")
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    if 'controller' in globals():
-        controller.logger.info(f"Received signal {signum}")
-        controller.shutdown()
-    sys.exit(0)
+    def auto_trading_loop(self):
+        """Main auto-trading loop"""
+        self.logger.info("Auto-trading loop started")
+        
+        while not shutdown_event.is_set():
+            try:
+                if not self.config['AUTO_TRADE']:
+                    time.sleep(30)
+                    continue
+                    
+                if not self.is_market_hours():
+                    time.sleep(60)
+                    continue
+                    
+                if not self._check_daily_limits():
+                    time.sleep(300)  # Wait 5 minutes if limits exceeded
+                    continue
+                
+                # Monitor existing trade
+                if self.current_trade:
+                    self.monitor_trade()
+                    time.sleep(30)
+                    continue
+                
+                # Look for new trading opportunities
+                df = self._get_market_data()
+                if df is None:
+                    time.sleep(60)
+                    continue
+                
+                buy_ce_score, buy_pe_score = self.engine.generate_signal(df)
+                entry_price = df['close'].iloc[-1]
+                
+                # Execute trade if signal is strong enough
+                if buy_ce_score > buy_pe_score and buy_ce_score >= self.config['SIGNAL_THRESHOLD']:
+                    self._execute_trade('CE', entry_price, buy_ce_score)
+                elif buy_pe_score >= self.config['SIGNAL_THRESHOLD']:
+                    self._execute_trade('PE', entry_price, buy_pe_score)
+                
+                time.sleep(60)  # Wait 1 minute before next check
+                
+            except Exception as e:
+                self.logger.error(f"Auto-trading loop error: {e}")
+                time.sleep(60)
+
+    def start_auto_trading(self):
+        """Start auto-trading in a separate thread"""
+        if hasattr(self, 'auto_thread') and self.auto_thread.is_alive():
+            return
+            
+        self.auto_thread = Thread(target=self.auto_trading_loop, daemon=True)
+        self.auto_thread.start()
+        self.logger.info("Auto-trading thread started")
 
 # ================================
 # Flask Routes
 # ================================
 
 @app.route('/')
-def home():
+def health_check():
     """Health check endpoint"""
-    try:
-        ist_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
-        return jsonify({
-            "status": "running",
-            "version": "2.0",
-            "ist_time": ist_time,
-            "auto_trading": controller.config['AUTO_TRADE'],
-            "market_hours": controller.is_market_hours(),
-            "current_trade": bool(controller.current_trade),
-            "total_trades": len(controller.trade_logs),
-            "dry_run": controller.config['DRY_RUN'],
-            "webhook_mode": controller.use_webhook
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    ist_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
+    return jsonify({
+        'status': 'healthy',
+        'service': 'Nifty Scalper Bot',
+        'version': '2.0',
+        'time': ist_time,
+        'market_open': bot_controller.is_market_hours() if 'bot_controller' in globals() else False
+    })
 
 @app.route('/telegram', methods=['POST'])
 def telegram_webhook():
     """Handle Telegram webhook updates"""
     try:
-        update_data = request.get_json(force=True)
-        controller.process_telegram_update(update_data)
-        return jsonify({"status": "ok"})
+        if 'bot_controller' in globals():
+            update_data = request.get_json()
+            bot_controller.process_telegram_update(update_data)
+        return jsonify({'status': 'ok'})
     except Exception as e:
-        controller.logger.error(f"Webhook error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Webhook error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/trades')
-def get_trades():
-    """API endpoint to get trade history"""
+@app.route('/status')
+def bot_status():
+    """Get bot status via API"""
     try:
+        if 'bot_controller' not in globals():
+            return jsonify({'status': 'error', 'message': 'Bot not initialized'})
+        
+        ist_now = get_ist_now()
+        today = ist_now.date()
+        today_trades = [t for t in bot_controller.trade_logs if bot_controller._parse_ist_timestamp(t['timestamp']).date() == today]
+        today_pnl = sum([t.get('pnl', 0) for t in today_trades])
+        
         return jsonify({
-            "trades": controller.trade_logs,
-            "current_trade": controller.current_trade,
-            "total_pnl": sum([t.get('pnl', 0) for t in controller.trade_logs]),
-            "ist_time": get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
+            'status': 'running',
+            'time': ist_now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            'market_open': bot_controller.is_market_hours(),
+            'auto_trade': bot_controller.config['AUTO_TRADE'],
+            'dry_run': bot_controller.config['DRY_RUN'],
+            'today_trades': len(today_trades),
+            'today_pnl': today_pnl,
+            'active_trade': bot_controller.current_trade is not None,
+            'total_trades': len(bot_controller.trade_logs)
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ================================
-# Initialization & Startup
+# Signal Handlers
+# ================================
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    logging.info(f"Received signal {signum}, shutting down gracefully...")
+    shutdown_event.set()
+    
+    if 'bot_controller' in globals():
+        # Exit any active trade
+        if bot_controller.current_trade:
+            bot_controller.exit_trade("Bot shutdown")
+        
+        # Stop Telegram updater
+        if bot_controller.updater:
+            bot_controller.updater.stop()
+    
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# ================================
+# Main Execution
 # ================================
 
 if __name__ == '__main__':
-    # Setup signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     try:
-        # Initialize controller
-        controller = BotController()
+        # Initialize bot controller
+        bot_controller = BotController()
         
-        # Register webhook if needed
-        if controller.use_webhook:
-            controller.register_webhook()
+        # Register webhook if in webhook mode
+        if bot_controller.use_webhook:
+            bot_controller.register_webhook()
         
-        # Send startup notification
-        ist_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
-        startup_msg = f"🚀 Nifty Scalper Bot v2.0 Started!\n\n" \
-                     f"🕐 IST Time: {ist_time}\n\n" \
-                     f"⚙️ Configuration:\n" \
-                     f"• Mode: {'🧪 DRY RUN' if controller.config['DRY_RUN'] else '💰 LIVE TRADING'}\n" \
-                     f"• Auto-trading: {'✅ ON' if controller.config['AUTO_TRADE'] else '❌ OFF'}\n" \
-                     f"• Market: {'🟢 OPEN' if controller.is_market_hours() else '🔴 CLOSED'}\n" \
-                     f"• Signal Threshold: {controller.config['SIGNAL_THRESHOLD']}\n" \
-                     f"• Max Daily Trades: {controller.config['MAX_TRADES_PER_DAY']}\n" \
-                     f"• Max Daily Loss: ₹{controller.config['MAX_LOSS_PER_DAY']}\n" \
-                     f"• Market Hours: 9:15 AM - 3:30 PM IST\n" \
-                     f"• Telegram Mode: {'Webhook' if controller.use_webhook else 'Polling'}"
-        
-        if controller.config['TELEGRAM_CHAT_ID']:
-            controller._send_message(controller.config['TELEGRAM_CHAT_ID'], startup_msg)
-        
-        # Start background threads
-        monitor_thread = Thread(target=monitor_trades, args=(controller,), daemon=True)
-        monitor_thread.start()
-        
-        # Start auto-trading scheduler if enabled
-        if controller.config['AUTO_TRADE']:
-            def auto_trade_scheduler():
-                while not shutdown_event.is_set():
-                    try:
-                        if controller.is_market_hours() and not controller.current_trade:
-                            auto_trade_job(controller)
-                        time.sleep(300)  # Check every 5 minutes
-                    except Exception as e:
-                        controller.logger.error(f"Auto-trade scheduler error: {e}")
-                        time.sleep(60)  # Wait 1 minute on error
-                        
-            auto_thread = Thread(target=auto_trade_scheduler, daemon=True)
-            auto_thread.start()
+        # Start auto-trading thread
+        bot_controller.start_auto_trading()
         
         # Start Flask server
-        try:
-            from waitress import serve
-            port = int(os.getenv('PORT', 8000))
-            controller.logger.info(f"Starting server on port {port}")
-            serve(app, host='0.0.0.0', port=port)
-        except ImportError:
-            # Fallback to Flask dev server
-            port = int(os.getenv('PORT', 8000))
-            controller.logger.warning("Waitress not available, using Flask dev server")
-            app.run(host='0.0.0.0', port=port, debug=False)
-            
+        port = int(os.getenv('PORT', 10000))
+        bot_controller.logger.info(f"Starting server on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False)
+        
     except Exception as e:
-        print(f"Startup error: {e}")
+        logging.error(f"Failed to start bot: {e}")
         traceback.print_exc()
         sys.exit(1)
