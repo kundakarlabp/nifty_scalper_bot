@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  nifty-scalper-bot:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: nifty-scalper-bot
+    env_file: 
+      - .env
+    ports:
+      - "10000:10000"
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PORT=10000
+      - HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - trading-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: nifty-scalper-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - trading-network
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-mypassword}
+
+networks:
+  trading-network:
+    driver: bridge
+
+volumes:
+  redis_data:

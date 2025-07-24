@@ -1,0 +1,64 @@
+services:
+  - type: web
+    name: nifty-scalper-bot
+    env: docker
+    plan: starter
+    region: singapore
+    branch: main
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: PYTHONUNBUFFERED
+        value: 1
+      - key: ZERODHA_API_KEY
+        sync: false
+      - key: ZERODHA_API_SECRET
+        sync: false
+      - key: ZERODHA_CLIENT_ID
+        sync: false
+      - key: ZERODHA_ACCESS_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TRADING_CAPITAL
+        value: 100000
+      - key: AUTO_TRADE
+        value: true
+      - key: DRY_RUN
+        value: false
+      - key: MAX_DAILY_LOSS_PCT
+        value: 5
+      - key: TRADE_LOT_SIZE
+        value: 75
+      - key: USE_ATR_SL
+        value: true
+      - key: ATR_SL_MULT
+        value: 1.2
+      - key: USE_ATR_TP
+        value: true
+      - key: ATR_TP_MULT
+        value: 1.8
+      - key: SIGNAL_THRESHOLD
+        value: 6.0
+      - key: MIN_THRESHOLD
+        value: 5.0
+      - key: MAX_THRESHOLD
+        value: 7.0
+      - key: MARKET_START_HOUR
+        value: 9
+      - key: MARKET_END_HOUR
+        value: 15
+      - key: MARKET_START_MINUTE
+        value: 15
+      - key: MARKET_END_MINUTE
+        value: 30
+      - key: MAX_LOSS_STREAK
+        value: 3
+      - key: LOSS_PAUSE_TIME
+        value: 60
+      - key: LOG_LEVEL
