@@ -566,4 +566,4 @@ if __name__ == '__main__':
         if 'controller' in globals() and controller.bot:
             controller._send_message(f"❌ Bot failed to start: {e}")
         sys.exit(1)
-```
+        
