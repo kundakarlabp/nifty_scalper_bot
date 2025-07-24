@@ -17,13 +17,17 @@ class TelegramBot:
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
-        if self.trading_bot:
-            self.trading_bot.auto_trade = True
-            message = "🚀 Auto-trading *STARTED*\n\nThe bot will now execute trades automatically based on signals."
-        else:
-            message = "Bot is not connected to trading engine."
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
+        start_message = """
+🚀 *Nifty Scalper Bot v2.0 Started!*
+
+*⚙️ Configuration:*
+• Mode: 💰 LIVE TRADING
+• Auto-trading: ✅ ON
+• Market: 🟢 OPEN
+
+Use /help to see all available commands.
+"""
+        await update.message.reply_text(start_message, parse_mode='Markdown')
     
     async def stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /stop command"""
@@ -41,43 +45,45 @@ class TelegramBot:
             await update.message.reply_text("Bot is not connected to trading engine.")
             return
         
-        # Get current status
+        # Get live data from the bot
         balance = getattr(self.trading_bot.risk_manager, 'current_balance', 0)
-        peak_balance = getattr(self.trading_bot.risk_manager, 'peak_balance', 0)
-        loss_streak = getattr(self.trading_bot.risk_manager, 'loss_streak', 0)
-        circuit_breaker = getattr(self.trading_bot.risk_manager, 'circuit_breaker_active', False)
-        
-        # Calculate drawdown
-        drawdown = 0
-        if peak_balance > 0:
-            drawdown = ((peak_balance - balance) / peak_balance) * 100
-        
-        # Get current position
+        todays_pnl = getattr(self.trading_bot.risk_manager, 'todays_pnl', 0)
         current_position = getattr(self.trading_bot, 'current_position', None)
-        
-        # Get today's trades
         trade_history = getattr(self.trading_bot, 'trade_history', [])
-        today_trades = len([t for t in trade_history if t.get('entry_time', '').startswith('2024')])  # Simple date check
+        today_trades = len([t for t in trade_history if t.get('entry_time', '').startswith('2024')]) # Simple date check
+        auto_trade_status = '✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'
         
+        # Determine position status text
+        position_text = "💤 No active trades."
+        if current_position:
+            position_text = f"🔥 *Active Trade:* {current_position.get('direction', 'N/A')}"
+
+        # Format the new status message
         status_message = f"""
-📊 *Trading Bot Status*
+*🔄 Bot Status:*
 
-💰 *Balance:* ₹{balance:,.2f}
-📈 *Peak Balance:* ₹{peak_balance:,.2f}
-📉 *Drawdown:* {drawdown:.2f}%
+• *Mode:* 💰 LIVE TRADING
+• *Auto-trading:* {auto_trade_status}
+• *Market:* 🟢 OPEN
+• *Today's trades:* {today_trades}/{Config.MAX_DAILY_TRADES}
+• *Today's P&L:* ₹{todays_pnl:,.2f}
 
-🔄 *Auto Trade:* {'✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'}
-🚨 *Circuit Breaker:* {'🔴 ACTIVE' if circuit_breaker else '🟢 INACTIVE'}
-📊 *Loss Streak:* {loss_streak}
-
-📋 *Current Position:* {current_position['direction'] if current_position else 'None'}
-📝 *Today\'s Trades:* {today_trades}
-
-⏰ *Last Update:* Just now
-        """
-        
+{position_text}
+"""
         await update.message.reply_text(status_message, parse_mode='Markdown')
-    
+
+    async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /config command"""
+        config_message = f"""
+*⚙️ Bot Configuration:*
+• *Signal Threshold:* {Config.SIGNAL_THRESHOLD}
+• *Max Daily Trades:* {Config.MAX_DAILY_TRADES}
+• *Max Daily Loss:* ₹{Config.MAX_DAILY_LOSS_PCT * 1000}
+• *Market Hours:* {Config.MARKET_START_HOUR}:{Config.MARKET_START_MINUTE:02d} AM - {Config.MARKET_END_HOUR - 12}:{Config.MARKET_END_MINUTE:02d} PM IST
+• *Telegram Mode:* Polling
+"""
+        await update.message.reply_text(config_message, parse_mode='Markdown')
+
     async def position_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /position command"""
         if not self.trading_bot:
@@ -198,25 +204,23 @@ Time: {trade.get('entry_time', 'N/A')}
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
         help_message = """
-🤖 *Nifty Scalper Bot Commands*
+*📱 Available Commands:*
 
-/start - Start auto-trading
-/stop - Stop auto-trading  
-/status - Show bot status
-/position - Show current position
-/exit - Force close current position
+*🔄 Trading:*
+/exit - Exit current trade
+/stop - Stop auto-trading
+/start - Re-enable auto-trading
+
+*📊 Monitoring:*
+/status - Current status
+/config - Show bot configuration
+/position - Show current open position
 /trades - Show recent trades
-/help - Show this help message
+/help - Show this help
 
-⚠️ *Important Notes:*
-• Always monitor your positions
-• Use /stop before market close
-• Check /status regularly
-• Keep sufficient margin
-
-📞 *Support:* Contact your administrator for issues
-        """
-        
+*🕐 Market Hours:* 9:15 AM - 3:30 PM IST
+*📅 Trading Days:* Monday to Friday
+"""
         await update.message.reply_text(help_message, parse_mode='Markdown')
     
     async def send_notification(self, message: str, parse_mode: str = 'Markdown'):
@@ -246,6 +250,7 @@ Time: {trade.get('entry_time', 'N/A')}
             CommandHandler("exit", self.exit_command),
             CommandHandler("trades", self.trades_command),
             CommandHandler("help", self.help_command),
+            CommandHandler("config", self.config_command), # Added the new config command
         ]
         
         for handler in handlers:
