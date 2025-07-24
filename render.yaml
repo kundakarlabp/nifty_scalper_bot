@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: nifty_scalper_bot
-    env: python
-    pythonVersion: 3.9
-    buildCommand: ""
-    startCommand: python nifty_scalper_bot.py
-    plan: free
-    autoDeploy: false
