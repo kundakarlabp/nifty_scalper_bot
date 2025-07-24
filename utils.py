@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-"""
-Utility functions and helpers for Nifty Scalper Bot
-"""
-
 import logging
 import os
 import pytz
-from datetime import datetime, time, timedelta
-from typing import Any, Dict, Optional, List
+from datetime import datetime, time
+from typing import Optional, Dict, Any
 import pandas as pd
-from config import Config
+import numpy as np
 
-# --- Logging setup ---
-def setup_logging() -> logging.Logger:
+# Setup logging
+def setup_logging():
     log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
+        level=getattr(logging, log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
@@ -26,224 +21,209 @@ def setup_logging() -> logging.Logger:
 
 logger = setup_logging()
 
-# --- Market timing utilities ---
-def is_market_open() -> bool:
-    """
-    Returns True if current IST time is between MARKET_START and MARKET_END on a weekday.
-    """
-    try:
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-        if now.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
-        start = time(Config.MARKET_START_HOUR, Config.MARKET_START_MINUTE)
-        end   = time(Config.MARKET_END_HOUR,   Config.MARKET_END_MINUTE)
-        return start <= now.time() <= end
-    except Exception as e:
-        logger.error(f"is_market_open error: {e}")
+def is_market_open(market_start_hour: int = 9, market_start_minute: int = 15,
+                  market_end_hour: int = 15, market_end_minute: int = 30) -> bool:
+    """Check if market is currently open"""
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    
+    # Skip weekends
+    if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
         return False
+    
+    current_time = now.time()
+    market_start = time(market_start_hour, market_start_minute)
+    market_end = time(market_end_hour, market_end_minute)
+    
+    return market_start <= current_time <= market_end
 
-def get_market_status() -> str:
-    """Return market status emoji + text."""
-    return "🟢 OPEN" if is_market_open() else "🔴 CLOSED"
-
-def time_until_market_open() -> str:
-    """
-    Returns human-friendly time until market next opens.
-    """
-    try:
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-        # Weekend handling
-        if now.weekday() >= 5:
-            days = 7 - now.weekday()
-            return f"Opens Monday at 9:15 AM (in {days} days)"
-        # Today
-        today_open = now.replace(
-            hour=Config.MARKET_START_HOUR,
-            minute=Config.MARKET_START_MINUTE,
-            second=0, microsecond=0
-        )
-        if now < today_open:
-            diff = today_open - now
-            hrs, rem = divmod(diff.seconds, 3600)
-            mins, _ = divmod(rem, 60)
-            return f"Opens in {hrs}h {mins}m"
-        # Tomorrow
-        return "Opens tomorrow at 9:15 AM"
-    except Exception as e:
-        logger.error(f"time_until_market_open error: {e}")
-        return "Unknown"
-
-# --- Safe converters ---
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Safely convert value to float."""
+    """Safely convert value to float"""
     try:
         return float(value)
     except (ValueError, TypeError):
         return default
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Safely convert value to int."""
+    """Safely convert value to int"""
     try:
         return int(value)
     except (ValueError, TypeError):
         return default
 
-# --- Position sizing ---
-def calculate_position_size(
-    capital: float,
-    risk_fraction: float,
-    entry_price: float,
-    stop_loss: float,
-    lot_size: int = Config.DEFAULT_QUANTITY
-) -> int:
-    """
-    Calculate number of shares/lots to trade based on risk_fraction of capital.
-    Rounds down to nearest multiple of lot_size.
-    """
+def calculate_position_size(capital: float, risk_percent: float, 
+                          entry_price: float, stop_loss: float, 
+                          lot_size: int = 75) -> int:
+    """Calculate position size based on risk management"""
     if entry_price <= 0 or stop_loss <= 0:
         return lot_size
-    risk_amount = capital * risk_fraction
-    price_diff  = abs(entry_price - stop_loss)
-    if price_diff <= 0:
+    
+    risk_amount = capital * (risk_percent / 100)
+    price_diff = abs(entry_price - stop_loss)
+    
+    if price_diff == 0:
         return lot_size
-    raw_qty = int(risk_amount / price_diff)
-    lots    = max(1, raw_qty // lot_size)
-    return lots * lot_size
+    
+    calculated_qty = int(risk_amount / price_diff)
+    
+    # Ensure it's in multiples of lot size
+    position_lots = max(1, calculated_qty // lot_size)
+    return position_lots * lot_size
 
 def format_price(price: float, decimals: int = 2) -> float:
-    """Round price to given number of decimal places."""
+    """Format price to specified decimal places"""
     return round(price, decimals)
 
-# --- Technical indicators ---
 class TechnicalIndicators:
-    """Calculations for RSI, EMA, MACD, ATR, Bollinger Bands, etc."""
-
+    """Technical indicator calculations"""
+    
     @staticmethod
     def calculate_rsi(prices: pd.Series, period: int = 14) -> float:
+        """Calculate RSI"""
         if len(prices) < period + 1:
             return 50.0
-        delta    = prices.diff()
-        gain     = delta.where(delta > 0, 0)
-        loss     = -delta.where(delta < 0, 0)
+        
+        delta = prices.diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
         avg_gain = gain.rolling(window=period).mean()
         avg_loss = loss.rolling(window=period).mean()
-        rs       = avg_gain / (avg_loss + 1e-9)
-        rsi      = 100 - (100 / (1 + rs))
-        return float(rsi.iloc[-1] if not rsi.empty else 50.0)
-
+        
+        rs = avg_gain / (avg_loss + 1e-9)
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi.iloc[-1] if not rsi.empty else 50.0
+    
     @staticmethod
     def calculate_ema(prices: pd.Series, period: int) -> float:
+        """Calculate EMA"""
         if len(prices) < period:
-            return float(prices.mean() if not prices.empty else 0.0)
-        return float(prices.ewm(span=period, adjust=False).mean().iloc[-1])
-
+            return prices.mean() if not prices.empty else 0.0
+        
+        ema = prices.ewm(span=period, adjust=False).mean()
+        return ema.iloc[-1]
+    
     @staticmethod
-    def calculate_macd(
-        prices: pd.Series,
-        fast: int = 12,
-        slow: int = 26,
-        signal: int = 9
-    ) -> Dict[str, float]:
+    def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, float]:
+        """Calculate MACD"""
         if len(prices) < slow:
             return {'macd': 0.0, 'signal': 0.0, 'histogram': 0.0}
+        
         ema_fast = prices.ewm(span=fast, adjust=False).mean()
         ema_slow = prices.ewm(span=slow, adjust=False).mean()
-        macd_line    = ema_fast - ema_slow
-        signal_line  = macd_line.ewm(span=signal, adjust=False).mean()
-        histogram    = macd_line - signal_line
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        
         return {
-            'macd': float(macd_line.iloc[-1]),
-            'signal': float(signal_line.iloc[-1]),
-            'histogram': float(histogram.iloc[-1])
+            'macd': macd_line.iloc[-1],
+            'signal': signal_line.iloc[-1],
+            'histogram': histogram.iloc[-1]
         }
-
+    
     @staticmethod
     def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-        if len(df) < period or not all(c in df.columns for c in ['high','low','close']):
+        """Calculate ATR"""
+        if len(df) < period or 'high' not in df.columns:
             return 0.0
-        high, low, prev_close = df['high'], df['low'], df['close'].shift(1)
-        tr = pd.concat([
-            high - low,
-            (high - prev_close).abs(),
-            (low  - prev_close).abs()
-        ], axis=1).max(axis=1)
+        
+        high = df['high']
+        low = df['low']
+        close = df['close'].shift(1)
+        
+        tr1 = high - low
+        tr2 = abs(high - close)
+        tr3 = abs(low - close)
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
-        return float(atr.iloc[-1] if not atr.empty else 0.0)
-
+        
+        return atr.iloc[-1] if not atr.empty else 0.0
+    
     @staticmethod
-    def calculate_bollinger_bands(
-        prices: pd.Series,
-        period: int = 20,
-        std_dev: float = 2.0
-    ) -> Dict[str, float]:
+    def calculate_bollinger_bands(prices: pd.Series, period: int = 20, std_dev: float = 2.0) -> Dict[str, float]:
+        """Calculate Bollinger Bands"""
         if len(prices) < period:
-            m = float(prices.mean() if not prices.empty else 0.0)
-            return {'upper': m, 'middle': m, 'lower': m}
+            price_mean = prices.mean() if not prices.empty else 0.0
+            return {
+                'upper': price_mean,
+                'middle': price_mean,
+                'lower': price_mean
+            }
+        
         sma = prices.rolling(window=period).mean()
-        sd  = prices.rolling(window=period).std()
+        std = prices.rolling(window=period).std()
+        
+        upper_band = sma + (std * std_dev)
+        lower_band = sma - (std * std_dev)
+        
         return {
-            'upper': float((sma + std_dev * sd).iloc[-1]),
-            'middle': float(sma.iloc[-1]),
-            'lower': float((sma - std_dev * sd).iloc[-1])
+            'upper': upper_band.iloc[-1],
+            'middle': sma.iloc[-1],
+            'lower': lower_band.iloc[-1]
         }
 
-# --- Trade data validation ---
 def validate_trade_data(trade_data: Dict[str, Any]) -> bool:
-    """
-    Ensure required fields are present and valid in a trade dict.
-    """
-    required = ['direction','entry_price','quantity','symbol']
-    for field in required:
+    """Validate trade data structure"""
+    required_fields = ['direction', 'entry_price', 'quantity', 'symbol']
+    
+    for field in required_fields:
         if field not in trade_data:
             logger.error(f"Missing required field: {field}")
             return False
-    if trade_data['direction'] not in ('BUY','SELL'):
+    
+    if trade_data['direction'] not in ['BUY', 'SELL']:
         logger.error(f"Invalid direction: {trade_data['direction']}")
         return False
-    if safe_float(trade_data['entry_price']) <= 0 or safe_int(trade_data['quantity']) <= 0:
-        logger.error(f"Invalid entry_price or quantity: {trade_data}")
+    
+    if safe_float(trade_data['entry_price']) <= 0:
+        logger.error(f"Invalid entry price: {trade_data['entry_price']}")
         return False
+    
+    if safe_int(trade_data['quantity']) <= 0:
+        logger.error(f"Invalid quantity: {trade_data['quantity']}")
+        return False
+    
     return True
 
-# --- Circuit breaker ---
 class CircuitBreaker:
-    """
-    Pauses trading after a streak of losing trades.
-    """
-
-    def __init__(
-        self,
-        max_losses: int = Config.CIRCUIT_BREAKER_MAX_LOSSES,
-        pause_minutes: int = Config.CIRCUIT_BREAKER_PAUSE_MINUTES
-    ):
-        self.max_losses       = max_losses
-        self.pause_minutes    = pause_minutes
+    """Circuit breaker for trading halts"""
+    
+    def __init__(self, max_losses: int = 3, pause_minutes: int = 60):
+        self.max_losses = max_losses
+        self.pause_minutes = pause_minutes
         self.consecutive_losses = 0
-        self.is_active        = False
-        self.resume_time: Optional[datetime] = None
-
+        self.is_active = False
+        self.resume_time = None
+    
     def record_trade(self, pnl: float):
+        """Record trade result and update circuit breaker status"""
         if pnl < 0:
             self.consecutive_losses += 1
             if self.consecutive_losses >= self.max_losses:
                 self.activate()
         else:
             self.consecutive_losses = 0
-
+            self.is_active = False
+            self.resume_time = None
+    
     def activate(self):
-        self.is_active   = True
-        self.resume_time = datetime.now() + timedelta(minutes=self.pause_minutes)
-        logger.warning(f"Circuit breaker activated until {self.resume_time}")
-
+        """Activate circuit breaker"""
+        self.is_active = True
+        self.resume_time = datetime.now() + pd.Timedelta(minutes=self.pause_minutes)
+        logger.warning(f"Circuit breaker activated! Trading paused until {self.resume_time}")
+    
     def can_trade(self) -> bool:
+        """Check if trading is allowed"""
         if not self.is_active:
             return True
+        
         if datetime.now() >= self.resume_time:
             self.is_active = False
             self.consecutive_losses = 0
             self.resume_time = None
-            logger.info("Circuit breaker cleared")
+            logger.info("Circuit breaker deactivated - trading resumed")
             return True
+        
         return False
