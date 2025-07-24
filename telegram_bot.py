@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Telegram bot for trading commands and notifications
-"""
-
 import logging
 import asyncio
 from datetime import datetime
