@@ -12,3 +12,4 @@ waitress
 matplotlib
 seaborn
 pytz
+python-dotenv
