@@ -685,7 +685,7 @@ class BotController:
             with trade_lock:
                 # Calculate strike price
                 strike = self._get_nearest_strike(entry_price)
-                symbol = f"NIFTY{strike}{trade_type}"
+                symbol = f"NIFTY{expiry}{strike}{trade_type}"
                 
                 # Calculate SL and TP
                 if trade_type == 'CE':
