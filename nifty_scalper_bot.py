@@ -678,6 +678,21 @@ class BotController:
             return False
             
         return True
+    def get_next_expiry():
+    """Returns the next weekly expiry date string in format '25JUL' for options symbol"""
+    today = get_ist_now().date()
+    weekday = today.weekday()  # Monday = 0 ... Sunday = 6
+
+    # Move to next Thursday
+    days_ahead = (3 - weekday + 7) % 7
+    if days_ahead == 0:
+        days_ahead = 7  # if today is Thursday, pick next Thursday
+
+    expiry_date = today + timedelta(days=days_ahead)
+    day = expiry_date.strftime('%d')
+    month = expiry_date.strftime('%b').upper()
+
+    return f"{day}{month}"
 
     def _execute_trade(self, trade_type: str, entry_price: float, score: float) -> bool:
         """Execute a trade with proper risk management"""
@@ -685,6 +700,7 @@ class BotController:
             with trade_lock:
                 # Calculate strike price
                 strike = self._get_nearest_strike(entry_price)
+                expiry = get_next_expiry()
                 symbol = f"NIFTY{expiry}{strike}{trade_type}"
                 
                 # Calculate SL and TP
