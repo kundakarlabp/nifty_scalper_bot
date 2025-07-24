@@ -2,7 +2,7 @@ flask
 rq
 redis
 pandas
-numpy
+numpy==1.23.5
 scikit-learn
 tensorflow-cpu
 kiteconnect
