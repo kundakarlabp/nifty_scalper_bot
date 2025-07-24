@@ -1,16 +1,3 @@
-My sincerest apologies. That is completely my fault.
-
-The error `SyntaxError: unterminated string literal` is happening because I accidentally included my explanatory text at the very top of the code block I provided.
-
-When you copied the code, you also copied the English sentences I wrote, and the Python interpreter tried to read them as code, which caused the crash. The apostrophe in "I've" is what specifically triggered the `unterminated string literal` error.
-
-### **The Solution: A Clean Copy**
-
-Please delete the entire content of your `nifty_scalper_bot.py` file and replace it with the code block below.
-
-This time, I have made absolutely sure it contains **only the Python code** and no explanatory text.
-
-```python
 # nifty_scalper_bot.py - Production Ready Automatic Trading Bot
 import os
 import time
