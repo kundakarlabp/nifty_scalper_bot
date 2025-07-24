@@ -29,7 +29,7 @@ shutdown_event = Event()
 trade_lock = Lock()
 
 # Indian Standard Time
-IST = pytz.timezone('Asia/Kolkata')
+IST = pytz.timezone("Asia/Kolkata")
 
 def get_ist_now():
     """Get current time in IST"""
@@ -46,33 +46,33 @@ class SignalEngine:
         """Compute technical indicators with error handling"""
         try:
             # Simple moving averages
-            df['ema_9'] = df['close'].ewm(span=9).mean()
-            df['ema_21'] = df['close'].ewm(span=21).mean()
+            df["ema_9"] = df["close"].ewm(span=9).mean()
+            df["ema_21"] = df["close"].ewm(span=21).mean()
             
             # RSI calculation
-            delta = df['close'].diff()
+            delta = df["close"].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs))
+            df["rsi"] = 100 - (100 / (1 + rs))
             
             # Simple MACD
-            exp1 = df['close'].ewm(span=12).mean()
-            exp2 = df['close'].ewm(span=26).mean()
-            df['macd'] = exp1 - exp2
-            df['macdsignal'] = df['macd'].ewm(span=9).mean()
+            exp1 = df["close"].ewm(span=12).mean()
+            exp2 = df["close"].ewm(span=26).mean()
+            df["macd"] = exp1 - exp2
+            df["macdsignal"] = df["macd"].ewm(span=9).mean()
             
             # Bollinger Bands
-            df['bb_middle'] = df['close'].rolling(window=20).mean()
-            bb_std = df['close'].rolling(window=20).std()
-            df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-            df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+            df["bb_middle"] = df["close"].rolling(window=20).mean()
+            bb_std = df["close"].rolling(window=20).std()
+            df["bb_upper"] = df["bb_middle"] + (bb_std * 2)
+            df["bb_lower"] = df["bb_middle"] - (bb_std * 2)
             
             # VWAP
-            df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
+            df["vwap"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
             
             # Volume indicators
-            df['volume_sma'] = df['volume'].rolling(window=20).mean()
+            df["volume_sma"] = df["volume"].rolling(window=20).mean()
             
             return df
         except Exception as e:
@@ -88,38 +88,38 @@ class SignalEngine:
                 
             last = df.iloc[-1]
             prev = df.iloc[-2]
-            close = last['close']
+            close = last["close"]
 
             # Trend analysis
-            trend_up = last['ema_9'] > last['ema_21']
-            trend_strength = abs(last['ema_9'] - last['ema_21']) / last['ema_21']
+            trend_up = last["ema_9"] > last["ema_21"]
+            trend_strength = abs(last["ema_9"] - last["ema_21"]) / last["ema_21"]
             
             # Momentum indicators
-            rsi_oversold = last['rsi'] < 30
-            rsi_overbought = last['rsi'] > 70
-            rsi_neutral = 30 <= last['rsi'] <= 70
+            rsi_oversold = last["rsi"] < 30
+            rsi_overbought = last["rsi"] > 70
+            rsi_neutral = 30 <= last["rsi"] <= 70
             
             # MACD signals
-            macd_bullish = last['macd'] > last['macdsignal'] and prev['macd'] <= prev['macdsignal']
-            macd_bearish = last['macd'] < last['macdsignal'] and prev['macd'] >= prev['macdsignal']
+            macd_bullish = last["macd"] > last["macdsignal"] and prev["macd"] <= prev["macdsignal"]
+            macd_bearish = last["macd"] < last["macdsignal"] and prev["macd"] >= prev["macdsignal"]
             
             # Volume confirmation
-            volume_surge = last['volume'] > last['volume_sma'] * 1.5
+            volume_surge = last["volume"] > last["volume_sma"] * 1.5
             
             # Bollinger Band signals
-            bb_squeeze = (last['bb_upper'] - last['bb_lower']) / last['bb_middle'] < 0.1
-            near_lower_bb = close <= last['bb_lower'] * 1.02
-            near_upper_bb = close >= last['bb_upper'] * 0.98
+            bb_squeeze = (last["bb_upper"] - last["bb_lower"]) / last["bb_middle"] < 0.1
+            near_lower_bb = close <= last["bb_lower"] * 1.02
+            near_upper_bb = close >= last["bb_upper"] * 0.98
             
             # Price action
-            bullish_candle = last['close'] > last['open']
-            bearish_candle = last['close'] < last['open']
+            bullish_candle = last["close"] > last["open"]
+            bearish_candle = last["close"] < last["open"]
             
             # CE (Call) scoring - Bullish signals
             buy_ce_score = 0.0
             if trend_up:
                 buy_ce_score += 2.0 * min(trend_strength * 10, 1.0)
-            if rsi_oversold or (rsi_neutral and last['rsi'] < 50):
+            if rsi_oversold or (rsi_neutral and last["rsi"] < 50):
                 buy_ce_score += 1.5
             if macd_bullish:
                 buy_ce_score += 1.8
@@ -127,7 +127,7 @@ class SignalEngine:
                 buy_ce_score += 1.2
             if near_lower_bb:
                 buy_ce_score += 1.0
-            if close > last['vwap']:
+            if close > last["vwap"]:
                 buy_ce_score += 0.8
             if bb_squeeze:
                 buy_ce_score += 0.5
@@ -136,7 +136,7 @@ class SignalEngine:
             buy_pe_score = 0.0
             if not trend_up:
                 buy_pe_score += 2.0 * min(trend_strength * 10, 1.0)
-            if rsi_overbought or (rsi_neutral and last['rsi'] > 50):
+            if rsi_overbought or (rsi_neutral and last["rsi"] > 50):
                 buy_pe_score += 1.5
             if macd_bearish:
                 buy_pe_score += 1.8
@@ -144,7 +144,7 @@ class SignalEngine:
                 buy_pe_score += 1.2
             if near_upper_bb:
                 buy_pe_score += 1.0
-            if close < last['vwap']:
+            if close < last["vwap"]:
                 buy_pe_score += 0.8
             if bb_squeeze:
                 buy_pe_score += 0.5
@@ -168,7 +168,7 @@ class BotController:
         self.trade_logs = []
         self.current_trade = None
         self.logger = self.setup_logging()
-        self.use_webhook = bool(os.getenv('WEBHOOK_URL'))
+        self.use_webhook = bool(os.getenv("WEBHOOK_URL"))
         
         # Initialize APIs
         self._initialize_kite()
@@ -177,53 +177,53 @@ class BotController:
     def _load_config(self) -> Dict:
         """Load and validate configuration"""
         config = {
-            'ZERODHA_API_KEY': os.getenv('ZERODHA_API_KEY'),
-            'ZERODHA_ACCESS_TOKEN': os.getenv('ZERODHA_ACCESS_TOKEN'),
-            'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN'),
-            'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID', '0'),
-            'DRY_RUN': os.getenv('DRY_RUN', 'true').lower() == 'true',
-            'AUTO_TRADE': os.getenv('AUTO_TRADE', 'false').lower() == 'true',
-            'MAX_LOSS_PER_DAY': float(os.getenv('MAX_LOSS_PER_DAY', '5000')),
-            'MAX_TRADES_PER_DAY': int(os.getenv('MAX_TRADES_PER_DAY', '10')),
-            'TRADE_QUANTITY': int(os.getenv('TRADE_QUANTITY', '75')),
-            'SIGNAL_THRESHOLD': float(os.getenv('SIGNAL_THRESHOLD', '3.0'))
+            "ZERODHA_API_KEY": os.getenv("ZERODHA_API_KEY"),
+            "ZERODHA_ACCESS_TOKEN": os.getenv("ZERODHA_ACCESS_TOKEN"),
+            "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
+            "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "0"),
+            "DRY_RUN": os.getenv("DRY_RUN", "true").lower() == "true",
+            "AUTO_TRADE": os.getenv("AUTO_TRADE", "false").lower() == "true",
+            "MAX_LOSS_PER_DAY": float(os.getenv("MAX_LOSS_PER_DAY", "5000")),
+            "MAX_TRADES_PER_DAY": int(os.getenv("MAX_TRADES_PER_DAY", "10")),
+            "TRADE_QUANTITY": int(os.getenv("TRADE_QUANTITY", "75")),
+            "SIGNAL_THRESHOLD": float(os.getenv("SIGNAL_THRESHOLD", "3.0"))
         }
         
         # Validate required fields
-        required_fields = ['TELEGRAM_BOT_TOKEN']
+        required_fields = ["TELEGRAM_BOT_TOKEN"]
         for field in required_fields:
             if not config[field]:
                 raise ValueError(f"Missing required configuration: {field}")
                 
         try:
-            config['TELEGRAM_CHAT_ID'] = int(config['TELEGRAM_CHAT_ID'])
+            config["TELEGRAM_CHAT_ID"] = int(config["TELEGRAM_CHAT_ID"])
         except ValueError:
-            config['TELEGRAM_CHAT_ID'] = 0
+            config["TELEGRAM_CHAT_ID"] = 0
             
         return config
         
     def _initialize_kite(self):
         """Initialize Kite Connect API"""
         try:
-            if self.config['ZERODHA_API_KEY'] and self.config['ZERODHA_ACCESS_TOKEN']:
+            if self.config["ZERODHA_API_KEY"] and self.config["ZERODHA_ACCESS_TOKEN"]:
                 from kiteconnect import KiteConnect
-                self.kite = KiteConnect(api_key=self.config['ZERODHA_API_KEY'])
-                self.kite.set_access_token(self.config['ZERODHA_ACCESS_TOKEN'])
+                self.kite = KiteConnect(api_key=self.config["ZERODHA_API_KEY"])
+                self.kite.set_access_token(self.config["ZERODHA_ACCESS_TOKEN"])
                 
                 # Test connection
                 profile = self.kite.profile()
-                self.logger.info(f"Kite connected successfully for user: {profile['user_name']}")
+                self.logger.info(f"Kite connected successfully for user: {profile["user_name"]}")
             else:
                 self.logger.warning("Kite credentials not provided, running in simulation mode")
         except Exception as e:
             self.logger.error(f"Kite initialization failed: {e}")
-            if not self.config['DRY_RUN']:
+            if not self.config["DRY_RUN"]:
                 self.logger.warning("Kite failed but continuing in DRY_RUN mode")
                 
     def _initialize_telegram(self):
         """Initialize Telegram bot"""
         try:
-            self.bot = telegram.Bot(token=self.config['TELEGRAM_BOT_TOKEN'])
+            self.bot = telegram.Bot(token=self.config["TELEGRAM_BOT_TOKEN"])
             self.setup_telegram()
             self.logger.info("Telegram bot initialized successfully")
         except Exception as e:
@@ -234,9 +234,9 @@ class BotController:
         """Setup logging configuration"""
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             handlers=[
-                logging.FileHandler('bot.log'),
+                logging.FileHandler("bot.log"),
                 logging.StreamHandler()
             ]
         )
@@ -252,7 +252,7 @@ class BotController:
             else:
                 # Polling mode
                 self.logger.info("Using polling mode for Telegram")
-                self.updater = Updater(token=self.config['TELEGRAM_BOT_TOKEN'], use_context=True)
+                self.updater = Updater(token=self.config["TELEGRAM_BOT_TOKEN"], use_context=True)
                 dp = self.updater.dispatcher
                 
                 # Command handlers
@@ -271,17 +271,17 @@ class BotController:
 
     def _add_handlers(self, dp):
         """Add command handlers to dispatcher"""
-        dp.add_handler(CommandHandler('start', self.cmd_start))
-        dp.add_handler(CommandHandler('status', self.cmd_status))
-        dp.add_handler(CommandHandler('summary', self.cmd_summary))
-        dp.add_handler(CommandHandler('export', self.cmd_export))
-        dp.add_handler(CommandHandler('trade', self.cmd_trade))
-        dp.add_handler(CommandHandler('exit', self.cmd_exit))
-        dp.add_handler(CommandHandler('sl', self.cmd_sl))
-        dp.add_handler(CommandHandler('tp', self.cmd_tp))
-        dp.add_handler(CommandHandler('auto', self.cmd_auto))
-        dp.add_handler(CommandHandler('config', self.cmd_config))
-        dp.add_handler(CommandHandler('help', self.cmd_help))
+        dp.add_handler(CommandHandler("start", self.cmd_start))
+        dp.add_handler(CommandHandler("status", self.cmd_status))
+        dp.add_handler(CommandHandler("summary", self.cmd_summary))
+        dp.add_handler(CommandHandler("export", self.cmd_export))
+        dp.add_handler(CommandHandler("trade", self.cmd_trade))
+        dp.add_handler(CommandHandler("exit", self.cmd_exit))
+        dp.add_handler(CommandHandler("sl", self.cmd_sl))
+        dp.add_handler(CommandHandler("tp", self.cmd_tp))
+        dp.add_handler(CommandHandler("auto", self.cmd_auto))
+        dp.add_handler(CommandHandler("config", self.cmd_config))
+        dp.add_handler(CommandHandler("help", self.cmd_help))
 
     def error_handler(self, update, context):
         """Handle Telegram errors"""
@@ -289,7 +289,7 @@ class BotController:
 
     def register_webhook(self):
         """Register webhook for Telegram updates"""
-        webhook_url = os.getenv('WEBHOOK_URL')
+        webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url and self.bot:
             try:
                 # Delete existing webhook first
@@ -315,17 +315,17 @@ class BotController:
                 text = update.message.text
                 chat_id = update.message.chat_id
                 
-                if text.startswith('/start'):
+                if text.startswith("/start"):
                     self.cmd_start_simple(chat_id)
-                elif text.startswith('/status'):
+                elif text.startswith("/status"):
                     self.cmd_status_simple(chat_id)
-                elif text.startswith('/help'):
+                elif text.startswith("/help"):
                     self.cmd_help_simple(chat_id)
-                elif text.startswith('/trade'):
+                elif text.startswith("/trade"):
                     self.cmd_trade_simple(chat_id)
-                elif text.startswith('/exit'):
+                elif text.startswith("/exit"):
                     self.cmd_exit_simple(chat_id)
-                elif text.startswith('/auto'):
+                elif text.startswith("/auto"):
                     self.cmd_auto_simple(chat_id)
                 else:
                     self._send_message(chat_id, "Unknown command. Type /help for available commands.")
@@ -359,24 +359,24 @@ class BotController:
         try:
             ist_now = get_ist_now()
             today = ist_now.date()
-            today_trades = [t for t in self.trade_logs if self._parse_ist_timestamp(t['timestamp']).date() == today]
-            today_pnl = sum([t.get('pnl', 0) for t in today_trades])
+            today_trades = [t for t in self.trade_logs if self._parse_ist_timestamp(t["timestamp"]).date() == today]
+            today_pnl = sum([t.get("pnl", 0) for t in today_trades])
             
             status_msg = f"🔄 Bot Status:\n\n"
-            status_msg += f"🕐 IST Time: {ist_now.strftime('%H:%M:%S')}\n"
-            status_msg += f"• Mode: {'🧪 DRY RUN' if self.config['DRY_RUN'] else '💰 LIVE TRADING'}\n"
-            status_msg += f"• Auto-trading: {'✅ ON' if self.config['AUTO_TRADE'] else '❌ OFF'}\n"
-            status_msg += f"• Market: {'🟢 OPEN' if self.is_market_hours() else '🔴 CLOSED'}\n"
-            status_msg += f"• Today's trades: {len(today_trades)}/{self.config['MAX_TRADES_PER_DAY']}\n"
+            status_msg += f"🕐 IST Time: {ist_now.strftime("%H:%M:%S")}\n"
+            status_msg += f"• Mode: {"🧪 DRY RUN" if self.config["DRY_RUN"] else "💰 LIVE TRADING"}\n"
+            status_msg += f"• Auto-trading: {"✅ ON" if self.config["AUTO_TRADE"] else "❌ OFF"}\n"
+            status_msg += f"• Market: {"🟢 OPEN" if self.is_market_hours() else "🔴 CLOSED"}\n"
+            status_msg += f"• Today's trades: {len(today_trades)}/{self.config["MAX_TRADES_PER_DAY"]}\n"
             status_msg += f"• Today's P&L: ₹{today_pnl:.2f}\n"
             
             if self.current_trade:
                 trade = self.current_trade
                 status_msg += f"\n📊 Active Trade:\n"
-                status_msg += f"• Symbol: {trade['symbol']}\n"
-                status_msg += f"• Type: {trade['type']}\n"
-                status_msg += f"• Entry: ₹{trade['entry']:.2f}\n"
-                status_msg += f"• Current P&L: ₹{trade.get('pnl', 0):.2f}"
+                status_msg += f"• Symbol: {trade["symbol"]}\n"
+                status_msg += f"• Type: {trade["type"]}\n"
+                status_msg += f"• Entry: ₹{trade["entry"]:.2f}\n"
+                status_msg += f"• Current P&L: ₹{trade.get("pnl", 0):.2f}"
             else:
                 status_msg += f"\n💤 No active trades"
                 
@@ -422,14 +422,14 @@ class BotController:
                 return
             
             buy_ce_score, buy_pe_score = self.engine.generate_signal(df)
-            entry_price = df['close'].iloc[-1]
+            entry_price = df["close"].iloc[-1]
             
-            if buy_ce_score > buy_pe_score and buy_ce_score >= self.config['SIGNAL_THRESHOLD']:
-                success = self._execute_trade('CE', entry_price, buy_ce_score)
+            if buy_ce_score > buy_pe_score and buy_ce_score >= self.config["SIGNAL_THRESHOLD"]:
+                success = self._execute_trade("CE", entry_price, buy_ce_score)
                 if success:
                     self._send_message(chat_id, f"✅ Manual CE trade executed!\n📊 Signal Score: {buy_ce_score:.2f}")
-            elif buy_pe_score >= self.config['SIGNAL_THRESHOLD']:
-                success = self._execute_trade('PE', entry_price, buy_pe_score)
+            elif buy_pe_score >= self.config["SIGNAL_THRESHOLD"]:
+                success = self._execute_trade("PE", entry_price, buy_pe_score)
                 if success:
                     self._send_message(chat_id, f"✅ Manual PE trade executed!\n📊 Signal Score: {buy_pe_score:.2f}")
             else:
@@ -450,8 +450,8 @@ class BotController:
 
     def cmd_auto_simple(self, chat_id):
         """Simplified auto command"""
-        self.config['AUTO_TRADE'] = not self.config['AUTO_TRADE']
-        state = "✅ enabled" if self.config['AUTO_TRADE'] else "❌ disabled"
+        self.config["AUTO_TRADE"] = not self.config["AUTO_TRADE"]
+        state = "✅ enabled" if self.config["AUTO_TRADE"] else "❌ disabled"
         self._send_message(chat_id, f"🤖 Auto-trading {state}")
         self.logger.info(f"Auto-trading {state}")
 
@@ -477,14 +477,14 @@ class BotController:
             ist_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
             config_msg = f"⚙️ Bot Configuration:\n\n"
             config_msg += f"🕐 Current IST Time: {ist_time}\n"
-            config_msg += f"• Dry Run: {'✅' if self.config['DRY_RUN'] else '❌'}\n"
-            config_msg += f"• Auto Trading: {'✅' if self.config['AUTO_TRADE'] else '❌'}\n"
-            config_msg += f"• Max Daily Loss: ₹{self.config['MAX_LOSS_PER_DAY']}\n"
-            config_msg += f"• Max Daily Trades: {self.config['MAX_TRADES_PER_DAY']}\n"
-            config_msg += f"• Trade Quantity: {self.config['TRADE_QUANTITY']}\n"
-            config_msg += f"• Signal Threshold: {self.config['SIGNAL_THRESHOLD']}\n"
+            config_msg += f"• Dry Run: {"✅" if self.config["DRY_RUN"] else "❌"}\n"
+            config_msg += f"• Auto Trading: {"✅" if self.config["AUTO_TRADE"] else "❌"}\n"
+            config_msg += f"• Max Daily Loss: ₹{self.config["MAX_LOSS_PER_DAY"]}\n"
+            config_msg += f"• Max Daily Trades: {self.config["MAX_TRADES_PER_DAY"]}\n"
+            config_msg += f"• Trade Quantity: {self.config["TRADE_QUANTITY"]}\n"
+            config_msg += f"• Signal Threshold: {self.config["SIGNAL_THRESHOLD"]}\n"
             config_msg += f"• Market Hours: 9:15 AM - 3:30 PM IST\n"
-            config_msg += f"• Market Status: {'🟢 OPEN' if self.is_market_hours() else '🔴 CLOSED'}"
+            config_msg += f"• Market Status: {"🟢 OPEN" if self.is_market_hours() else "🔴 CLOSED"}"
             
             self._send_message(update.effective_chat.id, config_msg)
         except Exception as e:
@@ -500,9 +500,9 @@ class BotController:
 
             # Calculate statistics
             total_trades = len(self.trade_logs)
-            winning_trades = len([t for t in self.trade_logs if t.get('pnl', 0) > 0])
+            winning_trades = len([t for t in self.trade_logs if t.get("pnl", 0) > 0])
             losing_trades = total_trades - winning_trades
-            total_pnl = sum([t.get('pnl', 0) for t in self.trade_logs])
+            total_pnl = sum([t.get("pnl", 0) for t in self.trade_logs])
             win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
             
             # Send summary text
@@ -533,11 +533,11 @@ class BotController:
             # Create simple export
             export_text = "📈 Trade History:\n\n"
             for i, trade in enumerate(self.trade_logs[-10:], 1):  # Last 10 trades
-                trade_time = self._parse_ist_timestamp(trade['timestamp'])
-                export_text += f"{i}. {trade['symbol']} - {trade['type']}\n"
-                export_text += f"   Entry: ₹{trade['entry']:.2f}\n"
-                export_text += f"   P&L: ₹{trade.get('pnl', 0):.2f}\n"
-                export_text += f"   Time: {trade_time.strftime('%d-%m-%Y %H:%M IST')}\n\n"
+                trade_time = self._parse_ist_timestamp(trade["timestamp"])
+                export_text += f"{i}. {trade["symbol"]} - {trade["type"]}\n"
+                export_text += f"   Entry: ₹{trade["entry"]:.2f}\n"
+                export_text += f"   P&L: ₹{trade.get("pnl", 0):.2f}\n"
+                export_text += f"   Time: {trade_time.strftime("%d-%m-%Y %H:%M IST")}\n\n"
 
             self._send_message(update.effective_chat.id, export_text)
 
@@ -562,11 +562,11 @@ class BotController:
         try:
             if context.args:
                 new_sl = float(context.args[0])
-                self.current_trade['sl'] = new_sl
+                self.current_trade["sl"] = new_sl
                 self._send_message(update.effective_chat.id, f"✅ Stop-loss updated to ₹{new_sl:.2f}")
                 self.logger.info(f"Stop-loss updated to {new_sl}")
             else:
-                current_sl = self.current_trade.get('sl', 'Not set')
+                current_sl = self.current_trade.get("sl", "Not set")
                 self._send_message(update.effective_chat.id, f"📊 Current SL: ₹{current_sl}\n💡 Usage: /sl <price>")
         except ValueError:
             self._send_message(update.effective_chat.id, "❌ Invalid price format. Usage: /sl <price>")
@@ -580,14 +580,14 @@ class BotController:
         try:
             if context.args:
                 new_tp = float(context.args[0])
-                self.current_trade['tp'] = new_tp
+                self.current_trade["tp"] = new_tp
                 self._send_message(update.effective_chat.id, f"✅ Take-profit updated to ₹{new_tp:.2f}")
                 self.logger.info(f"Take-profit updated to {new_tp}")
             else:
-                current_tp = self.current_trade.get('tp', 'Not set')
-                self._send_message(update.effective_chat.id, f"📊 Current TP: ₹{current_tp}\n💡 Usage: /tp <price>")
+                current_tp = self.current_trade.get("tp", "Not set")
+                self._send_message(chat_id, f"📊 Current TP: ₹{current_tp}\n💡 Usage: /tp <price>")
         except ValueError:
-            self._send_message(update.effective_chat.id, "❌ Invalid price format. Usage: /tp <price>")
+            self._send_message(chat_id, "❌ Invalid price format. Usage: /tp <price>")
 
     def cmd_auto(self, update, context):
         """Toggle auto-trading"""
@@ -608,7 +608,7 @@ class BotController:
         """Parse timestamp string and convert to IST"""
         try:
             # Parse the ISO format timestamp
-            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
             # Convert to IST
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=pytz.UTC)
@@ -627,7 +627,7 @@ class BotController:
                 from_date = ist_now - timedelta(days=5)
                 to_date = ist_now
                 
-                data = self.kite.historical_data(instrument_token, from_date, to_date, '15minute')
+                data = self.kite.historical_data(instrument_token, from_date, to_date, "15minute")
                 df = pd.DataFrame(data)
                 
                 if df.empty:
@@ -638,18 +638,18 @@ class BotController:
             else:
                 # Generate dummy data for testing
                 ist_now = get_ist_now()
-                dates = pd.date_range(start=ist_now - timedelta(days=1), end=ist_now, freq='15min')
+                dates = pd.date_range(start=ist_now - timedelta(days=1), end=ist_now, freq="15min")
                 np.random.seed(42)
                 base_price = 24000
                 prices = base_price + np.cumsum(np.random.randn(len(dates)) * 10)
                 
                 df = pd.DataFrame({
-                    'date': dates,
-                    'open': prices,
-                    'high': prices + np.random.rand(len(dates)) * 20,
-                    'low': prices - np.random.rand(len(dates)) * 20,
-                    'close': prices,
-                    'volume': np.random.randint(1000, 10000, len(dates))
+                    "date": dates,
+                    "open": prices,
+                    "high": prices + np.random.rand(len(dates)) * 20,
+                    "low": prices - np.random.rand(len(dates)) * 20,
+                    "close": prices,
+                    "volume": np.random.randint(1000, 10000, len(dates))
                 })
                 
                 return df
@@ -660,24 +660,24 @@ class BotController:
     def _check_daily_limits(self) -> bool:
         """Check if daily trading limits are exceeded"""
         today = get_ist_now().date()
-        today_trades = [t for t in self.trade_logs if self._parse_ist_timestamp(t['timestamp']).date() == today]
-        today_pnl = sum([t.get('pnl', 0) for t in today_trades])
+        today_trades = [t for t in self.trade_logs if self._parse_ist_timestamp(t["timestamp"]).date() == today]
+        today_pnl = sum([t.get("pnl", 0) for t in today_trades])
         
-        if len(today_trades) >= self.config['MAX_TRADES_PER_DAY']:
-            self._send_message(self.config['TELEGRAM_CHAT_ID'], 
-                             f"🚫 Daily trade limit reached ({self.config['MAX_TRADES_PER_DAY']})")
+        if len(today_trades) >= self.config["MAX_TRADES_PER_DAY"]:
+            self._send_message(self.config["TELEGRAM_CHAT_ID"], 
+                             f"🚫 Daily trade limit reached ({self.config["MAX_TRADES_PER_DAY"]})")
             return False
             
-        if today_pnl <= -self.config['MAX_LOSS_PER_DAY']:
-            self._send_message(self.config['TELEGRAM_CHAT_ID'], 
-                             f"🚫 Daily loss limit reached (₹{self.config['MAX_LOSS_PER_DAY']})")
+        if today_pnl <= -self.config["MAX_LOSS_PER_DAY"]:
+            self._send_message(self.config["TELEGRAM_CHAT_ID"], 
+                             f"🚫 Daily loss limit reached (₹{self.config["MAX_LOSS_PER_DAY"]})")
             return False
             
         return True
 
     def _get_nifty_expiry(self) -> str:
         """
-        Calculates the Nifty weekly expiry string in the correct format.
+        Calculates the Nifty weekly expiry string in the correct format (YYMMMDD).
         Nifty weekly options expire on Thursdays.
         """
         now = get_ist_now()
@@ -692,8 +692,27 @@ class BotController:
             
         expiry_date = today + timedelta(days=days_ahead)
         
-        # Format: YYMMMDD (e.g., 25JUL31 for July 31, 2025)
-        return expiry_date.strftime('%y%b%d').upper()
+        # Format: YYMMMDD (e.g., 25JUL24 for July 24, 2025)
+        return expiry_date.strftime("%y%b%d").upper()
+
+    def _verify_instrument(self, symbol: str) -> bool:
+        """Verifies if the instrument exists and is tradable via Kite Connect."""
+        if self.config["DRY_RUN"] or not self.kite:
+            self.logger.info(f"Dry run: Instrument verification skipped for {symbol}")
+            return True # Always return true in dry run
+
+        try:
+            # Search for the instrument
+            instruments = self.kite.instruments("NFO")
+            for inst in instruments:
+                if inst["tradingsymbol"] == symbol:
+                    self.logger.info(f"Instrument {symbol} found and verified.")
+                    return True
+            self.logger.warning(f"Instrument {symbol} not found in Kite instruments.")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error verifying instrument {symbol}: {e}")
+            return False
 
     def _execute_trade(self, trade_type: str, entry_price: float, score: float) -> bool:
         """Execute a trade with proper risk management"""
@@ -706,9 +725,16 @@ class BotController:
                 expiry = self._get_nifty_expiry()
                 
                 symbol = f"NIFTY{expiry}{strike}{trade_type}"
+
+                # Verify instrument before placing order
+                if not self._verify_instrument(symbol):
+                    self._send_message(self.config["TELEGRAM_CHAT_ID"], 
+                                     f"❌ Order failed for {symbol}. Reason: Instrument does not exist or is not tradable.")
+                    self.logger.error(f"Instrument verification failed for {symbol}.")
+                    return False
                 
                 # Calculate stop loss and take profit
-                if trade_type == 'CE':
+                if trade_type == "CE":
                     sl = entry_price * 0.97  # 3% stop loss
                     tp = entry_price * 1.06  # 6% take profit
                 else:  # PE
@@ -719,52 +745,52 @@ class BotController:
                 
                 # Create trade object
                 self.current_trade = {
-                    'symbol': symbol,
-                    'entry': entry_price,
-                    'sl': sl,
-                    'tp': tp,
-                    'type': trade_type,
-                    'score': score,
-                    'timestamp': ist_now.isoformat(),
-                    'pnl': 0,
-                    'highest': entry_price,
-                    'lowest': entry_price,
-                    'quantity': self.config['TRADE_QUANTITY']
+                    "symbol": symbol,
+                    "entry": entry_price,
+                    "sl": sl,
+                    "tp": tp,
+                    "type": trade_type,
+                    "score": score,
+                    "timestamp": ist_now.isoformat(),
+                    "pnl": 0,
+                    "highest": entry_price,
+                    "lowest": entry_price,
+                    "quantity": self.config["TRADE_QUANTITY"]
                 }
                 
                 # Execute order if not in dry run mode
-                if not self.config['DRY_RUN'] and self.kite:
+                if not self.config["DRY_RUN"] and self.kite:
                     try:
                         order_id = self.kite.place_order(
                             tradingsymbol=symbol,
                             exchange=self.kite.EXCHANGE_NFO,
                             transaction_type=self.kite.TRANSACTION_TYPE_BUY,
-                            quantity=self.config['TRADE_QUANTITY'],
+                            quantity=self.config["TRADE_QUANTITY"],
                             order_type=self.kite.ORDER_TYPE_MARKET,
                             product=self.kite.PRODUCT_MIS,
                             variety=self.kite.VARIETY_REGULAR
                         )
-                        self.current_trade['order_id'] = order_id
+                        self.current_trade["order_id"] = order_id
                         self.logger.info(f"Order placed: {order_id} for {symbol}")
                     except Exception as e:
                         self.logger.error(f"Order placement failed: {e}")
-                        self._send_message(self.config['TELEGRAM_CHAT_ID'], 
+                        self._send_message(self.config["TELEGRAM_CHAT_ID"], 
                                          f"❌ Order failed for {symbol}. Reason: {e}")
                         self.current_trade = None
                         return False
                 
                 # Send notification
-                notification = f"📈 {'🟢 BUY CE' if trade_type == 'CE' else '🔴 BUY PE'}\n\n"
+                notification = f"📈 {"🟢 BUY CE" if trade_type == "CE" else "🔴 BUY PE"}\n\n"
                 notification += f"🎯 Symbol: {symbol}\n"
                 notification += f"💰 Entry: ₹{entry_price:.2f}\n"
                 notification += f"📊 Score: {score:.2f}\n"
                 notification += f"🎯 Target: ₹{tp:.2f}\n"
                 notification += f"🛡️ Stop Loss: ₹{sl:.2f}\n"
-                notification += f"📦 Quantity: {self.config['TRADE_QUANTITY']}\n"
-                notification += f"🕐 Time: {ist_now.strftime('%H:%M:%S IST')}\n"
-                notification += f"🧪 Mode: {'DRY RUN' if self.config['DRY_RUN'] else 'LIVE'}"
+                notification += f"📦 Quantity: {self.config["TRADE_QUANTITY"]}\n"
+                notification += f"🕐 Time: {ist_now.strftime("%H:%M:%S IST")}\n"
+                notification += f"🧪 Mode: {"DRY RUN" if self.config["DRY_RUN"] else "LIVE"}"
                 
-                self._send_message(self.config['TELEGRAM_CHAT_ID'], notification)
+                self._send_message(self.config["TELEGRAM_CHAT_ID"], notification)
                 self.logger.info(f"Trade executed: {symbol} at {entry_price}")
                 
                 return True
@@ -799,50 +825,50 @@ class BotController:
         try:
             with trade_lock:
                 # Calculate P&L
-                if self.config['DRY_RUN'] or not self.kite:
+                if self.config["DRY_RUN"] or not self.kite:
                     # Simulate P&L for dry run
                     import random
                     pnl_factor = random.uniform(-0.05, 0.08)  # -5% to +8%
-                    self.current_trade['pnl'] = self.current_trade['entry'] * self.config['TRADE_QUANTITY'] * pnl_factor
-                    self.current_trade['exit_price'] = self.current_trade['entry'] * (1 + pnl_factor)
+                    self.current_trade["pnl"] = self.current_trade["entry"] * self.config["TRADE_QUANTITY"] * pnl_factor
+                    self.current_trade["exit_price"] = self.current_trade["entry"] * (1 + pnl_factor)
                 else:
                     # Get real market price
                     try:
-                        ticker = self.kite.quote(f"NFO:{self.current_trade['symbol']}")
-                        last_price = ticker[f"NFO:{self.current_trade['symbol']}"]["last_price"]
+                        ticker = self.kite.quote(f"NFO:{self.current_trade["symbol"]}")
+                        last_price = ticker[f"NFO:{self.current_trade["symbol"]}"]["last_price"]
                         
                         # Calculate P&L based on trade type
-                        pnl_multiplier = 1 if self.current_trade['type'] == 'CE' else -1
-                        self.current_trade['pnl'] = (last_price - self.current_trade['entry']) * self.config['TRADE_QUANTITY'] * pnl_multiplier
-                        self.current_trade['exit_price'] = last_price
+                        pnl_multiplier = 1 if self.current_trade["type"] == "CE" else -1
+                        self.current_trade["pnl"] = (last_price - self.current_trade["entry"]) * self.config["TRADE_QUANTITY"] * pnl_multiplier
+                        self.current_trade["exit_price"] = last_price
                     except Exception as e:
                         self.logger.error(f"Price fetch error during exit: {e}")
-                        self.current_trade['pnl'] = 0
-                        self.current_trade['exit_price'] = self.current_trade['entry']
+                        self.current_trade["pnl"] = 0
+                        self.current_trade["exit_price"] = self.current_trade["entry"]
                 
                 # Update trade record
                 ist_now = get_ist_now()
-                self.current_trade['exit_time'] = ist_now.isoformat()
-                self.current_trade['exit_reason'] = reason
+                self.current_trade["exit_time"] = ist_now.isoformat()
+                self.current_trade["exit_reason"] = reason
                 
                 # Add to trade logs
                 self.trade_logs.append(self.current_trade.copy())
                 
                 # Send exit notification
-                pnl = self.current_trade['pnl']
+                pnl = self.current_trade["pnl"]
                 pnl_emoji = "💚" if pnl > 0 else "❤️" if pnl < 0 else "💛"
                 
                 exit_msg = f"📉 TRADE CLOSED {pnl_emoji}\n\n"
-                exit_msg += f"🎯 Symbol: {self.current_trade['symbol']}\n"
-                exit_msg += f"💰 Entry: ₹{self.current_trade['entry']:.2f}\n"
-                exit_msg += f"🚪 Exit: ₹{self.current_trade['exit_price']:.2f}\n"
+                exit_msg += f"🎯 Symbol: {self.current_trade["symbol"]}\n"
+                exit_msg += f"💰 Entry: ₹{self.current_trade["entry"]:.2f}\n"
+                exit_msg += f"🚪 Exit: ₹{self.current_trade["exit_price"]:.2f}\n"
                 exit_msg += f"💸 P&L: ₹{pnl:.2f}\n"
                 exit_msg += f"📝 Reason: {reason}\n"
                 exit_msg += f"🕐 Duration: {self._calculate_trade_duration()}\n"
-                exit_msg += f"🧪 Mode: {'DRY RUN' if self.config['DRY_RUN'] else 'LIVE'}"
+                exit_msg += f"🧪 Mode: {"DRY RUN" if self.config["DRY_RUN"] else "LIVE"}"
                 
-                self._send_message(self.config['TELEGRAM_CHAT_ID'], exit_msg)
-                self.logger.info(f"Trade exited: {self.current_trade['symbol']} P&L: ₹{pnl:.2f}")
+                self._send_message(self.config["TELEGRAM_CHAT_ID"], exit_msg)
+                self.logger.info(f"Trade exited: {self.current_trade["symbol"]} P&L: ₹{pnl:.2f}")
                 
                 # Clear current trade
                 self.current_trade = None
@@ -856,7 +882,7 @@ class BotController:
             if not self.current_trade:
                 return "Unknown"
                 
-            entry_time = self._parse_ist_timestamp(self.current_trade['timestamp'])
+            entry_time = self._parse_ist_timestamp(self.current_trade["timestamp"])
             exit_time = get_ist_now()
             duration = exit_time - entry_time
             
@@ -876,29 +902,29 @@ class BotController:
             return
             
         try:
-            if self.config['DRY_RUN'] or not self.kite:
+            if self.config["DRY_RUN"] or not self.kite:
                 # Simulate price movement for dry run
                 import random
                 price_change = random.uniform(-0.02, 0.02)  # -2% to +2%
-                current_price = self.current_trade['entry'] * (1 + price_change)
+                current_price = self.current_trade["entry"] * (1 + price_change)
             else:
                 # Get real market price
                 try:
-                    ticker = self.kite.quote(f"NFO:{self.current_trade['symbol']}")
-                    current_price = ticker[f"NFO:{self.current_trade['symbol']}"]["last_price"]
+                    ticker = self.kite.quote(f"NFO:{self.current_trade["symbol"]}")
+                    current_price = ticker[f"NFO:{self.current_trade["symbol"]}"]["last_price"]
                 except Exception as e:
                     self.logger.error(f"Price monitoring error: {e}")
                     return
             
             # Update highest/lowest prices
-            self.current_trade['highest'] = max(self.current_trade['highest'], current_price)
-            self.current_trade['lowest'] = min(self.current_trade['lowest'], current_price)
+            self.current_trade["highest"] = max(self.current_trade["highest"], current_price)
+            self.current_trade["lowest"] = min(self.current_trade["lowest"], current_price)
             
             # Check stop loss and take profit
-            sl = self.current_trade['sl']
-            tp = self.current_trade['tp']
+            sl = self.current_trade["sl"]
+            tp = self.current_trade["tp"]
             
-            if self.current_trade['type'] == 'CE':
+            if self.current_trade["type"] == "CE":
                 if current_price <= sl:
                     self.exit_trade("Stop loss hit")
                 elif current_price >= tp:
@@ -918,7 +944,7 @@ class BotController:
         
         while not shutdown_event.is_set():
             try:
-                if not self.config['AUTO_TRADE']:
+                if not self.config["AUTO_TRADE"]:
                     time.sleep(30)
                     continue
                     
@@ -943,13 +969,13 @@ class BotController:
                     continue
                 
                 buy_ce_score, buy_pe_score = self.engine.generate_signal(df)
-                entry_price = df['close'].iloc[-1]
+                entry_price = df["close"].iloc[-1]
                 
                 # Execute trade if signal is strong enough
-                if buy_ce_score > buy_pe_score and buy_ce_score >= self.config['SIGNAL_THRESHOLD']:
-                    self._execute_trade('CE', entry_price, buy_ce_score)
-                elif buy_pe_score >= self.config['SIGNAL_THRESHOLD']:
-                    self._execute_trade('PE', entry_price, buy_pe_score)
+                if buy_ce_score > buy_pe_score and buy_ce_score >= self.config["SIGNAL_THRESHOLD"]:
+                    self._execute_trade("CE", entry_price, buy_ce_score)
+                elif buy_pe_score >= self.config["SIGNAL_THRESHOLD"]:
+                    self._execute_trade("PE", entry_price, buy_pe_score)
                 
                 time.sleep(60)  # Wait 1 minute before next check
                 
@@ -959,7 +985,7 @@ class BotController:
 
     def start_auto_trading(self):
         """Start auto-trading in a separate thread"""
-        if hasattr(self, 'auto_thread') and self.auto_thread.is_alive():
+        if hasattr(self, "auto_thread") and self.auto_thread.is_alive():
             return
             
         self.auto_thread = Thread(target=self.auto_trading_loop, daemon=True)
@@ -970,55 +996,55 @@ class BotController:
 # Flask Routes
 # ================================
 
-@app.route('/')
+@app.route("/")
 def health_check():
     """Health check endpoint"""
     ist_time = get_ist_now().strftime("%Y-%m-%d %H:%M:%S IST")
     return jsonify({
-        'status': 'healthy',
-        'service': 'Nifty Scalper Bot',
-        'version': '2.0',
-        'time': ist_time,
-        'market_open': bot_controller.is_market_hours() if 'bot_controller' in globals() else False
+        "status": "healthy",
+        "service": "Nifty Scalper Bot",
+        "version": "2.0",
+        "time": ist_time,
+        "market_open": bot_controller.is_market_hours() if "bot_controller" in globals() else False
     })
 
-@app.route('/telegram', methods=['POST'])
+@app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     """Handle Telegram webhook updates"""
     try:
-        if 'bot_controller' in globals():
+        if "bot_controller" in globals():
             update_data = request.get_json()
             bot_controller.process_telegram_update(update_data)
-        return jsonify({'status': 'ok'})
+        return jsonify({"status": "ok"})
     except Exception as e:
         logging.error(f"Webhook error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/status')
+@app.route("/status")
 def bot_status():
     """Get bot status via API"""
     try:
-        if 'bot_controller' not in globals():
-            return jsonify({'status': 'error', 'message': 'Bot not initialized'})
+        if "bot_controller" not in globals():
+            return jsonify({"status": "error", "message": "Bot not initialized"})
         
         ist_now = get_ist_now()
         today = ist_now.date()
-        today_trades = [t for t in bot_controller.trade_logs if bot_controller._parse_ist_timestamp(t['timestamp']).date() == today]
-        today_pnl = sum([t.get('pnl', 0) for t in today_trades])
+        today_trades = [t for t in bot_controller.trade_logs if bot_controller._parse_ist_timestamp(t["timestamp"]).date() == today]
+        today_pnl = sum([t.get("pnl", 0) for t in today_trades])
         
         return jsonify({
-            'status': 'running',
-            'time': ist_now.strftime("%Y-%m-%d %H:%M:%S IST"),
-            'market_open': bot_controller.is_market_hours(),
-            'auto_trade': bot_controller.config['AUTO_TRADE'],
-            'dry_run': bot_controller.config['DRY_RUN'],
-            'today_trades': len(today_trades),
-            'today_pnl': today_pnl,
-            'active_trade': bot_controller.current_trade is not None,
-            'total_trades': len(bot_controller.trade_logs)
+            "status": "running",
+            "time": ist_now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "market_open": bot_controller.is_market_hours(),
+            "auto_trade": bot_controller.config["AUTO_TRADE"],
+            "dry_run": bot_controller.config["DRY_RUN"],
+            "today_trades": len(today_trades),
+            "today_pnl": today_pnl,
+            "active_trade": bot_controller.current_trade is not None,
+            "total_trades": len(bot_controller.trade_logs)
         })
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ================================
 # Signal Handlers
@@ -1029,7 +1055,7 @@ def signal_handler(signum, frame):
     logging.info(f"Received signal {signum}, shutting down gracefully...")
     shutdown_event.set()
     
-    if 'bot_controller' in globals():
+    if "bot_controller" in globals():
         # Exit any active trade
         if bot_controller.current_trade:
             bot_controller.exit_trade("Bot shutdown")
@@ -1048,7 +1074,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 # Main Execution
 # ================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         # Initialize bot controller
         bot_controller = BotController()
@@ -1061,11 +1087,13 @@ if __name__ == '__main__':
         bot_controller.start_auto_trading()
         
         # Start Flask server
-        port = int(os.getenv('PORT', 10000))
+        port = int(os.getenv("PORT", 10000))
         bot_controller.logger.info(f"Starting server on port {port}")
-        app.run(host='0.0.0.0', port=port, debug=False)
+        app.run(host="0.0.0.0", port=port, debug=False)
         
     except Exception as e:
         logging.error(f"Failed to start bot: {e}")
         traceback.print_exc()
         sys.exit(1)
+
+
