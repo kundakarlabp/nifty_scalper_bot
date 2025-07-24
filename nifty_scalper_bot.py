@@ -21,7 +21,7 @@ from flask import Flask, jsonify
 from config import Config
 from kite_client import KiteClient
 from signal_generator import SignalGenerator
-from monitor import Monitor
+from monitor import BotMonitor
 from utils import is_market_open, get_market_status, time_until_market_open
 from telegram_bot import TelegramBot
 
