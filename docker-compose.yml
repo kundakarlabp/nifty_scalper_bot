@@ -1,0 +1,9 @@
+version: "3.8"
+services:
+  bot:
+    build: .
+    env_file: 
+      - .env
+    ports:
+      - "10000:10000"
+    restart: unless-stopped
