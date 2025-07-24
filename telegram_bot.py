@@ -40,37 +40,54 @@ Use /help to see all available commands.
         await update.message.reply_text(message, parse_mode='Markdown')
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command"""
-        if not self.trading_bot:
-            await update.message.reply_text("Bot is not connected to trading engine.")
-            return
-        
-        # Get live data from the bot
-        balance = getattr(self.trading_bot.risk_manager, 'current_balance', 0)
-        todays_pnl = getattr(self.trading_bot.risk_manager, 'todays_pnl', 0)
-        current_position = getattr(self.trading_bot, 'current_position', None)
-        trade_history = getattr(self.trading_bot, 'trade_history', [])
-        today_trades = len([t for t in trade_history if t.get('entry_time', '').startswith('2024')]) # Simple date check
-        auto_trade_status = '✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'
-        
-        # Determine position status text
-        position_text = "💤 No active trades."
-        if current_position:
-            position_text = f"🔥 *Active Trade:* {current_position.get('direction', 'N/A')}"
+    """Handle /status command with correct market status"""
+    if not self.trading_bot:
+        await update.message.reply_text("Bot is not connected to trading engine.")
+        return
+    
+    # Import market utils
+    from utils import is_market_open, get_market_status, time_until_market_open
+    
+    # Get live data from the bot
+    balance = getattr(self.trading_bot.risk_manager, 'current_balance', 0)
+    todays_pnl = getattr(self.trading_bot.risk_manager, 'todays_pnl', 0)
+    current_position = getattr(self.trading_bot, 'current_position', None)
+    trade_history = getattr(self.trading_bot, 'trade_history', [])
+    
+    # Get today's trades (better date filtering)
+    from datetime import datetime
+    today = datetime.now().strftime('%Y-%m-%d')
+    today_trades = len([t for t in trade_history if t.get('entry_time', '').startswith(today)])
+    
+    auto_trade_status = '✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'
+    
+    # Get market status
+    market_status = get_market_status()
+    market_info = ""
+    if not is_market_open():
+        market_info = f"\n• *Next Open:* {time_until_market_open()}"
+    
+    # Determine position status text
+    position_text = "💤 No active trades."
+    if current_position:
+        direction = current_position.get('direction', 'N/A')
+        entry_price = current_position.get('entry_price', 0)
+        position_text = f"🔥 *Active Trade:* {direction} @ ₹{entry_price:.2f}"
 
-        # Format the new status message
-        status_message = f"""
+    # Format the status message
+    status_message = f"""
 *🔄 Bot Status:*
 
 • *Mode:* 💰 LIVE TRADING
 • *Auto-trading:* {auto_trade_status}
-• *Market:* 🟢 OPEN
+• *Market:* {market_status}{market_info}
 • *Today's trades:* {today_trades}/{Config.MAX_DAILY_TRADES}
 • *Today's P&L:* ₹{todays_pnl:,.2f}
+• *Balance:* ₹{balance:,.2f}
 
 {position_text}
 """
-        await update.message.reply_text(status_message, parse_mode='Markdown')
+    await update.message.reply_text(status_message, parse_mode='Markdown')
 
     async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /config command"""
