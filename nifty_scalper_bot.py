@@ -300,11 +300,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error calculating position size: {e}")
             return Config.DEFAULT_LOTS
-        
-    except Exception as e:
-        logger.error(f"Error calculating position size: {e}")
-        return Config.DEFAULT_LOTS
-    
+         
     def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
         """Execute trade based on signal"""
         try:
