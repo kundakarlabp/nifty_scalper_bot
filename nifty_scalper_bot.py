@@ -224,7 +224,7 @@ class NiftyScalperBot:
             logger.error(f"Error getting market  {e}")
             return None
 
-    def analyze_signals(self, market_ Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def analyze_signals(self, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Analyze market data for trading signals"""
         try:
             if not self.signal_generator or not market_
@@ -267,7 +267,7 @@ class NiftyScalperBot:
             logger.error(f"Error calculating position size: {e}")
             return Config.DEFAULT_LOTS
 
-    def execute_trade(self, signal_ Dict[str, Any]) -> bool:
+    def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
         """Execute trade based on signal"""
         try:
             # Check if auto-trading is enabled
