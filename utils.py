@@ -44,6 +44,10 @@ def is_market_open() -> bool:
         logger.error(f"Error checking market status: {e}")
         return False
 
+def format_price(price):
+    """Format price to 2 decimal places"""
+    return round(float(price), 2) if price is not None else 0.0
+
 def get_market_status() -> str:
     """
     Get market status emoji and text
