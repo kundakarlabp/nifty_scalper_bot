@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, List
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify
+
 # Import custom modules
 from config import Config
 from kite_client import KiteClient
@@ -22,6 +23,7 @@ from signal_generator import SignalGenerator
 from monitor import Monitor
 from utils import is_market_open, get_market_status, time_until_market_open
 from telegram_bot import TelegramBot
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +34,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
 class RiskManager:
     """Enhanced Risk Management System"""
     def __init__(self, initial_balance: float = 100000):
@@ -44,6 +47,7 @@ class RiskManager:
         self.circuit_breaker_active = False
         self.circuit_breaker_until = None
         self.daily_loss_limit = initial_balance * Config.MAX_DAILY_LOSS_PCT
+
     def can_trade(self) -> tuple[bool, str]:
         """Check if trading is allowed"""
         # Check market hours
@@ -63,6 +67,7 @@ class RiskManager:
             else:
                 self.reset_circuit_breaker()
         return True, "Trading allowed"
+
     def update_balance(self, pnl: float):
         """Update balance and risk metrics"""
         self.current_balance += pnl
@@ -74,18 +79,21 @@ class RiskManager:
                 self.activate_circuit_breaker()
         else:
             self.consecutive_losses = 0
+
     def activate_circuit_breaker(self):
         """Activate circuit breaker after consecutive losses"""
         self.circuit_breaker_active = True
         pause_minutes = Config.CIRCUIT_BREAKER_PAUSE_MINUTES
         self.circuit_breaker_until = datetime.now() + timedelta(minutes=pause_minutes)
         logger.warning(f"Circuit breaker activated for {pause_minutes} minutes after {self.consecutive_losses} consecutive losses")
+
     def reset_circuit_breaker(self):
         """Reset circuit breaker"""
         self.circuit_breaker_active = False
         self.circuit_breaker_until = None
         self.consecutive_losses = 0
         logger.info("Circuit breaker reset")
+
     def reset_daily_stats(self):
         """Reset daily statistics"""
         self.todays_pnl = 0.0
@@ -93,6 +101,7 @@ class RiskManager:
         self.consecutive_losses = 0
         self.reset_circuit_breaker()
         logger.info("Daily statistics reset")
+
 class NiftyScalperBot:
     """Main Trading Bot Class with Enhanced Features"""
     def __init__(self):
@@ -111,14 +120,16 @@ class NiftyScalperBot:
         self.app = Flask(__name__)
         self.setup_web_routes()
         # Initialize components
-        self.initialize_components()
+        if not self.initialize_components():
+            raise RuntimeError("Failed to initialize bot components")
+
     def initialize_components(self):
         """Initialize all bot components"""
         try:
             # Initialize Kite client
             self.kite_client = KiteClient()
             # FIX: Check the is_connected flag instead of calling connect()
-            if not self.kite_client.is_connected: 
+            if not self.kite_client.is_connected:
                 logger.error("Failed to connect to Kite")
                 return False
             # Initialize signal generator
@@ -132,6 +143,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error initializing components: {e}")
             return False
+
     def setup_telegram_bot(self):
         """Setup Telegram bot integration"""
         if not Config.TELEGRAM_BOT_TOKEN:
@@ -153,6 +165,7 @@ class NiftyScalperBot:
             logger.info("Telegram bot thread started")
         except Exception as e:
             logger.error(f"Failed to setup Telegram bot: {e}")
+
     def setup_web_routes(self):
         """Setup Flask web routes for Render deployment"""
         @self.app.route('/')
@@ -166,6 +179,7 @@ class NiftyScalperBot:
                 "todays_pnl": self.risk_manager.todays_pnl,
                 "daily_trades": self.risk_manager.daily_trades
             })
+
         @self.app.route('/status')
         def bot_status():
             return jsonify({
@@ -179,12 +193,14 @@ class NiftyScalperBot:
                 "circuit_breaker": self.risk_manager.circuit_breaker_active,
                 "last_update": datetime.now().isoformat()
             })
+
         @self.app.route('/trades')
         def recent_trades():
             return jsonify({
                 "recent_trades": self.trade_history[-10:],  # Last 10 trades
                 "total_trades": len(self.trade_history)
             })
+
     def get_market_data(self) -> Optional[Dict[str, Any]]:
         """Get current market data"""
         try:
@@ -207,6 +223,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error getting market data: {e}")
             return None
+
     def analyze_signals(self, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Analyze market data for trading signals"""
         try:
@@ -217,7 +234,7 @@ class NiftyScalperBot:
             if signal and signal.get('strength', 0) >= Config.SIGNAL_THRESHOLD:
                 # Avoid duplicate signals
                 current_time = datetime.now()
-                if (self.last_signal_time and 
+                if (self.last_signal_time and
                     (current_time - self.last_signal_time).seconds < Config.MIN_SIGNAL_INTERVAL):
                     return None
                 self.last_signal_time = current_time
@@ -226,6 +243,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error analyzing signals: {e}")
             return None
+
     def calculate_position_size(self, signal_data: Dict[str, Any]) -> int:
         """Calculate number of lots based on capital and risk"""
         try:
@@ -248,6 +266,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error calculating position size: {e}")
             return Config.DEFAULT_LOTS
+
     def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
         """Execute trade based on signal"""
         try:
@@ -265,7 +284,6 @@ class NiftyScalperBot:
                 logger.info("Already have an open position, skipping new trade")
                 return False
             # Calculate position size
-            # Calculate position size (in lots)
             num_lots = self.calculate_position_size(signal_data)
             quantity = num_lots * Config.LOT_SIZE  # Convert lots to shares for Kite API
             # Place order
@@ -313,6 +331,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
             return False
+
     def place_order(self, direction: str, quantity: int, price: float = None) -> Optional[Dict[str, Any]]:
         """Place order through Kite"""
         try:
@@ -333,6 +352,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error placing order: {e}")
             return None
+
     def check_exit_conditions(self) -> Optional[str]:
         """Check if current position should be exited"""
         if not self.current_position:
@@ -349,12 +369,12 @@ class NiftyScalperBot:
             target = self.current_position.get('target')
             # Check stop loss
             if stop_loss:
-                if ((direction == 'BUY' and current_price <= stop_loss) or 
+                if ((direction == 'BUY' and current_price <= stop_loss) or
                     (direction == 'SELL' and current_price >= stop_loss)):
                     return 'stop_loss'
             # Check target
             if target:
-                if ((direction == 'BUY' and current_price >= target) or 
+                if ((direction == 'BUY' and current_price >= target) or
                     (direction == 'SELL' and current_price <= target)):
                     return 'target'
             # Check time-based exit (end of day)
@@ -365,6 +385,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error checking exit conditions: {e}")
             return None
+
     def close_position(self, exit_reason: str = 'manual') -> bool:
         """Close current position"""
         if not self.current_position:
@@ -417,8 +438,8 @@ class NiftyScalperBot:
                     # Clear current position
                     self.current_position = None
                     # Check circuit breaker
-                    if (self.risk_manager.circuit_breaker_active and 
-                        self.telegram_bot and 
+                    if (self.risk_manager.circuit_breaker_active and
+                        self.telegram_bot and
                         exit_reason == 'stop_loss'):
                         self.telegram_bot.notify_circuit_breaker(
                             self.risk_manager.consecutive_losses,
@@ -434,6 +455,7 @@ class NiftyScalperBot:
         except Exception as e:
             logger.error(f"Error closing position: {e}")
             return False
+
     def trading_loop(self):
         """Main trading loop"""
         logger.info("Starting trading loop")
@@ -470,19 +492,17 @@ class NiftyScalperBot:
             except Exception as e:
                 logger.error(f"Error in trading loop: {e}")
                 time.sleep(10)  # Wait before retrying
+
     def schedule_daily_reset(self):
         """Schedule daily reset of statistics"""
         schedule.every().day.at("00:01").do(self.risk_manager.reset_daily_stats)
         while self.is_running:
             schedule.run_pending()
             time.sleep(60)
+
     def start(self):
         """Start the trading bot"""
         logger.info("Starting Nifty Scalper Bot v2.0")
-        # Check initialization
-        if not self.kite_client:
-            logger.error("Bot not properly initialized")
-            return
         self.is_running = True
         # Start trading loop in separate thread
         trading_thread = threading.Thread(target=self.trading_loop, daemon=True)
@@ -491,19 +511,8 @@ class NiftyScalperBot:
         scheduler_thread = threading.Thread(target=self.schedule_daily_reset, daemon=True)
         scheduler_thread.start()
         logger.info("Bot started successfully")
-        # Send startup notification
-        if self.telegram_bot:
-            # Ensure we are in an asyncio context or schedule the task correctly
-            # Using asyncio.run() here might not work if the loop is already running.
-            # Consider using loop.create_task() if you have access to the loop.
-            # For simplicity, let's assume it's handled correctly in TelegramBot.
-             asyncio.create_task(self.telegram_bot.send_notification(
-                f"🚀 *Nifty Scalper Bot v2.0 Started*\n"
-                f"• *Market Status:* {get_market_status()}\n"
-                f"• *Auto-trading:* {'✅ ON' if self.auto_trade else '❌ OFF'}\n"
-                f"• *Balance:* ₹{self.risk_manager.current_balance:,.2f}\n"
-                f"• *Mode:* 💰 LIVE TRADING"
-            ))
+        # Startup notification is handled by TelegramBot.start_bot
+
     def stop(self):
         """Stop the trading bot"""
         logger.info("Stopping Nifty Scalper Bot")
@@ -511,11 +520,9 @@ class NiftyScalperBot:
         # Close any open positions
         if self.current_position:
             self.close_position('shutdown')
-        # Stop Telegram bot
-        if self.telegram_bot:
-            # Ensure stop_bot is an async function and called correctly
-            asyncio.create_task(self.telegram_bot.stop_bot())
-        logger.info("Bot stopped")
+        # Signal Telegram bot to stop (handled internally by TelegramBot)
+        logger.info("Bot stopped. Telegram bot stop is handled by its own thread.")
+
 def main():
     """Main function"""
     try:
@@ -524,7 +531,7 @@ def main():
         # Start bot
         bot.start()
         # Start Flask web service for Render
-        port = int(os.environ.get('PORT', 5000))
+        port = int(os.environ.get('PORT', 10000)) # Default to 10000 if PORT not set
         # Run Flask app in main thread
         bot.app.run(host='0.0.0.0', port=port, debug=False)
     except KeyboardInterrupt:
@@ -532,8 +539,9 @@ def main():
         if 'bot' in locals():
             bot.stop()
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True) # Log full traceback
         if 'bot' in locals():
             bot.stop()
+
 if __name__ == "__main__":
     main()
