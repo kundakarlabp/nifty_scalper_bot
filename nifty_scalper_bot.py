@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
 
 # --- 2. RiskManager Class ---
-# This class is self-contained and uses the final Config.
 class RiskManager:
     def __init__(self, telegram_bot=None):
         self.initial_balance = Config.INITIAL_CAPITAL
@@ -41,7 +40,8 @@ class RiskManager:
 
     def can_trade(self):
         if self.circuit_breaker_active:
-            if datetime.now(IST) < self.circuit_breaker_until: return False
+            if datetime.now(IST) < self.circuit_breaker_until:
+                return False
             else:
                 logger.info("Circuit breaker period ended. Resuming trading.")
                 self.circuit_breaker_active = False
@@ -89,7 +89,7 @@ class RiskManager:
 # --- 3. Main Bot Class with State Management ---
 class NiftyScalperBot:
     def __init__(self):
-        Config.validate() # Validate config on startup
+        Config.validate()  # Validate config on startup
         self.signal_generator = SignalGenerator()
         self.broker = BrokerManager()
         self.telegram_bot = TelegramBot(trading_bot_instance=self)
@@ -140,14 +140,13 @@ class NiftyScalperBot:
                         signal = self.signal_generator.generate_signal(market_data)
                         if signal:
                             await self.execute_trade(signal)
-                
+
                 await asyncio.sleep(Config.TICK_INTERVAL_SECONDS)
             except Exception as e:
                 logger.error(f"Critical error in main loop: {e}", exc_info=True)
                 await asyncio.sleep(Config.TICK_INTERVAL_SECONDS * 5)
 
     def get_market_data(self):
-        # *** CRITICAL PLACEHOLDER: Replace with your real data feed API call ***
         import random
         price = 25000 + random.uniform(-50, 50)
         return {'ltp': price, 'volume': random.randint(10000, 50000), 'open': price-10, 'high': price+10, 'low': price-10, 'timestamp': datetime.now(IST)}
@@ -163,7 +162,7 @@ class NiftyScalperBot:
         underlying_sl_points = abs(signal['underlying_price'] - signal['underlying_stop_loss'])
         option_sl_points = underlying_sl_points * delta_factor
         option_tp_points = abs(signal['underlying_price'] - signal['underlying_target']) * delta_factor
-        
+
         quantity = self.risk_manager.calculate_position_size(underlying_sl_points)
         if quantity <= 0: return
 
@@ -180,44 +179,33 @@ class NiftyScalperBot:
         self.telegram_bot.notify_trade_entry(self.current_position)
 
     async def manage_open_position(self, market_data: dict):
-        """Checks the status of the open GTT order."""
         pos = self.current_position
-        
-        # This is a placeholder for polling your broker's API for the order status.
-        # A webhook-based approach is more efficient if your broker supports it.
-        # order_update = self.broker.get_order_status(pos['order_id'])
-        # if order_update and order_update['status'] == 'COMPLETE':
-        #     await self.handle_position_closure(order_update['average_price'], "GTT Executed")
-        #     return
-        
-        # Placeholder for trailing stop-loss logic can also go here.
+        # Broker API polling for real/time order status would be here.
         pass
 
     async def handle_position_closure(self, exit_price: float, reason: str):
-        """Finalizes a trade, records P&L, and clears the state."""
         if not self.current_position: return
 
         pos = self.current_position
         pnl = (exit_price - pos['entry_price']) * pos['quantity']
-        
+
         self.risk_manager.record_trade(pnl)
-        
+
         exit_data = {**pos, 'exit_price': exit_price, 'pnl': pnl, 'reason': reason}
         logger.critical(f"POSITION CLOSED: P&L {format_currency(pnl)} | Reason: {reason}")
         self.telegram_bot.notify_trade_exit(exit_data)
-        
+
         self.current_position = None
         self._clear_position_state()
 
     async def manual_exit_position(self) -> bool:
-        """Allows manual cancellation of an open GTT order via Telegram."""
         if not self.current_position:
             logger.warning("Manual exit requested, but no active position found.")
             return False
-        
+
         order_id = self.current_position['order_id']
         logger.info(f"Attempting to manually cancel GTT order: {order_id}")
-        
+
         success = self.broker.cancel_order(order_id)
         if success:
             await self.handle_position_closure(self.current_position['entry_price'], "Manual Exit")
