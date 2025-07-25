@@ -321,7 +321,9 @@ class NiftyScalperBot:
                 return False
             
             # Calculate position size
-            quantity = self.calculate_position_size(signal_data)
+            # Calculate position size (in lots)
+                num_lots = self.calculate_position_size(signal_data)
+                quantity = num_lots * Config.LOT_SIZE  # Convert lots to shares for Kite API
             
             # Place order
             order_response = self.place_order(
