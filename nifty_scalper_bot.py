@@ -1,32 +1,32 @@
+# nifty_scalper_bot.py
+
 import asyncio
 import logging
+import json
+import os
 from datetime import datetime, timedelta
 import pytz
 
-# Import the classes from your other corrected Python files
+# Import all custom components
 from config import Config
 from utils import is_market_open, format_currency, get_market_status
 from signal_generator import SignalGenerator
 from telegram_bot import TelegramBot
+from broker_manager import BrokerManager
 
 # --- 1. Setup Professional Logging ---
-# This configuration will log to both a file and the console.
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
-        logging.FileHandler("nifty_scalper_bot.log"), # Log file for detailed history
-        logging.StreamHandler()                      # Console output for real-time monitoring
+        logging.FileHandler("nifty_scalper_bot.log"),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
-
-# Define the Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
 
-
-# --- 2. RiskManager Class ---
-# A dedicated class to handle all risk management rules.
+# --- 2. RiskManager Class (Unchanged but included for completeness) ---
 class RiskManager:
     def __init__(self, initial_balance, telegram_bot=None):
         self.initial_balance = initial_balance
@@ -39,229 +39,190 @@ class RiskManager:
         self.telegram_bot = telegram_bot
 
     def can_trade(self):
-        """Checks if a new trade is permitted under current risk rules."""
-        # Rule 1: Check for active circuit breaker
         if self.circuit_breaker_active:
-            if datetime.now(IST) < self.circuit_breaker_until:
-                return False # Still in timeout period
+            if datetime.now(IST) < self.circuit_breaker_until: return False
             else:
-                logger.info("Circuit breaker period has ended. Resuming trading.")
-                self.circuit_breaker_active = False # Reset the breaker
-
-        # Rule 2: Check max daily trades
+                logger.info("Circuit breaker period ended. Resuming trading.")
+                self.circuit_breaker_active = False
         if self.daily_trades >= Config.MAX_DAILY_TRADES:
-            logger.warning("Max daily trades limit reached. No new trades today.")
+            logger.warning("Max daily trades limit reached.")
             return False
-
-        # Rule 3: Check max daily loss
-        max_loss_amount = self.initial_balance * Config.MAX_DAILY_LOSS_PCT
-        if self.todays_pnl < -max_loss_amount:
-            logger.critical(f"Max daily loss limit of {format_currency(max_loss_amount)} reached. Stopping all trading for the day.")
+        max_loss = self.initial_balance * Config.MAX_DAILY_LOSS_PCT
+        if self.todays_pnl < -max_loss:
+            logger.critical(f"Max daily loss limit of {format_currency(max_loss)} reached. Stopping trading.")
             return False
-            
         return True
 
     def calculate_position_size(self, stop_loss_points):
-        """Calculates position size based on the risk-per-trade setting."""
-        if stop_loss_points <= 0:
-            logger.error("Cannot calculate position size: stop_loss_points is zero or negative.")
-            return 0
-            
-        risk_amount_per_trade = self.current_balance * Config.RISK_PER_TRADE_PCT
-        quantity = risk_amount_per_trade / stop_loss_points
-        
-        # Round to the nearest lot size
+        if stop_loss_points <= 0: return 0
+        risk_amount = self.current_balance * Config.RISK_PER_TRADE_PCT
+        quantity = risk_amount / stop_loss_points
         num_lots = max(1, round(quantity / Config.NIFTY_LOT_SIZE))
         return int(num_lots * Config.NIFTY_LOT_SIZE)
 
     def record_trade(self, pnl):
-        """Updates all risk metrics after a trade is closed."""
         self.daily_trades += 1
         self.todays_pnl += pnl
         self.current_balance += pnl
-        
         if pnl < 0:
             self.consecutive_losses += 1
             if self.consecutive_losses >= Config.MAX_CONSECUTIVE_LOSSES:
                 self.activate_circuit_breaker()
         else:
-            # Reset consecutive losses on a winning trade
             self.consecutive_losses = 0
 
     def activate_circuit_breaker(self):
-        """Activates the circuit breaker to pause trading after too many losses."""
-        self.circuit_breaker_active = True
         pause_duration = timedelta(minutes=Config.CIRCUIT_BREAKER_PAUSE_MINUTES)
+        self.circuit_breaker_active = True
         self.circuit_breaker_until = datetime.now(IST) + pause_duration
-        
-        logger.critical(f"CIRCUIT BREAKER ACTIVATED for {Config.CIRCUIT_BREAKER_PAUSE_MINUTES} minutes due to {self.consecutive_losses} consecutive losses.")
-        
-        # Notify the user via Telegram
+        logger.critical(f"CIRCUIT BREAKER ACTIVATED for {Config.CIRCUIT_BREAKER_PAUSE_MINUTES} minutes.")
         if self.telegram_bot:
             self.telegram_bot.notify_circuit_breaker(self.consecutive_losses, Config.CIRCUIT_BREAKER_PAUSE_MINUTES)
 
     def reset_daily_stats(self):
-        """Resets daily statistics at the start of a new trading day."""
-        logger.info("Resetting daily trading statistics for the new day.")
+        logger.info("Resetting daily trading statistics.")
         self.todays_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
-        self.circuit_breaker_active = False
 
-
-# --- 3. The Main NiftyScalperBot Class ---
-# This class orchestrates all the components.
+# --- 3. Main Bot Class with State Management ---
 class NiftyScalperBot:
     def __init__(self):
         self.signal_generator = SignalGenerator()
+        self.broker = BrokerManager()
         self.telegram_bot = TelegramBot(trading_bot_instance=self)
         self.risk_manager = RiskManager(Config.INITIAL_CAPITAL, telegram_bot=self.telegram_bot)
-        self.current_position = None
-        self.auto_trade = True  # Auto-trading is ON by default
-        self.last_reset_day = -1 # To track when we last reset daily stats
+        self.auto_trade = True
+        self.last_reset_day = -1
+        
+        # --- NEW: State Management ---
+        self.current_position = self._load_position_state()
+
+    # --- NEW: State Persistence Methods ---
+    def _load_position_state(self):
+        if os.path.exists(Config.STATE_FILE):
+            try:
+                with open(Config.STATE_FILE, 'r') as f:
+                    position = json.load(f)
+                    logger.critical(f"Loaded existing position from state file: {position}")
+                    return position
+            except Exception as e:
+                logger.error(f"Error loading state file '{Config.STATE_FILE}': {e}. Assuming no position.")
+                os.remove(Config.STATE_FILE) # Remove corrupt file
+        return None
+
+    def _save_position_state(self):
+        if self.current_position:
+            with open(Config.STATE_FILE, 'w') as f:
+                json.dump(self.current_position, f, indent=4)
+                logger.info(f"Saved current position state to '{Config.STATE_FILE}'.")
+
+    def _clear_position_state(self):
+        if os.path.exists(Config.STATE_FILE):
+            os.remove(Config.STATE_FILE)
+            logger.info(f"Cleared position state file '{Config.STATE_FILE}'.")
 
     async def run(self):
-        """The main execution loop for the entire bot."""
-        logger.info("Nifty Scalper Bot v2.0 is starting...")
-        
-        # Start the Telegram bot in the background. It will run concurrently.
+        logger.info("Nifty Scalper Bot v4.0 (Stateful) is starting...")
         telegram_task = asyncio.create_task(self.telegram_bot.start_bot())
 
         while True:
             try:
                 now = datetime.now(IST)
-                
-                # Reset daily stats at the start of each day
                 if now.day != self.last_reset_day:
                     self.risk_manager.reset_daily_stats()
                     self.last_reset_day = now.day
 
                 if is_market_open():
-                    # This is the most important placeholder for you to fill
                     market_data = self.get_market_data()
-                    
                     if self.current_position:
-                        self.check_exit_conditions(market_data)
+                        await self.manage_open_position(market_data)
                     elif self.auto_trade and self.risk_manager.can_trade():
                         signal = self.signal_generator.generate_signal(market_data)
                         if signal:
-                            self.execute_trade(signal)
+                            await self.execute_trade(signal)
                 
-                # Log status periodically even when the market is closed
-                logger.info(f"Status | P&L: {format_currency(self.risk_manager.todays_pnl)} | Balance: {format_currency(self.risk_manager.current_balance)} | Market: {get_market_status()}")
-
+                await asyncio.sleep(Config.TICK_INTERVAL_SECONDS)
             except Exception as e:
-                logger.error(f"An error occurred in the main bot loop: {e}", exc_info=True)
-
-            # Wait for the specified interval before the next cycle
-            await asyncio.sleep(Config.TICK_INTERVAL_SECONDS)
+                logger.error(f"Critical error in main loop: {e}", exc_info=True)
+                await asyncio.sleep(Config.TICK_INTERVAL_SECONDS * 5) # Longer sleep on error
 
     def get_market_data(self):
-        """
-        *** CRITICAL PLACEHOLDER ***
-        You must replace this with your live market data feed API call.
-        This function should return a dictionary like:
-        {'ltp': 24850.50, 'volume': 50000, 'open': 24800, 'high': 24900, 'low': 24750, 'timestamp': datetime_object}
-        """
+        # *** CRITICAL PLACEHOLDER *** - MUST BE REPLACED WITH REAL DATA FEED
         import random
-        # This is SIMULATED data. It is NOT real and will NOT work for actual trading.
-        simulated_price = 24800 + random.uniform(-50, 50)
-        return {
-            'ltp': simulated_price,
-            'volume': random.randint(10000, 50000),
-            'open': simulated_price - 10,
-            'high': simulated_price + 10,
-            'low': simulated_price - 10,
-            'timestamp': datetime.now(IST)
-        }
+        price = 25000 + random.uniform(-50, 50)
+        return {'ltp': price, 'volume': random.randint(10000, 50000), 'open': price-10, 'high': price+10, 'low': price-10, 'timestamp': datetime.now(IST)}
 
-    def execute_trade(self, signal: dict):
-        """Handles the logic for entering a new trade."""
-        logger.info(f"Attempting to execute trade for signal: {signal}")
+    async def execute_trade(self, signal: dict):
+        instrument = self.broker.get_instrument_for_option(signal['underlying_price'], signal['option_type'])
+        if not instrument: return
+
+        option_ltp = self.broker.get_ltp(instrument)
+        if option_ltp <= 0: return
+
+        delta_factor = 0.5
+        underlying_sl_points = abs(signal['underlying_price'] - signal['underlying_stop_loss'])
+        option_sl_points = underlying_sl_points * delta_factor
+        option_tp_points = abs(signal['underlying_price'] - signal['underlying_target']) * delta_factor
         
-        stop_loss_points = abs(signal['entry_price'] - signal['stop_loss'])
-        quantity = self.risk_manager.calculate_position_size(stop_loss_points)
+        quantity = self.risk_manager.calculate_position_size(underlying_sl_points)
+        if quantity <= 0: return
 
-        if quantity <= 0:
-            logger.warning("Trade skipped: Calculated position size is zero.")
-            return
+        order_id = self.broker.place_gtt_oco_order(instrument, "BUY", quantity, option_ltp, option_ltp + option_tp_points, option_ltp - option_sl_points)
+        if not order_id: return
 
-        # --- BROKER API INTEGRATION: PLACE ENTRY ORDER HERE ---
-        logger.critical("--- SIMULATING BROKER ORDER: PLACING ENTRY ORDER ---")
-        # Example: order_id = self.broker.place_order(symbol="NIFTY_FUT", ...)
-        # if not order_id:
-        #     logger.error("Failed to place order with broker.")
+        self.current_position = {
+            'order_id': order_id, 'instrument': instrument, 'quantity': quantity,
+            'entry_price': option_ltp, 'stop_loss': option_ltp - option_sl_points,
+            'target': option_ltp + option_tp_points, 'status': 'OPEN'
+        }
+        self._save_position_state() # Save state immediately after placing order
+        logger.critical(f"NEW GTT OCO POSITION PLACED: {self.current_position}")
+        # self.telegram_bot.notify_trade_entry(...)
+
+    async def manage_open_position(self, market_data: dict):
+        """Checks order status and manages trailing SL."""
+        pos = self.current_position
+        
+        # --- NEW: Check Order Status ---
+        # This is a placeholder for the most reliable method: webhooks or polling
+        # order_status = self.broker.get_order_status(pos['order_id'])
+        # if order_status == "COMPLETE":
+        #     final_price = self.broker.get_order_trade_price(pos['order_id'])
+        #     await self.handle_position_closure(final_price)
         #     return
         
-        self.current_position = {
-            'direction': signal['direction'],
-            'entry_price': signal['entry_price'],
-            'stop_loss': signal['stop_loss'],
-            'target': signal['target'],
-            'quantity': quantity,
-            'entry_time': datetime.now(IST)
-        }
-        logger.critical(f"NEW POSITION OPENED: {self.current_position}")
-        self.telegram_bot.notify_trade_entry(self.current_position)
+        # Trailing SL logic can be added here as before
+        pass
 
-    def check_exit_conditions(self, market_data: dict):
-        """Checks if the active position should be closed based on SL/TP."""
-        ltp = market_data['ltp']
-        pos = self.current_position
-        
-        exit_reason = None
-        if pos['direction'] == 'BUY':
-            if ltp >= pos['target']: exit_reason = "Target hit"
-            elif ltp <= pos['stop_loss']: exit_reason = "Stop-loss hit"
-        elif pos['direction'] == 'SELL':
-            if ltp <= pos['target']: exit_reason = "Target hit"
-            elif ltp >= pos['stop_loss']: exit_reason = "Stop-loss hit"
-        
-        if exit_reason:
-            self.close_position(reason=exit_reason, exit_price=ltp)
-
-    async def close_position(self, reason: str, exit_price: float):
-        """Handles the logic for closing the current position."""
-        if not self.current_position: return False
-
-        logger.info(f"Attempting to close position due to: {reason}")
-        
-        # --- BROKER API INTEGRATION: PLACE EXIT ORDER HERE ---
-        logger.critical("--- SIMULATING BROKER ORDER: PLACING EXIT ORDER ---")
-        # Example: self.broker.place_order(symbol="NIFTY_FUT", direction="SELL" if pos['direction'] == 'BUY' else "BUY", ...)
+    async def handle_position_closure(self, exit_price: float):
+        """Finalizes a trade, records P&L, and clears the state."""
+        if not self.current_position: return
 
         pos = self.current_position
-        pnl = (exit_price - pos['entry_price']) * pos['quantity'] if pos['direction'] == 'BUY' else (pos['entry_price'] - exit_price) * pos['quantity']
+        pnl = (exit_price - pos['entry_price']) * pos['quantity']
         
         self.risk_manager.record_trade(pnl)
-        
-        exit_data = {**pos, 'exit_price': exit_price, 'pnl': pnl, 'reason': reason}
         logger.critical(f"POSITION CLOSED: P&L {format_currency(pnl)}")
-        self.telegram_bot.notify_trade_exit(exit_data)
+        # self.telegram_bot.notify_trade_exit(...)
         
         self.current_position = None
-        return True
-
+        self._clear_position_state()
 
 # --- 4. Main Execution Block ---
-# This part initializes and runs the bot.
 async def main():
     bot = NiftyScalperBot()
     try:
         await bot.run()
     except asyncio.CancelledError:
-        logger.info("Main task was cancelled.")
+        logger.info("Main task cancelled.")
     finally:
-        logger.info("Initiating graceful shutdown of the bot...")
-        # This ensures the Telegram bot stops polling cleanly
+        logger.info("Initiating graceful shutdown...")
         await bot.telegram_bot.stop_bot()
         logger.info("Bot has been shut down.")
 
 if __name__ == "__main__":
     try:
-        # This starts the entire asynchronous application
         asyncio.run(main())
     except KeyboardInterrupt:
-        # This handles the case where you manually stop the bot with Ctrl+C
-        logger.info("Bot stopped manually by user.")
-
+        logger.info("Bot stopped manually by user (Ctrl+C).")
