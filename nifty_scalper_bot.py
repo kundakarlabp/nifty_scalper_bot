@@ -221,13 +221,13 @@ class NiftyScalperBot:
                 'ohlc': data.get('ohlc', {})
             }
         except Exception as e:
-            logger.error(f"Error getting market  {e}")
+            logger.error(f"Error getting market data: {e}")
             return None
 
     def analyze_signals(self, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Analyze market data for trading signals"""
         try:
-            if not self.signal_generator or not market_
+            if not self.signal_generator or not market_data:
                 return None
             # Generate signal
             signal = self.signal_generator.generate_signal(market_data)
@@ -467,7 +467,7 @@ class NiftyScalperBot:
                     continue
                 # Get market data
                 market_data = self.get_market_data()
-                if not market_
+                if not market_data:
                     time.sleep(Config.LOOP_DELAY)
                     continue
                 # Check exit conditions for existing position
@@ -551,3 +551,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
