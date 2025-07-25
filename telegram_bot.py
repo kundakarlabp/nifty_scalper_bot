@@ -31,6 +31,7 @@ class TelegramBot:
         self.app: Optional[Application] = None
         self.is_running = False
         self._background_tasks = set() # To keep references to tasks
+        self._stop_event = asyncio.Event() # Event to signal stop
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command with enhanced status"""
@@ -330,9 +331,9 @@ Bot remains active for monitoring and manual commands."""
             logger.error(f"Error in exit position command: {e}")
             await update.message.reply_text("❌ Error exiting position. Please try again.")
 
-    def notify_trade_entry(self, trade_data: Dict[str, Any]):
+    def notify_trade_entry(self, trade_ Dict[str, Any]):
         """Notify about trade entry"""
-        if not self.is_running:
+        if not self.is_running or not self.app:
             return
 
         message = f"""🟢 *Trade Entry*
@@ -345,13 +346,14 @@ Bot remains active for monitoring and manual commands."""
 • *Time:* {trade_data.get('timestamp', 'N/A')}
 """
         # Schedule the coroutine to be run
-        task = asyncio.create_task(self._send_message_to_all(message))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        if self.app:
+             task = asyncio.create_task(self._send_message_to_all(message))
+             self._background_tasks.add(task)
+             task.add_done_callback(self._background_tasks.discard)
 
-    def notify_trade_exit(self, trade_data: Dict[str, Any]):
+    def notify_trade_exit(self, trade_ Dict[str, Any]):
         """Notify about trade exit"""
-        if not self.is_running:
+        if not self.is_running or not self.app:
             return
 
         message = f"""🔴 *Trade Exit*
@@ -362,13 +364,14 @@ Bot remains active for monitoring and manual commands."""
 • *Duration:* {trade_data.get('duration', 'N/A')}
 """
         # Schedule the coroutine to be run
-        task = asyncio.create_task(self._send_message_to_all(message))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        if self.app:
+            task = asyncio.create_task(self._send_message_to_all(message))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def notify_circuit_breaker(self, consecutive_losses: int, pause_minutes: int):
         """Notify about circuit breaker activation"""
-        if not self.is_running:
+        if not self.is_running or not self.app:
             return
 
         message = f"""🚨 *Circuit Breaker Activated!*
@@ -380,11 +383,12 @@ Bot remains active for monitoring and manual commands."""
 Bot is temporarily paused to prevent further losses.
 """
         # Schedule the coroutine to be run
-        task = asyncio.create_task(self._send_message_to_all(message))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        if self.app:
+            task = asyncio.create_task(self._send_message_to_all(message))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
-    # Methods to fix the original errors
+    # Methods to fix the original errors and the new threading issue
     async def start_bot(self):
         """Start the Telegram bot"""
         try:
@@ -413,21 +417,34 @@ Bot is temporarily paused to prevent further losses.
                           f"• *Auto-trading:* {'✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'}\n" \
                           f"• *Balance:* ₹{getattr(getattr(self.trading_bot, 'risk_manager', None), 'current_balance', 0):,.2f}\n" \
                           f"• *Mode:* 💰 LIVE TRADING"
-            await self._send_message_to_all(startup_msg)
-            await self.app.run_polling()
+            # Send the startup message
+            if self.app:
+                await self._send_message_to_all(startup_msg)
+
+            # Start polling (without signal handling issues)
+            await self.app.updater.start_polling()
+            logger.info("Telegram bot polling started")
+
+            # Wait until stop is requested
+            await self._stop_event.wait()
+            logger.info("Stop event received, stopping Telegram bot...")
+
+            # Stop the updater gracefully
+            await self.app.updater.stop()
+            logger.info("Telegram bot updater stopped")
+            self.is_running = False
+
         except Exception as e:
             logger.error(f"Error starting Telegram bot: {e}", exc_info=True)
             self.is_running = False
 
     async def stop_bot(self):
-        """Stop the Telegram bot"""
-        try:
-            if self.app and self.is_running:
-                await self.app.stop()
-                self.is_running = False
-                logger.info("Telegram bot stopped")
-        except Exception as e:
-            logger.error(f"Error stopping Telegram bot: {e}")
+        """Signal the Telegram bot to stop"""
+        if self.is_running:
+            logger.info("Setting stop event for Telegram bot")
+            self._stop_event.set() # Signal the bot loop to stop
+        else:
+            logger.info("Telegram bot is not running, nothing to stop")
 
     async def _send_message_to_all(self, message: str):
         """Internal method to send message (placeholder)"""
