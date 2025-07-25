@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Telegram Bot Module for Nifty Scalper Bot v2.0
-Enhanced with proper market timing and auto-trading controls
+Telegram Bot Module for Nifty Scalper Bot v4.0
+Aligned with the new consolidated configuration and advanced trading logic.
 """
-import logging
 import asyncio
+import logging
 from typing import Optional, Dict, Any, Set
 from datetime import datetime, timedelta
+import pytz
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ALIGNED: Imports the final Config class and necessary utils
 from config import Config
 from utils import (
     is_market_open,
@@ -16,10 +20,12 @@ from utils import (
     time_until_market_open,
     get_market_session_info,
     format_currency,
-    format_percentage
+    format_percentage,
+    calculate_performance_metrics # Assuming this is in your utils
 )
 
 logger = logging.getLogger(__name__)
+IST = pytz.timezone('Asia/Kolkata')
 
 class TelegramBot:
     """Enhanced Telegram bot for trading commands and notifications"""
@@ -30,34 +36,32 @@ class TelegramBot:
         self.is_running = False
         self._background_tasks: Set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
-        # Store chat IDs to send notifications to users
         self.registered_chat_ids: Set[int] = set()
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command, register user for notifications, and show status."""
         try:
-            # Register the user's chat ID for notifications
             if update.effective_chat:
                 self.registered_chat_ids.add(update.effective_chat.id)
                 logger.info(f"Registered chat_id: {update.effective_chat.id} for notifications.")
 
             market_info = get_market_session_info()
-            auto_trade_status = '✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'
+            auto_trade_status = '✅ ON' if not Config.DRY_RUN else '❌ OFF (Dry Run)'
             
-            start_message = f"""🚀 *Nifty Scalper Bot v2.0 Started!*
+            start_message = f"""🚀 *Nifty Scalper Bot v4.0 Started!*
 
 *⚙️ Current Status:*
-• Mode: 💰 LIVE TRADING
-• Auto-trading: {auto_trade_status}
-• Market: {get_market_status()}
-• Time: {market_info.get("current_time", "Unknown")} IST
+• *Mode:* {'💰 LIVE TRADING' if not Config.DRY_RUN else '🔬 DRY RUN'}
+• *Auto-trading:* {auto_trade_status}
+• *Market:* {get_market_status()}
+• *Time:* {market_info.get("current_time", "Unknown")} IST
 
 Notifications have been enabled for this chat. Use /help to see all commands.
 """
             await update.message.reply_text(start_message, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in start command: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error processing /start command. Please try again.")
+            await update.message.reply_text("❌ Error processing /start command.")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
@@ -65,225 +69,145 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
 /start - Start the bot and show status
 /status - Show detailed bot status
-/config - Show configuration details
-/performance - Show performance metrics
-/positions - Show current open positions
-/start_trading - Enable auto-trading
-/stop_trading - Disable auto-trading
-/exit_position - Manually close current position
+/config - Show the bot's current trading configuration
+/performance - Show today's performance metrics
+/positions - Show current open positions or GTT orders
+/start_trading - Enable auto-trading (if in live mode)
+/stop_trading - Disable auto-trading (enter dry run mode)
+/exit_position - Manually cancel the current GTT order
 /help - Show this help message
 """
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command with comprehensive dashboard"""
+        """Handle /status command with a comprehensive dashboard."""
         try:
             if not self.trading_bot:
-                await update.message.reply_text("❌ Bot is not connected to trading engine.")
+                await update.message.reply_text("❌ Bot is not connected to the trading engine.")
                 return
 
+            risk_manager = self.trading_bot.risk_manager
+            current_position = self.trading_bot.current_position
             market_info = get_market_session_info()
             market_status = get_market_status()
-            auto_trade_status = "✅ ON" if getattr(self.trading_bot, 'auto_trade', False) else "❌ OFF"
-            risk_manager = getattr(self.trading_bot, 'risk_manager', None)
-            current_position = getattr(self.trading_bot, 'current_position', None)
+            auto_trade_status = "✅ ON" if self.trading_bot.auto_trade else "❌ OFF"
 
             market_extra = ""
             if not is_market_open():
-                time_until_open = time_until_market_open()
-                if time_until_open:
-                    hours, rem = divmod(int(time_until_open.total_seconds()), 3600)
+                time_left = time_until_market_open()
+                if time_left.total_seconds() > 0:
+                    hours, rem = divmod(int(time_left.total_seconds()), 3600)
                     minutes, _ = divmod(rem, 60)
                     market_extra = f" (Opens in {hours}h {minutes}m)"
 
             circuit_breaker_info = "🟢 *Circuit Breaker:* Inactive"
-            if risk_manager and getattr(risk_manager, 'circuit_breaker_active', False):
-                until = getattr(risk_manager, 'circuit_breaker_until', None)
+            if risk_manager.circuit_breaker_active:
+                until = risk_manager.circuit_breaker_until
                 if until:
-                    mins = max(0, int((until - datetime.now()).total_seconds() / 60))
+                    mins = max(0, int((until - datetime.now(IST)).total_seconds() / 60))
                     circuit_breaker_info = f"🚨 *Circuit Breaker:* Active ({mins}m remaining)"
 
             position_text = "💤 No active trades"
             if current_position:
-                direction = current_position.get('direction', 'N/A')
-                entry_price = current_position.get('entry_price', 0)
+                # ALIGNED: Displays info relevant to an options GTT order
+                instrument = current_position.get('instrument', 'N/A')
                 qty = current_position.get('quantity', 0)
-                unrealized_pnl = ""
-                try:
-                    md = self.trading_bot.get_market_data()
-                    if md and 'ltp' in md:
-                        cp = md['ltp']
-                        pnl = (cp - entry_price) * qty if direction == 'BUY' else (entry_price - cp) * qty
-                        unrealized_pnl = f" | P&L: {format_currency(pnl)}"
-                except Exception as e:
-                    logger.warning(f"Could not fetch market data for P&L: {e}")
+                entry = current_position.get('entry_price', 0)
+                target = current_position.get('target', 0)
+                sl = current_position.get('stop_loss', 0)
+                position_text = f"🔥 *Active GTT Order*\n• *Instrument:* {instrument}\n• *Qty:* {qty}\n• *Entry:* {format_currency(entry)}\n• *Target:* {format_currency(target)}\n• *Stop-Loss:* {format_currency(sl)}"
 
-                position_text = f"🔥 *{direction}* {qty} @ ₹{entry_price:.2f}{unrealized_pnl}"
-
-            todays_pnl = getattr(risk_manager, 'todays_pnl', 0) if risk_manager else 0
-            daily_trades = getattr(risk_manager, 'daily_trades', 0) if risk_manager else 0
-            current_balance = getattr(risk_manager, 'current_balance', 0) if risk_manager else 0
-            pnl_emoji = "📈" if todays_pnl >= 0 else "📉"
-            pnl_color = "+" if todays_pnl >= 0 else ""
-
+            pnl_emoji = "📈" if risk_manager.todays_pnl >= 0 else "📉"
+            
             status_message = f"""*🔄 Bot Status Dashboard*
+
 *💼 Trading Status:*
-• *Mode:* 💰 LIVE TRADING
+• *Mode:* {'💰 LIVE' if not Config.DRY_RUN else '🔬 DRY RUN'}
 • *Auto-trading:* {auto_trade_status}
 • *Market:* {market_status}{market_extra}
-• *Time:* {market_info.get("current_time", "Unknown")} IST
 {circuit_breaker_info}
 
 *📊 Today's Performance:*
-• *Balance:* {format_currency(current_balance)}
-• *P&L:* {pnl_emoji} {pnl_color}{format_currency(todays_pnl)}
-• *Trades:* {daily_trades}
+• *Balance:* {format_currency(risk_manager.current_balance)}
+• *P&L:* {pnl_emoji} {format_currency(risk_manager.todays_pnl)}
+• *Trades:* {risk_manager.daily_trades}
 
-*📍 Positions:*
+*📍 Current Position:*
 {position_text}
 """
             await update.message.reply_text(status_message, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in status command: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error getting status. Please try again.")
+            await update.message.reply_text("❌ Error getting status.")
 
     async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /config command with detailed configuration"""
+        """
+        Handle /config command with the new, relevant configuration.
+        This function is now aligned with the final config.py.
+        """
         try:
-            market_session = get_market_session_info()
-            config_message = f"""*⚙️ Bot Configuration*
+            rr_ratio = Config.ATR_TP_MULT / Config.ATR_SL_MULT if Config.ATR_SL_MULT > 0 else 0
+            config_message = f"""*⚙️ Bot Configuration Overview*
 
-*📈 Trading Parameters:*
-• *Signal Threshold:* {Config.SIGNAL_THRESHOLD}
+*Capital & Risk:*
+• *Initial Capital:* {format_currency(Config.INITIAL_CAPITAL)}
 • *Risk Per Trade:* {format_percentage(Config.RISK_PER_TRADE_PCT * 100)}
-• *Max Daily Trades:* {Config.MAX_DAILY_TRADES}
-• *Default Lots:* {Config.DEFAULT_LOTS}
 • *Max Daily Loss:* {format_percentage(Config.MAX_DAILY_LOSS_PCT * 100)}
+• *Max Daily Trades:* {Config.MAX_DAILY_TRADES}
+• *Consecutive Loss Limit:* {Config.MAX_CONSECUTIVE_LOSSES} trades
 
-*🕒 Market Timings (IST):*
-• *Market Hours:* {Config.MARKET_START_HOUR}:{Config.MARKET_START_MINUTE:02d} AM - {Config.MARKET_END_HOUR}:{Config.MARKET_END_MINUTE:02d} PM
-• *Trading Days:* Monday to Friday
-• *Current Day:* {market_session.get("day_of_week", "Unknown")}
+*Trade Execution:*
+• *ATR SL Multiplier:* {Config.ATR_SL_MULT}x
+• *ATR TP Multiplier:* {Config.ATR_TP_MULT}x (RR Ratio: 1:{rr_ratio:.1f})
+• *Nifty Lot Size:* {Config.NIFTY_LOT_SIZE}
 
-*🛡️ Risk Management:*
-• *Max Consecutive Losses:* {Config.MAX_CONSECUTIVE_LOSSES}
-• *Circuit Breaker Pause:* {Config.CIRCUIT_BREAKER_PAUSE_MINUTES} minutes
-• *Position Sizing:* Dynamic (Risk-based)
+*Technical Indicators:*
+• *Fast/Slow EMA:* {Config.EMA_FAST}/{Config.EMA_SLOW}
+• *RSI Period:* {Config.RSI_PERIOD}
+• *ATR Period:* {Config.ATR_PERIOD}
+
+*Operational:*
+• *Dry Run Mode:* {'✅ ON' if Config.DRY_RUN else '❌ OFF'}
+• *Tick Interval:* {Config.TICK_INTERVAL_SECONDS} seconds
 """
             await update.message.reply_text(config_message, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in config command: {e}", exc_info=True)
             await update.message.reply_text("❌ Error getting configuration.")
 
-    async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /performance command with metrics"""
-        try:
-            risk_manager = getattr(self.trading_bot, 'risk_manager', None)
-            if not risk_manager:
-                await update.message.reply_text("❌ Risk manager not available.")
-                return
-
-            metrics = calculate_performance_metrics(
-                risk_manager.current_balance,
-                risk_manager.initial_balance,
-                risk_manager.todays_pnl
-            )
-            circuit_breaker_status = 'Active' if risk_manager.circuit_breaker_active else 'Inactive'
-            perf_message = f"""*🏆 Performance Metrics*
-
-*💰 Capital:*
-• *Current Balance:* {format_currency(risk_manager.current_balance)}
-• *Initial Capital:* {format_currency(risk_manager.initial_balance)}
-• *Net P&L:* {format_currency(risk_manager.current_balance - risk_manager.initial_balance)}
-
-*📊 Today's Trading:*
-• *P&L:* {format_currency(risk_manager.todays_pnl)}
-• *Trades Executed:* {risk_manager.daily_trades}
-• *Win Rate:* {format_percentage(metrics.get("win_rate", 0))}
-• *Profit Factor:* {metrics.get("profit_factor", 0):.2f}
-
-*🛡️ Risk Metrics:*
-• *Consecutive Losses:* {risk_manager.consecutive_losses}
-• *Circuit Breaker:* {circuit_breaker_status}
-"""
-            await update.message.reply_text(perf_message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Error in performance command: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error getting performance metrics.")
-
-    async def positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /positions command"""
-        try:
-            current_position = getattr(self.trading_bot, 'current_position', None)
-            if not current_position:
-                await update.message.reply_text("📭 *No Open Positions*\nAll positions are closed.", parse_mode='Markdown')
-                return
-
-            direction = current_position.get('direction', 'N/A')
-            entry_price = current_position.get('entry_price', 0)
-            quantity = current_position.get('quantity', 0)
-            stop_loss = current_position.get('stop_loss', 0)
-            target = current_position.get('target', 0)
-            entry_time = current_position.get('entry_time', 'N/A')
-            unrealized_pnl_text = ""
-            try:
-                md = self.trading_bot.get_market_data()
-                if md and 'ltp' in md:
-                    cp = md['ltp']
-                    pnl = (cp - entry_price) * quantity if direction == 'BUY' else (entry_price - cp) * quantity
-                    unrealized_pnl_text = f"\n• *Unrealized P&L:* {format_currency(pnl)}"
-            except Exception as e:
-                logger.warning(f"Could not fetch market data for P&L: {e}")
-
-            position_message = f"""*📍 Current Position*
-• *Direction:* {direction}
-• *Quantity:* {quantity}
-• *Entry Price:* ₹{entry_price:.2f}
-• *Stop Loss:* ₹{stop_loss:.2f}
-• *Target:* ₹{target:.2f}
-• *Entry Time:* {entry_time}{unrealized_pnl_text}
-"""
-            await update.message.reply_text(position_message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Error in positions command: {e}", exc_info=True)
-            await update.message.reply_text("❌ Error getting position details.")
-
     async def start_trading_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start_trading command"""
+        """Enables auto-trading if not in dry run mode."""
+        if Config.DRY_RUN:
+            await update.message.reply_text("⚠️ Cannot start trading. Bot is in Dry Run mode.", parse_mode='Markdown')
+            return
         if self.trading_bot:
             self.trading_bot.auto_trade = True
             logger.info(f"Auto-trading enabled by user {update.effective_user.id}")
-            await update.message.reply_text("✅ *Auto-trading STARTED*\nNew trades will be executed automatically.", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Bot is not connected to trading engine.", parse_mode='Markdown')
+            await update.message.reply_text("✅ *Auto-trading STARTED*. The bot will now execute live trades.", parse_mode='Markdown')
 
     async def stop_trading_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /stop_trading command"""
+        """Disables auto-trading."""
         if self.trading_bot:
             self.trading_bot.auto_trade = False
             logger.info(f"Auto-trading disabled by user {update.effective_user.id}")
-            await update.message.reply_text("🛑 *Auto-trading STOPPED*\nNew trades will not be executed.", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Bot is not connected to trading engine.", parse_mode='Markdown')
+            await update.message.reply_text("🛑 *Auto-trading STOPPED*. The bot will not execute new trades.", parse_mode='Markdown')
 
     async def exit_position_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /exit_position command"""
+        """Manually cancels the current open GTT order."""
         try:
-            if not self.trading_bot:
-                await update.message.reply_text("❌ Bot is not connected to trading engine.")
-                return
-            if not getattr(self.trading_bot, 'current_position', None):
-                await update.message.reply_text("📭 *No Open Positions*\nNothing to close.", parse_mode='Markdown')
+            if not self.trading_bot or not self.trading_bot.current_position:
+                await update.message.reply_text("📭 *No Open Positions/GTT orders to exit.*", parse_mode='Markdown')
                 return
 
-            await update.message.reply_text("⏳ Closing position, please wait...", parse_mode='Markdown')
-            # Ensure close_position in your main bot is an async function
-            success = await self.trading_bot.close_position('manual_exit')
+            await update.message.reply_text("⏳ Attempting to cancel GTT order, please wait...", parse_mode='Markdown')
+            
+            # This now calls a more abstract function in the main bot
+            success = await self.trading_bot.manual_exit_position()
             
             if success:
-                await update.message.reply_text("✅ *Position Closed Successfully*", parse_mode='Markdown')
+                await update.message.reply_text("✅ *GTT Order Cancelled Successfully*", parse_mode='Markdown')
             else:
-                await update.message.reply_text("❌ *Error*\nFailed to close position. Please check logs.", parse_mode='Markdown')
+                await update.message.reply_text("❌ *Error*\nFailed to cancel GTT order. Please check logs.", parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in exit position command: {e}", exc_info=True)
             await update.message.reply_text("❌ An error occurred while exiting the position.")
@@ -296,33 +220,34 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             task.add_done_callback(self._background_tasks.discard)
 
     def notify_trade_entry(self, trade_data: Dict[str, Any]):
-        """Notify about trade entry"""
-        message = f"""🟢 *Trade Entry*
-• *Direction:* {trade_data.get("direction", "N/A")}
-• *Price:* {format_currency(trade_data.get("entry_price", 0))}
-• *Quantity:* {trade_data.get("quantity", 0)}
-• *Stop Loss:* {format_currency(trade_data.get("stop_loss", 0))}
+        """Notify about a new GTT order being placed."""
+        message = f"""🟢 *New GTT Order Placed*
+• *Instrument:* {trade_data.get("instrument", "N/A")}
+• *Qty:* {trade_data.get("quantity", 0)}
+• *Entry Price:* {format_currency(trade_data.get("entry_price", 0))}
 • *Target:* {format_currency(trade_data.get("target", 0))}
+• *Stop-Loss:* {format_currency(trade_data.get("stop_loss", 0))}
 """
         self._schedule_notification(message)
 
     def notify_trade_exit(self, trade_data: Dict[str, Any]):
-        """Notify about trade exit"""
+        """Notify about a trade being closed."""
         pnl = trade_data.get('pnl', 0)
         pnl_emoji = "✅" if pnl >= 0 else "🔻"
-        message = f"""🔴 *Trade Exit*
-• *Direction:* {trade_data.get("direction", "N/A")}
+        message = f"""🔴 *Trade Closed*
+• *Instrument:* {trade_data.get("instrument", "N/A")}
 • *Exit Price:* {format_currency(trade_data.get("exit_price", 0))}
 • *P&L:* {pnl_emoji} {format_currency(pnl)}
+• *Reason:* {trade_data.get("reason", "N/A")}
 """
         self._schedule_notification(message)
 
     def notify_circuit_breaker(self, consecutive_losses: int, pause_minutes: int):
-        """Notify about circuit breaker activation"""
-        resume_time = (datetime.now() + timedelta(minutes=pause_minutes)).strftime('%H:%M:%S')
+        """Notify about circuit breaker activation."""
+        resume_time = (datetime.now(IST) + timedelta(minutes=pause_minutes)).strftime('%H:%M:%S')
         message = f"""🚨 *Circuit Breaker Activated!*
 • *Consecutive Losses:* {consecutive_losses}
-• *Pause Duration:* {pause_minutes} minutes
+• *Trading Paused For:* {pause_minutes} minutes
 • *Trading will resume at:* {resume_time} IST
 """
         self._schedule_notification(message)
@@ -330,7 +255,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
     async def _send_message_to_all(self, message: str):
         """Internal method to send a message to all registered chat IDs."""
         if not self.app: return
-        logger.info(f"Broadcasting message to {len(self.registered_chat_ids)} chats.")
         for chat_id in self.registered_chat_ids:
             try:
                 await self.app.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
@@ -338,7 +262,7 @@ Notifications have been enabled for this chat. Use /help to see all commands.
                 logger.error(f"Failed to send message to chat_id {chat_id}: {e}")
 
     async def start_bot(self):
-        """Initializes and starts the Telegram bot, including polling."""
+        """Initializes and starts the Telegram bot."""
         try:
             if not Config.TELEGRAM_BOT_TOKEN:
                 logger.warning("Telegram bot token not configured. Bot will not start.")
@@ -357,21 +281,15 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
             await self.app.initialize()
             await self.app.updater.start_polling()
-            await asyncio.sleep(1) # Ensure bot is connected before sending startup message
+            await asyncio.sleep(1)
 
             self.is_running = True
             logger.info("Telegram bot started and polling.")
-
-            risk_manager = getattr(self.trading_bot, 'risk_manager', None)
-            balance = getattr(risk_manager, 'current_balance', 0) if risk_manager else 0
-            auto_trade_status = '✅ ON' if getattr(self.trading_bot, 'auto_trade', False) else '❌ OFF'
-            startup_msg = (
-                f"🚀 *Nifty Scalper Bot v2.0 Online!*\n"
-                f"• *Market Status:* {get_market_status()}\n"
-                f"• *Auto-trading:* {auto_trade_status}\n"
-                f"• *Balance:* {format_currency(balance)}"
-            )
-            await self._send_message_to_all(startup_msg)
+            
+            # Send a startup message to the admin if specified
+            if Config.TELEGRAM_ADMIN_CHAT_ID:
+                self.registered_chat_ids.add(Config.TELEGRAM_ADMIN_CHAT_ID)
+                await self._send_message_to_all(f"🚀 *Bot is online and running.* (Mode: {'Live' if not Config.DRY_RUN else 'Dry Run'})")
 
             await self._stop_event.wait()
 
@@ -388,5 +306,3 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         if self.is_running:
             logger.info("Stopping Telegram bot...")
             self._stop_event.set()
-        else:
-            logger.info("Telegram bot is not running.")
