@@ -286,7 +286,7 @@ def main():
     args = parser.parse_args()
     
     if args.mode in ['monitor', 'both']:
-        monitor = BotMonitor(args.url)
+        monitor = Monitor(args.url)
         if args.mode == 'monitor':
             monitor.monitor_loop(args.check_interval)
         else:
