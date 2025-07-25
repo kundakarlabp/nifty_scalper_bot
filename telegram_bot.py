@@ -109,7 +109,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
             position_text = "💤 No active trades"
             if current_position:
-                # ALIGNED: Displays info relevant to an options GTT order
                 instrument = current_position.get('instrument', 'N/A')
                 qty = current_position.get('quantity', 0)
                 entry = current_position.get('entry_price', 0)
@@ -175,6 +174,38 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             logger.error(f"Error in config command: {e}", exc_info=True)
             await update.message.reply_text("❌ Error getting configuration.")
 
+    async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show today's performance metrics."""
+        # Example: Replace these lines with your real implementation using your trading bot's risk manager/data
+        if not self.trading_bot or not hasattr(self.trading_bot, "risk_manager"):
+            await update.message.reply_text("❌ Performance data is currently unavailable.")
+            return
+
+        risk_manager = self.trading_bot.risk_manager
+        msg = f"""*Today's Performance Metrics:*
+• *Trades:* {risk_manager.daily_trades}
+• *Gross P&L:* {format_currency(risk_manager.todays_pnl)}
+• *Net P&L (after costs):* {format_currency(getattr(risk_manager, "todays_net_pnl", risk_manager.todays_pnl))}
+• *Win Rate:* {getattr(risk_manager, "win_rate", 'N/A')}%"""
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    async def positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current open positions or GTT orders."""
+        if not self.trading_bot or not self.trading_bot.current_position:
+            await update.message.reply_text("📭 No open positions or GTT orders at the moment.", parse_mode='Markdown')
+            return
+
+        pos = self.trading_bot.current_position
+        msg = (
+            f"*Open GTT Order:*\n"
+            f"• *Instrument:* {pos.get('instrument', 'N/A')}\n"
+            f"• *Qty:* {pos.get('quantity', 0)}\n"
+            f"• *Entry:* {format_currency(pos.get('entry_price', 0))}\n"
+            f"• *Target:* {format_currency(pos.get('target', 0))}\n"
+            f"• *Stop-loss:* {format_currency(pos.get('stop_loss', 0))}"
+        )
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
     async def start_trading_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Enables auto-trading if not in dry run mode."""
         if Config.DRY_RUN:
@@ -201,7 +232,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
             await update.message.reply_text("⏳ Attempting to cancel GTT order, please wait...", parse_mode='Markdown')
             
-            # This now calls a more abstract function in the main bot
             success = await self.trading_bot.manual_exit_position()
             
             if success:
