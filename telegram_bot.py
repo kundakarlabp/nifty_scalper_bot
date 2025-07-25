@@ -12,7 +12,6 @@ import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ALIGNED: Imports the final Config class and necessary utils
 from config import Config
 from utils import (
     is_market_open,
@@ -20,8 +19,7 @@ from utils import (
     time_until_market_open,
     get_market_session_info,
     format_currency,
-    format_percentage,
-    calculate_performance_metrics # Assuming this is in your utils
+    format_percentage
 )
 
 logger = logging.getLogger(__name__)
@@ -39,7 +37,6 @@ class TelegramBot:
         self.registered_chat_ids: Set[int] = set()
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command, register user for notifications, and show status."""
         try:
             if update.effective_chat:
                 self.registered_chat_ids.add(update.effective_chat.id)
@@ -47,7 +44,7 @@ class TelegramBot:
 
             market_info = get_market_session_info()
             auto_trade_status = '✅ ON' if not Config.DRY_RUN else '❌ OFF (Dry Run)'
-            
+
             start_message = f"""🚀 *Nifty Scalper Bot v4.0 Started!*
 
 *⚙️ Current Status:*
@@ -64,7 +61,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             await update.message.reply_text("❌ Error processing /start command.")
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help command"""
         help_text = """*🤖 Nifty Scalper Bot Commands:*
 
 /start - Start the bot and show status
@@ -80,7 +76,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command with a comprehensive dashboard."""
         try:
             if not self.trading_bot:
                 await update.message.reply_text("❌ Bot is not connected to the trading engine.")
@@ -117,7 +112,7 @@ Notifications have been enabled for this chat. Use /help to see all commands.
                 position_text = f"🔥 *Active GTT Order*\n• *Instrument:* {instrument}\n• *Qty:* {qty}\n• *Entry:* {format_currency(entry)}\n• *Target:* {format_currency(target)}\n• *Stop-Loss:* {format_currency(sl)}"
 
             pnl_emoji = "📈" if risk_manager.todays_pnl >= 0 else "📉"
-            
+
             status_message = f"""*🔄 Bot Status Dashboard*
 
 *💼 Trading Status:*
@@ -140,10 +135,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             await update.message.reply_text("❌ Error getting status.")
 
     async def config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Handle /config command with the new, relevant configuration.
-        This function is now aligned with the final config.py.
-        """
         try:
             rr_ratio = Config.ATR_TP_MULT / Config.ATR_SL_MULT if Config.ATR_SL_MULT > 0 else 0
             config_message = f"""*⚙️ Bot Configuration Overview*
@@ -176,17 +167,21 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
     async def performance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show today's performance metrics."""
-        # Example: Replace these lines with your real implementation using your trading bot's risk manager/data
         if not self.trading_bot or not hasattr(self.trading_bot, "risk_manager"):
             await update.message.reply_text("❌ Performance data is currently unavailable.")
             return
 
         risk_manager = self.trading_bot.risk_manager
+        # Assuming these attributes exist or default fallback.
+        win_rate = getattr(risk_manager, "win_rate", "N/A")
+        net_pnl = getattr(risk_manager, "todays_net_pnl", risk_manager.todays_pnl)
+
         msg = f"""*Today's Performance Metrics:*
 • *Trades:* {risk_manager.daily_trades}
 • *Gross P&L:* {format_currency(risk_manager.todays_pnl)}
-• *Net P&L (after costs):* {format_currency(getattr(risk_manager, "todays_net_pnl", risk_manager.todays_pnl))}
-• *Win Rate:* {getattr(risk_manager, "win_rate", 'N/A')}%"""
+• *Net P&L (after costs):* {format_currency(net_pnl)}
+• *Win Rate:* {win_rate}%
+"""
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,7 +202,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         await update.message.reply_text(msg, parse_mode='Markdown')
 
     async def start_trading_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enables auto-trading if not in dry run mode."""
         if Config.DRY_RUN:
             await update.message.reply_text("⚠️ Cannot start trading. Bot is in Dry Run mode.", parse_mode='Markdown')
             return
@@ -217,23 +211,21 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             await update.message.reply_text("✅ *Auto-trading STARTED*. The bot will now execute live trades.", parse_mode='Markdown')
 
     async def stop_trading_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Disables auto-trading."""
         if self.trading_bot:
             self.trading_bot.auto_trade = False
             logger.info(f"Auto-trading disabled by user {update.effective_user.id}")
             await update.message.reply_text("🛑 *Auto-trading STOPPED*. The bot will not execute new trades.", parse_mode='Markdown')
 
     async def exit_position_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Manually cancels the current open GTT order."""
         try:
             if not self.trading_bot or not self.trading_bot.current_position:
                 await update.message.reply_text("📭 *No Open Positions/GTT orders to exit.*", parse_mode='Markdown')
                 return
 
             await update.message.reply_text("⏳ Attempting to cancel GTT order, please wait...", parse_mode='Markdown')
-            
+
             success = await self.trading_bot.manual_exit_position()
-            
+
             if success:
                 await update.message.reply_text("✅ *GTT Order Cancelled Successfully*", parse_mode='Markdown')
             else:
@@ -243,14 +235,12 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             await update.message.reply_text("❌ An error occurred while exiting the position.")
 
     def _schedule_notification(self, message: str):
-        """Helper to schedule the sending of a notification."""
         if self.is_running and self.app:
             task = asyncio.create_task(self._send_message_to_all(message))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
 
     def notify_trade_entry(self, trade_data: Dict[str, Any]):
-        """Notify about a new GTT order being placed."""
         message = f"""🟢 *New GTT Order Placed*
 • *Instrument:* {trade_data.get("instrument", "N/A")}
 • *Qty:* {trade_data.get("quantity", 0)}
@@ -261,7 +251,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         self._schedule_notification(message)
 
     def notify_trade_exit(self, trade_data: Dict[str, Any]):
-        """Notify about a trade being closed."""
         pnl = trade_data.get('pnl', 0)
         pnl_emoji = "✅" if pnl >= 0 else "🔻"
         message = f"""🔴 *Trade Closed*
@@ -273,7 +262,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         self._schedule_notification(message)
 
     def notify_circuit_breaker(self, consecutive_losses: int, pause_minutes: int):
-        """Notify about circuit breaker activation."""
         resume_time = (datetime.now(IST) + timedelta(minutes=pause_minutes)).strftime('%H:%M:%S')
         message = f"""🚨 *Circuit Breaker Activated!*
 • *Consecutive Losses:* {consecutive_losses}
@@ -283,8 +271,8 @@ Notifications have been enabled for this chat. Use /help to see all commands.
         self._schedule_notification(message)
 
     async def _send_message_to_all(self, message: str):
-        """Internal method to send a message to all registered chat IDs."""
-        if not self.app: return
+        if not self.app:
+            return
         for chat_id in self.registered_chat_ids:
             try:
                 await self.app.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
@@ -292,22 +280,26 @@ Notifications have been enabled for this chat. Use /help to see all commands.
                 logger.error(f"Failed to send message to chat_id {chat_id}: {e}")
 
     async def start_bot(self):
-        """Initializes and starts the Telegram bot."""
         try:
             if not Config.TELEGRAM_BOT_TOKEN:
                 logger.warning("Telegram bot token not configured. Bot will not start.")
                 return
 
             self.app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-            
+
             handlers = [
-                CommandHandler("start", self.start_command), CommandHandler("help", self.help_command),
-                CommandHandler("status", self.status_command), CommandHandler("config", self.config_command),
-                CommandHandler("performance", self.performance_command), CommandHandler("positions", self.positions_command),
-                CommandHandler("start_trading", self.start_trading_command), CommandHandler("stop_trading", self.stop_trading_command),
+                CommandHandler("start", self.start_command),
+                CommandHandler("help", self.help_command),
+                CommandHandler("status", self.status_command),
+                CommandHandler("config", self.config_command),
+                CommandHandler("performance", self.performance_command),
+                CommandHandler("positions", self.positions_command),
+                CommandHandler("start_trading", self.start_trading_command),
+                CommandHandler("stop_trading", self.stop_trading_command),
                 CommandHandler("exit_position", self.exit_position_command),
             ]
-            self.app.add_handlers(handlers)
+            for handler in handlers:
+                self.app.add_handler(handler)
 
             await self.app.initialize()
             await self.app.updater.start_polling()
@@ -315,11 +307,12 @@ Notifications have been enabled for this chat. Use /help to see all commands.
 
             self.is_running = True
             logger.info("Telegram bot started and polling.")
-            
-            # Send a startup message to the admin if specified
+
             if Config.TELEGRAM_ADMIN_CHAT_ID:
                 self.registered_chat_ids.add(Config.TELEGRAM_ADMIN_CHAT_ID)
-                await self._send_message_to_all(f"🚀 *Bot is online and running.* (Mode: {'Live' if not Config.DRY_RUN else 'Dry Run'})")
+                await self._send_message_to_all(
+                    f"🚀 *Bot is online and running.* (Mode: {'Live' if not Config.DRY_RUN else 'Dry Run'})"
+                )
 
             await self._stop_event.wait()
 
@@ -332,7 +325,6 @@ Notifications have been enabled for this chat. Use /help to see all commands.
             logger.info("Telegram bot has been shut down.")
 
     async def stop_bot(self):
-        """Signals the Telegram bot to stop gracefully."""
         if self.is_running:
             logger.info("Stopping Telegram bot...")
             self._stop_event.set()
