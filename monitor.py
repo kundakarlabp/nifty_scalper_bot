@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BotMonitor:
+class Monitor:
     """Monitor the trading bot and send alerts"""
     
     def __init__(self, bot_url: str = "http://localhost:10000"):
@@ -32,6 +32,22 @@ class BotMonitor:
         self.last_status = None
         self.alert_threshold = 300  # 5 minutes
         self.last_alert_time = None
+
+    def update_metrics(self, metrics_data):
+    """Update system metrics (for compatibility with main bot)"""
+    try:
+        # Log key metrics for monitoring
+        if 'current_price' in metrics_data:
+            logger.info(f"Price: ₹{metrics_data['current_price']:.2f}")
+        
+        if 'pnl' in metrics_data:
+            logger.info(f"P&L: ₹{metrics_data['pnl']:.2f}")
+        
+        if 'balance' in metrics_data:
+            logger.info(f"Balance: ₹{metrics_data['balance']:.2f}")
+            
+    except Exception as e:
+        logger.error(f"Error updating metrics: {e}")
         
     def check_health(self) -> Dict[str, Any]:
         """Check bot health status"""
@@ -123,6 +139,14 @@ class BotMonitor:
         """Send email alert (implement if needed)"""
         # Email configuration would go here
         pass
+
+    def get_status(self):
+    """Get current monitor status"""
+    return {
+        'last_check': self.last_status,
+        'status': 'active',
+        'last_alert': self.last_alert_time
+    }
     
     def monitor_loop(self, check_interval: int = 60):
         """Main monitoring loop"""
