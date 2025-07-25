@@ -331,7 +331,7 @@ Bot remains active for monitoring and manual commands."""
             logger.error(f"Error in exit position command: {e}")
             await update.message.reply_text("❌ Error exiting position. Please try again.")
 
-    def notify_trade_entry(self, trade_ Dict[str, Any]):
+    def notify_trade_entry(self, trade_data: Dict[str, Any]):
         """Notify about trade entry"""
         if not self.is_running or not self.app:
             return
@@ -351,7 +351,7 @@ Bot remains active for monitoring and manual commands."""
              self._background_tasks.add(task)
              task.add_done_callback(self._background_tasks.discard)
 
-    def notify_trade_exit(self, trade_ Dict[str, Any]):
+    def notify_trade_exit(self, trade_data: Dict[str, Any]):
         """Notify about trade exit"""
         if not self.is_running or not self.app:
             return
