@@ -8,7 +8,7 @@ import requests
 import time
 import logging
 import smtplib
-from email.mime.text import MimeText
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 import json
 from typing import Dict, Any, Optional
