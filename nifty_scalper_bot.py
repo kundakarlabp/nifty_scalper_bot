@@ -1,4 +1,5 @@
 # nifty_scalper_bot.py
+# CORRECTED AND CONSOLIDATED VERSION
 
 import asyncio
 import logging
@@ -7,7 +8,8 @@ import os
 from datetime import datetime, timedelta
 import pytz
 
-# Import all custom components. This assumes they are in the same directory.
+# Import all custom components.
+# Make sure config.py, utils.py, signal_generator.py, telegram_bot.py, and broker_manager.py are present.
 from config import Config
 from utils import is_market_open, format_currency, get_market_status
 from signal_generator import SignalGenerator
@@ -26,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
 
-# --- 2. RiskManager Class ---
+# --- 2. RiskManager Class (No changes needed here) ---
 class RiskManager:
     def __init__(self, telegram_bot=None):
         self.initial_balance = Config.INITIAL_CAPITAL
@@ -89,7 +91,7 @@ class RiskManager:
 # --- 3. Main Bot Class with State Management ---
 class NiftyScalperBot:
     def __init__(self):
-        Config.validate()  # Validate config on startup
+        Config.validate()
         self.signal_generator = SignalGenerator()
         self.broker = BrokerManager()
         self.telegram_bot = TelegramBot(trading_bot_instance=self)
@@ -121,9 +123,12 @@ class NiftyScalperBot:
             os.remove(Config.STATE_FILE)
             logger.info(f"Cleared position state file '{Config.STATE_FILE}'.")
 
-    async def run(self):
-        logger.info(f"Nifty Scalper Bot starting... | DRY RUN: {Config.DRY_RUN}")
-        telegram_task = asyncio.create_task(self.telegram_bot.start_bot())
+    # *** CHANGE 1: Renamed 'run' to 'start_trading_loop' and removed Telegram task creation ***
+    async def start_trading_loop(self):
+        """This is the dedicated loop for the core trading logic."""
+        logger.info(f"Trading logic loop starting... | DRY RUN: {Config.DRY_RUN}")
+        
+        # The line that started the telegram bot has been REMOVED from here.
 
         while True:
             try:
@@ -180,7 +185,6 @@ class NiftyScalperBot:
 
     async def manage_open_position(self, market_data: dict):
         pos = self.current_position
-        # Broker API polling for real/time order status would be here.
         pass
 
     async def handle_position_closure(self, exit_price: float, reason: str):
@@ -215,15 +219,28 @@ class NiftyScalperBot:
             return False
 
 # --- 4. Main Execution Block ---
+# *** CHANGE 2: Updated 'main' to run both tasks concurrently with asyncio.gather ***
 async def main():
     bot = NiftyScalperBot()
     try:
-        await bot.run()
+        logger.info("Starting all bot components concurrently...")
+        
+        # Create a task for the trading loop using the renamed method
+        trading_loop_task = asyncio.create_task(bot.start_trading_loop())
+
+        # Create a task for the Telegram bot
+        telegram_bot_task = asyncio.create_task(bot.telegram_bot.start_bot())
+
+        # Use asyncio.gather to run both tasks concurrently.
+        # This is the correct way to manage multiple long-running async functions.
+        await asyncio.gather(trading_loop_task, telegram_bot_task)
+
     except asyncio.CancelledError:
         logger.info("Main task cancelled.")
     finally:
         logger.info("Initiating graceful shutdown...")
-        await bot.telegram_bot.stop_bot()
+        if bot.telegram_bot and bot.telegram_bot.is_running:
+            await bot.telegram_bot.stop_bot()
         logger.info("Bot has been shut down.")
 
 if __name__ == "__main__":
@@ -233,3 +250,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually by user (Ctrl+C).")
     except ValueError as e:
         logger.fatal(f"Configuration validation failed: {e}")
+
