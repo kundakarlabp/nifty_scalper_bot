@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timedelta
 import pytz
 
-# Import all custom components
+# Import all custom components. This assumes they are in the same directory.
 from config import Config
 from utils import is_market_open, format_currency, get_market_status
 from signal_generator import SignalGenerator
@@ -26,11 +26,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
 
-# --- 2. RiskManager Class (Unchanged but included for completeness) ---
+# --- 2. RiskManager Class ---
+# This class is self-contained and uses the final Config.
 class RiskManager:
-    def __init__(self, initial_balance, telegram_bot=None):
-        self.initial_balance = initial_balance
-        self.current_balance = initial_balance
+    def __init__(self, telegram_bot=None):
+        self.initial_balance = Config.INITIAL_CAPITAL
+        self.current_balance = Config.INITIAL_CAPITAL
         self.todays_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
@@ -80,7 +81,7 @@ class RiskManager:
             self.telegram_bot.notify_circuit_breaker(self.consecutive_losses, Config.CIRCUIT_BREAKER_PAUSE_MINUTES)
 
     def reset_daily_stats(self):
-        logger.info("Resetting daily trading statistics.")
+        logger.info("Resetting daily trading statistics for the new day.")
         self.todays_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
@@ -88,17 +89,15 @@ class RiskManager:
 # --- 3. Main Bot Class with State Management ---
 class NiftyScalperBot:
     def __init__(self):
+        Config.validate() # Validate config on startup
         self.signal_generator = SignalGenerator()
         self.broker = BrokerManager()
         self.telegram_bot = TelegramBot(trading_bot_instance=self)
-        self.risk_manager = RiskManager(Config.INITIAL_CAPITAL, telegram_bot=self.telegram_bot)
-        self.auto_trade = True
+        self.risk_manager = RiskManager(telegram_bot=self.telegram_bot)
+        self.auto_trade = not Config.DRY_RUN
         self.last_reset_day = -1
-        
-        # --- NEW: State Management ---
         self.current_position = self._load_position_state()
 
-    # --- NEW: State Persistence Methods ---
     def _load_position_state(self):
         if os.path.exists(Config.STATE_FILE):
             try:
@@ -107,8 +106,8 @@ class NiftyScalperBot:
                     logger.critical(f"Loaded existing position from state file: {position}")
                     return position
             except Exception as e:
-                logger.error(f"Error loading state file '{Config.STATE_FILE}': {e}. Assuming no position.")
-                os.remove(Config.STATE_FILE) # Remove corrupt file
+                logger.error(f"Error loading state file '{Config.STATE_FILE}': {e}. Removing corrupt file.")
+                os.remove(Config.STATE_FILE)
         return None
 
     def _save_position_state(self):
@@ -123,7 +122,7 @@ class NiftyScalperBot:
             logger.info(f"Cleared position state file '{Config.STATE_FILE}'.")
 
     async def run(self):
-        logger.info("Nifty Scalper Bot v4.0 (Stateful) is starting...")
+        logger.info(f"Nifty Scalper Bot starting... | DRY RUN: {Config.DRY_RUN}")
         telegram_task = asyncio.create_task(self.telegram_bot.start_bot())
 
         while True:
@@ -145,10 +144,10 @@ class NiftyScalperBot:
                 await asyncio.sleep(Config.TICK_INTERVAL_SECONDS)
             except Exception as e:
                 logger.error(f"Critical error in main loop: {e}", exc_info=True)
-                await asyncio.sleep(Config.TICK_INTERVAL_SECONDS * 5) # Longer sleep on error
+                await asyncio.sleep(Config.TICK_INTERVAL_SECONDS * 5)
 
     def get_market_data(self):
-        # *** CRITICAL PLACEHOLDER *** - MUST BE REPLACED WITH REAL DATA FEED
+        # *** CRITICAL PLACEHOLDER: Replace with your real data feed API call ***
         import random
         price = 25000 + random.uniform(-50, 50)
         return {'ltp': price, 'volume': random.randint(10000, 50000), 'open': price-10, 'high': price+10, 'low': price-10, 'timestamp': datetime.now(IST)}
@@ -176,26 +175,25 @@ class NiftyScalperBot:
             'entry_price': option_ltp, 'stop_loss': option_ltp - option_sl_points,
             'target': option_ltp + option_tp_points, 'status': 'OPEN'
         }
-        self._save_position_state() # Save state immediately after placing order
+        self._save_position_state()
         logger.critical(f"NEW GTT OCO POSITION PLACED: {self.current_position}")
-        # self.telegram_bot.notify_trade_entry(...)
+        self.telegram_bot.notify_trade_entry(self.current_position)
 
     async def manage_open_position(self, market_data: dict):
-        """Checks order status and manages trailing SL."""
+        """Checks the status of the open GTT order."""
         pos = self.current_position
         
-        # --- NEW: Check Order Status ---
-        # This is a placeholder for the most reliable method: webhooks or polling
-        # order_status = self.broker.get_order_status(pos['order_id'])
-        # if order_status == "COMPLETE":
-        #     final_price = self.broker.get_order_trade_price(pos['order_id'])
-        #     await self.handle_position_closure(final_price)
+        # This is a placeholder for polling your broker's API for the order status.
+        # A webhook-based approach is more efficient if your broker supports it.
+        # order_update = self.broker.get_order_status(pos['order_id'])
+        # if order_update and order_update['status'] == 'COMPLETE':
+        #     await self.handle_position_closure(order_update['average_price'], "GTT Executed")
         #     return
         
-        # Trailing SL logic can be added here as before
+        # Placeholder for trailing stop-loss logic can also go here.
         pass
 
-    async def handle_position_closure(self, exit_price: float):
+    async def handle_position_closure(self, exit_price: float, reason: str):
         """Finalizes a trade, records P&L, and clears the state."""
         if not self.current_position: return
 
@@ -203,11 +201,30 @@ class NiftyScalperBot:
         pnl = (exit_price - pos['entry_price']) * pos['quantity']
         
         self.risk_manager.record_trade(pnl)
-        logger.critical(f"POSITION CLOSED: P&L {format_currency(pnl)}")
-        # self.telegram_bot.notify_trade_exit(...)
+        
+        exit_data = {**pos, 'exit_price': exit_price, 'pnl': pnl, 'reason': reason}
+        logger.critical(f"POSITION CLOSED: P&L {format_currency(pnl)} | Reason: {reason}")
+        self.telegram_bot.notify_trade_exit(exit_data)
         
         self.current_position = None
         self._clear_position_state()
+
+    async def manual_exit_position(self) -> bool:
+        """Allows manual cancellation of an open GTT order via Telegram."""
+        if not self.current_position:
+            logger.warning("Manual exit requested, but no active position found.")
+            return False
+        
+        order_id = self.current_position['order_id']
+        logger.info(f"Attempting to manually cancel GTT order: {order_id}")
+        
+        success = self.broker.cancel_order(order_id)
+        if success:
+            await self.handle_position_closure(self.current_position['entry_price'], "Manual Exit")
+            return True
+        else:
+            logger.error(f"Failed to cancel GTT order {order_id} via broker API.")
+            return False
 
 # --- 4. Main Execution Block ---
 async def main():
@@ -226,3 +243,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped manually by user (Ctrl+C).")
+    except ValueError as e:
+        logger.fatal(f"Configuration validation failed: {e}")
