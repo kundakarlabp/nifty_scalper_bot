@@ -62,3 +62,33 @@ services:
       - key: LOSS_PAUSE_TIME
         value: 60
       - key: LOG_LEVEL
+        value: INFO
+      - key: UNDERLYING_SYMBOL
+        value: NIFTY
+      - key: TRADE_EXCHANGE
+        value: NFO
+      - key: ATR_PERIOD
+        value: 14
+      - key: RSI_PERIOD
+        value: 14
+      - key: EMA_FAST
+        value: 9
+      - key: EMA_SLOW
+        value: 21
+      - key: MACD_FAST
+        value: 12
+      - key: MACD_SLOW
+        value: 26
+      - key: MACD_SIGNAL
+        value: 9
+      - key: BB_PERIOD
+        value: 20
+      - key: BB_STDDEV
+        value: 2
+      - key: VOL_SMA_PERIOD
+        value: 20
+      - key: VWAP_WINDOW
+        value: 0
+    healthCheckPath: /health
+    buildCommand: pip install -r requirements.txt
+    startCommand: python nifty_scalper_bot.py
