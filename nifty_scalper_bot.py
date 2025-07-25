@@ -272,33 +272,34 @@ class NiftyScalperBot:
             return None
     
     def calculate_position_size(self, signal_data: Dict[str, Any]) -> int:
-        """Calculate position size based on risk management"""
-        try:
-            # Risk per trade (1% of current balance)
-            risk_amount = self.risk_manager.current_balance * Config.RISK_PER_TRADE_PCT
-            
-            # Calculate stop loss distance
-            entry_price = signal_data.get('entry_price', 0)
-            stop_loss = signal_data.get('stop_loss', 0)
-            
-            if entry_price <= 0 or stop_loss <= 0:
-                return Config.DEFAULT_QUANTITY
-            
-            risk_per_share = abs(entry_price - stop_loss)
-            if risk_per_share <= 0:
-                return Config.DEFAULT_QUANTITY
-            
-            # Calculate quantity
-            quantity = int(risk_amount / risk_per_share)
-            
-            # Apply limits
-            quantity = max(Config.MIN_QUANTITY, min(quantity, Config.MAX_QUANTITY))
-            
-            return quantity
-            
-        except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
-            return Config.DEFAULT_QUANTITY
+    """Calculate number of lots based on capital and risk"""
+    try:
+        # Risk per trade (1% of current balance)
+        risk_amount = self.risk_manager.current_balance * Config.RISK_PER_TRADE_PCT
+        
+        # Calculate stop loss distance
+        entry_price = signal_data.get('entry_price', 0)
+        stop_loss = signal_data.get('stop_loss', 0)
+        
+        if entry_price <= 0 or stop_loss <= 0:
+            return Config.DEFAULT_LOTS
+        
+        risk_per_share = abs(entry_price - stop_loss)
+        if risk_per_share <= 0:
+            return Config.DEFAULT_LOTS
+        
+        # Calculate number of lots
+        total_shares = int(risk_amount / risk_per_share)
+        num_lots = max(1, total_shares // Config.LOT_SIZE)
+        
+        # Apply lot limits
+        num_lots = max(Config.MIN_LOTS, min(num_lots, Config.MAX_LOTS))
+        
+        return num_lots
+        
+    except Exception as e:
+        logger.error(f"Error calculating position size: {e}")
+        return Config.DEFAULT_LOTS
     
     def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
         """Execute trade based on signal"""
