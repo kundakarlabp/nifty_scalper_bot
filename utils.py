@@ -663,3 +663,38 @@ def is_valid_trading_symbol(symbol: str) -> bool:
     except Exception as e:
         logger.error(f"Error validating trading symbol: {e}")
         return False
+
+class TechnicalIndicators:
+    @staticmethod
+    def sma(prices, period):
+        """Simple Moving Average"""
+        return sum(prices[-period:]) / period if len(prices) >= period else None
+    
+    @staticmethod
+    def ema(prices, period):
+        """Exponential Moving Average"""
+        if len(prices) < period:
+            return None
+        multiplier = 2 / (period + 1)
+        ema = prices[0]
+        for price in prices[1:]:
+            ema = (price * multiplier) + (ema * (1 - multiplier))
+        return ema
+    
+    @staticmethod
+    def rsi(prices, period=14):
+        """Relative Strength Index"""
+        if len(prices) < period + 1:
+            return None
+        gains = []
+        losses = []
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            gains.append(max(change, 0))
+            losses.append(max(-change, 0))
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
