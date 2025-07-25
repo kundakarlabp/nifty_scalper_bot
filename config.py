@@ -1,120 +1,86 @@
+# config.py
+
 import os
 
 class Config:
-    # ===== ZERODHA API CONFIGURATION =====
+    """
+    A centralized and consolidated configuration class for the Nifty Scalper Bot.
+    It sources settings from environment variables for security and flexibility.
+    """
+    
+    # --- SECTION 1: CRITICAL CREDENTIALS & IDENTIFIERS ---
+    # These MUST be set in your environment.
     ZERODHA_API_KEY = os.getenv('ZERODHA_API_KEY')
     ZERODHA_API_SECRET = os.getenv('ZERODHA_API_SECRET')
-    ZERODHA_CLIENT_ID = os.getenv('ZERODHA_CLIENT_ID')
-    ZERODHA_ACCESS_TOKEN = os.getenv('ZERODHA_ACCESS_TOKEN')
-    
-    # ===== TELEGRAM BOT CONFIGURATION =====
+    ZERODHA_ACCESS_TOKEN = os.getenv('ZERODHA_ACCESS_TOKEN') # For session management
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+    TELEGRAM_ADMIN_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # Your personal chat ID for critical alerts
+
+    # --- SECTION 2: CORE TRADING & RISK PARAMETERS ---
+    # These define the bot's primary financial behavior.
+    INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', 100000.0))
+    RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', 0.01)) # Risk 1% of account per trade.
+
+    # --- SECTION 3: SYSTEM-WIDE SAFETY LIMITS (CAPITAL PRESERVATION) ---
+    # These are the bot's main circuit breakers.
+    MAX_DAILY_LOSS_PCT = float(os.getenv('MAX_DAILY_LOSS_PCT', 0.03)) # Stop trading if down 3% on the day.
+    MAX_DAILY_TRADES = int(os.getenv('MAX_DAILY_TRADES', 10))         # Max trades per day.
+    MAX_CONSECUTIVE_LOSSES = int(os.getenv('MAX_CONSECUTIVE_LOSSES', 3)) # Trigger timeout after 3 straight losses.
+    CIRCUIT_BREAKER_PAUSE_MINUTES = int(os.getenv('CIRCUIT_BREAKER_PAUSE_MINUTES', 30))
+
+    # --- SECTION 4: TRADE EXECUTION & INSTRUMENT DETAILS ---
+    # Parameters related to what and how the bot trades.
+    NIFTY_LOT_SIZE = int(os.getenv('NIFTY_LOT_SIZE', 25)) # Current Nifty F&O lot size.
     
-    # ===== MARKET HOURS =====
-    MARKET_START_HOUR = int(os.getenv('MARKET_START_HOUR', 9))
-    MARKET_END_HOUR = int(os.getenv('MARKET_END_HOUR', 15))
-    MARKET_START_MINUTE = int(os.getenv('MARKET_START_MINUTE', 15))
-    MARKET_END_MINUTE = int(os.getenv('MARKET_END_MINUTE', 30))
-    
-    # ===== TRADING CONFIGURATION =====
-    AUTO_TRADE = os.getenv('AUTO_TRADE', 'true').lower() == 'true'
-    DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-    
-    # ===== REDIS CONFIGURATION =====
-    REDIS_URL = os.getenv('REDIS_URL')
-    REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
-    
-    # ===== SIGNAL CONFIGURATION =====
-    SIGNAL_THRESHOLD = float(os.getenv('SIGNAL_THRESHOLD', 6.0))
-    MIN_THRESHOLD = float(os.getenv('MIN_THRESHOLD', 5.0))
-    MAX_THRESHOLD = float(os.getenv('MAX_THRESHOLD', 7.0))
-    PERFORMANCE_WINDOW = int(os.getenv('PERFORMANCE_WINDOW', 20))
-    ADAPT_THRESHOLD = os.getenv('ADAPT_THRESHOLD', 'true').lower() == 'true'
-    
-    # ===== CAPITAL & RISK MANAGEMENT =====
-    TRADING_CAPITAL = float(os.getenv('TRADING_CAPITAL', 100000))
-    MAX_DAILY_LOSS_PCT = float(os.getenv('MAX_DAILY_LOSS_PCT', 5)) / 100  # Convert to decimal
-    TRADE_LOT_SIZE = int(os.getenv('TRADE_LOT_SIZE', 75))
-    MAX_LOSS_STREAK = int(os.getenv('MAX_LOSS_STREAK', 3))
-    LOSS_PAUSE_TIME = int(os.getenv('LOSS_PAUSE_TIME', 60))  # minutes
-    
-    # ===== POSITION SIZING (LOTS) =====
-    DEFAULT_LOTS = 1
-    MIN_LOTS = 1
-    MAX_LOTS = int(TRADING_CAPITAL / 50000)  # Max lots based on capital (adjust multiplier as needed)
-    LOT_SIZE = TRADE_LOT_SIZE
-    
-    # ===== ATR-BASED SL/TP =====
-    USE_ATR_SL = os.getenv('USE_ATR_SL', 'true').lower() == 'true'
-    ATR_SL_MULT = float(os.getenv('ATR_SL_MULT', 1.2))
-    USE_ATR_TP = os.getenv('USE_ATR_TP', 'true').lower() == 'true'
-    ATR_TP_MULT = float(os.getenv('ATR_TP_MULT', 1.8))
-    
-    # ===== LEGACY PERCENTAGE-BASED SL/TP =====
-    SL_PERCENT = float(os.getenv('SL_PERCENT', 0.20)) / 100  # Convert to decimal
-    TP_PERCENT = float(os.getenv('TP_PERCENT', 0.40)) / 100  # Convert to decimal
-    
-    # ===== NEWS API =====
-    NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
-    
-    # ===== CIRCUIT BREAKER =====
-    MAX_CONSECUTIVE_LOSSES = int(os.getenv('MAX_CONSEC_LOSSES', 3))
-    CIRCUIT_BREAKER_PAUSE_MINUTES = int(os.getenv('LOSS_PAUSE_TIME', 60))
-    
-    # ===== ML MODEL =====
-    ML_MODEL_PATH = os.getenv('ML_MODEL_PATH', 'model.pkl')
-    
-    # ===== TRADING INSTRUMENT =====
-    UNDERLYING_SYMBOL = os.getenv('UNDERLYING_SYMBOL', 'NIFTY')
-    STRIKE_STEP = int(os.getenv('STRIKE_STEP', 50))
-    TRADE_EXCHANGE = os.getenv('TRADE_EXCHANGE', 'NFO')
-    TRADE_QTY = int(os.getenv('TRADE_QTY', 75))  # Quantity per lot
-    
-    # ===== TECHNICAL INDICATORS =====
-    ATR_PERIOD = int(os.getenv('ATR_PERIOD', 14))
+    # The new SignalGenerator uses ATR for dynamic SL/TP. These are the multipliers.
+    # This setup creates a default Risk-Reward Ratio of 1:2.
+    ATR_SL_MULT = float(os.getenv('ATR_SL_MULT', 1.5)) # Stop-loss will be 1.5 * ATR.
+    ATR_TP_MULT = float(os.getenv('ATR_TP_MULT', 3.0)) # Target will be 3.0 * ATR.
+
+    # --- SECTION 5: TECHNICAL INDICATOR SETTINGS ---
+    # Tune the "brains" of the bot here.
+    EMA_FAST = int(os.getenv('EMA_FAST', 10))
+    EMA_SLOW = int(os.getenv('EMA_SLOW', 30))
     RSI_PERIOD = int(os.getenv('RSI_PERIOD', 14))
-    EMA_FAST = int(os.getenv('EMA_FAST', 9))
-    EMA_SLOW = int(os.getenv('EMA_SLOW', 21))
+    ATR_PERIOD = int(os.getenv('ATR_PERIOD', 14))
+    # Note: MACD and BBands are not used in the new, simplified high-conviction signal generator,
+    # but are kept here in case you want to re-integrate them.
     MACD_FAST = int(os.getenv('MACD_FAST', 12))
     MACD_SLOW = int(os.getenv('MACD_SLOW', 26))
     MACD_SIGNAL = int(os.getenv('MACD_SIGNAL', 9))
     BB_PERIOD = int(os.getenv('BB_PERIOD', 20))
-    BB_STDDEV = float(os.getenv('BB_STDDEV', 2))
-    VOL_SMA_PERIOD = int(os.getenv('VOL_SMA_PERIOD', 20))
-    VWAP_WINDOW = int(os.getenv('VWAP_WINDOW', 0))
-    
-    # ===== FLASK CONFIGURATION =====
-    PORT = int(os.getenv('PORT', 10000))
-    HOST = os.getenv('HOST', '0.0.0.0')
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    
-    # ===== DERIVED CONFIGURATIONS =====
-    RISK_PER_TRADE_PCT = 0.01  # 1% risk per trade
-    MIN_SIGNAL_INTERVAL = 300  # 5 minutes
-    LOOP_DELAY = 5  # seconds
-    DEFAULT_QUANTITY = TRADE_QTY  # For backward compatibility
-    MIN_QUANTITY = TRADE_QTY
-    MAX_QUANTITY = MAX_LOTS * TRADE_QTY
-    
-    # ===== VALIDATION =====
+    BB_STDDEV = float(os.getenv('BB_STDDEV', 2.0))
+
+    # --- SECTION 6: BOT OPERATION & ENVIRONMENT ---
+    # General operational settings.
+    TICK_INTERVAL_SECONDS = int(os.getenv('TICK_INTERVAL_SECONDS', 3)) # How often the main loop runs.
+    STATE_FILE = os.getenv('STATE_FILE', "position_state.json") # File for saving live trade state.
+    DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true' # If True, will not place real orders.
+
+    # --- SECTION 7: ADVANCED & EXTERNAL SERVICES (Optional) ---
+    # Configuration for Redis, Webhooks, etc. The bot logic will need to be
+    # extended to use these.
+    REDIS_URL = os.getenv('REDIS_URL') # e.g., 'redis://localhost:6379'
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL') # For broker postbacks
+
+    # --- VALIDATION METHOD ---
     @classmethod
     def validate(cls):
-        """Validate critical configuration"""
+        """Validates that critical environment variables are set."""
         required_vars = [
             'ZERODHA_API_KEY', 'ZERODHA_API_SECRET', 
-            'ZERODHA_CLIENT_ID', 'TELEGRAM_BOT_TOKEN'
+            'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_CHAT_ID'
         ]
-        
         missing = [var for var in required_vars if not getattr(cls, var)]
         if missing:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+            raise ValueError(f"FATAL: Missing required environment variables: {', '.join(missing)}")
         
-        if cls.MAX_DAILY_LOSS_PCT > 0.1:  # More than 10%
-            raise ValueError("MAX_DAILY_LOSS_PCT seems too high (>10%)")
+        if cls.RISK_PER_TRADE_PCT > 0.05: # Risking more than 5% is dangerous
+            print("WARNING: RISK_PER_TRADE_PCT is set to >5%, which is highly aggressive.")
         
-        if cls.TRADING_CAPITAL < 10000:
-            raise ValueError("TRADING_CAPITAL seems too low (<10,000)")
-        
+        logger.info("Configuration loaded and validated successfully.")
         return True
+
+# --- Optional: A logger instance for use within the config file itself if needed ---
+import logging
+logger = logging.getLogger(__name__)
