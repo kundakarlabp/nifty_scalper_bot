@@ -1,554 +1,225 @@
-#!/usr/bin/env python3
-"""
-Nifty Scalper Bot v2.0 - Production Ready
-Enhanced trading bot with Telegram integration and proper auto-trading
-"""
-import os
-import sys
-import logging
-import asyncio
-import threading
-import time
-import schedule
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-import pandas as pd
-import numpy as np
-from flask import Flask, jsonify
+# nifty_scalper_bot.py
 
-# Import custom modules
+import asyncio
+import logging
+from datetime import datetime
+import pytz
+
+# Import the classes from your other files
 from config import Config
-from kite_client import KiteClient
+from utils import is_market_open, format_currency
 from signal_generator import SignalGenerator
-from monitor import Monitor
-from utils import is_market_open, get_market_status, time_until_market_open
 from telegram_bot import TelegramBot
 
-# Setup logging
+# --- Setup Logging ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('trading_bot.log'),
-        logging.StreamHandler(sys.stdout)
+        logging.FileHandler("trading_bot.log"),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
+# --- RiskManager Class ---
+# Manages capital, position sizing, and enforces risk rules.
 class RiskManager:
-    """Enhanced Risk Management System"""
-    def __init__(self, initial_balance: float = 100000):
+    def __init__(self, initial_balance):
         self.initial_balance = initial_balance
         self.current_balance = initial_balance
         self.todays_pnl = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
-        self.max_consecutive_losses = Config.MAX_CONSECUTIVE_LOSSES
         self.circuit_breaker_active = False
         self.circuit_breaker_until = None
-        self.daily_loss_limit = initial_balance * Config.MAX_DAILY_LOSS_PCT
 
-    def can_trade(self) -> tuple[bool, str]:
-        """Check if trading is allowed"""
-        # Check market hours
-        if not is_market_open():
-            return False, "Market is closed"
-        # Check daily trade limit
+    def can_trade(self):
+        """Check if a new trade is allowed based on risk rules."""
+        if self.circuit_breaker_active and datetime.now(pytz.UTC) < self.circuit_breaker_until:
+            logger.warning(f"Circuit breaker is active. No new trades until {self.circuit_breaker_until}.")
+            return False
         if self.daily_trades >= Config.MAX_DAILY_TRADES:
-            return False, f"Daily trade limit reached ({Config.MAX_DAILY_TRADES})"
-        # Check daily loss limit
-        if self.todays_pnl <= -self.daily_loss_limit:
-            return False, f"Daily loss limit reached (₹{self.daily_loss_limit:,.2f})"
-        # Check circuit breaker
-        if self.circuit_breaker_active:
-            if datetime.now() < self.circuit_breaker_until:
-                remaining = (self.circuit_breaker_until - datetime.now()).seconds // 60
-                return False, f"Circuit breaker active for {remaining} more minutes"
-            else:
-                self.reset_circuit_breaker()
-        return True, "Trading allowed"
+            logger.warning("Max daily trades limit reached.")
+            return False
+        if self.todays_pnl < - (self.initial_balance * Config.MAX_DAILY_LOSS_PCT):
+            logger.error("Max daily loss limit reached. Stopping for the day.")
+            return False
+        return True
 
-    def update_balance(self, pnl: float):
-        """Update balance and risk metrics"""
-        self.current_balance += pnl
-        self.todays_pnl += pnl
+    def calculate_position_size(self, stop_loss_points):
+        """Calculates position size based on risk per trade."""
+        if stop_loss_points <= 0:
+            return 0
+        risk_amount = self.current_balance * Config.RISK_PER_TRADE_PCT
+        quantity = risk_amount / stop_loss_points
+        # Assuming Nifty lot size from config
+        num_lots = max(1, round(quantity / Config.NIFTY_LOT_SIZE))
+        return int(num_lots * Config.NIFTY_LOT_SIZE)
+
+    def record_trade(self, pnl):
+        """Update risk metrics after a trade is closed."""
         self.daily_trades += 1
+        self.todays_pnl += pnl
+        self.current_balance += pnl
         if pnl < 0:
             self.consecutive_losses += 1
-            if self.consecutive_losses >= self.max_consecutive_losses:
+            if self.consecutive_losses >= Config.MAX_CONSECUTIVE_LOSSES:
                 self.activate_circuit_breaker()
         else:
             self.consecutive_losses = 0
 
     def activate_circuit_breaker(self):
-        """Activate circuit breaker after consecutive losses"""
+        """Activates the circuit breaker, pausing trading."""
         self.circuit_breaker_active = True
-        pause_minutes = Config.CIRCUIT_BREAKER_PAUSE_MINUTES
-        self.circuit_breaker_until = datetime.now() + timedelta(minutes=pause_minutes)
-        logger.warning(f"Circuit breaker activated for {pause_minutes} minutes after {self.consecutive_losses} consecutive losses")
+        self.circuit_breaker_until = datetime.now(pytz.UTC) + asyncio.timedelta(minutes=Config.CIRCUIT_BREAKER_PAUSE_MINUTES)
+        logger.critical(f"CIRCUIT BREAKER ACTIVATED for {Config.CIRCUIT_BREAKER_PAUSE_MINUTES} minutes due to {self.consecutive_losses} consecutive losses.")
+        # Optionally notify via Telegram
+        if hasattr(self, 'telegram_bot') and self.telegram_bot:
+            self.telegram_bot.notify_circuit_breaker(self.consecutive_losses, Config.CIRCUIT_BREAKER_PAUSE_MINUTES)
 
-    def reset_circuit_breaker(self):
-        """Reset circuit breaker"""
-        self.circuit_breaker_active = False
-        self.circuit_breaker_until = None
-        self.consecutive_losses = 0
-        logger.info("Circuit breaker reset")
-
-    def reset_daily_stats(self):
-        """Reset daily statistics"""
-        self.todays_pnl = 0.0
-        self.daily_trades = 0
-        self.consecutive_losses = 0
-        self.reset_circuit_breaker()
-        logger.info("Daily statistics reset")
-
+# --- Main Bot Class ---
+# Orchestrates all components of the trading bot.
 class NiftyScalperBot:
-    """Main Trading Bot Class with Enhanced Features"""
     def __init__(self):
-        self.kite_client = None
-        self.signal_generator = None
-        self.monitor = None
-        self.telegram_bot = None
-        self.risk_manager = RiskManager()
-        # Trading state
-        self.auto_trade = True
-        self.is_running = False
+        self.signal_generator = SignalGenerator()
+        self.risk_manager = RiskManager(Config.INITIAL_CAPITAL)
+        self.telegram_bot = TelegramBot(trading_bot_instance=self)
+        self.risk_manager.telegram_bot = self.telegram_bot # Link for notifications
         self.current_position = None
-        self.trade_history = []
-        self.last_signal_time = None
-        # Flask app for web service
-        self.app = Flask(__name__)
-        self.setup_web_routes()
-        # Initialize components
-        if not self.initialize_components():
-            raise RuntimeError("Failed to initialize bot components")
+        self.auto_trade = True # Auto-trading is ON by default
 
-    def initialize_components(self):
-        """Initialize all bot components"""
-        try:
-            # Initialize Kite client
-            self.kite_client = KiteClient()
-            # FIX: Check the is_connected flag instead of calling connect()
-            if not self.kite_client.is_connected:
-                logger.error("Failed to connect to Kite")
-                return False
-            # Initialize signal generator
-            self.signal_generator = SignalGenerator()
-            # Initialize monitor
-            self.monitor = Monitor()
-            # Initialize Telegram bot
-            self.setup_telegram_bot()
-            logger.info("All components initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error initializing components: {e}")
-            return False
+    async def run(self):
+        """Main execution loop for the bot."""
+        logger.info("Nifty Scalper Bot v2.0 is starting...")
+        
+        # Start the Telegram bot as a background task
+        telegram_task = asyncio.create_task(self.telegram_bot.start_bot())
 
-    def setup_telegram_bot(self):
-        """Setup Telegram bot integration"""
-        if not Config.TELEGRAM_BOT_TOKEN:
-            logger.warning("Telegram bot token not provided - skipping Telegram integration")
-            return
-        try:
-            self.telegram_bot = TelegramBot(trading_bot_instance=self)
-            # Start Telegram bot in separate thread
-            def start_telegram():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(self.telegram_bot.start_bot())
-                    # loop.run_forever() # Not needed if start_bot handles the loop
-                except Exception as e:
-                    logger.error(f"Error in Telegram thread: {e}")
-            telegram_thread = threading.Thread(target=start_telegram, daemon=True)
-            telegram_thread.start()
-            logger.info("Telegram bot thread started")
-        except Exception as e:
-            logger.error(f"Failed to setup Telegram bot: {e}")
-
-    def setup_web_routes(self):
-        """Setup Flask web routes for Render deployment"""
-        @self.app.route('/')
-        def health_check():
-            return jsonify({
-                "status": "Nifty Scalper Bot is running",
-                "timestamp": datetime.now().isoformat(),
-                "market_status": get_market_status(),
-                "auto_trade": self.auto_trade,
-                "current_balance": self.risk_manager.current_balance,
-                "todays_pnl": self.risk_manager.todays_pnl,
-                "daily_trades": self.risk_manager.daily_trades
-            })
-
-        @self.app.route('/status')
-        def bot_status():
-            return jsonify({
-                "bot_status": "active" if self.is_running else "inactive",
-                "auto_trade": self.auto_trade,
-                "market_open": is_market_open(),
-                "current_position": self.current_position,
-                "balance": self.risk_manager.current_balance,
-                "todays_pnl": self.risk_manager.todays_pnl,
-                "daily_trades": self.risk_manager.daily_trades,
-                "circuit_breaker": self.risk_manager.circuit_breaker_active,
-                "last_update": datetime.now().isoformat()
-            })
-
-        @self.app.route('/trades')
-        def recent_trades():
-            return jsonify({
-                "recent_trades": self.trade_history[-10:],  # Last 10 trades
-                "total_trades": len(self.trade_history)
-            })
-
-    def get_market_data(self) -> Optional[Dict[str, Any]]:
-        """Get current market data"""
-        try:
-            if not self.kite_client:
-                return None
-            # Get NIFTY data
-            instrument_token = self.kite_client.get_instrument_token(Config.UNDERLYING_SYMBOL)
-            if not instrument_token:
-                return None
-            quote = self.kite_client.kite.quote([instrument_token])
-            if not quote or str(instrument_token) not in quote:
-                return None
-            data = quote[str(instrument_token)]
-            return {
-                'ltp': data['last_price'],
-                'volume': data.get('volume', 0),
-                'timestamp': datetime.now(),
-                'ohlc': data.get('ohlc', {})
-            }
-        except Exception as e:
-            logger.error(f"Error getting market data: {e}")
-            return None
-
-    def analyze_signals(self, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Analyze market data for trading signals"""
-        try:
-            if not self.signal_generator or not market_data:
-                return None
-            # Generate signal
-            signal = self.signal_generator.generate_signal(market_data)
-            if signal and signal.get('strength', 0) >= Config.SIGNAL_THRESHOLD:
-                # Avoid duplicate signals
-                current_time = datetime.now()
-                if (self.last_signal_time and
-                    (current_time - self.last_signal_time).seconds < Config.MIN_SIGNAL_INTERVAL):
-                    return None
-                self.last_signal_time = current_time
-                return signal
-            return None
-        except Exception as e:
-            logger.error(f"Error analyzing signals: {e}")
-            return None
-
-    def calculate_position_size(self, signal_data: Dict[str, Any]) -> int:
-        """Calculate number of lots based on capital and risk"""
-        try:
-            # Risk per trade (1% of current balance)
-            risk_amount = self.risk_manager.current_balance * Config.RISK_PER_TRADE_PCT
-            # Calculate stop loss distance
-            entry_price = signal_data.get('entry_price', 0)
-            stop_loss = signal_data.get('stop_loss', 0)
-            if entry_price <= 0 or stop_loss <= 0:
-                return Config.DEFAULT_LOTS
-            risk_per_share = abs(entry_price - stop_loss)
-            if risk_per_share <= 0:
-                return Config.DEFAULT_LOTS
-            # Calculate number of lots
-            total_shares = int(risk_amount / risk_per_share)
-            num_lots = max(1, total_shares // Config.LOT_SIZE)
-            # Apply lot limits
-            num_lots = max(Config.MIN_LOTS, min(num_lots, Config.MAX_LOTS))
-            return num_lots
-        except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
-            return Config.DEFAULT_LOTS
-
-    def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
-        """Execute trade based on signal"""
-        try:
-            # Check if auto-trading is enabled
-            if not self.auto_trade:
-                logger.info("Auto-trading disabled, skipping trade")
-                return False
-            # Check if we can trade
-            can_trade, reason = self.risk_manager.can_trade()
-            if not can_trade:
-                logger.info(f"Cannot trade: {reason}")
-                return False
-            # Check if we already have a position
-            if self.current_position:
-                logger.info("Already have an open position, skipping new trade")
-                return False
-            # Calculate position size
-            num_lots = self.calculate_position_size(signal_data)
-            quantity = num_lots * Config.LOT_SIZE  # Convert lots to shares for Kite API
-            # Place order
-            order_response = self.place_order(
-                direction=signal_data['direction'],
-                quantity=quantity,
-                price=signal_data.get('entry_price')
-            )
-            if order_response and 'order_id' in order_response:
-                # Wait for order execution
-                time.sleep(2)
-                # Check order status
-                order_status = self.kite_client.kite.order_history(order_response['order_id'])
-                if order_status and order_status[-1]['status'] == 'COMPLETE':
-                    executed_price = float(order_status[-1]['average_price'] or order_status[-1]['price'])
-                    # Create position record
-                    self.current_position = {
-                        'order_id': order_response['order_id'],
-                        'direction': signal_data['direction'],
-                        'quantity': quantity,
-                        'entry_price': executed_price,
-                        'stop_loss': signal_data.get('stop_loss'),
-                        'target': signal_data.get('target'),
-                        'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'symbol': Config.UNDERLYING_SYMBOL
-                    }
-                    logger.info(f"Trade executed: {signal_data['direction']} {quantity} @ ₹{executed_price:.2f}")
-                    # Send Telegram notification
-                    if self.telegram_bot:
-                        self.telegram_bot.notify_trade_entry({
-                            'direction': signal_data['direction'],
-                            'entry_price': executed_price,
-                            'quantity': quantity,
-                            'stop_loss': signal_data.get('stop_loss', 0),
-                            'target': signal_data.get('target', 0),
-                            'timestamp': datetime.now().strftime('%H:%M:%S')
-                        })
-                    return True
-                else:
-                    logger.error(f"Order not executed. Status: {order_status[-1]['status'] if order_status else 'Unknown'}")
-                    return False
-            else:
-                logger.error("Failed to place order")
-                return False
-        except Exception as e:
-            logger.error(f"Error executing trade: {e}")
-            return False
-
-    def place_order(self, direction: str, quantity: int, price: float = None) -> Optional[Dict[str, Any]]:
-        """Place order through Kite"""
-        try:
-            if not self.kite_client:
-                return None
-            order_params = {
-                'variety': self.kite_client.kite.VARIETY_REGULAR,
-                'exchange': self.kite_client.kite.EXCHANGE_NFO,
-                'tradingsymbol': Config.UNDERLYING_SYMBOL,
-                'transaction_type': direction,
-                'quantity': quantity,
-                'product': self.kite_client.kite.PRODUCT_MIS,
-                'order_type': self.kite_client.kite.ORDER_TYPE_MARKET if not price else self.kite_client.kite.ORDER_TYPE_LIMIT
-            }
-            if price:
-                order_params['price'] = price
-            return self.kite_client.kite.place_order(**order_params)
-        except Exception as e:
-            logger.error(f"Error placing order: {e}")
-            return None
-
-    def check_exit_conditions(self) -> Optional[str]:
-        """Check if current position should be exited"""
-        if not self.current_position:
-            return None
-        try:
-            # Get current market price
-            market_data = self.get_market_data()
-            if not market_data:
-                return None
-            current_price = market_data['ltp']
-            entry_price = self.current_position['entry_price']
-            direction = self.current_position['direction']
-            stop_loss = self.current_position.get('stop_loss')
-            target = self.current_position.get('target')
-            # Check stop loss
-            if stop_loss:
-                if ((direction == 'BUY' and current_price <= stop_loss) or
-                    (direction == 'SELL' and current_price >= stop_loss)):
-                    return 'stop_loss'
-            # Check target
-            if target:
-                if ((direction == 'BUY' and current_price >= target) or
-                    (direction == 'SELL' and current_price <= target)):
-                    return 'target'
-            # Check time-based exit (end of day)
-            now = datetime.now()
-            if now.hour >= 15 and now.minute >= 20:  # Exit 10 minutes before market close
-                return 'eod'
-            return None
-        except Exception as e:
-            logger.error(f"Error checking exit conditions: {e}")
-            return None
-
-    def close_position(self, exit_reason: str = 'manual') -> bool:
-        """Close current position"""
-        if not self.current_position:
-            return False
-        try:
-            # Get opposite direction
-            direction = self.current_position['direction']
-            opposite_direction = 'SELL' if direction == 'BUY' else 'BUY'
-            quantity = self.current_position['quantity']
-            # Place exit order
-            order_response = self.place_order(opposite_direction, quantity)
-            if order_response and 'order_id' in order_response:
-                # Wait for execution
-                time.sleep(2)
-                # Check order status
-                order_status = self.kite_client.kite.order_history(order_response['order_id'])
-                if order_status and order_status[-1]['status'] == 'COMPLETE':
-                    exit_price = float(order_status[-1]['average_price'] or order_status[-1]['price'])
-                    # Calculate P&L
-                    entry_price = self.current_position['entry_price']
-                    if direction == 'BUY':
-                        pnl = (exit_price - entry_price) * quantity
-                    else:
-                        pnl = (entry_price - exit_price) * quantity
-                    # Calculate trade duration
-                    entry_time = datetime.strptime(self.current_position['entry_time'], '%Y-%m-%d %H:%M:%S')
-                    duration = str(datetime.now() - entry_time).split('.')[0]
-                    # Create trade record
-                    trade_record = {
-                        **self.current_position,
-                        'exit_price': exit_price,
-                        'exit_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'pnl': pnl,
-                        'exit_reason': exit_reason,
-                        'duration': duration
-                    }
-                    # Update trade history
-                    self.trade_history.append(trade_record)
-                    # Update risk manager
-                    self.risk_manager.update_balance(pnl)
-                    logger.info(f"Position closed: {direction} @ ₹{exit_price:.2f}, P&L: ₹{pnl:.2f}")
-                    # Send Telegram notification
-                    if self.telegram_bot:
-                        self.telegram_bot.notify_trade_exit({
-                            'direction': direction,
-                            'exit_price': exit_price,
-                            'pnl': pnl,
-                            'duration': duration
-                        })
-                    # Clear current position
-                    self.current_position = None
-                    # Check circuit breaker
-                    if (self.risk_manager.circuit_breaker_active and
-                        self.telegram_bot and
-                        exit_reason == 'stop_loss'):
-                        self.telegram_bot.notify_circuit_breaker(
-                            self.risk_manager.consecutive_losses,
-                            Config.CIRCUIT_BREAKER_PAUSE_MINUTES
-                        )
-                    return True
-                else:
-                    logger.error(f"Exit order not executed. Status: {order_status[-1]['status'] if order_status else 'Unknown'}")
-                    return False
-            else:
-                logger.error("Failed to place exit order")
-                return False
-        except Exception as e:
-            logger.error(f"Error closing position: {e}")
-            return False
-
-    def trading_loop(self):
-        """Main trading loop"""
-        logger.info("Starting trading loop")
-        while self.is_running:
+        while True:
             try:
-                # Check if market is open
-                if not is_market_open():
-                    time.sleep(60)  # Check every minute when market is closed
-                    continue
-                # Get market data
-                market_data = self.get_market_data()
-                if not market_data:
-                    time.sleep(Config.LOOP_DELAY)
-                    continue
-                # Check exit conditions for existing position
-                if self.current_position:
-                    exit_reason = self.check_exit_conditions()
-                    if exit_reason:
-                        self.close_position(exit_reason)
-                else:
-                    # Look for new trading opportunities
-                    signal = self.analyze_signals(market_data)
-                    if signal:
-                        self.execute_trade(signal)
-                # Monitor system
-                if self.monitor:
-                    self.monitor.update_metrics({
-                        'current_price': market_data['ltp'],
-                        'balance': self.risk_manager.current_balance,
-                        'pnl': self.risk_manager.todays_pnl,
-                        'trades': self.risk_manager.daily_trades
-                    })
-                time.sleep(Config.LOOP_DELAY)
+                if is_market_open():
+                    market_data = self.get_market_data() # Placeholder for your data feed
+                    
+                    # If we have an open position, check if we should exit
+                    if self.current_position:
+                        self.check_exit_conditions(market_data)
+                    
+                    # If no position and auto-trading is on, check for new entry signals
+                    elif self.auto_trade and self.risk_manager.can_trade():
+                        signal = self.signal_generator.generate_signal(market_data)
+                        if signal:
+                            self.execute_trade(signal)
+                
+                # Log current status periodically
+                logger.info(f"P&L: {format_currency(self.risk_manager.todays_pnl)} | Balance: {format_currency(self.risk_manager.current_balance)}")
+
             except Exception as e:
-                logger.error(f"Error in trading loop: {e}")
-                time.sleep(10)  # Wait before retrying
+                logger.error(f"An error occurred in the main loop: {e}", exc_info=True)
 
-    def schedule_daily_reset(self):
-        """Schedule daily reset of statistics"""
-        schedule.every().day.at("00:01").do(self.risk_manager.reset_daily_stats)
-        while self.is_running:
-            schedule.run_pending()
-            time.sleep(60)
+            await asyncio.sleep(Config.TICK_INTERVAL_SECONDS) # Wait for the next tick
 
-    def start(self):
-        """Start the trading bot"""
-        logger.info("Starting Nifty Scalper Bot v2.0")
-        self.is_running = True
-        # Start trading loop in separate thread
-        trading_thread = threading.Thread(target=self.trading_loop, daemon=True)
-        trading_thread.start()
-        # Start scheduler thread
-        scheduler_thread = threading.Thread(target=self.schedule_daily_reset, daemon=True)
-        scheduler_thread.start()
-        logger.info("Bot started successfully")
-        # Startup notification is handled by TelegramBot.start_bot
+    def get_market_data(self):
+        """
+        Placeholder for your live market data feed API call.
+        This should return a dictionary with 'ltp', 'volume', etc.
+        """
+        # In a real scenario, this would be an API call.
+        # For demonstration, we simulate a price tick.
+        # You MUST replace this with your actual data provider (e.g., Zerodha Kite, Angel One).
+        import random
+        simulated_price = 24800 + random.uniform(-50, 50)
+        return {
+            'ltp': simulated_price,
+            'volume': random.randint(10000, 50000),
+            'timestamp': datetime.now(pytz.UTC)
+        }
 
-    def stop(self):
-        """Stop the trading bot"""
-        logger.info("Stopping Nifty Scalper Bot")
-        self.is_running = False
-        # Close any open positions
-        if self.current_position:
-            self.close_position('shutdown')
-        # Signal Telegram bot to stop (handled internally by TelegramBot)
-        if self.telegram_bot:
-             # Call the async stop method correctly from sync context
-             # This requires careful handling. For now, just log the intent.
-             # A better way is to signal the bot to stop via an event or flag.
-             logger.info("Requesting Telegram bot to stop...")
-             # self.telegram_bot.request_stop() # If you add this method to TelegramBot
-        logger.info("Bot stopped. Telegram bot stop request sent.")
+    def execute_trade(self, signal):
+        """Executes a new trade based on a signal."""
+        logger.info(f"Executing trade for signal: {signal}")
+        entry_price = signal['entry_price']
+        stop_loss = signal['stop_loss']
+        
+        stop_loss_points = abs(entry_price - stop_loss)
+        quantity = self.risk_manager.calculate_position_size(stop_loss_points)
 
-def main():
-    """Main function"""
+        if quantity == 0:
+            logger.warning("Trade skipped: Calculated position size is zero.")
+            return
+
+        # --- PLACE ORDER VIA BROKER API HERE ---
+        # This is a critical placeholder. You need to integrate your broker's API.
+        # order_response = broker.place_order(symbol="NIFTY", direction=signal['direction'], quantity=quantity)
+        # if not order_response.is_success:
+        #     logger.error("Failed to place order with broker.")
+        #     return
+        
+        self.current_position = {
+            'direction': signal['direction'],
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'target': signal['target'],
+            'quantity': quantity,
+            'entry_time': datetime.now(pytz.UTC)
+        }
+        logger.critical(f"NEW POSITION OPENED: {self.current_position}")
+        self.telegram_bot.notify_trade_entry(self.current_position)
+
+    def check_exit_conditions(self, market_data):
+        """Checks if the current position should be closed."""
+        ltp = market_data['ltp']
+        pos = self.current_position
+        
+        exit_reason = None
+        if pos['direction'] == 'BUY':
+            if ltp >= pos['target']: exit_reason = "Target hit"
+            elif ltp <= pos['stop_loss']: exit_reason = "Stop-loss hit"
+        elif pos['direction'] == 'SELL':
+            if ltp <= pos['target']: exit_reason = "Target hit"
+            elif ltp >= pos['stop_loss']: exit_reason = "Stop-loss hit"
+        
+        if exit_reason:
+            self.close_position(exit_reason, ltp)
+
+    def close_position(self, reason, exit_price):
+        """Closes the current open position."""
+        if not self.current_position:
+            return
+
+        # --- PLACE EXIT ORDER VIA BROKER API HERE ---
+        logger.info(f"Closing position due to: {reason}")
+
+        pos = self.current_position
+        pnl = 0
+        if pos['direction'] == 'BUY':
+            pnl = (exit_price - pos['entry_price']) * pos['quantity']
+        else: # SELL
+            pnl = (pos['entry_price'] - exit_price) * pos['quantity']
+        
+        self.risk_manager.record_trade(pnl)
+        
+        exit_data = {**pos, 'exit_price': exit_price, 'pnl': pnl, 'reason': reason}
+        logger.critical(f"POSITION CLOSED: P&L {format_currency(pnl)}")
+        self.telegram_bot.notify_trade_exit(exit_data)
+        
+        self.current_position = None
+        return True # Indicate success
+
+# --- Main Execution Block ---
+async def main():
+    bot = NiftyScalperBot()
     try:
-        # Create bot instance
-        bot = NiftyScalperBot()
-        # Start bot
-        bot.start()
-        # Start Flask web service for Render
-        port = int(os.environ.get('PORT', 10000)) # Default to 10000 if PORT not set
-        # Run Flask app in main thread
-        bot.app.run(host='0.0.0.0', port=port, debug=False)
-    except KeyboardInterrupt:
-        logger.info("Received shutdown signal")
-        if 'bot' in locals():
-            bot.stop()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True) # Log full traceback
-        if 'bot' in locals():
-            bot.stop()
+        await bot.run()
+    except asyncio.CancelledError:
+        logger.info("Main task cancelled. Shutting down.")
+    finally:
+        logger.info("Initiating graceful shutdown of Telegram bot...")
+        await bot.telegram_bot.stop_bot()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually by user (Ctrl+C).")
 
