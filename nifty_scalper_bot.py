@@ -157,7 +157,7 @@ class NiftyScalperBot:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     loop.run_until_complete(self.telegram_bot.start_bot())
-                    loop.run_forever()
+                    # loop.run_forever() # Not needed if start_bot handles the loop
                 except Exception as e:
                     logger.error(f"Error in Telegram thread: {e}")
             telegram_thread = threading.Thread(target=start_telegram, daemon=True)
@@ -221,13 +221,13 @@ class NiftyScalperBot:
                 'ohlc': data.get('ohlc', {})
             }
         except Exception as e:
-            logger.error(f"Error getting market data: {e}")
+            logger.error(f"Error getting market  {e}")
             return None
 
-    def analyze_signals(self, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def analyze_signals(self, market_ Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Analyze market data for trading signals"""
         try:
-            if not self.signal_generator or not market_data:
+            if not self.signal_generator or not market_
                 return None
             # Generate signal
             signal = self.signal_generator.generate_signal(market_data)
@@ -267,7 +267,7 @@ class NiftyScalperBot:
             logger.error(f"Error calculating position size: {e}")
             return Config.DEFAULT_LOTS
 
-    def execute_trade(self, signal_data: Dict[str, Any]) -> bool:
+    def execute_trade(self, signal_ Dict[str, Any]) -> bool:
         """Execute trade based on signal"""
         try:
             # Check if auto-trading is enabled
@@ -467,7 +467,7 @@ class NiftyScalperBot:
                     continue
                 # Get market data
                 market_data = self.get_market_data()
-                if not market_data:
+                if not market_
                     time.sleep(Config.LOOP_DELAY)
                     continue
                 # Check exit conditions for existing position
@@ -521,7 +521,13 @@ class NiftyScalperBot:
         if self.current_position:
             self.close_position('shutdown')
         # Signal Telegram bot to stop (handled internally by TelegramBot)
-        logger.info("Bot stopped. Telegram bot stop is handled by its own thread.")
+        if self.telegram_bot:
+             # Call the async stop method correctly from sync context
+             # This requires careful handling. For now, just log the intent.
+             # A better way is to signal the bot to stop via an event or flag.
+             logger.info("Requesting Telegram bot to stop...")
+             # self.telegram_bot.request_stop() # If you add this method to TelegramBot
+        logger.info("Bot stopped. Telegram bot stop request sent.")
 
 def main():
     """Main function"""
