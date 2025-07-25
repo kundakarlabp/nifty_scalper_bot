@@ -250,3 +250,66 @@ class SignalGenerator:
                 target = entry_price * (1 - Config.TP_PERCENT / 100)
         
         return round(stop_loss, 2), round(target, 2)
+    
+    def generate_signal(self, market_data: Dict[str, any]) -> Optional[Dict[str, any]]:
+        """Generate trading signal from market data - Main entry point"""
+        try:
+            # Convert market data to DataFrame for analysis
+            # This is a simplified version - in practice, you'd maintain a rolling window of data
+            if not market_data or 'ltp' not in market_data:
+                return None
+            
+            current_price = market_data['ltp']
+            
+            # For now, create a simple DataFrame with current data
+            # In a real implementation, you'd maintain historical data
+            df = pd.DataFrame({
+                'close': [current_price],
+                'high': [current_price * 1.001],  # Simplified
+                'low': [current_price * 0.999],   # Simplified
+                'volume': [market_data.get('volume', 1000)]
+            })
+            
+            # If we don't have enough data, return None
+            if len(df) < 20:  # Need minimum data for indicators
+                return None
+            
+            # Calculate signal strength
+            signal_strength, signal_components = self.calculate_signal_strength(df, current_price)
+            
+            # Check if we should trade
+            should_trade, reason = self.should_trade(signal_strength, signal_components)
+            
+            if not should_trade:
+                logger.debug(f"No trade signal: {reason}")
+                return None
+            
+            # Determine direction
+            direction = "BUY" if signal_strength > 0 else "SELL"
+            
+            # Calculate stop loss and target
+            atr = signal_components.get('atr', current_price * 0.01)  # Default 1% if no ATR
+            stop_loss, target = self.get_stop_loss_target(current_price, direction, atr)
+            
+            # Create signal dictionary
+            signal = {
+                'direction': direction,
+                'entry_price': current_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'strength': abs(signal_strength),
+                'timestamp': market_data.get('timestamp', pd.Timestamp.now()),
+                'components': signal_components
+            }
+            
+            # Store in signal history
+            self.signal_history.append(signal)
+            
+            logger.info(f"Generated {direction} signal at ₹{current_price:.2f} (Strength: {signal_strength:.2f})")
+            
+            return signal
+            
+        except Exception as e:
+            logger.error(f"Error generating signal: {e}")
+            return None
+
