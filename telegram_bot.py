@@ -396,4 +396,57 @@ Bot is temporarily paused to prevent further losses.
             
             # Register command handlers
             self.app.add_handler(CommandHandler("start", self.start_command))
-            self.app.add_handler(Command
+            self.app.add_handler(CommandHandler("help", self.help_command))
+            self.app.add_handler(CommandHandler("status", self.status_command))
+            self.app.add_handler(CommandHandler("config", self.config_command))
+            self.app.add_handler(CommandHandler("performance", self.performance_command))
+            self.app.add_handler(CommandHandler("positions", self.positions_command))
+            self.app.add_handler(CommandHandler("start_trading", self.start_trading_command))
+            self.app.add_handler(CommandHandler("stop_trading", self.stop_command)) # Renamed from stop to stop_trading
+            self.app.add_handler(CommandHandler("exit_position", self.exit_position_command))
+            
+            self.is_running = True
+            logger.info("Telegram bot started")
+            await self.app.run_polling()
+        except Exception as e:
+            logger.error(f"Error starting Telegram bot: {e}")
+            self.is_running = False
+
+    async def send_notification(self, message: str):
+        """Send a notification message to all chat IDs (simplified)"""
+        if not self.is_running or not self.app:
+            logger.warning("Telegram bot is not running, cannot send notification")
+            return
+            
+        # For simplicity, we'll just log the message
+        # In a real implementation, you'd need to store chat IDs and send to them
+        logger.info(f"Telegram Notification: {message}")
+        # If you want to send to specific users, you'd need to store their chat IDs
+        # and use self.app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
+
+    async def stop_bot(self):
+        """Stop the Telegram bot"""
+        try:
+            if self.app and self.is_running:
+                await self.app.stop()
+                self.is_running = False
+                logger.info("Telegram bot stopped")
+        except Exception as e:
+            logger.error(f"Error stopping Telegram bot: {e}")
+
+    async def _send_message_to_all(self, message: str):
+        """Internal method to send message (placeholder)"""
+        # This is a placeholder. In a real implementation, you'd track user chat IDs
+        # and send messages to them.
+        logger.info(f"Broadcasting message: {message}")
+        # Example of how you might send to specific users:
+        # for chat_id in self.registered_chat_ids:
+        #     try:
+        #         await self.app.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        #     except Exception as e:
+        #         logger.error(f"Failed to send message to {chat_id}: {e}")
+
+# Example usage (if run as script)
+if __name__ == "__main__":
+    # This would typically be run from the main bot
+    pass
