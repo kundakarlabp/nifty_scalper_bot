@@ -48,3 +48,4 @@ logs/
 
 # Render
 render.yaml
+.env

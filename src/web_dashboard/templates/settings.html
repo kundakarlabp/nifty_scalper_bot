@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Nifty Scalper{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1><i class="bi bi-gear"></i> System Settings</h1>
+        <p class="text-muted">Configure your trading system parameters</p>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="bi bi-sliders"></i> Trading Parameters</h5>
+            </div>
+            <div class="card-body">
+                <form>
+                    <div class="mb-3">
+                        <label for="accountSize" class="form-label">Account Size (₹)</label>
+                        <input type="number" class="form-control" id="accountSize" value="100000">
+                    </div>
+                    <div class="mb-3">
+                        <label for="riskPerTrade" class="form-label">Risk Per Trade (%)</label>
+                        <input type="number" class="form-control" id="riskPerTrade" value="1.0" step="0.1">
+                    </div>
+                    <div class="mb-3">
+                        <label for="maxPositions" class="form-label">Maximum Positions</label>
+                        <input type="number" class="form-control" id="maxPositions" value="5">
+                    </div>
+                    <div class="mb-3">
+                        <label for="confidenceThreshold" class="form-label">Signal Confidence Threshold (%)</label>
+                        <input type="number" class="form-control" id="confidenceThreshold" value="70" step="5">
+                    </div>
+                    <div class="mb-3">
+                        <label for="stopLossPoints" class="form-label">Default Stop Loss Points</label>
+                        <input type="number" class="form-control" id="stopLossPoints" value="20">
+                    </div>
+                    <div class="mb-3">
+                        <label for="targetPoints" class="form-label">Default Target Points</label>
+                        <input type="number" class="form-control" id="targetPoints" value="40">
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Save Settings</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="bi bi-shield-lock"></i> API Configuration</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="zerodhaApiKey" class="form-label">Zerodha API Key</label>
+                    <input type="password" class="form-control" id="zerodhaApiKey" placeholder="Enter API Key">
+                </div>
+                <div class="mb-3">
+                    <label for="zerodhaApiSecret" class="form-label">Zerodha API Secret</label>
+                    <input type="password" class="form-control" id="zerodhaApiSecret" placeholder="Enter API Secret">
+                </div>
+                <div class="mb-3">
+                    <label for="telegramBotToken" class="form-label">Telegram Bot Token</label>
+                    <input type="password" class="form-control" id="telegramBotToken" placeholder="Enter Bot Token">
+                </div>
+                <button type="button" class="btn btn-success"><i class="bi bi-check-circle"></i> Test Connections</button>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="bi bi-info-circle"></i> System Information</h5>
+            </div>
+            <div class="card-body">
+                <p><strong>Version:</strong> 1.0.0</p>
+                <p><strong>Uptime:</strong> 2 hours 35 minutes</p>
+                <p><strong>Python:</strong> 3.9.18</p>
+                <p><strong>Last Update:</strong> Today 14:30</p>
+                <button type="button" class="btn btn-warning"><i class="bi bi-arrow-repeat"></i> Restart System</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
