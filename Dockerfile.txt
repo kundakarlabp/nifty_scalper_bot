@@ -1,0 +1,22 @@
+# Dockerfile
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies for numpy, psutil, and other packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libffi-dev \
+    libatlas-base-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# Copy all project files
+COPY . .
+
+# Default command to run the bot in realtime trading mode
+CMD ["python3", "src/main.py", "--mode", "realtime", "--trade"]
