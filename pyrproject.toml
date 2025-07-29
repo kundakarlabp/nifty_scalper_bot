@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "nifty_scalper_bot"
+version = "0.1.0"
+description = "An autonomous Nifty 50 options scalping bot using Zerodha API, Telegram alerts, and technical indicators"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+kiteconnect = "^4.1.0"
+python-telegram-bot = "^20.6"
+pandas = "^2.2.2"
+ta-lib = "^0.4.0"
+numpy = "^1.26.4"
+requests = "^2.32.3"
+scikit-learn = "^1.5.0"
+python-dotenv = "^1.0.1"
+schedule = "^1.2.1"
+flask = "^3.0.3"
+yfinance = "^0.2.40"
+websocket-client = "^1.8.0"
+uvicorn = "^0.29.0"
+fastapi = "^0.111.0"
+matplotlib = "^3.9.0"
+
+[build-system]
+requires = ["poetry-core>=1.1.0"]
+build-backend = "poetry.core.masonry.api"
