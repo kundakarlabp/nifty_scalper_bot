@@ -1,0 +1,29 @@
+# render.yaml
+services:
+  - type: web
+    name: nifty-scalper-bot
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: ZERODHA_API_KEY
+        sync: false
+      - key: ZERODHA_API_SECRET
+        sync: false
+      - key: KITE_ACCESS_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_USER_ID
+        sync: false
+
+  - type: cron
+    name: start-bot-morning
+    schedule: "40 3 * * 1-5"  # 9:10 AM IST = 3:40 UTC
+    command: ./manage_bot.sh start
+
+  - type: cron
+    name: stop-bot-evening
+    schedule: "1 10 * * 1-5"  # 3:31 PM IST = 10:01 UTC
+    command: ./manage_bot.sh stop
