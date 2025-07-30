@@ -25,11 +25,9 @@ class DynamicScalpingStrategy:
                  stoch_d_period: int = 3,
                  atr_period: int = 14,
                  # --- Parameters passed by RealTimeTrader ---
-                 # These might ideally come from Config if not passed, but
-                 # passing them allows for potential strategy-specific overrides.
                  base_stop_loss_points: float = 20.0,
                  base_target_points: float = 40.0,
-                 confidence_threshold: float = 8.0,
+                 confidence_threshold: float = 8.0, # This is for internal scoring points check now
                  # Internal scoring threshold for generating a signal (points needed)
                  scoring_threshold: int = 9):
         """
@@ -44,10 +42,10 @@ class DynamicScalpingStrategy:
             stoch_k_period (int): Period for Stochastic %K.
             stoch_d_period (int): Period for Stochastic %D (signal line).
             atr_period (int): Period for ATR calculation.
-            base_stop_loss_points (float): Base stop loss points (can be overridden by ATR).
-            base_target_points (float): Base target points (can be overridden by ATR).
-            confidence_threshold (float): Minimum confidence level (from Config) to act on a signal.
-                                        This is the value checked in RealTimeTrader.
+            base_stop_loss_points (float): Base stop loss points.
+            base_target_points (float): Base target points.
+            confidence_threshold (float): Minimum internal scoring points to act on a signal.
+                                        (Renamed for clarity, as it's compared against `score`)
             scoring_threshold (int): Internal points threshold required to generate a raw signal.
                                      The signal's 'confidence' score (float) is then checked
                                      against confidence_threshold.
@@ -65,8 +63,9 @@ class DynamicScalpingStrategy:
         # --- Strategy Control Parameters ---
         self.base_stop_loss_points = base_stop_loss_points
         self.base_target_points = base_target_points
-        self.confidence_threshold = confidence_threshold # Used for final signal validation
-        self.scoring_threshold = scoring_threshold       # Used for internal scoring logic
+        # Rename for clarity: this is the internal score threshold now
+        self.min_score_threshold = confidence_threshold 
+        self.scoring_threshold = scoring_threshold       # Raw signal points threshold
 
         self.last_signal_hash = None
 
@@ -110,33 +109,35 @@ class DynamicScalpingStrategy:
 
             # Score the potential signal
             score, reasons = self._score_signal(indicators, regime)
+            logger.debug(f"Signal score calculated: {score}")
 
-            # Determine signal direction based on internal scoring threshold
+            # Determine signal direction based on internal scoring threshold (points)
             signal_direction = None
             if score >= self.scoring_threshold:
                 signal_direction = 'BUY'
             elif score <= -self.scoring_threshold:
                 signal_direction = 'SELL'
 
-            # If we have a valid raw signal, check against the confidence threshold
+            # If we have a valid raw signal based on points, check against the min score threshold
             # Note: The original logic checked `score >= self.confidence_threshold`.
-            # However, `score` is an integer (points), and `confidence_threshold` is a float.
-            # It's more likely the intention is to check the final `confidence` value
-            # returned in the signal dictionary against `Config.CONFIDENCE_THRESHOLD`
-            # in RealTimeTrader. The strategy's internal check should likely be
-            # based on the scoring_threshold or a separate internal confidence logic.
-            # Let's assume the signal is valid if direction exists and scoring passed.
-            # The float `confidence` in the returned dict will be validated by RealTimeTrader.
-            # Alternatively, if `confidence_threshold` here is meant to be an internal
-            # float score threshold (different from the Config one), it should be used differently.
-            # Given the context and typical usage, let's proceed with the directional signal
-            # if scoring passed, and let RealTimeTrader validate the returned confidence.
-
-            # Simplified condition: if we have a direction from scoring, proceed.
-            # The `confidence` in the returned dict (abs(score)) will be checked by RealTimeTrader.
-            if signal_direction: # Equivalent to if score >= self.scoring_threshold or <= -self.scoring_threshold
+            # Based on the KB file `Pasted_Text_1753870312034.txt`, the check was just `if signal_direction:`
+            # The `confidence_threshold` passed by RealTimeTrader is likely meant to be 
+            # the Config.CONFIDENCE_THRESHOLD, which is checked against the final 
+            # `signal['confidence']` (the absolute score) in RealTimeTrader itself.
+            # Let's make this strategy's internal check clear.
+            # Option 1 (if confidence_threshold is internal score): if signal_direction and abs(score) >= self.min_score_threshold:
+            # Option 2 (if confidence_threshold check is only in RealTimeTrader): if signal_direction:
+            # Based on typical separation of concerns, Option 2 is cleaner. 
+            # RealTimeTrader validates the final float confidence. Strategy validates its internal points.
+            
+            # Using Option 2 for cleaner separation, as RealTimeTrader does the final check.
+            # However, if you want the strategy itself to have a final internal filter, use Option 1.
+            # Let's go with Option 1 to utilize the passed parameter, but clarify its meaning.
+            # The passed `confidence_threshold` becomes `min_score_threshold` (an internal integer score check).
+            
+            # Final check: Was a direction determined by points, and does it meet the minimum internal score?
+            if signal_direction and abs(score) >= self.min_score_threshold:
                 # Create a unique hash to prevent duplicate signals
-                # Note: Using current_price from argument and df.index[-1] for timestamp
                 signal_string = f"{signal_direction}_{current_price}_{df.index[-1]}"
                 signal_hash = hashlib.md5(signal_string.encode()).hexdigest()
 
@@ -150,9 +151,7 @@ class DynamicScalpingStrategy:
 
                 # Calculate risk management parameters using ATR
                 atr = float(indicators.get('atr', 0))
-                # Example SL/TP calculation using ATR and base points
-                # The strategy can decide how to combine these
-                # Using the ATR multiplier approach as in the original KB version
+                # Example SL/TP calculation using ATR multipliers
                 sl_atr_component = 2 * atr
                 tp_atr_component = 3 * atr
 
@@ -166,11 +165,12 @@ class DynamicScalpingStrategy:
                 )
 
                 # Return the signal with details
-                # The 'confidence' returned is the absolute internal score
-                # RealTimeTrader will check if this meets its Config.CONFIDENCE_THRESHOLD
+                # The 'confidence' returned is the absolute internal score.
+                # RealTimeTrader will check if this meets its Config.CONFIDENCE_THRESHOLD.
+                final_confidence = abs(score) # Calculate once
                 return {
                     'signal': signal_direction,
-                    'confidence': abs(score), # This float value is checked in RealTimeTrader
+                    'confidence': final_confidence, # This integer score is checked in RealTimeTrader
                     'entry_price': round(current_price, 2),
                     'stop_loss': round(stop_loss, 2),
                     'target': round(target, 2),
@@ -226,26 +226,33 @@ class DynamicScalpingStrategy:
             obv = self._calculate_obv(df)
 
             # Return the latest values of all indicators
+            # Explicitly handle potential NaNs when converting to float
             return {
-                'sma': float(sma.iloc[-1]),
-                'ema_fast': float(ema_fast.iloc[-1]),
-                'ema_slow': float(ema_slow.iloc[-1]),
-                'rsi': float(rsi.iloc[-1]),
-                'macd_diff': float(macd_diff.iloc[-1]),
-                'bb_upper': float(bb_upper.iloc[-1]),
-                'bb_lower': float(bb_lower.iloc[-1]),
-                'bb_bandwidth': float(bb_bandwidth.iloc[-1]),
-                'stoch_k': float(stoch_data['%K'].iloc[-1]),
-                'stoch_d': float(stoch_data['%D'].iloc[-1]),
-                'atr': float(atr.iloc[-1]),
-                'obv': float(obv.iloc[-1]),
-                'volume': float(df['volume'].iloc[-1]),
-                'close': float(df['close'].iloc[-1])
+                'sma': float(sma.iloc[-1]) if not pd.isna(sma.iloc[-1]) else 0.0,
+                'ema_fast': float(ema_fast.iloc[-1]) if not pd.isna(ema_fast.iloc[-1]) else 0.0,
+                'ema_slow': float(ema_slow.iloc[-1]) if not pd.isna(ema_slow.iloc[-1]) else 0.0,
+                'rsi': float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0, # Default to neutral RSI
+                'macd_diff': float(macd_diff.iloc[-1]) if not pd.isna(macd_diff.iloc[-1]) else 0.0,
+                'bb_upper': float(bb_upper.iloc[-1]) if not pd.isna(bb_upper.iloc[-1]) else 0.0,
+                'bb_lower': float(bb_lower.iloc[-1]) if not pd.isna(bb_lower.iloc[-1]) else 0.0,
+                'bb_bandwidth': float(bb_bandwidth.iloc[-1]) if not pd.isna(bb_bandwidth.iloc[-1]) else 0.0,
+                'stoch_k': float(stoch_data['%K'].iloc[-1]) if not pd.isna(stoch_data['%K'].iloc[-1]) else 50.0,
+                'stoch_d': float(stoch_data['%D'].iloc[-1]) if not pd.isna(stoch_data['%D'].iloc[-1]) else 50.0,
+                'atr': float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else 1.0, # Default small ATR
+                'obv': float(obv.iloc[-1]) if not pd.isna(obv.iloc[-1]) else 0.0,
+                'volume': float(df['volume'].iloc[-1]) if not pd.isna(df['volume'].iloc[-1]) else 0.0,
+                'close': float(df['close'].iloc[-1]) if not pd.isna(df['close'].iloc[-1]) else 0.0
             }
 
         except Exception as e:
             logger.error(f"Error calculating indicators: {e}", exc_info=True)
-            return {}
+            # Return a default dict with neutral values to prevent downstream errors
+            return {
+                'sma': 0.0, 'ema_fast': 0.0, 'ema_slow': 0.0, 'rsi': 50.0,
+                'macd_diff': 0.0, 'bb_upper': 0.0, 'bb_lower': 0.0, 'bb_bandwidth': 0.0,
+                'stoch_k': 50.0, 'stoch_d': 50.0, 'atr': 1.0, 'obv': 0.0,
+                'volume': 0.0, 'close': 0.0
+            }
 
     def _score_signal(self, indicators: Dict, regime: str) -> Tuple[int, List[str]]:
         """
@@ -376,7 +383,6 @@ class DynamicScalpingStrategy:
             pd.DataFrame: Stochastic data with columns '%K', '%D'.
         """
         try:
-            # Ensure min_periods=1 to avoid NaN for initial rows if needed, but iloc[-1] gets the last valid one.
             low_min = df['low'].rolling(window=k_period, min_periods=1).min()
             high_max = df['high'].rolling(window=k_period, min_periods=1).max()
 
@@ -393,8 +399,8 @@ class DynamicScalpingStrategy:
 
         except Exception as e:
             logger.error(f"Error calculating stochastic: {e}", exc_info=True)
-            # Return a DataFrame with NaNs or empty to prevent downstream errors
-            return pd.DataFrame({'%K': [np.nan], '%D': [np.nan]})
+            # Return a DataFrame with NaNs or neutral values to prevent downstream errors
+            return pd.DataFrame({'%K': [50.0], '%D': [50.0]}, index=df.index[-1:])
 
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         """
@@ -419,12 +425,10 @@ class DynamicScalpingStrategy:
             # Calculate ATR using Wilder's smoothing method
             atr = pd.Series(index=tr.index, dtype='float64')
             # Initial value is the simple average of the first `period` TR values
-            atr.iloc[0] = tr.iloc[:period].mean()
+            atr.iloc[0] = tr.iloc[:period].mean() if len(tr) >= period else tr.mean()
 
             # Apply Wilder's recursive formula for subsequent values
             for i in range(1, len(atr)):
-                # ATR = (Previous ATR * (n-1) + Current TR) / n
-                # This is the standard Wilder's smoothing
                 atr.iloc[i] = (atr.iloc[i-1] * (period - 1) + tr.iloc[i]) / period
 
             # Return the ATR Series
@@ -432,8 +436,8 @@ class DynamicScalpingStrategy:
 
         except Exception as e:
             logger.error(f"Error calculating ATR: {e}", exc_info=True)
-            # Return a Series with NaN or empty
-            return pd.Series([np.nan], dtype='float64')
+            # Return a Series with NaN or a small default value
+            return pd.Series([1.0], index=df.index[-1:], dtype='float64')
 
     def _calculate_obv(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -466,14 +470,15 @@ class DynamicScalpingStrategy:
 
         except Exception as e:
             logger.error(f"Error calculating OBV: {e}", exc_info=True)
-            # Return a Series with NaN or empty
-            return pd.Series([np.nan], index=df.index[:1] if not df.empty else [0])
+            # Return a Series with NaN or zero
+            return pd.Series([0.0], index=df.index[-1:], dtype='float64')
 
 # Example usage (if run directly)
 # if __name__ == "__main__":
 #     # Configure logging for testing
 #     import os
 #     os.makedirs("logs", exist_ok=True)
+#     import logging
 #     logging.basicConfig(
 #         level=logging.INFO,
 #         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
