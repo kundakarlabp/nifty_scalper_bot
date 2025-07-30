@@ -13,9 +13,7 @@
           ]
         },
         "start": {
-          "cmds": [
-            "python src/main.py --mode realtime --trade"
-          ]
+          "cmd": "python src/main.py --mode realtime --trade"
         }
       }
     }
