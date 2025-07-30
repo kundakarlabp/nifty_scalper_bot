@@ -5,12 +5,12 @@
     "nixpacksPlan": {
       "phases": {
         "setup": {
-          "nixPkgs": ["python39", "python39Packages.pip", "git"]
+          "nixPkgs": ["python39", "git", "pkg-config"]
         },
         "install": {
           "cmds": [
             "python -m pip install --upgrade pip",
-            "pip install -r requirements.txt"
+            "python -m pip install -r requirements.txt"
           ]
         }
       }
