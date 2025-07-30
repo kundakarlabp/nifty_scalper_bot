@@ -106,7 +106,8 @@ class OrderExecutor:
                          exchange: str,
                          quantity: int,
                          transaction_type: str,
-                         product: Optional[str] = None) -> bool:
+                         product: Optional[str] = None,
+                         order_type: Optional[str] = None) -> bool:
         """
         Sets up GTT orders for Stop-Loss and Take-Profit after an entry order is filled.
 
@@ -120,19 +121,18 @@ class OrderExecutor:
             quantity (int): Quantity traded.
             transaction_type (str): Original entry transaction type ('BUY'/'SELL').
             product (str, optional): Product code. Defaults to Config.DEFAULT_PRODUCT.
+            order_type (str, optional): Order type. Defaults to Config.DEFAULT_ORDER_TYPE.
 
         Returns:
             bool: True if both GTTs are placed successfully, False otherwise.
         """
         product_to_use = product if product is not None else Config.DEFAULT_PRODUCT
+        order_type_to_use = order_type if order_type is not None else Config.DEFAULT_ORDER_TYPE
+        validity_to_use = Config.DEFAULT_VALIDITY # Always use configured validity
 
         try:
             # Determine the reverse transaction type for exit orders
-            reverse_transaction = (
-                self.kite.TRANSACTION_TYPE_SELL
-                if transaction_type == self.kite.TRANSACTION_TYPE_BUY
-                else self.kite.TRANSACTION_TYPE_BUY
-            )
+            reverse_transaction = self.kite.TRANSACTION_TYPE_SELL if transaction_type == self.kite.TRANSACTION_TYPE_BUY else self.kite.TRANSACTION_TYPE_BUY
 
             # --- Prepare GTT parameters for Stop-Loss ---
             sl_trigger_price = stop_loss_price
@@ -190,7 +190,7 @@ class OrderExecutor:
                 self.gtt_orders[str(gtt_sl_id)] = {
                     "parent_order_id": entry_order_id,
                     "type": "SL",
-                    "original_trigger_price": sl_trigger_price, # Store for reference
+                    "original_trigger_price": stop_loss_price, # Store for reference
                     "trigger_price": sl_trigger_price,
                     "limit_price": sl_limit_price,
                     "status": "active"
@@ -199,7 +199,7 @@ class OrderExecutor:
                 self.gtt_orders[str(gtt_tp_id)] = {
                     "parent_order_id": entry_order_id,
                     "type": "TP",
-                    "original_trigger_price": tp_trigger_price,
+                    "original_trigger_price": target_price,
                     "trigger_price": tp_trigger_price,
                     "limit_price": tp_limit_price,
                     "status": "active"
@@ -211,8 +211,8 @@ class OrderExecutor:
                     "quantity": quantity,
                     "entry_transaction_type": transaction_type,
                     "entry_price": entry_price,
-                    "sl_price": stop_loss_price,
-                    "tp_price": target_price,
+                    "stop_loss_price": stop_loss_price,
+                    "target_price": target_price,
                     "gtt_sl_id": str(gtt_sl_id),
                     "gtt_tp_id": str(gtt_tp_id),
                     "status": "open"
@@ -283,21 +283,17 @@ class OrderExecutor:
                         # GTT already triggered or was cancelled by another process
                         logger.info(f"ℹ️ Old SL GTT {old_gtt_sl_id} already triggered/cancelled.")
                         old_gtt_info["status"] = "triggered_or_cancelled"
-                        # If triggered, the position is likely closed. Prevent further trailing.
+                        # If triggered, the position might be closed already. Prevent further trailing.
                         return False
                     else:
                         logger.error(f"❌ Error canceling old SL GTT {old_gtt_sl_id}: {e.message}")
-                        return False # Fail if we can't cancel the old one
+                        return False
                 except Exception as e:
                     logger.error(f"❌ Unexpected error canceling old SL GTT {old_gtt_sl_id}: {e}", exc_info=True)
                     return False
 
             # 5. Place the new GTT SL (outside lock to minimize Kite API call time)
-            reverse_transaction = (
-                self.kite.TRANSACTION_TYPE_SELL
-                if entry_type == self.kite.TRANSACTION_TYPE_BUY
-                else self.kite.TRANSACTION_TYPE_BUY
-            )
+            reverse_transaction = self.kite.TRANSACTION_TYPE_SELL if entry_type == self.kite.TRANSACTION_TYPE_BUY else self.kite.TRANSACTION_TYPE_BUY
             new_sl_trigger_price = new_sl_price
             new_sl_limit_price = new_sl_price # Adjust if needed for limit orders
 
@@ -306,7 +302,7 @@ class OrderExecutor:
                 "tradingsymbol": position["symbol"],
                 "transaction_type": reverse_transaction,
                 "quantity": position["quantity"],
-                "product": position.get("product", product_to_use), # Use stored or default product
+                "product": product_to_use, # Use stored or default product
                 "order_type": self.kite.ORDER_TYPE_SL,
                 "price": new_sl_limit_price,
                 "trigger_price": new_sl_trigger_price
@@ -323,32 +319,30 @@ class OrderExecutor:
                 )
                 logger.info(f"✅ New SL GTT placed: GTT_ID={new_gtt_sl_id}, Trigger={new_sl_trigger_price}")
 
-                # 6. Update internal tracking (re-acquire lock)
+                # 6. Update Internal Tracking (re-acquire lock)
                 with self.lock:
                     self.gtt_orders[str(new_gtt_sl_id)] = {
                         "parent_order_id": entry_order_id,
                         "type": "SL",
-                        "original_trigger_price": old_gtt_info["original_trigger_price"],
+                        "original_trigger_price": old_gtt_info["original_trigger_price"], # Keep original for reference
                         "trigger_price": new_sl_trigger_price,
                         "limit_price": new_sl_limit_price,
                         "status": "active"
                     }
                     position["gtt_sl_id"] = str(new_gtt_sl_id)
-                    position["sl_price"] = new_sl_price # Update tracked SL price
+                    position["stop_loss_price"] = new_sl_price # Update tracked SL price
                 return True
 
             except KiteException as e:
                 logger.error(f"❌ Kite API error placing new SL GTT: {e.message} (Code: {e.code})")
-                # Note: The old GTT was cancelled, but the new one failed.
-                # This leaves the position without a SL GTT. This is a critical state.
-                # Consider adding logic to alert or handle this scenario.
             except Exception as e:
                 logger.error(f"❌ Unexpected error placing new SL GTT: {e}", exc_info=True)
-                # Same critical state as above KiteException.
+            # Consider re-activating the old GTT status here if desired, though it was cancelled.
+            # This is a complex edge case.
 
         except Exception as e:
             logger.error(f"❌ Error in trail_stop_loss for {entry_order_id}: {e}", exc_info=True)
-        return False # Return False if any step failed
+        return False
 
     def cancel_all_orders_for_position(self, entry_order_id: str) -> bool:
         """
@@ -407,7 +401,7 @@ class OrderExecutor:
 
         except Exception as e:
             logger.error(f"❌ Error canceling orders for position {entry_order_id}: {e}", exc_info=True)
-            return False
+        return False
 
     def update_position_on_exit(self, entry_order_id: str, exit_reason: str = "unknown"):
         """
@@ -440,7 +434,8 @@ class OrderExecutor:
         # Returning a direct reference from a locked dict is safe for reads
         # if all modifications are within the lock. For absolute safety,
         # returning a copy is preferred if the caller might modify the result.
-        return self.active_positions.get(entry_order_id)
+        with self.lock:
+            return self.active_positions.get(entry_order_id)
 
     def get_gtt_status(self, gtt_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -453,7 +448,8 @@ class OrderExecutor:
             Optional[Dict[str, Any]]: A dictionary containing GTT details,
                                     or None if the GTT is not found.
         """
-        return self.gtt_orders.get(gtt_id)
+        with self.lock:
+            return self.gtt_orders.get(gtt_id)
 
     def get_all_active_positions(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -475,66 +471,20 @@ class OrderExecutor:
         with self.lock:
             return self.gtt_orders.copy()
 
-# Example usage concept (within RealTimeTrader context)
-# This would typically be used inside _handle_trading_signal in RealTimeTrader
-#
-# def _handle_trading_signal(self, token, signal, position_details):
-#     # ... (risk management to get position_details)
-#
-#     if self.execution_enabled and self.order_executor:
-#         # --- IMPORTANT: Map token to symbol/exchange ---
-#         # You MUST replace this placeholder logic with actual data from your
-#         # strike selection process (e.g., main.py or a lookup table).
-#         # Example placeholder mapping (NEEDS REAL DATA):
-#         token_to_instrument = {
-#             256265: {"symbol": "NIFTY 50", "exchange": "NSE"}, # Nifty Index
-#             # Add your selected option tokens here, e.g., from strike selector
-#             # 123456: {"symbol": "NIFTY23APR18000CE", "exchange": "NFO"},
-#         }
-#         instrument_info = token_to_instrument.get(token)
-#         if not instrument_info:
-#             logger.error(f"❌ Cannot execute: No symbol/exchange mapping for token {token}")
-#             return
-#
-#         symbol = instrument_info["symbol"]
-#         exchange = instrument_info["exchange"]
-#         transaction_type = signal['signal'] # Assuming 'BUY' or 'SELL'
-#
-#         # 1. Place Entry Order
-#         entry_order_id = self.order_executor.place_entry_order(
-#             symbol=symbol,
-#             exchange=exchange,
-#             transaction_type=transaction_type,
-#             quantity=position_details['quantity']
-#             # product and order_type can use defaults
-#         )
-#
-#         if entry_order_id:
-#             # 2. Wait for order fill confirmation (simplified)
-#             # In a real scenario, you'd poll kite.order_history or listen via WebSocket OMS
-#             time.sleep(2) # Placeholder wait
-#             # Get filled price (simplified, use actual order history)
-#             filled_price = signal['entry_price'] # Placeholder
-#
-#             # 3. Setup GTT Orders
-#             success = self.order_executor.setup_gtt_orders(
-#                 entry_order_id=entry_order_id,
-#                 entry_price=filled_price,
-#                 stop_loss_price=signal['stop_loss'],
-#                 target_price=signal['target'],
-#                 symbol=symbol,
-#                 exchange=exchange,
-#                 quantity=position_details['quantity'],
-#                 transaction_type=transaction_type
-#             )
-#             if success:
-#                 logger.info("✅ Entry and GTTs placed successfully")
-#                 # Update risk manager
-#                 self.risk_manager.update_position_status(is_open=True)
-#             else:
-#                 logger.error("❌ Failed to place GTT orders")
-#                 # Handle failure (e.g., cancel entry order if it didn't fill as expected)
-#         else:
-#             logger.error("❌ Failed to place entry order")
-#     else:
-#         logger.info("⚠️ Execution is disabled or OrderExecutor not available (simulated).")
+# Example usage (if run directly)
+if __name__ == "__main__":
+    # Ensure logs directory exists if using the default logging setup here
+    # os.makedirs("logs", exist_ok=True)
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    #     handlers=[
+    #         logging.FileHandler("logs/order_executor.log"),
+    #         logging.StreamHandler()
+    #     ]
+    # )
+
+    # Note: Running this directly won't perform trades without a full setup
+    # including Kite credentials, OrderExecutor, and selected instruments.
+    # The main entry point is src/main.py
+    print("OrderExecutor class defined. Use via src/main.py.")
