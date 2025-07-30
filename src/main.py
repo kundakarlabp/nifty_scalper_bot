@@ -6,6 +6,7 @@ instrument selection, and starts the trading loop.
 """
 import sys
 import os
+from src import twisted_signal_blocker
 from src import monkey_patch_twisted_signals
 # Ensure correct path resolution for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
