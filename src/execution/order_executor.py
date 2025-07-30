@@ -164,14 +164,14 @@ class OrderExecutor:
 
             # --- Place GTT for Stop-Loss ---
             gtt_sl_id = self.kite.place_gtt(
-                trigger_type=self.kite.GTT_TYPE_SINGLE,
+                trigger_type=self.kite.GTT_TYPE_SINGLE, # Single leg GTT
                 tradingsymbol=symbol,
                 exchange=exchange,
-                trigger_values=[sl_trigger_price], # List for single leg GTT
+                trigger_values=[sl_trigger_price], # List for single leg
                 last_price=entry_price, # Last traded price for validation
-                orders=[sl_params] # List of order parameters
+                orders=[sl_params] # List of order params
             )
-            logger.info(f"✅ GTT Stop-Loss placed: GTT_ID={gtt_sl_id}, Trigger={sl_trigger_price}")
+            logger.info(f"✅ GTT SL placed: GTT_ID={gtt_sl_id}, Trigger={sl_trigger_price}")
 
             # --- Place GTT for Take-Profit ---
             gtt_tp_id = self.kite.place_gtt(
@@ -182,7 +182,7 @@ class OrderExecutor:
                 last_price=entry_price,
                 orders=[tp_params]
             )
-            logger.info(f"✅ GTT Take-Profit placed: GTT_ID={gtt_tp_id}, Trigger={tp_trigger_price}")
+            logger.info(f"✅ GTT TP placed: GTT_ID={gtt_tp_id}, Trigger={tp_trigger_price}")
 
             # --- Update Internal State (Thread-Safe) ---
             with self.lock:
@@ -364,7 +364,7 @@ class OrderExecutor:
             with self.lock:
                 if entry_order_id not in self.active_positions:
                     logger.warning(f"⚠️ Position not found for cancellation: {entry_order_id}")
-                    return False # Or True, depending on desired semantics for "not found"
+                    return False
 
                 position = self.active_positions[entry_order_id]
                 gtt_sl_id = position.get("gtt_sl_id")
