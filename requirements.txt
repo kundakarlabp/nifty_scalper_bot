@@ -2,7 +2,7 @@ kiteconnect==4.1.0
 python-telegram-bot==20.6
 pandas==2.2.2
 numpy==1.26.4
-TA-Lib-bin==0.4.26
+ta>=0.11.0
 requests==2.32.3
 scikit-learn==1.5.0
 python-dotenv==1.0.1
