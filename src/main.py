@@ -3,7 +3,6 @@
 Main entry point for the Nifty 50 Scalper Bot.
 Handles configuration, initialization of core components,
 instrument selection, and starts the trading loop.
-Optionally starts the Telegram command listener.
 """
 import sys
 import os
@@ -15,8 +14,9 @@ import logging
 from pathlib import Path
 # Import logging.handlers for log rotation
 import logging.handlers
-# CRITICAL FIX: Import time module
+# CRITICAL FIX: Import time module for main loop
 import time
+import threading
 
 # Import KiteConnect
 from kiteconnect import KiteConnect
@@ -31,8 +31,6 @@ from src.execution.order_executor import OrderExecutor
 # Import utility functions for instrument selection
 from src.utils.expiry_selector import get_next_weekly_expiry
 from src.utils.strike_selector import select_nifty_option_strikes
-# Import the Telegram Command Listener
-from src.notifications.telegram_command_listener import TelegramCommandListener
 
 # --- Setup Enhanced Logging with Rotation ---
 def setup_logging():
@@ -105,6 +103,7 @@ def select_instruments(kite_client: KiteConnect) -> list:
         logger.info(f"🎯 Selected Expiry Date: {expiry_str}")
 
         # 2. Select Strikes
+        # Example: Select ATM Call and Put for the next expiry
         logger.info("🔍 Selecting ATM Call strike...")
         atm_ce_tokens = select_nifty_option_strikes(
             kite=kite_client,
@@ -140,12 +139,12 @@ def select_instruments(kite_client: KiteConnect) -> list:
         logger.warning("⚠️ No instruments selected via strike selector.")
         # --- CRITICAL: Decide on Fallback Strategy ---
         # Option 1: Exit if no instruments are selected (Recommended for live trading)
-        # logger.error("❌ Instrument selection failed. Exiting application.")
-        # return [] # Return empty list to signal failure
+        logger.error("❌ Instrument selection failed. Exiting application.")
+        return [] # Return empty list to signal failure
 
         # Option 2: Use a default/fallback token for testing (Comment out Option 1 if using this)
-        logger.info("ℹ️ Using fallback Nifty 50 Index token (256265) for testing.")
-        selected_tokens = [256265] # Nifty 50 Index Token
+        # logger.info("ℹ️ Using fallback Nifty 50 Index token (256265) for testing.")
+        # selected_tokens = [256265] # Nifty 50 Index Token
 
     if selected_tokens:
         logger.info(f"✅ Final selected instrument tokens: {selected_tokens}")
@@ -162,12 +161,10 @@ def main():
                         help='Operational mode')
     parser.add_argument('--trade', action='store_true',
                         help='Enable live trade execution (requires valid Kite credentials)')
-    parser.add_argument('--telegram', action='store_true',
-                        help='Enable Telegram command listener (requires valid Telegram credentials)')
     args = parser.parse_args()
 
     logger.info("🚀 Initializing Nifty 50 Scalper Bot...")
-    logger.info(f"🔁 Mode: {args.mode}, Trade Execution: {'ENABLED' if args.trade else 'DISABLED'}, Telegram Listener: {'ENABLED' if args.telegram else 'DISABLED'}")
+    logger.info(f"🔁 Mode: {args.mode}, Trade Execution: {'ENABLED' if args.trade else 'DISABLED'}")
 
     # --- 1. Initialize Kite Connect ---
     if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
@@ -185,26 +182,37 @@ def main():
     # --- 2. Select Instruments ---
     instrument_tokens_to_trade = select_instruments(kite)
 
+    # Check if instrument selection was successful (based on your chosen fallback strategy)
+    # If you chose Option 1 (exit on failure), this check is crucial.
+    # If you chose Option 2 (fallback token), this might just log a warning.
     if not instrument_tokens_to_trade:
-        logger.error("❌ No instruments available to trade. Exiting.")
-        return
+         logger.error("❌ No instruments available to trade. Exiting.")
+         return # Exit the main function
 
     # --- 3. Initialize Order Executor ---
+    # Pass the same authenticated kite instance
     order_executor = OrderExecutor(kite=kite)
     logger.info("✅ OrderExecutor initialized.")
 
     # --- 4. Initialize RealTime Trader ---
     # Pass the OrderExecutor instance to the trader
+    # Ensure RealTimeTrader.__init__ accepts order_executor: Optional[OrderExecutor] = None
     trader = RealTimeTrader(order_executor=order_executor)
-    
+
     # Enable/disable live execution based on --trade flag
     trader.enable_trading(enable=args.trade)
     logger.info(f"{'✅' if args.trade else '⚠️'} Trading execution is {'ENABLED' if args.trade else 'DISABLED'}.")
 
     # --- 5. Add Selected Instruments to Trader ---
     successfully_added = 0
+    # Iterate through the list of selected instruments (dicts or ints)
+    # Assuming select_nifty_option_strikes returns a list of token integers
     for token in instrument_tokens_to_trade:
-        # Assuming add_trading_instrument now takes token, symbol, exchange
+        # If it returns dicts with token, symbol, exchange:
+        # token = instrument_data['token']
+        # symbol = instrument_data['symbol']
+        # exchange = instrument_data['exchange']
+        # For now, assuming it returns token integers
         # You need to get symbol/exchange from strike_selector or instrument data
         # Placeholder: You need to implement this mapping correctly
         # This is a critical missing piece from the logs.
@@ -212,6 +220,7 @@ def main():
         symbol = f"TOKEN_{token}_PLACEHOLDER" # REPLACE with actual symbol from selection
         exchange = "NFO" # REPLACE with actual exchange from selection
 
+        # Pass all three required arguments to add_trading_instrument
         if trader.add_trading_instrument(token, symbol, exchange):
             logger.info(f"➕ Successfully added instrument: Token={token}, Symbol={symbol}, Exchange={exchange}")
             successfully_added += 1
@@ -224,44 +233,17 @@ def main():
     elif successfully_added < len(instrument_tokens_to_trade):
         logger.warning(f"⚠️ Only {successfully_added}/{len(instrument_tokens_to_trade)} instruments were added successfully.")
 
-    # --- 6. Initialize and Start Telegram Command Listener (Optional) ---
-    telegram_listener_thread = None
-    telegram_listener = None # Declare variable upfront
-    if args.telegram:
-        if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_USER_ID:
-            logger.error("❌ Telegram credentials missing. Cannot start listener.")
-            # Optionally, continue without Telegram
-            # Or exit: return
-        else:
-            try:
-                # Create the Telegram listener instance, passing the *main* trader instance
-                telegram_listener = TelegramCommandListener(
-                    bot_token=Config.TELEGRAM_BOT_TOKEN,
-                    chat_id=str(Config.TELEGRAM_USER_ID), # Ensure chat_id is a string
-                    trader_instance=trader # Pass the main trader
-                )
-                # Start the listener in a separate thread so the main thread can run the trader
-                telegram_listener_thread = threading.Thread(target=telegram_listener.start_listening, daemon=True)
-                telegram_listener_thread.start()
-                logger.info("✅ Telegram Command Listener started in background thread.")
-            except Exception as e:
-                logger.error(f"❌ Failed to start Telegram Command Listener: {e}", exc_info=True)
-                # Optionally, continue without Telegram
-                # Or exit: return
-    else:
-        logger.info("ℹ️ Telegram Command Listener is disabled (--telegram flag not set).")
-
-    # --- 7. Start Trading Engine ---
+    # --- 6. Start Trading ---
     if args.mode == 'realtime':
         logger.info("🚀 Starting RealTime Trading Engine...")
         if trader.start_trading():
             logger.info("✅ RealTimeTrader started successfully.")
             logger.info("⏳ Bot is now running. Press Ctrl+C to stop.")
-            # --- 8. Keep the main thread alive ---
+            # --- 7. Keep the main thread alive correctly ---
             try:
-                # Main loop: The trader runs its streaming/processing in background threads
-                # The Telegram listener (if enabled) also runs in its own thread
-                # This main thread can monitor or wait.
+                # Use a simple loop that checks a flag
+                # This keeps the main thread alive without blocking it
+                # and allows Twisted/KiteTicker to run in the background
                 while trader.is_trading: # Check a flag that stop_trading sets to False
                     # You could add periodic status checks or other main-loop tasks here
                     # For now, just sleep to prevent a busy loop
@@ -270,15 +252,8 @@ def main():
             except KeyboardInterrupt:
                 logger.info("🛑 Keyboard Interrupt received. Stopping trader...")
             finally:
-                # Signal the trader to stop
                 trader.stop_trading()
-                # Signal the Telegram listener to stop (if it was started)
-                if args.telegram and telegram_listener:
-                    telegram_listener.stop_listening()
-                    # Optionally wait for the thread to finish
-                    # if telegram_listener_thread and telegram_listener_thread.is_alive():
-                    #     telegram_listener_thread.join(timeout=5)
-                logger.info("🛑 Trader and Listener stopped. Bot shutdown complete.")
+                logger.info("🛑 Trader stopped. Bot shutdown complete.")
         else:
             logger.error("❌ Failed to start RealTimeTrader.")
     else:
@@ -286,6 +261,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Import threading here, as it's used in main()
-    import threading
     main()
