@@ -1,39 +1,22 @@
+# Use official slim Python base image
 FROM python:3.9-slim
 
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies for numpy, TA-Lib, and others
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
-    make \
-    wget \
-    build-essential \
     libffi-dev \
-    libatlas-base-dev \
-    libtool \
-    autoconf \
-    pkg-config \
-    && apt-get clean
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install TA-Lib from source
-RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xvzf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib && \
-    ./configure --prefix=/usr && \
-    make && \
-    make install && \
-    cd .. && \
-    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
-
-# Set environment variable so TA-Lib is linked correctly
-ENV LD_LIBRARY_PATH=/usr/lib
-
-# Copy and install Python dependencies
+# Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files
+# Copy all remaining project files
 COPY . .
 
-# Run the bot in realtime mode
+# Command to run the bot in realtime trading mode
 CMD ["python3", "src/main.py", "--mode", "realtime", "--trade"]
