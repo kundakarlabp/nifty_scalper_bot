@@ -9,10 +9,7 @@
         },
         "install": {
           "cmds": [
-            "curl -sSL https://install.python-poetry.org | python -",
-            "export PATH=\"$HOME/.local/bin:$PATH\"",
-            "poetry config virtualenvs.create false",
-            "poetry install --no-root --no-interaction --no-ansi"
+            "curl -sSL https://install.python-poetry.org | python - && export PATH=\"$HOME/.local/bin:$PATH\" && poetry config virtualenvs.create false && poetry install --no-root --no-interaction --no-ansi"
           ]
         }
       }
@@ -24,3 +21,4 @@
     "restartPolicyMaxRetries": 10
   }
 }
+
