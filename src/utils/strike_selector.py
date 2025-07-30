@@ -222,21 +222,22 @@ def select_nifty_option_strikes(
         logger.error(f"❌ An error occurred in select_nifty_option_strikes: {e}", exc_info=True)
         return None # Indicate failure
 
-# Example of how this might be used within main.py or another module:
-# def example_usage():
-#     from kiteconnect import KiteConnect
-#     # You need a valid, authenticated KiteConnect instance
-#     # kite = KiteConnect(api_key="YOUR_API_KEY")
-#     # kite.set_access_token("YOUR_VALID_ACCESS_TOKEN")
+# Example usage concept (if run directly)
+# if __name__ == "__main__":
+#     # Configure logging for testing
+#     import os
+#     os.makedirs("logs", exist_ok=True)
+#     logging.basicConfig(
+#         level=logging.INFO,
+#         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+#         handlers=[
+#             logging.FileHandler("logs/strike_selector.log"),
+#             logging.StreamHandler()
+#         ]
+#     )
 #
-#     expiry_date = "2023-12-28" # This should be determined dynamically, e.g., by expiry_selector
-#
-#     # Select ATM Call
-#     ce_tokens = select_nifty_option_strikes(kite, expiry_date, "CE", "ATM")
-#     # Select ATM Put
-#     pe_tokens = select_nifty_option_strikes(kite, expiry_date, "PE", "ATM")
-#
-#     if ce_tokens and pe_tokens:
-#         print("Selected ATM Straddle Tokens:", ce_tokens[0], pe_tokens[0])
-#     else:
-#         print("Failed to select one or both strikes.")
+#     # Example DataFrame (replace with actual data)
+#     # data = pd.read_csv("your_data.csv", index_col='timestamp', parse_dates=True)
+#     # signal = DynamicScalpingStrategy().generate_signal(data, data['close'].iloc[-1])
+#     # print(signal)
+#     print("DynamicScalpingStrategy class defined. Ready for use.")
