@@ -19,15 +19,24 @@ import logging.handlers
 from kiteconnect import KiteConnect
 
 # Import configuration using the Config class for consistency
-from config import Config
+# Note: Based on the provided realtime_trader.py, it seems to use direct imports
+# like `from config import ZERODHA_API_KEY, ...`. If your config.py uses a Config class,
+# change this import and all usages (e.g., ZERODHA_API_KEY -> Config.ZERODHA_API_KEY).
+# For now, aligning with the provided realtime_trader.py structure.
+from config import (
+    ZERODHA_API_KEY,
+    ZERODHA_API_SECRET, # Kept for potential future use (e.g., regenerating token)
+    ZERODHA_ACCESS_TOKEN,
+    TELEGRAM_BOT_TOKEN, # Kept for potential future use or validation
+    TELEGRAM_USER_ID   # Kept for potential future use or validation
+)
 
 # Import core modules
 from src.data_streaming.realtime_trader import RealTimeTrader
-# Import the new OrderExecutor
+# Import the OrderExecutor
 from src.execution.order_executor import OrderExecutor
 # Import utility functions for instrument selection
-# Make sure these files exist and functions are implemented
-from src.utils.expiry_selector import get_next_weekly_expiry # , get_nearest_expiry, get_monthly_expiry
+from src.utils.expiry_selector import get_next_weekly_expiry
 from src.utils.strike_selector import select_nifty_option_strikes
 
 # --- Setup Enhanced Logging with Rotation ---
@@ -136,11 +145,14 @@ def select_instruments(kite_client: KiteConnect) -> list:
     # 3. Fallback logic if selection fails
     if not selected_tokens:
         logger.warning("⚠️ No instruments selected via strike selector.")
-        # You can choose to exit or use a default/fallback token for testing
-        # For now, we will proceed with an empty list, letting the trader handle it
-        # or you could add a fallback like:
-        # logger.info("ℹ️ Using fallback Nifty 50 Index token (256265) for testing.")
-        # selected_tokens = [256265] # Nifty 50 Index Token
+        # --- CRITICAL: Decide on Fallback Strategy ---
+        # Option 1: Exit if no instruments are selected (Recommended for live trading)
+        # logger.error("❌ Instrument selection failed. Exiting application.")
+        # return [] # Return empty list to signal failure
+
+        # Option 2: Use a default/fallback token for testing (Comment out Option 1 if using this)
+        logger.info("ℹ️ Using fallback Nifty 50 Index token (256265) for testing.")
+        selected_tokens = [256265] # Nifty 50 Index Token
 
     if selected_tokens:
         logger.info(f"✅ Final selected instrument tokens: {selected_tokens}")
@@ -163,13 +175,14 @@ def main():
     logger.info(f"🔁 Mode: {args.mode}, Trade Execution: {'ENABLED' if args.trade else 'DISABLED'}")
 
     # --- 1. Initialize Kite Connect ---
-    if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
-        logger.error("❌ Zerodha API credentials (ZERODHA_API_KEY, KITE_ACCESS_TOKEN) missing in config.")
+    # Aligning with provided realtime_trader.py which uses direct imports
+    if not ZERODHA_API_KEY or not ZERODHA_ACCESS_TOKEN:
+        logger.error("❌ Zerodha API credentials (ZERODHA_API_KEY, ZERODHA_ACCESS_TOKEN) missing in config.")
         return
 
-    kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
+    kite = KiteConnect(api_key=ZERODHA_API_KEY)
     try:
-        kite.set_access_token(Config.KITE_ACCESS_TOKEN)
+        kite.set_access_token(ZERODHA_ACCESS_TOKEN)
         logger.info("✅ Zerodha Kite Connect client initialized and authenticated.")
     except Exception as e:
         logger.error(f"❌ Failed to authenticate Kite client: {e}")
@@ -178,9 +191,12 @@ def main():
     # --- 2. Select Instruments ---
     instrument_tokens_to_trade = select_instruments(kite)
 
+    # Check if instrument selection was successful (based on your chosen fallback strategy)
+    # If you chose Option 1 (exit on failure), this check is crucial.
+    # If you chose Option 2 (fallback token), this might just log a warning.
     if not instrument_tokens_to_trade:
-        logger.error("❌ No instruments available to trade. Exiting.")
-        return
+         logger.error("❌ No instruments available to trade. Exiting.")
+         return # Exit the main function
 
     # --- 3. Initialize Order Executor ---
     # Pass the same authenticated kite instance
@@ -189,8 +205,37 @@ def main():
 
     # --- 4. Initialize RealTime Trader ---
     # Pass the OrderExecutor instance to the trader
-    trader = RealTimeTrader(order_executor=order_executor)
-    
+    # The provided RealTimeTrader constructor doesn't take arguments.
+    # You will need to modify RealTimeTrader.__init__ to accept order_executor.
+    # For now, assuming it's modified as discussed previously.
+    # If not modified, you'll need to set it after initialization.
+    # Example if modified:
+    # trader = RealTimeTrader(order_executor=order_executor)
+
+    # Example if NOT modified (you'll need to add `order_executor` as an attribute):
+    trader = RealTimeTrader()
+    # --- CRITICAL: Inject OrderExecutor into trader ---
+    # You need to modify RealTimeTrader to have an `order_executor` attribute
+    # and use it in `_handle_trading_signal`. If it's not modified yet,
+    # you can try setting it dynamically (though not ideal):
+    # trader.order_executor = order_executor # Only works if the class allows dynamic attributes
+    # A better way is to modify the RealTimeTrader class itself.
+
+    # Assuming RealTimeTrader is modified to accept order_executor in __init__
+    # and use self.order_executor in its methods:
+    # trader = RealTimeTrader(order_executor=order_executor)
+
+    # For compatibility with the provided code, let's assume it's NOT modified yet.
+    # So we inject it dynamically and ensure the trader uses it.
+    # This is a temporary workaround. The proper fix is to modify RealTimeTrader.
+    trader.order_executor = order_executor # Inject the executor
+
+    # --- CRITICAL: Modify RealTimeTrader._handle_trading_signal ---
+    # The provided RealTimeTrader has a TODO for order placement.
+    # You MUST modify this method to use `self.order_executor` when `self.execution_enabled` is True.
+    # This cannot be done from main.py easily. The change needs to be in the RealTimeTrader file itself.
+    # Ensure you have updated `src/data_streaming/realtime_trader.py` accordingly.
+
     # Enable/disable live execution based on --trade flag
     trader.enable_trading(enable=args.trade)
     logger.info(f"{'✅' if args.trade else '⚠️'} Trading execution is {'ENABLED' if args.trade else 'DISABLED'}.")
