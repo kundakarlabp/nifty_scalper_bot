@@ -36,7 +36,7 @@ class RealTimeTrader:
     """
     def __init__(self, order_executor: Optional[OrderExecutor] = None):
         """
-        Initializes the RealTimeTrader.
+        Initialize the RealTimeTrader.
 
         Args:
             order_executor (Optional[OrderExecutor]): An instance of OrderExecutor
@@ -215,9 +215,18 @@ class RealTimeTrader:
             if self.execution_enabled and self.order_executor and self.kite:
                 logger.info("💼 Initiating live execution via OrderExecutor...")
                 
-                # --- IMPORTANT: Get symbol and exchange from pre-populated map ---
-                # This mapping must be populated when instruments are added
-                # (e.g., in main.py when calling add_trading_instrument)
+                # --- CRITICAL: Get symbol and exchange correctly ---
+                # You MUST replace this placeholder logic with actual data from your
+                # strike selection process (e.g., main.py or a lookup table).
+                # Example placeholder mapping (NEEDS REAL DATA):
+                # token_to_symbol_exchange = {
+                #     256265: {"symbol": "NIFTY 50", "exchange": "NSE"}, # Nifty Index
+                #     # Add your selected option tokens here, e.g., from strike selector
+                #     # 123456: {"symbol": "NIFTY23APR18000CE", "exchange": "NFO"},
+                # }
+                # instrument_info = token_to_symbol_exchange.get(token)
+                
+                # The correct way: Use the mapping stored in add_trading_instrument
                 instrument_info = self.token_symbol_map.get(token)
                 if not instrument_info:
                     logger.error(f"❌ Cannot execute: No symbol/exchange mapping for token {token}")
