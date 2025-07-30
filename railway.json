@@ -9,16 +9,15 @@
         },
         "install": {
           "cmds": [
-            "curl -sSL https://install.python-poetry.org | python -",
-            "$HOME/.local/bin/poetry config virtualenvs.create false",
-            "$HOME/.local/bin/poetry install --no-root --no-interaction --no-ansi"
+            "pip install --upgrade pip",
+            "pip install -r requirements.txt"
           ]
         }
       }
     }
   },
   "deploy": {
-    "startCommand": "$HOME/.local/bin/poetry run python src/main.py --mode realtime --trade",
+    "startCommand": "PYTHONPATH=src python src/main.py --mode realtime --trade",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
