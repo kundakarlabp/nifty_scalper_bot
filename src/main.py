@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 import logging.handlers
 import time
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Ensure correct path resolution for imports if needed
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
