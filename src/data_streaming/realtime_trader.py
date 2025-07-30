@@ -6,8 +6,7 @@ risk management, execution (via OrderExecutor), and Telegram notifications.
 import sys
 import os
 # Ensure correct path resolution for imports
-# Consider if this is still necessary based on your project structure and deployment method (e.g., Docker)
-# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import logging
 import time
@@ -16,7 +15,6 @@ from typing import Dict, List, Any, Optional
 from kiteconnect import KiteConnect
 
 # Import configuration using the Config class for consistency
-# This assumes your config.py defines a Config class
 from config import Config
 
 # Import necessary modules
@@ -38,7 +36,7 @@ class RealTimeTrader:
     """
     def __init__(self, order_executor: Optional[OrderExecutor] = None):
         """
-        Initialize the RealTimeTrader.
+        Initializes the RealTimeTrader.
 
         Args:
             order_executor (Optional[OrderExecutor]): An instance of OrderExecutor
@@ -66,6 +64,8 @@ class RealTimeTrader:
         
         # Initialize Strategy
         # Pass parameters that scalping_strategy.py's __init__ now accepts.
+        # If it gets them from Config internally, you could pass fewer or none here,
+        # but explicit passing is clearer.
         self.strategy = DynamicScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
             base_target_points=Config.BASE_TARGET_POINTS,
@@ -191,7 +191,7 @@ class RealTimeTrader:
 
             # Skip if position size calculation failed or is zero
             if not position_details or position_details.get('quantity', 0) <= 0:
-                logger.warning(f"⚠️ Position size invalid for token {token}: {position_details}")
+                logger.warning(f"⚠️ Position size invalid for token {token}")
                 return
 
             # Format and send Telegram alert
@@ -215,7 +215,9 @@ class RealTimeTrader:
             if self.execution_enabled and self.order_executor and self.kite:
                 logger.info("💼 Initiating live execution via OrderExecutor...")
                 
-                # Get symbol and exchange from the pre-populated map
+                # --- IMPORTANT: Get symbol and exchange from pre-populated map ---
+                # This mapping must be populated when instruments are added
+                # (e.g., in main.py when calling add_trading_instrument)
                 instrument_info = self.token_symbol_map.get(token)
                 if not instrument_info:
                     logger.error(f"❌ Cannot execute: No symbol/exchange mapping for token {token}")
