@@ -1,13 +1,7 @@
 # src/risk/position_sizing.py
 import logging
 from typing import Dict, Optional
-from config import (
-    NIFTY_LOT_SIZE, 
-    ACCOUNT_SIZE, 
-    RISK_PER_TRADE, 
-    MIN_LOTS, 
-    MAX_LOTS
-)
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +27,13 @@ class PositionSizing:
             max_drawdown (float): Maximum allowed daily drawdown (0.05 = 5%).
         """
         # Configuration parameters
-        self.account_size = account_size or ACCOUNT_SIZE
+        self.account_size = account_size or Config.ACCOUNT_SIZE
         self.max_positions = max_positions
-        self.risk_per_trade = risk_per_trade or RISK_PER_TRADE
+        self.risk_per_trade = risk_per_trade or Config.RISK_PER_TRADE
         self.max_drawdown = max_drawdown
         
         # Instrument-specific parameters
-        self.nifty_lot_size = NIFTY_LOT_SIZE
+        self.nifty_lot_size = Config.NIFTY_LOT_SIZE
         self.min_lots = MIN_LOTS
         self.max_lots = MAX_LOTS
         
