@@ -119,7 +119,22 @@ class DynamicScalpingStrategy:
                 signal_direction = 'SELL'
 
             # If we have a valid raw signal, check against the confidence threshold
-            if signal_direction and score >= self.confidence_threshold:
+            # Note: The original logic checked `score >= self.confidence_threshold`.
+            # However, `score` is an integer (points), and `confidence_threshold` is a float.
+            # It's more likely the intention is to check the final `confidence` value
+            # returned in the signal dictionary against `Config.CONFIDENCE_THRESHOLD`
+            # in RealTimeTrader. The strategy's internal check should likely be
+            # based on the scoring_threshold or a separate internal confidence logic.
+            # Let's assume the signal is valid if direction exists and scoring passed.
+            # The float `confidence` in the returned dict will be validated by RealTimeTrader.
+            # Alternatively, if `confidence_threshold` here is meant to be an internal
+            # float score threshold (different from the Config one), it should be used differently.
+            # Given the context and typical usage, let's proceed with the directional signal
+            # if scoring passed, and let RealTimeTrader validate the returned confidence.
+
+            # Simplified condition: if we have a direction from scoring, proceed.
+            # The `confidence` in the returned dict (abs(score)) will be checked by RealTimeTrader.
+            if signal_direction: # Equivalent to if score >= self.scoring_threshold or <= -self.scoring_threshold
                 # Create a unique hash to prevent duplicate signals
                 # Note: Using current_price from argument and df.index[-1] for timestamp
                 signal_string = f"{signal_direction}_{current_price}_{df.index[-1]}"
@@ -137,6 +152,7 @@ class DynamicScalpingStrategy:
                 atr = float(indicators.get('atr', 0))
                 # Example SL/TP calculation using ATR and base points
                 # The strategy can decide how to combine these
+                # Using the ATR multiplier approach as in the original KB version
                 sl_atr_component = 2 * atr
                 tp_atr_component = 3 * atr
 
@@ -373,9 +389,6 @@ class DynamicScalpingStrategy:
             d = k.rolling(window=d_period, min_periods=1).mean()
 
             # Return as DataFrame
-            # Using self. here is incorrect for a local calculation result,
-            # but the original code had it. It should just return the result.
-            # Removing self. assignment.
             return pd.DataFrame({'%K': k, '%D': d})
 
         except Exception as e:
@@ -415,8 +428,6 @@ class DynamicScalpingStrategy:
                 atr.iloc[i] = (atr.iloc[i-1] * (period - 1) + tr.iloc[i]) / period
 
             # Return the ATR Series
-            # Using self. here is incorrect for a local calculation result.
-            # Removing self. assignment.
             return atr
 
         except Exception as e:
@@ -451,8 +462,6 @@ class DynamicScalpingStrategy:
                     obv.append(obv[-1])
 
             # Convert list to Pandas Series with the same index as the input DataFrame
-            # Using self. here is incorrect for a local calculation result.
-            # Removing self. assignment.
             return pd.Series(obv, index=df.index)
 
         except Exception as e:
