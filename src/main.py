@@ -3,10 +3,12 @@
 Main entry point for the Nifty 50 Scalper Bot.
 Handles configuration, initialization of core components,
 instrument selection, and starts the trading loop.
+Optionally starts the Telegram command listener.
 """
 import sys
 import os
 # Ensure correct path resolution for imports
+# This might be handled by your project structure or Docker setup
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
@@ -23,14 +25,19 @@ from config import Config
 
 # Import core modules
 from src.data_streaming.realtime_trader import RealTimeTrader
-# Import the new OrderExecutor
+# Import the OrderExecutor
 from src.execution.order_executor import OrderExecutor
+# Import the Telegram Command Listener
+from src.notifications.telegram_command_listener import TelegramCommandListener
 # Import utility functions for instrument selection
-# Make sure these files exist and functions are implemented
-from src.utils.expiry_selector import get_next_weekly_expiry # , get_nearest_expiry, get_monthly_expiry
+from src.utils.expiry_selector import get_next_weekly_expiry
 from src.utils.strike_selector import select_nifty_option_strikes
 
-# --- Setup Logging with Rotation ---
+# Import threading to run the Telegram listener in the background
+import threading
+
+
+# --- Setup Enhanced Logging with Rotation ---
 def setup_logging():
     """Configures the logging system with file rotation."""
     # Ensure the logs directory exists
@@ -103,93 +110,38 @@ def select_instruments(kite_client: KiteConnect) -> list:
         logger.info(f"🎯 Selected Expiry Date: {expiry_str}")
 
         # 2. Select Strikes
-        # Example: Select ATM Call and Put for the next expiry
         logger.info("🔍 Selecting ATM Call strike...")
-        # The select_nifty_option_strikes function needs to return token, symbol, exchange
-        # This example assumes it returns a list of tokens. You might need to modify
-        # select_nifty_option_strikes or this logic to get symbol/exchange.
-        # Let's assume select_nifty_option_strikes can be modified or we get the info differently.
-        # For now, let's assume it returns a list of tokens, and we have a way to get details.
-        # A more robust way is to modify select_nifty_option_strikes to return full details.
-
-        # --- MODIFIED APPROACH: Assume select_nifty_option_strikes returns full details ---
-        # This requires modifying strike_selector.py to return a list like:
-        # [{'token': 123, 'symbol': 'NIFTY...', 'exchange': 'NFO'}, ...]
-        # If it doesn't, you need to fetch the details based on the token.
-        # Placeholder for fetching full instrument details
-        def get_instrument_details(token_list):
-             # This is a simplified placeholder.
-             # In a real scenario, you'd use kite.instruments() or a pre-fetched map.
-             # For now, let's assume strike_selector provides enough info or we fetch it.
-             # If strike_selector returned tokens only, you'd need to look up symbol/exchange.
-             # Let's assume for this example it returns full details or we can get them.
-             # We'll simulate getting details. You need to replace this logic.
-             details_list = []
-             # Example: Fetch all NFO instruments once and create a map
-             # all_nfo_instruments = kite_client.instruments("NFO")
-             # instrument_map = {inst['instrument_token']: inst for inst in all_nfo_instruments}
-             # for token in token_list:
-             #     inst_data = instrument_map.get(token)
-             #     if inst_data:
-             #         details_list.append({
-             #             'token': token,
-             #             'symbol': inst_data['tradingsymbol'],
-             #             'exchange': inst_data['exchange']
-             #         })
-             # return details_list
-
-             # Since we don't have the full logic here, let's assume strike_selector
-             # can be made to return this structure. For now, we'll handle tokens only
-             # and fetch details. This is a common approach.
-             if not token_list:
-                 return []
-
-             # Fetch instrument details for all selected tokens
-             # This is a more robust way than assuming strike_selector provides symbol/exchange
-             logger.debug("📥 Fetching instrument details for selected tokens...")
-             try:
-                 # Fetch all NFO instruments (or filter more cleverly if possible)
-                 # Fetching all NFO can be slow. If strike_selector can provide exchange/symbol
-                 # or a smaller list to fetch, that's better. For now, this works.
-                 all_nfo_instruments = kite_client.instruments("NFO")
-                 instrument_map = {inst['instrument_token']: inst for inst in all_nfo_instruments}
-                 logger.debug(f"📥 Fetched {len(instrument_map)} NFO instruments.")
-
-                 for token in token_list:
-                     inst_data = instrument_map.get(token)
-                     if inst_data:
-                         details_list.append({
-                             'token': token,
-                             'symbol': inst_data['tradingsymbol'],
-                             'exchange': inst_data['exchange']
-                         })
-                         logger.debug(f"📥 Found details for token {token}: {inst_data['tradingsymbol']}")
-                     else:
-                         logger.warning(f"⚠️ Could not find instrument details for token {token}")
-             except Exception as e:
-                 logger.error(f"❌ Error fetching instrument details: {e}", exc_info=True)
-                 return [] # Return empty list on fetch error
-
-             return details_list
-
-        # --- Call strike selector for CE ---
+        # Assume select_nifty_option_strikes returns a list of tokens
         atm_ce_tokens = select_nifty_option_strikes(
             kite=kite_client,
             expiry=expiry_str,
             option_type="CE",
             strike_criteria="ATM"
-            # instrument_mapping=pre_fetched_mapping # Optional optimization
         )
         if atm_ce_tokens:
-            # Get full details for CE tokens
-            ce_details = get_instrument_details(atm_ce_tokens)
-            selected_instruments.extend(ce_details)
-            for detail in ce_details:
-                logger.info(f"✅ Selected ATM CE: Token={detail['token']}, Symbol={detail['symbol']}")
+            # Fetch full instrument details for CE tokens
+            try:
+                # Efficiently fetch details for selected tokens
+                # Get all NFO instruments once
+                all_nfo_instruments = kite_client.instruments("NFO")
+                instrument_map = {inst['instrument_token']: inst for inst in all_nfo_instruments}
+                
+                for token in atm_ce_tokens:
+                    inst_data = instrument_map.get(token)
+                    if inst_data:
+                        selected_instruments.append({
+                            'token': token,
+                            'symbol': inst_data['tradingsymbol'],
+                            'exchange': inst_data['exchange']
+                        })
+                        logger.info(f"✅ Selected ATM CE: Token={token}, Symbol={inst_data['tradingsymbol']}")
+                    else:
+                        logger.warning(f"⚠️ Could not find details for CE token {token}")
+            except Exception as e:
+                logger.error(f"❌ Error fetching CE instrument details: {e}", exc_info=True)
         else:
             logger.error("❌ Failed to select ATM CE strike.")
 
-        # --- Call strike selector for PE ---
         logger.info("🔍 Selecting ATM Put strike...")
         atm_pe_tokens = select_nifty_option_strikes(
             kite=kite_client,
@@ -198,11 +150,27 @@ def select_instruments(kite_client: KiteConnect) -> list:
             strike_criteria="ATM"
         )
         if atm_pe_tokens:
-            # Get full details for PE tokens
-            pe_details = get_instrument_details(atm_pe_tokens)
-            selected_instruments.extend(pe_details)
-            for detail in pe_details:
-                logger.info(f"✅ Selected ATM PE: Token={detail['token']}, Symbol={detail['symbol']}")
+             # Fetch full instrument details for PE tokens
+            try:
+                # Re-use the instrument_map if it was successfully created for CE
+                # If not, fetch it again (less efficient, but robust)
+                if 'all_nfo_instruments' not in locals() or 'instrument_map' not in locals():
+                     all_nfo_instruments = kite_client.instruments("NFO")
+                     instrument_map = {inst['instrument_token']: inst for inst in all_nfo_instruments}
+
+                for token in atm_pe_tokens:
+                    inst_data = instrument_map.get(token)
+                    if inst_data:
+                        selected_instruments.append({
+                            'token': token,
+                            'symbol': inst_data['tradingsymbol'],
+                            'exchange': inst_data['exchange']
+                        })
+                        logger.info(f"✅ Selected ATM PE: Token={token}, Symbol={inst_data['tradingsymbol']}")
+                    else:
+                         logger.warning(f"⚠️ Could not find details for PE token {token}")
+            except Exception as e:
+                logger.error(f"❌ Error fetching PE instrument details: {e}", exc_info=True)
         else:
             logger.error("❌ Failed to select ATM PE strike.")
 
@@ -235,15 +203,20 @@ def select_instruments(kite_client: KiteConnect) -> list:
 
 def main():
     """Main function to initialize and run the bot."""
-    parser = argparse.ArgumentParser(description="Nifty Scalper Bot")
+    parser = argparse.ArgumentParser(
+        description="Nifty Scalper Bot",
+        epilog="Example: python src/main.py --mode realtime --trade --telegram"
+    )
     parser.add_argument('--mode', choices=['realtime', 'signal'], default='realtime',
-                        help='Operational mode')
+                        help='Operational mode (default: realtime)')
     parser.add_argument('--trade', action='store_true',
                         help='Enable live trade execution (requires valid Kite credentials)')
+    parser.add_argument('--telegram', action='store_true',
+                        help='Enable Telegram command listener (requires valid Telegram credentials)')
     args = parser.parse_args()
 
     logger.info("🚀 Initializing Nifty 50 Scalper Bot...")
-    logger.info(f"🔁 Mode: {args.mode}, Trade Execution: {'ENABLED' if args.trade else 'DISABLED'}")
+    logger.info(f"🔁 Mode: {args.mode}, Trade Execution: {'ENABLED' if args.trade else 'DISABLED'}, Telegram Listener: {'ENABLED' if args.telegram else 'DISABLED'}")
 
     # --- 1. Initialize Kite Connect ---
     if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
@@ -301,17 +274,43 @@ def main():
     elif successfully_added < len(selected_instruments):
         logger.warning(f"⚠️ Only {successfully_added}/{len(selected_instruments)} instruments were added successfully.")
 
-    # --- 6. Start Trading ---
+    # --- 6. Initialize and Start Telegram Command Listener (Optional) ---
+    telegram_listener_thread = None
+    if args.telegram:
+        if not Config.TELEGRAM_BOT_TOKEN or not Config.TELEGRAM_USER_ID:
+            logger.error("❌ Telegram credentials missing. Cannot start listener.")
+            # Optionally, continue without Telegram
+            # Or exit: return
+        else:
+            try:
+                # Create the Telegram listener instance, passing the *main* trader instance
+                telegram_listener = TelegramCommandListener(
+                    bot_token=Config.TELEGRAM_BOT_TOKEN,
+                    chat_id=str(Config.TELEGRAM_USER_ID), # Ensure chat_id is a string
+                    trader_instance=trader # Pass the main trader
+                )
+                # Start the listener in a separate thread so the main thread can run the trader
+                telegram_listener_thread = threading.Thread(target=telegram_listener.start_listening, daemon=True)
+                telegram_listener_thread.start()
+                logger.info("✅ Telegram Command Listener started in background thread.")
+            except Exception as e:
+                logger.error(f"❌ Failed to start Telegram Command Listener: {e}", exc_info=True)
+                # Optionally, continue without Telegram
+                # Or exit: return
+    else:
+        logger.info("ℹ️ Telegram Command Listener is disabled (--telegram flag not set).")
+
+    # --- 7. Start Trading Engine ---
     if args.mode == 'realtime':
         logger.info("🚀 Starting RealTime Trading Engine...")
         if trader.start_trading():
             logger.info("✅ RealTimeTrader started successfully.")
             logger.info("⏳ Bot is now running. Press Ctrl+C to stop.")
-            # --- 7. Keep the main thread alive ---
+            # --- 8. Keep the main thread alive ---
             try:
-                # Simple loop to keep the script running
-                # The trader runs its streaming/processing in background threads
-                import time
+                # Main loop: The trader runs its streaming/processing in background threads
+                # The Telegram listener (if enabled) also runs in its own thread
+                # This main thread can monitor or wait.
                 while trader.is_trading: # Check a flag that stop_trading sets to False
                     # You could add periodic status checks or other main-loop tasks here
                     # For now, just sleep to prevent a busy loop
@@ -319,8 +318,15 @@ def main():
             except KeyboardInterrupt:
                 logger.info("🛑 Keyboard Interrupt received. Stopping trader...")
             finally:
+                # Signal the trader to stop
                 trader.stop_trading()
-                logger.info("🛑 Trader stopped. Bot shutdown complete.")
+                # Signal the Telegram listener to stop (if it was started)
+                if args.telegram and 'telegram_listener' in locals():
+                    telegram_listener.stop_listening()
+                    # Optionally wait for the thread to finish
+                    # if telegram_listener_thread and telegram_listener_thread.is_alive():
+                    #     telegram_listener_thread.join(timeout=5)
+                logger.info("🛑 Trader and Listener stopped. Bot shutdown complete.")
         else:
             logger.error("❌ Failed to start RealTimeTrader.")
     else:
