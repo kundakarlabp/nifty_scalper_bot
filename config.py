@@ -62,6 +62,6 @@ class Config:
 
     # --- Paths ---
     LOG_FILE = os.getenv("LOG_FILE", "logs/trades.csv")
-
+    MIS = "MIS"
     DEFAULT_PRODUCT =MIS
 
