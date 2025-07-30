@@ -1,17 +1,17 @@
 # src/monkey_patch_twisted_signals.py
+"""
+Prevents Twisted from crashing in environments like Render or Docker
+where signal handlers cannot be installed from non-main threads.
+This patch overrides signal.signal when not on the main thread.
+"""
 
+import signal
 import threading
-import twisted.internet._signals
 
-# Patch Twisted's install method to prevent signal errors
-def safe_install_signal_handlers(self):
-    if threading.current_thread() is threading.main_thread():
-        self._original_install()
+# Only patch if we're not in the main thread
+if threading.current_thread() is not threading.main_thread():
+    def no_op_signal(*args, **kwargs):
+        # Do nothing instead of setting a signal handler
+        return None
 
-# Save original method
-twisted.internet._signals._SignalReactorMixin._original_install = (
-    twisted.internet._signals._SignalReactorMixin.install
-)
-
-# Replace with safe method
-twisted.internet._signals._SignalReactorMixin.install = safe_install_signal_handlers
+    signal.signal = no_op_signal
