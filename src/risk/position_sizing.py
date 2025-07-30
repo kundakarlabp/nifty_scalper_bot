@@ -1,6 +1,7 @@
 # src/risk/position_sizing.py
 import logging
 from typing import Dict, Optional
+# Import the Config class to access configuration variables
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -11,7 +12,6 @@ class PositionSizing:
     Calculates appropriate position sizes based on account risk parameters,
     signal confidence, market volatility, and performance factors.
     """
-    
     def __init__(self, 
                  account_size: float = None, 
                  max_positions: int = 1, 
@@ -30,17 +30,17 @@ class PositionSizing:
         self.account_size = account_size or Config.ACCOUNT_SIZE
         self.max_positions = max_positions
         self.risk_per_trade = risk_per_trade or Config.RISK_PER_TRADE
-        self.max_drawdown = max_drawdown
-        
-        # Instrument-specific parameters
+        self.max_drawdown = max_drawdown or Config.MAX_DRAWDOWN # Use Config default if max_drawdown is 0.05 (or None)
+
+        # Instrument-specific parameters - Access via Config
         self.nifty_lot_size = Config.NIFTY_LOT_SIZE
-        self.min_lots = MIN_LOTS
-        self.max_lots = MAX_LOTS
-        
+        self.min_lots = Config.MIN_LOTS  # <-- Corrected: Access via Config
+        self.max_lots = Config.MAX_LOTS  # <-- Corrected: Access via Config
+
         # Runtime tracking variables
         self.current_positions = 0
         self.daily_pnl = 0.0
-        self.max_daily_loss = self.account_size * max_drawdown
+        self.max_daily_loss = self.account_size * self.max_drawdown
         self.current_daily_loss = 0.0
         self.consecutive_wins = 0
         self.consecutive_losses = 0
@@ -280,7 +280,10 @@ if __name__ == "__main__":
     # Configure logging for testing
     logging.basicConfig(level=logging.INFO)
     
+    # Example: Initialize with specific values, others from Config
     risk_manager = PositionSizing(account_size=100000, risk_per_trade=0.01)
+    
+    # Example calculation
     position_info = risk_manager.calculate_position_size(
         entry_price=18000,
         stop_loss=17980,
