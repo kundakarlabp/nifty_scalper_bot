@@ -4,7 +4,7 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Set unbuffered output (for better Railway log visibility)
+# Set unbuffered output (for better Railway/Render log visibility)
 ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies
@@ -21,8 +21,9 @@ ENV PYTHONPATH=/app/src
 # Copy requirements file first (to leverage Docker layer cache)
 COPY requirements.txt .
 
-# Install latest pip and then dependencies
+# Install dependencies in correct order
 RUN pip install --upgrade pip && \
+    pip install --no-cache-dir numpy pandas && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy full application code into the container
