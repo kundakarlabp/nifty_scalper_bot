@@ -5,15 +5,15 @@ risk management, execution (via OrderExecutor), and Telegram notifications.
 """
 import sys
 import os
+# Ensure correct path resolution for imports
+# Consider if this is still necessary based on your project structure and deployment method (e.g., Docker)
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import logging
 import time
 import pytz
 from typing import Dict, List, Any, Optional
 from kiteconnect import KiteConnect
-
-# Ensure correct path resolution for imports
-# Consider if this is still necessary based on your project structure and deployment method (e.g., Docker)
-# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # Import configuration using the Config class for consistency
 # This assumes your config.py defines a Config class
@@ -66,8 +66,6 @@ class RealTimeTrader:
         
         # Initialize Strategy
         # Pass parameters that scalping_strategy.py's __init__ now accepts.
-        # If it gets them from Config internally, you could pass fewer or none here,
-        # but explicit passing is clearer.
         self.strategy = DynamicScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
             base_target_points=Config.BASE_TARGET_POINTS,
