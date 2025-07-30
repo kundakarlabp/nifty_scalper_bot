@@ -6,7 +6,17 @@ instrument selection, and starts the trading loop.
 """
 import sys
 import os
-import twisted_signal_blocker  # ✅ CORRECT
+# ⚙️ Force Twisted to skip signal handler install in KiteTicker
+import twisted
+from twisted.internet import reactor
+
+# Only run the reactor if it's not running and only once
+def patched_start_reactor(installSignalHandlers=True):
+    if not reactor.running:
+        reactor.run(installSignalHandlers=False)
+
+twisted._original_run = reactor.run
+reactor.run = patched_start_reactor
 # Ensure correct path resolution for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
