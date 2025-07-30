@@ -1,36 +1,29 @@
-# Use official slim Python base image
-FROM python:3.10-slim as base
+# Use a clean, official Python base
+FROM python:3.10-slim
 
-# Set working directory inside container
+# Set working directory
 WORKDIR /app
 
-# Environment variable for unbuffered logging (good for Railway logs)
-ENV PYTHONUNBUFFERED=1
-
-# Install build dependencies (and pip if not present)
+# Install system dependencies for TA-Lib-bin and other packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
     build-essential \
-    pkg-config \
     libffi-dev \
     libssl-dev \
-    && python3 -m ensurepip --upgrade \
-    && python3 -m pip install --upgrade pip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first for better caching
+# Set Python to output everything (helpful for Railway logs)
+ENV PYTHONUNBUFFERED=1
+
+# Copy requirements and install dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Cache pip installs
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --no-cache-dir -r requirements.txt
-
-# Now copy rest of the app
+# Copy the entire project into container
 COPY . .
 
-# Set PYTHONPATH so imports from 'src/' work
+# Set PYTHONPATH for src imports
 ENV PYTHONPATH=/app/src
 
-# Default start command (can be overridden by Railway)
-CMD ["python3", "src/main.py", "--mode", "realtime", "--trade"]
+# Default start command
+CMD ["python", "src/main.py", "--mode", "realtime", "--trade"]
