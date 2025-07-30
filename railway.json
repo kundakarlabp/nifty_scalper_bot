@@ -1,4 +1,5 @@
 {
+  "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
     "nixpacksPlan": {
@@ -11,11 +12,13 @@
             "pip install --upgrade pip",
             "pip install -r requirements.txt"
           ]
-        },
-        "start": {
-          "cmd": "python src/main.py --mode realtime --trade"
         }
       }
     }
+  },
+  "deploy": {
+    "startCommand": "python src/main.py --mode realtime --trade",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
   }
 }
