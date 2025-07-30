@@ -1,17 +1,18 @@
 # src/monkey_patch_twisted_signals.py
 """
-Prevents Twisted from crashing in environments like Render or Docker
-where signal handlers cannot be installed from non-main threads.
-This patch overrides signal.signal when not on the main thread.
+Blocks signal registration globally if not running in the main thread.
+Must be imported before anything else, especially before importing Twisted.
 """
 
 import signal
 import threading
+import builtins
 
-# Only patch if we're not in the main thread
 if threading.current_thread() is not threading.main_thread():
-    def no_op_signal(*args, **kwargs):
-        # Do nothing instead of setting a signal handler
+    def patched_signal(sig, handler):
+        # Completely skip signal registration outside main thread
         return None
 
-    signal.signal = no_op_signal
+    # Apply early monkey patch
+    signal.signal = patched_signal
+    builtins.__original_signal__ = patched_signal  # Optional: backup
