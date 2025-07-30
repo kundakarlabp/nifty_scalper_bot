@@ -153,7 +153,7 @@ class RealTimeTrader:
         try:
             # Fetch last 100 candles for analysis
             ohlc_data = self.processor.get_latest_data(token, 100)
-            if not ohlc_data or len(ohlc_data) < 50: # Ensure enough data
+            if ohlc_data is None or ohlc_data.empty or len(ohlc_data) < 50: # Ensure enough data
                 return
 
             current_price = self.processor.get_current_price(token)
