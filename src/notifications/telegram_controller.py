@@ -20,7 +20,7 @@ class TelegramController:
     """
     Handles Telegram messaging and command processing for the trading bot.
     """
-    
+
     def __init__(self, status_callback: Optional[Callable] = None, control_callback: Optional[Callable] = None):
         """
         Initialize the Telegram controller with credentials and settings.
@@ -58,7 +58,7 @@ class TelegramController:
                 return False
 
             current_time = time.time()
-            
+
             # Create a hash for duplicate detection (using first 100 chars of lowercase message)
             message_hash = hash(message.lower().strip()[:100])
 
@@ -100,7 +100,7 @@ class TelegramController:
                     retry_after = 5
                 logger.warning(f"⚠️ Rate limit hit. Retrying in {retry_after}s...")
                 time.sleep(retry_after)
-                
+
                 retry_response = requests.post(url, json=payload, timeout=10)
                 if retry_response.status_code == 200:
                     self.sent_messages.append(message_hash)
@@ -219,20 +219,20 @@ Use `/start` to resume (requires restart)
     def send_realtime_session_alert(self, session_type: str, timestamp: Optional[datetime] = None) -> bool:
         """
         Send alert for real-time trading session start/stop.
-        
+
         Args:
             session_type (str): Either 'START' or 'STOP'
             timestamp (Optional[datetime]): When the session event occurred. Uses current time if None.
-            
+
         Returns:
             bool: True if message sent successfully
         """
         if timestamp is None:
             timestamp = datetime.now(pytz.timezone('Asia/Kolkata'))
-            
+
         emoji = "🟢" if session_type.upper() == "START" else "🔴"
         action = "started" if session_type.upper() == "START" else "stopped"
-        
+
         message = f"""
 {emoji} *REAL-TIME TRADING SESSION {session_type.upper()}*
 
@@ -368,14 +368,14 @@ Use `/start` to resume (requires restart)
         if not self.bot_token:
             logger.warning("⚠️ Telegram bot token missing. Cannot start polling.")
             return
-            
+
         if self.is_listening:
             logger.info("⚠️ Telegram polling already started.")
             return
-            
+
         self.is_listening = True
         logger.info("📡 Starting Telegram message polling...")
-        
+
         while self.is_listening:
             try:
                 url = f"{self.base_url}/getUpdates"
@@ -384,7 +384,7 @@ Use `/start` to resume (requires restart)
                     'timeout': 30  # Long polling timeout
                 }
                 response = requests.get(url, params=params, timeout=35)
-                
+
                 if response.status_code == 200:
                     updates = response.json().get('result', [])
                     for update in updates:
@@ -398,11 +398,11 @@ Use `/start` to resume (requires restart)
                     self.is_listening = False
                 else:
                     logger.warning(f"⚠️ Telegram getUpdates returned status {response.status_code}")
-                    
+
                 # Small delay to prevent excessive polling if there are errors
                 if not updates:
                     time.sleep(1)
-                    
+
             except requests.exceptions.Timeout:
                 # Timeout is expected with long polling, continue
                 continue
@@ -412,7 +412,7 @@ Use `/start` to resume (requires restart)
             except Exception as e:
                 logger.error(f"❌ Unexpected error in Telegram polling loop: {e}", exc_info=True)
                 time.sleep(5) # Wait before retrying
-                
+
         logger.info("🛑 Telegram message polling stopped.")
 
     def stop_polling(self):
