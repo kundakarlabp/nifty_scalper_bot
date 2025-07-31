@@ -4,15 +4,8 @@ Main entry point for the Nifty 50 Scalper Bot.
 Handles configuration, initialization of core components,
 instrument selection, and starts the trading loop.
 """
-
 import sys
 import os
-import argparse
-import logging
-from pathlib import Path
-import time
-from typing import List, Tuple, Optional
-
 # --- Twisted Signal Handling ---
 # Import the signal blocker before any Twisted imports
 import twisted_signal_blocker
@@ -34,9 +27,13 @@ reactor.run = patched_start_reactor
 # Ensure correct path resolution for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import argparse
+import logging
+from pathlib import Path
 # Import logging.handlers for log rotation
 import logging.handlers
-
+# CRITICAL FIX: Import time module for main loop
+import time
 # Import KiteConnect
 from kiteconnect import KiteConnect
 
@@ -49,51 +46,55 @@ from src.data_streaming.realtime_trader import RealTimeTrader
 from src.execution.order_executor import OrderExecutor
 # Import utility functions for instrument selection
 from src.utils.expiry_selector import get_next_weekly_expiry
-from src.utils.strike_selector import select_nifty_option_strikes, get_instrument_details # Assuming this function exists
+from src.utils.strike_selector import select_nifty_option_strikes # Corrected import
 
 # --- Setup Enhanced Logging with Rotation ---
 def setup_logging():
     """Configures the logging system with file rotation."""
+    # Ensure the logs directory exists
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
+    # Define the log file path
     log_file_path = logs_dir / "trading_bot.log"
-
     # Configure logging only if it hasn't been configured yet
     if not logging.getLogger().hasHandlers():
+        # Create a rotating file handler (e.g., 5 files, 10MB each)
         file_handler = logging.handlers.RotatingFileHandler(
             log_file_path,
-            maxBytes=10 * 1024 * 1024,  # 10 MB
+            maxBytes=10*1024*1024, # 10 MB
             backupCount=5
         )
-        file_handler.setLevel(logging.DEBUG)
-
+        file_handler.setLevel(logging.DEBUG) # Capture detailed logs in file
+        # Create a console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-
+        console_handler.setLevel(logging.INFO) # Show INFO and above on console
+        # Create a formatter
         formatter = logging.Formatter(
             fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
-
+        # Get the root logger and add handlers
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.DEBUG) # Set root level to DEBUG to allow filtering by handlers
         root_logger.addHandler(file_handler)
         root_logger.addHandler(console_handler)
-
+        # Get a logger for this specific module
         logger = logging.getLogger(__name__)
         logger.info("📜 Logging configured with rotation.")
 
-# Initialize logging
+# Call the setup function at the start
 setup_logging()
+# Now get the logger for main.py after setup
 logger = logging.getLogger(__name__)
 # --- End of Logging Setup ---
 
 
-def select_instruments(kite_client: KiteConnect) -> List[Tuple[int, str, str]]:
+def select_instruments(kite_client: KiteConnect):
     """
     Selects Nifty 50 option instruments to trade based on expiry and strike logic.
+    Fetches full instrument details (token, symbol, exchange) for the selected tokens.
 
     Args:
         kite_client (KiteConnect): An authenticated KiteConnect instance.
@@ -103,7 +104,7 @@ def select_instruments(kite_client: KiteConnect) -> List[Tuple[int, str, str]]:
               Returns an empty list if selection fails critically.
     """
     logger.info("🔍 Starting instrument selection...")
-    selected_instruments = []
+    selected_instruments = [] # List to hold (token, symbol, exchange) tuples
 
     try:
         # 1. Determine Next Expiry
@@ -146,20 +147,25 @@ def select_instruments(kite_client: KiteConnect) -> List[Tuple[int, str, str]]:
             logger.error("❌ Failed to select ATM PE strike.")
 
         # 3. Get full instrument details (symbol, exchange) for each token
+        # Fetch instrument list once for efficiency
         if all_selected_tokens:
-            # Fetch instrument list once for efficiency if needed internally by get_instrument_details
-            # instrument_map = kite_client.instruments(exchange="NFO") # Optional optimization
+            logger.info("🔍 Fetching instrument details from Kite...")
+            # Fetch all NFO instruments (or filter more specifically if needed)
+            nfo_instruments = kite_client.instruments(exchange="NFO")
+            # Create a map for quick lookup
+            instrument_map = {inst['instrument_token']: inst for inst in nfo_instruments}
+
             for token in all_selected_tokens:
-                details = get_instrument_details(kite_client, token) # Assuming this returns dict or None
-                if details and 'instrument_token' in details and 'tradingsymbol' in details and 'exchange' in details:
+                instrument_data = instrument_map.get(token)
+                if instrument_data:
                     selected_instruments.append((
-                        details['instrument_token'],
-                        details['tradingsymbol'],
-                        details['exchange']
+                        instrument_data['instrument_token'],
+                        instrument_data['tradingsymbol'],
+                        instrument_data['exchange']
                     ))
-                    logger.info(f"📄 Instrument Details - Token: {details['instrument_token']}, Symbol: {details['tradingsymbol']}, Exchange: {details['exchange']}")
+                    logger.info(f"📄 Added Instrument - Token: {instrument_data['instrument_token']}, Symbol: {instrument_data['tradingsymbol']}, Exchange: {instrument_data['exchange']}")
                 else:
-                    logger.warning(f"⚠️ Could not fetch full details for token {token}. Skipping.")
+                    logger.warning(f"⚠️ Details for token {token} not found in instrument list. Skipping.")
 
     except Exception as e:
         logger.error(f"❌ Unexpected error during instrument selection: {e}", exc_info=True)
@@ -192,7 +198,7 @@ def main():
     # --- 1. Initialize Kite Connect ---
     if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
         logger.critical("❌ Zerodha API credentials (ZERODHA_API_KEY, KITE_ACCESS_TOKEN) missing in config.")
-        return 1 # Standard exit code for error
+        sys.exit(1) # Standard exit code for error
 
     kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
     try:
@@ -202,7 +208,7 @@ def main():
         logger.info("✅ Zerodha Kite Connect client initialized and authenticated.")
     except Exception as e:
         logger.critical(f"❌ Failed to authenticate Kite client: {e}")
-        return 1 # Standard exit code for error
+        sys.exit(1) # Standard exit code for error
 
     # --- 2. Select Instruments ---
     # This now returns a list of tuples (token, symbol, exchange)
@@ -210,7 +216,7 @@ def main():
 
     if not selected_instruments:
         logger.critical("❌ No instruments available to trade. Exiting.")
-        return 1 # Standard exit code for error
+        sys.exit(1) # Standard exit code for error
 
     # --- 3. Initialize Order Executor ---
     order_executor = OrderExecutor(kite=kite)
@@ -233,7 +239,7 @@ def main():
     if successfully_added == 0:
         logger.critical("❌ Failed to add any instruments to the trader. Exiting.")
         trader.stop_trading() # Ensure clean shutdown if startup fails
-        return 1 # Standard exit code for error
+        sys.exit(1) # Standard exit code for error
     elif successfully_added < len(selected_instruments):
         logger.warning(f"⚠️ Only {successfully_added}/{len(selected_instruments)} instruments were added successfully.")
 
@@ -260,14 +266,12 @@ def main():
                     logger.info("🛑 Trader stopped. Bot shutdown complete.")
         else:
             logger.critical("❌ Failed to start RealTimeTrader.")
-            return 1 # Standard exit code for error
+            sys.exit(1) # Standard exit code for error
     else:
         logger.info("🔄 Signal generation mode selected. Implementation needed.")
         # Add signal generation logic here if required
 
-    return 0 # Standard exit code for success
+    sys.exit(0) # Standard exit code for success
 
 if __name__ == "__main__":
-    # Capture exit code from main function
-    exit_code = main()
-    sys.exit(exit_code)
+    main()
