@@ -9,6 +9,26 @@ This repository contains an advanced options scalping bot designed for the Nifty
 * **Telegram bot control** – supports `/start`, `/stop`, `/status` and `/summary` commands.  It pushes P&L updates, error alerts and session notifications to the configured chat.
 * **Dockerised deployment** – a minimal Dockerfile and Railway/Render configuration make it easy to run the bot in a cloud environment.
 
+nifty_scalper_bot/
+├── src/                      # All core bot logic lives here
+│   ├── main.py               # ✅ Entry point
+│   ├── config.py             # ✅ Central configuration file (API keys, SL/TP, etc.)
+│   ├── data_streaming/       # ✅ Market data & streaming logic
+│   ├── execution/            # ✅ Order execution logic
+│   ├── notifications/        # ✅ Telegram bot control & alerts
+│   ├── risk/                 # ✅ Position sizing, daily limits
+│   ├── strategies/           # ✅ Technical indicator logic
+│   └── utils/                # ✅ Utility tools: strike selector, expiry, etc.
+│
+├── tests/                    # 🔧 (Optional) Test scripts
+│
+├── .env.example              # ✅ Sample environment variable file
+├── Dockerfile                # ✅ For containerization
+├── manage_bot.sh             # ✅ Shell script to run/kill the bot
+├── render.yaml               # ✅ For Render or Railway deployment config
+├── README.md                 # ✅ Documentation
+├── requirements.txt          # ✅ Python dependencies
+
 ## Quick start
 
 1. **Clone the repository**
