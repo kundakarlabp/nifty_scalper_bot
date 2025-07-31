@@ -4,10 +4,10 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Unbuffered output for live logs
+# Set unbuffered output for logs
 ENV PYTHONUNBUFFERED=1
 
-# Set PYTHONPATH to allow imports from src/
+# Set PYTHONPATH so src/ becomes importable
 ENV PYTHONPATH=/app/src
 
 # Install system dependencies
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first to use Docker layer cache
+# Copy requirements file first (for cache optimization)
 COPY requirements.txt .
 
 # Install Python dependencies
@@ -26,8 +26,11 @@ RUN pip install --upgrade pip && \
     pip install --no-cache-dir numpy pandas && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy all application files
+# Copy full source code
 COPY . .
 
-# Final command to run in Railway: Real-time trading ENABLED
-CMD ["python", "src/main.py", "--mode", "realtime", "--trade"]
+# Make manage_bot.sh executable
+RUN chmod +x manage_bot.sh
+
+# Default command: run both real trading + telegram command listener
+CMD ["bash", "manage_bot.sh", "start"]
