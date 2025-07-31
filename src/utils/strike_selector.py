@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 def get_nearest_strike(target_price: float, step: int = NIFTY_STRIKE_STEP) -> int:
     """
     Calculates the nearest strike price based on a target price and a standard step.
-
     This function rounds a given price (like the Nifty 50 spot price) to the nearest
     valid strike price for options. For Nifty, strikes are typically in increments of 50.
 
@@ -40,10 +39,9 @@ def get_nearest_strike(target_price: float, step: int = NIFTY_STRIKE_STEP) -> in
 
 def get_itm_otm_strikes(atm_strike: int,
                        strike_step: int = NIFTY_STRIKE_STEP,
-                       offset: int = 1) -> tuple[int, int]:
+                       offset: int = 1) -> tuple:
     """
     Calculates the ITM and OTM strikes adjacent to a given ATM strike.
-
     This is a helper function if you want to explicitly calculate nearby strikes.
     Note: The definition of ITM/OTM depends on Call (CE) or Put (PE).
     For a Call: ITM is lower than ATM, OTM is higher.
@@ -55,12 +53,13 @@ def get_itm_otm_strikes(atm_strike: int,
         offset (int): Number of steps away from ATM (default 1 for nearest).
 
     Returns:
-        tuple[int, int]: A tuple containing (ITM strike, OTM strike) based on the offset.
-                         This is a simplified absolute calculation.
+        tuple: A tuple containing (ITM strike, OTM strike) based on the offset.
+               This is a simplified absolute calculation.
+               e.g., (17950, 18050) if atm_strike is 18000 and offset is 1.
     """
     itm_strike = atm_strike - (offset * strike_step)
     otm_strike = atm_strike + (offset * strike_step)
-    return itm_strike, otm_strike
+    return itm_strike, otm_strike # Corrected return type annotation to 'tuple'
 
 def select_nifty_option_strikes(
     kite: KiteConnect,
@@ -71,7 +70,6 @@ def select_nifty_option_strikes(
 ) -> Optional[List[int]]:
     """
     Selects Nifty 50 Index Option instrument tokens based on specified criteria.
-
     This is the main function. It fetches the current Nifty 50 spot price,
     calculates the target strike based on `strike_criteria`, fetches the list
     of Nifty options instruments, and finds the matching instrument token(s).
@@ -106,12 +104,10 @@ def select_nifty_option_strikes(
     Example Usage (Conceptual):
         # Assuming `kite` is an authenticated KiteConnect object
         # and `expiry_date` is a string like "2023-12-28"
-
         # Select ATM Call
         ce_tokens = select_nifty_option_strikes(kite, expiry_date, "CE", "ATM")
         if ce_tokens:
             print(f"Selected ATM CE Token: {ce_tokens[0]}")
-
         # Select ATM Put
         pe_tokens = select_nifty_option_strikes(kite, expiry_date, "PE", "ATM")
         if pe_tokens:
@@ -123,18 +119,16 @@ def select_nifty_option_strikes(
         # The instrument identifier for Nifty 50 Index on NSE is "NSE:NIFTY 50".
         ltp_data = kite.ltp(["NSE:NIFTY 50"])
         nifty_ltp = ltp_data.get("NSE:NIFTY 50", {}).get('last_price')
-
         if not nifty_ltp:
             logger.error("❌ Could not fetch Nifty 50 spot price using kite.ltp().")
             return None # Indicate failure
-
         logger.info(f"📈 Fetched Nifty 50 Spot Price: {nifty_ltp}")
 
         # --- 2. Calculate Target Strike Price ---
         atm_strike = get_nearest_strike(nifty_ltp, NIFTY_STRIKE_STEP)
         logger.debug(f"🎯 Calculated ATM Strike: {atm_strike}")
-
         target_strike = atm_strike
+
         # Determine the target strike based on the criteria
         if strike_criteria.upper() == "ITM":
             # Simplified logic: For CE, ITM is lower; for PE, ITM is higher.
@@ -213,7 +207,6 @@ def select_nifty_option_strikes(
                 f"Expiry={expiry}, Strike={target_strike}, Type={option_type.upper()}"
             )
             return None # Indicate no match found
-
         logger.info(f"✅ Final Selected Token(s): {selected_tokens}")
         return selected_tokens
 
