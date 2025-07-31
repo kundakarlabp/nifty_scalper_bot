@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from ..config import Config
+from src.config import Config
 
 logger = logging.getLogger(__name__)
 
