@@ -23,7 +23,7 @@ import logging
 import sys
 import time
 
-from .data_streaming.realtime_trader import RealTimeTrader
+from src.data_streaming.realtime_trader import RealTimeTrader
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
