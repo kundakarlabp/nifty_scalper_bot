@@ -1,0 +1,1 @@
+"""Data streaming and real‑time trading logic."""

@@ -1,0 +1,1 @@
+"""Risk management components for the scalper bot."""

@@ -1,0 +1,17 @@
+kiteconnect==4.1.0
+python-telegram-bot==20.6
+pandas==2.2.2
+numpy==1.26.4
+ta>=0.11.0
+requests==2.32.3
+scikit-learn==1.5.0
+python-dotenv==1.0.1
+schedule==1.2.1
+flask==3.0.3
+yfinance==0.2.40
+websocket-client==1.8.0
+uvicorn==0.29.0
+fastapi==0.111.0
+matplotlib==3.9.0
+pytest==7.4.4
+pytest-mock==3.11.1

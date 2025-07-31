@@ -1,0 +1,1 @@
+"""Root package for the scalper bot source code."""

@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: nifty-scalper-bot
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      # Zerodha credentials
+      - key: ZERODHA_API_KEY
+        sync: false
+      - key: ZERODHA_API_SECRET
+        sync: false
+      - key: KITE_ACCESS_TOKEN
+        sync: false
+      # Telegram credentials
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_USER_ID
+        sync: false
+      # Risk and strategy configuration
+      - key: ACCOUNT_SIZE
+        sync: false
+      - key: RISK_PER_TRADE
+        sync: false
+      - key: MAX_DRAWDOWN
+        sync: false
+      - key: CONFIDENCE_THRESHOLD
+        sync: false
+      - key: MIN_SIGNAL_SCORE
+        sync: false
+      - key: NIFTY_LOT_SIZE
+        sync: false
+      - key: MIN_LOTS
+        sync: false
+      - key: MAX_LOTS
+        sync: false
+
+  # Optionally schedule start/stop via cron if your platform supports it
+  - type: cron
+    name: start-bot-morning
+    schedule: "40 3 * * 1-5"  # 09:10 IST = 03:40 UTC
+    command: python3 -m src.main start
+  - type: cron
+    name: stop-bot-evening
+    schedule: "1 10 * * 1-5"   # 15:31 IST = 10:01 UTC
+    command: "pkill -f 'python3 -m src.main start' || true"
