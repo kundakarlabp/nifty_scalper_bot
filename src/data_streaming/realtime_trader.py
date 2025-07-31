@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import logging
 import time
-import threading
+import threading # Import threading for polling
 import pytz
 from typing import Dict, List, Any, Optional
 from kiteconnect import KiteConnect
@@ -56,19 +56,17 @@ class RealTimeTrader:
         self.active_signals: Dict[int, Dict[str, Any]] = {}
         # This can be used to track positions if needed at this level,
         # though OrderExecutor also tracks them.
-        self.active_positions: Dict[str, Dict[str, Any]] = {} # Placeholder, consider removing if OrderExecutor handles it
+        self.active_positions: Dict[str, Dict[str, Any]] = {} # Placeholder
 
         # --- Initialize core modules ---
         self.streamer = MarketDataStreamer()
         self.processor = StreamingDataProcessor()
 
         # --- Initialize Strategy ---
-        # Pass parameters from Config. Explicit passing is clearer.
         self.strategy = DynamicScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
             base_target_points=Config.BASE_TARGET_POINTS,
             confidence_threshold=Config.CONFIDENCE_THRESHOLD
-            # Add other strategy parameters from Config if needed and accepted by __init__
         )
 
         # --- Initialize Risk Manager ---
@@ -78,9 +76,11 @@ class RealTimeTrader:
             max_drawdown=Config.MAX_DRAWDOWN
         )
 
-        # --- Initialize Telegram Controller WITH status callback ---
-        # This allows /status command to get real-time data
-        self.telegram_controller = TelegramController(status_callback=self.get_trading_status)
+        # --- Initialize Telegram Controller WITH callbacks ---
+        self.telegram_controller = TelegramController(
+            status_callback=self.get_trading_status,
+            control_callback=self._handle_telegram_control
+        )
         # Store thread reference for Telegram polling
         self.telegram_polling_thread: Optional[threading.Thread] = None
         self._is_polling = False # Flag to control polling loop
@@ -122,7 +122,6 @@ class RealTimeTrader:
             successfully_subscribed = self.streamer.subscribe_tokens(self.trading_instruments)
             if successfully_subscribed:
                 logger.info(f"✅ Resubscribed to {len(successfully_subscribed)} tokens after reconnection.")
-            # Note: streamer.subscribe_tokens should ideally return the list of successfully subscribed tokens
 
     def _handle_close(self, code, reason):
         """Callback when WebSocket closes."""
@@ -131,10 +130,9 @@ class RealTimeTrader:
         # Send disconnection status to Telegram
         self.telegram_controller.send_message(f"🔌 *WebSocket closed* | Code: {code}")
 
-    def _handle_error(self, ws, error): # Adjusted signature to match common KiteTicker callback
+    def _handle_error(self, ws, error): # Adjusted signature
         """Callback when WebSocket encounters an error."""
         logger.error(f"⚠️ WebSocket error: {error}")
-        # Send error status to Telegram
         self.telegram_controller.send_message(f"⚠️ *WebSocket error*: {error}")
 
     def _handle_ticks(self, ticks):
@@ -149,18 +147,13 @@ class RealTimeTrader:
                     continue
                 token = processed_tick['instrument_token']
                 now = time.time()
-                # Use a dictionary to track last tick time per token more cleanly
-                # Consider using self.processor's internal timestamping if available
                 last_tick_time = getattr(self, f'_last_tick_time_{token}', 0)
-                # Update OHLC and check signals every minute per token
-                # TODO: Consider making this interval configurable or event-driven
                 if now - last_tick_time >= 60:
                     setattr(self, f'_last_tick_time_{token}', now)
                     self.processor.update_ohlc(token, '1min')
                     self._check_trading_signals(token)
         except Exception as e:
             logger.error(f"❌ Tick handler error: {e}", exc_info=True)
-            # Send error status to Telegram
             self.telegram_controller.send_message(f"❌ *Tick handler error*: {e}")
 
     # --- Signal & Execution Logic ---
@@ -169,27 +162,20 @@ class RealTimeTrader:
         Fetch latest data and generate/check for trading signals.
         """
         try:
-            # Fetch last 100 candles for analysis
             ohlc_data = self.processor.get_latest_data(token, 100)
-            if ohlc_data is None or ohlc_data.empty or len(ohlc_data) < 50: # Ensure enough data
+            if ohlc_data is None or ohlc_data.empty or len(ohlc_data) < 50:
                 return
             current_price = self.processor.get_current_price(token)
             if current_price is None:
                 return
 
-            # Generate signal using the strategy module
             signal = self.strategy.generate_signal(ohlc_data, current_price)
 
-            # If a valid signal is generated and meets confidence threshold from Config
             if signal and signal.get('confidence', 0) >= Config.CONFIDENCE_THRESHOLD:
-                # Avoid duplicate signals for the same token
                 if token not in self.active_signals:
                     self._handle_trading_signal(token, signal)
-                # else:
-                #     logger.debug(f"Signal for token {token} already active, ignoring.")
         except Exception as e:
             logger.error(f"❌ Signal check failed for token {token}: {e}", exc_info=True)
-            # Send error status to Telegram
             self.telegram_controller.send_message(f"❌ *Signal check failed* for token {token}: {e}")
 
     def _handle_trading_signal(self, token: int, signal: Dict[str, Any]):
@@ -201,41 +187,26 @@ class RealTimeTrader:
         position_details = {}
         try:
             logger.info(f"🎯 Signal for token {token}: {signal['signal']}")
-            # Calculate position size based on risk management rules
             position_details = self.risk_manager.calculate_position_size(
                 entry_price=signal['entry_price'],
                 stop_loss=signal['stop_loss'],
                 signal_confidence=signal['confidence'],
-                market_volatility=signal.get('market_volatility', 0) # Provide default if missing
+                market_volatility=signal.get('market_volatility', 0)
             )
-            # Skip if position size calculation failed or is zero
             if not position_details or position_details.get('quantity', 0) <= 0:
                 logger.warning(f"⚠️ Position size invalid for token {token}")
                 self.telegram_controller.send_message(f"⚠️ *Position size invalid* for token {token}")
                 execution_status = "INVALID_SIZE"
                 return # Exit early
 
-            # Format and send Telegram alert
-            alert_message = f"""
-🎯 *REAL-TIME SIGNAL*
-📈 Token: {token}
-📊 Direction: {signal['signal']}
-💰 Entry: {signal['entry_price']:.2f}
-🛑 SL: {signal['stop_loss']:.2f}
-🎯 Target: {signal['target']:.2f}
-🔥 Confidence: {signal['confidence']*100:.1f}%
-🌊 Volatility: {signal.get('market_volatility', 0):.2f}
-📦 Qty: {position_details['quantity']} ({position_details.get('lots', 'N/A')} lots)
-🧠 Reason: {', '.join(signal.get('reasons', [])[:3])}
-            """
-            self.telegram_controller.send_message(alert_message)
-            logger.info(f"Signal Alert Sent:\n{alert_message}")
+            # --- Use the enhanced signal alert ---
+            self.telegram_controller.send_signal_alert(token, signal, position_details)
+            logger.info(f"Enhanced Signal Alert Sent for token {token}")
 
             # --- Handle Execution ---
             if self.execution_enabled and self.order_executor and self.kite:
                 logger.info("💼 Initiating live execution via OrderExecutor...")
-                
-                # Get symbol and exchange from the stored mapping
+
                 instrument_info = self.token_symbol_map.get(token)
                 if not instrument_info:
                     error_msg = f"❌ Cannot execute: No symbol/exchange mapping for token {token}"
@@ -246,29 +217,21 @@ class RealTimeTrader:
 
                 symbol = instrument_info["symbol"]
                 exchange = instrument_info["exchange"]
-                transaction_type = signal['signal'] # Assuming 'BUY' or 'SELL'
+                transaction_type = signal['signal']
 
-                # 1. Place Entry Order
                 entry_order_id = self.order_executor.place_entry_order(
                     symbol=symbol,
                     exchange=exchange,
                     transaction_type=transaction_type,
                     quantity=position_details['quantity']
-                    # product and order_type can use defaults from Config/OrderExecutor
                 )
                 if entry_order_id:
                     logger.info(f"✅ Entry order placed, Order ID: {entry_order_id}")
-                    # 2. Wait for order fill confirmation (simplified)
-                    # In a real scenario, you'd poll kite.order_history or listen via OMS WebSocket
-                    # This is a placeholder wait. Consider a more robust check.
                     time.sleep(2) # TODO: Replace with proper order status check
 
-                    # 3. Get filled price (simplified, use actual order history)
-                    # Placeholder: using signal's entry price. Improve this.
                     filled_entry_price = signal['entry_price']
                     logger.info(f"ℹ️ Using signal entry price {filled_entry_price} as filled price (placeholder)")
 
-                    # 4. Setup GTT Orders
                     gtt_success = self.order_executor.setup_gtt_orders(
                         entry_order_id=entry_order_id,
                         entry_price=filled_entry_price,
@@ -277,14 +240,12 @@ class RealTimeTrader:
                         symbol=symbol,
                         exchange=exchange,
                         quantity=position_details['quantity'],
-                        transaction_type=transaction_type # Must match entry order
+                        transaction_type=transaction_type
                     )
                     if gtt_success:
                         logger.info("✅ Entry order and GTTs placed successfully via OrderExecutor")
                         execution_status = "SUCCESS"
-                        # Update risk manager that a position is open
                         self.risk_manager.update_position_status(is_open=True)
-                        # Send success alert
                         self.telegram_controller.send_message(
                             f"✅ *Trade Executed*\n"
                             f"Symbol: {symbol}\n"
@@ -297,14 +258,12 @@ class RealTimeTrader:
                         logger.error(error_msg)
                         self.telegram_controller.send_message(error_msg)
                         execution_status = "FAILED_GTT"
-                        # TODO: Consider cancelling the entry order if GTTs failed
                 else:
                     error_msg = "❌ Failed to place entry order via OrderExecutor"
                     logger.error(error_msg)
                     self.telegram_controller.send_message(error_msg)
                     execution_status = "FAILED_ENTRY"
             else:
-                # Execution is disabled or components missing
                 if not self.execution_enabled:
                     logger.info("⚠️ Execution is disabled (simulation mode)")
                     execution_status = "SIMULATED"
@@ -322,7 +281,6 @@ class RealTimeTrader:
             logger.error(error_msg, exc_info=True)
             self.telegram_controller.send_message(error_msg)
             execution_status = "ERROR_EXCEPTION"
-            # Optionally store error status in active_signals
 
         finally:
             # Store the active signal regardless of execution outcome for tracking
@@ -331,7 +289,7 @@ class RealTimeTrader:
                 "position_info": position_details,
                 "timestamp": time.time(),
                 "status": "processed",
-                "execution_status": execution_status # Track execution outcome
+                "execution_status": execution_status
             }
 
     # --- Public Methods for Control ---
@@ -351,13 +309,10 @@ class RealTimeTrader:
         try:
             if token not in self.trading_instruments:
                 self.trading_instruments.append(token)
-                # Store the mapping for order execution and status display
                 self.token_symbol_map[token] = {"symbol": symbol, "exchange": exchange}
                 logger.info(f"➕ Token added: {token} -> {symbol} ({exchange})")
-                # Send notification to Telegram
                 self.telegram_controller.send_message(f"➕ *Instrument Added*\nToken: {token}\nSymbol: {symbol}")
 
-                # Subscribe immediately if streamer is already connected
                 if self.streamer.is_connected:
                     successfully_subscribed = self.streamer.subscribe_tokens([token])
                     if not successfully_subscribed or token not in successfully_subscribed:
@@ -385,24 +340,19 @@ class RealTimeTrader:
             if token in self.trading_instruments:
                 self.trading_instruments.remove(token)
                 logger.info(f"➖ Token removed: {token}")
-                # Send notification to Telegram
                 token_symbol = self.token_symbol_map.get(token, {}).get('symbol', 'Unknown')
                 self.telegram_controller.send_message(f"➖ *Instrument Removed*\nToken: {token}\nSymbol: {token_symbol}")
 
-                # Remove mapping
                 removed_info = self.token_symbol_map.pop(token, None)
                 if not removed_info:
                     logger.warning(f"⚠️ No symbol/exchange mapping found for removed token {token}")
 
-                # Unsubscribe if streamer is connected
                 if self.streamer.is_connected:
                     self.streamer.unsubscribe_tokens([token])
 
-                # Clean up related data
                 self.processor.clear_buffer(token)
                 self.active_signals.pop(token, None)
-                # Optionally remove from active_positions if implemented and used
-                self.active_positions.pop(str(token), None) # Assuming key is str(token)
+                self.active_positions.pop(str(token), None)
             else:
                  logger.info(f"ℹ️ Token {token} not found in trading list.")
             return True
@@ -418,8 +368,20 @@ class RealTimeTrader:
         status_msg = "enabled" if enable else "disabled"
         status_emoji = "✅" if enable else "⚠️"
         logger.info(f"{status_emoji} Trading execution {status_msg}")
-        # Notify via Telegram
         self.telegram_controller.send_message(f"{status_emoji} *Trading execution {status_msg}*")
+
+    # --- NEW: Telegram Control Callback Method ---
+    def _handle_telegram_control(self, enable: bool) -> bool:
+        """
+        Callback method for Telegram controller to enable/disable trading.
+        """
+        try:
+            self.enable_trading(enable)
+            logger.info(f"{'✅' if enable else '⚠️'} Trading execution toggled via Telegram to {'ENABLED' if enable else 'DISABLED'}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error in Telegram control callback: {e}", exc_info=True)
+            return False
 
     def start_trading(self) -> bool:
         """Start the real-time trading session."""
@@ -430,15 +392,11 @@ class RealTimeTrader:
                 self.telegram_controller.send_message(warning_msg)
                 return False
 
-            # Initialize and start the data stream
             if not self.streamer.initialize_connection():
                 error_msg = "❌ Failed to initialize WebSocket connection"
                 logger.error(error_msg)
                 self.telegram_controller.send_message(error_msg)
                 return False
-
-            # Subscription happens in _handle_connect callback or can be done here if connection is immediate
-            # self.streamer.subscribe_tokens(self.trading_instruments)
 
             if not self.streamer.start_streaming():
                 error_msg = "❌ Failed to start WebSocket streaming"
@@ -446,19 +404,17 @@ class RealTimeTrader:
                 self.telegram_controller.send_message(error_msg)
                 return False
 
-            # Set internal state
             self.is_trading = True
             self.start_time = time.time()
             logger.info("✅ Real-time trading session started")
 
-            # --- Start Telegram Polling in a separate thread ---
+            # --- Start Telegram Polling ---
             if not self._is_polling:
                 self._is_polling = True
                 self.telegram_polling_thread = threading.Thread(target=self._run_telegram_polling, daemon=True)
                 self.telegram_polling_thread.start()
                 logger.info("📡 Telegram polling thread started.")
 
-            # Send session start alert via Telegram controller's dedicated method
             self.telegram_controller.send_realtime_session_alert("START")
             return True
 
@@ -478,21 +434,16 @@ class RealTimeTrader:
             self._is_polling = False
             if self.telegram_polling_thread and self.telegram_polling_thread.is_alive():
                 logger.info("🛑 Stopping Telegram polling...")
-                self.telegram_controller.stop_polling() # Signal the polling loop to stop
-                # Optionally join with a timeout if it doesn't stop promptly
-                # self.telegram_polling_thread.join(timeout=2)
+                self.telegram_controller.stop_polling()
             self.telegram_polling_thread = None
 
-            # Clear internal state
             self.active_signals.clear()
-            self.active_positions.clear() # If used
-            was_trading = self.is_trading # Store state before changing it
+            self.active_positions.clear()
+            was_trading = self.is_trading
             self.is_trading = False
             self.is_connected = False
             logger.info("🛑 Real-time trading session stopped")
 
-            # Send session stop alert via Telegram controller's dedicated method
-            # Only send stop message if it was actually trading
             if was_trading:
                  self.telegram_controller.send_realtime_session_alert("STOP")
 
@@ -521,13 +472,8 @@ class RealTimeTrader:
             seconds = int(uptime_seconds % 60)
             uptime_formatted = f"{hours}h {minutes}m {seconds}s"
 
-            # Get streaming status from streamer
             streaming_status = self.streamer.get_connection_status() if hasattr(self.streamer, 'get_connection_status') else {'connected': self.is_connected}
-
-            # Get processor buffer status
             processor_status = self.processor.get_buffer_status() if hasattr(self.processor, 'get_buffer_status') else {}
-
-            # Get risk manager status
             risk_status = self.risk_manager.get_risk_status() if hasattr(self.risk_manager, 'get_risk_status') else {}
 
             return {
@@ -535,7 +481,7 @@ class RealTimeTrader:
                 "execution_enabled": self.execution_enabled,
                 "streaming_status": streaming_status,
                 "active_signals": len(self.active_signals),
-                "active_positions": len(self.active_positions), # Consider if this is the right count
+                "active_positions": len(self.active_positions),
                 "trading_instruments_count": len(self.trading_instruments),
                 "processor_status": processor_status,
                 "risk_status": risk_status,
@@ -544,16 +490,12 @@ class RealTimeTrader:
             }
         except Exception as e:
             logger.error(f"❌ Error fetching trading status: {e}", exc_info=True)
-            # Return a minimal status indicating the error
             return {
                 "is_trading": self.is_trading,
                 "execution_enabled": self.execution_enabled,
-                "error": f"Status fetch error: {str(e)[:100]}" # Limit error string length
+                "error": f"Status fetch error: {str(e)[:100]}"
             }
 
 # Example usage (if run directly)
 if __name__ == "__main__":
-    # Note: Running this directly won't perform trades without a full setup
-    # including Kite credentials, OrderExecutor, and selected instruments.
-    # The main entry point is src/main.py
     print("RealTimeTrader class defined. Use via src/main.py.")
