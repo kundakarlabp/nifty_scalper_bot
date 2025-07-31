@@ -20,7 +20,7 @@ import pandas as pd
 # empty ``__init__.py`` files.
 # Use a relative import so that this module can be loaded as part of the
 # ``src`` package hierarchy.  See ``nifty_scalper_bot/src/__init__.py``.
-from ..config import Config
+from src.config import Config
 from src.utils.indicators import (
     calculate_ema,
     calculate_rsi,
