@@ -37,10 +37,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from ..config import Config
-from ..strategies.scalping_strategy import EnhancedScalpingStrategy
-from ..risk.position_sizing import PositionSizing
-from ..execution.order_executor import OrderExecutor
-from ..notifications.telegram_controller import TelegramController
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.risk.position_sizing import PositionSizing
+from src.execution.order_executor import OrderExecutor
+from src.notifications.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
