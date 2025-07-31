@@ -34,32 +34,109 @@ class TelegramController:
         self.last_message_time: float = 0
         self.message_cooldown: int = 1  # seconds - faster for commands
         self.sent_messages: deque = deque(maxlen=100)  # FIFO for duplicate prevention
-        # FIXED: Removed extra spaces in the URL construction
+        # FIXED: Ensure correct URL construction
         self.base_url: str = f"https://api.telegram.org/bot{self.bot_token}"
         self.status_callback = status_callback
         self.control_callback = control_callback # For enable/disable commands
         self.is_listening = False
         self.offset = 0 # For message polling
 
-    # --- Existing send_message and alert methods (mostly unchanged, minor improvements) ---
     def send_message(self, message: str) -> bool:
-        # ... (Keep existing send_message logic) ...
-        # (Implementation from previous optimized version is correct)
-        # Ensure base_url is correct and rate limiting/deduplication works
-        # ... 
+        """
+        Send a message via Telegram with deduplication and rate-limiting.
+
+        Args:
+            message (str): The message to send.
+
+        Returns:
+            bool: True if message sent successfully, False otherwise.
+        """
+        try:
+            # Validate credentials
+            if not self.bot_token or not self.chat_id:
+                logger.warning("⚠️ Telegram credentials missing")
+                return False
+
+            current_time = time.time()
+            
+            # Create a hash for duplicate detection (using first 100 chars of lowercase message)
+            message_hash = hash(message.lower().strip()[:100])
+
+            # Duplicate check
+            if message_hash in self.sent_messages:
+                logger.debug("⚠️ Duplicate message skipped")
+                return False
+
+            # Rate limiting
+            time_since_last = current_time - self.last_message_time
+            if time_since_last < self.message_cooldown:
+                sleep_time = self.message_cooldown - time_since_last
+                logger.debug(f"⏳ Rate limiting - sleeping for {sleep_time:.2f}s")
+                time.sleep(max(sleep_time, 0)) # Ensure non-negative sleep
+
+            # Construct the API URL
+            url = f"{self.base_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'Markdown'
+            }
+
+            # Send the message
+            response = requests.post(url, json=payload, timeout=10)
+
+            if response.status_code == 200:
+                # Success: record the message and timestamp
+                self.sent_messages.append(message_hash)
+                self.last_message_time = time.time()
+                logger.info("✅ Telegram message sent")
+                return True
+
+            elif response.status_code == 429:
+                # Rate limit hit: extract retry_after value or use default
+                try:
+                    retry_after = response.json().get('parameters', {}).get('retry_after', 5)
+                except:
+                    retry_after = 5
+                logger.warning(f"⚠️ Rate limit hit. Retrying in {retry_after}s...")
+                time.sleep(retry_after)
+                
+                retry_response = requests.post(url, json=payload, timeout=10)
+                if retry_response.status_code == 200:
+                    self.sent_messages.append(message_hash)
+                    self.last_message_time = time.time()
+                    logger.info("✅ Telegram retry succeeded")
+                    return True
+                logger.error(f"❌ Retry failed: {retry_response.status_code}")
+                return False
+
+            else:
+                # Other error
+                logger.error(f"❌ Failed to send Telegram message: {response.status_code} - {response.text}")
+                return False
+
+        except requests.exceptions.Timeout:
+            logger.error("❌ Telegram request timeout")
+            return False
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error in Telegram message: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Exception in Telegram message: {e}", exc_info=True)
+            return False
 
     def send_startup_alert(self) -> bool:
         """Send a startup alert message."""
-        message = """
+        message = f"""
 🚀 *NIFTY SCALPER BOT STARTED*
 
 ✅ System is operational
 📊 Trading Ready
 🔔 Telegram Alerts & Commands Active
-📈 Mode: Live Trading Default is *{}*
+📈 Mode: Live Trading Default is *{"ENABLED" if Config.ENABLE_LIVE_TRADING else "DISABLED"}*
 
 Use `/help` for commands
-        """.format("ENABLED" if Config.ENABLE_LIVE_TRADING else "DISABLED")
+        """
         return self.send_message(message)
 
     def send_shutdown_alert(self) -> bool:
@@ -75,10 +152,49 @@ Use `/start` to resume (requires restart)
         return self.send_message(message)
 
     def send_system_status(self, status: Optional[Dict[str, Any]] = None) -> bool:
-       # ... (Keep existing send_system_status logic, minor fixes if needed) ...
-       # Use provided status, callback, or default
-       # Format message with improved clarity
-       # ...
+        """
+        Send a formatted system status message.
+
+        Args:
+            status (Optional[Dict]): System status dictionary. If None, uses callback or default.
+
+        Returns:
+            bool: True if message sent successfully, False otherwise.
+        """
+        try:
+            # Use provided status, callback, or default
+            if status is None:
+                if self.status_callback:
+                    status = self.status_callback()
+                else:
+                    status = self.default_status()
+
+            # Format the message with status information
+            message = f"""
+📊 *SYSTEM STATUS*
+
+✅ Trading: {'ACTIVE' if status.get('is_trading', False) else 'INACTIVE'}
+⚡ Execution: {'ENABLED' if status.get('execution_enabled', False) else 'DISABLED'}
+📡 WebSocket: {'CONNECTED' if status.get('streaming_status', {}).get('connected', False) else 'DISCONNECTED'}
+🔔 Active Signals: {status.get('active_signals', 0)}
+💼 Positions: {status.get('active_positions', 0)} / {status.get('trading_instruments_count', status.get('trading_instruments', 0))}
+
+💰 *RISK MGMT*
+- Equity: ₹{status.get('risk_status', {}).get('account_size', 0):,.2f}
+- P&L: ₹{status.get('risk_status', {}).get('daily_pnl', 0):,.2f}
+- Drawdown: {status.get('risk_status', {}).get('drawdown_percentage', 0):.2f}%
+- Open Trades: {status.get('risk_status', {}).get('current_positions', 0)}/{status.get('risk_status', {}).get('max_positions', 1)}
+
+🕐 {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d %H:%M:%S %Z')}
+🕐 Uptime: {status.get('uptime_formatted', 'N/A')}
+            """
+            return self.send_message(message)
+
+        except Exception as e:
+            logger.error(f"❌ Error sending system status: {e}", exc_info=True)
+            # Try to send a simpler error message
+            error_msg = f"❌ Error generating status report: {str(e)[:100]}..."
+            return self.send_message(error_msg)
 
     @staticmethod
     def default_status() -> Dict[str, Any]:
@@ -101,10 +217,30 @@ Use `/start` to resume (requires restart)
         }
 
     def send_realtime_session_alert(self, session_type: str, timestamp: Optional[datetime] = None) -> bool:
-        # ... (Keep existing logic) ...
-        pass
+        """
+        Send alert for real-time trading session start/stop.
+        
+        Args:
+            session_type (str): Either 'START' or 'STOP'
+            timestamp (Optional[datetime]): When the session event occurred. Uses current time if None.
+            
+        Returns:
+            bool: True if message sent successfully
+        """
+        if timestamp is None:
+            timestamp = datetime.now(pytz.timezone('Asia/Kolkata'))
+            
+        emoji = "🟢" if session_type.upper() == "START" else "🔴"
+        action = "started" if session_type.upper() == "START" else "stopped"
+        
+        message = f"""
+{emoji} *REAL-TIME TRADING SESSION {session_type.upper()}*
 
-    # --- NEW: Enhanced Signal Alert ---
+⏰ Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')}
+📊 Status: Session {action}
+        """
+        return self.send_message(message)
+
     def send_signal_alert(self, token: int, signal_details: Dict[str, Any], position_details: Dict[str, Any]):
         """
         Send a detailed signal alert with TP, SL, and strength.
@@ -144,7 +280,6 @@ Use `/start` to resume (requires restart)
             logger.error(f"❌ Error sending signal alert: {e}", exc_info=True)
             return False
 
-    # --- NEW: Command Handling Logic ---
     def _handle_incoming_message(self, message_data: Dict[str, Any]):
         """Process an incoming message and respond to commands."""
         try:
@@ -156,9 +291,6 @@ Use `/start` to resume (requires restart)
             # Security: Only respond to messages from the configured user
             if user_id != self.chat_id:
                 logger.debug(f"⚠️ Ignoring message from unauthorized user {user_id}")
-                # Optionally send a security alert to the owner
-                # if chat_id == self.chat_id: # Only if the message was in the correct chat
-                #     self.send_message(f"⚠️ Security Alert: Unauthorized access attempt from user {user_id}")
                 return
 
             logger.info(f"Received Telegram command: '{text}' from user {user_id}")
@@ -217,20 +349,7 @@ Use `/start` to resume (requires restart)
 
             elif command == '/signal':
                  # Placeholder - you could fetch the last signal from trader state
-                 # For now, show a message
                  self.send_message("ℹ️ *Last Signal:* (Feature: Fetch last signal details)")
-
-            # elif command == '/force_entry':
-            #     # Advanced: Force entry for a specific token
-            #     # Requires parsing arguments and calling trader method
-            #     # self.send_message("⚠️ /force_entry command not yet implemented.")
-            #     pass
-
-            # elif command == '/cancel':
-            #     # Advanced: Cancel an order by ID
-            #     # Requires parsing arguments and calling order executor
-            #     # self.send_message("⚠️ /cancel command not yet implemented.")
-            #     pass
 
             else:
                 # Unknown command
@@ -241,14 +360,65 @@ Use `/start` to resume (requires restart)
             # Send error message back
             self.send_message("❌ An error occurred while processing your command.")
 
-    # --- Polling Mechanism (Keep existing logic, minor fixes) ---
     def start_polling(self):
-        # ... (Keep existing start_polling logic) ...
-        pass
+        """
+        Start polling for incoming messages. This should be run in a separate thread.
+        This is a basic polling mechanism. For production, consider webhooks.
+        """
+        if not self.bot_token:
+            logger.warning("⚠️ Telegram bot token missing. Cannot start polling.")
+            return
+            
+        if self.is_listening:
+            logger.info("⚠️ Telegram polling already started.")
+            return
+            
+        self.is_listening = True
+        logger.info("📡 Starting Telegram message polling...")
+        
+        while self.is_listening:
+            try:
+                url = f"{self.base_url}/getUpdates"
+                params = {
+                    'offset': self.offset,
+                    'timeout': 30  # Long polling timeout
+                }
+                response = requests.get(url, params=params, timeout=35)
+                
+                if response.status_code == 200:
+                    updates = response.json().get('result', [])
+                    for update in updates:
+                        self.offset = update['update_id'] + 1
+                        self._handle_incoming_message(update)
+                elif response.status_code == 401:
+                    logger.error("❌ Telegram bot token is invalid. Stopping polling.")
+                    self.is_listening = False
+                elif response.status_code == 409:
+                    logger.error("❌ Telegram bot conflict (maybe another instance is running). Stopping polling.")
+                    self.is_listening = False
+                else:
+                    logger.warning(f"⚠️ Telegram getUpdates returned status {response.status_code}")
+                    
+                # Small delay to prevent excessive polling if there are errors
+                if not updates:
+                    time.sleep(1)
+                    
+            except requests.exceptions.Timeout:
+                # Timeout is expected with long polling, continue
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ Network error in Telegram polling: {e}")
+                time.sleep(5) # Wait before retrying
+            except Exception as e:
+                logger.error(f"❌ Unexpected error in Telegram polling loop: {e}", exc_info=True)
+                time.sleep(5) # Wait before retrying
+                
+        logger.info("🛑 Telegram message polling stopped.")
 
     def stop_polling(self):
-        # ... (Keep existing stop_polling logic) ...
-        pass
+        """Stop the polling loop."""
+        self.is_listening = False
+        logger.info("🛑 Stopping Telegram message polling...")
 
 # Example usage (if run directly)
 if __name__ == "__main__":
