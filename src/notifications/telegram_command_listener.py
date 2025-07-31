@@ -15,7 +15,7 @@ trading itself; instead, it logs incoming commands.
 from __future__ import annotations
 
 import logging
-from .telegram_controller import TelegramController
+from src.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
