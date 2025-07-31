@@ -229,6 +229,7 @@ def main():
 
     # --- 5. Add Selected Instruments to Trader ---
     successfully_added = 0
+    # --- FIXED: Iterate over the tuple (token, symbol, exchange) ---
     for token, symbol, exchange in selected_instruments:
         if trader.add_trading_instrument(token, symbol, exchange):
             logger.info(f"➕ Successfully added instrument: {symbol} ({token}) on {exchange}")
@@ -269,7 +270,6 @@ def main():
             sys.exit(1) # Standard exit code for error
     else:
         logger.info("🔄 Signal generation mode selected. Implementation needed.")
-        # Add signal generation logic here if required
 
     sys.exit(0) # Standard exit code for success
 
