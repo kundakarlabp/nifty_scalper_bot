@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from ..config import Config
+from src.config import Config
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
