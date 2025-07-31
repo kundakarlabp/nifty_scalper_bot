@@ -4,8 +4,11 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Set unbuffered output (for better Railway/Render log visibility)
+# Unbuffered output for live logs
 ENV PYTHONUNBUFFERED=1
+
+# Set PYTHONPATH to allow imports from src/
+ENV PYTHONPATH=/app/src
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,19 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Set PYTHONPATH so src/ becomes importable
-ENV PYTHONPATH=/app/src
-
-# Copy requirements file first (to leverage Docker layer cache)
+# Copy requirements file first to use Docker layer cache
 COPY requirements.txt .
 
-# Install dependencies in correct order
+# Install Python dependencies
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir numpy pandas && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy full application code into the container
+# Copy all application files
 COPY . .
 
-# Default command to run your bot
+# Final command to run in Railway: Real-time trading ENABLED
 CMD ["python", "src/main.py", "--mode", "realtime", "--trade"]
