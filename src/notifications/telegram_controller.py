@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
-from ..config import Config
+from src.config import Config
 
 logger = logging.getLogger(__name__)
 
