@@ -21,10 +21,11 @@ class TelegramController:
     def __init__(self):
         """Initialize the Telegram controller with credentials and settings."""
         self.bot_token: str = Config.TELEGRAM_BOT_TOKEN
-        self.chat_id: str = str(Config.TELEGRAM_USER_ID)  # Ensure it's a string
+        self.chat_id: str = str(Config.TELEGRAM_USER_ID)
         self.last_message_time: float = 0
         self.message_cooldown: int = 2  # seconds
         self.sent_messages: deque = deque(maxlen=100)  # FIFO for duplicate prevention
+        self.base_url: str = f"https://api.telegram.org/bot{self.bot_token}"
 
     def send_message(self, message: str) -> bool:
         """
@@ -44,7 +45,7 @@ class TelegramController:
 
             current_time = time.time()
             
-            # Create a hash for duplicate detection (using first 100 chars of lowercase message)
+            # Create a hash for duplicate detection
             message_hash = hash(message.lower().strip()[:100])
 
             # Duplicate check
@@ -53,12 +54,14 @@ class TelegramController:
                 return False
 
             # Rate limiting
-            if current_time - self.last_message_time < self.message_cooldown:
-                logger.debug("⚠️ Telegram message rate limited")
-                return False
+            time_since_last = current_time - self.last_message_time
+            if time_since_last < self.message_cooldown:
+                sleep_time = self.message_cooldown - time_since_last
+                logger.debug(f"⏳ Rate limiting - sleeping for {sleep_time:.2f}s")
+                time.sleep(sleep_time)
 
             # Construct the API URL (FIXED: removed extra space)
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            url = f"{self.base_url}/sendMessage"
             payload = {
                 'chat_id': self.chat_id,
                 'text': message,
@@ -71,14 +74,16 @@ class TelegramController:
             if response.status_code == 200:
                 # Success: record the message and timestamp
                 self.sent_messages.append(message_hash)
-                self.last_message_time = current_time
+                self.last_message_time = time.time()
                 logger.info("✅ Telegram message sent")
                 return True
 
             elif response.status_code == 429:
-                # Rate limit hit: wait and retry once
-                logger.warning("⚠️ Rate limit hit. Retrying in 5s...")
-                time.sleep(5)
+                # Rate limit hit: extract retry_after value or use default
+                retry_after = response.json().get('parameters', {}).get('retry_after', 5)
+                logger.warning(f"⚠️ Rate limit hit. Retrying in {retry_after}s...")
+                time.sleep(retry_after)
+                
                 retry_response = requests.post(url, json=payload, timeout=10)
                 if retry_response.status_code == 200:
                     self.sent_messages.append(message_hash)
@@ -93,6 +98,9 @@ class TelegramController:
                 logger.error(f"❌ Failed to send Telegram message: {response.status_code} - {response.text}")
                 return False
 
+        except requests.exceptions.Timeout:
+            logger.error("❌ Telegram request timeout")
+            return False
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Network error in Telegram message: {e}")
             return False
@@ -101,12 +109,7 @@ class TelegramController:
             return False
 
     def send_startup_alert(self) -> bool:
-        """
-        Send a startup alert message.
-
-        Returns:
-            bool: True if message sent successfully, False otherwise.
-        """
+        """Send a startup alert message."""
         message = """
 🚀 *NIFTY SCALPER BOT STARTED*
 
@@ -120,12 +123,7 @@ Use `/help` for commands
         return self.send_message(message)
 
     def send_shutdown_alert(self) -> bool:
-        """
-        Send a shutdown alert message.
-
-        Returns:
-            bool: True if message sent successfully, False otherwise.
-        """
+        """Send a shutdown alert message."""
         message = """
 🛑 *NIFTY SCALPER BOT STOPPED*
 
@@ -177,12 +175,7 @@ Use `/start` to resume
 
     @staticmethod
     def default_status() -> Dict[str, Any]:
-        """
-        Provide a default status dictionary.
-
-        Returns:
-            Dict: Default status information.
-        """
+        """Provide a default status dictionary."""
         return {
             'is_trading': False,
             'execution_enabled': False,
@@ -199,6 +192,30 @@ Use `/start` to resume
             }
         }
 
+    def send_realtime_session_alert(self, session_type: str, timestamp: datetime) -> bool:
+        """
+        Send alert for real-time trading session start/stop.
+        
+        Args:
+            session_type (str): Either 'START' or 'STOP'
+            timestamp (datetime): When the session event occurred
+            
+        Returns:
+            bool: True if message sent successfully
+        """
+        emoji = "🟢" if session_type.upper() == "START" else "🔴"
+        action = "started" if session_type.upper() == "START" else "stopped"
+        
+        message = f"""
+{emoji} *REAL-TIME TRADING SESSION {session_type.upper()}*
+
+⏰ Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')}
+📊 Status: Session {action}
+        """
+        return self.send_message(message)
+
 # Example usage (if run directly)
 if __name__ == "__main__":
+    # Configure logging for testing
+    logging.basicConfig(level=logging.INFO)
     print("✅ Telegram Controller module ready!")
