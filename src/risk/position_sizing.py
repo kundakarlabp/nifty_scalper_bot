@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 # Use a relative import.  The ``risk`` package is a subpackage of ``src``.
-from ..config import Config
+from src.config import Config
 
 logger = logging.getLogger(__name__)
 
