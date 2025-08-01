@@ -1,4 +1,3 @@
-
 import logging
 import threading
 from typing import Any, Dict, List, Optional
@@ -74,8 +73,8 @@ class RealTimeTrader:
             self.telegram_controller.send_realtime_session_alert("STOP")
         except Exception:
             pass
-       logger.info("Trading stopped.")
-       return True
+        logger.info("Trading stopped.")
+        return True
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         if command == "start":
