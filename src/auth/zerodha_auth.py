@@ -8,7 +8,6 @@ from urllib.parse import urlparse, parse_qs
 from kiteconnect import KiteConnect
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 class ZerodhaAuthHandler(BaseHTTPRequestHandler):
@@ -22,26 +21,26 @@ class ZerodhaAuthHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                  <body>
-                    <h2>✅ Authentication Successful!</h2>
-                    <p>You can now return to your bot. This window can be closed.</p>
-                  </body>
-                </html>
-            """)
+            self.wfile.write("""
+            <html>
+              <body>
+                <h2>✅ Authentication Successful!</h2>
+                <p>You can now return to your bot. This window can be closed.</p>
+              </body>
+            </html>
+            """.encode("utf-8"))
         else:
             self.send_response(400)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                  <body>
-                    <h2>❌ Authentication Failed</h2>
-                    <p>No request token found in URL.</p>
-                  </body>
-                </html>
-            """)
+            self.wfile.write("""
+            <html>
+              <body>
+                <h2>❌ Authentication Failed</h2>
+                <p>No request token found in URL.</p>
+              </body>
+            </html>
+            """.encode("utf-8"))
 
 
 class ZerodhaAuthenticator:
@@ -78,7 +77,7 @@ class ZerodhaAuthenticator:
             if not server:
                 return False
 
-            timeout = 120  # 2 minutes timeout
+            timeout = 120
             start = time.time()
 
             while not getattr(server, 'request_token', None):
@@ -146,13 +145,26 @@ class ZerodhaAuthenticator:
             return False
 
 
+def get_kite_client() -> KiteConnect:
+    api_key = os.getenv("ZERODHA_API_KEY")
+    api_secret = os.getenv("ZERODHA_API_SECRET")
+    access_token = os.getenv("KITE_ACCESS_TOKEN")
+
+    if not all([api_key, api_secret, access_token]):
+        raise EnvironmentError("Missing API credentials. Set ZERODHA_API_KEY, ZERODHA_API_SECRET, and KITE_ACCESS_TOKEN.")
+
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    return kite
+
+
 if __name__ == "__main__":
     API_KEY = os.getenv("ZERODHA_API_KEY")
     API_SECRET = os.getenv("ZERODHA_API_SECRET")
 
     if API_KEY and API_SECRET:
         auth = ZerodhaAuthenticator(API_KEY, API_SECRET)
-        # Uncomment below line to run auth flow manually
+        # Uncomment this to initiate login flow:
         # auth.authenticate_interactive()
     else:
-        print("⚠️ Please set ZERODHA_API_KEY and ZERODHA_API_SECRET in environment variables or .env file")
+        print("⚠️ Please set ZERODHA_API_KEY and ZERODHA_API_SECRET in .env or environment variables.")
