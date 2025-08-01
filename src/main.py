@@ -2,18 +2,17 @@
 Entry point for the Nifty scalper bot.
 
 This module provides a simple CLI interface to start or stop the bot
-manually. When run with ``python -m src.main start`` it will spin up a
-``RealTimeTrader`` instance, begin Telegram polling and await incoming
-market data via the ``process_bar`` method. In the absence of a live
-data feed the bot will simply idle and respond to Telegram commands.
-
-Usage::
+manually. When run with:
 
     python -m src.main start    # start the bot and polling
     python -m src.main stop     # stop a running bot
     python -m src.main status   # print current status
 
-In typical deployment the bot will be managed via ``manage_bot.sh`` or
+It will spin up a `RealTimeTrader` instance, begin Telegram polling and await incoming
+market data via the `process_bar` method. In the absence of a live data feed,
+the bot will simply idle and respond to Telegram commands.
+
+In typical deployment the bot will be managed via `manage_bot.sh` or
 the Render `render.yaml` rather than invoking this module directly.
 """
 
@@ -34,7 +33,7 @@ _trader: RealTimeTrader | None = None
 
 
 def get_trader() -> RealTimeTrader:
-    """Return a singleton instance of ``RealTimeTrader``."""
+    """Return a singleton instance of `RealTimeTrader`."""
     global _trader
     if _trader is None:
         _trader = RealTimeTrader()
@@ -51,6 +50,7 @@ def main() -> None:
     trader = get_trader()
 
     if command == "start":
+        logger.info("🚀 Starting Nifty Scalper Bot...")
         trader.start()
         try:
             while trader.is_trading:
@@ -60,9 +60,11 @@ def main() -> None:
             trader.stop()
 
     elif command == "stop":
+        logger.info("🛑 Stopping Nifty Scalper Bot...")
         trader.stop()
 
     elif command == "status":
+        logger.info("📊 Fetching bot status...")
         status = trader.get_status()
         print("📊 Bot Status:")
         for k, v in status.items():
