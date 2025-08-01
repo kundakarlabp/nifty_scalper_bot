@@ -22,11 +22,14 @@ from __future__ import annotations
 import logging
 import sys
 import time
+
 from src.data_streaming.realtime_trader import RealTimeTrader
 
+# Logging setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# Singleton trader instance
 _trader: RealTimeTrader | None = None
 
 
