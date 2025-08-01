@@ -1,24 +1,11 @@
 """
-Simplified real-time trading engine.
-
-This module glues together the strategy, risk manager, order executor, and Telegram controller.
-It exposes a straightforward interface for starting/stopping the bot, processing new OHLCV data,
-and producing status updates.
-
-Telegram commands:
-/start          – Start trading
-/stop           – Stop trading
-/status         – Show current bot status
-/summary        – Show daily P&L summary
-/mode live|shadow – Switch between live and simulated modes
+Simplified real-time trading engine for Nifty Scalper Bot.
 """
 
 from __future__ import annotations
-
 import logging
 import threading
 from typing import Any, Dict, List, Optional
-
 import pandas as pd
 
 from src.config import Config
@@ -35,6 +22,7 @@ class RealTimeTrader:
         self.daily_pnl: float = 0.0
         self.trades: List[Dict[str, Any]] = []
         self.live_mode: bool = False
+        self._polling_thread: Optional[threading.Thread] = None
 
         self.strategy = EnhancedScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
@@ -49,21 +37,17 @@ class RealTimeTrader:
             control_callback=self._handle_control,
             summary_callback=self.get_summary,
         )
-        self._polling_thread: Optional[threading.Thread] = None
 
     def _init_order_executor(self) -> OrderExecutor:
         if not Config.ENABLE_LIVE_TRADING:
             logger.info("Live trading disabled. Using simulated order executor.")
             self.live_mode = False
             return OrderExecutor()
+
         try:
             from kiteconnect import KiteConnect
-            api_key = Config.ZERODHA_API_KEY
-            access_token = Config.KITE_ACCESS_TOKEN
-            if not api_key or not access_token:
-                raise ValueError("Missing Zerodha API credentials.")
-            kite = KiteConnect(api_key=api_key)
-            kite.set_access_token(access_token)
+            kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
+            kite.set_access_token(Config.KITE_ACCESS_TOKEN)
             self.live_mode = True
             logger.info("Live order executor initialised.")
             return OrderExecutor(kite=kite)
@@ -74,11 +58,14 @@ class RealTimeTrader:
 
     def start(self) -> bool:
         if self.is_trading:
-            logger.info("Trader is already running.")
+            logger.info("Trader already running.")
             return True
         self.is_trading = True
         self._start_polling()
-        self.telegram_controller.send_realtime_session_alert("START")
+        try:
+            self.telegram_controller.send_realtime_session_alert("START")
+        except Exception:
+            pass
         logger.info("Trading started.")
         return True
 
@@ -87,19 +74,22 @@ class RealTimeTrader:
             logger.info("Trader is not running.")
             return True
         self.is_trading = False
-        self._stop_polling()
-        self.telegram_controller.send_realtime_session_alert("STOP")
+        try:
+            self.telegram_controller.send_realtime_session_alert("STOP")
+        except Exception:
+            pass
         logger.info("Trading stopped.")
         return True
 
     def process_bar(self, ohlc: pd.DataFrame) -> None:
         if not self.is_trading or ohlc is None or len(ohlc) < 30:
             return
+
         try:
             ts = ohlc.index[-1]
-            current_time_str = ts.strftime("%H:%M")
+            time_str = ts.strftime("%H:%M")
             if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
-                if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
+                if time_str < Config.TIME_FILTER_START or time_str > Config.TIME_FILTER_END:
                     return
 
             current_price = float(ohlc.iloc[-1]["close"])
@@ -157,7 +147,7 @@ class RealTimeTrader:
             logger.error("Error processing bar: %s", exc, exc_info=True)
 
     def get_status(self) -> Dict[str, Any]:
-        status: Dict[str, Any] = {
+        status = {
             "is_trading": self.is_trading,
             "open_orders": len(self.order_executor.get_active_orders()),
             "trades_today": len(self.trades),
@@ -178,53 +168,42 @@ class RealTimeTrader:
     def _start_polling(self) -> None:
         if self._polling_thread and self._polling_thread.is_alive():
             return
-        self.telegram_controller.send_startup_alert()
         self._polling_thread = threading.Thread(target=self.telegram_controller.start_polling, daemon=True)
         self._polling_thread.start()
 
-    def _stop_polling(self) -> None:
-        self.telegram_controller.stop_polling()
-        if self._polling_thread and self._polling_thread.is_alive():
-            self._polling_thread.join(timeout=2)
-        self._polling_thread = None
-
-    def _handle_control(self, command: str) -> bool:
+    def _handle_control(self, command: str, argument: Optional[str] = "") -> bool:
         if command == "start":
             return self.start()
         if command == "stop":
             return self.stop()
-        if command == "mode_live":
-            return self._set_live_mode(True)
-        if command == "mode_shadow":
-            return self._set_live_mode(False)
+        if command == "mode":
+            return self._set_live_mode(argument.strip().lower())
         logger.warning("Unknown control command: %s", command)
         return False
 
-    def _set_live_mode(self, enable: bool) -> bool:
-        desired = bool(enable)
-        if desired == self.live_mode:
-            return True
+    def _set_live_mode(self, mode: str) -> bool:
         if self.is_trading:
             logger.info("Cannot change mode while trading is active. Stop trading first.")
             return False
-        if desired:
+
+        if mode == "live":
             try:
                 from kiteconnect import KiteConnect
-                api_key = Config.ZERODHA_API_KEY
-                access_token = Config.KITE_ACCESS_TOKEN
-                if not api_key or not access_token:
-                    raise ValueError("Missing Zerodha API credentials.")
-                kite = KiteConnect(api_key=api_key)
-                kite.set_access_token(access_token)
+                kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
+                kite.set_access_token(Config.KITE_ACCESS_TOKEN)
                 self.order_executor = OrderExecutor(kite=kite)
                 self.live_mode = True
                 logger.info("Switched to live trading mode.")
                 return True
             except Exception as exc:
-                logger.error("Failed to enable live mode. Remaining in simulation: %s", exc, exc_info=True)
+                logger.error("Failed to switch to live mode: %s", exc, exc_info=True)
                 return False
-        else:
+
+        elif mode == "shadow":
             self.order_executor = OrderExecutor()
             self.live_mode = False
             logger.info("Switched to shadow/simulated trading mode.")
             return True
+
+        logger.warning("Unknown mode: %s", mode)
+        return False
