@@ -78,10 +78,7 @@ class RealTimeTrader:
             return True
         self.is_trading = True
         self._start_polling()
-        try:
-            self.telegram_controller.send_realtime_session_alert("START")
-        except Exception:
-            pass
+        self.telegram_controller.send_realtime_session_alert("START")
         logger.info("Trading started.")
         return True
 
@@ -91,10 +88,7 @@ class RealTimeTrader:
             return True
         self.is_trading = False
         self._stop_polling()
-        try:
-            self.telegram_controller.send_realtime_session_alert("STOP")
-        except Exception:
-            pass
+        self.telegram_controller.send_realtime_session_alert("STOP")
         logger.info("Trading stopped.")
         return True
 
@@ -184,8 +178,7 @@ class RealTimeTrader:
     def _start_polling(self) -> None:
         if self._polling_thread and self._polling_thread.is_alive():
             return
-        if hasattr(self.telegram_controller, "send_startup_alert"):
-            self.telegram_controller.send_startup_alert()
+        self.telegram_controller.send_startup_alert()
         self._polling_thread = threading.Thread(target=self.telegram_controller.start_polling, daemon=True)
         self._polling_thread.start()
 
