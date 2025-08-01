@@ -58,14 +58,14 @@ class TelegramController:
 
         if text == "/start":
             if self.control_callback:
-                success = self.control_callback("start", None)
+                success = self.control_callback("start", "")
                 self._send_message("✅ Bot started." if success else "❌ Failed to start bot.")
             else:
                 self._send_message("⚠️ Start control not configured.")
 
         elif text == "/stop":
             if self.control_callback:
-                success = self.control_callback("stop", None)
+                success = self.control_callback("stop", "")  # ✅ updated as per your request
                 self._send_message("🛑 Bot stopped." if success else "❌ Failed to stop bot.")
             else:
                 self._send_message("⚠️ Stop control not configured.")
