@@ -39,11 +39,11 @@ import pandas as pd
 # Import modules from the root package.  Relative imports are avoided to
 # simplify execution when the code resides outside of a package.  All
 # dependencies reside in the same directory.
-from config import Config
-from scalping_strategy import EnhancedScalpingStrategy
-from position_sizing import PositionSizing
-from order_executor import OrderExecutor
-from telegram_controller import TelegramController
+from src.config import Config
+from src.scalping_strategy import EnhancedScalpingStrategy
+from src.position_sizing import PositionSizing
+from src.order_executor import OrderExecutor
+from src.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
