@@ -1,14 +1,14 @@
 """
 Adaptive position sizing module.
 
-This module provides a ``PositionSizing`` class that determines how many
+This module provides a `PositionSizing` class that determines how many
 contract lots to trade based on the live account balance from Zerodha,
 risk settings, and market conditions. It protects the account by enforcing
 per-trade risk limits, a daily drawdown cap, and a maximum number of
 consecutive losses.
 
 The calculation assumes that each point move in the underlying contract
-is worth ``Config.NIFTY_LOT_SIZE`` rupees.
+is worth `Config.NIFTY_LOT_SIZE` rupees.
 """
 
 from __future__ import annotations
@@ -28,10 +28,13 @@ def get_live_account_balance() -> float:
         kite = get_kite_client()
         margins = kite.margins(segment='equity')
         cash = margins['available']['cash']
-        return float(cash)
+        balance = float(cash)
+        logger.info(f"💰 Live account balance fetched: ₹{balance:.2f}")
+        return balance
     except Exception as e:
+        fallback = 30000.0
         logger.warning(f"⚠️ Failed to fetch live account balance, using fallback: {e}")
-        return Config.ACCOUNT_SIZE
+        return fallback
 
 
 @dataclass
@@ -54,10 +57,9 @@ class PositionSizing:
     consecutive_losses: int = 0
 
     def __post_init__(self) -> None:
-        self.account_size = get_live_account_balance()
         self.equity = self.account_size
         self.equity_peak = self.account_size
-        logger.info(f"💰 Live account size loaded: ₹{self.account_size:.2f}")
+        logger.info(f"💰 Live account size initialized: ₹{self.account_size:.2f}")
 
     def calculate_position_size(
         self,
@@ -81,7 +83,9 @@ class PositionSizing:
             qty = int(trade_risk_budget // risk_per_lot)
 
             if qty <= 0:
-                logger.info(f"❌ Risk per lot ₹{risk_per_lot:.2f} exceeds trade budget ₹{trade_risk_budget:.2f}.")
+                logger.info(
+                    f"❌ Risk per lot ₹{risk_per_lot:.2f} exceeds trade budget ₹{trade_risk_budget:.2f}."
+                )
                 return None
 
             confidence_factor = max(0.1, min(signal_confidence / 10.0, 1.0))
