@@ -40,10 +40,10 @@ import pandas as pd
 # simplify execution when the code resides outside of a package.  All
 # dependencies reside in the same directory.
 from src.config import Config
-from src.scalping_strategy import EnhancedScalpingStrategy
-from src.position_sizing import PositionSizing
-from src.order_executor import OrderExecutor
-from src.telegram_controller import TelegramController
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.risk.position_sizing import PositionSizing
+from src.execution.order_executor import OrderExecutor
+from src.notifications.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
