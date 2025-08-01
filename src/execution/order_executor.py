@@ -2,7 +2,7 @@
 Order execution module.
 
 The ``OrderExecutor`` encapsulates interaction with the Zerodha Kite API
-for placing entry orders and setting up Good‑Till‑Triggered (GTT) stop
+for placing entry orders and setting up Goodâ€‘Tillâ€‘Triggered (GTT) stop
 loss and target orders.  To support backtesting or dry runs, the
 executor can operate in a simulated mode where it generates dummy order
 IDs and records order information internally without contacting the
@@ -11,7 +11,7 @@ broker.
 Trailing stop logic can be applied via the ``update_trailing_stop``
 method: as the trade moves in favour of the position, the stop loss
 level is moved up (for long trades) or down (for short trades) by a
-multiple of the Average True Range (ATR).  This lock‑in of profits is
+multiple of the Average True Range (ATR).  This lockâ€‘in of profits is
 an optional enhancement that the caller can perform periodically.
 """
 
@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from src.config import Config
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class OrderExecutor:
     If ``kite`` is ``None`` then orders are simulated and no API calls
     are made.  Otherwise the given ``KiteConnect`` instance is used for
     placing market orders and creating GTTs.  In both cases the
-    ``OrderExecutor`` maintains an in‑memory registry of open orders to
+    ``OrderExecutor`` maintains an inâ€‘memory registry of open orders to
     support trailing stop updates and P&L computation.
     """
 
@@ -78,7 +78,7 @@ class OrderExecutor:
         """
         try:
             if quantity <= 0:
-                logger.warning("Attempted to place order with non‑positive quantity: %s", quantity)
+                logger.warning("Attempted to place order with nonâ€‘positive quantity: %s", quantity)
                 return None
             if self.kite:
                 # Attempt to place order via Kite Connect
@@ -118,7 +118,7 @@ class OrderExecutor:
 
         Returns ``True`` if the orders were registered successfully.  In
         simulation mode the order is stored internally.  The caller can
-        pass an ``atr`` value to pre‑define the trailing stop step.  If
+        pass an ``atr`` value to preâ€‘define the trailing stop step.  If
         omitted, trailing stops will be updated explicitly later.
         """
         try:
