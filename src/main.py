@@ -25,7 +25,7 @@ import signal
 
 import os
 
-from src.data_streaming.real_time_trader import RealTimeTrader  # Updated path
+from src.data_streaming.realtime_trader import RealTimeTrader  # Updated path
 
 # Logging setup
 logger = logging.getLogger(__name__)
