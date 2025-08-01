@@ -1,3 +1,21 @@
+"""
+Telegram notification and command handling.
+
+This module wraps the Telegram Bot API for sending rich messages and
+processing user commands.  It uses long polling via ``getUpdates``
+instead of webhooks to simplify deployment.  Commands supported:
+
+* ``/start`` â€“ begin trading (invokes the provided control callback)
+* ``/stop`` â€“ halt trading
+* ``/status`` â€“ get a snapshot of current bot status (via status callback)
+* ``/summary`` â€“ daily P&L summary (via summary callback)
+
+The controller can be used independently or integrated into a
+``RealTimeTrader`` class.  It is designed to operate even when no
+Telegram credentials are configured; in that case all methods become
+noâ€‘ops.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -7,12 +25,16 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
-from src.config import Config
+# Import Config from the root package.  Relative imports are avoided to
+# simplify execution when the code resides outside of a package.
+from config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramController:
+    """Wrapper around the Telegram bot API."""
+
     def __init__(
         self,
         status_callback: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -27,13 +49,16 @@ class TelegramController:
         self.polling_active = False
         self._polling_thread: Optional[threading.Thread] = None
         self._update_offset = 0
+        # Skip initial polling if no credentials
         if not self.bot_token or not self.user_id:
             logger.warning("Telegram credentials not set. Notifications disabled.")
 
+    # --- Messaging ---
     def _api_url(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self.bot_token}/{method}"
 
     def send_message(self, text: str, parse_mode: str = "Markdown") -> None:
+        """Send a plain text or Markdown message to the configured user."""
         if not self.bot_token or not self.user_id:
             logger.debug("Skipping Telegram message because credentials are missing: %s", text)
             return
@@ -51,15 +76,16 @@ class TelegramController:
             logger.error("Error sending Telegram message: %s", exc, exc_info=True)
 
     def send_startup_alert(self) -> None:
-        self.send_message("\ud83d\ude80 Scalper bot initialised and ready.")
+        self.send_message("ðŸš€ Scalper bot initialised and ready.")
 
     def send_realtime_session_alert(self, state: str) -> None:
         if state.upper() == "START":
-            self.send_message("\u25b6\ufe0f Real-time trading session started.")
+            self.send_message("â–¶ï¸ Realâ€‘time trading session started.")
         elif state.upper() == "STOP":
-            self.send_message("\u23f9\ufe0f Real-time trading session stopped.")
+            self.send_message("â¹ï¸ Realâ€‘time trading session stopped.")
 
     def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
+        """Send a detailed alert when a new trading signal is generated."""
         direction = signal.get("signal")
         score = signal.get("score", 0)
         confidence = signal.get("confidence", 0)
@@ -67,7 +93,7 @@ class TelegramController:
         target = signal.get("target")
         qty = position.get("quantity") if position else None
         message = (
-            f"\ud83d\udcc8 *New Signal*\n"
+            f"ðŸ“ˆ *New Signal*\n"
             f"Token: `{token}`\n"
             f"Direction: `{direction}`\n"
             f"Score: `{score:.2f}`\n"
@@ -78,14 +104,19 @@ class TelegramController:
         )
         self.send_message(message)
 
+    # --- Polling and command handling ---
     def start_polling(self) -> None:
+        """Begin long polling for incoming user messages."""
         if self.polling_active or not self.bot_token:
             return
         logger.info("Starting Telegram polling loop...")
         self.polling_active = True
         while self.polling_active:
             try:
-                params = {"timeout": 10, "offset": self._update_offset}
+                params = {
+                    "timeout": 10,
+                    "offset": self._update_offset,
+                }
                 resp = requests.get(self._api_url("getUpdates"), params=params, timeout=15)
                 if not resp.ok:
                     logger.error("Telegram getUpdates failed: %s", resp.text)
@@ -107,20 +138,11 @@ class TelegramController:
                         self._handle_status()
                     elif text.startswith("/summary"):
                         self._handle_summary()
-                    elif text.startswith("/signal"):
-                        self._handle_signal()
-                    elif text.startswith("/lasttrade"):
-                        self._handle_last_trade()
-                    elif text.startswith("/open"):
-                        self._handle_open_position()
-                    elif text.startswith("/pnl"):
-                        self._handle_pnl()
-                    elif text.startswith("/resetday"):
-                        self._handle_reset_day()
-                    elif text.startswith("/log"):
-                        self._handle_log()
-                    elif text.startswith("/config"):
-                        self._handle_config()
+                    elif text.startswith("/mode"):
+                        self._handle_mode(text)
+                    elif text.startswith("/help"):
+                        self._handle_help()
+                # Short pause to avoid spamming Telegram
                 time.sleep(1)
             except Exception as exc:
                 logger.error("Error in Telegram polling loop: %s", exc, exc_info=True)
@@ -128,108 +150,90 @@ class TelegramController:
         logger.info("Telegram polling stopped.")
 
     def stop_polling(self) -> None:
+        """Stop the polling loop."""
         self.polling_active = False
 
+    # --- Command handlers ---
     def _handle_start(self) -> None:
-        self.send_message("\u25b6\ufe0f Start command received.")
-        if self.control_callback and self.control_callback("start"):
-            self.send_message("\u2705 Trading started.")
-        else:
-            self.send_message("\u26a0\ufe0f Failed to start trading.")
+        self.send_message("â–¶ï¸ Start command received.")
+        if self.control_callback:
+            result = self.control_callback("start")
+            if result:
+                self.send_message("âœ… Trading started.")
+            else:
+                self.send_message("âš ï¸ Failed to start trading.")
 
     def _handle_stop(self) -> None:
-        self.send_message("\u23f9\ufe0f Stop command received.")
-        if self.control_callback and self.control_callback("stop"):
-            self.send_message("\u2705 Trading stopped.")
-        else:
-            self.send_message("\u26a0\ufe0f Failed to stop trading.")
+        self.send_message("â¹ï¸ Stop command received.")
+        if self.control_callback:
+            result = self.control_callback("stop")
+            if result:
+                self.send_message("âœ… Trading stopped.")
+            else:
+                self.send_message("âš ï¸ Failed to stop trading.")
 
     def _handle_status(self) -> None:
         if self.status_callback:
             status = self.status_callback()
             status_lines = [f"*{k}*: `{v}`" for k, v in status.items()]
-            self.send_message("\ud83d\udcca *Status*\n" + "\n".join(status_lines))
+            message = "ðŸ“Š *Status*\n" + "\n".join(status_lines)
+            self.send_message(message)
         else:
-            self.send_message("\u2139\ufe0f Status unavailable.")
+            self.send_message("â„¹ï¸ Status unavailable.")
 
     def _handle_summary(self) -> None:
         if self.summary_callback:
             summary = self.summary_callback()
-            self.send_message(f"\ud83d\udcc8 *Daily Summary*\n{summary}")
+            self.send_message(f"ðŸ“ˆ *Daily Summary*\n{summary}")
         else:
-            self.send_message("\u2139\ufe0f Summary unavailable.")
+            self.send_message("â„¹ï¸ Summary unavailable.")
 
-    def _handle_signal(self) -> None:
-        if self.status_callback:
-            signal = self.status_callback().get("last_signal", {})
-            if signal:
-                self.send_message(
-                    f"\ud83d\udd39 *Latest Signal*\n"
-                    f"Type: `{signal.get('signal')}`\n"
-                    f"Score: `{signal.get('score')}`\n"
-                    f"Confidence: `{signal.get('confidence')}`\n"
-                    f"Entry: `{signal.get('entry_price')}`\n"
-                    f"SL: `{signal.get('stop_loss')}` | Target: `{signal.get('target')}`"
-                )
+    def _handle_mode(self, text: str) -> None:
+        """Handle the /mode command to switch between live and shadow modes.
+
+        The expected syntax is ``/mode live`` or ``/mode shadow``.  If
+        no argument is provided the current mode is returned.
+        """
+        # Parse the desired mode from the user message
+        parts = text.split()
+        # If only '/mode' is provided return current status via status callback
+        if len(parts) < 2:
+            if self.status_callback:
+                status = self.status_callback()
+                current_mode = "LIVE" if status.get("live_mode") else "SHADOW"
+                self.send_message(f"âš™ï¸ Mode: `{current_mode}`")
             else:
-                self.send_message("\u2139\ufe0f No recent signal.")
-
-    def _handle_last_trade(self) -> None:
-        trades = self.status_callback().get("trade_history", [])
-        if trades:
-            last = trades[-1]
-            self.send_message(
-                f"\ud83d\udce6 *Last Trade*\n"
-                f"Type: `{last['side']}`\n"
-                f"Entry: `{last['entry_price']}`\n"
-                f"Exit: `{last['exit_price']}`\n"
-                f"P&L: `{last['pnl']}`"
-            )
+                self.send_message("â„¹ï¸ Mode information unavailable.")
+            return
+        desired = parts[1].strip().lower()
+        # Translate the user's request into a control command
+        if desired in ("live", "on", "enable"):
+            cmd = "mode_live"
+        elif desired in ("shadow", "off", "disable", "sim"):  # synonyms
+            cmd = "mode_shadow"
         else:
-            self.send_message("\u2139\ufe0f No trades yet.")
-
-    def _handle_open_position(self) -> None:
-        position = self.status_callback().get("open_position", {})
-        if position:
-            self.send_message(
-                f"\ud83d\udcc2 *Open Position*\n"
-                f"Token: `{position['token']}`\n"
-                f"Direction: `{position['direction']}`\n"
-                f"Qty: `{position['quantity']}`\n"
-                f"Entry: `{position['entry_price']}`"
-            )
+            self.send_message("âš ï¸ Unknown mode. Use /mode live or /mode shadow.")
+            return
+        # Invoke the control callback if provided
+        if self.control_callback:
+            result = self.control_callback(cmd)
+            if result:
+                new_mode = "LIVE" if cmd == "mode_live" else "SHADOW"
+                self.send_message(f"âœ… Mode switched to `{new_mode}`.")
+            else:
+                self.send_message("âš ï¸ Failed to change mode.")
         else:
-            self.send_message("\u2139\ufe0f No active positions.")
+            self.send_message("â„¹ï¸ Cannot change mode: no control callback.")
 
-    def _handle_pnl(self) -> None:
-        pnl = self.status_callback().get("live_pnl", None)
-        if pnl is not None:
-            self.send_message(f"\ud83d\udcb0 Live P&L: `{pnl}`")
-        else:
-            self.send_message("\u2139\ufe0f Live P&L unavailable.")
-
-    def _handle_reset_day(self) -> None:
-        if self.control_callback and self.control_callback("resetday"):
-            self.send_message("\ud83d\udd04 Daily counters reset.")
-        else:
-            self.send_message("\u26a0\ufe0f Failed to reset day.")
-
-    def _handle_log(self) -> None:
-        try:
-            with open("logs/trading_bot.log", "r") as f:
-                lines = f.readlines()[-20:]
-            self.send_message("\ud83d\udcc4 *Recent Logs*\n```\n" + "".join(lines) + "```", parse_mode="Markdown")
-        except Exception as e:
-            self.send_message(f"\u26a0\ufe0f Error reading log: {e}")
-
-    def _handle_config(self) -> None:
-        config_data = {
-            "Capital": Config.ACCOUNT_SIZE,
-            "Risk Per Trade": Config.RISK_PER_TRADE,
-            "SL Points": Config.BASE_STOP_LOSS_POINTS,
-            "TP Points": Config.BASE_TARGET_POINTS,
-            "Max Drawdown": Config.MAX_DRAWDOWN,
-            "Scoring Threshold": Config.CONFIDENCE_THRESHOLD,
-        }
-        msg = "\u2699\ufe0f *Bot Config*\n" + "\n".join(f"{k}: `{v}`" for k, v in config_data.items())
-        self.send_message(msg)
+    def _handle_help(self) -> None:
+        """Send a help message describing available commands."""
+        help_text = (
+            "ðŸ› ï¸ *Available Commands*\n"
+            "/start â€“ begin trading\n"
+            "/stop â€“ halt trading\n"
+            "/status â€“ show current bot status\n"
+            "/summary â€“ show daily P&L summary\n"
+            "/mode [live|shadow] â€“ switch trading mode\n"
+            "/help â€“ show this help message"
+        )
+        self.send_message(help_text)
