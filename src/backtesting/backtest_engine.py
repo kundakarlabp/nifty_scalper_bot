@@ -4,35 +4,33 @@ from src.strategies.scalping_strategy import DynamicScalpingStrategy
 from src.risk.position_sizing import PositionSizing
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class BacktestEngine:
     """
-    A simple bar-by-bar backtesting engine.
+    A simple bar-by-bar backtesting engine using DynamicScalpingStrategy.
     """
 
     def __init__(self, data: pd.DataFrame, initial_capital: float = 100000.0):
-        self.data = data
+        self.data = data.copy()
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
-        self.positions = []  # List of dicts: [{'entry_price': ..., 'exit_price': ..., 'pnl': ...}]
+        self.positions = []  # Each position: dict with entry, exit, pnl, etc.
         self.strategy = DynamicScalpingStrategy()
-        self.risk_manager = PositionSizing(account_size=initial_capital)
+        self.risk_manager = PositionSizing(account_size=self.initial_capital)
 
     def run(self):
         try:
             logger.info("🔁 Starting Backtest...")
 
-            buffer = []  # Rolling window of data for indicators
+            buffer = []  # Rolling bar window
             for idx, (timestamp, row) in enumerate(self.data.iterrows()):
                 buffer.append(row)
                 df_buffer = pd.DataFrame(buffer)
 
-                # Require minimum 50 bars to start generating signals
                 if len(df_buffer) < 50:
-                    continue
+                    continue  # Need sufficient bars for indicators
 
-                # Generate signal
                 signal = self.strategy.generate_signal(df_buffer)
 
                 if signal:
@@ -42,9 +40,9 @@ class BacktestEngine:
 
                     position_size = self.risk_manager.calculate_position_size(entry_price, stop_loss)
                     if position_size == 0:
-                        continue  # Skip if capital/risk constraint breached
+                        continue
 
-                    # Simulate immediate exit on next bar for now (replace with real SL/TP logic)
+                    # Simplified exit logic: next bar close
                     if idx + 1 < len(self.data):
                         next_close = self.data.iloc[idx + 1]['close']
                         pnl = (next_close - entry_price) * position_size
@@ -58,28 +56,22 @@ class BacktestEngine:
                             'pnl': pnl
                         })
 
-                        logger.info(f"📈 Trade Executed @ {timestamp} | Entry: {entry_price:.2f} | Exit: {next_close:.2f} | PnL: {pnl:.2f}")
+                        logger.info(f"📈 Trade @ {timestamp} | Entry: {entry_price:.2f} | Exit: {next_close:.2f} | PnL: {pnl:.2f}")
 
             self._generate_report()
 
         except Exception as e:
-            logger.error(f"❌ Error during backtest: {e}")
+            logger.error(f"❌ Error during backtest: {e}", exc_info=True)
 
     def _generate_report(self):
         total_trades = len(self.positions)
         total_pnl = sum(p['pnl'] for p in self.positions)
-        win_trades = len([p for p in self.positions if p['pnl'] > 0])
-        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        win_trades = sum(1 for p in self.positions if p['pnl'] > 0)
+        win_rate = (win_trades / total_trades * 100) if total_trades else 0
 
-        logger.info("✅ --- Backtest Report ---")
+        logger.info("✅ --- Backtest Summary Report ---")
         logger.info(f"Initial Capital: ₹{self.initial_capital:.2f}")
         logger.info(f"Final Capital: ₹{self.current_capital:.2f}")
         logger.info(f"Total Trades: {total_trades}")
         logger.info(f"Winning Trades: {win_trades} ({win_rate:.2f}%)")
         logger.info(f"Net PnL: ₹{total_pnl:.2f}")
-
-# Example usage (you can move this to a CLI runner later):
-# if __name__ == "__main__":
-#     df = pd.read_csv("data/your_historical_data.csv", parse_dates=True, index_col="timestamp")
-#     engine = BacktestEngine(df)
-#     engine.run()
