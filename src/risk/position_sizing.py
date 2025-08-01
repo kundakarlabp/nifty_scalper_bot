@@ -3,16 +3,16 @@ Adaptive position sizing module.
 
 This module provides a ``PositionSizing`` class that determines how many
 contract lots to trade based on the account size, risk settings and
-market conditions.  It protects the account by enforcing per‑trade risk
+market conditions.  It protects the account by enforcing perâ€‘trade risk
 limits, a daily drawdown cap and a maximum number of consecutive losses.
 
 The calculation assumes that each point move in the underlying contract
 is worth ``Config.NIFTY_LOT_SIZE`` rupees.  For example, if the stop
 loss is 10 points and the lot size is 50 (Nifty index options), then
-one lot risks 10 × 50 = ₹500.  If the risk budget per trade is 1 % of a
-₹100 000 account (₹1 000), two lots may be traded.
+one lot risks 10Â Ã—Â 50Â =Â â‚¹500.  If the risk budget per trade is 1Â % of a
+â‚¹100â€‰000 account (â‚¹1â€‰000), two lots may be traded.
 
-The size is further scaled by the signal confidence (on a 0–10 scale) so
+The size is further scaled by the signal confidence (on a 0â€“10 scale) so
 that lower conviction signals risk less capital.  Daily loss and
 drawdown limits are enforced to stop trading once losses exceed
 predefined thresholds.
@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 # Use a relative import.  The ``risk`` package is a subpackage of ``src``.
-from src.config import Config
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ class PositionSizing:
     """Risk manager that calculates position sizes and tracks drawdown."""
 
     account_size: float = Config.ACCOUNT_SIZE
-    risk_per_trade: float = Config.RISK_PER_TRADE  # fraction (e.g. 0.01 for 1 %)
-    daily_risk: float = Config.MAX_DRAWDOWN        # fraction (e.g. 0.05 for 5 %)
+    risk_per_trade: float = Config.RISK_PER_TRADE  # fraction (e.g. 0.01 for 1Â %)
+    daily_risk: float = Config.MAX_DRAWDOWN        # fraction (e.g. 0.05 for 5Â %)
     max_drawdown: float = Config.MAX_DRAWDOWN      # fraction (same as daily_risk by default)
     lot_size: int = Config.NIFTY_LOT_SIZE          # number of units per contract
     min_lots: int = Config.MIN_LOTS
@@ -74,9 +74,9 @@ class PositionSizing:
         Args:
             entry_price: The expected entry price of the trade.
             stop_loss: The absolute stop loss price level.  The difference
-                ``abs(entry_price - stop_loss)`` determines the points risk.
-            signal_confidence: Trade confidence on a 0–10 scale.
-            market_volatility: Additional risk factor (0–1).  High values
+                ``abs(entry_priceÂ -Â stop_loss)`` determines the points risk.
+            signal_confidence: Trade confidence on a 0â€“10 scale.
+            market_volatility: Additional risk factor (0â€“1).  High values
                 reduce the position size to account for elevated volatility.
 
         Returns:
@@ -109,7 +109,7 @@ class PositionSizing:
                 )
                 return None
 
-            # Scale quantity by confidence (0–10).  Cap at 1.0 when confidence >= 10.
+            # Scale quantity by confidence (0â€“10).  Cap at 1.0 when confidence >= 10.
             confidence_factor = max(0.1, min(signal_confidence / 10.0, 1.0))
             qty = max(self.min_lots, int(qty * confidence_factor))
 
