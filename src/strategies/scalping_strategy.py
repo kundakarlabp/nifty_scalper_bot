@@ -25,7 +25,7 @@ import pandas as pd
 # contexts.  When executed as part of the package the root directory is on
 # ``sys.path`` via the project configuration.
 from config import Config
-from indicators import (
+from src.utils.indicators import (
     calculate_ema,
     calculate_rsi,
     calculate_macd,
