@@ -1,8 +1,8 @@
 """
 Advanced scalping strategy combining multiple technical indicators to
 generate option trading signals.  Signals are scored on an integer scale
-and converted into a confidence score on a 1–10 range.  The strategy
-also calculates adaptive stop‑loss and take‑profit levels using ATR and
+and converted into a confidence score on a 1â€“10 range.  The strategy
+also calculates adaptive stopâ€‘loss and takeâ€‘profit levels using ATR and
 supports market regime detection to adapt scoring for trending versus
 ranging markets.
 """
@@ -20,8 +20,12 @@ import pandas as pd
 # empty ``__init__.py`` files.
 # Use a relative import so that this module can be loaded as part of the
 # ``src`` package hierarchy.  See ``nifty_scalper_bot/src/__init__.py``.
-from src.config import Config
-from src.utils.indicators import (
+# Import Config and indicator helpers from the root package.  Relative imports
+# are avoided here because this module may be executed from different
+# contexts.  When executed as part of the package the root directory is on
+# ``sys.path`` via the project configuration.
+from config import Config
+from indicators import (
     calculate_ema,
     calculate_rsi,
     calculate_macd,
@@ -41,9 +45,9 @@ class EnhancedScalpingStrategy:
     technical indicators.  Each indicator contributes positively or
     negatively to an integer ``score``.  A valid trade signal is
     generated when the absolute score meets or exceeds
-    ``scoring_threshold`` and the direction‑specific score meets
+    ``scoring_threshold`` and the directionâ€‘specific score meets
     ``min_score_threshold``.  The confidence value returned is on a
-    0–10 scale.
+    0â€“10 scale.
     """
 
     def __init__(
@@ -63,6 +67,7 @@ class EnhancedScalpingStrategy:
         base_stop_loss_points: float = Config.BASE_STOP_LOSS_POINTS,
         base_target_points: float = Config.BASE_TARGET_POINTS,
         confidence_threshold: float = Config.CONFIDENCE_THRESHOLD,
+        min_score_threshold: Optional[int] = None,
         scoring_threshold: int = 4,
     ) -> None:
         # Indicator parameters
@@ -79,13 +84,25 @@ class EnhancedScalpingStrategy:
         # Strategy thresholds
         self.base_stop_loss_points = base_stop_loss_points
         self.base_target_points = base_target_points
-        # Minimum integer score required for a trade (internal threshold)
-        self.min_score_threshold = int(confidence_threshold)
+        # Store the confidence threshold for informational purposes.  It is
+        # used by the caller (RealTimeTrader) to decide whether to act on a
+        # signal.  Within the strategy a separate integer threshold is
+        # derived from ``min_score_threshold``.
+        self.confidence_threshold = confidence_threshold
+        # Minimum integer score required for a trade (internal threshold).
+        # If not provided it defaults to the environmentâ€‘defined
+        # ``MIN_SIGNAL_SCORE``.  Casting to int ensures the comparison is
+        # against an integer score value.
+        self.min_score_threshold: int = (
+            int(min_score_threshold)
+            if min_score_threshold is not None
+            else int(Config.MIN_SIGNAL_SCORE)
+        )
         # Raw score threshold to determine direction; lower than max possible
         self.scoring_threshold = scoring_threshold
 
         # Precompute max possible score for confidence normalisation
-        # EMA (±2) + RSI (±1) + MACD (±1) + SuperTrend (±2) + VWAP (±1) + regime (±1)
+        # EMA (Â±2) + RSI (Â±1) + MACD (Â±1) + SuperTrend (Â±2) + VWAP (Â±1) + regime (Â±1)
         self.max_possible_score = 8
 
         self.last_signal_hash: Optional[str] = None
@@ -138,7 +155,9 @@ class EnhancedScalpingStrategy:
         trending = adx >= 25 and bb_width >= 0.05
         return "trend" if trending else "range"
 
-    def _score_signal(self, indicators: Dict[str, float], regime: str) -> Tuple[int, List[str]]:
+    def _score_signal(
+        self, indicators: Dict[str, float], regime: str, current_price: float
+    ) -> Tuple[int, List[str]]:
         """
         Assign integer points based on indicator conditions.  Returns a tuple
         of (score, reasons) where ``reasons`` lists the contributing
@@ -180,9 +199,9 @@ class EnhancedScalpingStrategy:
             score -= 2
             reasons.append("SuperTrend down (-2)")
 
-        # VWAP position
-        # Use the current close for comparison
-        if indicators["vwap"] < indicators["ema_fast"]:
+        # VWAP position.  Compare the current price to the VWAP; a price
+        # above VWAP is generally considered bullish and vice versa.
+        if current_price > indicators["vwap"]:
             score += 1
             reasons.append("Price above VWAP (+1)")
         else:
@@ -210,7 +229,7 @@ class EnhancedScalpingStrategy:
         """
         Generate a trading signal based on the provided OHLCV ``DataFrame``
         and current price.  Returns a dictionary containing the signal
-        direction, score, confidence, stop‑loss and take‑profit levels or
+        direction, score, confidence, stopâ€‘loss and takeâ€‘profit levels or
         ``None`` if no trade should be taken.
         """
         # Sanity checks
@@ -238,7 +257,9 @@ class EnhancedScalpingStrategy:
         if not indicators:
             return None
         regime = self._detect_market_regime(indicators)
-        score, reasons = self._score_signal(indicators, regime)
+        # Pass the latest price to the scoring function so VWAP comparison uses
+        # the correct reference point
+        score, reasons = self._score_signal(indicators, regime, current_price)
         logger.debug(f"Computed score {score} with reasons: {reasons}")
 
         # Determine direction if score meets scoring threshold
@@ -252,7 +273,7 @@ class EnhancedScalpingStrategy:
         if not direction or abs(score) < self.min_score_threshold:
             return None
 
-        # De‑duplicate signals
+        # Deâ€‘duplicate signals
         signal_key = f"{direction}_{current_price}_{df.index[-1]}"
         new_hash = hashlib.md5(signal_key.encode()).hexdigest()
         if new_hash == self.last_signal_hash:
@@ -260,10 +281,33 @@ class EnhancedScalpingStrategy:
             return None
         self.last_signal_hash = new_hash
 
-        # Adaptive stop and target using ATR
+        # Compute confidence on a 0â€“10 scale based on the absolute score.  The
+        # ``max_possible_score`` represents the theoretical upper bound of
+        # contributions from all indicators.  Scores above this value are
+        # clipped to 10.
+        confidence_raw = (abs(score) / self.max_possible_score) * 10
+        confidence = round(min(confidence_raw, 10.0), 1)
+
+        # Adaptive stop and target distances using ATR and market regime.
         atr = indicators.get("atr", 0.0)
-        sl_distance = max(self.base_stop_loss_points, atr * 2)
-        tp_distance = max(self.base_target_points, atr * 3)
+        # Base distances scaled by regime.  Trending markets warrant
+        # larger targets and slightly wider stops, whereas ranging markets
+        # prefer tighter targets and stops to capture small oscillations.
+        if regime == "trend":
+            sl_distance = max(self.base_stop_loss_points, atr * Config.ATR_SL_MULTIPLIER)
+            tp_distance = max(self.base_target_points, atr * Config.ATR_TP_MULTIPLIER)
+        else:
+            # Ranging regime uses 75Â % of the trend multipliers
+            sl_distance = max(self.base_stop_loss_points, atr * (Config.ATR_SL_MULTIPLIER * 0.75))
+            tp_distance = max(self.base_target_points, atr * (Config.ATR_TP_MULTIPLIER * 0.75))
+        # Adjust distances based on confidence.  Higher confidence reduces
+        # the stop distance (allowing tighter stops) and increases the
+        # target distance (seeking larger profits).  The adjustments are
+        # bounded by configuration variables.
+        conf_factor = min(max(abs(score) / self.max_possible_score, 0.0), 1.0)
+        sl_distance *= max(0.5, 1.0 - (Config.SL_CONFIDENCE_ADJ * conf_factor))
+        tp_distance *= (1.0 + Config.TP_CONFIDENCE_ADJ * conf_factor)
+        # Compute absolute stop loss and target levels based on direction
         if direction == "BUY":
             stop_loss = current_price - sl_distance
             target = current_price + tp_distance
@@ -271,14 +315,18 @@ class EnhancedScalpingStrategy:
             stop_loss = current_price + sl_distance
             target = current_price - tp_distance
 
-        # Confidence on a 0–10 scale
-        confidence_raw = (abs(score) / self.max_possible_score) * 10
-        confidence = round(min(confidence_raw, 10.0), 1)
-
         return {
+            # ``direction`` indicates BUY or SELL for human readability
             "direction": direction,
+            # ``signal`` mirrors direction for backward compatibility with
+            # callers that expect a ``signal`` key.
+            "signal": direction,
+            # Raw integer score and computed confidence
             "score": score,
             "confidence": confidence,
+            # Entry price used as the basis for risk calculations
+            "entry_price": float(current_price),
+            # Absolute stop loss and take profit levels
             "stop_loss": float(stop_loss),
             "target": float(target),
         }
