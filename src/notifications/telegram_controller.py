@@ -3,7 +3,8 @@ import threading
 import time 
 from typing import Any, Callable, Dict, Optional
 
-import requests from config import Config
+import requests 
+from config import Config
 
 logger = logging.getLogger(name)
 
