@@ -35,6 +35,14 @@ class TelegramController:
         except Exception as e:
             logger.error(f"Telegram send_message failed: {e}")
 
+    def send_startup_alert(self) -> None:
+    """Send a startup message to confirm bot is running."""
+    try:
+        message = "✅ Nifty Scalper Bot is now active and monitoring trades!"
+        self._send_message(message)
+    except Exception as e:
+        logging.error(f"Failed to send startup alert: {e}")
+
     def _handle_command(self, text: str) -> None:
         logger.info(f"Telegram command received: {text}")
         cmd = text.strip().lower()
