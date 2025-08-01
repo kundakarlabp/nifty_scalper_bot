@@ -12,6 +12,7 @@ from src.notifications.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
+
 class RealTimeTrader:
     def __init__(self) -> None:
         self.is_trading: bool = False
@@ -35,6 +36,9 @@ class RealTimeTrader:
         )
         self._polling_thread: Optional[threading.Thread] = None
 
+        # ✅ Start Telegram polling once at initialization
+        self._start_polling()
+
     def _init_order_executor(self) -> OrderExecutor:
         if not self.live_mode:
             logger.info("Live trading disabled. Using simulated order executor.")
@@ -51,29 +55,34 @@ class RealTimeTrader:
             return OrderExecutor()
 
     def start(self) -> bool:
+        """Start trading (does NOT restart polling)."""
         if self.is_trading:
             logger.info("Trader already running.")
             return True
+
         self.is_trading = True
-        self._start_polling()
         try:
             self.telegram_controller.send_realtime_session_alert("START")
-        except Exception:
-            pass
-        logger.info("Trading started.")
+            logger.info("✅ Trading started.")
+        except Exception as exc:
+            logger.warning("Failed to send START alert: %s", exc)
+
         return True
 
     def stop(self) -> bool:
+        """Stop trading only — keeps Telegram polling alive."""
         if not self.is_trading:
             logger.info("Trader is not running.")
             return True
+
         self.is_trading = False
         try:
             self.telegram_controller.send_realtime_session_alert("STOP")
-            logger.info("Trading stopped.")
+            logger.info("🛑 Trading stopped. Telegram polling remains active.")
         except Exception as exc:
-            logger.warning("Failed to send stop alert: %s", exc)
-        return True  # Do NOT stop polling here
+            logger.warning("Failed to send STOP alert: %s", exc)
+
+        return True
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         if command == "start":
@@ -82,16 +91,18 @@ class RealTimeTrader:
             return self.stop()
         elif command == "mode":
             return self._set_live_mode(arg)
-        logger.warning("Unknown control command: %s", command)
-        return False
+        else:
+            logger.warning("Unknown control command: %s", command)
+            return False
 
     def _set_live_mode(self, mode: str) -> bool:
         desired = mode.strip().lower() == "live"
         if desired == self.live_mode:
             return True
         if self.is_trading:
-            logger.info("Cannot change mode while trading is active. Stop trading first.")
+            logger.warning("Cannot change mode while trading is active. Stop trading first.")
             return False
+
         if desired:
             try:
                 from kiteconnect import KiteConnect
@@ -99,7 +110,7 @@ class RealTimeTrader:
                 kite.set_access_token(Config.KITE_ACCESS_TOKEN)
                 self.order_executor = OrderExecutor(kite=kite)
                 self.live_mode = True
-                logger.info("Switched to LIVE mode.")
+                logger.info("🟢 Switched to LIVE mode.")
                 return True
             except Exception as exc:
                 logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
@@ -107,22 +118,47 @@ class RealTimeTrader:
         else:
             self.order_executor = OrderExecutor()
             self.live_mode = False
-            logger.info("Switched to SHADOW mode.")
+            logger.info("🛡️ Switched to SHADOW (simulation) mode.")
             return True
 
     def _start_polling(self) -> None:
+        """Start Telegram polling in a background thread — only once."""
         if self._polling_thread and self._polling_thread.is_alive():
+            logger.debug("Polling thread already running.")
             return
-        self.telegram_controller.send_startup_alert()
-        self._polling_thread = threading.Thread(target=self.telegram_controller.start_polling, daemon=True)
+
+        try:
+            self.telegram_controller.send_startup_alert()
+        except Exception as e:
+            logger.warning("Failed to send startup alert: %s", e)
+
+        self._polling_thread = threading.Thread(
+            target=self.telegram_controller.start_polling,
+            daemon=True  # Dies when main thread dies
+        )
         self._polling_thread.start()
+        logger.info("✅ Telegram polling started (daemon).")
 
     def _stop_polling(self) -> None:
+        """
+        🚨 Only call this during full application shutdown.
+        Do NOT use in /stop command.
+        """
+        logger.info("🛑 Stopping Telegram polling (app shutdown)...")
         self.telegram_controller.stop_polling()
         if self._polling_thread and self._polling_thread.is_alive():
             if threading.current_thread() != self._polling_thread:
-                self._polling_thread.join(timeout=2)
+                self._polling_thread.join(timeout=3)
         self._polling_thread = None
+
+    def shutdown(self) -> None:
+        """
+        Gracefully shut down the bot (call this on app exit).
+        """
+        logger.info("👋 Shutting down RealTimeTrader...")
+        self.stop()  # Stop trading
+        self._stop_polling()  # Now safe to stop polling
+        logger.info("✅ Shutdown complete.")
 
     def process_bar(self, ohlc: pd.DataFrame) -> None:
         if not self.is_trading or ohlc is None or len(ohlc) < 30:
@@ -195,7 +231,12 @@ class RealTimeTrader:
         return status
 
     def get_summary(self) -> str:
-        lines = [f"Total trades: {len(self.trades)}", f"PNL: {self.daily_pnl:.2f}"]
+        lines = [
+            f"📊 Daily Summary",
+            f"Total trades: {len(self.trades)}",
+            f"PNL: {self.daily_pnl:.2f}",
+            "-" * 30
+        ]
         for trade in self.trades:
             lines.append(
                 f"{trade['direction']} {trade['quantity']} @ {trade['entry_price']:.2f} "
