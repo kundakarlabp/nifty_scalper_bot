@@ -8,35 +8,106 @@ numpy/pandas formulas are implemented directly.
 from typing import Dict
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.volatility import AverageTrueRange
+"""
+This module attempts to import indicator functions from the ``ta`` library.  If
+that library is not available in the environment, fallback implementations
+using pandas and numpy are provided.  The fallback versions are approximate
+but sufficient for demonstration purposes.
+"""
+
+try:
+    from ta.momentum import RSIIndicator  # type: ignore
+    from ta.trend import EMAIndicator, MACD, ADXIndicator  # type: ignore
+    from ta.volatility import AverageTrueRange  # type: ignore
+except ImportError:
+    # Define dummy classes to satisfy type checkers when ``ta`` is absent.
+    RSIIndicator = None  # type: ignore
+    EMAIndicator = None  # type: ignore
+    MACD = None  # type: ignore
+    ADXIndicator = None  # type: ignore
+    AverageTrueRange = None  # type: ignore
+
 
 
 def calculate_ema(df: pd.DataFrame, period: int) -> pd.Series:
-    """Return the Exponential Moving Average of the closing price."""
-    return EMAIndicator(close=df["close"], window=period, fillna=False).ema_indicator()
+    """Return the Exponential Moving Average of the closing price.
+
+    Uses ``ta.trend.EMAIndicator`` when available.  Falls back to pandas'
+    exponential weighted mean otherwise.
+    """
+    if EMAIndicator:
+        return EMAIndicator(close=df["close"], window=period, fillna=False).ema_indicator()
+    # Fallback: use pandas' ewm
+    return df["close"].ewm(span=period, adjust=False).mean()
 
 
 def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Return the Relative Strength Index of the closing price."""
-    return RSIIndicator(close=df["close"], window=period, fillna=False).rsi()
+    """Return the Relative Strength Index of the closing price.
+
+    When the ``ta`` library is unavailable a manual RSI calculation is
+    performed using simple moving averages of gains and losses.
+    """
+    if RSIIndicator:
+        return RSIIndicator(close=df["close"], window=period, fillna=False).rsi()
+    # Fallback RSI implementation
+    delta = df["close"].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    roll_up = gain.rolling(window=period, min_periods=period).mean()
+    roll_down = loss.rolling(window=period, min_periods=period).mean()
+    rs = roll_up / roll_down
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.fillna(method="bfill")  # backfill initial values
+    return rsi
 
 
 def calculate_macd(df: pd.DataFrame) -> Dict[str, pd.Series]:
-    """Return the MACD line, signal line and histogram as a dictionary."""
-    macd_calc = MACD(close=df["close"], fillna=False)
+    """Return the MACD line, signal line and histogram as a dictionary.
+
+    Falls back to manual calculation when the ``ta`` library is absent.
+    """
+    if MACD:
+        macd_calc = MACD(close=df["close"], fillna=False)
+        return {
+            "macd": macd_calc.macd(),
+            "macd_signal": macd_calc.macd_signal(),
+            "macd_hist": macd_calc.macd_diff(),
+        }
+    # Fallback MACD calculation
+    short_ema = df["close"].ewm(span=12, adjust=False).mean()
+    long_ema = df["close"].ewm(span=26, adjust=False).mean()
+    macd_line = short_ema - long_ema
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    macd_hist = macd_line - signal_line
     return {
-        "macd": macd_calc.macd(),
-        "macd_signal": macd_calc.macd_signal(),
-        "macd_hist": macd_calc.macd_diff(),
+        "macd": macd_line,
+        "macd_signal": signal_line,
+        "macd_hist": macd_hist,
     }
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Return the Average True Range."""
-    atr_calc = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=period, fillna=False)
-    return atr_calc.average_true_range()
+    """Return the Average True Range.
+
+    Falls back to a manual ATR computation when the ``ta`` library is
+    unavailable.
+    """
+    if AverageTrueRange:
+        atr_calc = AverageTrueRange(
+            high=df["high"], low=df["low"], close=df["close"], window=period, fillna=False
+        )
+        return atr_calc.average_true_range()
+    # Fallback ATR calculation
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    return atr
 
 
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
@@ -95,9 +166,44 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
 
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Return the Average Directional Index (ADX) which measures trend strength."""
-    adx_calc = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=period, fillna=False)
-    return adx_calc.adx()
+    """Return the Average Directional Index (ADX) which measures trend strength.
+
+    Falls back to a manual ADX calculation when the ``ta`` library is
+    unavailable.
+    """
+    if ADXIndicator:
+        adx_calc = ADXIndicator(
+            high=df["high"], low=df["low"], close=df["close"], window=period, fillna=False
+        )
+        return adx_calc.adx()
+    # Fallback ADX calculation
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    prev_close = close.shift(1)
+    # Directional movement
+    up_move = high - prev_high
+    down_move = prev_low - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # True range
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    # Convert numpy arrays to Series with the original index
+    plus_dm_s = pd.Series(plus_dm, index=df.index)
+    minus_dm_s = pd.Series(minus_dm, index=df.index)
+    tr_s = pd.Series(tr, index=df.index)
+    # Smoothed moving averages of DM and TR
+    atr = tr_s.rolling(window=period, min_periods=period).mean()
+    plus_di = 100.0 * plus_dm_s.rolling(window=period, min_periods=period).mean() / atr
+    minus_di = 100.0 * minus_dm_s.rolling(window=period, min_periods=period).mean() / atr
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    adx = dx.rolling(window=period, min_periods=period).mean()
+    return adx.fillna(method="bfill")
 
 
 def calculate_bb_width(df: pd.DataFrame, window: int = 20, std: int = 2) -> pd.Series:
