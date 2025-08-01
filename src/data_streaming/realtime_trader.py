@@ -68,13 +68,12 @@ class RealTimeTrader:
             logger.info("Trader is not running.")
             return True
         self.is_trading = False
-        # DO NOT stop polling here
         try:
             self.telegram_controller.send_realtime_session_alert("STOP")
-        except Exception:
-            pass
-        logger.info("Trading stopped.")
-        return True
+            logger.info("Trading stopped.")
+        except Exception as exc:
+            logger.warning("Failed to send stop alert: %s", exc)
+        return True  # Do NOT stop polling here
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         if command == "start":
