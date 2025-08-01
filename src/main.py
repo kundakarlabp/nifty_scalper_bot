@@ -24,11 +24,6 @@ import time
 import signal
 
 import os
-print("📁 Files in /app/src/data_streaming:")
-try:
-    print(os.listdir("/app/src/data_streaming"))
-except Exception as e:
-    print(f"Error listing directory: {e}")
 
 from src.data_streaming.real_time_trader import RealTimeTrader  # Updated path
 
