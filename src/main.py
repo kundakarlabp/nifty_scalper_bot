@@ -26,7 +26,7 @@ import time
 # Import the realâ€‘time trader from the root package.  The code has been
 # flattened so there is no ``data_streaming`` subpackage.  Using an
 # absolute import here avoids import errors when running as a script.
-from realtime_trader import RealTimeTrader
+from src.data_streaming.realtime_trader import RealTimeTrade
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
