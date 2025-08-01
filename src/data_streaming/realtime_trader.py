@@ -64,18 +64,17 @@ class RealTimeTrader:
         return True
 
     def stop(self) -> bool:
-    if not self.is_trading:
-        logger.info("Trader is not running.")
-        return True
-    self.is_trading = False
-    # DO NOT stop polling here
-    try:
-        self.telegram_controller.send_realtime_session_alert("STOP")
-    except Exception:
-        pass
-    logger.info("Trading stopped.")
-    return True
-
+        if not self.is_trading:
+            logger.info("Trader is not running.")
+            return True
+        self.is_trading = False
+        # DO NOT stop polling here
+        try:
+            self.telegram_controller.send_realtime_session_alert("STOP")
+        except Exception:
+            pass
+       logger.info("Trading stopped.")
+       return True
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         if command == "start":
