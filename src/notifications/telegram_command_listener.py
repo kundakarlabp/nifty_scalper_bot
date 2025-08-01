@@ -1,5 +1,5 @@
 """
-Backward‑compatibility wrapper for the Telegram controller.
+Backwardâ€‘compatibility wrapper for the Telegram controller.
 
 In the original codebase the Telegram bot command listener was a
 standalone script.  This refactored version rolls command handling
@@ -15,7 +15,7 @@ trading itself; instead, it logs incoming commands.
 from __future__ import annotations
 
 import logging
-from src.telegram_controller import TelegramController
+from telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
 
