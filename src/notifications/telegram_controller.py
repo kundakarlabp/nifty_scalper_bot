@@ -60,14 +60,14 @@ class TelegramController:
                 status = self.status_callback()
                 status_msg = (
                     "📊 Status:\n"
-                    f"is_trading: {status.get('is_trading')}\n"
-                    f"open_orders: {status.get('open_orders')}\n"
-                    f"trades_today: {status.get('trades_today')}\n"
-                    f"live_mode: {status.get('live_mode')}\n"
-                    f"equity: {status.get('equity')}\n"
-                    f"equity_peak: {status.get('equity_peak')}\n"
-                    f"daily_loss: {status.get('daily_loss')}\n"
-                    f"consecutive_losses: {status.get('consecutive_losses')}"
+                    f"🔁 is_trading: {status.get('is_trading')}\n"
+                    f"📥 open_orders: {status.get('open_orders')}\n"
+                    f"📈 trades_today: {status.get('trades_today')}\n"
+                    f"🧠 live_mode: {status.get('live_mode')}\n"
+                    f"💰 equity: {status.get('equity')}\n"
+                    f"📈 equity_peak: {status.get('equity_peak')}\n"
+                    f"📉 daily_loss: {status.get('daily_loss')}\n"
+                    f"🔻 consecutive_losses: {status.get('consecutive_losses')}"
                 )
                 self._send_message(status_msg)
             else:
@@ -94,12 +94,12 @@ class TelegramController:
         elif command == "/help":
             help_text = (
                 "🤖 Available Commands:\n"
-                "/start – begin trading\n"
-                "/stop – halt trading\n"
-                "/status – show current bot status\n"
-                "/summary – show daily P&L summary\n"
-                "/mode live|shadow – switch trading mode\n"
-                "/help – show this help message"
+                "/start – Begin trading\n"
+                "/stop – Halt trading\n"
+                "/status – Show current bot status\n"
+                "/summary – Show daily P&L summary\n"
+                "/mode live|shadow – Switch trading mode\n"
+                "/help – Show this help message"
             )
             self._send_message(help_text)
 
@@ -112,7 +112,8 @@ class TelegramController:
             try:
                 response = requests.get(url, params={"offset": self._update_offset + 1, "timeout": 10})
                 if response.status_code == 200:
-                    updates = response.json()["result"]
+                    json_data = response.json()
+                    updates = json_data.get("result", [])
                     for update in updates:
                         self._update_offset = update["update_id"]
                         message = update.get("message", {}).get("text")
