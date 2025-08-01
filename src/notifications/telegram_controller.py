@@ -1,239 +1,184 @@
-"""
-Telegram notification and command handling.
+import logging import threading import time from typing import Any, Callable, Dict, Optional
 
-This module wraps the Telegram Bot API for sending rich messages and
-processing user commands.  It uses long polling via ``getUpdates``
-instead of webhooks to simplify deployment.  Commands supported:
+import requests from config import Config
 
-* ``/start`` â€“ begin trading (invokes the provided control callback)
-* ``/stop`` â€“ halt trading
-* ``/status`` â€“ get a snapshot of current bot status (via status callback)
-* ``/summary`` â€“ daily P&L summary (via summary callback)
+logger = logging.getLogger(name)
 
-The controller can be used independently or integrated into a
-``RealTimeTrader`` class.  It is designed to operate even when no
-Telegram credentials are configured; in that case all methods become
-noâ€‘ops.
-"""
+class TelegramController: def init( self, status_callback: Optional[Callable[[], Dict[str, Any]]] = None, control_callback: Optional[Callable[[str], bool]] = None, summary_callback: Optional[Callable[[], str]] = None, ) -> None: self.bot_token = Config.TELEGRAM_BOT_TOKEN self.user_id = Config.TELEGRAM_USER_ID self.status_callback = status_callback self.control_callback = control_callback self.summary_callback = summary_callback self.polling_active = False self._polling_thread: Optional[threading.Thread] = None self._update_offset = 0 self.awaiting_confirmation = False
 
-from __future__ import annotations
+if not self.bot_token or not self.user_id:
+        logger.warning("Telegram credentials not set. Notifications disabled.")
 
-import logging
-import threading
-import time
-from typing import Any, Callable, Dict, Optional
+def _api_url(self, method: str) -> str:
+    return f"https://api.telegram.org/bot{self.bot_token}/{method}"
 
-import requests
+def send_message(self, text: str, parse_mode: str = "Markdown") -> None:
+    if not self.bot_token or not self.user_id:
+        logger.debug("Skipping Telegram message because credentials are missing: %s", text)
+        return
+    try:
+        payload = {
+            "chat_id": self.user_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }
+        resp = requests.post(self._api_url("sendMessage"), json=payload, timeout=5)
+        if not resp.ok:
+            logger.error("Failed to send Telegram message: %s", resp.text)
+    except Exception as exc:
+        logger.error("Error sending Telegram message: %s", exc, exc_info=True)
 
-# Import Config from the root package.  Relative imports are avoided to
-# simplify execution when the code resides outside of a package.
-from config import Config
+def send_startup_alert(self) -> None:
+    self.send_message("🚀 Scalper bot initialized and ready.")
 
-logger = logging.getLogger(__name__)
+def send_realtime_session_alert(self, state: str) -> None:
+    if state.upper() == "START":
+        self.send_message("▶️ Real-time trading session started.")
+    elif state.upper() == "STOP":
+        self.send_message("⏹️ Real-time trading session stopped.")
 
+def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
+    direction = signal.get("signal")
+    score = signal.get("score", 0)
+    confidence = signal.get("confidence", 0)
+    sl = signal.get("stop_loss")
+    target = signal.get("target")
+    qty = position.get("quantity") if position else None
+    message = (
+        f"📈 *New Signal*\n"
+        f"Token: `{token}`\n"
+        f"Direction: `{direction}`\n"
+        f"Score: `{score:.2f}`\n"
+        f"Confidence: `{confidence:.1f}/10`\n"
+        f"Qty: `{qty}`\n"
+        f"Entry: `{signal.get('entry_price'):.2f}`\n"
+        f"SL: `{sl:.2f}` | Target: `{target:.2f}`"
+    )
+    self.send_message(message)
 
-class TelegramController:
-    """Wrapper around the Telegram bot API."""
-
-    def __init__(
-        self,
-        status_callback: Optional[Callable[[], Dict[str, Any]]] = None,
-        control_callback: Optional[Callable[[str], bool]] = None,
-        summary_callback: Optional[Callable[[], str]] = None,
-    ) -> None:
-        self.bot_token = Config.TELEGRAM_BOT_TOKEN
-        self.user_id = Config.TELEGRAM_USER_ID
-        self.status_callback = status_callback
-        self.control_callback = control_callback
-        self.summary_callback = summary_callback
-        self.polling_active = False
-        self._polling_thread: Optional[threading.Thread] = None
-        self._update_offset = 0
-        # Skip initial polling if no credentials
-        if not self.bot_token or not self.user_id:
-            logger.warning("Telegram credentials not set. Notifications disabled.")
-
-    # --- Messaging ---
-    def _api_url(self, method: str) -> str:
-        return f"https://api.telegram.org/bot{self.bot_token}/{method}"
-
-    def send_message(self, text: str, parse_mode: str = "Markdown") -> None:
-        """Send a plain text or Markdown message to the configured user."""
-        if not self.bot_token or not self.user_id:
-            logger.debug("Skipping Telegram message because credentials are missing: %s", text)
-            return
+def start_polling(self) -> None:
+    if self.polling_active or not self.bot_token:
+        return
+    logger.info("Starting Telegram polling loop...")
+    self.polling_active = True
+    while self.polling_active:
         try:
-            payload = {
-                "chat_id": self.user_id,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            }
-            resp = requests.post(self._api_url("sendMessage"), json=payload, timeout=5)
+            params = {"timeout": 10, "offset": self._update_offset}
+            resp = requests.get(self._api_url("getUpdates"), params=params, timeout=15)
             if not resp.ok:
-                logger.error("Failed to send Telegram message: %s", resp.text)
-        except Exception as exc:
-            logger.error("Error sending Telegram message: %s", exc, exc_info=True)
-
-    def send_startup_alert(self) -> None:
-        self.send_message("ðŸš€ Scalper bot initialised and ready.")
-
-    def send_realtime_session_alert(self, state: str) -> None:
-        if state.upper() == "START":
-            self.send_message("â–¶ï¸ Realâ€‘time trading session started.")
-        elif state.upper() == "STOP":
-            self.send_message("â¹ï¸ Realâ€‘time trading session stopped.")
-
-    def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
-        """Send a detailed alert when a new trading signal is generated."""
-        direction = signal.get("signal")
-        score = signal.get("score", 0)
-        confidence = signal.get("confidence", 0)
-        sl = signal.get("stop_loss")
-        target = signal.get("target")
-        qty = position.get("quantity") if position else None
-        message = (
-            f"ðŸ“ˆ *New Signal*\n"
-            f"Token: `{token}`\n"
-            f"Direction: `{direction}`\n"
-            f"Score: `{score:.2f}`\n"
-            f"Confidence: `{confidence:.1f}/10`\n"
-            f"Qty: `{qty}`\n"
-            f"Entry: `{signal.get('entry_price'):.2f}`\n"
-            f"SL: `{sl:.2f}` | Target: `{target:.2f}`"
-        )
-        self.send_message(message)
-
-    # --- Polling and command handling ---
-    def start_polling(self) -> None:
-        """Begin long polling for incoming user messages."""
-        if self.polling_active or not self.bot_token:
-            return
-        logger.info("Starting Telegram polling loop...")
-        self.polling_active = True
-        while self.polling_active:
-            try:
-                params = {
-                    "timeout": 10,
-                    "offset": self._update_offset,
-                }
-                resp = requests.get(self._api_url("getUpdates"), params=params, timeout=15)
-                if not resp.ok:
-                    logger.error("Telegram getUpdates failed: %s", resp.text)
-                    time.sleep(5)
-                    continue
-                data = resp.json()
-                for update in data.get("result", []):
-                    self._update_offset = update["update_id"] + 1
-                    message = update.get("message") or {}
-                    chat_id = message.get("chat", {}).get("id")
-                    if chat_id != self.user_id:
-                        continue
-                    text = (message.get("text") or "").strip().lower()
-                    if text.startswith("/start"):
-                        self._handle_start()
-                    elif text.startswith("/stop"):
-                        self._handle_stop()
-                    elif text.startswith("/status"):
-                        self._handle_status()
-                    elif text.startswith("/summary"):
-                        self._handle_summary()
-                    elif text.startswith("/mode"):
-                        self._handle_mode(text)
-                    elif text.startswith("/help"):
-                        self._handle_help()
-                # Short pause to avoid spamming Telegram
-                time.sleep(1)
-            except Exception as exc:
-                logger.error("Error in Telegram polling loop: %s", exc, exc_info=True)
+                logger.error("Telegram getUpdates failed: %s", resp.text)
                 time.sleep(5)
-        logger.info("Telegram polling stopped.")
+                continue
+            data = resp.json()
+            for update in data.get("result", []):
+                self._update_offset = update["update_id"] + 1
+                message = update.get("message") or {}
+                chat_id = message.get("chat", {}).get("id")
+                if chat_id != self.user_id:
+                    continue
+                text = (message.get("text") or "").strip().lower()
 
-    def stop_polling(self) -> None:
-        """Stop the polling loop."""
-        self.polling_active = False
+                if self.awaiting_confirmation:
+                    if text == "/confirmstop":
+                        self._execute_stop()
+                    else:
+                        self.send_message("❗ Stop command not confirmed. Please send `/confirmstop`.")
+                    self.awaiting_confirmation = False
+                    continue
 
-    # --- Command handlers ---
-    def _handle_start(self) -> None:
-        self.send_message("â–¶ï¸ Start command received.")
-        if self.control_callback:
-            result = self.control_callback("start")
-            if result:
-                self.send_message("âœ… Trading started.")
-            else:
-                self.send_message("âš ï¸ Failed to start trading.")
+                if text.startswith("/start"):
+                    self._handle_start()
+                elif text.startswith("/stop"):
+                    self.awaiting_confirmation = True
+                    self.send_message("⚠️ Send `/confirmstop` to confirm trading halt.")
+                elif text.startswith("/status"):
+                    self._handle_status()
+                elif text.startswith("/summary"):
+                    self._handle_summary()
+                elif text.startswith("/mode"):
+                    self._handle_mode(text)
+                elif text.startswith("/help"):
+                    self._handle_help()
+                elif text.startswith("/restart"):
+                    self.send_message("🔄 Restarting bot...")
+                elif text.startswith("/debug"):
+                    self.send_message("🔍 Debug mode toggled (not implemented).")
+                elif text.startswith("/trades"):
+                    self.send_message("📋 Last 3 trades: (mocked data)")
+                elif text.startswith("/risk"):
+                    self.send_message("📐 Risk settings: (mocked data)")
+                elif text.startswith("/refresh"):
+                    self.send_message("♻️ Refreshed indicators and signal state.")
 
-    def _handle_stop(self) -> None:
-        self.send_message("â¹ï¸ Stop command received.")
-        if self.control_callback:
-            result = self.control_callback("stop")
-            if result:
-                self.send_message("âœ… Trading stopped.")
-            else:
-                self.send_message("âš ï¸ Failed to stop trading.")
+            time.sleep(1)
+        except Exception as exc:
+            logger.error("Error in Telegram polling loop: %s", exc, exc_info=True)
+            time.sleep(5)
+    logger.info("Telegram polling stopped.")
 
-    def _handle_status(self) -> None:
+def stop_polling(self) -> None:
+    self.polling_active = False
+
+def _handle_start(self) -> None:
+    self.send_message("▶️ Start command received.")
+    if self.control_callback:
+        result = self.control_callback("start")
+        self.send_message("✅ Trading started." if result else "⚠️ Failed to start trading.")
+
+def _execute_stop(self) -> None:
+    self.send_message("⏹️ Stop command confirmed.")
+    if self.control_callback:
+        result = self.control_callback("stop")
+        self.send_message("✅ Trading stopped." if result else "⚠️ Failed to stop trading.")
+
+def _handle_status(self) -> None:
+    if self.status_callback:
+        status = self.status_callback()
+        status_lines = [f"*{k}*: `{v}`" for k, v in status.items()]
+        self.send_message("📊 *Status*\n" + "\n".join(status_lines))
+    else:
+        self.send_message("ℹ️ Status unavailable.")
+
+def _handle_summary(self) -> None:
+    if self.summary_callback:
+        summary = self.summary_callback()
+        self.send_message(f"📈 *Daily Summary*\n{summary}")
+    else:
+        self.send_message("ℹ️ Summary unavailable.")
+
+def _handle_mode(self, text: str) -> None:
+    parts = text.split()
+    if len(parts) < 2:
         if self.status_callback:
             status = self.status_callback()
-            status_lines = [f"*{k}*: `{v}`" for k, v in status.items()]
-            message = "ðŸ“Š *Status*\n" + "\n".join(status_lines)
-            self.send_message(message)
+            current_mode = "LIVE" if status.get("live_mode") else "SHADOW"
+            self.send_message(f"⚙️ Mode: `{current_mode}`")
         else:
-            self.send_message("â„¹ï¸ Status unavailable.")
+            self.send_message("ℹ️ Mode information unavailable.")
+        return
+    desired = parts[1].strip().lower()
+    cmd = "mode_live" if desired in ("live", "on") else "mode_shadow"
+    if self.control_callback:
+        result = self.control_callback(cmd)
+        self.send_message(f"✅ Mode switched to `{desired.upper()}`." if result else "⚠️ Failed to change mode.")
+    else:
+        self.send_message("ℹ️ Cannot change mode: no control callback.")
 
-    def _handle_summary(self) -> None:
-        if self.summary_callback:
-            summary = self.summary_callback()
-            self.send_message(f"ðŸ“ˆ *Daily Summary*\n{summary}")
-        else:
-            self.send_message("â„¹ï¸ Summary unavailable.")
+def _handle_help(self) -> None:
+    help_text = (
+        "🧰 *Available Commands*\n"
+        "/start – Begin trading\n"
+        "/stop – Halt trading (requires /confirmstop)\n"
+        "/status – Show bot status\n"
+        "/summary – Daily P&L\n"
+        "/mode [live|shadow] – Switch trading mode\n"
+        "/restart – Restart bot (future)\n"
+        "/refresh – Refresh indicators\n"
+        "/risk – Show risk settings\n"
+        "/trades – Last 3 trades\n"
+        "/debug – Toggle debug\n"
+        "/help – Show this help"
+    )
+    self.send_message(help_text)
 
-    def _handle_mode(self, text: str) -> None:
-        """Handle the /mode command to switch between live and shadow modes.
-
-        The expected syntax is ``/mode live`` or ``/mode shadow``.  If
-        no argument is provided the current mode is returned.
-        """
-        # Parse the desired mode from the user message
-        parts = text.split()
-        # If only '/mode' is provided return current status via status callback
-        if len(parts) < 2:
-            if self.status_callback:
-                status = self.status_callback()
-                current_mode = "LIVE" if status.get("live_mode") else "SHADOW"
-                self.send_message(f"âš™ï¸ Mode: `{current_mode}`")
-            else:
-                self.send_message("â„¹ï¸ Mode information unavailable.")
-            return
-        desired = parts[1].strip().lower()
-        # Translate the user's request into a control command
-        if desired in ("live", "on", "enable"):
-            cmd = "mode_live"
-        elif desired in ("shadow", "off", "disable", "sim"):  # synonyms
-            cmd = "mode_shadow"
-        else:
-            self.send_message("âš ï¸ Unknown mode. Use /mode live or /mode shadow.")
-            return
-        # Invoke the control callback if provided
-        if self.control_callback:
-            result = self.control_callback(cmd)
-            if result:
-                new_mode = "LIVE" if cmd == "mode_live" else "SHADOW"
-                self.send_message(f"âœ… Mode switched to `{new_mode}`.")
-            else:
-                self.send_message("âš ï¸ Failed to change mode.")
-        else:
-            self.send_message("â„¹ï¸ Cannot change mode: no control callback.")
-
-    def _handle_help(self) -> None:
-        """Send a help message describing available commands."""
-        help_text = (
-            "ðŸ› ï¸ *Available Commands*\n"
-            "/start â€“ begin trading\n"
-            "/stop â€“ halt trading\n"
-            "/status â€“ show current bot status\n"
-            "/summary â€“ show daily P&L summary\n"
-            "/mode [live|shadow] â€“ switch trading mode\n"
-            "/help â€“ show this help message"
-        )
-        self.send_message(help_text)
