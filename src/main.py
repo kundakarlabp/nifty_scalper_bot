@@ -23,7 +23,10 @@ import logging
 import sys
 import time
 
-from src.data_streaming.realtime_trader import RealTimeTrader
+# Import the realâ€‘time trader from the root package.  The code has been
+# flattened so there is no ``data_streaming`` subpackage.  Using an
+# absolute import here avoids import errors when running as a script.
+from realtime_trader import RealTimeTrader
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -41,7 +44,7 @@ def get_trader() -> RealTimeTrader:
 
 
 def main() -> None:
-    """Command‑line interface for starting/stopping the bot."""
+    """Commandâ€‘line interface for starting/stopping the bot."""
     if len(sys.argv) < 2:
         print("Usage: python -m src.main [start|stop|status]")
         return
