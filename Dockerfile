@@ -32,5 +32,5 @@ COPY . .
 # Make manage script executable (if used)
 RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
 
-# ✅ Run the main bot using module-based execution
-CMD ["python3", "-m", "src.main", "start"]
+# ✅ Run the main bot script directly
+CMD ["python3", "src/main.py"]
