@@ -18,7 +18,7 @@ import time
 import signal
 
 # ✅ Correct import path based on your actual file
-from src.core.real_time_trader import RealTimeTrader
+from src.data_streaming.real_time_trader import RealTimeTrader
 
 # Configure logging
 logging.basicConfig(
