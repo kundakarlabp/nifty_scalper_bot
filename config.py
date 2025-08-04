@@ -46,12 +46,6 @@ class Config:
         print("⚠️  Invalid TELEGRAM_CHAT_ID, defaulting to 0")
         TELEGRAM_CHAT_ID = 0
 
-    # Optional: backward compatibility
-    try:
-        TELEGRAM_USER_ID: int = int(os.getenv("TELEGRAM_USER_ID", str(TELEGRAM_CHAT_ID)))
-    except (ValueError, TypeError):
-        TELEGRAM_USER_ID = 0
-
     # ———————————————— RISK & MONEY MANAGEMENT ———————————————— #
     RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.01"))
     MAX_DRAWDOWN: float = float(os.getenv("MAX_DRAWDOWN", "0.05"))
