@@ -23,9 +23,8 @@ import sys
 import time
 import signal
 
-import os
-
-from src.data_streaming.realtime_trader import RealTimeTrader  # Updated path
+# ✅ CORRECT import path and filename
+from src.core.real_time_trader import RealTimeTrader
 
 # Logging setup
 logger = logging.getLogger(__name__)
