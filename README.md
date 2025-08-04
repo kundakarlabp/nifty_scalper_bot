@@ -10,25 +10,35 @@ This repository contains an advanced options scalping bot designed for the Nifty
 * **Dockerised deployment** – a minimal Dockerfile and Railway/Render configuration make it easy to run the bot in a cloud environment.
 
 nifty_scalper_bot/
-├── src/                      # All core bot logic lives here
-│   ├── main.py               # ✅ Entry point
-│   ├── config.py             # ✅ Central configuration file (API keys, SL/TP, etc.)
-│   ├── data_streaming/       # ✅ Market data & streaming logic
-│   ├── execution/            # ✅ Order execution logic
-│   ├── notifications/        # ✅ Telegram bot control & alerts
-│   ├── risk/                 # ✅ Position sizing, daily limits
-│   ├── strategies/           # ✅ Technical indicator logic
-│   └── utils/                # ✅ Utility tools: strike selector, expiry, etc.
-│
-├── tests/                    # 🔧 (Optional) Test scripts
-│
-├── .env.example              # ✅ Sample environment variable file
-├── Dockerfile                # ✅ For containerization
-├── manage_bot.sh             # ✅ Shell script to run/kill the bot
-├── render.yaml               # ✅ For Render or Railway deployment config
-├── README.md                 # ✅ Documentation
-├── requirements.txt          # ✅ Python dependencies
-
+├── src/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── auth/
+│   ├── backtesting/
+│   ├── data/
+│   ├── data_streaming/
+│   │   ├── __init__.py
+│   │   └── realtime_trader.py
+│   ├── execution/
+│   │   ├── __init__.py
+│   │   └── order_executor.py
+│   ├── notifications/
+│   │   ├── __init__.py
+│   │   └── telegram_controller.py
+│   ├── risk/
+│   │   ├── __init__.py
+│   │   └── position_sizing.py
+│   ├── scripts/
+│   ├── strategies/
+│   │   ├── __init__.py
+│   │   └── scalping_strategy.py
+│   ├── utils/
+│   └── config.py
+├── Dockerfile
+├── manage_bot.sh
+├── render.yaml
+├── requirements.txt
+└── ...
 ## Quick start
 
 1. **Clone the repository**
