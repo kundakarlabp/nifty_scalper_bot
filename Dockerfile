@@ -12,13 +12,13 @@ RUN adduser \
     --uid "${UID}" \
     appuser
 
-# Set working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Ensure unbuffered logs for real-time output
+# Ensure unbuffered logs
 ENV PYTHONUNBUFFERED=1
 
-# Set PYTHONPATH so absolute imports like 'from src.xyz' work
+# Set PYTHONPATH
 ENV PYTHONPATH=/app
 
 # Install system dependencies
@@ -30,21 +30,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first to leverage Docker layer caching
+# Copy requirements and install Python packages
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the project files into the container
+# Copy project files
 COPY . .
 
-# Ensure the app runs as non-root user
+# Set permissions
 USER appuser
-
-# Make manage script executable (if exists)
 RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
 
-# ✅ Run the main bot script directly
-CMD ["python3", "src/main.py"]
+# Run using module for correct imports
+CMD ["python3", "-m", "src.main"]
