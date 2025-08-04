@@ -1,14 +1,11 @@
 # src/core/real_time_trader.py
-
 import logging
 import threading
 import atexit
 import signal
 import sys
 from typing import Any, Dict, List, Optional
-
 import pandas as pd
-
 from src.config import Config
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizing
@@ -60,6 +57,8 @@ class RealTimeTrader:
         # Register graceful shutdown
         atexit.register(self.shutdown)
 
+        logger.info("RealTimeTrader initialized and ready to receive commands.")
+
     def _init_order_executor(self) -> OrderExecutor:
         """Initialize order executor based on live/simulation mode."""
         if not self.live_mode:
@@ -81,6 +80,7 @@ class RealTimeTrader:
         """Start trading (does NOT restart polling)."""
         if self.is_trading:
             logger.info("Trader already running.")
+            self.telegram_controller.send_message("🛑 Trader already running.")
             return True
 
         self.is_trading = True
@@ -89,13 +89,13 @@ class RealTimeTrader:
             logger.info("✅ Trading started.")
         except Exception as exc:
             logger.warning("Failed to send START alert: %s", exc)
-
         return True
 
     def stop(self) -> bool:
         """Stop trading only — keeps Telegram polling alive."""
         if not self.is_trading:
             logger.info("Trader is not running.")
+            self.telegram_controller.send_message("🛑 Trader is already stopped.")
             return True
 
         self.is_trading = False
@@ -104,31 +104,52 @@ class RealTimeTrader:
             logger.info("🛑 Trading stopped. Telegram polling remains active.")
         except Exception as exc:
             logger.warning("Failed to send STOP alert: %s", exc)
-
         return True
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
-        """Handle control commands from Telegram."""
+        """
+        Handle control commands from Telegram.
+        Expected commands: /start, /stop, /mode live, /mode shadow
+        """
+        command = command.strip().lower()
+        arg = arg.strip().lower() if arg else ""
+
+        logger.info(f"Received command: /{command} {arg}")
+
         if command == "start":
             return self.start()
+
         elif command == "stop":
             return self.stop()
+
         elif command == "mode":
+            if arg not in ["live", "shadow"]:
+                logger.warning("Invalid mode argument: %s", arg)
+                self.telegram_controller.send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
+                return False
             return self._set_live_mode(arg)
+
         else:
             logger.warning("Unknown control command: %s", command)
+            self.telegram_controller.send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
             return False
 
     def _set_live_mode(self, mode: str) -> bool:
         """Switch between live and shadow (simulation) mode."""
-        desired = mode.strip().lower() == "live"
-        if desired == self.live_mode:
+        desired_live = (mode == "live")
+
+        if desired_live == self.live_mode:
+            current_mode = "LIVE" if self.live_mode else "SHADOW"
+            logger.info(f"Already in {current_mode} mode.")
+            self.telegram_controller.send_message(f"🟢 Already in *{current_mode}* mode.", parse_mode="Markdown")
             return True
+
         if self.is_trading:
             logger.warning("Cannot change mode while trading is active. Stop trading first.")
+            self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.")
             return False
 
-        if desired:
+        if desired_live:
             try:
                 from kiteconnect import KiteConnect
                 kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
@@ -136,14 +157,22 @@ class RealTimeTrader:
                 self.order_executor = OrderExecutor(kite=kite)
                 self.live_mode = True
                 logger.info("🟢 Switched to LIVE mode.")
+                self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
                 return True
             except Exception as exc:
                 logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
+                self.telegram_controller.send_message(
+                    f"❌ Failed to switch to LIVE mode: `{str(exc)}`\n\n"
+                    "Reverted to SHADOW mode.", parse_mode="Markdown"
+                )
+                self.live_mode = False
+                self.order_executor = OrderExecutor()
                 return False
         else:
             self.order_executor = OrderExecutor()
             self.live_mode = False
             logger.info("🛡️ Switched to SHADOW (simulation) mode.")
+            self.telegram_controller.send_message("🛡️ Switched to *SHADOW* (simulation) mode.", parse_mode="Markdown")
             return True
 
     def _start_polling(self) -> None:
@@ -238,7 +267,6 @@ class RealTimeTrader:
             # Place entry order
             symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
             exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
-
             order_id = self.order_executor.place_entry_order(
                 symbol=symbol,
                 exchange=exchange,
