@@ -38,9 +38,11 @@ RUN pip install --upgrade pip && \
 # Copy project files
 COPY . .
 
-# Set permissions
-USER appuser
+# ✅ Set executable permission as ROOT (before switching user)
 RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
+
+# ✅ Switch to non-root user LAST
+USER appuser
 
 # Run using module for correct imports
 CMD ["python3", "-m", "src.main"]
