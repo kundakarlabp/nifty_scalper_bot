@@ -1,19 +1,13 @@
 """
-Entry point for the Nifty scalper bot.
+Entry point for the Nifty Scalper Bot.
 
-This module provides a simple CLI interface to start or stop the bot
-manually. When run with:
+Provides a CLI to control the bot:
+    python -m src.main start    → Start the trading engine and Telegram bot
+    python -m src.main stop     → Stop only trading (polling stays alive)
+    python -m src.main status   → Print current bot status
 
-    python -m src.main start    # start the bot and polling
-    python -m src.main stop     # stop a running bot
-    python -m src.main status   # print current status
-
-It will spin up a `RealTimeTrader` instance, begin Telegram polling and await incoming
-market data via the `process_bar` method. In the absence of a live data feed,
-the bot will simply idle and respond to Telegram commands.
-
-In typical deployment the bot will be managed via `manage_bot.sh` or
-the Render `render.yaml` rather than invoking this module directly.
+The bot will respond to Telegram commands like /start, /stop, /mode live.
+Always run this as a module to ensure correct imports.
 """
 
 from __future__ import annotations
@@ -23,31 +17,31 @@ import sys
 import time
 import signal
 
-# ✅ CORRECT import path and filename
+# ✅ Correct import path based on your actual file
 from src.core.real_time_trader import RealTimeTrader
 
-# Logging setup
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Singleton trader instance
+# Singleton instance
 _trader: RealTimeTrader | None = None
 
 
 def get_trader() -> RealTimeTrader:
-    """
-    Return a singleton instance of `RealTimeTrader`.
-    Initializes only once, and avoids sending duplicate startup alerts.
-    """
+    """Lazy-initialize the RealTimeTrader singleton."""
     global _trader
     if _trader is None:
-        logger.info("🧠 Initializing RealTimeTrader singleton...")
+        logger.info("🧠 Initializing RealTimeTrader...")
         _trader = RealTimeTrader()
     return _trader
 
 
 def graceful_shutdown(signum, frame):
-    """Handle shutdown signals gracefully."""
+    """Handle SIGINT/SIGTERM gracefully."""
     logger.info(f"🛑 Received signal {signum}. Shutting down...")
     if _trader:
         _trader.shutdown()
@@ -55,11 +49,9 @@ def graceful_shutdown(signum, frame):
 
 
 def wait_for_commands():
-    """
-    Keep the main thread alive and responsive to Telegram.
-    Unlike trading loop, this runs regardless of is_trading.
-    """
+    """Keep the main thread alive to handle Telegram messages."""
     try:
+        logger.info("✅ Bot is running. Awaiting commands via Telegram...")
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
@@ -67,31 +59,27 @@ def wait_for_commands():
 
 
 def main() -> None:
-    """Command-line interface for starting/stopping the bot."""
+    """CLI entry point."""
     if len(sys.argv) < 2:
         print("Usage: python -m src.main [start|stop|status]")
         sys.exit(1)
 
-    command = sys.argv[1].lower()
-
-    # Register signal handlers early
+    command = sys.argv[1].lower().strip()
     signal.signal(signal.SIGINT, graceful_shutdown)
     signal.signal(signal.SIGTERM, graceful_shutdown)
 
-    # Always get trader instance (safe even for status)
     trader = get_trader()
 
     if command == "start":
         logger.info("🚀 Starting Nifty Scalper Bot...")
         trader.start()
-        logger.info("Bot started. Awaiting commands via Telegram...")
-        wait_for_commands()  # Stay alive forever (or until signal)
+        wait_for_commands()  # Blocks forever
 
     elif command == "stop":
-        logger.info("🛑 Stopping Nifty Scalper Bot...")
+        logger.info("🛑 Stopping trading engine...")
         trader.stop()
-        # Do NOT call shutdown() here — just stop trading
-        logger.info("Bot stopped. Telegram polling remains active for further commands.")
+        logger.info("Trading stopped. Telegram polling remains active.")
+        sys.exit(0)
 
     elif command == "status":
         logger.info("📊 Fetching bot status...")
@@ -99,6 +87,7 @@ def main() -> None:
         print("📊 Bot Status:")
         for key, value in status.items():
             print(f"  {key}: {value}")
+        sys.exit(0)
 
     else:
         print(f"❌ Unknown command: {command}")
