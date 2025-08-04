@@ -1,4 +1,4 @@
-# src/data_streaming/real_time_trader.py
+# src/data_streaming/realtime_trader.py
 import logging
 import threading
 import atexit
