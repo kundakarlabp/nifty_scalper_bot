@@ -1,6 +1,17 @@
 # Use official Python slim image
 FROM python:3.10-slim
 
+# Set non-root user (security best practice)
+ARG UID=10001
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "${UID}" \
+    appuser
+
 # Set working directory inside the container
 WORKDIR /app
 
@@ -17,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     curl \
     ca-certificates \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file first to leverage Docker layer caching
 COPY requirements.txt .
@@ -29,7 +40,10 @@ RUN pip install --upgrade pip && \
 # Copy the rest of the project files into the container
 COPY . .
 
-# Make manage script executable (if used)
+# Ensure the app runs as non-root user
+USER appuser
+
+# Make manage script executable (if exists)
 RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
 
 # ✅ Run the main bot script directly
