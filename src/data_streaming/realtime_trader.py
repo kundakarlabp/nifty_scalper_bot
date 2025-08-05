@@ -10,10 +10,10 @@ from src.config import Config
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
+# ✅ Corrected import path based on your project structure
 from src.notifications.telegram_controller import TelegramController
 
 logger = logging.getLogger(__name__)
-
 
 class RealTimeTrader:
     """
@@ -42,6 +42,7 @@ class RealTimeTrader:
         self.order_executor = self._init_order_executor()
 
         # Initialize Telegram controller with callbacks
+        # ✅ Pass the required callbacks
         self.telegram_controller = TelegramController(
             status_callback=self.get_status,
             control_callback=self._handle_control,
@@ -80,7 +81,7 @@ class RealTimeTrader:
         """Start trading (does NOT restart polling)."""
         if self.is_trading:
             logger.info("Trader already running.")
-            self.telegram_controller.send_message("🛑 Trader already running.")
+            self.telegram_controller.send_message("🛑 Trader already running.") # ✅ Use send_message
             return True
 
         self.is_trading = True
@@ -95,7 +96,7 @@ class RealTimeTrader:
         """Stop trading only — keeps Telegram polling alive."""
         if not self.is_trading:
             logger.info("Trader is not running.")
-            self.telegram_controller.send_message("🛑 Trader is already stopped.")
+            self.telegram_controller.send_message("🛑 Trader is already stopped.") # ✅ Use send_message
             return True
 
         self.is_trading = False
@@ -125,12 +126,14 @@ class RealTimeTrader:
         elif command == "mode":
             if arg not in ["live", "shadow"]:
                 logger.warning("Invalid mode argument: %s", arg)
+                # ✅ Use send_message with Markdown
                 self.telegram_controller.send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
                 return False
             return self._set_live_mode(arg)
 
         else:
             logger.warning("Unknown control command: %s", command)
+            # ✅ Use send_message with Markdown
             self.telegram_controller.send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
             return False
 
@@ -141,12 +144,14 @@ class RealTimeTrader:
         if desired_live == self.live_mode:
             current_mode = "LIVE" if self.live_mode else "SHADOW"
             logger.info(f"Already in {current_mode} mode.")
+            # ✅ Use send_message with Markdown
             self.telegram_controller.send_message(f"🟢 Already in *{current_mode}* mode.", parse_mode="Markdown")
             return True
 
         if self.is_trading:
             logger.warning("Cannot change mode while trading is active. Stop trading first.")
-            self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.")
+            # ✅ Use send_message with Markdown
+            self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.", parse_mode="Markdown")
             return False
 
         if desired_live:
@@ -157,10 +162,12 @@ class RealTimeTrader:
                 self.order_executor = OrderExecutor(kite=kite)
                 self.live_mode = True
                 logger.info("🟢 Switched to LIVE mode.")
+                # ✅ Use send_message with Markdown
                 self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
                 return True
             except Exception as exc:
                 logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
+                # ✅ Use send_message with Markdown
                 self.telegram_controller.send_message(
                     f"❌ Failed to switch to LIVE mode: `{str(exc)}`\n\n"
                     "Reverted to SHADOW mode.", parse_mode="Markdown"
@@ -172,6 +179,7 @@ class RealTimeTrader:
             self.order_executor = OrderExecutor()
             self.live_mode = False
             logger.info("🛡️ Switched to SHADOW (simulation) mode.")
+            # ✅ Use send_message with Markdown
             self.telegram_controller.send_message("🛡️ Switched to *SHADOW* (simulation) mode.", parse_mode="Markdown")
             return True
 
@@ -217,10 +225,14 @@ class RealTimeTrader:
 
     def process_bar(self, ohlc: pd.DataFrame) -> None:
         """Process a new OHLC bar and generate trading signals."""
+        # ✅ Add debug log at the very beginning
+        logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
+
         if not self.is_trading:
+            logger.debug("process_bar: Trading not active, returning.")
             return
         if ohlc is None or len(ohlc) < 30:
-            logger.debug("Insufficient data to process bar.")
+            logger.debug("Insufficient data to process bar (less than 30 points).")
             return
 
         try:
@@ -235,23 +247,40 @@ class RealTimeTrader:
             # Time filter
             if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
                 if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
-                    return
+                     logger.debug(f"Time filter active ({Config.TIME_FILTER_START} - {Config.TIME_FILTER_END}). Current time {current_time_str} is outside range, skipping bar.")
+                     return
 
             current_price = float(ohlc.iloc[-1]["close"])
+            logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
 
             # Generate signal
+            logger.debug("Calling strategy.generate_signal...")
             signal = self.strategy.generate_signal(ohlc, current_price)
-            if not signal or float(signal.get("confidence", 0.0)) < Config.CONFIDENCE_THRESHOLD:
+            logger.debug(f"Strategy returned signal: {signal}")
+
+            if not signal:
+                logger.debug("No signal generated by strategy.")
+                return
+
+            signal_confidence = float(signal.get("confidence", 0.0))
+            logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
+
+            if signal_confidence < Config.CONFIDENCE_THRESHOLD:
+                logger.debug("Signal confidence below threshold, discarding.")
                 return
 
             # Calculate position size
+            logger.debug("Calling risk_manager.calculate_position_size...")
             position = self.risk_manager.calculate_position_size(
                 entry_price=signal.get("entry_price", current_price),
                 stop_loss=signal.get("stop_loss", current_price),
                 signal_confidence=signal.get("confidence", 0.0),
                 market_volatility=signal.get("market_volatility", 0.0),
             )
+            logger.debug(f"Position sizing returned: {position}")
+
             if not position or position.get("quantity", 0) <= 0:
+                logger.debug("Position sizing failed or quantity is zero/negative.")
                 return
 
             # Send signal alert
@@ -267,6 +296,7 @@ class RealTimeTrader:
             # Place entry order
             symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
             exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
+            logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
             order_id = self.order_executor.place_entry_order(
                 symbol=symbol,
                 exchange=exchange,
@@ -278,6 +308,7 @@ class RealTimeTrader:
                 return
 
             # Setup GTT (bracket/OCO) orders
+            logger.debug("Attempting to setup GTT orders...")
             self.order_executor.setup_gtt_orders(
                 entry_order_id=order_id,
                 entry_price=signal.get("entry_price", current_price),
@@ -299,6 +330,7 @@ class RealTimeTrader:
                 "target": signal.get("target", current_price),
                 "confidence": signal.get("confidence", 0.0),
             })
+            logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
 
         except Exception as exc:
             logger.error("Error processing bar: %s", exc, exc_info=True)
