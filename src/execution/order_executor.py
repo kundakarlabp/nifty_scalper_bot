@@ -52,6 +52,12 @@ class OrderExecutor:
     """
 
     def __init__(self, kite: Optional[Any] = None) -> None: # Use Any for kite object type
+        """Initializes the OrderExecutor.
+
+        Args:
+            kite (Optional[Any]): An instance of KiteConnect for live trading.
+                                  If None, orders are simulated.
+        """
         self.kite = kite
         self.orders: Dict[str, OrderRecord] = {}
 
@@ -109,12 +115,8 @@ class OrderExecutor:
         exchange: str,
         quantity: int,
         transaction_type: str,
-        # ✅ Clarify trailing_atr usage or remove if not standard
-        # Assuming trailing_atr is the step size derived from ATR and a multiplier
-        # If you want to derive step from ATR here, pass ATR and use Config.ATR_SL_MULTIPLIER
-        # For now, let's assume trailing_step_atr_multiplier is passed or derived elsewhere
-        # Let's remove trailing_atr from args for clarity based on OrderRecord
-        # trailing_atr: float = 0.0,
+        # Note: trailing_atr parameter removed from args for clarity based on OrderRecord
+        # and standard ATR usage via Config. Trailing logic uses the multiplier.
     ) -> bool:
         """Create stop loss and target orders (GTT OCO) after the entry fills."""
         try:
@@ -198,7 +200,7 @@ class OrderExecutor:
             logger.debug("📉 Trailing stop update skipped: Order %s not found or closed.", order_id)
             return
         try:
-            # ✅ Use Config.ATR_SL_MULTIPLIER to calculate step size from ATR
+            # ✅ Corrected: Use Config.ATR_SL_MULTIPLIER to calculate step size from ATR
             step_size = atr * order.trailing_step_atr_multiplier # Use the multiplier stored or from config
             if step_size <= 0:
                 logger.debug("📉 Trailing stop update skipped: Calculated step size <= 0 for order %s", order_id)
