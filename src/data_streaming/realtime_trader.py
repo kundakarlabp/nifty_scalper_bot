@@ -12,13 +12,13 @@ from datetime import datetime, timedelta
 import time # Import for caching
 
 from src.config import Config
-# Assuming you'll adapt or create an OptionsStrategy
+# Assuming you'll have an OptionsStrategy or modify the existing one
 # from src.strategies.options_strategy import OptionsStrategy
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placeholder, might need new strategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
-# Import helpers for consistent spot LTP symbol usage and strike selection
+# Import helper for consistent spot LTP symbol usage and strike selector
 from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens, get_next_expiry_date
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,14 @@ class RealTimeTrader:
         self.trades: List[Dict[str, Any]] = []
         self.live_mode: bool = Config.ENABLE_LIVE_TRADING
 
-        # Assuming you'll adapt or create an OptionsStrategy
+        # --- Instrument Caching for Rate Limiting ---
+        self._nfo_instruments_cache: Optional[List[Dict]] = None
+        self._nse_instruments_cache: Optional[List[Dict]] = None
+        self._instruments_cache_timestamp: float = 0
+        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
+        # --- End Instrument Caching ---
+
+        # Assuming you'll have an OptionsStrategy or modify the existing one
         self.strategy = EnhancedScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
             base_target_points=Config.BASE_TARGET_POINTS,
@@ -45,13 +52,6 @@ class RealTimeTrader:
             summary_callback=self.get_summary,
         )
         self._polling_thread: Optional[threading.Thread] = None
-
-        # --- Instrument Caching for Rate Limiting ---
-        self._nfo_instruments_cache: Optional[List[Dict]] = None
-        self._nse_instruments_cache: Optional[List[Dict]] = None
-        self._instruments_cache_timestamp: float = 0
-        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
-        # --- End Instrument Caching ---
 
         # Start Telegram polling in a daemon thread
         self._start_polling()
@@ -76,7 +76,6 @@ class RealTimeTrader:
         except Exception as exc:
             logger.error("Failed to initialize live trading. Falling back to simulation: %s", exc, exc_info=True)
             self.live_mode = False
-            self.order_executor = OrderExecutor()
             return OrderExecutor()
 
     def start(self) -> bool:
@@ -144,7 +143,7 @@ class RealTimeTrader:
                 self.live_mode = True
                 logger.info("🟢 Switched to LIVE mode.")
                 # Refresh instruments cache upon switching to live mode
-                self._refresh_instruments_cache(force=True)
+                self._refresh_instruments_cache(force=True) # Force refresh when enabling live mode
                 self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
                 return True
             except Exception as exc:
@@ -224,8 +223,9 @@ class RealTimeTrader:
                 logger.error(f"[_refresh_instruments_cache] Failed to refresh instruments cache: {e}")
                 # Don't update timestamp on failure, so it retries sooner
                 # Keep old cache if it exists, or set to empty list if it's the first failure
+                # Using empty list [] is generally safer than None for iteration
                 if self._nfo_instruments_cache is None:
-                     self._nfo_instruments_cache = [] # Or None, but empty list might be safer
+                     self._nfo_instruments_cache = []
                 if self._nse_instruments_cache is None:
                      self._nse_instruments_cache = []
                 # Let it proceed with potentially stale or empty cache
@@ -235,13 +235,114 @@ class RealTimeTrader:
         return self._nfo_instruments_cache, self._nse_instruments_cache
     # --- End Instrument Caching Methods ---
 
+    def _analyze_options_data(self, spot_price: float, options_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
+        """
+        Analyze fetched options data to select optimal strikes based on OI, Delta, etc.
+        This is a simplified example. You can add more complex logic here.
+        """
+        selected_strikes = []
+        atm_strike = round(spot_price / 50) * 50
+
+        for opt_type in ['CE', 'PE']:
+            # Example logic: Select ATM and one ITM/OTM based on OI change or Delta
+            relevant_strikes = []
+            for symbol, df in options_data.items():
+                if opt_type not in symbol or df.empty:
+                    continue
+                # Extract strike from symbol (assuming format like NIFTY23SEP24000CE)
+                try:
+                    # Find the position of 'CE' or 'PE' and extract the strike before it
+                    opt_index = symbol.find(opt_type)
+                    if opt_index != -1:
+                        # Assuming strike is 5 digits before CE/PE
+                        strike_str = symbol[opt_index-5:opt_index]
+                        strike = int(strike_str)
+                    else:
+                        logger.warning(f"Could not extract strike from symbol {symbol}")
+                        continue
+                except ValueError:
+                    logger.warning(f"Could not extract strike from symbol {symbol}")
+                    continue
+
+                if opt_type == 'CE':
+                    otm_condition = strike > atm_strike
+                    itm_condition = strike < atm_strike
+                else: # PE
+                    otm_condition = strike < atm_strike
+                    itm_condition = strike > atm_strike
+
+                # Get last few rows for analysis (e.g., last 2 bars for delta)
+                if len(df) < 2:
+                    continue
+
+                last_row = df.iloc[-1]
+                prev_row = df.iloc[-2]
+
+                # Basic OI Change calculation (placeholder, real OI data needed)
+                # Kite historical data might not have 'oi' by default.
+                # You might need to fetch LTP and calculate changes or use quotes.
+                # This example assumes 'oi' column exists.
+                oi_change = last_row.get('oi', 0) - prev_row.get('oi', 0)
+
+                # Basic Delta approximation (requires more sophisticated calculation)
+                # This is a very rough proxy using price change vs underlying change
+                # A real implementation would use Greeks from the API or calculate from the book
+                delta_approx = 0.5 # Placeholder, needs real calculation
+
+                relevant_strikes.append({
+                    'symbol': symbol,
+                    'strike': strike,
+                    'type': opt_type,
+                    'ltp': last_row.get('last_price', 0),
+                    'oi': last_row.get('oi', 0),
+                    'oi_change': oi_change,
+                    'delta': delta_approx,
+                    'is_atm': strike == atm_strike,
+                    'is_otm': otm_condition,
+                    'is_itm': itm_condition
+                })
+
+            # Sort by OI Change (descending) to find strongest buildup
+            # Note: If 'oi' is not available, this sorting won't work as intended.
+            relevant_strikes.sort(key=lambda x: x['oi_change'], reverse=True)
+
+            # Select ATM
+            atm_option = next((s for s in relevant_strikes if s['is_atm']), None)
+            if atm_option:
+                selected_strikes.append(atm_option)
+                logger.info(f"Selected ATM {opt_type}: {atm_option['symbol']}")
+
+            # Select one with highest OI change (could be ITM or OTM)
+            # Add logic to prefer ITM or OTM based on strategy
+            if Config.STRIKE_SELECTION_TYPE == "ITM":
+                 best_other = next((s for s in relevant_strikes if s['is_itm']), None)
+            elif Config.STRIKE_SELECTION_TYPE == "OTM":
+                 best_other = next((s for s in relevant_strikes if s['is_otm']), None)
+            else: # Default to highest OI change non-ATM or ATM logic
+                 # If OI data is not reliable, fallback to ATM/ATM+offset logic
+                 # Or implement a different selection criterion here.
+                 # For now, let's just pick the first non-ATM if available.
+                 best_other = next((s for s in relevant_strikes if not s['is_atm']), None)
+
+            if best_other:
+                selected_strikes.append(best_other)
+                logger.info(f"Selected {Config.STRIKE_SELECTION_TYPE} {opt_type}: {best_other['symbol']} (OI Change: {best_other['oi_change']})")
+            elif atm_option: # If no other found, ensure ATM is added if not already
+                 # ATM already added above
+                 pass
+            else:
+                 # If nothing found, log a warning
+                 logger.warning(f"No suitable {opt_type} strike found based on criteria.")
+
+        return selected_strikes
+
     def fetch_and_process_data(self):
         """
         Fetches the latest spot price, options data, analyzes it, and triggers processing.
         """
         logger.debug("fetch_and_process_data triggered by schedule.")
         if not self.is_trading:
-             logger.debug("fetch_and_process_ Trading not active, skipping.")
+             logger.debug("fetch_and_process_data: Trading not active, skipping.")
              return
 
         try:
@@ -269,7 +370,7 @@ class RealTimeTrader:
                 if spot_price is None:
                     logger.error(f"[RT] Failed to fetch spot price for {spot_symbol_ltp}. Check symbol and market status.")
                     # Returning prevents proceeding without spot data, which is critical for options
-                    return # Or handle the error appropriately
+                    return # Or handle the error appropriately (e.g., skip this cycle)
                 else:
                      logger.info(f"[RT] Successfully fetched current spot price: {spot_price}")
             except Exception as e:
@@ -280,12 +381,11 @@ class RealTimeTrader:
             # 2. Determine expiry and get instrument tokens for ATM
             # Pass the cached instrument lists
             instruments_data = get_instrument_tokens(
-                symbol=Config.SPOT_SYMBOL.split()[0], # Pass base name like 'NIFTY'
+                symbol=Config.SPOT_SYMBOL,
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo,
                 cached_nse_instruments=cached_nse
             )
-
             if not instruments_data:
                 logger.error("Failed to get instrument tokens for ATM strike.")
                 return
@@ -315,17 +415,17 @@ class RealTimeTrader:
                         spot_df['date'] = pd.to_datetime(spot_df['date'])
                         spot_df.set_index('date', inplace=True)
                 except Exception as e:
-                    logger.warning(f"Could not fetch spot historical  {e}")
+                    logger.warning(f"Could not fetch spot historical data: {e}")
 
             # 5. Fetch historical data for a range of CE and PE options around ATM
             options_data = {}
-            strike_range = Config.STRIKE_RANGE # e.g., 4 strikes on either side of ATM
+            strike_range = Config.STRIKE_RANGE # e.g., 4 strikes on either side
             for offset in range(-strike_range, strike_range + 1):
                 strike_to_check = atm_strike + (offset * 50) # Assuming 50 point strikes
 
                 # Re-fetch tokens for these strikes, passing cached data
                 temp_instruments = get_instrument_tokens(
-                    symbol=Config.SPOT_SYMBOL.split()[0], # Pass base name like 'NIFTY'
+                    symbol=Config.SPOT_SYMBOL,
                     offset=offset,
                     kite_instance=self.order_executor.kite,
                     cached_nfo_instruments=cached_nfo,
@@ -348,7 +448,7 @@ class RealTimeTrader:
                                 to_date=end_time,
                                 interval="minute"
                             )
-                            if hist_
+                            if hist_data:
                                 df = pd.DataFrame(hist_data)
                                 if 'date' in df.columns:
                                     df['date'] = pd.to_datetime(df['date'])
@@ -375,7 +475,14 @@ class RealTimeTrader:
                 # Simple fallback: ATM, ATM+50, ATM-50 for both CE and PE
                 for offset in [0, 1, -1]:
                     fb_strike = atm_strike + (offset * 50)
-                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite, cached_nfo_instruments=cached_nfo, cached_nse_instruments=cached_nse)
+                    # Pass cached data to fallback calls too
+                    fb_instruments = get_instrument_tokens(
+                        symbol=Config.SPOT_SYMBOL,
+                        offset=offset,
+                        kite_instance=self.order_executor.kite,
+                        cached_nfo_instruments=cached_nfo,
+                        cached_nse_instruments=cached_nse
+                    )
                     if fb_instruments:
                         if fb_instruments.get('ce_symbol') and fb_instruments.get('ce_token'):
                             selected_strikes_info.append({
@@ -487,6 +594,7 @@ class RealTimeTrader:
             # --- Call Strategy ---
             # Pass the options OHLC, spot OHLC, and strike information to the strategy
             # NOTE: You will need to implement or adapt `generate_options_signal` in your strategy.
+            # Placeholder: Using the existing strategy method, which might not be suitable.
             # A new method `generate_options_signal` should be created.
             # signal = self.strategy.generate_options_signal(ohlc, spot_ohlc, strike_info, current_price)
             # For now, using a dummy signal generation based on price action
@@ -507,6 +615,8 @@ class RealTimeTrader:
 
             # --- Position Sizing ---
             # Might need options-specific position sizing logic
+            # Pass the lot size for the specific option contract if it differs
+            # For Nifty options, Config.NIFTY_LOT_SIZE (75) is typically correct.
             position = self.risk_manager.calculate_position_size(
                 entry_price=signal.get("entry_price", current_price),
                 stop_loss=signal.get("stop_loss", current_price),
@@ -631,6 +741,7 @@ class RealTimeTrader:
             return None
 
 
+    # Keep the original process_bar for potential future use or mixed strategies
     def process_bar(self, ohlc: pd.DataFrame) -> None:
          # ... (original logic for futures/single asset) ...
          # This is the original method from Pasted_Text_1754457091365.txt
@@ -654,33 +765,94 @@ class RealTimeTrader:
              current_price = float(ohlc.iloc[-1]["close"])
              logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
              signal = self.strategy.generate_signal(ohlc, current_price)
+             logger.debug(f"Strategy returned signal: {signal}")
+             if not signal:
+                 logger.debug("No signal generated by strategy.")
+                 return
+             signal_confidence = float(signal.get("confidence", 0.0))
+             logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
+             if signal_confidence < Config.CONFIDENCE_THRESHOLD:
+                 logger.debug("Signal confidence below threshold, discarding.")
+                 return
+             position = self.risk_manager.calculate_position_size(
+                 entry_price=signal.get("entry_price", current_price),
+                 stop_loss=signal.get("stop_loss", current_price),
+                 signal_confidence=signal.get("confidence", 0.0),
+                 market_volatility=signal.get("market_volatility", 0.0),
+             )
+             logger.debug(f"Position sizing returned: {position}")
+             if not position or position.get("quantity", 0) <= 0:
+                 logger.debug("Position sizing failed or quantity is zero/negative.")
+                 return
+             token = len(self.trades) + 1
+             self.telegram_controller.send_signal_alert(token, signal, position)
+             transaction_type = signal.get("signal") or signal.get("direction")
+             if not transaction_type:
+                 logger.warning("Missing signal direction.")
+                 return
+             symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
+             exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
+             logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
+             order_id = self.order_executor.place_entry_order(
+                 symbol=symbol,
+                 exchange=exchange,
+                 transaction_type=transaction_type,
+                 quantity=position["quantity"],
+             )
+             if not order_id:
+                 logger.warning("Failed to place entry order.")
+                 return
+             logger.debug("Attempting to setup GTT orders...")
+             self.order_executor.setup_gtt_orders(
+                 entry_order_id=order_id,
+                 entry_price=signal.get("entry_price", current_price),
+                 stop_loss_price=signal.get("stop_loss", current_price),
+                 target_price=signal.get("target", current_price),
+                 symbol=symbol,
+                 exchange=exchange,
+                 quantity=position["quantity"],
+                 transaction_type=transaction_type,
+             )
+             self.trades.append({
+                 "order_id": order_id,
+                 "direction": transaction_type,
+                 "quantity": position["quantity"],
+                 "entry_price": signal.get("entry_price", current_price),
+                 "stop_loss": signal.get("stop_loss", current_price),
+                 "target": signal.get("target", current_price),
+                 "confidence": signal.get("confidence", 0.0),
+             })
+             logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
+         except Exception as exc:
+             logger.error("Error processing bar: %s", exc, exc_info=True)
+         # ... (rest of original logic) ...
 
-...
 
-def get_status(self) -> Dict[str, Any]:
-    status: Dict[str, Any] = {
-        "is_trading": self.is_trading,
-        "open_orders": len(self.order_executor.get_active_orders()),
-        "trades_today": len(self.trades),
-        "live_mode": self.live_mode,
-    }
-    status.update(self.risk_manager.get_risk_status())
-    return status
+    def get_status(self) -> Dict[str, Any]:
+        status: Dict[str, Any] = {
+            "is_trading": self.is_trading,
+            "open_orders": len(self.order_executor.get_active_orders()),
+            "trades_today": len(self.trades),
+            "live_mode": self.live_mode,
+        }
+        status.update(self.risk_manager.get_risk_status())
+        return status
 
-def get_summary(self) -> str:
-    lines = [
-        f"📊 <b>Daily Summary</b>",
-        f"🔁 <b>Total trades:</b> {len(self.trades)}",
-        f"💰 <b>PNL:</b> {self.daily_pnl:.2f}",
-        "────────────────────"
-    ]
-    for trade in self.trades:
-        lines.append(
-            f"{trade.get('symbol', 'N/A')} {trade['direction']} {trade['quantity']} @ {trade['entry_price']:.2f} "
-            f"(SL {trade['stop_loss']:.2f}, TP {trade['target']:.2f})"
-        )
-    return "\n".join(lines)
+    def get_summary(self) -> str:
+        lines = [
+            f"📊 <b>Daily Summary</b>",
+            f"🔁 <b>Total trades:</b> {len(self.trades)}",
+            f"💰 <b>PNL:</b> {self.daily_pnl:.2f}",
+            "────────────────────"
+        ]
+        for trade in self.trades:
+            # Adjust summary for options
+            lines.append(
+                f"{trade.get('symbol', 'N/A')} {trade['direction']} {trade['quantity']} @ {trade['entry_price']:.2f} "
+                f"(SL {trade['stop_loss']:.2f}, TP {trade['target']:.2f})"
+            )
+        return "\n".join(lines)
 
-def __repr__(self) -> str:
-    return (f"<RealTimeTrader is_trading={self.is_trading} "
-            f"live_mode={self.live_mode} trades_today={len(self.trades)}>")
+    def __repr__(self) -> str:
+        return (f"<RealTimeTrader is_trading={self.is_trading} "
+                f"live_mode={self.live_mode} trades_today={len(self.trades)}>")
