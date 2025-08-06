@@ -74,7 +74,7 @@ class Config:
     MIN_LOTS: int = int(os.getenv("MIN_LOTS", "1"))
     MAX_LOTS: int = int(os.getenv("MAX_LOTS", "5"))
 
-    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY")
+    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NSE:NIFTY 50")
     TRADE_EXCHANGE: str = os.getenv("TRADE_EXCHANGE", "NFO")
 
     # Add this line for the instrument token (if still used for futures)
