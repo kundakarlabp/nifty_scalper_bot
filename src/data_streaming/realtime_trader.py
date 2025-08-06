@@ -385,7 +385,7 @@ class RealTimeTrader:
                 cached_nfo_instruments=cached_nfo,
                 cached_nse_instruments=cached_nse
             )
-            if not instruments_
+            if not instruments_data:
                 logger.error("Failed to get instrument tokens for ATM strike.")
                 return
 
