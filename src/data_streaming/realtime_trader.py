@@ -46,6 +46,7 @@ class RealTimeTrader:
         
         # Schedule the data fetching and processing task
         # Adjust the frequency (e.g., '1' minute) according to your strategy's needs.
+        # process_bar checks for Config.TIME_FILTER_START/END, so frequent checks are usually okay.
         schedule.every(1).minutes.do(self.fetch_and_process_data)
         logger.info("Scheduled fetch_and_process_data to run every 1 minute.")
 
@@ -321,7 +322,8 @@ class RealTimeTrader:
             # Create 35 minutes of dummy 1-minute data
             end_time = datetime.now().replace(second=0, microsecond=0)
             start_time = end_time - timedelta(minutes=34)
-            dates = pd.date_range(start=start_time, end=end_time, freq='T')
+            # FIX: Changed freq='T' to freq='min' to address FutureWarning
+            dates = pd.date_range(start=start_time, end=end_time, freq='min')
             # Generate dummy prices around a base (e.g., 19000)
             base_price = 19000
             noise = np.random.randn(len(dates)) * 20 # Random noise
