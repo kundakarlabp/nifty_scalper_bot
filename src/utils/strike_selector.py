@@ -238,6 +238,23 @@ def get_instrument_tokens(
                          logger.debug("  [DIAGNOSTIC] - ... (output limited)")
             if count == 0:
                 logger.debug(f"  [DIAGNOSTIC] - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
+            
+            # --- Enhanced Diagnostic: Show Cache Stats ---
+            # Provide more context about the overall cache state
+            total_cached_nfo = len(instruments) if instruments else 0
+            total_nifty_filtered = len(nifty_index_instruments)
+            unique_expiries_in_nifty = set()
+            for inst in nifty_index_instruments:
+                 inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
+                 unique_expiries_in_nifty.add(inst_expiry_str)
+            sorted_unique_expiries = sorted(list(unique_expiries_in_nifty))
+            
+            logger.debug(f"  [DIAGNOSTIC] - Cache Stats: Total NFO Instruments: {total_cached_nfo}")
+            logger.debug(f"  [DIAGNOSTIC] - Cache Stats: Filtered NIFTY Instruments: {total_nifty_filtered}")
+            logger.debug(f"  [DIAGNOSTIC] - Cache Stats: Unique Expiries in Filtered NIFTY: {len(sorted_unique_expiries)}")
+            logger.debug(f"  [DIAGNOSTIC] - Cache Stats: First 10 Unique Expiries: {sorted_unique_expiries[:10]}")
+            # --- End Enhanced Diagnostic ---
+            
         # --- Diagnostic Logging End ---
         
         # Iterate only through the filtered list of instruments for this index
