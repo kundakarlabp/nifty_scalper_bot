@@ -1,5 +1,15 @@
+# main.py
+
 """
 Entry point for the Nifty Scalper Bot.
+
+Provides a CLI to control the bot:
+    python -m src.main start    → Initialize bot, start Telegram, and begin main processing loop
+    python -m src.main stop     → Stop only trading logic (polling stays alive)
+    python -m src.main status   → Print current bot status
+
+The bot will respond to Telegram commands like /start, /stop, /mode live.
+Always run this as a module to ensure correct imports.
 """
 
 from __future__ import annotations
@@ -8,7 +18,7 @@ import logging
 import sys
 import time
 import signal
-import threading
+import schedule # Import schedule if your trader uses it
 
 # ✅ Correct import path based on your actual file
 from src.data_streaming.realtime_trader import RealTimeTrader
@@ -29,7 +39,7 @@ def get_trader() -> RealTimeTrader:
     global _trader
     if _trader is None:
         logger.info("🧠 Initializing RealTimeTrader...")
-        _trader = RealTimeTrader()
+        _trader = RealTimeTrader() # This initializes and starts Telegram polling in a daemon thread
     return _trader
 
 
@@ -39,16 +49,6 @@ def graceful_shutdown(signum, frame):
     if _trader:
         _trader.shutdown()
     sys.exit(0)
-
-
-def wait_for_commands():
-    """Keep the main thread alive to handle Telegram messages."""
-    try:
-        logger.info("✅ Bot is running. Awaiting commands via Telegram...")
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        graceful_shutdown(signal.SIGINT, None)
 
 
 def main() -> None:
@@ -61,28 +61,32 @@ def main() -> None:
     signal.signal(signal.SIGINT, graceful_shutdown)
     signal.signal(signal.SIGTERM, graceful_shutdown)
 
-    trader = get_trader()
+    trader = get_trader() # This initializes the trader and starts Telegram polling in __init__
 
     if command == "start":
-        logger.info("🚀 Starting Nifty Scalper Bot...")
-
-        # 🔁 Start trading loop in background thread
-        logger.info("Starting trading loop...")
-        trading_thread = threading.Thread(target=trader.run, daemon=True)
-        trading_thread.start()
-        logger.info("Trading loop started.")
-
-        # 📞 Start Telegram bot in main thread (blocking)
-        logger.info("Starting Telegram...")
-        trader.start_telegram()
-
-        # Keep main thread alive for Telegram
-        wait_for_commands()
+        logger.info("🚀 Starting Nifty Scalper Bot main processing loop...")
+        # Trader is initialized, Telegram polling started in __init__ (daemon thread)
+        # Now run the main processing loop in the main thread.
+        # This loop is responsible for running scheduled tasks or periodic checks.
+        try:
+            logger.info("🟢 Entering main processing loop. Press Ctrl+C to stop.")
+            # The main loop runs scheduled tasks or other periodic logic.
+            # If you have scheduled tasks set up elsewhere (e.g., in trader.__init__ or process_data_and_trade),
+            # this loop will execute them.
+            while True:
+                # Run any scheduled tasks (e.g., data fetching, signal checking)
+                # Make sure you have scheduled tasks set up, e.g.:
+                # schedule.every(1).minutes.do(trader.some_periodic_method)
+                schedule.run_pending()
+                time.sleep(1) # Check for scheduled tasks every second
+        except KeyboardInterrupt:
+            logger.info("🛑 KeyboardInterrupt received in main loop.")
+            graceful_shutdown(signal.SIGINT, None)
 
     elif command == "stop":
-        logger.info("🛑 Stopping trading engine...")
-        trader.stop()
-        logger.info("Trading stopped. Telegram polling remains active.")
+        logger.info("🛑 Stopping trading logic...")
+        trader.stop() # This sets trader.is_trading = False
+        logger.info("Trading logic stopped. Telegram polling remains active.")
         sys.exit(0)
 
     elif command == "status":
