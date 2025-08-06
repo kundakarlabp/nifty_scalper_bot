@@ -16,6 +16,7 @@ import logging
 import sys
 import time
 import signal
+import threading
 
 # ✅ Correct import path based on your actual file
 from src.data_streaming.realtime_trader import RealTimeTrader
@@ -72,8 +73,16 @@ def main() -> None:
 
     if command == "start":
         logger.info("🚀 Starting Nifty Scalper Bot...")
-        trader.start()
-        wait_for_commands()  # Blocks forever
+
+        # 🔁 Start trading loop in background thread
+        trading_thread = threading.Thread(target=trader.run, daemon=True)
+        trading_thread.start()
+
+        # 📞 Start Telegram bot in main thread (blocking)
+        trader.start_telegram()  # assuming this is where Telegram polling starts
+
+        # Keep main thread alive for Telegram
+        wait_for_commands()
 
     elif command == "stop":
         logger.info("🛑 Stopping trading engine...")
