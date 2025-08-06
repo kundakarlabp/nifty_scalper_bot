@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import schedule
 from datetime import datetime, timedelta
+import time # Import for caching
 
 from src.config import Config
 # Assuming you'll have an OptionsStrategy or modify the existing one
@@ -17,8 +18,8 @@ from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placehol
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
-# Import helper for consistent spot LTP symbol usage
-from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens
+# Import helper for consistent spot LTP symbol usage and strike selector
+from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens, get_next_expiry_date
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,13 @@ class RealTimeTrader:
         self.daily_pnl: float = 0.0
         self.trades: List[Dict[str, Any]] = []
         self.live_mode: bool = Config.ENABLE_LIVE_TRADING
+
+        # --- Instrument Caching for Rate Limiting ---
+        self._nfo_instruments_cache: Optional[List[Dict]] = None
+        self._nse_instruments_cache: Optional[List[Dict]] = None
+        self._instruments_cache_timestamp: float = 0
+        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
+        # --- End Instrument Caching ---
 
         # Assuming you'll have an OptionsStrategy or modify the existing one
         self.strategy = EnhancedScalpingStrategy(
@@ -134,6 +142,8 @@ class RealTimeTrader:
                 self.order_executor = OrderExecutor(kite=kite)
                 self.live_mode = True
                 logger.info("🟢 Switched to LIVE mode.")
+                # Refresh instruments cache upon switching to live mode
+                self._refresh_instruments_cache(force=True) # Force refresh when enabling live mode
                 self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
                 return True
             except Exception as exc:
@@ -181,6 +191,49 @@ class RealTimeTrader:
         self.stop()
         self._stop_polling()
         logger.info("✅ RealTimeTrader shutdown complete.")
+
+    # --- Instrument Caching Methods ---
+    def _refresh_instruments_cache(self, force: bool = False) -> None:
+        """Fetches and caches NFO and NSE instruments if cache is stale or empty."""
+        if not self.order_executor or not self.order_executor.kite:
+            logger.warning("[_refresh_instruments_cache] Cannot refresh cache, Kite instance not available.")
+            # Clear cache to force retry if kite becomes available later
+            self._nfo_instruments_cache = None
+            self._nse_instruments_cache = None
+            return
+
+        current_time = time.time()
+        needs_refresh = (
+            force or
+            self._nfo_instruments_cache is None or
+            self._nse_instruments_cache is None or
+            (current_time - self._instruments_cache_timestamp) > self._INSTRUMENT_CACHE_DURATION
+        )
+
+        if needs_refresh:
+            try:
+                logger.debug("[_refresh_instruments_cache] Refreshing instruments cache...")
+                self._nfo_instruments_cache = self.order_executor.kite.instruments("NFO")
+                logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nfo_instruments_cache)} NFO instruments.")
+                self._nse_instruments_cache = self.order_executor.kite.instruments("NSE")
+                logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nse_instruments_cache)} NSE instruments.")
+                self._instruments_cache_timestamp = current_time
+                logger.info("[_refresh_instruments_cache] ✅ Instruments cache refreshed.")
+            except Exception as e:
+                logger.error(f"[_refresh_instruments_cache] Failed to refresh instruments cache: {e}")
+                # Don't update timestamp on failure, so it retries sooner
+                # Keep old cache if it exists, or set to empty list if it's the first failure
+                # Using empty list [] is generally safer than None for iteration
+                if self._nfo_instruments_cache is None:
+                     self._nfo_instruments_cache = []
+                if self._nse_instruments_cache is None:
+                     self._nse_instruments_cache = []
+                # Let it proceed with potentially stale or empty cache
+
+    def _get_cached_instruments(self):
+        """Returns the cached NFO and NSE instrument lists."""
+        return self._nfo_instruments_cache, self._nse_instruments_cache
+    # --- End Instrument Caching Methods ---
 
     def _analyze_options_data(self, spot_price: float, options_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
         """
@@ -297,6 +350,16 @@ class RealTimeTrader:
                  logger.error("KiteConnect instance not found in order_executor. Cannot fetch data. Is live mode enabled?")
                  return
 
+            # --- Instrument Caching Integration ---
+            # Refresh instruments cache if needed (handles rate limiting internally)
+            self._refresh_instruments_cache()
+            # Check if cache is available
+            cached_nfo, cached_nse = self._get_cached_instruments()
+            if cached_nfo is None or cached_nse is None:
+                 logger.error("[fetch_and_process_data] Instrument cache is not available. Cannot proceed with strike selection.")
+                 return # Critical data missing
+            # --- End Instrument Caching Integration ---
+
             # 1. Fetch current spot price using the confirmed correct symbol
             try:
                 spot_symbol_ltp = _get_spot_ltp_symbol() # This will get "NSE:NIFTY 50" from Config.SPOT_SYMBOL
@@ -316,8 +379,13 @@ class RealTimeTrader:
 
 
             # 2. Determine expiry and get instrument tokens for ATM
-            # This part might need adjustment based on your exact symbol format
-            instruments_data = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], kite_instance=self.order_executor.kite)
+            # Pass the cached instrument lists
+            instruments_data = get_instrument_tokens(
+                symbol=Config.SPOT_SYMBOL,
+                kite_instance=self.order_executor.kite,
+                cached_nfo_instruments=cached_nfo,
+                cached_nse_instruments=cached_nse
+            )
             if not instruments_data:
                 logger.error("Failed to get instrument tokens for ATM strike.")
                 return
@@ -355,8 +423,14 @@ class RealTimeTrader:
             for offset in range(-strike_range, strike_range + 1):
                 strike_to_check = atm_strike + (offset * 50) # Assuming 50 point strikes
 
-                # Re-fetch tokens for these strikes
-                temp_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite)
+                # Re-fetch tokens for these strikes, passing cached data
+                temp_instruments = get_instrument_tokens(
+                    symbol=Config.SPOT_SYMBOL,
+                    offset=offset,
+                    kite_instance=self.order_executor.kite,
+                    cached_nfo_instruments=cached_nfo,
+                    cached_nse_instruments=cached_nse
+                )
                 if not temp_instruments:
                     continue # Skip if couldn't get tokens
 
@@ -401,7 +475,14 @@ class RealTimeTrader:
                 # Simple fallback: ATM, ATM+50, ATM-50 for both CE and PE
                 for offset in [0, 1, -1]:
                     fb_strike = atm_strike + (offset * 50)
-                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite)
+                    # Pass cached data to fallback calls too
+                    fb_instruments = get_instrument_tokens(
+                        symbol=Config.SPOT_SYMBOL,
+                        offset=offset,
+                        kite_instance=self.order_executor.kite,
+                        cached_nfo_instruments=cached_nfo,
+                        cached_nse_instruments=cached_nse
+                    )
                     if fb_instruments:
                         if fb_instruments.get('ce_symbol') and fb_instruments.get('ce_token'):
                             selected_strikes_info.append({
