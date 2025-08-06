@@ -11,7 +11,9 @@ import schedule
 from datetime import datetime, timedelta
 
 from src.config import Config
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Might need a new OptionsStrategy
+# Assuming you'll have an OptionsStrategy or modify the existing one
+# from src.strategies.options_strategy import OptionsStrategy
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placeholder, might need new strategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
@@ -195,7 +197,15 @@ class RealTimeTrader:
                     continue
                 # Extract strike from symbol (assuming format like NIFTY23SEP24000CE)
                 try:
-                    strike = int(symbol[-7:-2]) # Extract 5 digits before CE/PE
+                    # Find the position of 'CE' or 'PE' and extract the strike before it
+                    opt_index = symbol.find(opt_type)
+                    if opt_index != -1:
+                        # Assuming strike is 5 digits before CE/PE
+                        strike_str = symbol[opt_index-5:opt_index]
+                        strike = int(strike_str)
+                    else:
+                        logger.warning(f"Could not extract strike from symbol {symbol}")
+                        continue
                 except ValueError:
                     logger.warning(f"Could not extract strike from symbol {symbol}")
                     continue
@@ -214,9 +224,12 @@ class RealTimeTrader:
                 last_row = df.iloc[-1]
                 prev_row = df.iloc[-2]
 
-                # Basic OI Change calculation
+                # Basic OI Change calculation (placeholder, real OI data needed)
+                # Kite historical data might not have 'oi' by default.
+                # You might need to fetch LTP and calculate changes or use quotes.
+                # This example assumes 'oi' column exists.
                 oi_change = last_row.get('oi', 0) - prev_row.get('oi', 0)
-                
+
                 # Basic Delta approximation (requires more sophisticated calculation)
                 # This is a very rough proxy using price change vs underlying change
                 # A real implementation would use Greeks from the API or calculate from the book
@@ -236,6 +249,7 @@ class RealTimeTrader:
                 })
 
             # Sort by OI Change (descending) to find strongest buildup
+            # Note: If 'oi' is not available, this sorting won't work as intended.
             relevant_strikes.sort(key=lambda x: x['oi_change'], reverse=True)
 
             # Select ATM
@@ -250,12 +264,21 @@ class RealTimeTrader:
                  best_other = next((s for s in relevant_strikes if s['is_itm']), None)
             elif Config.STRIKE_SELECTION_TYPE == "OTM":
                  best_other = next((s for s in relevant_strikes if s['is_otm']), None)
-            else: # Default to highest OI change non-ATM
+            else: # Default to highest OI change non-ATM or ATM logic
+                 # If OI data is not reliable, fallback to ATM/ATM+offset logic
+                 # Or implement a different selection criterion here.
+                 # For now, let's just pick the first non-ATM if available.
                  best_other = next((s for s in relevant_strikes if not s['is_atm']), None)
 
             if best_other:
                 selected_strikes.append(best_other)
                 logger.info(f"Selected {Config.STRIKE_SELECTION_TYPE} {opt_type}: {best_other['symbol']} (OI Change: {best_other['oi_change']})")
+            elif atm_option: # If no other found, ensure ATM is added if not already
+                 # ATM already added above
+                 pass
+            else:
+                 # If nothing found, log a warning
+                 logger.warning(f"No suitable {opt_type} strike found based on criteria.")
 
         return selected_strikes
 
@@ -279,24 +302,24 @@ class RealTimeTrader:
             spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
             if spot_price is None:
                 logger.warning("Failed to fetch spot price.")
-                return
+                # Fallback attempt
+                ltp_data_fb = self.order_executor.kite.ltp([Config.SPOT_SYMBOL])
+                spot_price = ltp_data_fb.get(Config.SPOT_SYMBOL, {}).get('last_price')
+                if spot_price is None:
+                    logger.error("Failed to fetch spot price even with fallback.")
+                    return
             logger.info(f"Current {Config.SPOT_SYMBOL} spot price: {spot_price}")
 
-            # 2. Determine expiry and get instrument tokens
+            # 2. Determine expiry and get instrument tokens for ATM
             # This part might need adjustment based on your exact symbol format
             instruments_data = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, kite_instance=self.order_executor.kite)
             if not instruments_data:
-                logger.error("Failed to get instrument tokens.")
+                logger.error("Failed to get instrument tokens for ATM strike.")
                 return
 
             atm_strike = instruments_data['atm_strike']
-            ce_token = instruments_data['ce_token']
-            pe_token = instruments_data['pe_token']
             expiry = instruments_data['expiry']
-            
-            if not ce_token or not pe_token:
-                 logger.warning("Could not find CE or PE tokens.")
-                 return # Or handle appropriately
+            spot_token = instruments_data.get('spot_token')
 
             logger.info(f"ATM Strike: {atm_strike}, Expiry: {expiry}")
 
@@ -305,28 +328,33 @@ class RealTimeTrader:
             start_time = end_time - timedelta(minutes=Config.DATA_LOOKBACK_MINUTES) # e.g., 30 mins
 
             # 4. Fetch historical data for spot (for trend context)
-            spot_historical = self.order_executor.kite.historical_data(
-                instrument_token=instruments_data['spot_token'], # You need to add spot_token to get_instrument_tokens
-                from_date=start_time,
-                to_date=end_time,
-                interval="minute"
-            )
-            spot_df = pd.DataFrame(spot_historical) if spot_historical else pd.DataFrame()
-            if not spot_df.empty and 'date' in spot_df.columns:
-                spot_df['date'] = pd.to_datetime(spot_df['date'])
-                spot_df.set_index('date', inplace=True)
+            spot_df = pd.DataFrame()
+            if spot_token:
+                try:
+                    spot_historical = self.order_executor.kite.historical_data(
+                        instrument_token=spot_token,
+                        from_date=start_time,
+                        to_date=end_time,
+                        interval="minute"
+                    )
+                    spot_df = pd.DataFrame(spot_historical) if spot_historical else pd.DataFrame()
+                    if not spot_df.empty and 'date' in spot_df.columns:
+                        spot_df['date'] = pd.to_datetime(spot_df['date'])
+                        spot_df.set_index('date', inplace=True)
+                except Exception as e:
+                    logger.warning(f"Could not fetch spot historical data: {e}")
 
             # 5. Fetch historical data for a range of CE and PE options around ATM
-            # This is a simplified approach. You might want to fetch a wider range.
             options_data = {}
             strike_range = Config.STRIKE_RANGE # e.g., 4 strikes on either side
             for offset in range(-strike_range, strike_range + 1):
                 strike_to_check = atm_strike + (offset * 50) # Assuming 50 point strikes
-                
-                # Re-fetch tokens for these strikes if needed, or use a pre-fetched list
-                # For simplicity, let's assume we have a way to get tokens for these strikes
-                # This part needs robustification
+
+                # Re-fetch tokens for these strikes
                 temp_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, offset=offset, kite_instance=self.order_executor.kite)
+                if not temp_instruments:
+                    continue # Skip if couldn't get tokens
+
                 temp_ce_token = temp_instruments.get('ce_token')
                 temp_pe_token = temp_instruments.get('pe_token')
                 temp_ce_symbol = temp_instruments.get('ce_symbol')
@@ -354,10 +382,51 @@ class RealTimeTrader:
                             logger.error(f"Error fetching data for {symbol} (Token: {token}): {e}")
 
             # 6. Analyze options data to select strikes
+            # Note: _analyze_options_data relies on 'oi' which might not be in historical data.
+            # This is a limitation of the Kite historical data API for options.
+            # You might need to fetch LTP for a list of options and analyze those,
+            # or use a different data source for OI/Delta.
+            # For now, we'll proceed with a simpler selection.
             selected_strikes_info = self._analyze_options_data(spot_price, options_data)
-            
+
+            # Fallback if analysis doesn't yield results or if OI data is unreliable
             if not selected_strikes_info:
-                logger.warning("No strikes selected based on analysis.")
+                logger.warning("Analysis yielded no strikes or OI data unreliable. Using fallback selection (ATM and ATM+/-1).")
+                selected_strikes_info = []
+                # Simple fallback: ATM, ATM+50, ATM-50 for both CE and PE
+                for offset in [0, 1, -1]:
+                    fb_strike = atm_strike + (offset * 50)
+                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, offset=offset, kite_instance=self.order_executor.kite)
+                    if fb_instruments:
+                        if fb_instruments.get('ce_symbol') and fb_instruments.get('ce_token'):
+                            selected_strikes_info.append({
+                                'symbol': fb_instruments['ce_symbol'],
+                                'strike': fb_strike,
+                                'type': 'CE',
+                                'ltp': 0, # Will be fetched or estimated
+                                'oi': 0,
+                                'oi_change': 0,
+                                'delta': 0.5 if offset <= 0 else 0.7 if offset > 0 else 0.3, # Rough estimate
+                                'is_atm': offset == 0,
+                                'is_otm': offset > 0,
+                                'is_itm': offset < 0
+                            })
+                        if fb_instruments.get('pe_symbol') and fb_instruments.get('pe_token'):
+                             selected_strikes_info.append({
+                                'symbol': fb_instruments['pe_symbol'],
+                                'strike': fb_strike,
+                                'type': 'PE',
+                                'ltp': 0,
+                                'oi': 0,
+                                'oi_change': 0,
+                                'delta': -0.5 if offset >= 0 else -0.7 if offset < 0 else -0.3, # Rough estimate
+                                'is_atm': offset == 0,
+                                'is_otm': offset < 0,
+                                'is_itm': offset > 0
+                            })
+
+            if not selected_strikes_info:
+                logger.warning("No strikes selected based on analysis or fallback.")
                 return
 
             # 7. Process data for each selected strike
@@ -368,7 +437,30 @@ class RealTimeTrader:
                     # Pass spot data and strike info for context in strategy
                     self.process_options_bar(symbol, df, spot_df, strike_info)
                 else:
-                    logger.warning(f"No data to process for selected strike {symbol}.")
+                    # If no historical data, we can still try to get LTP and process
+                    # This is useful if we are using a different selection method
+                    # that doesn't rely on historical OHLC but on current state (like LTP, Quotes)
+                    logger.debug(f"No historical data for {symbol}, attempting LTP-based processing.")
+                    # Example: Fetch LTP for the symbol
+                    try:
+                        ltp_option_data = self.order_executor.kite.ltp([f"NFO:{symbol}"])
+                        ltp_price = ltp_option_data.get(f"NFO:{symbol}", {}).get('last_price', 0)
+                        if ltp_price > 0:
+                            # Create a minimal dataframe or pass LTP directly
+                            # For simplicity, let's create a single-row df
+                            dummy_df = pd.DataFrame([{
+                                'date': pd.Timestamp.now(),
+                                'last_price': ltp_price,
+                                # Add other necessary fields with defaults or Nones
+                                'oi': strike_info.get('oi', 0),
+                                'volume': 0
+                            }]).set_index('date')
+                            self.process_options_bar(symbol, dummy_df, spot_df, strike_info)
+                        else:
+                            logger.warning(f"Could not fetch LTP for {symbol}")
+                    except Exception as e:
+                        logger.error(f"Error fetching LTP for {symbol}: {e}")
+
 
         except Exception as e:
             logger.error(f"Error in fetch_and_process_data (Options): {e}", exc_info=True)
@@ -383,31 +475,52 @@ class RealTimeTrader:
         if not self.is_trading:
             logger.debug("process_options_bar: Trading not active, returning.")
             return
-        if ohlc is None or len(ohlc) < 10: # Might need fewer bars for options
-            logger.debug("Insufficient data to process options bar.")
-            return
+        # Might need fewer bars for options or LTP-based logic
+        # if ohlc is None or len(ohlc) < 10:
+        #     logger.debug("Insufficient data to process options bar.")
+        #     return
 
         try:
             # --- Time Filter Check (if applicable) ---
-            ts = ohlc.index[-1]
+            # Use the last available timestamp
+            if not ohlc.empty:
+                ts = ohlc.index[-1]
+            else:
+                ts = pd.Timestamp.now() # Fallback if df is empty (e.g., LTP only)
             current_time_str = ts.strftime("%H:%M")
             if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
                 if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
                     logger.debug(f"Time filter active. Skipping bar for {symbol}.")
                     return
 
-            current_price = float(ohlc.iloc[-1]["last_price"]) # Options use 'last_price'
+            # Options use 'last_price' from Kite
+            if not ohlc.empty:
+                current_price = float(ohlc.iloc[-1].get("last_price", 0))
+            else:
+                # If df is empty (e.g., from LTP fetch), use strike_info or a default
+                current_price = strike_info.get('ltp', 0)
+                if current_price == 0:
+                    logger.warning(f"Could not determine current price for {symbol}")
+                    return
+
             logger.debug(f"Processing {symbol} bar at {ts}, price: {current_price}")
 
             # --- Call Strategy ---
             # Pass the options OHLC, spot OHLC, and strike information to the strategy
-            signal = self.strategy.generate_options_signal(ohlc, spot_ohlc, strike_info, current_price)
-            
+            # NOTE: You will need to implement or adapt `generate_options_signal` in your strategy.
+            # Placeholder: Using the existing strategy method, which might not be suitable.
+            # A new method `generate_options_signal` should be created.
+            # signal = self.strategy.generate_options_signal(ohlc, spot_ohlc, strike_info, current_price)
+            # For now, using a dummy signal generation based on price action
+            # --- Dummy Signal Generation (Replace with real strategy) ---
+            signal = self._generate_dummy_options_signal(ohlc, spot_ohlc, strike_info, current_price)
+            # --- End Dummy Signal ---
+
             logger.debug(f"Strategy returned signal for {symbol}: {signal}")
             if not signal:
                 logger.debug(f"No signal generated by strategy for {symbol}.")
                 return
-            
+
             signal_confidence = float(signal.get("confidence", 0.0))
             logger.debug(f"Signal confidence for {symbol}: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
             if signal_confidence < Config.CONFIDENCE_THRESHOLD:
@@ -432,13 +545,8 @@ class RealTimeTrader:
             self.telegram_controller.send_signal_alert(token, signal, position)
 
             # --- Order Placement ---
-            transaction_type = signal.get("signal") or signal.get("direction") # e.g., "BUY"
-            if not transaction_type:
-                logger.warning("Missing signal direction.")
-                return
-            
-            # Assuming BUY for options
-            order_transaction_type = "BUY" # Options are typically bought
+            # Options are typically bought
+            order_transaction_type = "BUY"
 
             logger.debug(f"Attempting to place entry order for {symbol}. Type: {order_transaction_type}, Qty: {position['quantity']}")
             order_id = self.order_executor.place_entry_order(
@@ -450,7 +558,7 @@ class RealTimeTrader:
             if not order_id:
                 logger.warning(f"Failed to place entry order for {symbol}.")
                 return
-            
+
             # --- GTT Orders (Stop Loss / Target) ---
             # Note: GTTs for options might work differently, check Kite documentation
             logger.debug("Attempting to setup GTT orders...")
@@ -482,11 +590,154 @@ class RealTimeTrader:
         except Exception as exc:
             logger.error(f"Error processing options bar for {symbol}: {exc}", exc_info=True)
 
+    def _generate_dummy_options_signal(self, ohlc: pd.DataFrame, spot_ohlc: pd.DataFrame, strike_info: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
+        """
+        A dummy signal generator for testing. Replace with your actual strategy logic.
+        This is a very basic example.
+        """
+        try:
+            signal_dict = {
+                "signal": None,
+                "entry_price": current_price,
+                "stop_loss": None,
+                "target": None,
+                "confidence": 0.0,
+                "market_volatility": 0.0
+            }
+
+            # 1. Check if selected based on OI/Delta (already done in trader, but can double-check)
+            # if strike_info.get('oi_change') < some_threshold:
+            #     return None
+
+            # 2. Analyze Options Price Action (if OHLC data is available)
+            if ohlc is not None and len(ohlc) >= 2:
+                # Example: Bullish breakout in option price on high volume (conceptual)
+                last_close = ohlc['last_price'].iloc[-2] # Use 'last_price' for options
+                current_close = ohlc['last_price'].iloc[-1]
+                # Kite historical might not have volume for options, check
+                last_volume = ohlc['volume'].iloc[-2] if 'volume' in ohlc.columns else 1
+                current_volume = ohlc['volume'].iloc[-1] if 'volume' in ohlc.columns else 1
+
+                avg_volume = ohlc['volume'][-10:-1].mean() if 'volume' in ohlc.columns and len(ohlc) > 10 else 1 # Avg of last 10 bars (excluding current)
+
+                # Simple breakout logic
+                if (current_close > last_close * 1.005) and (current_volume > avg_volume * 1.5):
+                     signal_dict["signal"] = "BUY"
+                     signal_dict["stop_loss"] = current_close * 0.98 # 2% SL
+                     signal_dict["target"] = current_close * 1.05 # 5% Target
+                     signal_dict["confidence"] = 8.5 # Set based on strength of pattern
+                     # Adjust confidence based on spot trend, delta, etc.
+                     if spot_ohlc is not None and not spot_ohlc.empty:
+                         # Example: Boost confidence if spot is also trending up for CE
+                         if strike_info['type'] == 'CE':
+                             if len(spot_ohlc) >= 5:
+                                 spot_return = (spot_ohlc['close'].iloc[-1] / spot_ohlc['close'].iloc[-5]) - 1
+                                 if spot_return > 0.002: # 0.2% spot up
+                                     signal_dict["confidence"] += 1.0
+                         elif strike_info['type'] == 'PE':
+                             if len(spot_ohlc) >= 5:
+                                 spot_return = (spot_ohlc['close'].iloc[-1] / spot_ohlc['close'].iloc[-5]) - 1
+                                 if spot_return < -0.002: # 0.2% spot down
+                                     signal_dict["confidence"] += 1.0
+
+                     logger.debug(f"Generated BUY signal for {strike_info.get('symbol', 'Unknown')}")
+                     return signal_dict
+
+            # Add more logic for PE, different patterns, etc.
+            # If no condition met, return None
+            return None
+
+        except Exception as e:
+            logger.error(f"Error generating dummy options signal: {e}", exc_info=True)
+            return None
+
 
     # Keep the original process_bar for potential future use or mixed strategies
     def process_bar(self, ohlc: pd.DataFrame) -> None:
          # ... (original logic for futures/single asset) ...
-         pass
+         # This is the original method from Pasted_Text_1754457091365.txt
+         logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
+         if not self.is_trading:
+             logger.debug("process_bar: Trading not active, returning.")
+             return
+         if ohlc is None or len(ohlc) < 30:
+             logger.debug("Insufficient data to process bar (less than 30 points).")
+             return
+         try:
+             if not isinstance(ohlc.index, pd.DatetimeIndex):
+                 logger.error("OHLC data must have DatetimeIndex.")
+                 return
+             ts = ohlc.index[-1]
+             current_time_str = ts.strftime("%H:%M")
+             if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
+                 if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
+                     logger.debug(f"Time filter active ({Config.TIME_FILTER_START} - {Config.TIME_FILTER_END}). Current time {current_time_str} is outside range, skipping bar.")
+                     return
+             current_price = float(ohlc.iloc[-1]["close"])
+             logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
+             signal = self.strategy.generate_signal(ohlc, current_price)
+             logger.debug(f"Strategy returned signal: {signal}")
+             if not signal:
+                 logger.debug("No signal generated by strategy.")
+                 return
+             signal_confidence = float(signal.get("confidence", 0.0))
+             logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
+             if signal_confidence < Config.CONFIDENCE_THRESHOLD:
+                 logger.debug("Signal confidence below threshold, discarding.")
+                 return
+             position = self.risk_manager.calculate_position_size(
+                 entry_price=signal.get("entry_price", current_price),
+                 stop_loss=signal.get("stop_loss", current_price),
+                 signal_confidence=signal.get("confidence", 0.0),
+                 market_volatility=signal.get("market_volatility", 0.0),
+             )
+             logger.debug(f"Position sizing returned: {position}")
+             if not position or position.get("quantity", 0) <= 0:
+                 logger.debug("Position sizing failed or quantity is zero/negative.")
+                 return
+             token = len(self.trades) + 1
+             self.telegram_controller.send_signal_alert(token, signal, position)
+             transaction_type = signal.get("signal") or signal.get("direction")
+             if not transaction_type:
+                 logger.warning("Missing signal direction.")
+                 return
+             symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
+             exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
+             logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
+             order_id = self.order_executor.place_entry_order(
+                 symbol=symbol,
+                 exchange=exchange,
+                 transaction_type=transaction_type,
+                 quantity=position["quantity"],
+             )
+             if not order_id:
+                 logger.warning("Failed to place entry order.")
+                 return
+             logger.debug("Attempting to setup GTT orders...")
+             self.order_executor.setup_gtt_orders(
+                 entry_order_id=order_id,
+                 entry_price=signal.get("entry_price", current_price),
+                 stop_loss_price=signal.get("stop_loss", current_price),
+                 target_price=signal.get("target", current_price),
+                 symbol=symbol,
+                 exchange=exchange,
+                 quantity=position["quantity"],
+                 transaction_type=transaction_type,
+             )
+             self.trades.append({
+                 "order_id": order_id,
+                 "direction": transaction_type,
+                 "quantity": position["quantity"],
+                 "entry_price": signal.get("entry_price", current_price),
+                 "stop_loss": signal.get("stop_loss", current_price),
+                 "target": signal.get("target", current_price),
+                 "confidence": signal.get("confidence", 0.0),
+             })
+             logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
+         except Exception as exc:
+             logger.error("Error processing bar: %s", exc, exc_info=True)
+         # ... (rest of original logic) ...
+
 
     def get_status(self) -> Dict[str, Any]:
         status: Dict[str, Any] = {
