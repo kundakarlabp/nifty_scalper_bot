@@ -12,13 +12,13 @@ from datetime import datetime, timedelta
 import time # Import for caching
 
 from src.config import Config
-# Assuming you'll have an OptionsStrategy or modify the existing one
+# Assuming you'll adapt or create an OptionsStrategy
 # from src.strategies.options_strategy import OptionsStrategy
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placeholder, might need new strategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
-# Import helper for consistent spot LTP symbol usage and strike selector
+# Import helpers for consistent spot LTP symbol usage and strike selection
 from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens, get_next_expiry_date
 
 logger = logging.getLogger(__name__)
@@ -30,14 +30,7 @@ class RealTimeTrader:
         self.trades: List[Dict[str, Any]] = []
         self.live_mode: bool = Config.ENABLE_LIVE_TRADING
 
-        # --- Instrument Caching for Rate Limiting ---
-        self._nfo_instruments_cache: Optional[List[Dict]] = None
-        self._nse_instruments_cache: Optional[List[Dict]] = None
-        self._instruments_cache_timestamp: float = 0
-        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
-        # --- End Instrument Caching ---
-
-        # Assuming you'll have an OptionsStrategy or modify the existing one
+        # Assuming you'll adapt or create an OptionsStrategy
         self.strategy = EnhancedScalpingStrategy(
             base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
             base_target_points=Config.BASE_TARGET_POINTS,
@@ -52,6 +45,13 @@ class RealTimeTrader:
             summary_callback=self.get_summary,
         )
         self._polling_thread: Optional[threading.Thread] = None
+
+        # --- Instrument Caching for Rate Limiting ---
+        self._nfo_instruments_cache: Optional[List[Dict]] = None
+        self._nse_instruments_cache: Optional[List[Dict]] = None
+        self._instruments_cache_timestamp: float = 0
+        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
+        # --- End Instrument Caching ---
 
         # Start Telegram polling in a daemon thread
         self._start_polling()
@@ -143,7 +143,7 @@ class RealTimeTrader:
                 self.live_mode = True
                 logger.info("🟢 Switched to LIVE mode.")
                 # Refresh instruments cache upon switching to live mode
-                self._refresh_instruments_cache(force=True) # Force refresh when enabling live mode
+                self._refresh_instruments_cache(force=True)
                 self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
                 return True
             except Exception as exc:
@@ -223,9 +223,8 @@ class RealTimeTrader:
                 logger.error(f"[_refresh_instruments_cache] Failed to refresh instruments cache: {e}")
                 # Don't update timestamp on failure, so it retries sooner
                 # Keep old cache if it exists, or set to empty list if it's the first failure
-                # Using empty list [] is generally safer than None for iteration
                 if self._nfo_instruments_cache is None:
-                     self._nfo_instruments_cache = []
+                     self._nfo_instruments_cache = [] # Or None, but empty list might be safer
                 if self._nse_instruments_cache is None:
                      self._nse_instruments_cache = []
                 # Let it proceed with potentially stale or empty cache
@@ -342,7 +341,7 @@ class RealTimeTrader:
         """
         logger.debug("fetch_and_process_data triggered by schedule.")
         if not self.is_trading:
-             logger.debug("fetch_and_process_data: Trading not active, skipping.")
+             logger.debug("fetch_and_process_ Trading not active, skipping.")
              return
 
         try:
@@ -370,7 +369,7 @@ class RealTimeTrader:
                 if spot_price is None:
                     logger.error(f"[RT] Failed to fetch spot price for {spot_symbol_ltp}. Check symbol and market status.")
                     # Returning prevents proceeding without spot data, which is critical for options
-                    return # Or handle the error appropriately (e.g., skip this cycle)
+                    return # Or handle the error appropriately
                 else:
                      logger.info(f"[RT] Successfully fetched current spot price: {spot_price}")
             except Exception as e:
@@ -381,12 +380,12 @@ class RealTimeTrader:
             # 2. Determine expiry and get instrument tokens for ATM
             # Pass the cached instrument lists
             instruments_data = get_instrument_tokens(
-                symbol=Config.SPOT_SYMBOL,
+                symbol=Config.SPOT_SYMBOL.split()[0], # Pass base name like 'NIFTY'
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo,
                 cached_nse_instruments=cached_nse
             )
-            if not instruments_data:
+            if not instruments_
                 logger.error("Failed to get instrument tokens for ATM strike.")
                 return
 
@@ -415,17 +414,17 @@ class RealTimeTrader:
                         spot_df['date'] = pd.to_datetime(spot_df['date'])
                         spot_df.set_index('date', inplace=True)
                 except Exception as e:
-                    logger.warning(f"Could not fetch spot historical data: {e}")
+                    logger.warning(f"Could not fetch spot historical  {e}")
 
             # 5. Fetch historical data for a range of CE and PE options around ATM
             options_data = {}
-            strike_range = Config.STRIKE_RANGE # e.g., 4 strikes on either side
+            strike_range = Config.STRIKE_RANGE # e.g., 4 strikes on either side of ATM
             for offset in range(-strike_range, strike_range + 1):
                 strike_to_check = atm_strike + (offset * 50) # Assuming 50 point strikes
 
                 # Re-fetch tokens for these strikes, passing cached data
                 temp_instruments = get_instrument_tokens(
-                    symbol=Config.SPOT_SYMBOL,
+                    symbol=Config.SPOT_SYMBOL.split()[0], # Pass base name like 'NIFTY'
                     offset=offset,
                     kite_instance=self.order_executor.kite,
                     cached_nfo_instruments=cached_nfo,
@@ -448,7 +447,7 @@ class RealTimeTrader:
                                 to_date=end_time,
                                 interval="minute"
                             )
-                            if hist_data:
+                            if hist_
                                 df = pd.DataFrame(hist_data)
                                 if 'date' in df.columns:
                                     df['date'] = pd.to_datetime(df['date'])
@@ -475,14 +474,7 @@ class RealTimeTrader:
                 # Simple fallback: ATM, ATM+50, ATM-50 for both CE and PE
                 for offset in [0, 1, -1]:
                     fb_strike = atm_strike + (offset * 50)
-                    # Pass cached data to fallback calls too
-                    fb_instruments = get_instrument_tokens(
-                        symbol=Config.SPOT_SYMBOL,
-                        offset=offset,
-                        kite_instance=self.order_executor.kite,
-                        cached_nfo_instruments=cached_nfo,
-                        cached_nse_instruments=cached_nse
-                    )
+                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite, cached_nfo_instruments=cached_nfo, cached_nse_instruments=cached_nse)
                     if fb_instruments:
                         if fb_instruments.get('ce_symbol') and fb_instruments.get('ce_token'):
                             selected_strikes_info.append({
@@ -615,8 +607,6 @@ class RealTimeTrader:
 
             # --- Position Sizing ---
             # Might need options-specific position sizing logic
-            # Pass the lot size for the specific option contract if it differs
-            # For Nifty options, Config.NIFTY_LOT_SIZE (75) is typically correct.
             position = self.risk_manager.calculate_position_size(
                 entry_price=signal.get("entry_price", current_price),
                 stop_loss=signal.get("stop_loss", current_price),
