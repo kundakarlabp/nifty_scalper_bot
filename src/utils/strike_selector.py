@@ -16,7 +16,7 @@ def get_next_expiry_date(kite_instance: KiteConnect) -> str:
     if days_ahead == 0:
         days_ahead = 7 # If today is Thursday, get next Thursday
     next_thursday = today + timedelta(days=days_ahead)
-    
+
     # Format for Kite API (YYYY-MM-DD)
     return next_thursday.strftime("%Y-%m-%d")
 
@@ -32,12 +32,12 @@ def get_instrument_tokens(symbol: str = "NIFTY", offset: int = 0, kite_instance:
     try:
         instruments = kite_instance.instruments("NFO")
         spot_instruments = kite_instance.instruments("NSE") # For spot price
-        
+
         # 1. Get Spot Price
         spot_symbol_full = f"NSE:{symbol}" # Adjust if needed (e.g., NSE:NIFTY 50)
         ltp_data = kite_instance.ltp([spot_symbol_full])
         spot_price = ltp_data.get(spot_symbol_full, {}).get('last_price')
-        
+
         if spot_price is None:
             logger.warning(f"Could not fetch spot price for {spot_symbol_full}")
             # Fallback: Try without 'NSE:' prefix if that's how it's listed
@@ -70,13 +70,13 @@ def get_instrument_tokens(symbol: str = "NIFTY", offset: int = 0, kite_instance:
             # Check expiry match (Kite returns datetime.date)
             inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
             if inst_expiry_str == expiry:
-                if f"{symbol}{expiry.replace('-', '')}{atm_strike}CE" in inst['tradingsymbol']:
+                if f"{symbol.replace(' ', '')}{expiry.replace('-', '')}{atm_strike}CE" in inst['tradingsymbol']: # Remove space from symbol for option name
                     ce_symbol = inst['tradingsymbol']
                     ce_token = inst['instrument_token']
-                elif f"{symbol}{expiry.replace('-', '')}{atm_strike}PE" in inst['tradingsymbol']:
+                elif f"{symbol.replace(' ', '')}{expiry.replace('-', '')}{atm_strike}PE" in inst['tradingsymbol']:
                     pe_symbol = inst['tradingsymbol']
                     pe_token = inst['instrument_token']
-        
+
         if not ce_token or not pe_token:
             logger.warning(f"Could not find tokens for {symbol} {expiry} {atm_strike}CE/PE")
 
