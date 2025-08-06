@@ -17,7 +17,8 @@ from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placehol
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
-from src.utils.strike_selector import get_next_expiry_date, get_instrument_tokens
+# Import helper for consistent spot LTP symbol usage
+from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -296,23 +297,27 @@ class RealTimeTrader:
                  logger.error("KiteConnect instance not found in order_executor. Cannot fetch data. Is live mode enabled?")
                  return
 
-            # 1. Fetch current spot price (e.g., NIFTY 50 Index)
-            spot_symbol = f"NSE:{Config.SPOT_SYMBOL}" # e.g., NSE:NIFTY 50
-            ltp_data = self.order_executor.kite.ltp([spot_symbol])
-            spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
-            if spot_price is None:
-                logger.warning("Failed to fetch spot price.")
-                # Fallback attempt
-                ltp_data_fb = self.order_executor.kite.ltp([Config.SPOT_SYMBOL])
-                spot_price = ltp_data_fb.get(Config.SPOT_SYMBOL, {}).get('last_price')
+            # 1. Fetch current spot price using the confirmed correct symbol
+            try:
+                spot_symbol_ltp = _get_spot_ltp_symbol() # This will get "NSE:NIFTY 50" from Config.SPOT_SYMBOL
+                logger.debug(f"[RT] Fetching spot price using LTP symbol: {spot_symbol_ltp}")
+                ltp_data = self.order_executor.kite.ltp([spot_symbol_ltp])
+                spot_price = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
+
                 if spot_price is None:
-                    logger.error("Failed to fetch spot price even with fallback.")
-                    return
-            logger.info(f"Current {Config.SPOT_SYMBOL} spot price: {spot_price}")
+                    logger.error(f"[RT] Failed to fetch spot price for {spot_symbol_ltp}. Check symbol and market status.")
+                    # Returning prevents proceeding without spot data, which is critical for options
+                    return # Or handle the error appropriately (e.g., skip this cycle)
+                else:
+                     logger.info(f"[RT] Successfully fetched current spot price: {spot_price}")
+            except Exception as e:
+                logger.error(f"[RT] Exception occurred while fetching spot price: {e}", exc_info=True)
+                return # Or handle the error appropriately
+
 
             # 2. Determine expiry and get instrument tokens for ATM
             # This part might need adjustment based on your exact symbol format
-            instruments_data = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, kite_instance=self.order_executor.kite)
+            instruments_data = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], kite_instance=self.order_executor.kite)
             if not instruments_data:
                 logger.error("Failed to get instrument tokens for ATM strike.")
                 return
@@ -351,7 +356,7 @@ class RealTimeTrader:
                 strike_to_check = atm_strike + (offset * 50) # Assuming 50 point strikes
 
                 # Re-fetch tokens for these strikes
-                temp_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, offset=offset, kite_instance=self.order_executor.kite)
+                temp_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite)
                 if not temp_instruments:
                     continue # Skip if couldn't get tokens
 
@@ -396,7 +401,7 @@ class RealTimeTrader:
                 # Simple fallback: ATM, ATM+50, ATM-50 for both CE and PE
                 for offset in [0, 1, -1]:
                     fb_strike = atm_strike + (offset * 50)
-                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL, offset=offset, kite_instance=self.order_executor.kite)
+                    fb_instruments = get_instrument_tokens(symbol=Config.SPOT_SYMBOL.split()[0], offset=offset, kite_instance=self.order_executor.kite)
                     if fb_instruments:
                         if fb_instruments.get('ce_symbol') and fb_instruments.get('ce_token'):
                             selected_strikes_info.append({
@@ -529,11 +534,14 @@ class RealTimeTrader:
 
             # --- Position Sizing ---
             # Might need options-specific position sizing logic
+            # Pass the lot size for the specific option contract if it differs
+            # For Nifty options, Config.NIFTY_LOT_SIZE (75) is typically correct.
             position = self.risk_manager.calculate_position_size(
                 entry_price=signal.get("entry_price", current_price),
                 stop_loss=signal.get("stop_loss", current_price),
                 signal_confidence=signal.get("confidence", 0.0),
                 market_volatility=signal.get("market_volatility", 0.0), # Extract from options data if available
+                lot_size=Config.NIFTY_LOT_SIZE # Ensure risk manager uses correct lot size
             )
             logger.debug(f"Position sizing returned for {symbol}: {position}")
             if not position or position.get("quantity", 0) <= 0:
