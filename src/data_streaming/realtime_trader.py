@@ -16,8 +16,8 @@ from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
 
-# Note: 'name' is not defined, it should likely be __name__
-logger = logging.getLogger(__name__) # Corrected from logging.getLogger(name)
+# Corrected logger instantiation
+logger = logging.getLogger(__name__)
 
 class RealTimeTrader:
     def __init__(self) -> None:
@@ -40,10 +40,10 @@ class RealTimeTrader:
             summary_callback=self.get_summary,
         )
         self._polling_thread: Optional[threading.Thread] = None
-        
+
         # Start Telegram polling in a daemon thread
         self._start_polling()
-        
+
         # Schedule the data fetching and processing task
         # Adjust the frequency (e.g., '1' minute) according to your strategy's needs.
         # process_bar checks for Config.TIME_FILTER_START/END, so frequent checks are usually okay.
@@ -172,7 +172,7 @@ class RealTimeTrader:
             # Avoid joining from within the same thread
             if threading.current_thread() != self._polling_thread:
                  # Use a timeout to prevent hanging
-                self._polling_thread.join(timeout=3) 
+                self._polling_thread.join(timeout=3)
         self._polling_thread = None
 
     def shutdown(self) -> None:
@@ -302,57 +302,64 @@ class RealTimeTrader:
              return
 
         try:
-            # --- YOU MUST REPLACE THIS SECTION WITH YOUR ACTUAL DATA FETCHING LOGIC ---
-            # Example (conceptual, you need KiteConnect integration):
-            # from datetime import datetime, timedelta
-            # end_time = datetime.now()
-            # start_time = end_time - timedelta(minutes=35) # Fetch last 35 minutes
-            # ohlc_df = self._fetch_historical_data("NIFTY 50", "NSE", start_time, end_time, "minute")
-            # if ohlc_df is not None and not ohlc_df.empty:
-            #     logger.debug(f"Fetched {len(ohlc_df)} bars.")
-            #     self.process_bar(ohlc_df)
-            # else:
-            #     logger.warning("Failed to fetch OHLC data.")
-            # -------------------------------------------------------------------------
-
-            # --- Placeholder/Dummy Data Section (REMOVE THIS WHEN YOU ADD REAL FETCHING) ---
-            logger.warning("!!! USING DUMMY DATA - REPLACE WITH REAL KITE DATA FETCHING !!!")
-            import numpy as np
+            # --- REAL KITE DATA FETCHING SECTION ---
             from datetime import datetime, timedelta
-            # Create 35 minutes of dummy 1-minute data
-            end_time = datetime.now().replace(second=0, microsecond=0)
-            start_time = end_time - timedelta(minutes=34)
-            # FIX: Changed freq='T' to freq='min' to address FutureWarning
-            dates = pd.date_range(start=start_time, end=end_time, freq='min')
-            # Generate dummy prices around a base (e.g., 19000)
-            base_price = 19000
-            noise = np.random.randn(len(dates)) * 20 # Random noise
-            trend = np.linspace(0, 50, len(dates)) # Small upward trend
-            close_prices = base_price + trend + noise
-            opens = np.concatenate(([close_prices[0]], close_prices[:-1])) # Simple open simulation
-            closes = close_prices
-            highs = np.maximum(opens, closes) + np.abs(np.random.randn(len(opens))) * 10
-            lows = np.minimum(opens, closes) - np.abs(np.random.randn(len(opens))) * 10
-            volumes = np.random.randint(1000, 5000, len(opens))
+            import pandas as pd
 
-            dummy_data = {
-                'open': opens,
-                'high': highs,
-                'low': lows,
-                'close': closes,
-                'volume': volumes
-            }
-            ohlc_df = pd.DataFrame(dummy_data, index=dates) # 35 data points
-            logger.debug(f"Generated dummy OHLC data with {len(ohlc_df)} bars.")
-            # --- End Placeholder ---
+            # 1. Define instrument using the token from Config
+            # Ensure INSTRUMENT_TOKEN is set correctly in your .env file for the desired instrument
+            instrument_token = Config.INSTRUMENT_TOKEN # e.g., 256265 for NIFTY 50 Index
 
+            # 2. Define the timeframe for historical data (adjust the 35 as needed)
+            end_time = datetime.now()
+            # Fetch last 35 minutes of 1-minute data
+            start_time = end_time - timedelta(minutes=35)
+
+            # 3. Fetch historical data using the KiteConnect instance from order_executor
+            # Ensure self.order_executor.kite exists and is initialized (it should be if live_mode is True or was set to live)
+            if not hasattr(self.order_executor, 'kite') or not self.order_executor.kite:
+                 logger.error("KiteConnect instance not found in order_executor. Cannot fetch data. Is live mode enabled?")
+                 return # Or handle appropriately
+
+            logger.debug(f"Fetching historical data for instrument token: {instrument_token}")
+            ohlc_data_list = self.order_executor.kite.historical_data(
+                instrument_token=instrument_token,
+                from_date=start_time,
+                to_date=end_time,
+                interval="minute" # Fetch 1-minute candles
+            )
+
+            # 4. Convert to DataFrame
+            if not ohlc_data_list:
+                logger.warning("fetch_and_process_data: KiteConnect returned empty data list.")
+                return
+
+            ohlc_df = pd.DataFrame(ohlc_data_list)
+
+            # 5. Ensure the DataFrame has the correct structure
+            # Kite data usually has 'date', 'open', 'high', 'low', 'close', 'volume'
+            # Set 'date' as the index and ensure it's datetime
+            if 'date' in ohlc_df.columns:
+                ohlc_df['date'] = pd.to_datetime(ohlc_df['date'])
+                ohlc_df.set_index('date', inplace=True)
+                # Rename columns if necessary to match process_bar's expectations (though they usually match)
+                # ohlc_df.rename(columns={'open': 'open', 'high': 'high', ...}, inplace=True)
+            else:
+                logger.error("Fetched data does not contain 'date' column.")
+                return
+
+            logger.debug(f"Fetched real OHLC data with {len(ohlc_df)} bars from KiteConnect.")
+
+            # 6. Pass the fetched data to process_bar
             if ohlc_df is not None and not ohlc_df.empty:
                 self.process_bar(ohlc_df)
             else:
-                logger.warning("fetch_and_process_data: No data to process (dummy or real).")
+                logger.warning("fetch_and_process_data: No data to process after fetching (real).")
 
         except Exception as e:
-            logger.error(f"Error in fetch_and_process_data: {e}", exc_info=True)
+            logger.error(f"Error in fetch_and_process_data (KiteConnect fetch): {e}", exc_info=True)
+        # --- END OF REAL KITE DATA FETCHING SECTION ---
+
     # --- END OF NEW METHOD ---
 
     def __repr__(self) -> str:
