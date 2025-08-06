@@ -1,4 +1,8 @@
 # src/utils/strike_selector.py
+"""
+Utility functions for selecting strike prices and fetching instrument tokens
+for Nifty 50 options trading.
+"""
 
 from kiteconnect import KiteConnect
 from datetime import datetime, timedelta
@@ -14,23 +18,19 @@ def _get_spot_ltp_symbol():
     return Config.SPOT_SYMBOL # This will now be "NSE:NIFTY 50" from .env
 # --- End Helper ---
 
-def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: list) -> str:
+def get_next_expiry_date(kite_instance: KiteConnect) -> str:
     """
     Finds the next expiry date that has available instruments.
-    This function uses cached NFO instruments to find a valid expiry.
+    This function now cross-references with actual NFO instruments to find a valid expiry.
     Returns the date in YYYY-MM-DD format.
     """
     if not kite_instance:
-        logger.error("[get_next_expiry_date] KiteConnect instance is required.")
-        return ""
-    
-    if not cached_nfo_instruments:
-        logger.error("[get_next_expiry_date] Cached NFO instruments list is required.")
+        logger.error("[get_next_expiry_date] KiteConnect instance is required to find expiry.")
         return ""
 
     try:
-        # Use the cached NFO instruments list
-        all_nfo_instruments = cached_nfo_instruments
+        # Fetch all NFO instruments to get available expiries
+        all_nfo_instruments = kite_instance.instruments("NFO")
 
         # --- Find the relevant symbol prefix ---
         # Use Config.SPOT_SYMBOL to derive the base name for filtering.
@@ -106,13 +106,13 @@ def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: lis
 
 def _format_expiry_for_symbol(expiry_str: str) -> str:
     """
-    Formats a YYYY-MM-DD expiry string into the NSE weekly option symbol format (YYMON).
-    E.g., '2025-08-07' -> '25AUG'
+    Formats a YYYY-MM-DD expiry string into the verified NSE option symbol format (YYMMDD).
+    E.g., '2025-08-07' -> '250807'
     """
     try:
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-        # Format: YYMON (Corrected format for weekly index options)
-        return expiry_date.strftime("%y%b").upper()
+        # Format: YYMMDD (Verified format for this specific contract)
+        return expiry_date.strftime("%y%m%d").upper() # This produces YYMMDD (e.g., 250807)
     except ValueError as e:
         logger.error(f"[_format_expiry_for_symbol] Error formatting expiry date '{expiry_str}': {e}")
         return ""
@@ -121,8 +121,8 @@ def get_instrument_tokens(
     symbol: str = "NIFTY",
     offset: int = 0,
     kite_instance: KiteConnect = None,
-    cached_nfo_instruments: list = None, # Parameter for cached NFO data
-    cached_nse_instruments: list = None  # Parameter for cached NSE data
+    cached_nfo_instruments: list = None, # New parameter for cached NFO data
+    cached_nse_instruments: list = None  # New parameter for cached NSE data
 ):
     """
     Gets instrument tokens for spot, ATM CE, and PE for the *nearest valid* expiry.
@@ -135,10 +135,11 @@ def get_instrument_tokens(
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
         return None
-        
+
     if cached_nfo_instruments is None or cached_nse_instruments is None:
         logger.error("[get_instrument_tokens] Cached NFO and NSE instrument lists are required to prevent rate limits.")
         # Returning None here is critical to prevent the calling function from proceeding with invalid data
+        # which would likely lead to errors or incorrect behavior.
         return None
 
     try:
@@ -175,14 +176,14 @@ def get_instrument_tokens(
 
         # 2. Calculate Strike
         atm_strike = round(spot_price / 50) * 50 + (offset * 50)
-        # Get the nearest valid expiry date using the cached data
-        expiry_yyyy_mm_dd = get_next_expiry_date(kite_instance, cached_nfo_instruments)
+        # Get the nearest valid expiry date using the live Kite instance (or cached if modified)
+        expiry_yyyy_mm_dd = get_next_expiry_date(kite_instance)
 
         if not expiry_yyyy_mm_dd:
             logger.error("[get_instrument_tokens] Could not determine a valid expiry date.")
             return None # Return None if expiry cannot be determined
 
-        # Format expiry for symbol construction (YYMON - Corrected)
+        # Format expiry for symbol construction (YYMMDD - Verified Format)
         expiry_for_symbol = _format_expiry_for_symbol(expiry_yyyy_mm_dd)
 
         if not expiry_for_symbol:
@@ -198,23 +199,6 @@ def get_instrument_tokens(
         logger.debug(f"[get_instrument_tokens] Found {len(nifty_index_instruments)} instruments for base symbol '{base_symbol_for_search}' on NFO.")
         # --- End Crucial Change ---
 
-        # --- Diagnostic Logging Start ---
-        # Log details of instruments that match name and expiry to help debugging
-        if logger.isEnabledFor(logging.DEBUG): # Only log this extra info in DEBUG mode
-            logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] Instruments for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd}:")
-            count = 0
-            for inst in nifty_index_instruments:
-                inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-                if inst_expiry_str == expiry_yyyy_mm_dd:
-                    count += 1
-                    if count <= 20: # Limit output to prevent log spam
-                        logger.debug(f"  [DIAGNOSTIC] - Symbol: {inst['tradingsymbol']}, Strike: {inst.get('strike', 'N/A')}, Type: {inst.get('instrument_type', 'N/A')}")
-                    elif count == 21:
-                         logger.debug("  [DIAGNOSTIC] - ... (output limited)")
-            if count == 0:
-                logger.debug(f"  [DIAGNOSTIC] - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
-        # --- Diagnostic Logging End ---
-        
         ce_symbol = None
         pe_symbol = None
         ce_token = None
@@ -232,23 +216,28 @@ def get_instrument_tokens(
         # If you need the spot token for historical data, uncomment above. For LTP, token isn't needed.
 
         # Find Option Tokens using the correctly formatted symbol
-        # Construct the expected full trading symbols using base_symbol_for_search and corrected expiry format
+        # Construct the expected full trading symbols using base_symbol_for_search and VERIFIED expiry format (YYMMDD)
         expected_ce_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}CE"
         expected_pe_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}PE"
-        logger.debug(f"[get_instrument_tokens] Constructed CE symbol to find: {expected_ce_symbol}")
-        logger.debug(f"[get_instrument_tokens] Constructed PE symbol to find: {expected_pe_symbol}")
+        logger.info(f"[get_instrument_tokens] Constructed CE symbol to find: {expected_ce_symbol}")
+        logger.info(f"[get_instrument_tokens] Constructed PE symbol to find: {expected_pe_symbol}")
 
-        # --- Diagnostic Check for Specific Symbol ---
-        # This directly checks if the *expected* symbol is in the *full* cached list
-        # This helps confirm if the symbol exists at all, independent of the filtering loop.
-        import pandas as pd # Import locally for diagnostics
-        debug_df = pd.DataFrame(instruments) # Convert full cached list to DataFrame
-        debug_result = debug_df[debug_df['tradingsymbol'] == expected_ce_symbol]
-        if not debug_result.empty:
-            logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] ✅ Expected CE Symbol '{expected_ce_symbol}' FOUND in full cached instruments. Details: Token={debug_result.iloc[0]['instrument_token']}")
-        else:
-             logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] ❌ Expected CE Symbol '{expected_ce_symbol}' NOT found in full cached instruments (size: {len(instruments)}).")
-        # --- End Diagnostic Check ---
+        # --- Diagnostic Logging Start ---
+        # Log details of instruments that match name and expiry to help debugging
+        if logger.isEnabledFor(logging.DEBUG): # Only log this extra info in DEBUG mode
+            logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] Instruments for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd}:")
+            count = 0
+            for inst in nifty_index_instruments:
+                inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
+                if inst_expiry_str == expiry_yyyy_mm_dd:
+                    count += 1
+                    if count <= 20: # Limit output to prevent log spam
+                        logger.debug(f"  [DIAGNOSTIC] - Symbol: {inst['tradingsymbol']}, Strike: {inst.get('strike', 'N/A')}, Type: {inst.get('instrument_type', 'N/A')}")
+                    elif count == 21:
+                         logger.debug("  [DIAGNOSTIC] - ... (output limited)")
+            if count == 0:
+                logger.debug(f"  [DIAGNOSTIC] - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
+        # --- Diagnostic Logging End ---
 
         # Iterate only through the filtered list of instruments for this index
         for inst in nifty_index_instruments:
@@ -259,11 +248,11 @@ def get_instrument_tokens(
                 if inst['tradingsymbol'] == expected_ce_symbol:
                     ce_symbol = inst['tradingsymbol']
                     ce_token = inst['instrument_token']
-                    logger.debug(f"[get_instrument_tokens] ✅ Found CE Token: {ce_token} for {ce_symbol}")
+                    logger.info(f"[get_instrument_tokens] ✅ Found CE Token: {ce_token} for {ce_symbol}")
                 elif inst['tradingsymbol'] == expected_pe_symbol:
                     pe_symbol = inst['tradingsymbol']
                     pe_token = inst['instrument_token']
-                    logger.debug(f"[get_instrument_tokens] ✅ Found PE Token: {pe_token} for {pe_symbol}")
+                    logger.info(f"[get_instrument_tokens] ✅ Found PE Token: {pe_token} for {pe_symbol}")
 
         if not ce_token and not pe_token:
             logger.warning(f"[get_instrument_tokens] ❌ Could not find tokens for {spot_symbol_config} Expiry:{expiry_yyyy_mm_dd} Strike:{atm_strike} CE/PE. Expected Symbols: {expected_ce_symbol}, {expected_pe_symbol}")
