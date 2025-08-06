@@ -121,8 +121,8 @@ def get_instrument_tokens(
     symbol: str = "NIFTY",
     offset: int = 0,
     kite_instance: KiteConnect = None,
-    cached_nfo_instruments: list = None, # New parameter for cached NFO data
-    cached_nse_instruments: list = None  # New parameter for cached NSE data
+    cached_nfo_instruments: list = None, # Parameter for cached NFO data
+    cached_nse_instruments: list = None  # Parameter for cached NSE data
 ):
     """
     Gets instrument tokens for spot, ATM CE, and PE for the *nearest valid* expiry.
@@ -201,18 +201,18 @@ def get_instrument_tokens(
         # --- Diagnostic Logging Start ---
         # Log details of instruments that match name and expiry to help debugging
         if logger.isEnabledFor(logging.DEBUG): # Only log this extra info in DEBUG mode
-            logger.debug(f"[get_instrument_tokens] Diagnostic: Instruments for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd}:")
+            logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] Instruments for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd}:")
             count = 0
             for inst in nifty_index_instruments:
                 inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
                 if inst_expiry_str == expiry_yyyy_mm_dd:
                     count += 1
                     if count <= 20: # Limit output to prevent log spam
-                        logger.debug(f"  - Symbol: {inst['tradingsymbol']}, Strike: {inst.get('strike', 'N/A')}, Type: {inst.get('instrument_type', 'N/A')}")
+                        logger.debug(f"  [DIAGNOSTIC] - Symbol: {inst['tradingsymbol']}, Strike: {inst.get('strike', 'N/A')}, Type: {inst.get('instrument_type', 'N/A')}")
                     elif count == 21:
-                         logger.debug("  - ... (output limited)")
+                         logger.debug("  [DIAGNOSTIC] - ... (output limited)")
             if count == 0:
-                logger.debug(f"  - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
+                logger.debug(f"  [DIAGNOSTIC] - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
         # --- Diagnostic Logging End ---
         
         ce_symbol = None
@@ -237,6 +237,18 @@ def get_instrument_tokens(
         expected_pe_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}PE"
         logger.debug(f"[get_instrument_tokens] Constructed CE symbol to find: {expected_ce_symbol}")
         logger.debug(f"[get_instrument_tokens] Constructed PE symbol to find: {expected_pe_symbol}")
+
+        # --- Diagnostic Check for Specific Symbol ---
+        # This directly checks if the *expected* symbol is in the *full* cached list
+        # This helps confirm if the symbol exists at all, independent of the filtering loop.
+        import pandas as pd # Import locally for diagnostics
+        debug_df = pd.DataFrame(instruments) # Convert full cached list to DataFrame
+        debug_result = debug_df[debug_df['tradingsymbol'] == expected_ce_symbol]
+        if not debug_result.empty:
+            logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] ✅ Expected CE Symbol '{expected_ce_symbol}' FOUND in full cached instruments. Details: Token={debug_result.iloc[0]['instrument_token']}")
+        else:
+             logger.debug(f"[get_instrument_tokens] [DIAGNOSTIC] ❌ Expected CE Symbol '{expected_ce_symbol}' NOT found in full cached instruments (size: {len(instruments)}).")
+        # --- End Diagnostic Check ---
 
         # Iterate only through the filtered list of instruments for this index
         for inst in nifty_index_instruments:
