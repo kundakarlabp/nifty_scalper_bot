@@ -27,11 +27,11 @@ def get_next_expiry_date(kite_instance: KiteConnect) -> str:
     if not kite_instance:
         logger.error("[get_next_expiry_date] KiteConnect instance is required to find expiry.")
         return ""
-
+    
     try:
         # Fetch all NFO instruments to get available expiries
         all_nfo_instruments = kite_instance.instruments("NFO")
-
+        
         # --- Find the relevant symbol prefix ---
         # Use Config.SPOT_SYMBOL to derive the base name for filtering.
         from src.config import Config
@@ -106,13 +106,14 @@ def get_next_expiry_date(kite_instance: KiteConnect) -> str:
 
 def _format_expiry_for_symbol(expiry_str: str) -> str:
     """
-    Formats a YYYY-MM-DD expiry string into the verified NSE option symbol format (YYMMDD).
-    E.g., '2025-08-07' -> '250807'
+    Formats a YYYY-MM-DD expiry string into the NSE weekly option symbol format (YYMONDD).
+    E.g., '2025-08-07' -> '25AUG07'
+    This format is confirmed correct by Zerodha's instrument example: NIFTY25AUG0724650CE
     """
     try:
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-        # Format: YYMMDD (Verified format for this specific contract)
-        return expiry_date.strftime("%y%m%d").upper() # This produces YYMMDD (e.g., 250807)
+        # Format: YYMONDD (Confirmed correct format for weekly index options)
+        return expiry_date.strftime("%y%b%d").upper() # This produces YYMONDD (e.g., 25AUG07)
     except ValueError as e:
         logger.error(f"[_format_expiry_for_symbol] Error formatting expiry date '{expiry_str}': {e}")
         return ""
@@ -135,7 +136,7 @@ def get_instrument_tokens(
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
         return None
-
+        
     if cached_nfo_instruments is None or cached_nse_instruments is None:
         logger.error("[get_instrument_tokens] Cached NFO and NSE instrument lists are required to prevent rate limits.")
         # Returning None here is critical to prevent the calling function from proceeding with invalid data
@@ -176,14 +177,14 @@ def get_instrument_tokens(
 
         # 2. Calculate Strike
         atm_strike = round(spot_price / 50) * 50 + (offset * 50)
-        # Get the nearest valid expiry date using the live Kite instance (or cached if modified)
+        # Get the nearest valid expiry date using the cached data
         expiry_yyyy_mm_dd = get_next_expiry_date(kite_instance)
 
         if not expiry_yyyy_mm_dd:
             logger.error("[get_instrument_tokens] Could not determine a valid expiry date.")
             return None # Return None if expiry cannot be determined
 
-        # Format expiry for symbol construction (YYMMDD - Verified Format)
+        # Format expiry for symbol construction (YYMONDD - Confirmed Correct Format)
         expiry_for_symbol = _format_expiry_for_symbol(expiry_yyyy_mm_dd)
 
         if not expiry_for_symbol:
@@ -216,7 +217,7 @@ def get_instrument_tokens(
         # If you need the spot token for historical data, uncomment above. For LTP, token isn't needed.
 
         # Find Option Tokens using the correctly formatted symbol
-        # Construct the expected full trading symbols using base_symbol_for_search and VERIFIED expiry format (YYMMDD)
+        # Construct the expected full trading symbols using base_symbol_for_search and corrected expiry format (YYMONDD)
         expected_ce_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}CE"
         expected_pe_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}PE"
         logger.info(f"[get_instrument_tokens] Constructed CE symbol to find: {expected_ce_symbol}")
@@ -238,7 +239,7 @@ def get_instrument_tokens(
             if count == 0:
                 logger.debug(f"  [DIAGNOSTIC] - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
         # --- Diagnostic Logging End ---
-
+        
         # Iterate only through the filtered list of instruments for this index
         for inst in nifty_index_instruments:
             # Check expiry match (Kite returns datetime.date or string)
