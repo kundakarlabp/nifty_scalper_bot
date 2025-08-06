@@ -106,13 +106,13 @@ def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: lis
 
 def _format_expiry_for_symbol(expiry_str: str) -> str:
     """
-    Formats a YYYY-MM-DD expiry string into the NSE option symbol format (YYMONDD).
-    E.g., '2025-08-07' -> '25AUG07'
+    Formats a YYYY-MM-DD expiry string into the NSE weekly option symbol format (YYMON).
+    E.g., '2025-08-07' -> '25AUG'
     """
     try:
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-        # Format: YYMONDD
-        return expiry_date.strftime("%y%b%d").upper()
+        # Format: YYMON (Corrected format for weekly index options)
+        return expiry_date.strftime("%y%b").upper()
     except ValueError as e:
         logger.error(f"[_format_expiry_for_symbol] Error formatting expiry date '{expiry_str}': {e}")
         return ""
@@ -183,7 +183,7 @@ def get_instrument_tokens(
             logger.error("[get_instrument_tokens] Could not determine a valid expiry date.")
             return None # Return None if expiry cannot be determined
 
-        # Format expiry for symbol construction (YYMONDD)
+        # Format expiry for symbol construction (YYMON - Corrected)
         expiry_for_symbol = _format_expiry_for_symbol(expiry_yyyy_mm_dd)
 
         if not expiry_for_symbol:
@@ -216,7 +216,7 @@ def get_instrument_tokens(
         # If you need the spot token for historical data, uncomment above. For LTP, token isn't needed.
 
         # Find Option Tokens using the correctly formatted symbol
-        # Construct the expected full trading symbols using base_symbol_for_search
+        # Construct the expected full trading symbols using base_symbol_for_search and corrected expiry format
         expected_ce_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}CE"
         expected_pe_symbol = f"{base_symbol_for_search}{expiry_for_symbol}{atm_strike}PE"
         logger.debug(f"[get_instrument_tokens] Constructed CE symbol to find: {expected_ce_symbol}")
