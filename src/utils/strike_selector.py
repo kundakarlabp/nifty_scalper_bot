@@ -9,8 +9,9 @@ logger = logging.getLogger(__name__)
 # --- Helper function to get the correct LTP symbol ---
 def _get_spot_ltp_symbol():
     """Determines the correct symbol string for fetching Nifty 50 LTP."""
-    # Based on user confirmation, NSE:NIFTY 50 is correct for LTP
-    return "NSE:NIFTY 50"
+    # Fetch the confirmed correct symbol directly from Config
+    from src.config import Config
+    return Config.SPOT_SYMBOL # This will now be "NSE:NIFTY 50" from .env
 # --- End Helper ---
 
 def get_next_expiry_date(kite_instance: KiteConnect) -> str:
