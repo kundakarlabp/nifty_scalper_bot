@@ -83,7 +83,7 @@ class Config:
     INSTRUMENT_TOKEN: int = int(os.getenv("INSTRUMENT_TOKEN", "256265"))
 
     # ———————————————— OPTIONS TRADING SETTINGS ———————————————— #
-    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NIFTY 50") # Full name as on NSE
+    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NSE:NIFTY 50") # Full name as on NSE
     OPTION_TYPE: str = os.getenv("OPTION_TYPE", "BOTH") # CE, PE, BOTH
     STRIKE_SELECTION_TYPE: str = os.getenv("STRIKE_SELECTION_TYPE", "ATM") # ATM, ITM, OTM, OI_DELTA
     STRIKE_RANGE: int = int(os.getenv("STRIKE_RANGE", "3")) # Number of strikes on either side of ATM to consider
