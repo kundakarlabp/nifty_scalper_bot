@@ -139,7 +139,6 @@ def get_instrument_tokens(
     if cached_nfo_instruments is None or cached_nse_instruments is None:
         logger.error("[get_instrument_tokens] Cached NFO and NSE instrument lists are required to prevent rate limits.")
         # Returning None here is critical to prevent the calling function from proceeding with invalid data
-        # which would likely lead to errors or incorrect behavior.
         return None
 
     try:
@@ -199,6 +198,23 @@ def get_instrument_tokens(
         logger.debug(f"[get_instrument_tokens] Found {len(nifty_index_instruments)} instruments for base symbol '{base_symbol_for_search}' on NFO.")
         # --- End Crucial Change ---
 
+        # --- Diagnostic Logging Start ---
+        # Log details of instruments that match name and expiry to help debugging
+        if logger.isEnabledFor(logging.DEBUG): # Only log this extra info in DEBUG mode
+            logger.debug(f"[get_instrument_tokens] Diagnostic: Instruments for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd}:")
+            count = 0
+            for inst in nifty_index_instruments:
+                inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
+                if inst_expiry_str == expiry_yyyy_mm_dd:
+                    count += 1
+                    if count <= 20: # Limit output to prevent log spam
+                        logger.debug(f"  - Symbol: {inst['tradingsymbol']}, Strike: {inst.get('strike', 'N/A')}, Type: {inst.get('instrument_type', 'N/A')}")
+                    elif count == 21:
+                         logger.debug("  - ... (output limited)")
+            if count == 0:
+                logger.debug(f"  - No instruments found for '{base_symbol_for_search}' expiring {expiry_yyyy_mm_dd} in filtered list.")
+        # --- Diagnostic Logging End ---
+        
         ce_symbol = None
         pe_symbol = None
         ce_token = None
