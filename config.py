@@ -1,3 +1,4 @@
+# src/config.py
 """
 Centralised configuration loader for the scalper bot.
 Reads environment variables at import time and exposes them via the `Config` class.
@@ -69,12 +70,17 @@ class Config:
     TP_CONFIDENCE_ADJ: float = float(os.getenv("TP_CONFIDENCE_ADJ", "0.3"))
 
     # ———————————————— INSTRUMENT SETTINGS ———————————————— #
-    NIFTY_LOT_SIZE: int = int(os.getenv("NIFTY_LOT_SIZE", "50"))
+    NIFTY_LOT_SIZE: int = int(os.getenv("NIFTY_LOT_SIZE", "75"))
     MIN_LOTS: int = int(os.getenv("MIN_LOTS", "1"))
     MAX_LOTS: int = int(os.getenv("MAX_LOTS", "5"))
 
     TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY")
     TRADE_EXCHANGE: str = os.getenv("TRADE_EXCHANGE", "NFO")
+
+    # Add this line for the instrument token
+    # Default token 256265 is for NIFTY 50 Index on NSE. You MUST verify this is correct for your instrument.
+    # It's highly recommended to set this in your .env file.
+    INSTRUMENT_TOKEN: int = int(os.getenv("INSTRUMENT_TOKEN", "256265"))
 
     # ———————————————— EXECUTION DEFAULTS ———————————————— #
     DEFAULT_PRODUCT: str = os.getenv("DEFAULT_PRODUCT", "MIS")
