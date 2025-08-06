@@ -1,13 +1,5 @@
 """
 Entry point for the Nifty Scalper Bot.
-
-Provides a CLI to control the bot:
-    python -m src.main start    → Start the trading engine and Telegram bot
-    python -m src.main stop     → Stop only trading (polling stays alive)
-    python -m src.main status   → Print current bot status
-
-The bot will respond to Telegram commands like /start, /stop, /mode live.
-Always run this as a module to ensure correct imports.
 """
 
 from __future__ import annotations
@@ -75,11 +67,14 @@ def main() -> None:
         logger.info("🚀 Starting Nifty Scalper Bot...")
 
         # 🔁 Start trading loop in background thread
+        logger.info("Starting trading loop...")
         trading_thread = threading.Thread(target=trader.run, daemon=True)
         trading_thread.start()
+        logger.info("Trading loop started.")
 
         # 📞 Start Telegram bot in main thread (blocking)
-        trader.start_telegram()  # assuming this is where Telegram polling starts
+        logger.info("Starting Telegram...")
+        trader.start_telegram()
 
         # Keep main thread alive for Telegram
         wait_for_commands()
