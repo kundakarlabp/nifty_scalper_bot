@@ -74,13 +74,12 @@ class Config:
     MIN_LOTS: int = int(os.getenv("MIN_LOTS", "1"))
     MAX_LOTS: int = int(os.getenv("MAX_LOTS", "5"))
 
-    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY")
-    TRADE_EXCHANGE: str = os.getenv("TRADE_EXCHANGE", "NFO")
-
-    # Add this line for the instrument token
-    # Default token 256265 is for NIFTY 50 Index on NSE. You MUST verify this is correct for your instrument.
-    # It's highly recommended to set this in your .env file.
-    INSTRUMENT_TOKEN: int = int(os.getenv("INSTRUMENT_TOKEN", "256265"))
+    # --- Options Trading Specific ---
+    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NIFTY 50") # Full name as on NSE
+    OPTION_TYPE: str = os.getenv("OPTION_TYPE", "BOTH") # CE, PE, BOTH
+    STRIKE_SELECTION_TYPE: str = os.getenv("STRIKE_SELECTION_TYPE", "ATM") # ATM, ITM, OTM, OI_DELTA
+    STRIKE_RANGE: int = int(os.getenv("STRIKE_RANGE", "3")) # Number of strikes on either side of ATM to consider
+    DATA_LOOKBACK_MINUTES: int = int(os.getenv("DATA_LOOKBACK_MINUTES", "30")) # For OI/Delta analysis
 
     # ———————————————— EXECUTION DEFAULTS ———————————————— #
     DEFAULT_PRODUCT: str = os.getenv("DEFAULT_PRODUCT", "MIS")
