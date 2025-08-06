@@ -1,295 +1,358 @@
-src/data_streaming/realtime_trader.py
+# src/data_streaming/realtime_trader.py
 
-import logging import threading import atexit import signal import sys from typing import Any, Dict, List, Optional import pandas as pd from src.config import Config from src.strategies.scalping_strategy import EnhancedScalpingStrategy from src.risk.position_sizing import PositionSizing from src.execution.order_executor import OrderExecutor from src.notifications.telegram_controller import TelegramController
+import logging
+import threading
+import atexit
+import signal
+import sys
+from typing import Any, Dict, List, Optional
+import pandas as pd
+# Import the schedule library
+import schedule
 
-logger = logging.getLogger(name)
+from src.config import Config
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.risk.position_sizing import PositionSizing
+from src.execution.order_executor import OrderExecutor
+from src.notifications.telegram_controller import TelegramController
 
-class RealTimeTrader: def init(self) -> None: self.is_trading: bool = False self.daily_pnl: float = 0.0 self.trades: List[Dict[str, Any]] = [] self.live_mode: bool = Config.ENABLE_LIVE_TRADING
+# Note: 'name' is not defined, it should likely be __name__
+logger = logging.getLogger(__name__) # Corrected from logging.getLogger(name)
 
-self.strategy = EnhancedScalpingStrategy(
-        base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-        base_target_points=Config.BASE_TARGET_POINTS,
-        confidence_threshold=Config.CONFIDENCE_THRESHOLD,
-        min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
-    )
+class RealTimeTrader:
+    def __init__(self) -> None:
+        self.is_trading: bool = False
+        self.daily_pnl: float = 0.0
+        self.trades: List[Dict[str, Any]] = []
+        self.live_mode: bool = Config.ENABLE_LIVE_TRADING
 
-    self.risk_manager = PositionSizing()
-    self.order_executor = self._init_order_executor()
+        self.strategy = EnhancedScalpingStrategy(
+            base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
+            base_target_points=Config.BASE_TARGET_POINTS,
+            confidence_threshold=Config.CONFIDENCE_THRESHOLD,
+            min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
+        )
+        self.risk_manager = PositionSizing()
+        self.order_executor = self._init_order_executor()
+        self.telegram_controller = TelegramController(
+            status_callback=self.get_status,
+            control_callback=self._handle_control,
+            summary_callback=self.get_summary,
+        )
+        self._polling_thread: Optional[threading.Thread] = None
+        
+        # Start Telegram polling in a daemon thread
+        self._start_polling()
+        
+        # Schedule the data fetching and processing task
+        # Adjust the frequency (e.g., '1' minute) according to your strategy's needs.
+        schedule.every(1).minutes.do(self.fetch_and_process_data)
+        logger.info("Scheduled fetch_and_process_data to run every 1 minute.")
 
-    self.telegram_controller = TelegramController(
-        status_callback=self.get_status,
-        control_callback=self._handle_control,
-        summary_callback=self.get_summary,
-    )
+        atexit.register(self.shutdown)
+        logger.info("RealTimeTrader initialized and ready to receive commands.")
 
-    self._polling_thread: Optional[threading.Thread] = None
-    self._start_polling()
-    atexit.register(self.shutdown)
-
-    logger.info("RealTimeTrader initialized and ready to receive commands.")
-
-def _init_order_executor(self) -> OrderExecutor:
-    if not self.live_mode:
-        logger.info("Live trading disabled. Using simulated order executor.")
-        return OrderExecutor()
-
-    try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
-        kite.set_access_token(Config.KITE_ACCESS_TOKEN)
-        logger.info("✅ Live order executor initialized with Kite Connect.")
-        return OrderExecutor(kite=kite)
-    except Exception as exc:
-        logger.error("Failed to initialize live trading. Falling back to simulation: %s", exc, exc_info=True)
-        self.live_mode = False
-        return OrderExecutor()
-
-def start(self) -> bool:
-    if self.is_trading:
-        logger.info("Trader already running.")
-        self.telegram_controller.send_message("🛑 Trader already running.")
-        return True
-
-    self.is_trading = True
-    try:
-        self.telegram_controller.send_realtime_session_alert("START")
-        logger.info("✅ Trading started.")
-    except Exception as exc:
-        logger.warning("Failed to send START alert: %s", exc)
-    return True
-
-def stop(self) -> bool:
-    if not self.is_trading:
-        logger.info("Trader is not running.")
-        self.telegram_controller.send_message("🛑 Trader is already stopped.")
-        return True
-
-    self.is_trading = False
-    try:
-        self.telegram_controller.send_realtime_session_alert("STOP")
-        logger.info("🛑 Trading stopped. Telegram polling remains active.")
-    except Exception as exc:
-        logger.warning("Failed to send STOP alert: %s", exc)
-    return True
-
-def _handle_control(self, command: str, arg: str = "") -> bool:
-    command = command.strip().lower()
-    arg = arg.strip().lower() if arg else ""
-
-    logger.info(f"Received command: /{command} {arg}")
-
-    if command == "start":
-        return self.start()
-    elif command == "stop":
-        return self.stop()
-    elif command == "mode":
-        if arg not in ["live", "shadow"]:
-            logger.warning("Invalid mode argument: %s", arg)
-            self.telegram_controller.send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
-            return False
-        return self._set_live_mode(arg)
-    else:
-        logger.warning("Unknown control command: %s", command)
-        self.telegram_controller.send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
-        return False
-
-def _set_live_mode(self, mode: str) -> bool:
-    desired_live = (mode == "live")
-
-    if desired_live == self.live_mode:
-        current_mode = "LIVE" if self.live_mode else "SHADOW"
-        logger.info(f"Already in {current_mode} mode.")
-        self.telegram_controller.send_message(f"🟢 Already in *{current_mode}* mode.", parse_mode="Markdown")
-        return True
-
-    if self.is_trading:
-        logger.warning("Cannot change mode while trading is active. Stop trading first.")
-        self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.", parse_mode="Markdown")
-        return False
-
-    if desired_live:
+    def _init_order_executor(self) -> OrderExecutor:
+        if not self.live_mode:
+            logger.info("Live trading disabled. Using simulated order executor.")
+            return OrderExecutor()
         try:
             from kiteconnect import KiteConnect
             kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
             kite.set_access_token(Config.KITE_ACCESS_TOKEN)
-            self.order_executor = OrderExecutor(kite=kite)
-            self.live_mode = True
-            logger.info("🟢 Switched to LIVE mode.")
-            self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
-            return True
-        except Exception as exc:
-            logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
-            self.telegram_controller.send_message(
-                f"❌ Failed to switch to LIVE mode: `{str(exc)}`\n\nReverted to SHADOW mode.", parse_mode="Markdown"
-            )
+            logger.info("✅ Live order executor initialized with Kite Connect.")
+            return OrderExecutor(kite=kite)
+        except Exception as exc: # Catching generic exception is generally okay here for fallback logic
+            logger.error("Failed to initialize live trading. Falling back to simulation: %s", exc, exc_info=True)
             self.live_mode = False
-            self.order_executor = OrderExecutor()
-            return False
-    else:
-        self.order_executor = OrderExecutor()
-        self.live_mode = False
-        logger.info("🛡️ Switched to SHADOW (simulation) mode.")
-        self.telegram_controller.send_message("🛡️ Switched to *SHADOW* (simulation) mode.", parse_mode="Markdown")
+            return OrderExecutor()
+
+    def start(self) -> bool:
+        if self.is_trading:
+            logger.info("Trader already running.")
+            self.telegram_controller.send_message("🛑 Trader already running.")
+            return True
+        self.is_trading = True
+        try:
+            self.telegram_controller.send_realtime_session_alert("START")
+            logger.info("✅ Trading started.")
+        except Exception as exc:
+            logger.warning("Failed to send START alert: %s", exc)
         return True
 
-def _start_polling(self) -> None:
-    if self._polling_thread and self._polling_thread.is_alive():
-        logger.debug("Polling thread already running.")
-        return
+    def stop(self) -> bool:
+        if not self.is_trading:
+            logger.info("Trader is not running.")
+            self.telegram_controller.send_message("🛑 Trader is already stopped.")
+            return True
+        self.is_trading = False
+        try:
+            self.telegram_controller.send_realtime_session_alert("STOP")
+            logger.info("🛑 Trading stopped. Telegram polling remains active.")
+        except Exception as exc:
+            logger.warning("Failed to send STOP alert: %s", exc)
+        return True
 
-    try:
-        self.telegram_controller.send_startup_alert()
-    except Exception as e:
-        logger.warning("Failed to send startup alert: %s", e)
+    def _handle_control(self, command: str, arg: str = "") -> bool:
+        command = command.strip().lower()
+        arg = arg.strip().lower() if arg else ""
+        logger.info(f"Received command: /{command} {arg}")
+        if command == "start":
+            return self.start()
+        elif command == "stop":
+            return self.stop()
+        elif command == "mode":
+            if arg not in ["live", "shadow"]:
+                logger.warning("Invalid mode argument: %s", arg)
+                self.telegram_controller.send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
+                return False
+            return self._set_live_mode(arg)
+        else:
+            logger.warning("Unknown control command: %s", command)
+            self.telegram_controller.send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
+            return False
 
-    self._polling_thread = threading.Thread(
-        target=self.telegram_controller.start_polling,
-        daemon=True
-    )
-    self._polling_thread.start()
-    logger.info("✅ Telegram polling started (daemon).")
+    def _set_live_mode(self, mode: str) -> bool:
+        desired_live = (mode == "live")
+        if desired_live == self.live_mode:
+            current_mode = "LIVE" if self.live_mode else "SHADOW"
+            logger.info(f"Already in {current_mode} mode.")
+            self.telegram_controller.send_message(f"🟢 Already in *{current_mode}* mode.", parse_mode="Markdown")
+            return True
+        if self.is_trading:
+            logger.warning("Cannot change mode while trading is active. Stop trading first.")
+            self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.", parse_mode="Markdown")
+            return False
+        if desired_live:
+            try:
+                from kiteconnect import KiteConnect
+                kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
+                kite.set_access_token(Config.KITE_ACCESS_TOKEN)
+                self.order_executor = OrderExecutor(kite=kite)
+                self.live_mode = True
+                logger.info("🟢 Switched to LIVE mode.")
+                self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
+                return True
+            except Exception as exc: # Catching generic exception is generally okay here for user feedback
+                logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
+                # Ensure the message is properly formatted on one line if needed
+                self.telegram_controller.send_message(
+                    f"❌ Failed to switch to LIVE mode: `{str(exc)[:100]}...` Reverted to SHADOW mode.", parse_mode="Markdown"
+                )
+                self.live_mode = False
+                self.order_executor = OrderExecutor()
+                return False
+        else:
+            self.order_executor = OrderExecutor()
+            self.live_mode = False
+            logger.info("🛡️ Switched to SHADOW (simulation) mode.")
+            self.telegram_controller.send_message("🛡️ Switched to *SHADOW* (simulation) mode.", parse_mode="Markdown")
+            return True
 
-def _stop_polling(self) -> None:
-    logger.info("🛑 Stopping Telegram polling (app shutdown)...")
-    self.telegram_controller.stop_polling()
-    if self._polling_thread and self._polling_thread.is_alive():
-        if threading.current_thread() != self._polling_thread:
-            self._polling_thread.join(timeout=3)
-    self._polling_thread = None
-
-def shutdown(self) -> None:
-    if not self.is_trading and (not self._polling_thread or not self._polling_thread.is_alive()):
-        return
-
-    logger.info("👋 Shutting down RealTimeTrader...")
-    self.stop()
-    self._stop_polling()
-    logger.info("✅ RealTimeTrader shutdown complete.")
-
-def process_bar(self, ohlc: pd.DataFrame) -> None:
-    logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
-
-    if not self.is_trading:
-        logger.debug("process_bar: Trading not active, returning.")
-        return
-    if ohlc is None or len(ohlc) < 30:
-        logger.debug("Insufficient data to process bar (less than 30 points).")
-        return
-
-    try:
-        if not isinstance(ohlc.index, pd.DatetimeIndex):
-            logger.error("OHLC data must have DatetimeIndex.")
+    def _start_polling(self) -> None:
+        if self._polling_thread and self._polling_thread.is_alive():
+            logger.debug("Polling thread already running.")
             return
+        try:
+            self.telegram_controller.send_startup_alert()
+        except Exception as e:
+            logger.warning("Failed to send startup alert: %s", e)
+        self._polling_thread = threading.Thread(
+            target=self.telegram_controller.start_polling,
+            daemon=True # Correctly set as daemon thread
+        )
+        self._polling_thread.start()
+        logger.info("✅ Telegram polling started (daemon).")
 
-        ts = ohlc.index[-1]
-        current_time_str = ts.strftime("%H:%M")
+    def _stop_polling(self) -> None:
+        logger.info("🛑 Stopping Telegram polling (app shutdown)...")
+        self.telegram_controller.stop_polling()
+        if self._polling_thread and self._polling_thread.is_alive():
+            # Avoid joining from within the same thread
+            if threading.current_thread() != self._polling_thread:
+                 # Use a timeout to prevent hanging
+                self._polling_thread.join(timeout=3) 
+        self._polling_thread = None
 
-        if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
-            if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
-                logger.debug(f"Time filter active ({Config.TIME_FILTER_START} - {Config.TIME_FILTER_END}). Current time {current_time_str} is outside range, skipping bar.")
+    def shutdown(self) -> None:
+        # Check if shutdown is necessary
+        if not self.is_trading and (not self._polling_thread or not self._polling_thread.is_alive()):
+            return
+        logger.info("👋 Shutting down RealTimeTrader...")
+        self.stop() # Stop trading logic
+        self._stop_polling() # Stop Telegram polling
+        logger.info("✅ RealTimeTrader shutdown complete.")
+
+    def process_bar(self, ohlc: pd.DataFrame) -> None:
+        logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
+        if not self.is_trading:
+            logger.debug("process_bar: Trading not active, returning.")
+            return
+        if ohlc is None or len(ohlc) < 30:
+            logger.debug("Insufficient data to process bar (less than 30 points).")
+            return
+        try:
+            if not isinstance(ohlc.index, pd.DatetimeIndex):
+                logger.error("OHLC data must have DatetimeIndex.")
                 return
+            ts = ohlc.index[-1]
+            current_time_str = ts.strftime("%H:%M")
+            if Config.TIME_FILTER_START and Config.TIME_FILTER_END:
+                if current_time_str < Config.TIME_FILTER_START or current_time_str > Config.TIME_FILTER_END:
+                    logger.debug(f"Time filter active ({Config.TIME_FILTER_START} - {Config.TIME_FILTER_END}). Current time {current_time_str} is outside range, skipping bar.")
+                    return
+            current_price = float(ohlc.iloc[-1]["close"])
+            logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
+            signal = self.strategy.generate_signal(ohlc, current_price)
+            logger.debug(f"Strategy returned signal: {signal}")
+            if not signal:
+                logger.debug("No signal generated by strategy.")
+                return
+            signal_confidence = float(signal.get("confidence", 0.0))
+            logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
+            if signal_confidence < Config.CONFIDENCE_THRESHOLD:
+                logger.debug("Signal confidence below threshold, discarding.")
+                return
+            position = self.risk_manager.calculate_position_size(
+                entry_price=signal.get("entry_price", current_price),
+                stop_loss=signal.get("stop_loss", current_price),
+                signal_confidence=signal.get("confidence", 0.0),
+                market_volatility=signal.get("market_volatility", 0.0),
+            )
+            logger.debug(f"Position sizing returned: {position}")
+            if not position or position.get("quantity", 0) <= 0:
+                logger.debug("Position sizing failed or quantity is zero/negative.")
+                return
+            token = len(self.trades) + 1
+            self.telegram_controller.send_signal_alert(token, signal, position)
+            transaction_type = signal.get("signal") or signal.get("direction")
+            if not transaction_type:
+                logger.warning("Missing signal direction.")
+                return
+            symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
+            exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
+            logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
+            order_id = self.order_executor.place_entry_order(
+                symbol=symbol,
+                exchange=exchange,
+                transaction_type=transaction_type,
+                quantity=position["quantity"],
+            )
+            if not order_id:
+                logger.warning("Failed to place entry order.")
+                return
+            logger.debug("Attempting to setup GTT orders...")
+            self.order_executor.setup_gtt_orders(
+                entry_order_id=order_id,
+                entry_price=signal.get("entry_price", current_price),
+                stop_loss_price=signal.get("stop_loss", current_price),
+                target_price=signal.get("target", current_price),
+                symbol=symbol,
+                exchange=exchange,
+                quantity=position["quantity"],
+                transaction_type=transaction_type,
+            )
+            self.trades.append({
+                "order_id": order_id,
+                "direction": transaction_type,
+                "quantity": position["quantity"],
+                "entry_price": signal.get("entry_price", current_price),
+                "stop_loss": signal.get("stop_loss", current_price),
+                "target": signal.get("target", current_price),
+                "confidence": signal.get("confidence", 0.0),
+            })
+            logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
+        except Exception as exc:
+            logger.error("Error processing bar: %s", exc, exc_info=True)
 
-        current_price = float(ohlc.iloc[-1]["close"])
-        logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
+    def get_status(self) -> Dict[str, Any]:
+        status: Dict[str, Any] = {
+            "is_trading": self.is_trading,
+            "open_orders": len(self.order_executor.get_active_orders()),
+            "trades_today": len(self.trades),
+            "live_mode": self.live_mode,
+        }
+        status.update(self.risk_manager.get_risk_status())
+        return status
 
-        signal = self.strategy.generate_signal(ohlc, current_price)
-        logger.debug(f"Strategy returned signal: {signal}")
+    def get_summary(self) -> str:
+        lines = [
+            f"📊 <b>Daily Summary</b>",
+            f"🔁 <b>Total trades:</b> {len(self.trades)}",
+            f"💰 <b>PNL:</b> {self.daily_pnl:.2f}",
+            "────────────────────"
+        ]
+        for trade in self.trades:
+            lines.append(
+                f"{trade['direction']} {trade['quantity']} @ {trade['entry_price']:.2f} "
+                f"(SL {trade['stop_loss']:.2f}, TP {trade['target']:.2f})"
+            )
+        return "\n".join(lines) # Ensure lines are joined with newlines
 
-        if not signal:
-            logger.debug("No signal generated by strategy.")
-            return
+    # --- NEW METHOD TO FETCH DATA AND TRIGGER PROCESSING ---
+    def fetch_and_process_data(self):
+        """
+        Fetches the latest OHLC data and triggers the processing logic.
+        This method will be scheduled to run periodically.
+        """
+        logger.debug("fetch_and_process_data triggered by schedule.")
+        if not self.is_trading:
+             logger.debug("fetch_and_process_data: Trading not active, skipping.")
+             return
 
-        signal_confidence = float(signal.get("confidence", 0.0))
-        logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {Config.CONFIDENCE_THRESHOLD}")
+        try:
+            # --- YOU MUST REPLACE THIS SECTION WITH YOUR ACTUAL DATA FETCHING LOGIC ---
+            # Example (conceptual, you need KiteConnect integration):
+            # from datetime import datetime, timedelta
+            # end_time = datetime.now()
+            # start_time = end_time - timedelta(minutes=35) # Fetch last 35 minutes
+            # ohlc_df = self._fetch_historical_data("NIFTY 50", "NSE", start_time, end_time, "minute")
+            # if ohlc_df is not None and not ohlc_df.empty:
+            #     logger.debug(f"Fetched {len(ohlc_df)} bars.")
+            #     self.process_bar(ohlc_df)
+            # else:
+            #     logger.warning("Failed to fetch OHLC data.")
+            # -------------------------------------------------------------------------
 
-        if signal_confidence < Config.CONFIDENCE_THRESHOLD:
-            logger.debug("Signal confidence below threshold, discarding.")
-            return
+            # --- Placeholder/Dummy Data Section (REMOVE THIS WHEN YOU ADD REAL FETCHING) ---
+            logger.warning("!!! USING DUMMY DATA - REPLACE WITH REAL KITE DATA FETCHING !!!")
+            import numpy as np
+            from datetime import datetime, timedelta
+            # Create 35 minutes of dummy 1-minute data
+            end_time = datetime.now().replace(second=0, microsecond=0)
+            start_time = end_time - timedelta(minutes=34)
+            dates = pd.date_range(start=start_time, end=end_time, freq='T')
+            # Generate dummy prices around a base (e.g., 19000)
+            base_price = 19000
+            noise = np.random.randn(len(dates)) * 20 # Random noise
+            trend = np.linspace(0, 50, len(dates)) # Small upward trend
+            close_prices = base_price + trend + noise
+            opens = np.concatenate(([close_prices[0]], close_prices[:-1])) # Simple open simulation
+            closes = close_prices
+            highs = np.maximum(opens, closes) + np.abs(np.random.randn(len(opens))) * 10
+            lows = np.minimum(opens, closes) - np.abs(np.random.randn(len(opens))) * 10
+            volumes = np.random.randint(1000, 5000, len(opens))
 
-        position = self.risk_manager.calculate_position_size(
-            entry_price=signal.get("entry_price", current_price),
-            stop_loss=signal.get("stop_loss", current_price),
-            signal_confidence=signal.get("confidence", 0.0),
-            market_volatility=signal.get("market_volatility", 0.0),
-        )
-        logger.debug(f"Position sizing returned: {position}")
+            dummy_data = {
+                'open': opens,
+                'high': highs,
+                'low': lows,
+                'close': closes,
+                'volume': volumes
+            }
+            ohlc_df = pd.DataFrame(dummy_data, index=dates) # 35 data points
+            logger.debug(f"Generated dummy OHLC data with {len(ohlc_df)} bars.")
+            # --- End Placeholder ---
 
-        if not position or position.get("quantity", 0) <= 0:
-            logger.debug("Position sizing failed or quantity is zero/negative.")
-            return
+            if ohlc_df is not None and not ohlc_df.empty:
+                self.process_bar(ohlc_df)
+            else:
+                logger.warning("fetch_and_process_data: No data to process (dummy or real).")
 
-        token = len(self.trades) + 1
-        self.telegram_controller.send_signal_alert(token, signal, position)
+        except Exception as e:
+            logger.error(f"Error in fetch_and_process_data: {e}", exc_info=True)
+    # --- END OF NEW METHOD ---
 
-        transaction_type = signal.get("signal") or signal.get("direction")
-        if not transaction_type:
-            logger.warning("Missing signal direction.")
-            return
-
-        symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
-        exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
-        logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
-        order_id = self.order_executor.place_entry_order(
-            symbol=symbol,
-            exchange=exchange,
-            transaction_type=transaction_type,
-            quantity=position["quantity"],
-        )
-        if not order_id:
-            logger.warning("Failed to place entry order.")
-            return
-
-        logger.debug("Attempting to setup GTT orders...")
-        self.order_executor.setup_gtt_orders(
-            entry_order_id=order_id,
-            entry_price=signal.get("entry_price", current_price),
-            stop_loss_price=signal.get("stop_loss", current_price),
-            target_price=signal.get("target", current_price),
-            symbol=symbol,
-            exchange=exchange,
-            quantity=position["quantity"],
-            transaction_type=transaction_type,
-        )
-
-        self.trades.append({
-            "order_id": order_id,
-            "direction": transaction_type,
-            "quantity": position["quantity"],
-            "entry_price": signal.get("entry_price", current_price),
-            "stop_loss": signal.get("stop_loss", current_price),
-            "target": signal.get("target", current_price),
-            "confidence": signal.get("confidence", 0.0),
-        })
-        logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
-
-    except Exception as exc:
-        logger.error("Error processing bar: %s", exc, exc_info=True)
-
-def get_status(self) -> Dict[str, Any]:
-    status: Dict[str, Any] = {
-        "is_trading": self.is_trading,
-        "open_orders": len(self.order_executor.get_active_orders()),
-        "trades_today": len(self.trades),
-        "live_mode": self.live_mode,
-    }
-    status.update(self.risk_manager.get_risk_status())
-    return status
-
-def get_summary(self) -> str:
-    lines = [
-        f"📊 <b>Daily Summary</b>",
-        f"🔁 <b>Total trades:</b> {len(self.trades)}",
-        f"💰 <b>PNL:</b> {self.daily_pnl:.2f}",
-        "────────────────────"
-    ]
-    for trade in self.trades:
-        lines.append(
-            f"{trade['direction']} {trade['quantity']} @ {trade['entry_price']:.2f} "
-            f"(SL {trade['stop_loss']:.2f}, TP {trade['target']:.2f})"
-        )
-    return "\n".join(lines)
-
-def __repr__(self) -> str:
-    return (f"<RealTimeTrader is_trading={self.is_trading} "
-            f"live_mode={self.live_mode} trades_today={len(self.trades)}>")
-
+    def __repr__(self) -> str:
+        return (f"<RealTimeTrader is_trading={self.is_trading} "
+                f"live_mode={self.live_mode} trades_today={len(self.trades)}>")
