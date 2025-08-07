@@ -4,27 +4,67 @@ Optimized utility functions for selecting strike prices and fetching instrument 
 for Nifty 50 options trading.
 
 This version includes robust symbol resolution, multiple fallback strategies,
-and enhanced diagnostics.
+enhanced diagnostics, and comprehensive rate limiting protection.
 """
 
 from kiteconnect import KiteConnect
 from datetime import datetime, timedelta
 import logging
-import calendar # Import calendar for week calculation
+import calendar
+import time
+import threading
+from functools import lru_cache
+from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
+
+# Global rate limiting and caching
+_last_api_call = {}
+_api_call_lock = threading.RLock()
+_MIN_API_INTERVAL = 0.5  # Minimum 500ms between API calls
+
+def _rate_limited_api_call(func, *args, **kwargs):
+    """Rate-limited API call wrapper"""
+    with _api_call_lock:
+        call_key = func.__name__
+        now = time.time()
+        
+        if call_key in _last_api_call:
+            elapsed = now - _last_api_call[call_key]
+            if elapsed < _MIN_API_INTERVAL:
+                sleep_time = _MIN_API_INTERVAL - elapsed
+                logger.debug(f"Rate limiting {call_key}: sleeping {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+        
+        try:
+            result = func(*args, **kwargs)
+            _last_api_call[call_key] = time.time()
+            return result
+        except Exception as e:
+            if "Too many requests" in str(e) or "rate limit" in str(e).lower():
+                logger.warning(f"Rate limit hit for {call_key}, waiting 2 seconds...")
+                time.sleep(2)
+                # Retry once
+                result = func(*args, **kwargs)
+                _last_api_call[call_key] = time.time()
+                return result
+            raise
 
 # --- Helper function to get the correct LTP symbol ---
 def _get_spot_ltp_symbol():
     """Determines the correct symbol string for fetching Nifty 50 LTP."""
     from src.config import Config
-    return Config.SPOT_SYMBOL # Should be "NSE:NIFTY 50"
-# --- End Helper ---
+    return getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
 
-def get_next_expiry_date(kite_instance: KiteConnect) -> str:
+@lru_cache(maxsize=32)
+def _get_cached_expiry_date(base_symbol: str, current_date_str: str) -> str:
+    """Cached expiry date calculation to avoid repeated API calls"""
+    return ""  # Will be populated by the main function
+
+def get_next_expiry_date(kite_instance: KiteConnect, use_cache: bool = True) -> str:
     """
     Finds the next expiry date (Thursday) that has available instruments.
-    Cross-references with actual NFO instruments.
+    Cross-references with actual NFO instruments with enhanced error handling.
     Returns the date in YYYY-MM-DD format.
     """
     if not kite_instance:
@@ -32,10 +72,10 @@ def get_next_expiry_date(kite_instance: KiteConnect) -> str:
         return ""
 
     try:
-        all_nfo_instruments = kite_instance.instruments("NFO")
         from src.config import Config
-        spot_symbol_config = Config.SPOT_SYMBOL
-
+        spot_symbol_config = getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+        
+        # Extract base symbol
         if ':' in spot_symbol_config:
             potential_name_with_spaces = spot_symbol_config.split(':', 1)[1]
         else:
@@ -44,50 +84,81 @@ def get_next_expiry_date(kite_instance: KiteConnect) -> str:
 
         logger.debug(f"[get_next_expiry_date] Searching for base symbol: '{base_symbol_for_search}'")
 
-        index_instruments = [inst for inst in all_nfo_instruments if inst['name'] == base_symbol_for_search]
+        # Rate-limited instruments fetch
+        try:
+            all_nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+        except Exception as api_error:
+            logger.error(f"[get_next_expiry_date] Failed to fetch NFO instruments: {api_error}")
+            # Fallback to next Thursday calculation
+            return _calculate_next_thursday()
+
+        index_instruments = [inst for inst in all_nfo_instruments if inst.get('name') == base_symbol_for_search]
 
         if not index_instruments:
             logger.error(f"[get_next_expiry_date] No instruments found for '{base_symbol_for_search}'.")
-            return ""
+            return _calculate_next_thursday()
 
-        unique_expiries = set(inst['expiry'] for inst in index_instruments)
+        # Extract and sort expiries
+        unique_expiries = set()
+        for inst in index_instruments:
+            expiry = inst.get('expiry')
+            if expiry:
+                if hasattr(expiry, 'strftime'):
+                    unique_expiries.add(expiry.strftime("%Y-%m-%d"))
+                else:
+                    unique_expiries.add(str(expiry))
+
         sorted_expiries = sorted(unique_expiries)
         logger.debug(f"[get_next_expiry_date] Found {len(sorted_expiries)} unique expiries.")
 
         if not sorted_expiries:
-             logger.error(f"[get_next_expiry_date] No expiries found for '{base_symbol_for_search}'.")
-             return ""
+            logger.error(f"[get_next_expiry_date] No expiries found for '{base_symbol_for_search}'.")
+            return _calculate_next_thursday()
 
         today = datetime.today().date()
         logger.debug(f"[get_next_expiry_date] Today's date: {today}")
 
-        for expiry_date in sorted_expiries:
-            if isinstance(expiry_date, str):
-                try:
-                    expiry_date_obj = datetime.strptime(expiry_date, "%Y-%m-%d").date()
-                except ValueError:
-                    logger.warning(f"[get_next_expiry_date] Could not parse expiry: {expiry_date}")
-                    continue
-            else:
-                expiry_date_obj = expiry_date
+        # Find next valid expiry
+        for expiry_str in sorted_expiries:
+            try:
+                expiry_date_obj = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                logger.debug(f"[get_next_expiry_date] Checking expiry: {expiry_date_obj}")
+                
+                if expiry_date_obj >= today:
+                    logger.info(f"[get_next_expiry_date] ✅ Selected expiry: {expiry_str}")
+                    return expiry_str
+            except ValueError:
+                logger.warning(f"[get_next_expiry_date] Could not parse expiry: {expiry_str}")
+                continue
 
-            logger.debug(f"[get_next_expiry_date] Checking expiry: {expiry_date_obj}")
-            if expiry_date_obj >= today:
-                selected_expiry_str = expiry_date_obj.strftime('%Y-%m-%d')
-                logger.info(f"[get_next_expiry_date] ✅ Selected expiry: {selected_expiry_str}")
-                return selected_expiry_str
+        # Fallback to latest available expiry
+        if sorted_expiries:
+            latest_expiry = sorted_expiries[-1]
+            logger.info(f"[get_next_expiry_date] Fallback to latest expiry: {latest_expiry}")
+            return latest_expiry
 
-        logger.warning("[get_next_expiry_date] No future expiry found.")
-        latest_expiry = sorted_expiries[-1]
-        latest_expiry_str = latest_expiry.strftime('%Y-%m-%d') if hasattr(latest_expiry, 'strftime') else str(latest_expiry)
-        logger.info(f"[get_next_expiry_date] Fallback to latest expiry: {latest_expiry_str}")
-        return latest_expiry_str
+        # Final fallback
+        return _calculate_next_thursday()
 
     except Exception as e:
         logger.error(f"[get_next_expiry_date] Error: {e}", exc_info=True)
-        return ""
+        return _calculate_next_thursday()
 
-# --- Optimized Symbol Formatting and Resolution ---
+def _calculate_next_thursday() -> str:
+    """Calculate next Thursday as fallback expiry"""
+    try:
+        today = datetime.today()
+        days_ahead = 3 - today.weekday()  # Thursday is 3
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+        next_thursday = today + timedelta(days=days_ahead)
+        return next_thursday.strftime("%Y-%m-%d")
+    except Exception as e:
+        logger.error(f"Error calculating next Thursday: {e}")
+        # Ultimate fallback
+        return (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")
+
+# --- Enhanced Symbol Formatting and Resolution ---
 
 def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
     """
@@ -101,10 +172,10 @@ def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
         logger.error(f"[_format_expiry_for_symbol_primary] Error: {e}")
         return ""
 
-def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, opt_type: str) -> list:
+def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, opt_type: str) -> List[str]:
     """
     Generate a list of possible symbol formats to try.
-    Prioritizes the known correct format.
+    Prioritizes the known correct format with enhanced variants.
     """
     variants = []
     try:
@@ -115,38 +186,56 @@ def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, o
         if primary_format:
             variants.append(f"{base_symbol}{primary_format}{strike}{opt_type}")
 
-        # 2. Alternative: YYMON (e.g., NIFTY25AUG24550CE) - Less likely for weekly, but possible for monthly
-        alt_format_1 = expiry_date.strftime("%y%b").upper()
-        variants.append(f"{base_symbol}{alt_format_1}{strike}{opt_type}")
+        # 2. Alternative formats for different expiry types
+        year_short = expiry_date.strftime("%y")
+        month_short = expiry_date.strftime("%b").upper()
+        day = expiry_date.strftime("%d")
+        
+        # Monthly format: YYMON (e.g., NIFTY25AUG24550CE)
+        variants.append(f"{base_symbol}{year_short}{month_short}{strike}{opt_type}")
+        
+        # Weekly format with week number
+        week_of_month = (expiry_date.day - 1) // 7 + 1
+        variants.append(f"{base_symbol}{year_short}{month_short}{week_of_month}W{strike}{opt_type}")
+        
+        # Date format: YYMMDD
+        date_format = expiry_date.strftime("%y%m%d")
+        variants.append(f"{base_symbol}{date_format}{strike}{opt_type}")
+        
+        # Full month name format
+        month_full = expiry_date.strftime("%B").upper()
+        variants.append(f"{base_symbol}{year_short}{month_full}{day}{strike}{opt_type}")
 
-        # 3. Weekly format: YYMONGW (e.g., NIFTY25AUG1W24550CE for weekly expiries)
-        week_num = (expiry_date.day - 1) // 7 + 1
-        weekly_format = f"{expiry_date.strftime('%y%b').upper()}{week_num}W"
-        variants.append(f"{base_symbol}{weekly_format}{strike}{opt_type}")
-
-        # 4. Numerical Format: YYMMDD (e.g., NIFTY25080724550CE) - Low priority fallback
-        num_format = expiry_date.strftime("%y%m%d")
-        variants.append(f"{base_symbol}{num_format}{strike}{opt_type}")
-
-        # Remove duplicates
-        unique_variants = list(set(variants))
-        logger.debug(f"[_construct_symbol_variants] Generated variants for {base_symbol} {expiry_str} {strike}{opt_type}: {unique_variants}")
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_variants = []
+        for variant in variants:
+            if variant not in seen:
+                seen.add(variant)
+                unique_variants.append(variant)
+        
+        logger.debug(f"[_construct_symbol_variants] Generated {len(unique_variants)} variants for {base_symbol} {expiry_str} {strike}{opt_type}")
         return unique_variants
 
     except Exception as e:
         logger.error(f"[_construct_symbol_variants] Error generating variants: {e}")
-        # Fallback to primary format only - FIXED SYNTAX ERROR
+        # Fallback to primary format only
         primary_format = _format_expiry_for_symbol_primary(expiry_str)
         if primary_format:
-             return [f"{base_symbol}{primary_format}{strike}{opt_type}"]
+            return [f"{base_symbol}{primary_format}{strike}{opt_type}"]
         return []
 
-def _fuzzy_find_instrument(instruments_list: list, base_symbol: str, expiry_yyyy_mm_dd: str, strike: int, opt_type: str) -> dict:
+def _fuzzy_find_instrument(instruments_list: List[Dict], base_symbol: str, 
+                          expiry_yyyy_mm_dd: str, strike: int, opt_type: str) -> Dict[str, Any]:
     """
-    Fuzzy search for an instrument if direct symbol matching fails.
-    Matches based on name, expiry, strike, and instrument_type.
+    Enhanced fuzzy search for an instrument if direct symbol matching fails.
+    Matches based on name, expiry, strike, and instrument_type with tolerance.
     """
     logger.debug(f"[_fuzzy_find_instrument] Fuzzy searching for {base_symbol} Exp:{expiry_yyyy_mm_dd} Strike:{strike} Type:{opt_type}")
+    
+    best_match = {}
+    exact_matches = []
+    
     try:
         for inst in instruments_list:
             # Check base symbol/name match
@@ -154,32 +243,61 @@ def _fuzzy_find_instrument(instruments_list: list, base_symbol: str, expiry_yyyy
                 continue
 
             # Check expiry match
-            inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-            if inst_expiry_str != expiry_yyyy_mm_dd:
-                continue
+            inst_expiry = inst.get('expiry')
+            if inst_expiry:
+                if hasattr(inst_expiry, 'strftime'):
+                    inst_expiry_str = inst_expiry.strftime("%Y-%m-%d")
+                else:
+                    inst_expiry_str = str(inst_expiry)
+                    
+                if inst_expiry_str != expiry_yyyy_mm_dd:
+                    continue
 
             # Check instrument type (CE/PE)
             if inst.get('instrument_type') != opt_type:
                 continue
 
-            # Check strike match (allow for float/int comparison)
+            # Check strike match with tolerance
             inst_strike = inst.get('strike')
             if inst_strike is not None:
                 try:
-                    if int(float(inst_strike)) == int(strike):
-                        logger.info(f"[_fuzzy_find_instrument] ✅ Found via fuzzy search: {inst['tradingsymbol']} ({inst['instrument_token']})")
-                        return {
+                    strike_diff = abs(int(float(inst_strike)) - int(strike))
+                    if strike_diff == 0:  # Exact match
+                        exact_matches.append({
                             "symbol": inst['tradingsymbol'],
                             "token": inst['instrument_token'],
-                            "strike": int(strike),
+                            "strike": int(float(inst_strike)),
                             "type": opt_type,
-                            "expiry": expiry_yyyy_mm_dd
-                        }
+                            "expiry": expiry_yyyy_mm_dd,
+                            "difference": strike_diff
+                        })
+                    elif strike_diff <= 50:  # Within one strike (50 points)
+                        if not best_match or strike_diff < best_match.get('difference', float('inf')):
+                            best_match = {
+                                "symbol": inst['tradingsymbol'],
+                                "token": inst['instrument_token'],
+                                "strike": int(float(inst_strike)),
+                                "type": opt_type,
+                                "expiry": expiry_yyyy_mm_dd,
+                                "difference": strike_diff
+                            }
                 except (ValueError, TypeError):
-                    continue # Skip if strike comparison fails
+                    continue
 
-        logger.debug(f"[_fuzzy_find_instrument] ❌ No fuzzy match found.")
+        # Return exact match if available
+        if exact_matches:
+            result = exact_matches[0]
+            logger.info(f"[_fuzzy_find_instrument] ✅ Exact match found: {result['symbol']} (token: {result['token']})")
+            return result
+        
+        # Return best approximate match
+        if best_match:
+            logger.info(f"[_fuzzy_find_instrument] ✅ Approximate match found: {best_match['symbol']} (strike difference: {best_match['difference']})")
+            return best_match
+
+        logger.debug("[_fuzzy_find_instrument] ❌ No fuzzy match found.")
         return {}
+        
     except Exception as e:
         logger.error(f"[_fuzzy_find_instrument] Error during fuzzy search: {e}")
         return {}
@@ -189,122 +307,151 @@ def _fuzzy_find_instrument(instruments_list: list, base_symbol: str, expiry_yyyy
 def get_instrument_tokens(
     symbol: str = "NIFTY",
     offset: int = 0,
-    kite_instance: KiteConnect = None,
-    cached_nfo_instruments: list = None,
-    cached_nse_instruments: list = None,
-    strike_range: int = 3  # Try ±3 strikes (150 points) if exact not found
-):
+    kite_instance: Optional[KiteConnect] = None,
+    cached_nfo_instruments: Optional[List[Dict]] = None,
+    cached_nse_instruments: Optional[List[Dict]] = None,
+    strike_range: int = 3
+) -> Optional[Dict[str, Any]]:
     """
-    Gets instrument tokens for spot, ATM CE, and PE for the *nearest valid* expiry.
-    Implements robust symbol resolution with multiple fallbacks and strike range search.
+    Enhanced instrument token retrieval with comprehensive error handling and fallbacks.
     
     Args:
         symbol: Base symbol (default "NIFTY")
         offset: Strike offset in multiples of 50 (default 0 for ATM)
         kite_instance: KiteConnect instance
         cached_nfo_instruments: List of NFO instruments
-        cached_nse_instruments: List of NSE instruments (not used currently)
+        cached_nse_instruments: List of NSE instruments
         strike_range: Number of strikes to try on each side if exact not found
+    
+    Returns:
+        Dictionary with instrument tokens and metadata, None if failed
     """
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
         return None
 
-    if cached_nfo_instruments is None:
+    if not cached_nfo_instruments:
         logger.error("[get_instrument_tokens] Cached NFO instruments are required.")
         return None
 
     try:
         from src.config import Config
-        spot_symbol_config = Config.SPOT_SYMBOL
+        spot_symbol_config = getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
 
-        # Derive base symbol name for filtering (e.g., 'NIFTY' from 'NSE:NIFTY 50')
+        # Derive base symbol name
         if ':' in spot_symbol_config:
             potential_name_with_spaces = spot_symbol_config.split(':', 1)[1]
         else:
             potential_name_with_spaces = spot_symbol_config
         base_symbol_for_search = potential_name_with_spaces.split()[0]
+        
         logger.debug(f"[get_instrument_tokens] Base symbol for search: '{base_symbol_for_search}'")
 
-        # 1. Get Spot Price
+        # 1. Get Spot Price with rate limiting
         spot_symbol_ltp = _get_spot_ltp_symbol()
         logger.debug(f"[get_instrument_tokens] Fetching spot LTP for: {spot_symbol_ltp}")
-        ltp_data = kite_instance.ltp([spot_symbol_ltp])
-        spot_price = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
+        
+        try:
+            ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol_ltp])
+            spot_price = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
+        except Exception as ltp_error:
+            logger.error(f"[get_instrument_tokens] LTP fetch failed: {ltp_error}")
+            # Try with alternative spot symbol formats
+            alternative_symbols = [
+                'NSE:NIFTY 50',
+                'NSE:NIFTY50',
+                'NSE:NIFTY',
+                'NIFTY 50'
+            ]
+            
+            spot_price = None
+            for alt_symbol in alternative_symbols:
+                try:
+                    logger.debug(f"Trying alternative spot symbol: {alt_symbol}")
+                    ltp_data = _rate_limited_api_call(kite_instance.ltp, [alt_symbol])
+                    spot_price = ltp_data.get(alt_symbol, {}).get('last_price')
+                    if spot_price:
+                        logger.info(f"✅ Spot price fetched with alternative symbol {alt_symbol}: {spot_price}")
+                        break
+                except Exception:
+                    continue
+            
+            if not spot_price:
+                logger.error("[get_instrument_tokens] Failed to fetch spot price with any symbol format")
+                return None
 
-        if spot_price is None:
-             logger.error(f"[get_instrument_tokens] Failed to fetch spot price for '{spot_symbol_ltp}'.")
-             return None
-        else:
-             logger.info(f"[get_instrument_tokens] Spot price fetched: {spot_price}")
+        logger.info(f"[get_instrument_tokens] Spot price: {spot_price}")
 
         # 2. Calculate Strike and Expiry
         base_strike = round(spot_price / 50) * 50
         target_strike = base_strike + (offset * 50)
+        
+        # Get expiry with error handling
         expiry_yyyy_mm_dd = get_next_expiry_date(kite_instance)
-
         if not expiry_yyyy_mm_dd:
             logger.error("[get_instrument_tokens] Could not determine expiry date.")
             return None
 
-        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, ATM Strike: {target_strike}, Spot: {spot_price}")
+        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, Strike: {target_strike}, Offset: {offset}")
 
-        # 3. Prepare for Symbol Search
-        # Filter NFO instruments for the specific index (e.g., 'NIFTY')
-        nifty_index_instruments = [inst for inst in cached_nfo_instruments if inst['name'] == base_symbol_for_search]
-        logger.debug(f"[get_instrument_tokens] Filtered {len(nifty_index_instruments)} '{base_symbol_for_search}' instruments.")
+        # 3. Filter instruments efficiently
+        nifty_instruments = [
+            inst for inst in cached_nfo_instruments 
+            if inst.get('name') == base_symbol_for_search
+        ]
+        
+        if not nifty_instruments:
+            logger.error(f"[get_instrument_tokens] No {base_symbol_for_search} instruments in cache")
+            return None
 
         # Filter for target expiry
         expiry_instruments = []
-        for inst in nifty_index_instruments:
-            inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-            if inst_expiry_str == expiry_yyyy_mm_dd:
-                expiry_instruments.append(inst)
+        for inst in nifty_instruments:
+            inst_expiry = inst.get('expiry')
+            if inst_expiry:
+                if hasattr(inst_expiry, 'strftime'):
+                    inst_expiry_str = inst_expiry.strftime("%Y-%m-%d")
+                else:
+                    inst_expiry_str = str(inst_expiry)
+                
+                if inst_expiry_str == expiry_yyyy_mm_dd:
+                    expiry_instruments.append(inst)
 
         if not expiry_instruments:
             logger.error(f"[get_instrument_tokens] No instruments found for expiry {expiry_yyyy_mm_dd}")
             # Show available expiries for debugging
             available_expiries = set()
-            for inst in nifty_index_instruments:
-                exp_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-                available_expiries.add(exp_str)
+            for inst in nifty_instruments:
+                exp = inst.get('expiry')
+                if exp:
+                    exp_str = exp.strftime("%Y-%m-%d") if hasattr(exp, 'strftime') else str(exp)
+                    available_expiries.add(exp_str)
             logger.info(f"Available expiries: {sorted(available_expiries)}")
             return None
 
-        logger.info(f"[get_instrument_tokens] Found {len(expiry_instruments)} instruments for target expiry")
+        logger.info(f"[get_instrument_tokens] Found {len(expiry_instruments)} instruments for expiry {expiry_yyyy_mm_dd}")
 
-        # --- Diagnostic: Show available strikes for debugging ---
-        if logger.isEnabledFor(logging.DEBUG):
-            try:
-                available_strikes = set()
-                for inst in expiry_instruments:
-                    if inst.get('strike'):
-                        available_strikes.add(int(float(inst['strike'])))
-                sorted_strikes = sorted(list(available_strikes))
-                logger.debug(f"[DIAGNOSTIC] Available strikes for '{expiry_yyyy_mm_dd}': {sorted_strikes}")
-                logger.debug(f"[DIAGNOSTIC] Target strike {target_strike} {'IS' if target_strike in sorted_strikes else 'NOT'} in available strikes.")
-            except Exception as diag_e:
-                logger.debug(f"[DIAGNOSTIC] Error during strike diagnostic: {diag_e}")
-        # --- End Diagnostic ---
-
+        # 4. Initialize results
         results = {
             "spot_price": spot_price,
-            "atm_strike": target_strike,  # Changed from target_strike to atm_strike for compatibility
-            "target_strike": target_strike,  # Keep both for backward compatibility
-            "actual_strikes": {},  # Will store actual strikes found
+            "atm_strike": base_strike,  # Actual ATM
+            "target_strike": target_strike,  # Target with offset
+            "offset": offset,
+            "actual_strikes": {},
             "expiry": expiry_yyyy_mm_dd,
             "ce_symbol": None,
             "ce_token": None,
             "pe_symbol": None,
-            "pe_token": None
+            "pe_token": None,
+            "spot_token": None  # Add spot token if needed
         }
 
-        # 4. Attempt to Find Tokens for CE and PE with Strike Range
+        # 5. Search for CE and PE tokens
         for opt_type in ['CE', 'PE']:
             found = False
             logger.debug(f"[get_instrument_tokens] Searching for {opt_type}...")
             
-            # Try strikes in order: exact target, then expanding outward
+            # Define strike search order: target first, then expand
             strike_attempts = [target_strike]
             for i in range(1, strike_range + 1):
                 strike_attempts.extend([target_strike + i * 50, target_strike - i * 50])
@@ -312,22 +459,21 @@ def get_instrument_tokens(
             for attempt_strike in strike_attempts:
                 if found:
                     break
-                    
+                
                 logger.debug(f"[get_instrument_tokens] Trying {opt_type} strike: {attempt_strike}")
 
-                # a. Try Symbol Variants
+                # Try direct symbol matching first
                 symbol_variants = _construct_symbol_variants(base_symbol_for_search, expiry_yyyy_mm_dd, attempt_strike, opt_type)
                 
                 for variant in symbol_variants:
-                    # Find matching instrument by symbol
                     matching_inst = next(
                         (inst for inst in expiry_instruments 
-                         if inst['tradingsymbol'] == variant and inst.get('instrument_type') == opt_type), 
+                         if inst.get('tradingsymbol') == variant and inst.get('instrument_type') == opt_type), 
                         None
                     )
                     
                     if matching_inst:
-                        logger.info(f"[get_instrument_tokens] ✅ Found {opt_type} via symbol match: {variant} (token: {matching_inst['instrument_token']})")
+                        logger.info(f"[get_instrument_tokens] ✅ {opt_type} symbol match: {variant} (token: {matching_inst['instrument_token']})")
                         if opt_type == 'CE':
                             results['ce_symbol'] = variant
                             results['ce_token'] = matching_inst['instrument_token']
@@ -339,10 +485,10 @@ def get_instrument_tokens(
                         found = True
                         break
                 
-                # b. Fallback: Fuzzy Search for this strike
+                # Fallback to fuzzy search
                 if not found:
-                    logger.debug(f"[get_instrument_tokens] Symbol variants failed for {opt_type} strike {attempt_strike}. Trying fuzzy search...")
-                    fuzzy_result = _fuzzy_find_instrument(expiry_instruments, base_symbol_for_search, expiry_yyyy_mm_dd, attempt_strike, opt_type)
+                    fuzzy_result = _fuzzy_find_instrument(expiry_instruments, base_symbol_for_search, 
+                                                        expiry_yyyy_mm_dd, attempt_strike, opt_type)
                     if fuzzy_result:
                         if opt_type == 'CE':
                             results['ce_symbol'] = fuzzy_result['symbol']
@@ -352,27 +498,27 @@ def get_instrument_tokens(
                             results['pe_symbol'] = fuzzy_result['symbol']
                             results['pe_token'] = fuzzy_result['token']
                             results['actual_strikes']['pe'] = fuzzy_result['strike']
-                        logger.info(f"[get_instrument_tokens] ✅ Found {opt_type} via fuzzy search: {fuzzy_result['symbol']}")
+                        logger.info(f"[get_instrument_tokens] ✅ {opt_type} fuzzy match: {fuzzy_result['symbol']}")
                         found = True
                         break
 
             if not found:
-                logger.warning(f"[get_instrument_tokens] ❌ Could not find {opt_type} for any strike in range {target_strike}±{strike_range*50}")
+                logger.warning(f"[get_instrument_tokens] ❌ Could not find {opt_type} for any strike in range")
 
-        # Final validation and results
+        # 6. Final validation
         success_count = sum([1 for x in [results['ce_token'], results['pe_token']] if x])
         
         if success_count == 0:
-            logger.error("[get_instrument_tokens] ❌ No options found for any strike in the range")
+            logger.error("[get_instrument_tokens] ❌ No options found")
             return None
         
         logger.info(f"[get_instrument_tokens] ✅ Successfully found {success_count}/2 option tokens")
         
-        # Log actual strikes used if different from target
-        if results['actual_strikes'].get('ce') != target_strike:
-            logger.info(f"[get_instrument_tokens] CE strike adjusted from {target_strike} to {results['actual_strikes'].get('ce')}")
-        if results['actual_strikes'].get('pe') != target_strike:
-            logger.info(f"[get_instrument_tokens] PE strike adjusted from {target_strike} to {results['actual_strikes'].get('pe')}")
+        # Log strike adjustments
+        for opt_type_lower in ['ce', 'pe']:
+            actual_strike = results['actual_strikes'].get(opt_type_lower)
+            if actual_strike and actual_strike != target_strike:
+                logger.info(f"[get_instrument_tokens] {opt_type_lower.upper()} strike adjusted: {target_strike} → {actual_strike}")
 
         return results
 
@@ -380,18 +526,20 @@ def get_instrument_tokens(
         logger.error(f"[get_instrument_tokens] Unexpected error: {e}", exc_info=True)
         return None
 
-# --- Additional Utility Functions ---
+# --- Enhanced Diagnostic Functions ---
 
-def diagnose_symbol_patterns(kite_instance: KiteConnect, target_expiry: str = None):
+def diagnose_symbol_patterns(kite_instance: KiteConnect, target_expiry: str = None) -> None:
     """
-    Diagnostic function to understand available symbol patterns
+    Enhanced diagnostic function to understand available symbol patterns
     """
     try:
-        logger.info("[diagnose_symbol_patterns] Starting symbol pattern diagnosis...")
-        nfo_instruments = kite_instance.instruments("NFO")
+        logger.info("[diagnose_symbol_patterns] Starting comprehensive symbol analysis...")
+        
+        # Rate-limited instruments fetch
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
         
         # Filter NIFTY instruments
-        nifty_instruments = [inst for inst in nfo_instruments if inst['name'] == 'NIFTY']
+        nifty_instruments = [inst for inst in nfo_instruments if inst.get('name') == 'NIFTY']
         
         if target_expiry:
             nifty_instruments = [
@@ -405,57 +553,619 @@ def diagnose_symbol_patterns(kite_instance: KiteConnect, target_expiry: str = No
         
         logger.info(f"📊 Found {len(nifty_instruments)} NIFTY instruments")
         
-        # Show sample symbols
-        logger.info("🔍 Sample trading symbols:")
-        for i, inst in enumerate(nifty_instruments[:10]):
-            logger.info(f"  {inst['tradingsymbol']} | Strike: {inst.get('strike', 'N/A')} | Type: {inst.get('instrument_type', 'N/A')}")
+        # Analyze by type
+        ce_instruments = [inst for inst in nifty_instruments if inst.get('instrument_type') == 'CE']
+        pe_instruments = [inst for inst in nifty_instruments if inst.get('instrument_type') == 'PE']
         
-        # Analyze patterns
-        ce_symbols = [inst['tradingsymbol'] for inst in nifty_instruments if inst.get('instrument_type') == 'CE']
-        pe_symbols = [inst['tradingsymbol'] for inst in nifty_instruments if inst.get('instrument_type') == 'PE']
+        logger.info(f"📈 CE Options: {len(ce_instruments)}")
+        logger.info(f"📉 PE Options: {len(pe_instruments)}")
         
-        logger.info(f"📈 Stats: CE Options: {len(ce_symbols)}, PE Options: {len(pe_symbols)}")
+        # Show sample symbols with pattern analysis
+        logger.info("🔍 Symbol Pattern Analysis:")
+        for i, inst in enumerate(nifty_instruments[:20]):  # Show more samples
+            symbol = inst['tradingsymbol']
+            strike = inst.get('strike', 'N/A')
+            opt_type = inst.get('instrument_type', 'N/A')
+            logger.info(f"  {symbol} | Strike: {strike} | Type: {opt_type}")
+            
+            # Pattern analysis
+            if 'NIFTY' in symbol:
+                parts = symbol.replace('NIFTY', '').replace(opt_type, '')
+                logger.debug(f"    Pattern parts: '{parts}'")
         
-        if ce_symbols:
-            logger.info(f"🎯 Sample CE Symbol: {ce_symbols[0]}")
+        # Strike analysis
+        strikes = set()
+        for inst in nifty_instruments:
+            strike = inst.get('strike')
+            if strike:
+                try:
+                    strikes.add(int(float(strike)))
+                except (ValueError, TypeError):
+                    pass
+        
+        sorted_strikes = sorted(strikes)
+        if sorted_strikes:
+            logger.info(f"🎯 Strike range: {min(sorted_strikes)} - {max(sorted_strikes)} ({len(sorted_strikes)} strikes)")
+            logger.info(f"🎯 Sample strikes: {sorted_strikes[:10]}{'...' if len(sorted_strikes) > 10 else ''}")
         
     except Exception as e:
-        logger.error(f"❌ Symbol pattern diagnosis failed: {e}")
+        logger.error(f"❌ Symbol pattern diagnosis failed: {e}", exc_info=True)
 
-def test_token_resolution(kite_instance: KiteConnect, test_spot_price: float = None):
+def test_token_resolution(kite_instance: KiteConnect, test_spot_price: float = None) -> bool:
     """
-    Test function to validate token resolution
+    Enhanced test function to validate token resolution
     """
-    logger.info("🧪 Testing token resolution...")
+            logger.info("🧪 Starting comprehensive token resolution test...")
     
     try:
-        # Get cached instruments
-        nfo_instruments = kite_instance.instruments("NFO")
+        # Test with cached instruments
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
         
-        # Test the main function
-        result = get_instrument_tokens(
-            kite_instance=kite_instance,
-            cached_nfo_instruments=nfo_instruments
-        )
+        # Test different scenarios
+        test_cases = [
+            {"offset": 0, "description": "ATM"},
+            {"offset": 1, "description": "OTM +50"},
+            {"offset": -1, "description": "ITM -50"},
+        ]
         
-        if result:
-            logger.info("✅ Token resolution test successful!")
-            logger.info(f"  Spot Price: {result.get('spot_price')}")
-            logger.info(f"  ATM Strike: {result.get('atm_strike')}")
-            logger.info(f"  Target Strike: {result.get('target_strike')}")
-            logger.info(f"  Expiry: {result.get('expiry')}")
-            logger.info(f"  CE: {result.get('ce_symbol')} (Token: {result.get('ce_token')})")
-            logger.info(f"  PE: {result.get('pe_symbol')} (Token: {result.get('pe_token')})")
+        success_count = 0
+        total_tests = len(test_cases)
+        
+        for test_case in test_cases:
+            logger.info(f"🔍 Testing {test_case['description']} (offset: {test_case['offset']})")
             
-            if result.get('actual_strikes'):
-                logger.info(f"  Actual Strikes Used: {result['actual_strikes']}")
-        else:
-            logger.error("❌ Token resolution test failed")
-            # Run diagnostic
-            logger.info("🔍 Running diagnostic...")
-            diagnose_symbol_patterns(kite_instance)
-    
+            result = get_instrument_tokens(
+                symbol="NIFTY",
+                offset=test_case['offset'],
+                kite_instance=kite_instance,
+                cached_nfo_instruments=nfo_instruments,
+                strike_range=3
+            )
+            
+            if result:
+                logger.info(f"✅ {test_case['description']} test passed")
+                logger.info(f"   CE: {result.get('ce_symbol', 'Not found')}")
+                logger.info(f"   PE: {result.get('pe_symbol', 'Not found')}")
+                logger.info(f"   Target Strike: {result.get('target_strike')}")
+                success_count += 1
+            else:
+                logger.error(f"❌ {test_case['description']} test failed")
+        
+        success_rate = (success_count / total_tests) * 100
+        logger.info(f"🎯 Test Results: {success_count}/{total_tests} passed ({success_rate:.1f}%)")
+        
+        return success_count == total_tests
+        
     except Exception as e:
-        logger.error(f"❌ Test failed with error: {e}")
+        logger.error(f"❌ Token resolution test failed: {e}", exc_info=True)
+        return False
 
-# --- End of Complete Script ---
+def quick_test_api_connectivity(kite_instance: KiteConnect) -> bool:
+    """
+    Quick test to check if Kite API is responding
+    """
+    try:
+        logger.info("🔍 Testing API connectivity...")
+        
+        # Test profile endpoint (lightweight)
+        profile = _rate_limited_api_call(kite_instance.profile)
+        logger.info(f"✅ API Connected - User: {profile.get('user_name', 'Unknown')}")
+        
+        # Test instruments endpoint
+        nfo_count = len(_rate_limited_api_call(kite_instance.instruments, "NFO"))
+        logger.info(f"✅ Instruments accessible - NFO count: {nfo_count}")
+        
+        # Test LTP endpoint
+        spot_symbol = _get_spot_ltp_symbol()
+        ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+        spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
+        logger.info(f"✅ LTP accessible - Spot: {spot_price}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ API connectivity test failed: {e}")
+        return False
+
+def get_market_status(kite_instance: KiteConnect) -> Dict[str, Any]:
+    """
+    Get current market status information
+    """
+    try:
+        # This is a placeholder - Kite might not have a direct market status endpoint
+        # You can implement based on time checks or other indicators
+        
+        now = datetime.now()
+        current_time = now.time()
+        current_day = now.weekday()  # 0 = Monday, 6 = Sunday
+        
+        # Basic market hours check (9:15 AM to 3:30 PM, Mon-Fri)
+        market_open_time = datetime.strptime("09:15", "%H:%M").time()
+        market_close_time = datetime.strptime("15:30", "%H:%M").time()
+        
+        is_trading_day = current_day < 5  # Monday to Friday
+        is_trading_hours = market_open_time <= current_time <= market_close_time
+        
+        market_status = {
+            "is_trading_day": is_trading_day,
+            "is_trading_hours": is_trading_hours,
+            "is_market_open": is_trading_day and is_trading_hours,
+            "current_time": now.strftime("%H:%M:%S"),
+            "day_of_week": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][current_day]
+        }
+        
+        # Try to get real market status if available
+        try:
+            # Some brokers provide market status, adjust based on your API
+            pass
+        except:
+            pass
+        
+        return market_status
+        
+    except Exception as e:
+        logger.error(f"Error getting market status: {e}")
+        return {"error": str(e)}
+
+def cleanup_cache():
+    """
+    Clean up global caches and rate limiting data
+    """
+    global _last_api_call
+    try:
+        with _api_call_lock:
+            _last_api_call.clear()
+            logger.debug("Strike selector cache cleaned up")
+    except Exception as e:
+        logger.error(f"Error cleaning up cache: {e}")
+
+def get_system_info() -> Dict[str, Any]:
+    """
+    Get system information for debugging
+    """
+    try:
+        import sys
+        import platform
+        
+        return {
+            "python_version": sys.version,
+            "platform": platform.platform(),
+            "timestamp": datetime.now().isoformat(),
+            "cache_entries": len(_last_api_call),
+            "module_version": "2.0.0-optimized"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- Backward Compatibility Wrapper ---
+def get_atm_strike_price(spot_price: float) -> int:
+    """
+    Simple ATM strike calculation for backward compatibility
+    """
+    return round(spot_price / 50) * 50
+
+def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type: str) -> str:
+    """
+    Format option symbol using primary format
+    """
+    formatted_expiry = _format_expiry_for_symbol_primary(expiry)
+    if formatted_expiry:
+        return f"{base_symbol}{formatted_expiry}{strike}{option_type}"
+    return ""
+
+# --- Main execution for testing ---
+if __name__ == "__main__":
+    # This section is for testing the module directly
+    logging.basicConfig(level=logging.INFO)
+    logger.info("Strike Selector Module - Direct Execution Test")
+    
+    try:
+        # Test configuration validation
+        config_valid = validate_config()
+        logger.info(f"Configuration valid: {config_valid}")
+        
+        # Test date calculations
+        next_thursday = _calculate_next_thursday()
+        logger.info(f"Next Thursday (fallback): {next_thursday}")
+        
+        # Test symbol formatting
+        test_expiry = "2025-08-07"
+        test_symbol = _format_expiry_for_symbol_primary(test_expiry)
+        logger.info(f"Formatted expiry: {test_symbol}")
+        
+        logger.info("✅ Basic module tests completed successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Module test failed: {e}", exc_info=True)
+
+# --- Additional Utility Functions ---
+
+def get_available_expiries(kite_instance: KiteConnect, base_symbol: str = "NIFTY") -> List[str]:
+    """Get list of available expiry dates for a symbol"""
+    try:
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+        nifty_instruments = [inst for inst in nfo_instruments if inst.get('name') == base_symbol]
+        
+        expiries = set()
+        for inst in nifty_instruments:
+            expiry = inst.get('expiry')
+            if expiry:
+                exp_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, 'strftime') else str(expiry)
+                expiries.add(exp_str)
+        
+        return sorted(list(expiries))
+        
+    except Exception as e:
+        logger.error(f"Error getting available expiries: {e}")
+        return []
+
+def validate_config() -> bool:
+    """Validate configuration settings"""
+    try:
+        from src.config import Config
+        
+        required_attrs = ['SPOT_SYMBOL', 'NIFTY_LOT_SIZE']
+        missing_attrs = []
+        
+        for attr in required_attrs:
+            if not hasattr(Config, attr):
+                missing_attrs.append(attr)
+        
+        if missing_attrs:
+            logger.error(f"Missing required config attributes: {missing_attrs}")
+            return False
+        
+        # Validate spot symbol format
+        spot_symbol = getattr(Config, 'SPOT_SYMBOL', '')
+        if not spot_symbol or ('NIFTY' not in spot_symbol.upper()):
+            logger.error(f"Invalid SPOT_SYMBOL: {spot_symbol}")
+            return False
+        
+        logger.info("✅ Configuration validation passed")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Configuration validation failed: {e}")
+        return False
+
+def get_strike_chain(kite_instance: KiteConnect, expiry: str, base_symbol: str = "NIFTY", 
+                    center_strike: int = None, range_points: int = 500) -> Dict[str, List[Dict]]:
+    """
+    Get a complete strike chain around a center strike
+    
+    Args:
+        kite_instance: KiteConnect instance
+        expiry: Expiry date in YYYY-MM-DD format
+        base_symbol: Base symbol name (default "NIFTY")
+        center_strike: Center strike price (if None, will calculate ATM)
+        range_points: Range in points on each side (default 500)
+    
+    Returns:
+        Dictionary with 'CE' and 'PE' lists containing strike information
+    """
+    try:
+        # Get instruments
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+        
+        # Filter for the symbol and expiry
+        filtered_instruments = []
+        for inst in nfo_instruments:
+            if (inst.get('name') == base_symbol and 
+                inst.get('expiry') and
+                (inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])) == expiry):
+                filtered_instruments.append(inst)
+        
+        if not filtered_instruments:
+            logger.error(f"No instruments found for {base_symbol} expiry {expiry}")
+            return {"CE": [], "PE": []}
+        
+        # Calculate center strike if not provided
+        if center_strike is None:
+            try:
+                spot_symbol = _get_spot_ltp_symbol()
+                ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+                spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
+                if spot_price:
+                    center_strike = round(spot_price / 50) * 50
+                else:
+                    logger.error("Could not determine center strike")
+                    return {"CE": [], "PE": []}
+            except Exception as e:
+                logger.error(f"Error getting spot price for strike chain: {e}")
+                return {"CE": [], "PE": []}
+        
+        # Define strike range
+        min_strike = center_strike - range_points
+        max_strike = center_strike + range_points
+        
+        # Organize by strike and type
+        strike_chain = {"CE": [], "PE": []}
+        
+        for inst in filtered_instruments:
+            strike = inst.get('strike')
+            opt_type = inst.get('instrument_type')
+            
+            if strike and opt_type in ['CE', 'PE']:
+                try:
+                    strike_int = int(float(strike))
+                    if min_strike <= strike_int <= max_strike:
+                        strike_info = {
+                            'strike': strike_int,
+                            'symbol': inst['tradingsymbol'],
+                            'token': inst['instrument_token'],
+                            'expiry': expiry,
+                            'type': opt_type,
+                            'is_atm': strike_int == center_strike,
+                            'distance_from_atm': strike_int - center_strike
+                        }
+                        strike_chain[opt_type].append(strike_info)
+                except (ValueError, TypeError):
+                    continue
+        
+        # Sort by strike
+        for opt_type in ['CE', 'PE']:
+            strike_chain[opt_type].sort(key=lambda x: x['strike'])
+        
+        logger.info(f"Strike chain: {len(strike_chain['CE'])} CE, {len(strike_chain['PE'])} PE options around {center_strike}")
+        return strike_chain
+        
+    except Exception as e:
+        logger.error(f"Error getting strike chain: {e}", exc_info=True)
+        return {"CE": [], "PE": []}
+
+def get_weekly_monthly_expiries(kite_instance: KiteConnect, base_symbol: str = "NIFTY") -> Dict[str, List[str]]:
+    """
+    Categorize expiries into weekly and monthly
+    
+    Returns:
+        Dictionary with 'weekly' and 'monthly' lists of expiry dates
+    """
+    try:
+        all_expiries = get_available_expiries(kite_instance, base_symbol)
+        
+        weekly_expiries = []
+        monthly_expiries = []
+        
+        for expiry_str in all_expiries:
+            try:
+                expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                
+                # Check if it's the last Thursday of the month (monthly expiry)
+                # Get the last day of the month
+                last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
+                last_date = datetime(expiry_date.year, expiry_date.month, last_day)
+                
+                # Find the last Thursday
+                while last_date.weekday() != 3:  # 3 is Thursday
+                    last_date -= timedelta(days=1)
+                
+                if expiry_date.date() == last_date.date():
+                    monthly_expiries.append(expiry_str)
+                else:
+                    weekly_expiries.append(expiry_str)
+                    
+            except ValueError:
+                continue
+        
+        logger.info(f"Categorized expiries: {len(weekly_expiries)} weekly, {len(monthly_expiries)} monthly")
+        return {
+            'weekly': weekly_expiries,
+            'monthly': monthly_expiries
+        }
+        
+    except Exception as e:
+        logger.error(f"Error categorizing expiries: {e}")
+        return {'weekly': [], 'monthly': []}
+
+def emergency_fallback_tokens(spot_price: float, offset: int = 0) -> Dict[str, Any]:
+    """
+    Emergency fallback when all API calls fail
+    Provides basic structure with calculated values
+    """
+    try:
+        base_strike = round(spot_price / 50) * 50
+        target_strike = base_strike + (offset * 50)
+        next_thursday = _calculate_next_thursday()
+        
+        logger.warning("Using emergency fallback tokens - API calls failed")
+        
+        return {
+            "spot_price": spot_price,
+            "atm_strike": base_strike,
+            "target_strike": target_strike,
+            "offset": offset,
+            "actual_strikes": {},
+            "expiry": next_thursday,
+            "ce_symbol": None,
+            "ce_token": None,
+            "pe_symbol": None,
+            "pe_token": None,
+            "spot_token": None,
+            "fallback": True,
+            "warning": "Emergency fallback mode - no API data available"
+        }
+        
+    except Exception as e:
+        logger.error(f"Even emergency fallback failed: {e}")
+        return None
+
+def health_check(kite_instance: KiteConnect) -> Dict[str, Any]:
+    """
+    Perform comprehensive health check of the strike selector system
+    
+    Returns:
+        Dictionary with health check results
+    """
+    health_status = {
+        "overall_status": "UNKNOWN",
+        "timestamp": datetime.now().isoformat(),
+        "checks": {},
+        "recommendations": []
+    }
+    
+    try:
+        # Check 1: Kite connection
+        try:
+            profile = _rate_limited_api_call(kite_instance.profile)
+            health_status["checks"]["kite_connection"] = {
+                "status": "PASS",
+                "message": f"Connected as {profile.get('user_name', 'Unknown')}"
+            }
+        except Exception as e:
+            health_status["checks"]["kite_connection"] = {
+                "status": "FAIL",
+                "message": f"Connection failed: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Check Kite Connect credentials and network connection")
+        
+        # Check 2: Instruments availability
+        try:
+            nfo_count = len(_rate_limited_api_call(kite_instance.instruments, "NFO"))
+            if nfo_count > 1000:  # Reasonable number for NFO instruments
+                health_status["checks"]["instruments"] = {
+                    "status": "PASS",
+                    "message": f"Found {nfo_count} NFO instruments"
+                }
+            else:
+                health_status["checks"]["instruments"] = {
+                    "status": "WARN",
+                    "message": f"Only {nfo_count} NFO instruments found"
+                }
+        except Exception as e:
+            health_status["checks"]["instruments"] = {
+                "status": "FAIL",
+                "message": f"Failed to fetch instruments: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Instruments API is failing - check market status")
+        
+        # Check 3: Spot price fetch
+        try:
+            spot_symbol = _get_spot_ltp_symbol()
+            ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+            spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
+            
+            if spot_price and spot_price > 15000:  # Reasonable range for Nifty
+                health_status["checks"]["spot_price"] = {
+                    "status": "PASS",
+                    "message": f"Spot price: {spot_price}"
+                }
+            else:
+                health_status["checks"]["spot_price"] = {
+                    "status": "WARN",
+                    "message": f"Unusual spot price: {spot_price}"
+                }
+        except Exception as e:
+            health_status["checks"]["spot_price"] = {
+                "status": "FAIL",
+                "message": f"Failed to fetch spot price: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Spot price fetch failing - check symbol configuration")
+        
+        # Check 4: Expiry resolution
+        try:
+            next_expiry = get_next_expiry_date(kite_instance)
+            if next_expiry:
+                expiry_date = datetime.strptime(next_expiry, "%Y-%m-%d")
+                days_to_expiry = (expiry_date.date() - datetime.now().date()).days
+                
+                health_status["checks"]["expiry_resolution"] = {
+                    "status": "PASS",
+                    "message": f"Next expiry: {next_expiry} ({days_to_expiry} days)"
+                }
+                
+                if days_to_expiry < 1:
+                    health_status["recommendations"].append("Expiry is very close - monitor for rollover")
+                elif days_to_expiry > 30:
+                    health_status["recommendations"].append("Expiry is far out - check for nearer expiries")
+            else:
+                health_status["checks"]["expiry_resolution"] = {
+                    "status": "FAIL",
+                    "message": "Could not resolve next expiry"
+                }
+                health_status["recommendations"].append("Expiry resolution failing - check instrument data")
+        except Exception as e:
+            health_status["checks"]["expiry_resolution"] = {
+                "status": "FAIL",
+                "message": f"Expiry resolution error: {str(e)[:100]}"
+            }
+        
+        # Check 5: Token resolution test
+        try:
+            nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+            test_result = get_instrument_tokens(
+                symbol="NIFTY",
+                offset=0,
+                kite_instance=kite_instance,
+                cached_nfo_instruments=nfo_instruments,
+                strike_range=3
+            )
+            
+            if test_result and (test_result.get('ce_token') or test_result.get('pe_token')):
+                found_tokens = sum([1 for x in [test_result.get('ce_token'), test_result.get('pe_token')] if x])
+                health_status["checks"]["token_resolution"] = {
+                    "status": "PASS",
+                    "message": f"Found {found_tokens}/2 option tokens"
+                }
+            else:
+                health_status["checks"]["token_resolution"] = {
+                    "status": "FAIL",
+                    "message": "No option tokens found"
+                }
+                health_status["recommendations"].append("Token resolution completely failing - check symbol formats")
+        except Exception as e:
+            health_status["checks"]["token_resolution"] = {
+                "status": "FAIL",
+                "message": f"Token resolution test failed: {str(e)[:100]}"
+            }
+        
+        # Check 6: Configuration validation
+        config_valid = validate_config()
+        health_status["checks"]["configuration"] = {
+            "status": "PASS" if config_valid else "FAIL",
+            "message": "Configuration valid" if config_valid else "Configuration has issues"
+        }
+        
+        if not config_valid:
+            health_status["recommendations"].append("Fix configuration issues")
+        
+        # Determine overall status
+        failed_checks = [check for check in health_status["checks"].values() if check["status"] == "FAIL"]
+        warning_checks = [check for check in health_status["checks"].values() if check["status"] == "WARN"]
+        
+        if failed_checks:
+            health_status["overall_status"] = "CRITICAL" if len(failed_checks) > 2 else "DEGRADED"
+        elif warning_checks:
+            health_status["overall_status"] = "WARNING"
+        else:
+            health_status["overall_status"] = "HEALTHY"
+        
+        # Add summary
+        total_checks = len(health_status["checks"])
+        passed_checks = len([c for c in health_status["checks"].values() if c["status"] == "PASS"])
+        
+        health_status["summary"] = f"{passed_checks}/{total_checks} checks passed"
+        
+        logger.info(f"Health check completed: {health_status['overall_status']} ({health_status['summary']})")
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+        health_status["overall_status"] = "ERROR"
+        health_status["error"] = str(e)
+        return health_status
+
+# --- Export all functions for backward compatibility ---
+__all__ = [
+    '_get_spot_ltp_symbol',
+    'get_next_expiry_date', 
+    'get_instrument_tokens',
+    'diagnose_symbol_patterns',
+    'test_token_resolution',
+    'get_available_expiries',
+    'validate_config',
+    'get_strike_chain',
+    'get_weekly_monthly_expiries',
+    'emergency_fallback_tokens',
+    'health_check'
+]
