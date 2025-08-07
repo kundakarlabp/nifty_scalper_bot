@@ -247,7 +247,7 @@ def get_instrument_tokens(
             logger.error("[get_instrument_tokens] Could not determine expiry date.")
             return None
 
-        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, Target Strike: {target_strike}, Spot: {spot_price}")
+        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, ATM Strike: {target_strike}, Spot: {spot_price}")
 
         # 3. Prepare for Symbol Search
         # Filter NFO instruments for the specific index (e.g., 'NIFTY')
@@ -289,7 +289,8 @@ def get_instrument_tokens(
 
         results = {
             "spot_price": spot_price,
-            "target_strike": target_strike,
+            "atm_strike": target_strike,  # Changed from target_strike to atm_strike for compatibility
+            "target_strike": target_strike,  # Keep both for backward compatibility
             "actual_strikes": {},  # Will store actual strikes found
             "expiry": expiry_yyyy_mm_dd,
             "ce_symbol": None,
@@ -440,6 +441,7 @@ def test_token_resolution(kite_instance: KiteConnect, test_spot_price: float = N
         if result:
             logger.info("✅ Token resolution test successful!")
             logger.info(f"  Spot Price: {result.get('spot_price')}")
+            logger.info(f"  ATM Strike: {result.get('atm_strike')}")
             logger.info(f"  Target Strike: {result.get('target_strike')}")
             logger.info(f"  Expiry: {result.get('expiry')}")
             logger.info(f"  CE: {result.get('ce_symbol')} (Token: {result.get('ce_token')})")
