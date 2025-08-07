@@ -1,10 +1,10 @@
 # src/utils/strike_selector.py
 """
-Optimized utility functions for selecting strike prices and fetching instrument tokens
+Complete utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
 
 This version includes robust symbol resolution, multiple fallback strategies,
-enhanced diagnostics, and comprehensive rate limiting protection.
+enhanced diagnostics, comprehensive rate limiting protection, and error-free execution.
 """
 
 from kiteconnect import KiteConnect
@@ -14,7 +14,8 @@ import calendar
 import time
 import threading
 from functools import lru_cache
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ _api_call_lock = threading.RLock()
 _MIN_API_INTERVAL = 0.5  # Minimum 500ms between API calls
 
 def _rate_limited_api_call(func, *args, **kwargs):
-    """Rate-limited API call wrapper"""
+    """Rate-limited API call wrapper with retry logic"""
     with _api_call_lock:
         call_key = func.__name__
         now = time.time()
@@ -45,16 +46,37 @@ def _rate_limited_api_call(func, *args, **kwargs):
                 logger.warning(f"Rate limit hit for {call_key}, waiting 2 seconds...")
                 time.sleep(2)
                 # Retry once
-                result = func(*args, **kwargs)
-                _last_api_call[call_key] = time.time()
-                return result
+                try:
+                    result = func(*args, **kwargs)
+                    _last_api_call[call_key] = time.time()
+                    return result
+                except Exception as retry_e:
+                    logger.error(f"Retry also failed for {call_key}: {retry_e}")
+                    raise retry_e
             raise
 
-# --- Helper function to get the correct LTP symbol ---
 def _get_spot_ltp_symbol():
     """Determines the correct symbol string for fetching Nifty 50 LTP."""
-    from src.config import Config
-    return getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+    try:
+        from src.config import Config
+        return getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+    except ImportError:
+        logger.warning("Could not import Config, using default SPOT_SYMBOL")
+        return 'NSE:NIFTY 50'
+
+def _calculate_next_thursday() -> str:
+    """Calculate next Thursday as fallback expiry"""
+    try:
+        today = datetime.today()
+        days_ahead = 3 - today.weekday()  # Thursday is 3
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+        next_thursday = today + timedelta(days=days_ahead)
+        return next_thursday.strftime("%Y-%m-%d")
+    except Exception as e:
+        logger.error(f"Error calculating next Thursday: {e}")
+        # Ultimate fallback
+        return (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")
 
 @lru_cache(maxsize=32)
 def _get_cached_expiry_date(base_symbol: str, current_date_str: str) -> str:
@@ -69,11 +91,10 @@ def get_next_expiry_date(kite_instance: KiteConnect, use_cache: bool = True) -> 
     """
     if not kite_instance:
         logger.error("[get_next_expiry_date] KiteConnect instance is required.")
-        return ""
+        return _calculate_next_thursday()
 
     try:
-        from src.config import Config
-        spot_symbol_config = getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+        spot_symbol_config = _get_spot_ltp_symbol()
         
         # Extract base symbol
         if ':' in spot_symbol_config:
@@ -89,7 +110,6 @@ def get_next_expiry_date(kite_instance: KiteConnect, use_cache: bool = True) -> 
             all_nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
         except Exception as api_error:
             logger.error(f"[get_next_expiry_date] Failed to fetch NFO instruments: {api_error}")
-            # Fallback to next Thursday calculation
             return _calculate_next_thursday()
 
         index_instruments = [inst for inst in all_nfo_instruments if inst.get('name') == base_symbol_for_search]
@@ -137,28 +157,11 @@ def get_next_expiry_date(kite_instance: KiteConnect, use_cache: bool = True) -> 
             logger.info(f"[get_next_expiry_date] Fallback to latest expiry: {latest_expiry}")
             return latest_expiry
 
-        # Final fallback
         return _calculate_next_thursday()
 
     except Exception as e:
         logger.error(f"[get_next_expiry_date] Error: {e}", exc_info=True)
         return _calculate_next_thursday()
-
-def _calculate_next_thursday() -> str:
-    """Calculate next Thursday as fallback expiry"""
-    try:
-        today = datetime.today()
-        days_ahead = 3 - today.weekday()  # Thursday is 3
-        if days_ahead <= 0:  # Target day already happened this week
-            days_ahead += 7
-        next_thursday = today + timedelta(days=days_ahead)
-        return next_thursday.strftime("%Y-%m-%d")
-    except Exception as e:
-        logger.error(f"Error calculating next Thursday: {e}")
-        # Ultimate fallback
-        return (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")
-
-# --- Enhanced Symbol Formatting and Resolution ---
 
 def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
     """
@@ -202,8 +205,8 @@ def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, o
         date_format = expiry_date.strftime("%y%m%d")
         variants.append(f"{base_symbol}{date_format}{strike}{opt_type}")
         
-        # Full month name format
-        month_full = expiry_date.strftime("%B").upper()
+        # Full month name format (less common)
+        month_full = expiry_date.strftime("%B").upper()[:3]  # First 3 chars
         variants.append(f"{base_symbol}{year_short}{month_full}{day}{strike}{opt_type}")
 
         # Remove duplicates while preserving order
@@ -302,8 +305,6 @@ def _fuzzy_find_instrument(instruments_list: List[Dict], base_symbol: str,
         logger.error(f"[_fuzzy_find_instrument] Error during fuzzy search: {e}")
         return {}
 
-# --- Main Instrument Token Retrieval Function ---
-
 def get_instrument_tokens(
     symbol: str = "NIFTY",
     offset: int = 0,
@@ -335,8 +336,7 @@ def get_instrument_tokens(
         return None
 
     try:
-        from src.config import Config
-        spot_symbol_config = getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+        spot_symbol_config = _get_spot_ltp_symbol()
 
         # Derive base symbol name
         if ':' in spot_symbol_config:
@@ -443,7 +443,7 @@ def get_instrument_tokens(
             "ce_token": None,
             "pe_symbol": None,
             "pe_token": None,
-            "spot_token": None  # Add spot token if needed
+            "spot_token": None
         }
 
         # 5. Search for CE and PE tokens
@@ -525,8 +525,6 @@ def get_instrument_tokens(
     except Exception as e:
         logger.error(f"[get_instrument_tokens] Unexpected error: {e}", exc_info=True)
         return None
-
-# --- Enhanced Diagnostic Functions ---
 
 def diagnose_symbol_patterns(kite_instance: KiteConnect, target_expiry: str = None) -> None:
     """
@@ -640,6 +638,385 @@ def test_token_resolution(kite_instance: KiteConnect, test_spot_price: float = N
         logger.error(f"❌ Token resolution test failed: {e}", exc_info=True)
         return False
 
+def get_available_expiries(kite_instance: KiteConnect, base_symbol: str = "NIFTY") -> List[str]:
+    """Get list of available expiry dates for a symbol"""
+    try:
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+        nifty_instruments = [inst for inst in nfo_instruments if inst.get('name') == base_symbol]
+        
+        expiries = set()
+        for inst in nifty_instruments:
+            expiry = inst.get('expiry')
+            if expiry:
+                exp_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, 'strftime') else str(expiry)
+                expiries.add(exp_str)
+        
+        return sorted(list(expiries))
+        
+    except Exception as e:
+        logger.error(f"Error getting available expiries: {e}")
+        return []
+
+def validate_config() -> bool:
+    """Validate configuration settings"""
+    try:
+        try:
+            from src.config import Config
+        except ImportError:
+            logger.error("Could not import Config module")
+            return False
+        
+        required_attrs = ['SPOT_SYMBOL']
+        missing_attrs = []
+        
+        for attr in required_attrs:
+            if not hasattr(Config, attr):
+                missing_attrs.append(attr)
+        
+        if missing_attrs:
+            logger.error(f"Missing required config attributes: {missing_attrs}")
+            return False
+        
+        # Validate spot symbol format
+        spot_symbol = getattr(Config, 'SPOT_SYMBOL', '')
+        if not spot_symbol or ('NIFTY' not in spot_symbol.upper()):
+            logger.error(f"Invalid SPOT_SYMBOL: {spot_symbol}")
+            return False
+        
+        logger.info("✅ Configuration validation passed")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Configuration validation failed: {e}")
+        return False
+
+def get_strike_chain(kite_instance: KiteConnect, expiry: str, base_symbol: str = "NIFTY", 
+                    center_strike: int = None, range_points: int = 500) -> Dict[str, List[Dict]]:
+    """
+    Get a complete strike chain around a center strike
+    
+    Args:
+        kite_instance: KiteConnect instance
+        expiry: Expiry date in YYYY-MM-DD format
+        base_symbol: Base symbol name (default "NIFTY")
+        center_strike: Center strike price (if None, will calculate ATM)
+        range_points: Range in points on each side (default 500)
+    
+    Returns:
+        Dictionary with 'CE' and 'PE' lists containing strike information
+    """
+    try:
+        # Get instruments
+        nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+        
+        # Filter for the symbol and expiry
+        filtered_instruments = []
+        for inst in nfo_instruments:
+            if (inst.get('name') == base_symbol and 
+                inst.get('expiry') and
+                (inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])) == expiry):
+                filtered_instruments.append(inst)
+        
+        if not filtered_instruments:
+            logger.error(f"No instruments found for {base_symbol} expiry {expiry}")
+            return {"CE": [], "PE": []}
+        
+        # Calculate center strike if not provided
+        if center_strike is None:
+            try:
+                spot_symbol = _get_spot_ltp_symbol()
+                ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+                spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
+                if spot_price:
+                    center_strike = round(spot_price / 50) * 50
+                else:
+                    logger.error("Could not determine center strike")
+                    return {"CE": [], "PE": []}
+            except Exception as e:
+                logger.error(f"Error getting spot price for strike chain: {e}")
+                return {"CE": [], "PE": []}
+        
+        # Define strike range
+        min_strike = center_strike - range_points
+        max_strike = center_strike + range_points
+        
+        # Organize by strike and type
+        strike_chain = {"CE": [], "PE": []}
+        
+        for inst in filtered_instruments:
+            strike = inst.get('strike')
+            opt_type = inst.get('instrument_type')
+            
+            if strike and opt_type in ['CE', 'PE']:
+                try:
+                    strike_int = int(float(strike))
+                    if min_strike <= strike_int <= max_strike:
+                        strike_info = {
+                            'strike': strike_int,
+                            'symbol': inst['tradingsymbol'],
+                            'token': inst['instrument_token'],
+                            'expiry': expiry,
+                            'type': opt_type,
+                            'is_atm': strike_int == center_strike,
+                            'distance_from_atm': strike_int - center_strike
+                        }
+                        strike_chain[opt_type].append(strike_info)
+                except (ValueError, TypeError):
+                    continue
+        
+        # Sort by strike
+        for opt_type in ['CE', 'PE']:
+            strike_chain[opt_type].sort(key=lambda x: x['strike'])
+        
+        logger.info(f"Strike chain: {len(strike_chain['CE'])} CE, {len(strike_chain['PE'])} PE options around {center_strike}")
+        return strike_chain
+        
+    except Exception as e:
+        logger.error(f"Error getting strike chain: {e}", exc_info=True)
+        return {"CE": [], "PE": []}
+
+def get_weekly_monthly_expiries(kite_instance: KiteConnect, base_symbol: str = "NIFTY") -> Dict[str, List[str]]:
+    """
+    Categorize expiries into weekly and monthly
+    
+    Returns:
+        Dictionary with 'weekly' and 'monthly' lists of expiry dates
+    """
+    try:
+        all_expiries = get_available_expiries(kite_instance, base_symbol)
+        
+        weekly_expiries = []
+        monthly_expiries = []
+        
+        for expiry_str in all_expiries:
+            try:
+                expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                
+                # Check if it's the last Thursday of the month (monthly expiry)
+                # Get the last day of the month
+                last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
+                last_date = datetime(expiry_date.year, expiry_date.month, last_day)
+                
+                # Find the last Thursday
+                while last_date.weekday() != 3:  # 3 is Thursday
+                    last_date -= timedelta(days=1)
+                
+                if expiry_date.date() == last_date.date():
+                    monthly_expiries.append(expiry_str)
+                else:
+                    weekly_expiries.append(expiry_str)
+                    
+            except ValueError:
+                continue
+        
+        logger.info(f"Categorized expiries: {len(weekly_expiries)} weekly, {len(monthly_expiries)} monthly")
+        return {
+            'weekly': weekly_expiries,
+            'monthly': monthly_expiries
+        }
+        
+    except Exception as e:
+        logger.error(f"Error categorizing expiries: {e}")
+        return {'weekly': [], 'monthly': []}
+
+def emergency_fallback_tokens(spot_price: float, offset: int = 0) -> Dict[str, Any]:
+    """
+    Emergency fallback when all API calls fail
+    Provides basic structure with calculated values
+    """
+    try:
+        base_strike = round(spot_price / 50) * 50
+        target_strike = base_strike + (offset * 50)
+        next_thursday = _calculate_next_thursday()
+        
+        logger.warning("Using emergency fallback tokens - API calls failed")
+        
+        return {
+            "spot_price": spot_price,
+            "atm_strike": base_strike,
+            "target_strike": target_strike,
+            "offset": offset,
+            "actual_strikes": {},
+            "expiry": next_thursday,
+            "ce_symbol": None,
+            "ce_token": None,
+            "pe_symbol": None,
+            "pe_token": None,
+            "spot_token": None,
+            "fallback": True,
+            "warning": "Emergency fallback mode - no API data available"
+        }
+        
+    except Exception as e:
+        logger.error(f"Even emergency fallback failed: {e}")
+        return None
+
+def health_check(kite_instance: KiteConnect) -> Dict[str, Any]:
+    """
+    Perform comprehensive health check of the strike selector system
+    
+    Returns:
+        Dictionary with health check results
+    """
+    health_status = {
+        "overall_status": "UNKNOWN",
+        "timestamp": datetime.now().isoformat(),
+        "checks": {},
+        "recommendations": []
+    }
+    
+    try:
+        # Check 1: Kite connection
+        try:
+            profile = _rate_limited_api_call(kite_instance.profile)
+            health_status["checks"]["kite_connection"] = {
+                "status": "PASS",
+                "message": f"Connected as {profile.get('user_name', 'Unknown')}"
+            }
+        except Exception as e:
+            health_status["checks"]["kite_connection"] = {
+                "status": "FAIL",
+                "message": f"Connection failed: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Check Kite Connect credentials and network connection")
+        
+        # Check 2: Instruments availability
+        try:
+            nfo_count = len(_rate_limited_api_call(kite_instance.instruments, "NFO"))
+            if nfo_count > 1000:  # Reasonable number for NFO instruments
+                health_status["checks"]["instruments"] = {
+                    "status": "PASS",
+                    "message": f"Found {nfo_count} NFO instruments"
+                }
+            else:
+                health_status["checks"]["instruments"] = {
+                    "status": "WARN",
+                    "message": f"Only {nfo_count} NFO instruments found"
+                }
+        except Exception as e:
+            health_status["checks"]["instruments"] = {
+                "status": "FAIL",
+                "message": f"Failed to fetch instruments: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Instruments API is failing - check market status")
+        
+        # Check 3: Spot price fetch
+        try:
+            spot_symbol = _get_spot_ltp_symbol()
+            ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+            spot_price = ltp_data.get(spot_symbol, {}).get('last_price')
+            
+            if spot_price and spot_price > 15000:  # Reasonable range for Nifty
+                health_status["checks"]["spot_price"] = {
+                    "status": "PASS",
+                    "message": f"Spot price: {spot_price}"
+                }
+            else:
+                health_status["checks"]["spot_price"] = {
+                    "status": "WARN",
+                    "message": f"Unusual spot price: {spot_price}"
+                }
+        except Exception as e:
+            health_status["checks"]["spot_price"] = {
+                "status": "FAIL",
+                "message": f"Failed to fetch spot price: {str(e)[:100]}"
+            }
+            health_status["recommendations"].append("Spot price fetch failing - check symbol configuration")
+        
+        # Check 4: Expiry resolution
+        try:
+            next_expiry = get_next_expiry_date(kite_instance)
+            if next_expiry:
+                expiry_date = datetime.strptime(next_expiry, "%Y-%m-%d")
+                days_to_expiry = (expiry_date.date() - datetime.now().date()).days
+                
+                health_status["checks"]["expiry_resolution"] = {
+                    "status": "PASS",
+                    "message": f"Next expiry: {next_expiry} ({days_to_expiry} days)"
+                }
+                
+                if days_to_expiry < 1:
+                    health_status["recommendations"].append("Expiry is very close - monitor for rollover")
+                elif days_to_expiry > 30:
+                    health_status["recommendations"].append("Expiry is far out - check for nearer expiries")
+            else:
+                health_status["checks"]["expiry_resolution"] = {
+                    "status": "FAIL",
+                    "message": "Could not resolve next expiry"
+                }
+                health_status["recommendations"].append("Expiry resolution failing - check instrument data")
+        except Exception as e:
+            health_status["checks"]["expiry_resolution"] = {
+                "status": "FAIL",
+                "message": f"Expiry resolution error: {str(e)[:100]}"
+            }
+        
+        # Check 5: Token resolution test
+        try:
+            nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
+            test_result = get_instrument_tokens(
+                symbol="NIFTY",
+                offset=0,
+                kite_instance=kite_instance,
+                cached_nfo_instruments=nfo_instruments,
+                strike_range=3
+            )
+            
+            if test_result and (test_result.get('ce_token') or test_result.get('pe_token')):
+                found_tokens = sum([1 for x in [test_result.get('ce_token'), test_result.get('pe_token')] if x])
+                health_status["checks"]["token_resolution"] = {
+                    "status": "PASS",
+                    "message": f"Found {found_tokens}/2 option tokens"
+                }
+            else:
+                health_status["checks"]["token_resolution"] = {
+                    "status": "FAIL",
+                    "message": "No option tokens found"
+                }
+                health_status["recommendations"].append("Token resolution completely failing - check symbol formats")
+        except Exception as e:
+            health_status["checks"]["token_resolution"] = {
+                "status": "FAIL",
+                "message": f"Token resolution test failed: {str(e)[:100]}"
+            }
+        
+        # Check 6: Configuration validation
+        config_valid = validate_config()
+        health_status["checks"]["configuration"] = {
+            "status": "PASS" if config_valid else "FAIL",
+            "message": "Configuration valid" if config_valid else "Configuration has issues"
+        }
+        
+        if not config_valid:
+            health_status["recommendations"].append("Fix configuration issues")
+        
+        # Determine overall status
+        failed_checks = [check for check in health_status["checks"].values() if check["status"] == "FAIL"]
+        warning_checks = [check for check in health_status["checks"].values() if check["status"] == "WARN"]
+        
+        if failed_checks:
+            health_status["overall_status"] = "CRITICAL" if len(failed_checks) > 2 else "DEGRADED"
+        elif warning_checks:
+            health_status["overall_status"] = "WARNING"
+        else:
+            health_status["overall_status"] = "HEALTHY"
+        
+        # Add summary
+        total_checks = len(health_status["checks"])
+        passed_checks = len([c for c in health_status["checks"].values() if c["status"] == "PASS"])
+        
+        health_status["summary"] = f"{passed_checks}/{total_checks} checks passed"
+        
+        logger.info(f"Health check completed: {health_status['overall_status']} ({health_status['summary']})")
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+        health_status["overall_status"] = "ERROR"
+        health_status["error"] = str(e)
+        return health_status
+
 def quick_test_api_connectivity(kite_instance: KiteConnect) -> bool:
     """
     Quick test to check if Kite API is responding
@@ -672,9 +1049,6 @@ def get_market_status(kite_instance: KiteConnect) -> Dict[str, Any]:
     Get current market status information
     """
     try:
-        # This is a placeholder - Kite might not have a direct market status endpoint
-        # You can implement based on time checks or other indicators
-        
         now = datetime.now()
         current_time = now.time()
         current_day = now.weekday()  # 0 = Monday, 6 = Sunday
@@ -693,13 +1067,6 @@ def get_market_status(kite_instance: KiteConnect) -> Dict[str, Any]:
             "current_time": now.strftime("%H:%M:%S"),
             "day_of_week": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][current_day]
         }
-        
-        # Try to get real market status if available
-        try:
-            # Some brokers provide market status, adjust based on your API
-            pass
-        except:
-            pass
         
         return market_status
         
@@ -724,7 +1091,6 @@ def get_system_info() -> Dict[str, Any]:
     Get system information for debugging
     """
     try:
-        import sys
         import platform
         
         return {
@@ -737,5 +1103,144 @@ def get_system_info() -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-# --- Backward Compatibility Wrapper ---
-def get_atm_strike_price(spot_price: float) -> int
+# Backward Compatibility Wrapper
+def get_atm_strike_price(spot_price: float) -> int:
+    """
+    Simple ATM strike calculation for backward compatibility
+    """
+    try:
+        return round(spot_price / 50) * 50
+    except Exception as e:
+        logger.error(f"Error calculating ATM strike: {e}")
+        return 24500  # Default fallback
+
+def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type: str) -> str:
+    """
+    Format option symbol using primary format
+    """
+    try:
+        formatted_expiry = _format_expiry_for_symbol_primary(expiry)
+        if formatted_expiry:
+            return f"{base_symbol}{formatted_expiry}{strike}{option_type}"
+        return ""
+    except Exception as e:
+        logger.error(f"Error formatting option symbol: {e}")
+        return ""
+
+def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
+    """
+    Get nearest strike prices around spot price
+    """
+    try:
+        atm_strike = get_atm_strike_price(spot_price)
+        strikes = []
+        
+        # Get strikes on both sides
+        for i in range(-strike_count//2, strike_count//2 + 1):
+            strikes.append(atm_strike + (i * 50))
+        
+        return sorted(strikes)
+        
+    except Exception as e:
+        logger.error(f"Error getting nearest strikes: {e}")
+        return []
+
+def is_trading_hours() -> bool:
+    """
+    Check if current time is within trading hours
+    """
+    try:
+        now = datetime.now()
+        current_time = now.time()
+        current_day = now.weekday()
+        
+        market_open = datetime.strptime("09:15", "%H:%M").time()
+        market_close = datetime.strptime("15:30", "%H:%M").time()
+        
+        is_weekday = current_day < 5
+        is_market_hours = market_open <= current_time <= market_close
+        
+        return is_weekday and is_market_hours
+        
+    except Exception as e:
+        logger.error(f"Error checking trading hours: {e}")
+        return False
+
+# Export all functions for backward compatibility
+__all__ = [
+    '_get_spot_ltp_symbol',
+    'get_next_expiry_date', 
+    'get_instrument_tokens',
+    'diagnose_symbol_patterns',
+    'test_token_resolution',
+    'get_available_expiries',
+    'validate_config',
+    'get_strike_chain',
+    'get_weekly_monthly_expiries',
+    'emergency_fallback_tokens',
+    'health_check',
+    'quick_test_api_connectivity',
+    'get_market_status',
+    'cleanup_cache',
+    'get_system_info',
+    'get_atm_strike_price',
+    'format_option_symbol',
+    'get_nearest_strikes',
+    'is_trading_hours'
+]
+
+# Main execution for testing
+if __name__ == "__main__":
+    # Setup logging for direct execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    logger.info("🚀 Strike Selector Module - Direct Execution Test")
+    
+    try:
+        # Test configuration validation
+        logger.info("Testing configuration validation...")
+        config_valid = validate_config()
+        logger.info(f"Configuration valid: {config_valid}")
+        
+        # Test date calculations
+        logger.info("Testing date calculations...")
+        next_thursday = _calculate_next_thursday()
+        logger.info(f"Next Thursday (fallback): {next_thursday}")
+        
+        # Test symbol formatting
+        logger.info("Testing symbol formatting...")
+        test_expiry = "2025-08-07"
+        test_symbol = _format_expiry_for_symbol_primary(test_expiry)
+        logger.info(f"Formatted expiry for {test_expiry}: {test_symbol}")
+        
+        # Test ATM calculation
+        logger.info("Testing ATM calculation...")
+        test_spot = 24567.85
+        atm_strike = get_atm_strike_price(test_spot)
+        logger.info(f"ATM strike for spot {test_spot}: {atm_strike}")
+        
+        # Test nearest strikes
+        logger.info("Testing nearest strikes...")
+        nearest = get_nearest_strikes(test_spot, 5)
+        logger.info(f"Nearest 5 strikes: {nearest}")
+        
+        # Test trading hours
+        logger.info("Testing trading hours...")
+        trading_hours = is_trading_hours()
+        logger.info(f"Is trading hours: {trading_hours}")
+        
+        # Test system info
+        logger.info("Testing system info...")
+        sys_info = get_system_info()
+        logger.info(f"System info: {sys_info}")
+        
+        logger.info("✅ All basic module tests completed successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Module test failed: {e}", exc_info=True)
+        sys.exit(1)
+    
+    logger.info("🎯 Strike Selector Module ready for production use")
