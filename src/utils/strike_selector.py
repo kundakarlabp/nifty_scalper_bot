@@ -352,7 +352,7 @@ def get_instrument_tokens(
         logger.debug(f"[get_instrument_tokens] Fetching spot LTP for: {spot_symbol_ltp}")
         
         try:
-            ltp_data = _rate_limited_api_call(kite_instance.ltp, spot_symbol_ltp)
+            ltp_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol_ltp])
             spot_price = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
         except Exception as ltp_error:
             logger.error(f"[get_instrument_tokens] LTP fetch failed: {ltp_error}")
