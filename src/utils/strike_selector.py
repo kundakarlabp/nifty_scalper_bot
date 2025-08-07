@@ -109,18 +109,24 @@ def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, o
     variants = []
     try:
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+        
         # 1. Primary Known Format: YYMONDD (e.g., NIFTY25AUG0724550CE)
         primary_format = _format_expiry_for_symbol_primary(expiry_str)
         if primary_format:
             variants.append(f"{base_symbol}{primary_format}{strike}{opt_type}")
 
-        # 2. Alternative: YYMON (e.g., NIFTY25AUG24550CE) - Less likely for weekly, but possible for monthly or if Kite has inconsistencies
+        # 2. Alternative: YYMON (e.g., NIFTY25AUG24550CE) - Less likely for weekly, but possible for monthly
         alt_format_1 = expiry_date.strftime("%y%b").upper()
         variants.append(f"{base_symbol}{alt_format_1}{strike}{opt_type}")
 
-        # 3. Numerical Format: YYMMDD (e.g., NIFTY25080724550CE) - Was previously incorrect, kept as low prio fallback
-        # num_format = expiry_date.strftime("%y%m%d")
-        # variants.append(f"{base_symbol}{num_format}{strike}{opt_type}")
+        # 3. Weekly format: YYMONGW (e.g., NIFTY25AUG1W24550CE for weekly expiries)
+        week_num = (expiry_date.day - 1) // 7 + 1
+        weekly_format = f"{expiry_date.strftime('%y%b').upper()}{week_num}W"
+        variants.append(f"{base_symbol}{weekly_format}{strike}{opt_type}")
+
+        # 4. Numerical Format: YYMMDD (e.g., NIFTY25080724550CE) - Low priority fallback
+        num_format = expiry_date.strftime("%y%m%d")
+        variants.append(f"{base_symbol}{num_format}{strike}{opt_type}")
 
         # Remove duplicates
         unique_variants = list(set(variants))
@@ -129,10 +135,10 @@ def _construct_symbol_variants(base_symbol: str, expiry_str: str, strike: int, o
 
     except Exception as e:
         logger.error(f"[_construct_symbol_variants] Error generating variants: {e}")
-        # Fallback to primary format only
+        # Fallback to primary format only - FIXED SYNTAX ERROR
         primary_format = _format_expiry_for_symbol_primary(expiry_str)
         if primary_format:
-             return [f"{base_symbol}{primary_format}{strike}{opt_type}]
+             return [f"{base_symbol}{primary_format}{strike}{opt_type}"]
         return []
 
 def _fuzzy_find_instrument(instruments_list: list, base_symbol: str, expiry_yyyy_mm_dd: str, strike: int, opt_type: str) -> dict:
@@ -171,8 +177,6 @@ def _fuzzy_find_instrument(instruments_list: list, base_symbol: str, expiry_yyyy
                         }
                 except (ValueError, TypeError):
                     continue # Skip if strike comparison fails
-            # If strike is not available in the instrument data, we cannot fuzzy match reliably
-            # In this case, symbol matching is the only reliable way.
 
         logger.debug(f"[_fuzzy_find_instrument] ❌ No fuzzy match found.")
         return {}
@@ -187,18 +191,27 @@ def get_instrument_tokens(
     offset: int = 0,
     kite_instance: KiteConnect = None,
     cached_nfo_instruments: list = None,
-    cached_nse_instruments: list = None
+    cached_nse_instruments: list = None,
+    strike_range: int = 3  # Try ±3 strikes (150 points) if exact not found
 ):
     """
     Gets instrument tokens for spot, ATM CE, and PE for the *nearest valid* expiry.
-    Implements robust symbol resolution with multiple fallbacks.
+    Implements robust symbol resolution with multiple fallbacks and strike range search.
+    
+    Args:
+        symbol: Base symbol (default "NIFTY")
+        offset: Strike offset in multiples of 50 (default 0 for ATM)
+        kite_instance: KiteConnect instance
+        cached_nfo_instruments: List of NFO instruments
+        cached_nse_instruments: List of NSE instruments (not used currently)
+        strike_range: Number of strikes to try on each side if exact not found
     """
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
         return None
 
-    if cached_nfo_instruments is None or cached_nse_instruments is None:
-        logger.error("[get_instrument_tokens] Cached instrument lists are required.")
+    if cached_nfo_instruments is None:
+        logger.error("[get_instrument_tokens] Cached NFO instruments are required.")
         return None
 
     try:
@@ -226,97 +239,139 @@ def get_instrument_tokens(
              logger.info(f"[get_instrument_tokens] Spot price fetched: {spot_price}")
 
         # 2. Calculate Strike and Expiry
-        atm_strike = round(spot_price / 50) * 50 + (offset * 50)
+        base_strike = round(spot_price / 50) * 50
+        target_strike = base_strike + (offset * 50)
         expiry_yyyy_mm_dd = get_next_expiry_date(kite_instance)
 
         if not expiry_yyyy_mm_dd:
             logger.error("[get_instrument_tokens] Could not determine expiry date.")
             return None
 
-        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, ATM Strike: {atm_strike}")
+        logger.info(f"[get_instrument_tokens] Target - Expiry: {expiry_yyyy_mm_dd}, Target Strike: {target_strike}, Spot: {spot_price}")
 
         # 3. Prepare for Symbol Search
         # Filter NFO instruments for the specific index (e.g., 'NIFTY')
         nifty_index_instruments = [inst for inst in cached_nfo_instruments if inst['name'] == base_symbol_for_search]
         logger.debug(f"[get_instrument_tokens] Filtered {len(nifty_index_instruments)} '{base_symbol_for_search}' instruments.")
 
-        # --- Diagnostic: Show available expiries for this index ---
+        # Filter for target expiry
+        expiry_instruments = []
+        for inst in nifty_index_instruments:
+            inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
+            if inst_expiry_str == expiry_yyyy_mm_dd:
+                expiry_instruments.append(inst)
+
+        if not expiry_instruments:
+            logger.error(f"[get_instrument_tokens] No instruments found for expiry {expiry_yyyy_mm_dd}")
+            # Show available expiries for debugging
+            available_expiries = set()
+            for inst in nifty_index_instruments:
+                exp_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
+                available_expiries.add(exp_str)
+            logger.info(f"Available expiries: {sorted(available_expiries)}")
+            return None
+
+        logger.info(f"[get_instrument_tokens] Found {len(expiry_instruments)} instruments for target expiry")
+
+        # --- Diagnostic: Show available strikes for debugging ---
         if logger.isEnabledFor(logging.DEBUG):
             try:
-                available_expiries = set()
-                for inst in nifty_index_instruments:
-                    inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-                    available_expiries.add(inst_expiry_str)
-                sorted_expiries = sorted(list(available_expiries))
-                logger.debug(f"[DIAGNOSTIC] Available expiries for '{base_symbol_for_search}': {sorted_expiries}")
-                if expiry_yyyy_mm_dd not in sorted_expiries:
-                     logger.debug(f"[DIAGNOSTIC] Target expiry '{expiry_yyyy_mm_dd}' NOT found in available expiries.")
-                else:
-                     logger.debug(f"[DIAGNOSTIC] Target expiry '{expiry_yyyy_mm_dd}' IS present in available expiries.")
+                available_strikes = set()
+                for inst in expiry_instruments:
+                    if inst.get('strike'):
+                        available_strikes.add(int(float(inst['strike'])))
+                sorted_strikes = sorted(list(available_strikes))
+                logger.debug(f"[DIAGNOSTIC] Available strikes for '{expiry_yyyy_mm_dd}': {sorted_strikes}")
+                logger.debug(f"[DIAGNOSTIC] Target strike {target_strike} {'IS' if target_strike in sorted_strikes else 'NOT'} in available strikes.")
             except Exception as diag_e:
-                logger.debug(f"[DIAGNOSTIC] Error during expiry diagnostic: {diag_e}")
+                logger.debug(f"[DIAGNOSTIC] Error during strike diagnostic: {diag_e}")
         # --- End Diagnostic ---
 
         results = {
             "spot_price": spot_price,
-            "atm_strike": atm_strike,
+            "target_strike": target_strike,
+            "actual_strikes": {},  # Will store actual strikes found
             "expiry": expiry_yyyy_mm_dd,
             "ce_symbol": None,
             "ce_token": None,
             "pe_symbol": None,
-            "pe_token": None,
-            "spot_token": None # Add if needed
+            "pe_token": None
         }
 
-        # 4. Attempt to Find Tokens for CE and PE
+        # 4. Attempt to Find Tokens for CE and PE with Strike Range
         for opt_type in ['CE', 'PE']:
-            target_strike = atm_strike
-            logger.debug(f"[get_instrument_tokens] Searching for {opt_type} with strike {target_strike}...")
+            found = False
+            logger.debug(f"[get_instrument_tokens] Searching for {opt_type}...")
+            
+            # Try strikes in order: exact target, then expanding outward
+            strike_attempts = [target_strike]
+            for i in range(1, strike_range + 1):
+                strike_attempts.extend([target_strike + i * 50, target_strike - i * 50])
+            
+            for attempt_strike in strike_attempts:
+                if found:
+                    break
+                    
+                logger.debug(f"[get_instrument_tokens] Trying {opt_type} strike: {attempt_strike}")
 
-            # a. Construct Symbol Variants
-            symbol_variants = _construct_symbol_variants(base_symbol_for_search, expiry_yyyy_mm_dd, target_strike, opt_type)
-            found_by_variant = False
-
-            # b. Try Direct Symbol Match with Variants
-            for variant in symbol_variants:
-                logger.debug(f"[get_instrument_tokens] Trying symbol variant: {variant}")
-                for inst in nifty_index_instruments:
-                    inst_expiry_str = inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])
-                    if inst_expiry_str == expiry_yyyy_mm_dd and inst['tradingsymbol'] == variant:
-                        logger.info(f"[get_instrument_tokens] ✅ Found {opt_type} via symbol match: {variant} ({inst['instrument_token']})")
+                # a. Try Symbol Variants
+                symbol_variants = _construct_symbol_variants(base_symbol_for_search, expiry_yyyy_mm_dd, attempt_strike, opt_type)
+                
+                for variant in symbol_variants:
+                    # Find matching instrument by symbol
+                    matching_inst = next(
+                        (inst for inst in expiry_instruments 
+                         if inst['tradingsymbol'] == variant and inst.get('instrument_type') == opt_type), 
+                        None
+                    )
+                    
+                    if matching_inst:
+                        logger.info(f"[get_instrument_tokens] ✅ Found {opt_type} via symbol match: {variant} (token: {matching_inst['instrument_token']})")
                         if opt_type == 'CE':
                             results['ce_symbol'] = variant
-                            results['ce_token'] = inst['instrument_token']
-                        elif opt_type == 'PE':
+                            results['ce_token'] = matching_inst['instrument_token']
+                            results['actual_strikes']['ce'] = attempt_strike
+                        else:
                             results['pe_symbol'] = variant
-                            results['pe_token'] = inst['instrument_token']
-                        found_by_variant = True
-                        break # Found for this option type
-                if found_by_variant:
-                    break # Stop trying variants for this option type
+                            results['pe_token'] = matching_inst['instrument_token']
+                            results['actual_strikes']['pe'] = attempt_strike
+                        found = True
+                        break
+                
+                # b. Fallback: Fuzzy Search for this strike
+                if not found:
+                    logger.debug(f"[get_instrument_tokens] Symbol variants failed for {opt_type} strike {attempt_strike}. Trying fuzzy search...")
+                    fuzzy_result = _fuzzy_find_instrument(expiry_instruments, base_symbol_for_search, expiry_yyyy_mm_dd, attempt_strike, opt_type)
+                    if fuzzy_result:
+                        if opt_type == 'CE':
+                            results['ce_symbol'] = fuzzy_result['symbol']
+                            results['ce_token'] = fuzzy_result['token']
+                            results['actual_strikes']['ce'] = fuzzy_result['strike']
+                        else:
+                            results['pe_symbol'] = fuzzy_result['symbol']
+                            results['pe_token'] = fuzzy_result['token']
+                            results['actual_strikes']['pe'] = fuzzy_result['strike']
+                        logger.info(f"[get_instrument_tokens] ✅ Found {opt_type} via fuzzy search: {fuzzy_result['symbol']}")
+                        found = True
+                        break
 
-            # c. Fallback: Fuzzy Search (if direct match failed)
-            if not found_by_variant:
-                logger.debug(f"[get_instrument_tokens] Direct symbol match failed for {opt_type}. Trying fuzzy search...")
-                fuzzy_result = _fuzzy_find_instrument(nifty_index_instruments, base_symbol_for_search, expiry_yyyy_mm_dd, target_strike, opt_type)
-                if fuzzy_result:
-                    # Assign fuzzy result
-                    if opt_type == 'CE':
-                        results['ce_symbol'] = fuzzy_result['symbol']
-                        results['ce_token'] = fuzzy_result['token']
-                    elif opt_type == 'PE':
-                        results['pe_symbol'] = fuzzy_result['symbol']
-                        results['pe_token'] = fuzzy_result['token']
-                else:
-                     logger.warning(f"[get_instrument_tokens] ❌ Could not find {opt_type} for Strike:{target_strike} Expiry:{expiry_yyyy_mm_dd} using any method.")
+            if not found:
+                logger.warning(f"[get_instrument_tokens] ❌ Could not find {opt_type} for any strike in range {target_strike}±{strike_range*50}")
 
-
-        # Check if we found at least one token
-        if not results['ce_token'] and not results['pe_token']:
-            logger.warning(f"[get_instrument_tokens] ❌ Failed to find tokens for any strike on expiry {expiry_yyyy_mm_dd}.")
-            # Optional: Return results anyway, caller decides if partial is ok
-            # Or return None if both are critical
-            # return None # Uncomment if both CE & PE are mandatory
+        # Final validation and results
+        success_count = sum([1 for x in [results['ce_token'], results['pe_token']] if x])
+        
+        if success_count == 0:
+            logger.error("[get_instrument_tokens] ❌ No options found for any strike in the range")
+            return None
+        
+        logger.info(f"[get_instrument_tokens] ✅ Successfully found {success_count}/2 option tokens")
+        
+        # Log actual strikes used if different from target
+        if results['actual_strikes'].get('ce') != target_strike:
+            logger.info(f"[get_instrument_tokens] CE strike adjusted from {target_strike} to {results['actual_strikes'].get('ce')}")
+        if results['actual_strikes'].get('pe') != target_strike:
+            logger.info(f"[get_instrument_tokens] PE strike adjusted from {target_strike} to {results['actual_strikes'].get('pe')}")
 
         return results
 
@@ -324,4 +379,81 @@ def get_instrument_tokens(
         logger.error(f"[get_instrument_tokens] Unexpected error: {e}", exc_info=True)
         return None
 
-# --- End of Optimized Script ---
+# --- Additional Utility Functions ---
+
+def diagnose_symbol_patterns(kite_instance: KiteConnect, target_expiry: str = None):
+    """
+    Diagnostic function to understand available symbol patterns
+    """
+    try:
+        logger.info("[diagnose_symbol_patterns] Starting symbol pattern diagnosis...")
+        nfo_instruments = kite_instance.instruments("NFO")
+        
+        # Filter NIFTY instruments
+        nifty_instruments = [inst for inst in nfo_instruments if inst['name'] == 'NIFTY']
+        
+        if target_expiry:
+            nifty_instruments = [
+                inst for inst in nifty_instruments
+                if (inst['expiry'].strftime("%Y-%m-%d") if hasattr(inst['expiry'], 'strftime') else str(inst['expiry'])) == target_expiry
+            ]
+        
+        if not nifty_instruments:
+            logger.error(f"❌ No NIFTY instruments found for expiry: {target_expiry}")
+            return
+        
+        logger.info(f"📊 Found {len(nifty_instruments)} NIFTY instruments")
+        
+        # Show sample symbols
+        logger.info("🔍 Sample trading symbols:")
+        for i, inst in enumerate(nifty_instruments[:10]):
+            logger.info(f"  {inst['tradingsymbol']} | Strike: {inst.get('strike', 'N/A')} | Type: {inst.get('instrument_type', 'N/A')}")
+        
+        # Analyze patterns
+        ce_symbols = [inst['tradingsymbol'] for inst in nifty_instruments if inst.get('instrument_type') == 'CE']
+        pe_symbols = [inst['tradingsymbol'] for inst in nifty_instruments if inst.get('instrument_type') == 'PE']
+        
+        logger.info(f"📈 Stats: CE Options: {len(ce_symbols)}, PE Options: {len(pe_symbols)}")
+        
+        if ce_symbols:
+            logger.info(f"🎯 Sample CE Symbol: {ce_symbols[0]}")
+        
+    except Exception as e:
+        logger.error(f"❌ Symbol pattern diagnosis failed: {e}")
+
+def test_token_resolution(kite_instance: KiteConnect, test_spot_price: float = None):
+    """
+    Test function to validate token resolution
+    """
+    logger.info("🧪 Testing token resolution...")
+    
+    try:
+        # Get cached instruments
+        nfo_instruments = kite_instance.instruments("NFO")
+        
+        # Test the main function
+        result = get_instrument_tokens(
+            kite_instance=kite_instance,
+            cached_nfo_instruments=nfo_instruments
+        )
+        
+        if result:
+            logger.info("✅ Token resolution test successful!")
+            logger.info(f"  Spot Price: {result.get('spot_price')}")
+            logger.info(f"  Target Strike: {result.get('target_strike')}")
+            logger.info(f"  Expiry: {result.get('expiry')}")
+            logger.info(f"  CE: {result.get('ce_symbol')} (Token: {result.get('ce_token')})")
+            logger.info(f"  PE: {result.get('pe_symbol')} (Token: {result.get('pe_token')})")
+            
+            if result.get('actual_strikes'):
+                logger.info(f"  Actual Strikes Used: {result['actual_strikes']}")
+        else:
+            logger.error("❌ Token resolution test failed")
+            # Run diagnostic
+            logger.info("🔍 Running diagnostic...")
+            diagnose_symbol_patterns(kite_instance)
+    
+    except Exception as e:
+        logger.error(f"❌ Test failed with error: {e}")
+
+# --- End of Complete Script ---
