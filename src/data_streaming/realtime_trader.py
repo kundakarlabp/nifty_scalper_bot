@@ -60,7 +60,11 @@ class RealTimeTrader:
         self.strategy = EnhancedScalpingStrategy()
         self.position_sizer = PositionSizing()
         self.order_executor = OrderExecutor()
-        self.telegram_controller = TelegramController()
+        self.telegram_controller = TelegramController(
+            status_callback=self.get_status,
+            control_callback=self._handle_control,
+            summary_callback=self.get_summary,
+        )
         
         # Setup threading
         self._executor = ThreadPoolExecutor(max_workers=4)
