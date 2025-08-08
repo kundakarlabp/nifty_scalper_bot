@@ -1,5 +1,4 @@
 # src/data_streaming/realtime_trader.py
-
 import logging
 import threading
 import atexit
@@ -17,245 +16,114 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import Config
 # Assuming you'll have an OptionsStrategy or modify the existing one
 # from src.strategies.options_strategy import OptionsStrategy
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy # Placeholder, might need new strategy
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizing
 from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
+
 # Import helper for consistent spot LTP symbol usage and strike selector
-from src.utils.strike_selector import _get_spot_ltp_symbol, get_instrument_tokens, get_next_expiry_date
+from src.utils.strike_selector import (
+    _get_spot_ltp_symbol, 
+    get_instrument_tokens, 
+    get_next_expiry_date,
+    is_trading_hours,
+    health_check
+)
 
 logger = logging.getLogger(__name__)
 
 class RealTimeTrader:
     def __init__(self) -> None:
+        """Enhanced initialization with additional tracking"""
+        # Store start time for uptime calculation
+        self._start_time = time.time()
+        self._session_start_time = datetime.now().isoformat()
+        self._last_activity_time = None
+        self._error_count = 0
+        self._last_spot_prices = [] # For trend tracking
+        
+        # Initialize all the original attributes
         self.is_trading: bool = False
         self.daily_pnl: float = 0.0
         self.trades: List[Dict[str, Any]] = []
-        self.live_mode: bool = Config.ENABLE_LIVE_TRADING
-
-        # --- Enhanced Instrument Caching for Rate Limiting ---
+        self.positions: Dict[str, Any] = {}
+        self.live_mode: bool = getattr(Config, 'ENABLE_LIVE_TRADING', False)
+        
+        # Cache for instruments to reduce API calls
         self._nfo_instruments_cache: Optional[List[Dict]] = None
         self._nse_instruments_cache: Optional[List[Dict]] = None
         self._instruments_cache_timestamp: float = 0
-        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
-        self._cache_lock = threading.RLock()  # Thread-safe cache access
-        # --- End Instrument Caching ---
-
-        # Performance optimization: Pre-calculate commonly used values
-        self._atm_cache: Dict[str, Tuple[int, float]] = {}  # symbol -> (strike, timestamp)
-        self._ATM_CACHE_DURATION: int = 30  # Cache ATM for 30 seconds
+        self._INSTRUMENT_CACHE_DURATION: int = 300  # 5 minutes
+        self._cache_lock = threading.Lock()
         
-        # Thread pool for parallel data fetching
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="OptionsDataWorker")
-
-        # Strategy initialization with optimized parameters
-        self.strategy = EnhancedScalpingStrategy(
-            base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-            base_target_points=Config.BASE_TARGET_POINTS,
-            confidence_threshold=Config.CONFIDENCE_THRESHOLD,
-            min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
-        )
-        self.risk_manager = PositionSizing()
-        self.order_executor = self._init_order_executor()
-        self.telegram_controller = TelegramController(
-            status_callback=self.get_status,
-            control_callback=self._handle_control,
-            summary_callback=self.get_summary,
-        )
-        self._polling_thread: Optional[threading.Thread] = None
-
-        # Start Telegram polling in a daemon thread
-        self._start_polling()
-
-        # Optimized scheduling: Use different intervals based on market conditions
+        # Initialize components
+        self.strategy = EnhancedScalpingStrategy()
+        self.position_sizer = PositionSizing()
+        self.order_executor = OrderExecutor()
+        self.telegram_controller = TelegramController()
+        
+        # Setup threading
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        
+        # Initialize Kite connection
+        self._set_live_mode()
+        
+        # Setup scheduling
         self._setup_smart_scheduling()
         
+        # Register shutdown handlers
         atexit.register(self.shutdown)
-        logger.info("RealTimeTrader initialized and ready to receive commands.")
+        signal.signal(signal.SIGTERM, lambda signum, frame: self.shutdown())
+        signal.signal(signal.SIGINT, lambda signum, frame: self.shutdown())
+        
+        logger.info("✅ Enhanced RealTimeTrader initialized and ready")
+        logger.info(f"🔧 Features: Live={self.live_mode}, Cache=Enabled, Threads={self._executor._max_workers}")
+
+    def _set_live_mode(self) -> None:
+        """Initialize components based on live mode setting"""
+        try:
+            if self.live_mode:
+                logger.info("🟢 Live trading mode enabled")
+                # Components are already initialized for live mode
+            else:
+                logger.info("🛡️ Shadow/paper trading mode enabled")
+                # Reinitialize order executor for simulation
+                # This would depend on your simulation implementation
+        except Exception as e:
+            logger.error(f"Error setting trading mode: {e}")
 
     def _setup_smart_scheduling(self) -> None:
-        """Setup intelligent scheduling based on market hours and volatility"""
-        # More frequent during active market hours
-        schedule.every(30).seconds.do(self._smart_fetch_and_process)
-        logger.info("Scheduled smart_fetch_and_process to run every 30 seconds during market hours.")
+        """Setup intelligent scheduling for data fetching"""
+        try:
+            # Schedule the smart fetch and process every minute
+            schedule.every().minute.at(":00").do(self._smart_fetch_and_process)
+            logger.info("📅 Smart scheduling setup complete")
+        except Exception as e:
+            logger.error(f"Error setting up scheduling: {e}")
 
     def _smart_fetch_and_process(self) -> None:
-        """Intelligent data fetching based on current market conditions"""
-        current_time = datetime.now()
-        hour = current_time.hour
-        
-        # Skip during non-market hours (basic check)
-        if hour < 9 or hour > 15:
-            logger.debug("Outside market hours, skipping data fetch.")
-            return
-            
-        # Call the main processing function
-        self.fetch_and_process_data()
-
-    def _init_order_executor(self) -> OrderExecutor:
-        if not self.live_mode:
-            logger.info("Live trading disabled. Using simulated order executor.")
-            return OrderExecutor()
-        try:
-            from kiteconnect import KiteConnect
-            kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
-            kite.set_access_token(Config.KITE_ACCESS_TOKEN)
-            logger.info("✅ Live order executor initialized with Kite Connect.")
-            return OrderExecutor(kite=kite)
-        except Exception as exc:
-            logger.error("Failed to initialize live trading. Falling back to simulation: %s", exc, exc_info=True)
-            self.live_mode = False
-            return OrderExecutor()
-
-    def start(self) -> bool:
+        """Smart fetch and process with trading state check"""
         if self.is_trading:
-            logger.info("Trader already running.")
-            self.telegram_controller.send_message("🛑 Trader already running.")
-            return True
-        self.is_trading = True
+            self.fetch_and_process_data()
+
+    def start(self) -> None:
+        """Start the real-time trading process"""
         try:
-            self.telegram_controller.send_realtime_session_alert("START")
-            logger.info("✅ Trading started.")
-        except Exception as exc:
-            logger.warning("Failed to send START alert: %s", exc)
-        return True
-
-    def stop(self) -> bool:
-        if not self.is_trading:
-            logger.info("Trader is not running.")
-            self.telegram_controller.send_message("🛑 Trader is already stopped.")
-            return True
-        self.is_trading = False
-        try:
-            self.telegram_controller.send_realtime_session_alert("STOP")
-            logger.info("🛑 Trading stopped. Telegram polling remains active.")
-        except Exception as exc:
-            logger.warning("Failed to send STOP alert: %s", exc)
-        return True
-
-    def _handle_control(self, command: str, arg: str = "") -> bool:
-        command = command.strip().lower()
-        arg = arg.strip().lower() if arg else ""
-        logger.info(f"Received command: /{command} {arg}")
-        
-        command_handlers = {
-            "start": self.start,
-            "stop": self.stop,
-            "mode": lambda: self._set_live_mode(arg) if arg in ["live", "shadow"] else self._invalid_mode_arg(),
-            "refresh": self._force_refresh_cache,
-            "status": lambda: self._send_detailed_status()
-        }
-        
-        handler = command_handlers.get(command)
-        if handler:
-            return handler()
-        else:
-            logger.warning("Unknown control command: %s", command)
-            self.telegram_controller.send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
-            return False
-
-    def _invalid_mode_arg(self) -> bool:
-        self.telegram_controller.send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
-        return False
-
-    def _force_refresh_cache(self) -> bool:
-        """Force refresh instrument cache"""
-        self._refresh_instruments_cache(force=True)
-        self.telegram_controller.send_message("🔄 Instrument cache refreshed successfully.")
-        return True
-
-    def _send_detailed_status(self) -> bool:
-        """Send detailed status information"""
-        status = self.get_status()
-        cache_age = (time.time() - self._instruments_cache_timestamp) / 60  # minutes
-        
-        status_msg = f"""
-📊 **Detailed Status**
-🔄 Trading: {'✅ Active' if status['is_trading'] else '❌ Stopped'}
-🎯 Mode: {'🟢 LIVE' if self.live_mode else '🛡️ SHADOW'}
-📈 Open Orders: {status['open_orders']}
-💼 Trades Today: {status['trades_today']}
-🕐 Cache Age: {cache_age:.1f} min
-📊 Daily PnL: ₹{self.daily_pnl:.2f}
-        """
-        self.telegram_controller.send_message(status_msg, parse_mode="Markdown")
-        return True
-
-    def _set_live_mode(self, mode: str) -> bool:
-        desired_live = (mode == "live")
-        if desired_live == self.live_mode:
-            current_mode = "LIVE" if self.live_mode else "SHADOW"
-            logger.info(f"Already in {current_mode} mode.")
-            self.telegram_controller.send_message(f"🟢 Already in *{current_mode}* mode.", parse_mode="Markdown")
-            return True
-        if self.is_trading:
-            logger.warning("Cannot change mode while trading is active. Stop trading first.")
-            self.telegram_controller.send_message("🛑 Cannot change mode while trading. Use `/stop` first.", parse_mode="Markdown")
-            return False
-        if desired_live:
-            try:
-                from kiteconnect import KiteConnect
-                kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
-                kite.set_access_token(Config.KITE_ACCESS_TOKEN)
-                self.order_executor = OrderExecutor(kite=kite)
-                self.live_mode = True
-                logger.info("🟢 Switched to LIVE mode.")
-                # Refresh instruments cache upon switching to live mode
-                self._refresh_instruments_cache(force=True)
-                self.telegram_controller.send_message("🚀 Switched to *LIVE* trading mode.", parse_mode="Markdown")
-                return True
-            except Exception as exc:
-                logger.error("Failed to switch to LIVE mode: %s", exc, exc_info=True)
-                self.telegram_controller.send_message(
-                    f"❌ Failed to switch to LIVE mode: `{str(exc)[:100]}...` Reverted to SHADOW mode.", parse_mode="Markdown"
-                )
-                self.live_mode = False
-                self.order_executor = OrderExecutor()
-                return False
-        else:
-            self.order_executor = OrderExecutor()
-            self.live_mode = False
-            logger.info("🛡️ Switched to SHADOW (simulation) mode.")
-            self.telegram_controller.send_message("🛡️ Switched to *SHADOW* (simulation) mode.", parse_mode="Markdown")
-            return True
-
-    def _start_polling(self) -> None:
-        if self._polling_thread and self._polling_thread.is_alive():
-            logger.debug("Polling thread already running.")
-            return
-        try:
-            self.telegram_controller.send_startup_alert()
+            self.is_trading = True
+            logger.info("🚀 Real-time trading started")
+            self.telegram_controller.send_realtime_session_alert("STARTED")
         except Exception as e:
-            logger.warning("Failed to send startup alert: %s", e)
-        self._polling_thread = threading.Thread(
-            target=self.telegram_controller.start_polling,
-            daemon=True
-        )
-        self._polling_thread.start()
-        logger.info("✅ Telegram polling started (daemon).")
+            logger.error(f"Error starting trading: {e}")
 
-    def _stop_polling(self) -> None:
-        logger.info("🛑 Stopping Telegram polling (app shutdown)...")
-        self.telegram_controller.stop_polling()
-        if self._polling_thread and self._polling_thread.is_alive():
-            if threading.current_thread() != self._polling_thread:
-                self._polling_thread.join(timeout=3)
-        self._polling_thread = None
+    def stop(self) -> None:
+        """Stop the real-time trading process"""
+        try:
+            self.is_trading = False
+            logger.info("🛑 Real-time trading stopped")
+            self.telegram_controller.send_realtime_session_alert("STOPPED")
+        except Exception as e:
+            logger.error(f"Error stopping trading: {e}")
 
-    def shutdown(self) -> None:
-        if not self.is_trading and (not self._polling_thread or not self._polling_thread.is_alive()):
-            return
-        logger.info("👋 Shutting down RealTimeTrader...")
-        self.stop()
-        self._stop_polling()
-        
-        # Shutdown executor
-        if self._executor:
-            self._executor.shutdown(wait=True, timeout=5)
-            
-        logger.info("✅ RealTimeTrader shutdown complete.")
-
-    # --- Enhanced Instrument Caching Methods ---
     def _refresh_instruments_cache(self, force: bool = False) -> None:
         """Thread-safe instrument cache refresh with enhanced error handling"""
         with self._cache_lock:
@@ -264,7 +132,7 @@ class RealTimeTrader:
                 self._nfo_instruments_cache = []
                 self._nse_instruments_cache = []
                 return
-
+                
             current_time = time.time()
             needs_refresh = (
                 force or
@@ -272,51 +140,222 @@ class RealTimeTrader:
                 self._nse_instruments_cache is None or
                 (current_time - self._instruments_cache_timestamp) > self._INSTRUMENT_CACHE_DURATION
             )
-
-            if needs_refresh:
-                try:
-                    logger.debug("[_refresh_instruments_cache] Refreshing instruments cache...")
-                    
-                    # Use ThreadPoolExecutor for parallel fetching
-                    with ThreadPoolExecutor(max_workers=2) as executor:
-                        nfo_future = executor.submit(self.order_executor.kite.instruments, "NFO")
-                        nse_future = executor.submit(self.order_executor.kite.instruments, "NSE")
-                        
-                        # Wait for both with timeout
-                        self._nfo_instruments_cache = nfo_future.result(timeout=10)
-                        self._nse_instruments_cache = nse_future.result(timeout=10)
-                    
-                    logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nfo_instruments_cache)} NFO instruments.")
-                    logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nse_instruments_cache)} NSE instruments.")
-                    self._instruments_cache_timestamp = current_time
-                    logger.info("[_refresh_instruments_cache] ✅ Instruments cache refreshed.")
-                    
-                except Exception as e:
-                    logger.error(f"[_refresh_instruments_cache] Failed to refresh instruments cache: {e}")
-                    # Keep old cache if it exists, otherwise use empty list
-                    if self._nfo_instruments_cache is None:
-                        self._nfo_instruments_cache = []
-                    if self._nse_instruments_cache is None:
-                        self._nse_instruments_cache = []
+            
+            if not needs_refresh:
+                logger.debug("[_refresh_instruments_cache] Cache is still valid")
+                return
+                
+            try:
+                logger.info("[_refresh_instruments_cache] 🔄 Refreshing instruments cache...")
+                self._nfo_instruments_cache = self.order_executor.kite.instruments("NFO")
+                logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nfo_instruments_cache)} NFO instruments.")
+                self._nse_instruments_cache = self.order_executor.kite.instruments("NSE")
+                logger.debug(f"[_refresh_instruments_cache] Cached {len(self._nse_instruments_cache)} NSE instruments.")
+                self._instruments_cache_timestamp = current_time
+                logger.info("[_refresh_instruments_cache] ✅ Instruments cache refreshed.")
+            except Exception as e:
+                logger.error(f"[_refresh_instruments_cache] Failed to refresh instruments cache: {e}")
+                # Keep old cache if it exists, otherwise use empty list
+                if self._nfo_instruments_cache is None:
+                    self._nfo_instruments_cache = []
+                if self._nse_instruments_cache is None:
+                    self._nse_instruments_cache = []
 
     def _get_cached_instruments(self) -> Tuple[List[Dict], List[Dict]]:
-        """Thread-safe access to cached instruments"""
+        """Get cached instruments safely"""
         with self._cache_lock:
-            return self._nfo_instruments_cache or [], self._nse_instruments_cache or []
+            # Return copies to prevent external modification
+            return (self._nfo_instruments_cache or []).copy(), (self._nse_instruments_cache or []).copy()
 
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=32)
     def _get_cached_atm_strike(self, spot_price: float, timestamp_bucket: int) -> int:
-        """Cached ATM strike calculation to avoid repeated computation"""
+        """Get cached ATM strike calculation"""
         return round(spot_price / 50) * 50
-    # --- End Enhanced Instrument Caching Methods ---
+
+    def _fetch_spot_price(self, spot_symbol: str) -> Optional[float]:
+        """Fetch current spot price"""
+        try:
+            spot_data = self.order_executor.kite.ltp([spot_symbol])
+            return spot_data.get(spot_symbol, {}).get('last_price')
+        except Exception as e:
+            logger.error(f"[RT] Error fetching spot price: {e}")
+            return None
+
+    def _fetch_historical_data(self, instrument_token: int, from_time: datetime, to_time: datetime) -> pd.DataFrame:
+        """Fetch historical data for an instrument"""
+        try:
+            # Fetch historical data
+            hist_data = self.order_executor.kite.historical_data(
+                instrument_token=instrument_token,
+                from_date=from_time,
+                to_date=to_time,
+                interval="minute"
+            )
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(hist_data)
+            if not df.empty:
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df.sort_index(inplace=True)
+                
+            return df
+        except Exception as e:
+            logger.error(f"[RT] Error fetching historical data for {instrument_token}: {e}")
+            return pd.DataFrame()
+
+    # --- CRITICAL CHANGE: Modified _fetch_all_data_parallel to pass cached data ---
+    def _fetch_all_data_parallel(self, spot_token: int, atm_strike: int, start_time: datetime, end_time: datetime,
+                                cached_nfo: List[Dict], cached_nse: List[Dict]) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+        """Fetch all required data in parallel"""
+        spot_df = pd.DataFrame()
+        options_data = {}
+        
+        try:
+            # --- CRITICAL CHANGE: Pass cached data to get_instrument_tokens ---
+            instruments_data = get_instrument_tokens(
+                symbol=Config.SPOT_SYMBOL,
+                kite_instance=self.order_executor.kite,
+                cached_nfo_instruments=cached_nfo, # Pass cached data
+                cached_nse_instruments=cached_nse, # Pass cached data
+                offset=0  # ATM
+            )
+            
+            if not instruments_data:
+                logger.error("Failed to get instrument tokens")
+                return spot_df, options_data
+                
+            # Prepare tokens to fetch
+            tokens_to_fetch = {
+                'spot': spot_token,
+                'ce': instruments_data.get('ce_token'),
+                'pe': instruments_data.get('pe_token')
+            }
+            
+            # Fetch data in parallel
+            futures = {}
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                for name, token in tokens_to_fetch.items():
+                    if token:
+                        futures[name] = executor.submit(
+                            self._fetch_historical_data, 
+                            token, 
+                            start_time, 
+                            end_time
+                        )
+                
+                # Collect results
+                for name, future in futures.items():
+                    try:
+                        df = future.result(timeout=10)
+                        if name == 'spot':
+                            spot_df = df
+                        else:
+                            symbol_key = 'ce_symbol' if name == 'ce' else 'pe_symbol'
+                            symbol = instruments_data.get(symbol_key)
+                            if symbol and not df.empty:
+                                options_data[symbol] = df
+                    except Exception as e:
+                        logger.error(f"Error fetching {name} data: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Error in parallel data fetching: {e}")
+            
+        return spot_df, options_data
+
+    # --- CRITICAL CHANGE: Modified fetch_and_process_data to pass cached data ---
+    def fetch_and_process_data(self) -> None:
+        """Main data fetching and processing workflow
+        
+        Optimized data fetching with parallel processing and better error handling
+        """
+        if not self.is_trading:
+            logger.debug("fetch_and_process_data: Trading not active, skipping.")
+            return
+            
+        start_time = time.time()
+        logger.debug("🔄 Starting data fetch and process cycle...")
+        
+        try:
+            if not hasattr(self.order_executor, 'kite') or not self.order_executor.kite:
+                logger.error("KiteConnect instance not found. Is live mode enabled?")
+                return
+                
+            # Refresh instruments cache with timeout
+            self._refresh_instruments_cache()
+            
+            # --- CRITICAL CHANGE: Get cached instruments ---
+            cached_nfo, cached_nse = self._get_cached_instruments()
+            
+            if not cached_nfo and not cached_nse:
+                logger.error("Instrument cache is empty. Cannot proceed.")
+                return
+                
+            # Parallel spot price and instrument token fetching
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                # Submit spot price fetch
+                spot_future = executor.submit(self._fetch_spot_price, _get_spot_ltp_symbol())
+                
+                # --- CRITICAL CHANGE: Submit instrument token fetch with cached data ---
+                instruments_future = executor.submit(
+                    get_instrument_tokens,
+                    Config.SPOT_SYMBOL,
+                    self.order_executor.kite,
+                    cached_nfo, # Pass cached data
+                    cached_nse, # Pass cached data
+                    0  # ATM
+                )
+                
+                # Get results with timeout
+                spot_price = spot_future.result(timeout=5)
+                instruments_data = instruments_future.result(timeout=5)
+                
+                if not spot_price or not instruments_data:
+                    logger.error("Failed to fetch essential data (spot price or instruments)")
+                    return
+                    
+            logger.info(f"[RT] Successfully fetched current spot price: {spot_price}")
+            
+            atm_strike = instruments_data['atm_strike']
+            expiry = instruments_data['expiry']
+            spot_token = instruments_data.get('spot_token')
+            
+            logger.info(f"ATM Strike: {atm_strike}, Expiry: {expiry}, Spot: {spot_price}")
+            
+            # Optimized timeframe calculation
+            end_time = datetime.now()
+            lookback_minutes = getattr(Config, 'DATA_LOOKBACK_MINUTES', 30)
+            start_time_data = end_time - timedelta(minutes=lookback_minutes)
+            
+            # Parallel data fetching for spot and options
+            spot_df, options_data = self._fetch_all_data_parallel(
+                spot_token, atm_strike, start_time_data, end_time, cached_nfo, cached_nse # Pass cached data
+            )
+            
+            # Optimized analysis
+            if options_data:
+                selected_strikes_info = self._analyze_options_data_optimized(spot_price, options_data)
+            else:
+                selected_strikes_info = self._get_fallback_strikes(atm_strike, cached_nfo, cached_nse)
+                
+            if not selected_strikes_info:
+                logger.warning("No strikes selected for processing")
+                return
+                
+            # Process selected strikes
+            self._process_selected_strikes(selected_strikes_info, options_data, spot_df)
+            
+            processing_time = time.time() - start_time
+            logger.debug(f"Data fetch and process completed in {processing_time:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Error in fetch_and_process_data: {e}", exc_info=True)
 
     def _analyze_options_data_optimized(self, spot_price: float, options_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
-        """
-        Optimized options data analysis with parallel processing and caching
-        """
+        """Optimized options data analysis for strike selection"""
         if not options_data:
             return []
-
+            
         # Use cached ATM calculation
         timestamp_bucket = int(time.time() // 30)  # 30-second buckets
         atm_strike = self._get_cached_atm_strike(spot_price, timestamp_bucket)
@@ -330,28 +369,28 @@ class RealTimeTrader:
             
             if not relevant_data:
                 return type_strikes
-
+                
             for symbol, df in relevant_data.items():
                 try:
                     # Optimized strike extraction
                     opt_index = symbol.find(opt_type)
                     if opt_index == -1:
                         continue
-                    
+                        
                     strike_str = symbol[opt_index-5:opt_index]
                     strike = int(strike_str)
                     
                     # Quick data quality check
                     if len(df) < 1:
                         continue
-
+                        
                     last_row = df.iloc[-1]
                     prev_row = df.iloc[-2] if len(df) > 1 else last_row
-
+                    
                     # Optimized calculations
                     oi_change = last_row.get('oi', 0) - prev_row.get('oi', 0)
                     delta_approx = self._calculate_delta_approximation(opt_type, strike, atm_strike, spot_price)
-
+                    
                     type_strikes.append({
                         'symbol': symbol,
                         'strike': strike,
@@ -364,15 +403,14 @@ class RealTimeTrader:
                         'is_otm': (strike > atm_strike) if opt_type == 'CE' else (strike < atm_strike),
                         'is_itm': (strike < atm_strike) if opt_type == 'CE' else (strike > atm_strike)
                     })
-
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Could not extract strike from symbol {symbol}: {e}")
                     continue
-
+                    
             # Sort by OI change and select best candidates
             type_strikes.sort(key=lambda x: x['oi_change'], reverse=True)
             return self._select_best_strikes(type_strikes, opt_type)
-
+        
         # Process both types in parallel
         with ThreadPoolExecutor(max_workers=2) as executor:
             ce_future = executor.submit(analyze_option_type, 'CE')
@@ -380,7 +418,7 @@ class RealTimeTrader:
             
             selected_strikes.extend(ce_future.result())
             selected_strikes.extend(pe_future.result())
-
+            
         return selected_strikes
 
     def _calculate_delta_approximation(self, opt_type: str, strike: int, atm_strike: int, spot_price: float) -> float:
@@ -406,7 +444,7 @@ class RealTimeTrader:
         """Select the best strikes based on strategy configuration"""
         if not strikes:
             return []
-
+            
         selected = []
         
         # Always try to include ATM
@@ -414,7 +452,7 @@ class RealTimeTrader:
         if atm_option:
             selected.append(atm_option)
             logger.debug(f"Selected ATM {opt_type}: {atm_option['symbol']}")
-
+            
         # Select based on strategy preference
         strategy_type = getattr(Config, 'STRIKE_SELECTION_TYPE', 'OTM')
         
@@ -425,186 +463,14 @@ class RealTimeTrader:
         else:
             # Default: highest OI change
             best_other = next((s for s in strikes if s not in selected), None)
-
+            
         if best_other:
             selected.append(best_other)
             logger.debug(f"Selected {strategy_type} {opt_type}: {best_other['symbol']} (OI Change: {best_other['oi_change']})")
-
+            
         return selected
 
-    def fetch_and_process_data(self) -> None:
-        """
-        Optimized data fetching with parallel processing and better error handling
-        """
-        if not self.is_trading:
-            logger.debug("fetch_and_process_data: Trading not active, skipping.")
-            return
-
-        start_time = time.time()
-        
-        try:
-            if not hasattr(self.order_executor, 'kite') or not self.order_executor.kite:
-                logger.error("KiteConnect instance not found. Is live mode enabled?")
-                return
-
-            # Refresh instruments cache with timeout
-            self._refresh_instruments_cache()
-            cached_nfo, cached_nse = self._get_cached_instruments()
-            
-            if not cached_nfo and not cached_nse:
-                logger.error("Instrument cache is empty. Cannot proceed.")
-                return
-
-            # Parallel spot price and instrument token fetching
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                # Submit spot price fetch
-                spot_future = executor.submit(self._fetch_spot_price)
-                
-                # Submit instrument token fetch
-                instruments_future = executor.submit(
-                    get_instrument_tokens,
-                    Config.SPOT_SYMBOL,
-                    self.order_executor.kite,
-                    cached_nfo,
-                    cached_nse
-                )
-                
-                # Get results with timeout
-                spot_price = spot_future.result(timeout=5)
-                instruments_data = instruments_future.result(timeout=5)
-
-            if not spot_price or not instruments_data:
-                logger.error("Failed to fetch essential data (spot price or instruments)")
-                return
-
-            atm_strike = instruments_data['atm_strike']
-            expiry = instruments_data['expiry']
-            spot_token = instruments_data.get('spot_token')
-
-            logger.info(f"ATM Strike: {atm_strike}, Expiry: {expiry}, Spot: {spot_price}")
-
-            # Optimized timeframe calculation
-            end_time = datetime.now()
-            lookback_minutes = getattr(Config, 'DATA_LOOKBACK_MINUTES', 30)
-            start_time_data = end_time - timedelta(minutes=lookback_minutes)
-
-            # Parallel data fetching for spot and options
-            spot_df, options_data = self._fetch_all_data_parallel(
-                spot_token, atm_strike, start_time_data, end_time, cached_nfo, cached_nse
-            )
-
-            # Optimized analysis
-            if options_data:
-                selected_strikes_info = self._analyze_options_data_optimized(spot_price, options_data)
-            else:
-                selected_strikes_info = self._get_fallback_strikes(atm_strike, cached_nfo, cached_nse)
-
-            if not selected_strikes_info:
-                logger.warning("No strikes selected for processing")
-                return
-
-            # Process selected strikes
-            self._process_selected_strikes(selected_strikes_info, options_data, spot_df)
-
-            processing_time = time.time() - start_time
-            logger.debug(f"Data fetch and process completed in {processing_time:.2f}s")
-
-        except Exception as e:
-            logger.error(f"Error in fetch_and_process_data: {e}", exc_info=True)
-
-    def _fetch_spot_price(self) -> Optional[float]:
-        """Fetch spot price with error handling"""
-        try:
-            spot_symbol_ltp = _get_spot_ltp_symbol()
-            ltp_data = self.order_executor.kite.ltp([spot_symbol_ltp])
-            spot_price = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
-            
-            if spot_price is None:
-                logger.error(f"Failed to fetch spot price for {spot_symbol_ltp}")
-                return None
-                
-            logger.debug(f"Successfully fetched spot price: {spot_price}")
-            return float(spot_price)
-            
-        except Exception as e:
-            logger.error(f"Exception fetching spot price: {e}")
-            return None
-
-    def _fetch_all_data_parallel(self, spot_token: Optional[int], atm_strike: int, 
-                               start_time: datetime, end_time: datetime,
-                               cached_nfo: List[Dict], cached_nse: List[Dict]) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
-        """Fetch all required data in parallel"""
-        spot_df = pd.DataFrame()
-        options_data = {}
-
-        # Create list of all data fetch tasks
-        fetch_tasks = []
-        
-        # Add spot data fetch task
-        if spot_token:
-            fetch_tasks.append(('spot', spot_token, 'SPOT'))
-
-        # Add options data fetch tasks
-        strike_range = getattr(Config, 'STRIKE_RANGE', 4)
-        for offset in range(-strike_range, strike_range + 1):
-            temp_instruments = get_instrument_tokens(
-                symbol=Config.SPOT_SYMBOL,
-                offset=offset,
-                kite_instance=self.order_executor.kite,
-                cached_nfo_instruments=cached_nfo,
-                cached_nse_instruments=cached_nse
-            )
-            
-            if temp_instruments:
-                for opt_type, token_key, symbol_key in [('CE', 'ce_token', 'ce_symbol'), ('PE', 'pe_token', 'pe_symbol')]:
-                    token = temp_instruments.get(token_key)
-                    symbol = temp_instruments.get(symbol_key)
-                    if token and symbol:
-                        fetch_tasks.append((symbol, token, opt_type))
-
-        # Execute all fetch tasks in parallel
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_symbol = {
-                executor.submit(self._fetch_historical_data, token, start_time, end_time): symbol
-                for symbol, token, _ in fetch_tasks
-            }
-
-            for future in as_completed(future_to_symbol, timeout=15):
-                symbol = future_to_symbol[future]
-                try:
-                    hist_data = future.result()
-                    if hist_data is not None:
-                        if symbol == 'SPOT':
-                            spot_df = hist_data
-                        else:
-                            options_data[symbol] = hist_data
-                except Exception as e:
-                    logger.warning(f"Failed to fetch data for {symbol}: {e}")
-
-        return spot_df, options_data
-
-    def _fetch_historical_data(self, token: int, start_time: datetime, end_time: datetime) -> Optional[pd.DataFrame]:
-        """Fetch historical data for a single instrument"""
-        try:
-            hist_data = self.order_executor.kite.historical_data(
-                instrument_token=token,
-                from_date=start_time,
-                to_date=end_time,
-                interval="minute"
-            )
-            
-            if hist_data:
-                df = pd.DataFrame(hist_data)
-                if 'date' in df.columns:
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                return df
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error fetching historical data for token {token}: {e}")
-            return None
-
+    # --- CRITICAL CHANGE: Modified _get_fallback_strikes to pass cached data ---
     def _get_fallback_strikes(self, atm_strike: int, cached_nfo: List[Dict], cached_nse: List[Dict]) -> List[Dict[str, Any]]:
         """Optimized fallback strike selection"""
         logger.warning("Using fallback strike selection")
@@ -612,12 +478,13 @@ class RealTimeTrader:
         
         for offset in [0, 1, -1]:  # ATM, ATM+50, ATM-50
             fb_strike = atm_strike + (offset * 50)
+            # --- CRITICAL CHANGE: Pass cached data ---
             fb_instruments = get_instrument_tokens(
                 symbol=Config.SPOT_SYMBOL,
-                offset=offset,
                 kite_instance=self.order_executor.kite,
-                cached_nfo_instruments=cached_nfo,
-                cached_nse_instruments=cached_nse
+                cached_nfo_instruments=cached_nfo, # Pass cached data
+                cached_nse_instruments=cached_nse, # Pass cached data
+                offset=offset
             )
             
             if fb_instruments:
@@ -636,15 +503,15 @@ class RealTimeTrader:
                             'is_otm': (offset > 0) if opt_type == 'CE' else (offset < 0),
                             'is_itm': (offset < 0) if opt_type == 'CE' else (offset > 0)
                         })
-        
+                        
         return fallback_strikes
 
-    def _process_selected_strikes(self, selected_strikes: List[Dict[str, Any]], 
-                                options_data: Dict[str, pd.DataFrame], spot_df: pd.DataFrame) -> None:
+    def _process_selected_strikes(self, selected_strikes: List[Dict[str, Any]],
+                                 options_data: Dict[str, pd.DataFrame], spot_df: pd.DataFrame) -> None:
         """Process selected strikes with parallel execution"""
         if not selected_strikes:
             return
-
+            
         # Process strikes in parallel for better performance
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
@@ -660,7 +527,7 @@ class RealTimeTrader:
                     # Try LTP-based processing
                     future = executor.submit(self._process_ltp_based, symbol, spot_df, strike_info)
                     futures.append(future)
-            
+                    
             # Wait for all processing to complete
             for future in as_completed(futures, timeout=10):
                 try:
@@ -685,15 +552,12 @@ class RealTimeTrader:
                 
                 self.process_options_bar(symbol, dummy_df, spot_df, strike_info)
             else:
-                logger.warning(f"Could not fetch valid LTP for {symbol}")
-                
+                logger.warning(f"Could not get LTP for {symbol}")
         except Exception as e:
             logger.error(f"Error in LTP-based processing for {symbol}: {e}")
 
     def process_options_bar(self, symbol: str, ohlc: pd.DataFrame, spot_ohlc: pd.DataFrame, strike_info: Dict[str, Any]) -> None:
-        """
-        Optimized options bar processing with enhanced error handling
-        """
+        """Optimized options bar processing with enhanced error handling"""
         if not self.is_trading:
             logger.debug(f"process_options_bar: Trading not active for {symbol}")
             return
@@ -705,24 +569,13 @@ class RealTimeTrader:
                 logger.debug(f"Outside trading hours for {symbol}")
                 return
 
-            # Get current price with fallback mechanisms
+            # Get current price with fallbacks
             current_price = self._get_current_price(ohlc, strike_info)
             if current_price <= 0:
-                logger.warning(f"Invalid current price for {symbol}: {current_price}")
+                logger.debug(f"Invalid price for {symbol}")
                 return
 
-            # Time filter check
-            if not ohlc.empty:
-                ts = ohlc.index[-1]
-                if not self._passes_time_filter(ts):
-                    logger.debug(f"Time filter rejected bar for {symbol}")
-                    return
-            else:
-                ts = pd.Timestamp.now()
-
-            logger.debug(f"Processing {symbol} at {ts}, price: {current_price}")
-
-            # Enhanced signal generation
+            # Generate enhanced signal with multiple confirmations
             signal = self._generate_enhanced_options_signal(ohlc, spot_ohlc, strike_info, current_price)
             
             if not signal:
@@ -732,7 +585,6 @@ class RealTimeTrader:
             # Optimized confidence check
             signal_confidence = float(signal.get("confidence", 0.0))
             confidence_threshold = getattr(Config, 'CONFIDENCE_THRESHOLD', 7.0)
-            
             if signal_confidence < confidence_threshold:
                 logger.debug(f"Signal confidence {signal_confidence} below threshold {confidence_threshold} for {symbol}")
                 return
@@ -754,7 +606,7 @@ class RealTimeTrader:
                 logger.info(f"✅ Successfully executed options trade for {symbol}")
             else:
                 logger.warning(f"❌ Failed to execute options trade for {symbol}")
-
+                
         except Exception as exc:
             logger.error(f"Error processing options bar for {symbol}: {exc}", exc_info=True)
 
@@ -768,89 +620,63 @@ class RealTimeTrader:
             return False
         if hour > 15 or (hour == 15 and minute > 30):
             return False
-        
         return True
 
     def _get_current_price(self, ohlc: pd.DataFrame, strike_info: Dict[str, Any]) -> float:
         """Get current price with multiple fallback mechanisms"""
         if not ohlc.empty:
-            return float(ohlc.iloc[-1].get("last_price", 0))
-        
-        # Fallback to strike_info
-        ltp = strike_info.get('ltp', 0)
-        if ltp > 0:
-            return float(ltp)
-            
-        logger.warning("Could not determine current price from any source")
-        return 0.0
-
-    def _passes_time_filter(self, timestamp: pd.Timestamp) -> bool:
-        """Enhanced time filter check"""
-        if not hasattr(Config, 'TIME_FILTER_START') or not hasattr(Config, 'TIME_FILTER_END'):
-            return True
-            
-        if not Config.TIME_FILTER_START or not Config.TIME_FILTER_END:
-            return True
-            
-        current_time_str = timestamp.strftime("%H:%M")
-        return Config.TIME_FILTER_START <= current_time_str <= Config.TIME_FILTER_END
+            return ohlc['last_price'].iloc[-1]
+        return strike_info.get('ltp', 0)
 
     def _generate_enhanced_options_signal(self, ohlc: pd.DataFrame, spot_ohlc: pd.DataFrame, 
-                                        strike_info: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """
-        Enhanced options signal generation with multiple strategies
-        """
+                                         strike_info: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
+        """Generate enhanced options signal with multiple confirmations"""
         try:
-            signal_dict = {
-                "signal": None,
-                "entry_price": current_price,
-                "stop_loss": None,
-                "target": None,
-                "confidence": 0.0,
-                "market_volatility": 0.0,
-                "strategy_type": "options_momentum"
-            }
-
-            # Multi-factor signal generation
+            signal_dict = {"signal": None, "confidence": 0.0, "reasons": []}
             confidence_score = 0.0
             
-            # 1. Options price momentum analysis
+            # 1. Momentum analysis
             momentum_signal = self._analyze_options_momentum(ohlc, strike_info)
             if momentum_signal:
                 confidence_score += momentum_signal['confidence']
-                if not signal_dict["signal"]:
-                    signal_dict.update(momentum_signal)
-
-            # 2. Spot-options correlation analysis
+                signal_dict["signal"] = momentum_signal["signal"]
+                signal_dict["reasons"].append(f"Momentum: {momentum_signal['strategy_type']}")
+                
+            # 2. Spot-options correlation
             correlation_signal = self._analyze_spot_options_correlation(spot_ohlc, strike_info, current_price)
             if correlation_signal:
                 confidence_score += correlation_signal['confidence']
-                if correlation_signal['confidence'] > momentum_signal.get('confidence', 0):
-                    signal_dict.update(correlation_signal)
-
-            # 3. Options Greeks-based signals (simplified)
+                if not signal_dict["signal"]:
+                    signal_dict["signal"] = correlation_signal["signal"]
+                signal_dict["reasons"].append(f"Correlation: {correlation_signal['strategy_type']}")
+                
+            # 3. Greeks approximation
             greeks_signal = self._analyze_options_greeks(strike_info, current_price)
             if greeks_signal:
                 confidence_score += greeks_signal['confidence']
-
+                if not signal_dict["signal"]:
+                    signal_dict["signal"] = greeks_signal["signal"]
+                signal_dict["reasons"].append(f"Greeks: Delta-based analysis")
+                
             # 4. Volume and OI analysis
             volume_signal = self._analyze_volume_oi(ohlc, strike_info)
             if volume_signal:
                 confidence_score *= volume_signal['multiplier']
-
+                signal_dict["reasons"].append(f"Volume/OI: Multiplier {volume_signal['multiplier']:.2f}")
+                
             # Final confidence adjustment
             signal_dict["confidence"] = min(confidence_score, 10.0)  # Cap at 10
-
+            
             # Only return signal if above minimum threshold
             min_confidence = getattr(Config, 'MIN_SIGNAL_CONFIDENCE', 6.0)
             if signal_dict["confidence"] >= min_confidence and signal_dict["signal"]:
                 # Set risk parameters
+                signal_dict["entry_price"] = current_price
                 signal_dict["stop_loss"] = self._calculate_options_stop_loss(current_price, strike_info)
                 signal_dict["target"] = self._calculate_options_target(current_price, strike_info)
                 return signal_dict
-
+                
             return None
-
         except Exception as e:
             logger.error(f"Error generating enhanced options signal: {e}")
             return None
@@ -859,13 +685,13 @@ class RealTimeTrader:
         """Analyze options price momentum"""
         if ohlc.empty or len(ohlc) < 3:
             return None
-
+            
         try:
             # Calculate momentum indicators
             recent_prices = ohlc['last_price'].tail(5).values
             if len(recent_prices) < 2:
                 return None
-
+                
             # Price change momentum
             price_change_pct = (recent_prices[-1] - recent_prices[0]) / recent_prices[0] * 100
             
@@ -876,32 +702,30 @@ class RealTimeTrader:
                 avg_volume = recent_volumes.mean()
                 current_volume = recent_volumes.iloc[-1]
                 volume_momentum = min(current_volume / avg_volume, 3.0) if avg_volume > 0 else 1.0
-
+                
             # Determine signal strength
             confidence = 0.0
             signal_direction = None
-
+            
             # Bullish momentum
             if price_change_pct > 2.0:  # 2% price increase
                 signal_direction = "BUY"
                 confidence = min(price_change_pct * volume_momentum, 5.0)
-
+                
             # Bearish momentum (for selling options)
             elif price_change_pct < -1.5:  # 1.5% price decrease
                 # For options, we typically buy on dips if it's a good setup
                 if strike_info.get('is_otm', False):  # OTM options on dips can be opportunities
                     signal_direction = "BUY"
                     confidence = min(abs(price_change_pct) * volume_momentum * 0.8, 4.0)
-
+                    
             if signal_direction and confidence > 0:
                 return {
                     "signal": signal_direction,
                     "confidence": confidence,
                     "strategy_type": "momentum"
                 }
-
             return None
-
         except Exception as e:
             logger.error(f"Error in momentum analysis: {e}")
             return None
@@ -910,50 +734,44 @@ class RealTimeTrader:
         """Analyze spot-options price correlation"""
         if spot_ohlc.empty or len(spot_ohlc) < 5:
             return None
-
+            
         try:
             # Calculate spot momentum
             spot_prices = spot_ohlc['close'].tail(5).values
             spot_change_pct = (spot_prices[-1] - spot_prices[0]) / spot_prices[0] * 100
-
+            
             # Analyze based on option type and moneyness
             opt_type = strike_info.get('type', '')
             is_atm = strike_info.get('is_atm', False)
             is_itm = strike_info.get('is_itm', False)
             is_otm = strike_info.get('is_otm', False)
-
-            confidence = 0.0
+            
+            # Simple correlation logic
             signal_direction = None
-
-            # CE analysis
+            confidence = 0.0
+            
             if opt_type == 'CE':
-                if spot_change_pct > 0.3:  # Spot moving up
-                    if is_atm or is_otm:
-                        signal_direction = "BUY"
-                        confidence = min(spot_change_pct * 2.0, 6.0)
-                    elif is_itm:
-                        signal_direction = "BUY"
-                        confidence = min(spot_change_pct * 1.5, 5.0)
-
-            # PE analysis
-            elif opt_type == 'PE':
-                if spot_change_pct < -0.3:  # Spot moving down
-                    if is_atm or is_otm:
-                        signal_direction = "BUY"
-                        confidence = min(abs(spot_change_pct) * 2.0, 6.0)
-                    elif is_itm:
-                        signal_direction = "BUY"
-                        confidence = min(abs(spot_change_pct) * 1.5, 5.0)
-
-            if signal_direction and confidence > 0:
+                if spot_change_pct > 0.2:  # Spot going up
+                    signal_direction = "BUY"
+                    confidence = 2.5
+                elif spot_change_pct < -0.2:  # Spot going down
+                    signal_direction = "SELL"
+                    confidence = 2.5
+            else:  # PE
+                if spot_change_pct > 0.2:  # Spot going up
+                    signal_direction = "SELL"
+                    confidence = 2.5
+                elif spot_change_pct < -0.2:  # Spot going down
+                    signal_direction = "BUY"
+                    confidence = 2.5
+                    
+            if signal_direction:
                 return {
                     "signal": signal_direction,
                     "confidence": confidence,
                     "strategy_type": "correlation"
                 }
-
             return None
-
         except Exception as e:
             logger.error(f"Error in correlation analysis: {e}")
             return None
@@ -963,7 +781,6 @@ class RealTimeTrader:
         try:
             delta = strike_info.get('delta', 0)
             opt_type = strike_info.get('type', '')
-            
             confidence_boost = 0.0
             
             # Delta-based analysis
@@ -977,9 +794,8 @@ class RealTimeTrader:
                     confidence_boost = 1.5
                 elif abs(delta) > 0.7:  # High delta, more sensitive
                     confidence_boost = 1.0
-
+                    
             return {"confidence": confidence_boost} if confidence_boost > 0 else None
-
         except Exception as e:
             logger.error(f"Error in Greeks analysis: {e}")
             return None
@@ -1001,12 +817,41 @@ class RealTimeTrader:
                 multiplier *= 1.3
             elif oi_change < 0:
                 multiplier *= 0.9
-
+                
             return {"multiplier": multiplier}
-
         except Exception as e:
             logger.error(f"Error in volume/OI analysis: {e}")
             return {"multiplier": 1.0}
+
+    def _calculate_options_position_size(self, signal: Dict[str, Any], strike_info: Dict[str, Any], current_price: float) -> Dict[str, Any]:
+        """Calculate position size for options trade with enhanced logic"""
+        try:
+            # Use the base position sizer
+            base_position = self.position_sizer.calculate_position_size(
+                signal=signal,
+                price=current_price,
+                instrument_info=strike_info
+            )
+            
+            if not base_position:
+                return None
+                
+            # Options-specific adjustments
+            quantity = base_position.get('quantity', 0)
+            
+            # Reduce quantity for OTM options (higher risk)
+            if strike_info.get('is_otm', False):
+                quantity = max(1, int(quantity * 0.7))
+                
+            # Increase quantity for ATM options (balanced risk/reward)
+            elif strike_info.get('is_atm', False):
+                quantity = int(quantity * 1.1)
+                
+            base_position['quantity'] = quantity
+            return base_position
+        except Exception as e:
+            logger.error(f"Error calculating options position size: {e}")
+            return None
 
     def _calculate_options_stop_loss(self, current_price: float, strike_info: Dict[str, Any]) -> float:
         """Calculate options-specific stop loss"""
@@ -1021,7 +866,6 @@ class RealTimeTrader:
                 stop_loss_pct *= 0.8  # ITM options can have tighter stops
                 
             return current_price * (1 - stop_loss_pct / 100)
-            
         except Exception as e:
             logger.error(f"Error calculating options stop loss: {e}")
             return current_price * 0.8  # 20% default
@@ -1029,53 +873,18 @@ class RealTimeTrader:
     def _calculate_options_target(self, current_price: float, strike_info: Dict[str, Any]) -> float:
         """Calculate options-specific target"""
         try:
-            # Options targets should account for time decay and volatility
-            target_pct = getattr(Config, 'OPTIONS_TARGET_PCT', 50.0)  # 50% default
+            target_pct = getattr(Config, 'OPTIONS_TARGET_PCT', 40.0)  # 40% default
             
-            # Adjust based on option characteristics
-            if strike_info.get('is_atm', False):
-                target_pct *= 1.2  # ATM options have good profit potential
-            elif strike_info.get('is_otm', False):
-                target_pct *= 1.5  # OTM options can give higher returns
+            # Adjust based on option type and moneyness
+            if strike_info.get('is_otm', False):
+                target_pct *= 1.3  # OTM options can have higher targets
+            elif strike_info.get('is_itm', False):
+                target_pct *= 0.9  # ITM options may have lower targets
                 
             return current_price * (1 + target_pct / 100)
-            
         except Exception as e:
             logger.error(f"Error calculating options target: {e}")
-            return current_price * 1.5  # 50% default
-
-    def _calculate_options_position_size(self, signal: Dict[str, Any], strike_info: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """Calculate position size specific to options trading"""
-        try:
-            # Use the existing risk manager but with options-specific adjustments
-            base_position = self.risk_manager.calculate_position_size(
-                entry_price=signal.get("entry_price", current_price),
-                stop_loss=signal.get("stop_loss", current_price),
-                signal_confidence=signal.get("confidence", 0.0),
-                market_volatility=signal.get("market_volatility", 0.0),
-                lot_size=getattr(Config, 'NIFTY_LOT_SIZE', 75)
-            )
-            
-            if not base_position:
-                return None
-                
-            # Options-specific adjustments
-            quantity = base_position.get('quantity', 0)
-            
-            # Reduce quantity for OTM options (higher risk)
-            if strike_info.get('is_otm', False):
-                quantity = max(1, int(quantity * 0.7))
-            
-            # Increase quantity for ATM options (balanced risk/reward)
-            elif strike_info.get('is_atm', False):
-                quantity = int(quantity * 1.1)
-                
-            base_position['quantity'] = quantity
-            return base_position
-            
-        except Exception as e:
-            logger.error(f"Error calculating options position size: {e}")
-            return None
+            return current_price * 1.4  # 40% default
 
     def _passes_risk_checks(self, signal: Dict[str, Any], position: Dict[str, Any], strike_info: Dict[str, Any]) -> bool:
         """Enhanced risk management checks for options"""
@@ -1093,7 +902,6 @@ class RealTimeTrader:
             # Maximum position size check
             max_position_value = getattr(Config, 'MAX_POSITION_VALUE', 50000)
             position_value = position['quantity'] * signal.get('entry_price', 0) * getattr(Config, 'NIFTY_LOT_SIZE', 75)
-            
             if position_value > max_position_value:
                 logger.warning(f"Position value {position_value} exceeds limit {max_position_value}")
                 return False
@@ -1103,7 +911,6 @@ class RealTimeTrader:
             # For now, assume this check passes
             
             return True
-            
         except Exception as e:
             logger.error(f"Error in risk checks: {e}")
             return False
@@ -1114,287 +921,122 @@ class RealTimeTrader:
             # Send telegram alert
             token = len(self.trades) + 1
             self.telegram_controller.send_signal_alert(token, signal, position)
-
+            
             # Place entry order
             order_transaction_type = signal.get("signal", "BUY")
-            
             logger.info(f"Placing {order_transaction_type} order for {symbol}, Qty: {position['quantity']}")
             
             order_id = self.order_executor.place_entry_order(
                 symbol=symbol,
                 exchange="NFO",
                 transaction_type=order_transaction_type,
-                quantity=position["quantity"],
+                quantity=position['quantity'],
+                price=signal.get('entry_price'),
+                product="MIS"  # Assuming MIS for intraday options
             )
             
             if not order_id:
                 logger.error(f"Failed to place entry order for {symbol}")
                 return False
-
-            # Setup GTT orders
-            logger.debug(f"Setting up GTT orders for {symbol}")
-            self.order_executor.setup_gtt_orders(
-                entry_order_id=order_id,
-                entry_price=signal.get("entry_price", 0),
-                stop_loss_price=signal.get("stop_loss", 0),
-                target_price=signal.get("target", 0),
+                
+            # Setup GTT orders for stop-loss and target
+            sl_order_id = self.order_executor.setup_gtt_orders(
                 symbol=symbol,
                 exchange="NFO",
-                quantity=position["quantity"],
-                transaction_type=order_transaction_type,
+                transaction_type="SELL" if order_transaction_type == "BUY" else "BUY",
+                quantity=position['quantity'],
+                stop_loss_price=signal.get('stop_loss'),
+                target_price=signal.get('target')
             )
-
-            # Record trade
+            
+            # Record the trade
             trade_record = {
-                "order_id": order_id,
+                "timestamp": datetime.now().isoformat(),
                 "symbol": symbol,
                 "direction": order_transaction_type,
-                "quantity": position["quantity"],
-                "entry_price": signal.get("entry_price", 0),
-                "stop_loss": signal.get("stop_loss", 0),
-                "target": signal.get("target", 0),
-                "confidence": signal.get("confidence", 0.0),
+                "quantity": position['quantity'],
+                "entry_price": signal.get('entry_price'),
+                "stop_loss": signal.get('stop_loss'),
+                "target": signal.get('target'),
                 "strike_info": strike_info,
-                "timestamp": datetime.now(),
-                "strategy_type": signal.get("strategy_type", "unknown")
+                "order_id": order_id,
+                "sl_order_id": sl_order_id,
+                "status": "OPEN"
             }
             
             self.trades.append(trade_record)
-            
-            logger.info(f"✅ Options trade recorded: {order_transaction_type} {position['quantity']}x {symbol} @ {signal.get('entry_price', 0)}")
+            logger.info(f"✅ Trade executed and recorded: {trade_record}")
             return True
-
+            
         except Exception as e:
-            logger.error(f"Error executing options trade for {symbol}: {e}", exc_info=True)
+            logger.error(f"Error executing options trade for {symbol}: {e}")
             return False
 
-    # Keep the original process_bar method for backward compatibility
-    def process_bar(self, ohlc: pd.DataFrame) -> None:
-        """Original bar processing method for non-options strategies"""
-        logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
-        if not self.is_trading:
-            logger.debug("process_bar: Trading not active, returning.")
-            return
-        if ohlc is None or len(ohlc) < 30:
-            logger.debug("Insufficient data to process bar (less than 30 points).")
-            return
-        try:
-            if not isinstance(ohlc.index, pd.DatetimeIndex):
-                logger.error("OHLC data must have DatetimeIndex.")
-                return
-            ts = ohlc.index[-1]
-            
-            if not self._passes_time_filter(ts):
-                logger.debug("Time filter rejected bar")
-                return
-                
-            current_price = float(ohlc.iloc[-1]["close"])
-            logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
-            
-            signal = self.strategy.generate_signal(ohlc, current_price)
-            logger.debug(f"Strategy returned signal: {signal}")
-            if not signal:
-                logger.debug("No signal generated by strategy.")
-                return
-                
-            signal_confidence = float(signal.get("confidence", 0.0))
-            logger.debug(f"Signal confidence: {signal_confidence}, Threshold: {getattr(Config, 'CONFIDENCE_THRESHOLD', 7.0)}")
-            if signal_confidence < getattr(Config, 'CONFIDENCE_THRESHOLD', 7.0):
-                logger.debug("Signal confidence below threshold, discarding.")
-                return
-                
-            position = self.risk_manager.calculate_position_size(
-                entry_price=signal.get("entry_price", current_price),
-                stop_loss=signal.get("stop_loss", current_price),
-                signal_confidence=signal.get("confidence", 0.0),
-                market_volatility=signal.get("market_volatility", 0.0),
-            )
-            logger.debug(f"Position sizing returned: {position}")
-            if not position or position.get("quantity", 0) <= 0:
-                logger.debug("Position sizing failed or quantity is zero/negative.")
-                return
-                
-            token = len(self.trades) + 1
-            self.telegram_controller.send_signal_alert(token, signal, position)
-            
-            transaction_type = signal.get("signal") or signal.get("direction")
-            if not transaction_type:
-                logger.warning("Missing signal direction.")
-                return
-                
-            symbol = getattr(Config, "TRADE_SYMBOL", "NIFTY50")
-            exchange = getattr(Config, "TRADE_EXCHANGE", "NFO")
-            logger.debug(f"Attempting to place entry order. Symbol: {symbol}, Exchange: {exchange}, Type: {transaction_type}, Qty: {position['quantity']}")
-            
-            order_id = self.order_executor.place_entry_order(
-                symbol=symbol,
-                exchange=exchange,
-                transaction_type=transaction_type,
-                quantity=position["quantity"],
-            )
-            if not order_id:
-                logger.warning("Failed to place entry order.")
-                return
-                
-            logger.debug("Attempting to setup GTT orders...")
-            self.order_executor.setup_gtt_orders(
-                entry_order_id=order_id,
-                entry_price=signal.get("entry_price", current_price),
-                stop_loss_price=signal.get("stop_loss", current_price),
-                target_price=signal.get("target", current_price),
-                symbol=symbol,
-                exchange=exchange,
-                quantity=position["quantity"],
-                transaction_type=transaction_type,
-            )
-            
-            self.trades.append({
-                "order_id": order_id,
-                "direction": transaction_type,
-                "quantity": position["quantity"],
-                "entry_price": signal.get("entry_price", current_price),
-                "stop_loss": signal.get("stop_loss", current_price),
-                "target": signal.get("target", current_price),
-                "confidence": signal.get("confidence", 0.0),
-            })
-            logger.info(f"✅ Trade recorded: {transaction_type} {position['quantity']} @ {signal.get('entry_price', current_price)}")
-        except Exception as exc:
-            logger.error("Error processing bar: %s", exc, exc_info=True)
-
-    def get_status(self) -> Dict[str, Any]:
-        """Enhanced status reporting"""
-        try:
-            active_orders = 0
-            if hasattr(self.order_executor, 'get_active_orders'):
-                active_orders = len(self.order_executor.get_active_orders())
-                
-            status: Dict[str, Any] = {
-                "is_trading": self.is_trading,
-                "open_orders": active_orders,
-                "trades_today": len(self.trades),
-                "live_mode": self.live_mode,
-                "cache_age_minutes": (time.time() - self._instruments_cache_timestamp) / 60,
-                "total_pnl": self.daily_pnl,
-                "last_update": datetime.now().strftime("%H:%M:%S")
-            }
-            
-            # Add risk manager status if available
-            if hasattr(self.risk_manager, 'get_risk_status'):
-                status.update(self.risk_manager.get_risk_status())
-                
-            return status
-        except Exception as e:
-            logger.error(f"Error getting status: {e}")
-            return {"error": str(e)}
-
-    def get_summary(self) -> str:
-        """Enhanced daily summary with options-specific information"""
-        try:
-            lines = [
-                f"📊 <b>Daily Options Trading Summary</b>",
-                f"🔁 <b>Total trades:</b> {len(self.trades)}",
-                f"💰 <b>PnL:</b> ₹{self.daily_pnl:.2f}",
-                f"📈 <b>Mode:</b> {'🟢 LIVE' if self.live_mode else '🛡️ SHADOW'}",
-                "────────────────────"
-            ]
-            
-            # Group trades by option type
-            ce_trades = [t for t in self.trades if t.get('strike_info', {}).get('type') == 'CE']
-            pe_trades = [t for t in self.trades if t.get('strike_info', {}).get('type') == 'PE']
-            
-            if ce_trades:
-                lines.append(f"📈 <b>CE Trades:</b> {len(ce_trades)}")
-            if pe_trades:
-                lines.append(f"📉 <b>PE Trades:</b> {len(pe_trades)}")
-                
-            lines.append("────────────────────")
-            
-            # Show recent trades
-            recent_trades = self.trades[-5:] if len(self.trades) > 5 else self.trades
-            for trade in recent_trades:
-                symbol = trade.get('symbol', 'N/A')
-                strike_info = trade.get('strike_info', {})
-                opt_type = strike_info.get('type', 'UNK')
-                strike = strike_info.get('strike', 'N/A')
-                
-                lines.append(
-                    f"{opt_type} {strike} {trade['direction']} {trade['quantity']} @ ₹{trade['entry_price']:.2f} "
-                    f"(SL ₹{trade['stop_loss']:.2f}, TP ₹{trade['target']:.2f})"
-                )
-            
-            return "\n".join(lines)
-        except Exception as e:
-            logger.error(f"Error generating summary: {e}")
-            return f"📊 Summary Error: {str(e)}"
-
-    def __repr__(self) -> str:
-        return (f"<RealTimeTrader is_trading={self.is_trading} "
-                f"live_mode={self.live_mode} trades_today={len(self.trades)} "
-                f"cache_age={int((time.time() - self._instruments_cache_timestamp)/60)}min>")
-
-    def __del__(self):
-        """Cleanup on object destruction"""
-        try:
-            if hasattr(self, '_executor') and self._executor:
-                self._executor.shutdown(wait=False)
-        except Exception:
-            pass
-
-# --- Additional Utility Methods for Complete Functionality ---
-
+    # --- Additional Utility Methods for Complete Functionality ---
     def get_current_positions(self) -> List[Dict[str, Any]]:
         """Get current open positions"""
         try:
             if not self.order_executor or not hasattr(self.order_executor, 'kite') or not self.order_executor.kite:
                 return []
-            
             positions = self.order_executor.kite.positions()
             return positions.get('net', []) if positions else []
-            
         except Exception as e:
             logger.error(f"Error getting current positions: {e}")
             return []
 
-    def get_order_history(self) -> List[Dict[str, Any]]:
-        """Get today's order history"""
-        try:
-            if not self.order_executor or not hasattr(self.order_executor, 'kite') or not self.order_executor.kite:
-                return []
-            
-            orders = self.order_executor.kite.orders()
-            return orders if orders else []
-            
-        except Exception as e:
-            logger.error(f"Error getting order history: {e}")
-            return []
-
     def calculate_current_pnl(self) -> float:
-        """Calculate current P&L from positions"""
+        """Calculate current P&L from open positions"""
         try:
             positions = self.get_current_positions()
             total_pnl = 0.0
-            
-            for position in positions:
-                if position.get('quantity', 0) != 0:  # Open position
-                    pnl = float(position.get('pnl', 0))
-                    total_pnl += pnl
-            
-            self.daily_pnl = total_pnl
+            for pos in positions:
+                total_pnl += pos.get('pnl', 0)
             return total_pnl
-            
         except Exception as e:
-            logger.error(f"Error calculating P&L: {e}")
+            logger.error(f"Error calculating current P&L: {e}")
             return 0.0
 
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """Calculate basic performance metrics"""
+        try:
+            metrics = {
+                "total_trades": len(self.trades),
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "win_rate": 0.0,
+                "total_pnl": self.daily_pnl,
+                "trades_by_type": {},
+                "avg_win": 0.0,
+                "avg_loss": 0.0
+            }
+            
+            winning_pnls = []
+            losing_pnls = []
+            
+            # For now, use a placeholder P&L calculation
+            # In a real system, you'd track actual exit prices
+            for trade in self.trades:
+                strike_info = trade.get('strike_info', {})
+                opt_type = strike_info.get('type', 'UNK')
+                metrics["trades_by_type"][opt_type] = metrics["trades_by_type"].get(opt_type, 0) + 1
+                
+                # Calculate win rate
+                total_trades = len(self.trades)
+                if total_trades > 0:
+                    metrics["win_rate"] = (metrics["winning_trades"] / total_trades) * 100
+                    
+            return metrics
+        except Exception as e:
+            logger.error(f"Error calculating performance metrics: {e}")
+            return {"error": str(e)}
+
     def get_market_data_summary(self) -> Dict[str, Any]:
-        """Get market data summary for monitoring"""
+        """Get a summary of current market data"""
         try:
             summary = {
                 "timestamp": datetime.now().isoformat(),
                 "spot_price": None,
-                "volatility": None,
-                "trend": "NEUTRAL",
-                "market_status": "UNKNOWN"
+                "trend": "NEUTRAL"
             }
             
             # Get spot price
@@ -1404,7 +1046,7 @@ class RealTimeTrader:
                 summary["spot_price"] = ltp_data.get(spot_symbol_ltp, {}).get('last_price')
             except Exception:
                 pass
-            
+                
             # Basic trend analysis (simplified)
             if hasattr(self, '_last_spot_prices'):
                 if len(self._last_spot_prices) >= 5:
@@ -1413,9 +1055,8 @@ class RealTimeTrader:
                         summary["trend"] = "BULLISH"
                     elif recent_prices[-1] < recent_prices[0]:
                         summary["trend"] = "BEARISH"
-            
+                        
             return summary
-            
         except Exception as e:
             logger.error(f"Error getting market data summary: {e}")
             return {"error": str(e)}
@@ -1423,155 +1064,90 @@ class RealTimeTrader:
     def force_exit_all_positions(self) -> bool:
         """Emergency function to exit all open positions"""
         try:
-            logger.warning("🚨 FORCE EXIT ALL POSITIONS initiated")
-            
             positions = self.get_current_positions()
-            exit_orders = []
+            success_count = 0
             
-            for position in positions:
-                if position.get('quantity', 0) != 0:
-                    # Determine exit transaction type
-                    current_qty = int(position.get('quantity', 0))
-                    if current_qty > 0:
-                        transaction_type = "SELL"
-                    else:
-                        transaction_type = "BUY"
-                        current_qty = abs(current_qty)
+            for pos in positions:
+                if pos.get('quantity', 0) != 0:
+                    symbol = pos.get('tradingsymbol')
+                    exchange = pos.get('exchange')
+                    quantity = abs(pos.get('quantity', 0))
+                    transaction_type = "SELL" if pos.get('quantity', 0) > 0 else "BUY"
                     
-                    # Place market order to exit
                     try:
-                        order_id = self.order_executor.place_entry_order(
-                            symbol=position.get('tradingsymbol', ''),
-                            exchange=position.get('exchange', 'NFO'),
+                        order_id = self.order_executor.place_order(
+                            symbol=symbol,
+                            exchange=exchange,
                             transaction_type=transaction_type,
-                            quantity=current_qty,
-                            order_type="MARKET"
+                            quantity=quantity,
+                            order_type="MARKET",
+                            product=pos.get('product')
                         )
-                        
                         if order_id:
-                            exit_orders.append(order_id)
-                            logger.info(f"Emergency exit order placed: {order_id}")
+                            success_count += 1
+                            logger.info(f"Exit order placed for {symbol}: {order_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to exit {symbol}: {e}")
                         
-                    except Exception as order_error:
-                        logger.error(f"Failed to place emergency exit order: {order_error}")
-            
-            # Send alert
-            if exit_orders:
-                self.telegram_controller.send_message(
-                    f"🚨 EMERGENCY EXIT: {len(exit_orders)} exit orders placed"
-                )
-                return True
-            else:
-                self.telegram_controller.send_message("ℹ️ No positions to exit")
-                return False
-                
+            self.telegram_controller.send_message(
+                f"🚨 Emergency exit completed. {success_count}/{len(positions)} positions closed."
+            )
+            return success_count == len(positions)
         except Exception as e:
-            logger.error(f"Error in force exit: {e}")
-            self.telegram_controller.send_message(f"❌ Force exit failed: {str(e)[:100]}")
+            logger.error(f"Error in emergency exit: {e}")
             return False
 
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics for the day"""
+    def optimize_performance(self) -> None:
+        """Optimize system performance by cleaning up resources"""
         try:
-            metrics = {
-                "total_trades": len(self.trades),
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "total_pnl": self.daily_pnl,
-                "gross_profit": 0.0,
-                "gross_loss": 0.0,
-                "win_rate": 0.0,
-                "avg_win": 0.0,
-                "avg_loss": 0.0,
-                "profit_factor": 0.0,
-                "max_drawdown": 0.0,
-                "trades_by_type": {"CE": 0, "PE": 0}
+            logger.info("🔧 Running performance optimization...")
+            
+            # Clean up old cache entries
+            with self._cache_lock:
+                current_time = time.time()
+                if (current_time - self._instruments_cache_timestamp) > (self._INSTRUMENT_CACHE_DURATION * 2):
+                    logger.info("Clearing stale instrument cache")
+                    self._nfo_instruments_cache = None
+                    self._nse_instruments_cache = None
+                    self._instruments_cache_timestamp = 0
+                    
+            # Clear ATM cache
+            if hasattr(self, '_atm_cache'):
+                self._atm_cache.clear()
+                
+            # Force garbage collection
+            import gc
+            gc.collect()
+            logger.info("✅ Performance optimization completed")
+        except Exception as e:
+            logger.error(f"Error during performance optimization: {e}")
+
+    def get_detailed_status(self) -> Dict[str, Any]:
+        """Get comprehensive detailed status"""
+        try:
+            basic_status = self.get_status()
+            detailed_status = {
+                **basic_status,
+                "system_info": {
+                    "uptime_seconds": time.time() - self._start_time,
+                    "session_start": self._session_start_time,
+                    "last_activity": getattr(self, '_last_activity_time', 'Never'),
+                    "errors_count": getattr(self, '_error_count', 0)
+                }
             }
             
-            if not self.trades:
-                return metrics
-            
-            # Calculate basic metrics
-            profits = []
-            losses = []
-            
-            for trade in self.trades:
-                # This is a simplified calculation - in reality, you'd need exit prices
-                entry_price = trade.get('entry_price', 0)
-                # For now, use a placeholder P&L calculation
-                # In a real system, you'd track actual exit prices
+            # Add risk manager status if available
+            if hasattr(self, 'risk_manager') and hasattr(self.risk_manager, 'get_risk_status'):
+                detailed_status.update(self.risk_manager.get_risk_status())
                 
-                strike_info = trade.get('strike_info', {})
-                opt_type = strike_info.get('type', 'UNK')
-                metrics["trades_by_type"][opt_type] = metrics["trades_by_type"].get(opt_type, 0) + 1
-            
-            # Calculate win rate
-            total_trades = len(self.trades)
-            if total_trades > 0:
-                metrics["win_rate"] = (metrics["winning_trades"] / total_trades) * 100
-            
-            return metrics
-            
+            return detailed_status
         except Exception as e:
-            logger.error(f"Error calculating performance metrics: {e}")
+            logger.error(f"Error getting detailed status: {e}")
             return {"error": str(e)}
-
-    def save_trading_session(self, filename: str = None) -> bool:
-        """Save current trading session to file"""
-        try:
-            if not filename:
-                filename = f"trading_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            
-            session_data = {
-                "session_info": {
-                    "start_time": getattr(self, '_session_start_time', datetime.now().isoformat()),
-                    "end_time": datetime.now().isoformat(),
-                    "live_mode": self.live_mode,
-                    "total_trades": len(self.trades)
-                },
-                "trades": self.trades,
-                "daily_pnl": self.daily_pnl,
-                "performance_metrics": self.get_performance_metrics(),
-                "market_summary": self.get_market_data_summary()
-            }
-            
-            import json
-            with open(filename, 'w') as f:
-                json.dump(session_data, f, indent=2, default=str)
-            
-            logger.info(f"Trading session saved to {filename}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error saving trading session: {e}")
-            return False
-
-    def load_trading_session(self, filename: str) -> bool:
-        """Load trading session from file"""
-        try:
-            import json
-            with open(filename, 'r') as f:
-                session_data = json.load(f)
-            
-            # Restore session data
-            if 'trades' in session_data:
-                self.trades = session_data['trades']
-            
-            if 'daily_pnl' in session_data:
-                self.daily_pnl = session_data['daily_pnl']
-            
-            logger.info(f"Trading session loaded from {filename}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error loading trading session: {e}")
-            return False
 
     def run_system_diagnostics(self) -> Dict[str, Any]:
         """Run comprehensive system diagnostics"""
         try:
-            from src.utils.strike_selector import health_check
-            
             diagnostics = {
                 "timestamp": datetime.now().isoformat(),
                 "trader_status": {
@@ -1600,155 +1176,252 @@ class RealTimeTrader:
                     diagnostics["executor_status"]["user_name"] = profile.get('user_name', 'Unknown')
                 except Exception:
                     diagnostics["executor_status"]["connection_valid"] = False
-            
+                    
             # Run strike selector health check
             if self.order_executor and hasattr(self.order_executor, 'kite') and self.order_executor.kite:
                 try:
                     diagnostics["strike_selector_health"] = health_check(self.order_executor.kite)
                 except Exception as e:
                     diagnostics["strike_selector_health"] = {"error": str(e)}
-            
+                    
             return diagnostics
-            
         except Exception as e:
             logger.error(f"Error running system diagnostics: {e}")
             return {"error": str(e)}
 
-    def optimize_performance(self) -> None:
-        """Optimize system performance"""
+    def save_trading_session(self, filename: str = None) -> bool:
+        """Save current trading session to file"""
         try:
-            logger.info("🔧 Running performance optimization...")
-            
-            # Clean up old cache entries
-            with self._cache_lock:
-                current_time = time.time()
-                if (current_time - self._instruments_cache_timestamp) > (self._INSTRUMENT_CACHE_DURATION * 2):
-                    logger.info("Clearing stale instrument cache")
-                    self._nfo_instruments_cache = None
-                    self._nse_instruments_cache = None
-                    self._instruments_cache_timestamp = 0
-            
-            # Clear ATM cache
-            if hasattr(self, '_atm_cache'):
-                self._atm_cache.clear()
-            
-            # Force garbage collection
-            import gc
-            gc.collect()
-            
-            logger.info("✅ Performance optimization completed")
-            
-        except Exception as e:
-            logger.error(f"Error during performance optimization: {e}")
-
-    def get_detailed_status(self) -> Dict[str, Any]:
-        """Get comprehensive detailed status"""
-        try:
-            basic_status = self.get_status()
-            
-            detailed_status = {
-                **basic_status,
-                "system_info": {
-                    "uptime_minutes": (time.time() - getattr(self, '_start_time', time.time())) / 60,
-                    "python_threads": threading.active_count(),
-                    "memory_usage": "N/A"  # Would need psutil for actual memory usage
-                },
-                "cache_info": {
-                    "nfo_instruments_count": len(self._nfo_instruments_cache or []),
-                    "nse_instruments_count": len(self._nse_instruments_cache or []),
-                    "cache_age_seconds": time.time() - self._instruments_cache_timestamp
-                },
-                "trading_stats": {
-                    "session_trades": len(self.trades),
-                    "current_pnl": self.calculate_current_pnl(),
-                    "positions_count": len(self.get_current_positions())
-                },
-                "last_activity": getattr(self, '_last_activity_time', 'Never'),
-                "errors_count": getattr(self, '_error_count', 0)
+            import json
+            if not filename:
+                filename = f"trading_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                
+            session_data = {
+                "timestamp": datetime.now().isoformat(),
+                "trades": self.trades,
+                "daily_pnl": self.daily_pnl,
+                "is_trading": self.is_trading
             }
             
-            return detailed_status
-            
+            with open(filename, 'w') as f:
+                json.dump(session_data, f, indent=2)
+                
+            logger.info(f"Trading session saved to {filename}")
+            return True
         except Exception as e:
-            logger.error(f"Error getting detailed status: {e}")
-            return {"error": str(e)}
+            logger.error(f"Error saving trading session: {e}")
+            return False
 
-# --- Enhanced Telegram Command Handling ---
+    def load_trading_session(self, filename: str) -> bool:
+        """Load trading session from file"""
+        try:
+            import json
+            with open(filename, 'r') as f:
+                session_data = json.load(f)
+                
+            # Restore session data
+            if 'trades' in session_data:
+                self.trades = session_data['trades']
+            if 'daily_pnl' in session_data:
+                self.daily_pnl = session_data['daily_pnl']
+                
+            logger.info(f"Trading session loaded from {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading trading session: {e}")
+            return False
 
+    # --- Enhanced Telegram Command Handling ---
     def _handle_control(self, command: str, arg: str = "") -> bool:
         """Enhanced command handling with more options"""
         command = command.strip().lower()
         arg = arg.strip().lower() if arg else ""
-        
         logger.info(f"Received command: /{command} {arg}")
         
         # Store last activity
         self._last_activity_time = datetime.now().isoformat()
         
-        # Enhanced command handlers
-        command_handlers = {
-            # Basic controls
-            "start": self.start,
-            "stop": self.stop,
-            "status": lambda: self._send_detailed_status(),
-            "summary": lambda: self._send_summary(),
+        try:
+            if command == "start":
+                self.start()
+                self.telegram_controller.send_message("✅ Trading started")
+                return True
+            elif command == "stop":
+                self.stop()
+                self.telegram_controller.send_message("🛑 Trading stopped")
+                return True
+            elif command == "status":
+                return self._send_status()
+            elif command == "summary":
+                return self._send_summary()
+            elif command == "positions":
+                return self._send_positions()
+            elif command == "pnl":
+                return self._send_pnl()
+            elif command == "health":
+                return self._send_health_check()
+            elif command == "help":
+                return self._send_help()
+            elif command == "refresh":
+                self._refresh_instruments_cache(force=True)
+                self.telegram_controller.send_message("🔄 Instrument cache refreshed")
+                return True
+            elif command == "mode":
+                if arg == "live":
+                    self.live_mode = True
+                    self._set_live_mode()
+                    self.telegram_controller.send_message("🟢 Switched to LIVE mode")
+                elif arg == "shadow":
+                    self.live_mode = False
+                    self._set_live_mode()
+                    self.telegram_controller.send_message("🛡️ Switched to SHADOW mode")
+                else:
+                    self.telegram_controller.send_message("Usage: /mode live or /mode shadow")
+                return True
+            elif command == "exit":
+                if arg == "all":
+                    success = self.force_exit_all_positions()
+                    if success:
+                        self.telegram_controller.send_message("✅ All positions closed")
+                    else:
+                        self.telegram_controller.send_message("⚠️ Some positions may not have closed")
+                else:
+                    self._show_exit_help()
+                return True
+            elif command == "optimize":
+                self.optimize_performance()
+                self.telegram_controller.send_message("⚡ Performance optimized")
+                return True
+            elif command == "diagnostics":
+                return self._send_diagnostics()
+            elif command == "save":
+                return self._save_session()
+            elif command == "load":
+                if arg:
+                    success = self.load_trading_session(arg)
+                    if success:
+                        self.telegram_controller.send_message(f"💾 Session loaded from {arg}")
+                    else:
+                        self.telegram_controller.send_message(f"❌ Failed to load session from {arg}")
+                else:
+                    self.telegram_controller.send_message("Usage: /load <filename>")
+                return True
+            else:
+                self._send_unknown_command(command)
+                return True
+        except Exception as e:
+            logger.error(f"Error handling control command '{command}': {e}")
+            self.telegram_controller.send_message("❌ Error processing command")
+            return False
+
+    def _send_status(self) -> bool:
+        """Send current status"""
+        try:
+            status = self.get_status()
+            message = (
+                f"📊 **RealTimeTrader Status**\n"
+                f"🔁 **Trading Active:** {'🟢 YES' if status.get('is_trading') else '🔴 NO'}\n"
+                f"💰 **Mode:** {'🟢 LIVE' if status.get('live_mode') else '🛡️ SHADOW'}\n"
+                f"📈 **Trades Today:** {status.get('trades_today', 0)}\n"
+                f"💼 **Open Positions:** {status.get('open_positions', 0)}\n"
+                f"💵 **Daily P&L:** ₹{status.get('daily_pnl', 0.0):.2f}\n"
+                f"🕒 **Cache Age:** {status.get('cache_age_minutes', 0):.1f} min"
+            )
+            self.telegram_controller.send_message(message.strip(), parse_mode="Markdown")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending status: {e}")
+            return False
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current system status"""
+        try:
+            status = {
+                "is_trading": self.is_trading,
+                "live_mode": self.live_mode,
+                "trades_today": len(self.trades),
+                "daily_pnl": self.daily_pnl,
+                "cache_age_minutes": (time.time() - self._instruments_cache_timestamp) / 60,
+                "open_positions": len([p for p in self.get_current_positions() if p.get('quantity', 0) != 0])
+            }
             
-            # Mode controls
-            "mode": lambda: self._set_live_mode(arg) if arg in ["live", "shadow"] else self._invalid_mode_arg(),
+            # Add risk manager status if available
+            if hasattr(self, 'risk_manager') and hasattr(self.risk_manager, 'get_risk_status'):
+                status.update(self.risk_manager.get_risk_status())
+                
+            return status
+        except Exception as e:
+            logger.error(f"Error getting status: {e}")
+            return {"error": str(e)}
+
+    def get_summary(self) -> str:
+        """Enhanced daily summary with options-specific information"""
+        try:
+            lines = [
+                f"📊 **Daily Options Trading Summary**",
+                f"🔁 **Total trades:** {len(self.trades)}",
+                f"💰 **PnL:** ₹{self.daily_pnl:.2f}",
+                f"📈 **Mode:** {'🟢 LIVE' if self.live_mode else '🛡️ SHADOW'}",
+                "────────────────────"
+            ]
             
-            # Cache and system controls
-            "refresh": self._force_refresh_cache,
-            "optimize": lambda: self._run_optimization(),
-            "diagnostics": lambda: self._send_diagnostics(),
+            # Group trades by option type
+            ce_trades = [t for t in self.trades if t.get('strike_info', {}).get('type') == 'CE']
+            pe_trades = [t for t in self.trades if t.get('strike_info', {}).get('type') == 'PE']
             
-            # Position management
-            "positions": lambda: self._send_positions(),
-            "pnl": lambda: self._send_pnl(),
-            "exit": lambda: self._emergency_exit() if arg == "all" else self._show_exit_help(),
+            if ce_trades:
+                lines.append(f"📈 **CE Trades:** {len(ce_trades)}")
+            if pe_trades:
+                lines.append(f"📉 **PE Trades:** {len(pe_trades)}")
+                
+            lines.append("────────────────────")
             
-            # Session management
-            "save": lambda: self._save_session(),
-            "health": lambda: self._send_health_check(),
-            
-            # Help
-            "help": lambda: self._send_help()
-        }
-        
-        handler = command_handlers.get(command)
-        if handler:
-            try:
-                return handler()
-            except Exception as e:
-                logger.error(f"Error executing command {command}: {e}")
-                self.telegram_controller.send_message(f"❌ Command failed: {str(e)[:100]}")
-                return False
-        else:
-            self._send_unknown_command(command)
+            # Show recent trades
+            recent_trades = self.trades[-5:] if len(self.trades) > 5 else self.trades
+            for trade in recent_trades:
+                symbol = trade.get('symbol', 'N/A')
+                strike_info = trade.get('strike_info', {})
+                opt_type = strike_info.get('type', 'UNK')
+                strike = strike_info.get('strike', 'N/A')
+                lines.append(
+                    f"{opt_type} {strike} {trade['direction']} {trade['quantity']} @ ₹{trade['entry_price']:.2f} "
+                    f"(SL ₹{trade['stop_loss']:.2f}, TP ₹{trade['target']:.2f})"
+                )
+                
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            return f"📊 Summary Error: {str(e)}"
+
+    def _send_summary(self) -> bool:
+        """Send trading summary"""
+        try:
+            summary = self.get_summary()
+            self.telegram_controller.send_message(summary, parse_mode="Markdown")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending summary: {e}")
             return False
 
     def _send_positions(self) -> bool:
-        """Send current positions summary"""
+        """Send current positions"""
         try:
             positions = self.get_current_positions()
-            
             if not positions:
                 self.telegram_controller.send_message("📊 No open positions")
                 return True
-            
+                
             lines = ["📊 **Current Positions**", ""]
-            
             for pos in positions:
                 if pos.get('quantity', 0) != 0:
                     symbol = pos.get('tradingsymbol', 'Unknown')
                     qty = pos.get('quantity', 0)
                     pnl = pos.get('pnl', 0)
                     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                    
                     lines.append(f"{pnl_emoji} {symbol}: {qty} qty, P&L: ₹{pnl:.2f}")
-            
+                    
             self.telegram_controller.send_message("\n".join(lines), parse_mode="Markdown")
             return True
-            
         except Exception as e:
             logger.error(f"Error sending positions: {e}")
             return False
@@ -1757,128 +1430,52 @@ class RealTimeTrader:
         """Send P&L summary"""
         try:
             current_pnl = self.calculate_current_pnl()
-            performance = self.get_performance_metrics()
-            
-            pnl_emoji = "🟢" if current_pnl >= 0 else "🔴"
-            
-            message = f"""
-💰 **P&L Summary**
-
-{pnl_emoji} **Current P&L:** ₹{current_pnl:.2f}
-📊 **Total Trades:** {performance['total_trades']}
-📈 **CE Trades:** {performance['trades_by_type'].get('CE', 0)}
-📉 **PE Trades:** {performance['trades_by_type'].get('PE', 0)}
-            """
-            
-            self.telegram_controller.send_message(message.strip(), parse_mode="Markdown")
+            message = (
+                f"💰 **Profit & Loss Summary**\n"
+                f"📊 Daily P&L: ₹{self.daily_pnl:.2f}\n"
+                f"💼 Open P&L: ₹{current_pnl:.2f}\n"
+                f"📈 Total P&L: ₹{self.daily_pnl + current_pnl:.2f}"
+            )
+            self.telegram_controller.send_message(message, parse_mode="Markdown")
             return True
-            
         except Exception as e:
             logger.error(f"Error sending P&L: {e}")
             return False
 
-    def _emergency_exit(self) -> bool:
-        """Handle emergency exit command"""
-        return self.force_exit_all_positions()
-
-    def _show_exit_help(self) -> bool:
-        """Show exit command help"""
-        self.telegram_controller.send_message(
-            "⚠️ Usage: `/exit all` to close all positions\n⚠️ This will place market orders immediately!",
-            parse_mode="Markdown"
-        )
-        return True
-
-    def _run_optimization(self) -> bool:
-        """Run system optimization"""
-        try:
-            self.optimize_performance()
-            self.telegram_controller.send_message("⚡ System optimization completed")
-            return True
-        except Exception as e:
-            logger.error(f"Optimization failed: {e}")
-            return False
-
-    def _send_diagnostics(self) -> bool:
-        """Send system diagnostics"""
-        try:
-            diagnostics = self.run_system_diagnostics()
-            
-            status = diagnostics.get('strike_selector_health', {}).get('overall_status', 'UNKNOWN')
-            cache_age = diagnostics.get('cache_status', {}).get('cache_age_minutes', 0)
-            
-            message = f"""
-🔍 **System Diagnostics**
-
-🔄 **Trading:** {'✅ Active' if diagnostics['trader_status']['is_trading'] else '❌ Stopped'}
-🎯 **Mode:** {'🟢 LIVE' if diagnostics['trader_status']['live_mode'] else '🛡️ SHADOW'}
-🏥 **Health:** {status}
-📊 **Cache Age:** {cache_age:.1f} min
-💼 **Trades Today:** {diagnostics['trader_status']['trades_count']}
-            """
-            
-            self.telegram_controller.send_message(message.strip(), parse_mode="Markdown")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error sending diagnostics: {e}")
-            return False
-
-    def _save_session(self) -> bool:
-        """Save current session"""
-        try:
-            success = self.save_trading_session()
-            if success:
-                self.telegram_controller.send_message("💾 Trading session saved successfully")
-            else:
-                self.telegram_controller.send_message("❌ Failed to save trading session")
-            return success
-        except Exception as e:
-            logger.error(f"Error in save session command: {e}")
-            return False
-
     def _send_health_check(self) -> bool:
-        """Send health check results"""
+        """Send system health check"""
         try:
             if self.order_executor and hasattr(self.order_executor, 'kite') and self.order_executor.kite:
-                from src.utils.strike_selector import health_check
                 health = health_check(self.order_executor.kite)
-                
-                status_emoji = {
-                    "HEALTHY": "🟢",
-                    "WARNING": "🟡", 
-                    "DEGRADED": "🟠",
-                    "CRITICAL": "🔴"
-                }.get(health.get('overall_status'), "⚪")
-                
-                message = f"""
-🏥 **System Health Check**
+                message = f"""🛠️ **System Health Check**
+📊 **Status:** {health.get('overall_status', 'UNKNOWN')}
+⏱️ **Timestamp:** {health.get('timestamp', 'N/A')[:19]}
 
-{status_emoji} **Status:** {health.get('overall_status', 'UNKNOWN')}
-📊 **Summary:** {health.get('summary', 'No data')}
-
-**Recommendations:**
-{chr(10).join(f"• {rec}" for rec in health.get('recommendations', [])[:3])}
-                """
-                
+**Checks:**
+"""
+                for check_name, check_info in health.get('checks', {}).items():
+                    status_emoji = "✅" if check_info.get('status') == 'PASS' else "❌"
+                    message += f"{status_emoji} {check_name}: {check_info.get('message', 'N/A')}\n"
+                    
+                if health.get('recommendations'):
+                    message += f"\n**Recommendations:**\n"
+                    message += "\n".join(f"• {rec}" for rec in health.get('recommendations', [])[:3])
+                    
                 self.telegram_controller.send_message(message.strip(), parse_mode="Markdown")
             else:
                 self.telegram_controller.send_message("❌ Cannot run health check - No API connection")
-            
             return True
-            
         except Exception as e:
             logger.error(f"Error sending health check: {e}")
             return False
 
     def _send_help(self) -> bool:
         """Send help message with available commands"""
-        help_message = """
-🤖 **Available Commands**
+        help_message = """🤖 **Available Commands**
 
 **Basic Controls:**
 • `/start` - Start trading
-• `/stop` - Stop trading  
+• `/stop` - Stop trading
 • `/status` - Get current status
 • `/summary` - Trading summary
 
@@ -1896,87 +1493,219 @@ class RealTimeTrader:
 • `/optimize` - Optimize performance
 • `/diagnostics` - Full system check
 • `/save` - Save trading session
+• `/load <filename>` - Load trading session
 
 **Emergency:**
 • `/exit all` - Close all positions (⚠️ Market orders!)
 
 **Other:**
-• `/help` - Show this help
-        """
-        
+• `/help` - Show this help"""
         self.telegram_controller.send_message(help_message.strip(), parse_mode="Markdown")
         return True
 
+    def _send_diagnostics(self) -> bool:
+        """Send system diagnostics"""
+        try:
+            diagnostics = self.run_system_diagnostics()
+            message = f"""🛠️ **System Diagnostics**
+📊 **Trader Status**
+🔁 Trading Active: {'🟢 YES' if diagnostics['trader_status']['is_trading'] else '🔴 NO'}
+💰 Mode: {'🟢 LIVE' if diagnostics['trader_status']['live_mode'] else '🛡️ SHADOW'}
+📈 Trades Today: {diagnostics['trader_status']['trades_count']}
+"""
+            self.telegram_controller.send_message(message.strip(), parse_mode="Markdown")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending diagnostics: {e}")
+            return False
+
+    def _save_session(self) -> bool:
+        """Save current session"""
+        try:
+            success = self.save_trading_session()
+            if success:
+                self.telegram_controller.send_message("💾 Trading session saved successfully")
+            else:
+                self.telegram_controller.send_message("❌ Failed to save trading session")
+            return success
+        except Exception as e:
+            logger.error(f"Error in save session command: {e}")
+            return False
+
     def _send_unknown_command(self, command: str) -> None:
         """Handle unknown commands"""
-        self.telegram_controller.send_message(
-            f"❌ Unknown command: `{command}`\nUse `/help` for available commands",
-            parse_mode="Markdown"
-        )
+        self.telegram_controller.send_message(f"❌ Unknown command: `{command}`\nUse `/help` for available commands",
+                                              parse_mode="Markdown")
 
-# --- Initialization Enhancements ---
+    def _show_exit_help(self) -> bool:
+        """Show exit command help"""
+        self.telegram_controller.send_message("⚠️ Usage: `/exit all` to close all positions\n⚠️ This will place market orders immediately!",
+                                              parse_mode="Markdown")
+        return True
 
-    def __init__(self) -> None:
-        """Enhanced initialization with additional tracking"""
-        # Store start time for uptime calculation
-        self._start_time = time.time()
-        self._session_start_time = datetime.now().isoformat()
-        self._last_activity_time = None
-        self._error_count = 0
-        self._last_spot_prices = []  # For trend tracking
-        
-        # Initialize all the original attributes
-        self.is_trading: bool = False
-        self.daily_pnl: float = 0.0
-        self.trades: List[Dict[str, Any]] = []
-        self.live_mode: bool = Config.ENABLE_LIVE_TRADING
+    def _emergency_exit(self) -> bool:
+        """Handle emergency exit command"""
+        return self.force_exit_all_positions()
 
-        # --- Enhanced Instrument Caching for Rate Limiting ---
-        self._nfo_instruments_cache: Optional[List[Dict]] = None
-        self._nse_instruments_cache: Optional[List[Dict]] = None
-        self._instruments_cache_timestamp: float = 0
-        self._INSTRUMENT_CACHE_DURATION: int = 300  # Cache for 5 minutes (300 seconds)
-        self._cache_lock = threading.RLock()  # Thread-safe cache access
-        # --- End Instrument Caching ---
+    def _run_optimization(self) -> bool:
+        """Run system optimization"""
+        try:
+            self.optimize_performance()
+            self.telegram_controller.send_message("⚡ System optimization completed")
+            return True
+        except Exception as e:
+            logger.error(f"Optimization failed: {e}")
+            return False
 
-        # Performance optimization: Pre-calculate commonly used values
-        self._atm_cache: Dict[str, Tuple[int, float]] = {}  # symbol -> (strike, timestamp)
-        self._ATM_CACHE_DURATION: int = 30  # Cache ATM for 30 seconds
-        
-        # Thread pool for parallel data fetching
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="OptionsDataWorker")
+    # --- Original Bar Processing (for backward compatibility) ---
+    def process_bar(self, ohlc: pd.DataFrame) -> None:
+        """Original bar processing method for non-options strategies"""
+        logger.debug(f"process_bar called. Trading active: {self.is_trading}, OHLC data points: {len(ohlc) if ohlc is not None else 'None'}")
+        if not self.is_trading:
+            logger.debug("process_bar: Trading not active, returning.")
+            return
+        if ohlc is None or len(ohlc) < 30:
+            logger.debug("Insufficient data to process bar (less than 30 points).")
+            return
+        try:
+            if not isinstance(ohlc.index, pd.DatetimeIndex):
+                logger.error("OHLC data must have DatetimeIndex.")
+                return
+            ts = ohlc.index[-1]
+            if not self._passes_time_filter(ts):
+                logger.debug("Time filter rejected bar")
+                return
+            current_price = float(ohlc.iloc[-1]["close"])
+            logger.debug(f"Current bar timestamp: {ts}, price: {current_price}")
+            signal = self.strategy.generate_signal(ohlc, current_price)
+            logger.debug(f"Strategy returned signal: {signal}")
+            if not signal:
+                logger.debug("No signal generated by strategy.")
+                return
+            signal_confidence = float(signal.get("confidence", 0.0))
+            confidence_threshold = getattr(Config, 'CONFIDENCE_THRESHOLD', 7.0)
+            if signal_confidence < confidence_threshold:
+                logger.debug(f"Signal confidence {signal_confidence} below threshold {confidence_threshold}")
+                return
+            position = self.position_sizer.calculate_position_size(signal, current_price)
+            if not position or position.get("quantity", 0) <= 0:
+                logger.debug("Invalid position sizing.")
+                return
+            if not self._passes_risk_checks(signal, position):
+                logger.warning("Risk checks failed for bar signal.")
+                return
+            success = self._execute_trade(signal, position)
+            if success:
+                logger.info("✅ Successfully executed trade for bar signal")
+            else:
+                logger.warning("❌ Failed to execute trade for bar signal")
+        except Exception as exc:
+            logger.error(f"Error processing bar: {exc}", exc_info=True)
 
-        # Strategy initialization with optimized parameters
-        self.strategy = EnhancedScalpingStrategy(
-            base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-            base_target_points=Config.BASE_TARGET_POINTS,
-            confidence_threshold=Config.CONFIDENCE_THRESHOLD,
-            min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
-        )
-        self.risk_manager = PositionSizing()
-        self.order_executor = self._init_order_executor()
-        self.telegram_controller = TelegramController(
-            status_callback=self.get_status,
-            control_callback=self._handle_control,
-            summary_callback=self.get_summary,
-        )
-        self._polling_thread: Optional[threading.Thread] = None
+    def _passes_time_filter(self, ts: pd.Timestamp) -> bool:
+        """Check if timestamp passes time filter"""
+        try:
+            hour = ts.hour
+            minute = ts.minute
+            # Allow trading between 9:15 AM and 3:30 PM
+            if hour < 9 or (hour == 9 and minute < 15):
+                return False
+            if hour > 15 or (hour == 15 and minute > 30):
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error in time filter: {e}")
+            return True
 
-        # Start Telegram polling in a daemon thread
-        self._start_polling()
+    def _execute_trade(self, signal: Dict[str, Any], position: Dict[str, Any]) -> bool:
+        """Execute a regular trade"""
+        try:
+            # Send telegram alert
+            token = len(self.trades) + 1
+            self.telegram_controller.send_signal_alert(token, signal, position)
+            
+            # Place order
+            order_transaction_type = signal.get("signal", "BUY")
+            logger.info(f"Placing {order_transaction_type} order, Qty: {position['quantity']}")
+            
+            order_id = self.order_executor.place_entry_order(
+                symbol=getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50'),
+                exchange="NSE",
+                transaction_type=order_transaction_type,
+                quantity=position['quantity'],
+                price=signal.get('entry_price'),
+                product="MIS"
+            )
+            
+            if not order_id:
+                logger.error("Failed to place entry order")
+                return False
+                
+            # Setup GTT orders
+            sl_order_id = self.order_executor.setup_gtt_orders(
+                symbol=getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50'),
+                exchange="NSE",
+                transaction_type="SELL" if order_transaction_type == "BUY" else "BUY",
+                quantity=position['quantity'],
+                stop_loss_price=signal.get('stop_loss'),
+                target_price=signal.get('target')
+            )
+            
+            # Record trade
+            trade_record = {
+                "timestamp": datetime.now().isoformat(),
+                "symbol": getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50'),
+                "direction": order_transaction_type,
+                "quantity": position['quantity'],
+                "entry_price": signal.get('entry_price'),
+                "stop_loss": signal.get('stop_loss'),
+                "target": signal.get('target'),
+                "order_id": order_id,
+                "sl_order_id": sl_order_id,
+                "status": "OPEN"
+            }
+            
+            self.trades.append(trade_record)
+            logger.info(f"✅ Trade executed and recorded: {trade_record}")
+            return True
+        except Exception as e:
+            logger.error(f"Error executing trade: {e}")
+            return False
 
-        # Optimized scheduling: Use different intervals based on market conditions
-        self._setup_smart_scheduling()
-        
-        # Register cleanup handlers
-        atexit.register(self.shutdown)
-        signal.signal(signal.SIGTERM, lambda signum, frame: self.shutdown())
-        signal.signal(signal.SIGINT, lambda signum, frame: self.shutdown())
-        
-        logger.info("✅ Enhanced RealTimeTrader initialized and ready")
-        logger.info(f"🔧 Features: Live={self.live_mode}, Cache=Enabled, Threads={self._executor._max_workers}")
+    # --- Cleanup ---
+    def shutdown(self) -> None:
+        """Gracefully shutdown the trader"""
+        try:
+            logger.info("👋 Shutting down RealTimeTrader...")
+            
+            # Stop trading
+            self.stop()
+            
+            # Shutdown executor
+            self._executor.shutdown(wait=True)
+            
+            # Cleanup order executor
+            if hasattr(self.order_executor, 'cleanup'):
+                self.order_executor.cleanup()
+                
+            logger.info("✅ RealTimeTrader shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
 
-# --- Final Export for Module ---
+    def __repr__(self) -> str:
+        return (f"<RealTimeTrader is_trading={self.is_trading} "
+                f"live_mode={self.live_mode} trades_today={len(self.trades)} "
+                f"cache_age={int((time.time() - self._instruments_cache_timestamp)/60)}min>")
+
+    def __del__(self):
+        """Cleanup on object destruction"""
+        try:
+            if hasattr(self, '_executor') and self._executor:
+                self._executor.shutdown(wait=False)
+        except Exception:
+            pass
+
+# - Final Export for Module -
 if __name__ == "__main__":
     # Allow running the trader directly for testing
     logging.basicConfig(level=logging.INFO)
@@ -1990,7 +1719,6 @@ if __name__ == "__main__":
         import time
         while True:
             time.sleep(60)  # Run for testing
-            
     except KeyboardInterrupt:
         logger.info("👋 RealTimeTrader stopped by user")
     except Exception as e:
