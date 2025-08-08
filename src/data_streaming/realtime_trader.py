@@ -1,4 +1,8 @@
 # src/data_streaming/realtime_trader.py
+"""
+Complete Real-Time Options Trading System
+A comprehensive automated trading system for Indian options market
+"""
 import logging
 import threading
 import atexit
@@ -12,8 +16,26 @@ import time # Import for caching
 from functools import lru_cache
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 
-from src.config import Config
+# Safe imports with fallbacks
+try:
+    from src.config import Config
+except ImportError:
+    logging.warning("Could not import Config, using default configuration")
+    class Config:
+        ENABLE_LIVE_TRADING = False
+        SPOT_SYMBOL = "NSE:NIFTY 50"
+        CONFIDENCE_THRESHOLD = 7.0
+        MIN_SIGNAL_CONFIDENCE = 6.0
+        STRIKE_SELECTION_TYPE = "OTM"
+        OPTIONS_STOP_LOSS_PCT = 20.0
+        OPTIONS_TARGET_PCT = 40.0
+        MAX_DAILY_OPTIONS_TRADES = 5
+        MAX_POSITION_VALUE = 50000
+        NIFTY_LOT_SIZE = 50
+        DATA_LOOKBACK_MINUTES = 30
+
 # Assuming you'll have an OptionsStrategy or modify the existing one
 # from src.strategies.options_strategy import OptionsStrategy
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
@@ -22,15 +44,28 @@ from src.execution.order_executor import OrderExecutor
 from src.notifications.telegram_controller import TelegramController
 
 # Import helper for consistent spot LTP symbol usage and strike selector
-from src.utils.strike_selector import (
-    _get_spot_ltp_symbol, 
-    get_instrument_tokens, 
-    get_next_expiry_date,
-    is_trading_hours,
-    health_check
-)
+# Handle potential import issues gracefully
+try:
+    from src.utils.strike_selector import (
+        _get_spot_ltp_symbol, 
+        get_instrument_tokens, 
+        get_next_expiry_date,
+        is_trading_hours,
+        health_check
+    )
+except ImportError:
+    logging.error("Could not import strike_selector utilities. Using fallbacks.")
+    def _get_spot_ltp_symbol():
+        return getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
+    def get_instrument_tokens(*args, **kwargs):
+        return None
+    def get_next_expiry_date(*args, **kwargs):
+        return ""
+    def health_check(*args, **kwargs):
+        return {"overall_status": "ERROR", "message": "Strike selector not available"}
 
 logger = logging.getLogger(__name__)
+
 
 class RealTimeTrader:
     def __init__(self) -> None:
@@ -60,11 +95,17 @@ class RealTimeTrader:
         self.strategy = EnhancedScalpingStrategy()
         self.position_sizer = PositionSizing()
         self.order_executor = OrderExecutor()
+        
+        # Initialize TelegramController with proper callbacks
+        # This ensures Telegram polling starts correctly
         self.telegram_controller = TelegramController(
             status_callback=self.get_status,
             control_callback=self._handle_control,
             summary_callback=self.get_summary,
         )
+        self._polling_thread: Optional[threading.Thread] = None
+        # Start Telegram polling in a daemon thread
+        self._start_polling()
         
         # Setup threading
         self._executor = ThreadPoolExecutor(max_workers=4)
@@ -176,9 +217,10 @@ class RealTimeTrader:
         """Get cached ATM strike calculation"""
         return round(spot_price / 50) * 50
 
-    def _fetch_spot_price(self, spot_symbol: str) -> Optional[float]:
+    def _fetch_spot_price(self) -> Optional[float]:
         """Fetch current spot price"""
         try:
+            spot_symbol = _get_spot_ltp_symbol()
             spot_data = self.order_executor.kite.ltp([spot_symbol])
             return spot_data.get(spot_symbol, {}).get('last_price')
         except Exception as e:
@@ -208,7 +250,6 @@ class RealTimeTrader:
             logger.error(f"[RT] Error fetching historical data for {instrument_token}: {e}")
             return pd.DataFrame()
 
-    # --- CRITICAL CHANGE: Modified _fetch_all_data_parallel to pass cached data ---
     def _fetch_all_data_parallel(self, spot_token: int, atm_strike: int, start_time: datetime, end_time: datetime,
                                 cached_nfo: List[Dict], cached_nse: List[Dict]) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
         """Fetch all required data in parallel"""
@@ -219,13 +260,13 @@ class RealTimeTrader:
             # --- CRITICAL CHANGE: Pass cached data to get_instrument_tokens ---
             instruments_data = get_instrument_tokens(
                 symbol=Config.SPOT_SYMBOL,
+                offset=0, # ATM
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo, # Pass cached data
-                cached_nse_instruments=cached_nse, # Pass cached data
-                offset=0  # ATM
+                cached_nse_instruments=cached_nse  # Pass cached data
             )
             
-            if not instruments_data:
+            if not instruments_
                 logger.error("Failed to get instrument tokens")
                 return spot_df, options_data
                 
@@ -267,14 +308,13 @@ class RealTimeTrader:
             
         return spot_df, options_data
 
-    # --- CRITICAL CHANGE: Modified fetch_and_process_data to pass cached data ---
     def fetch_and_process_data(self) -> None:
         """Main data fetching and processing workflow
         
         Optimized data fetching with parallel processing and better error handling
         """
         if not self.is_trading:
-            logger.debug("fetch_and_process_data: Trading not active, skipping.")
+            logger.debug("fetch_and_process_ Trading not active, skipping.")
             return
             
         start_time = time.time()
@@ -298,23 +338,23 @@ class RealTimeTrader:
             # Parallel spot price and instrument token fetching
             with ThreadPoolExecutor(max_workers=3) as executor:
                 # Submit spot price fetch
-                spot_future = executor.submit(self._fetch_spot_price, _get_spot_ltp_symbol())
+                spot_future = executor.submit(self._fetch_spot_price)
                 
                 # --- CRITICAL CHANGE: Submit instrument token fetch with cached data ---
                 instruments_future = executor.submit(
                     get_instrument_tokens,
                     Config.SPOT_SYMBOL,
+                    0, # ATM offset
                     self.order_executor.kite,
                     cached_nfo, # Pass cached data
-                    cached_nse, # Pass cached data
-                    0  # ATM
+                    cached_nse  # Pass cached data
                 )
                 
                 # Get results with timeout
                 spot_price = spot_future.result(timeout=5)
                 instruments_data = instruments_future.result(timeout=5)
                 
-                if not spot_price or not instruments_data:
+                if not spot_price or not instruments_
                     logger.error("Failed to fetch essential data (spot price or instruments)")
                     return
                     
@@ -337,7 +377,7 @@ class RealTimeTrader:
             )
             
             # Optimized analysis
-            if options_data:
+            if options_
                 selected_strikes_info = self._analyze_options_data_optimized(spot_price, options_data)
             else:
                 selected_strikes_info = self._get_fallback_strikes(atm_strike, cached_nfo, cached_nse)
@@ -355,9 +395,9 @@ class RealTimeTrader:
         except Exception as e:
             logger.error(f"Error in fetch_and_process_data: {e}", exc_info=True)
 
-    def _analyze_options_data_optimized(self, spot_price: float, options_data: Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
+    def _analyze_options_data_optimized(self, spot_price: float, options_ Dict[str, pd.DataFrame]) -> List[Dict[str, Any]]:
         """Optimized options data analysis for strike selection"""
-        if not options_data:
+        if not options_
             return []
             
         # Use cached ATM calculation
@@ -371,7 +411,7 @@ class RealTimeTrader:
             type_strikes = []
             relevant_data = {k: v for k, v in options_data.items() if opt_type in k and not v.empty}
             
-            if not relevant_data:
+            if not relevant_
                 return type_strikes
                 
             for symbol, df in relevant_data.items():
@@ -474,7 +514,6 @@ class RealTimeTrader:
             
         return selected
 
-    # --- CRITICAL CHANGE: Modified _get_fallback_strikes to pass cached data ---
     def _get_fallback_strikes(self, atm_strike: int, cached_nfo: List[Dict], cached_nse: List[Dict]) -> List[Dict[str, Any]]:
         """Optimized fallback strike selection"""
         logger.warning("Using fallback strike selection")
@@ -485,10 +524,10 @@ class RealTimeTrader:
             # --- CRITICAL CHANGE: Pass cached data ---
             fb_instruments = get_instrument_tokens(
                 symbol=Config.SPOT_SYMBOL,
+                offset=offset,
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo, # Pass cached data
-                cached_nse_instruments=cached_nse, # Pass cached data
-                offset=offset
+                cached_nse_instruments=cached_nse  # Pass cached data
             )
             
             if fb_instruments:
@@ -511,7 +550,7 @@ class RealTimeTrader:
         return fallback_strikes
 
     def _process_selected_strikes(self, selected_strikes: List[Dict[str, Any]],
-                                 options_data: Dict[str, pd.DataFrame], spot_df: pd.DataFrame) -> None:
+                                 options_ Dict[str, pd.DataFrame], spot_df: pd.DataFrame) -> None:
         """Process selected strikes with parallel execution"""
         if not selected_strikes:
             return
@@ -1224,9 +1263,9 @@ class RealTimeTrader:
                 session_data = json.load(f)
                 
             # Restore session data
-            if 'trades' in session_data:
+            if 'trades' in session_
                 self.trades = session_data['trades']
-            if 'daily_pnl' in session_data:
+            if 'daily_pnl' in session_
                 self.daily_pnl = session_data['daily_pnl']
                 
             logger.info(f"Trading session loaded from {filename}")
@@ -1676,6 +1715,36 @@ class RealTimeTrader:
             logger.error(f"Error executing trade: {e}")
             return False
 
+    # --- Polling Thread Management ---
+    def _start_polling(self) -> None:
+        """Start Telegram polling in a daemon thread"""
+        if self._polling_thread and self._polling_thread.is_alive():
+            logger.warning("Telegram polling thread is already running.")
+            return
+
+        def run_polling():
+            try:
+                logger.info("📡 Starting Telegram polling (daemon)...")
+                self.telegram_controller.start_polling()
+            except Exception as e:
+                logger.error("Error in Telegram polling thread: %s", e, exc_info=True)
+
+        self._polling_thread = threading.Thread(target=run_polling, daemon=True)
+        self._polling_thread.start()
+        logger.info("📡 Telegram polling started (daemon).")
+
+    def _stop_polling(self) -> None:
+        """Stop the Telegram polling thread gracefully"""
+        logger.info("🛑 Stopping Telegram polling...")
+        self.telegram_controller.stop_polling()
+        if self._polling_thread and self._polling_thread.is_alive():
+            # Give it a moment to stop gracefully
+            self._polling_thread.join(timeout=3)
+            if self._polling_thread.is_alive():
+                logger.warning("Telegram polling thread did not stop gracefully.")
+            self._polling_thread = None
+        logger.info("🛑 Telegram polling stopped.")
+
     # --- Cleanup ---
     def shutdown(self) -> None:
         """Gracefully shutdown the trader"""
@@ -1684,6 +1753,9 @@ class RealTimeTrader:
             
             # Stop trading
             self.stop()
+            
+            # Stop Telegram polling
+            self._stop_polling()
             
             # Shutdown executor
             self._executor.shutdown(wait=True)
@@ -1709,21 +1781,58 @@ class RealTimeTrader:
         except Exception:
             pass
 
-# - Final Export for Module -
-if __name__ == "__main__":
-    # Allow running the trader directly for testing
-    logging.basicConfig(level=logging.INFO)
-    logger.info("RealTimeTrader - Direct execution mode")
+# - Enhanced Main Execution -
+def main():
+    """Enhanced main execution with proper setup and error handling"""
+    # Setup logging
+    logging.basicConfig(level=logging.INFO,
+                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                       handlers=[
+                           logging.FileHandler('realtime_trader.log'),
+                           logging.StreamHandler(sys.stdout)
+                       ])
+    logger.info("🚀 Starting RealTime Options Trader...")
     
     try:
+        # Initialize trader
         trader = RealTimeTrader()
-        logger.info("✅ RealTimeTrader created successfully")
         
-        # Keep it running for testing
-        import time
+        # Setup signal handlers for graceful shutdown
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}. Initiating shutdown...")
+            trader.shutdown()
+            sys.exit(0)
+            
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Send startup alert
+        startup_msg = (
+            "🚀 *Nifty Scalper Bot Started*\n"
+            "✅ System initialized and ready\n"
+            "📡 Awaiting commands..."
+        )
+        trader.telegram_controller.send_message(startup_msg, parse_mode="Markdown")
+        logger.info("✅ RealTime Trader initialized successfully")
+        
+        # Main loop
         while True:
-            time.sleep(60)  # Run for testing
-    except KeyboardInterrupt:
-        logger.info("👋 RealTimeTrader stopped by user")
+            try:
+                # Run scheduled tasks
+                schedule.run_pending()
+                time.sleep(1)
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received")
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}", exc_info=True)
+                time.sleep(5) # Wait before retrying
+                
     except Exception as e:
-        logger.error(f"❌ RealTimeTrader failed: {e}", exc_info=True)
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        logger.info("Shutting down RealTime Trader...")
+
+if __name__ == "__main__":
+    main()
