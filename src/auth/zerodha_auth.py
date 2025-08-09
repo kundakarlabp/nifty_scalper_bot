@@ -1,4 +1,3 @@
-# src/auth/zerodha_auth.py
 import os
 import logging
 import threading
@@ -6,7 +5,17 @@ import webbrowser
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 from kiteconnect import KiteConnect
+
+# --- Load .env automatically for local auth flows ---
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -16,32 +25,32 @@ class ZerodhaAuthHandler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         query_params = parse_qs(parsed_url.query)
 
-        if "request_token" in query_params:
-            request_token = query_params["request_token"][0]
+        if 'request_token' in query_params:
+            request_token = query_params['request_token'][0]
             self.server.request_token = request_token
             self.send_response(200)
-            self.send_header("Content-type", "text/html")
+            self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(
-                b"""
-            <html><body>
-              <h2>✅ Authentication Successful!</h2>
-              <p>You can now return to your bot. This window can be closed.</p>
-            </body></html>
-            """
-            )
+            self.wfile.write(b"""
+            <html>
+              <body>
+                <h2>✅ Authentication Successful!</h2>
+                <p>You can now return to your bot. This window can be closed.</p>
+              </body>
+            </html>
+            """)
         else:
             self.send_response(400)
-            self.send_header("Content-type", "text/html")
+            self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(
-                b"""
-            <html><body>
-              <h2>❌ Authentication Failed</h2>
-              <p>No request token found in URL.</p>
-            </body></html>
-            """
-            )
+            self.wfile.write(b"""
+            <html>
+              <body>
+                <h2>❌ Authentication Failed</h2>
+                <p>No request token found in URL.</p>
+              </body>
+            </html>
+            """)
 
 
 class ZerodhaAuthenticator:
@@ -57,20 +66,20 @@ class ZerodhaAuthenticator:
 
     def start_local_server(self, port=8000):
         try:
-            server = HTTPServer(("localhost", port), ZerodhaAuthHandler)
+            server = HTTPServer(('localhost', port), ZerodhaAuthHandler)
             server.request_token = None
-            logger.info("🌐 Local server at http://localhost:%d", port)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            logger.info(f"🌐 Local server started at http://localhost:{port}")
+            thread = threading.Thread(target=server.serve_forever, name="AuthHTTP", daemon=True)
             thread.start()
             return server
         except Exception as e:
-            logger.error("❌ Failed to start local server: %s", e)
+            logger.error(f"❌ Failed to start local server: {e}")
             return None
 
     def authenticate_interactive(self):
         try:
             login_url = self.get_login_url()
-            logger.info("🔗 Login URL: %s", login_url)
+            logger.info(f"🔗 Login URL: {login_url}")
             webbrowser.open(login_url)
 
             server = self.start_local_server(8000)
@@ -80,7 +89,7 @@ class ZerodhaAuthenticator:
             timeout = 120
             start = time.time()
 
-            while not getattr(server, "request_token", None):
+            while not getattr(server, 'request_token', None):
                 if time.time() - start > timeout:
                     logger.error("❌ Timeout waiting for request token")
                     server.shutdown()
@@ -88,13 +97,13 @@ class ZerodhaAuthenticator:
                 time.sleep(1)
 
             self.request_token = server.request_token
-            logger.info("📩 Received request token: %s", self.request_token)
+            logger.info(f"📩 Received request token: {self.request_token}")
             server.shutdown()
 
             return self.generate_access_token()
 
         except Exception as e:
-            logger.error("❌ Authentication error: %s", e, exc_info=True)
+            logger.error(f"❌ Authentication error: {e}")
             return False
 
     def generate_access_token(self):
@@ -108,26 +117,25 @@ class ZerodhaAuthenticator:
             self.kite.set_access_token(self.access_token)
 
             logger.info("✅ Access token generated")
-            logger.info("🔐 Access Token: %s", self.access_token)
+            logger.info(f"🔐 Access Token: {self.access_token}")
             return True
 
         except Exception as e:
-            logger.error("❌ Failed to generate access token: %s", e, exc_info=True)
+            logger.error(f"❌ Failed to generate access token: {e}")
             return False
 
     def save_access_token(self, filepath=".env"):
-        """Write KITE_ACCESS_TOKEN=... to .env (create or update)."""
         try:
             lines = []
             if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8") as f:
+                with open(filepath, "r") as f:
                     lines = f.readlines()
 
             new_line = f"KITE_ACCESS_TOKEN={self.access_token}\n"
             updated = False
 
             for i, line in enumerate(lines):
-                if line.startswith("KITE_ACCESS_TOKEN=") or line.startswith("ZERODHA_ACCESS_TOKEN="):
+                if line.startswith("KITE_ACCESS_TOKEN="):
                     lines[i] = new_line
                     updated = True
                     break
@@ -135,40 +143,24 @@ class ZerodhaAuthenticator:
             if not updated:
                 lines.append(new_line)
 
-            with open(filepath, "w", encoding="utf-8") as f:
+            with open(filepath, "w") as f:
                 f.writelines(lines)
 
-            logger.info("💾 Access token saved to %s", filepath)
+            logger.info(f"💾 Access token saved to {filepath}")
             return True
 
         except Exception as e:
-            logger.error("❌ Failed to save token to %s: %s", filepath, e, exc_info=True)
+            logger.error(f"❌ Failed to save token to {filepath}: {e}")
             return False
 
 
 def get_kite_client() -> KiteConnect:
-    """
-    Return an authenticated KiteConnect client using env vars.
-
-    Accepts either:
-      - KITE_ACCESS_TOKEN (preferred), or
-      - ZERODHA_ACCESS_TOKEN (legacy)
-    """
     api_key = os.getenv("ZERODHA_API_KEY")
     api_secret = os.getenv("ZERODHA_API_SECRET")
-    access_token = os.getenv("KITE_ACCESS_TOKEN", "").strip()
-    if not access_token:
-        access_token = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()
+    access_token = os.getenv("KITE_ACCESS_TOKEN")
 
-    missing = [name for name, val in [
-        ("ZERODHA_API_KEY", api_key),
-        ("ZERODHA_API_SECRET", api_secret),
-        ("KITE_ACCESS_TOKEN/ZERODHA_ACCESS_TOKEN", access_token),
-    ] if not val]
-    if missing:
-        raise EnvironmentError(
-            "Missing API credentials. Set: " + ", ".join(missing)
-        )
+    if not all([api_key, api_secret, access_token]):
+        raise EnvironmentError("Missing API credentials. Set ZERODHA_API_KEY, ZERODHA_API_SECRET, and KITE_ACCESS_TOKEN.")
 
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
@@ -181,7 +173,6 @@ if __name__ == "__main__":
 
     if API_KEY and API_SECRET:
         auth = ZerodhaAuthenticator(API_KEY, API_SECRET)
-        # Uncomment this to initiate login flow:
-        # auth.authenticate_interactive()
+        # auth.authenticate_interactive()  # Uncomment to run the flow
     else:
-        print("⚠️ Please set ZERODHA_API_KEY and ZERODHA_API_SECRET in environment variables.")
+        print("⚠️ Please set ZERODHA_API_KEY and ZERODHA_API_SECRET in .env or environment variables.")
