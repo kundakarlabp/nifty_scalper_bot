@@ -1,11 +1,13 @@
 # src/utils/strike_selector.py
 """
-Complete utility functions for selecting strike prices and fetching instrument tokens
+Utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
 
-This version keeps your structure, adds robust symbol resolution,
-fallbacks, cached instruments usage, and clearer logs.
+Keeps the original structure, adds robust symbol resolution, fallbacks,
+cached instruments usage, clearer logs, and a small health_check().
 """
+
+from __future__ import annotations
 
 from kiteconnect import KiteConnect
 from datetime import datetime, timedelta
@@ -17,9 +19,10 @@ from typing import Optional, Dict, List, Any
 logger = logging.getLogger(__name__)
 
 # --- Global rate limiting and caching ---
-_last_api_call = {}
+_last_api_call: Dict[str, float] = {}
 _api_call_lock = threading.RLock()
 _MIN_API_INTERVAL = 0.5  # Minimum 500ms between API calls
+
 
 def _rate_limited_api_call(func, *args, **kwargs):
     """Rate-limited API call wrapper with single retry on rate-limit."""
@@ -45,24 +48,27 @@ def _rate_limited_api_call(func, *args, **kwargs):
                 return result
             raise
 
+
 def _get_spot_ltp_symbol() -> str:
     """Read SPOT_SYMBOL from Config; fall back to 'NSE:NIFTY 50'."""
     try:
         from src.config import Config
-        sym = getattr(Config, 'SPOT_SYMBOL', 'NSE:NIFTY 50')
-        return sym or 'NSE:NIFTY 50'
+        sym = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
+        return sym or "NSE:NIFTY 50"
     except Exception as e:
         logger.debug(f"SPOT_SYMBOL fallback due to: {e}")
-        return 'NSE:NIFTY 50'
+        return "NSE:NIFTY 50"
+
 
 def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
-    """Format: YYMONDD (e.g., '2025-08-07' -> '25AUG07')"""
+    """Format: YYMONDD (e.g., '2025-08-07' -> '25AUG07')."""
     try:
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
         return expiry_date.strftime("%y%b%d").upper()
     except Exception as e:
         logger.error(f"[_format_expiry_for_symbol_primary] {e}")
         return ""
+
 
 def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type: str) -> str:
     """Primary tradingsymbol format used by Zerodha for NIFTY weeklys."""
@@ -73,13 +79,15 @@ def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type
         logger.error(f"[format_option_symbol] {e}")
         return ""
 
+
 def get_atm_strike_price(spot_price: float) -> int:
     """Nearest 50-step strike."""
     try:
-        return int(round(spot_price / 50.0) * 50)
+        return int(round(float(spot_price) / 50.0) * 50)
     except Exception as e:
         logger.error(f"[get_atm_strike_price] {e}")
         return 24500
+
 
 def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
     """Centered range around ATM."""
@@ -94,6 +102,7 @@ def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
         logger.error(f"[get_nearest_strikes] {e}", exc_info=True)
         return []
 
+
 def _calculate_next_thursday(target_date: Optional[datetime] = None) -> str:
     """Pure calendar fallback for 'next Thursday' in YYYY-MM-DD."""
     d = target_date or datetime.now()
@@ -102,8 +111,8 @@ def _calculate_next_thursday(target_date: Optional[datetime] = None) -> str:
     nxt = d + timedelta(days=days_ahead)
     return nxt.strftime("%Y-%m-%d")
 
-# ---------------- Cached instruments helpers ----------------
 
+# ---------------- Cached instruments helpers ----------------
 def fetch_cached_instruments(kite: KiteConnect) -> Dict[str, List[Dict[str, Any]]]:
     """
     One-shot fetch for 'NFO' and 'NSE' instruments with rate limiting.
@@ -123,9 +132,12 @@ def fetch_cached_instruments(kite: KiteConnect) -> Dict[str, List[Dict[str, Any]
 
     return {"NFO": nfo or [], "NSE": nse or []}
 
-# ---------------- Core selection functions ----------------
 
-def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: Optional[List[Dict]] = None) -> Optional[str]:
+# ---------------- Core selection functions ----------------
+def get_next_expiry_date(
+    kite_instance: KiteConnect,
+    cached_nfo_instruments: Optional[List[Dict]] = None
+) -> Optional[str]:
     """
     Resolve the nearest upcoming expiry for NIFTY options based on cached NFO instruments.
     Falls back to 'next Thursday' if instruments unavailable.
@@ -135,9 +147,7 @@ def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: Opt
         return _calculate_next_thursday()
 
     try:
-        spot_symbol_config = _get_spot_ltp_symbol()
-        # Zerodha instruments 'name' for NIFTY options is 'NIFTY'
-        base_name_for_search = "NIFTY"
+        base_name_for_search = "NIFTY"  # Zerodha instruments 'name' for NIFTY options
 
         if cached_nfo_instruments is None:
             try:
@@ -146,7 +156,7 @@ def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: Opt
                 logger.error(f"[get_next_expiry_date] instruments fetch failed: {e}")
                 return _calculate_next_thursday()
 
-        index_instruments = [i for i in cached_nfo_instruments if i.get('name') == base_name_for_search]
+        index_instruments = [i for i in cached_nfo_instruments if i.get("name") == base_name_for_search]
         if not index_instruments:
             logger.error(f"[get_next_expiry_date] No NFO instruments for '{base_name_for_search}'")
             return _calculate_next_thursday()
@@ -172,11 +182,37 @@ def get_next_expiry_date(kite_instance: KiteConnect, cached_nfo_instruments: Opt
             if exp.date() >= today:
                 return exp.strftime("%Y-%m-%d")
 
-        # All past? last one as fallback.
+        # All past? return the last one.
         return expiries[-1].strftime("%Y-%m-%d")
     except Exception as e:
         logger.error(f"[get_next_expiry_date] Error: {e}", exc_info=True)
         return _calculate_next_thursday()
+
+
+def _resolve_spot_token_from_cache(
+    cached_nse_instruments: List[Dict],
+) -> Optional[int]:
+    """
+    Try to find the NSE instrument token for NIFTY 50 index from cached instruments.
+    Fallback to Config.INSTRUMENT_TOKEN if not found.
+    """
+    try:
+        from src.config import Config
+        # Common listing in instruments dump for the index:
+        # tradingsymbol == "NIFTY 50", exchange == "NSE", segment == "INDICES"
+        for inst in cached_nse_instruments or []:
+            tsym = (inst.get("tradingsymbol") or "").strip().upper()
+            seg = (inst.get("segment") or "").upper()
+            if tsym == "NIFTY 50" and "INDICE" in seg:
+                tok = inst.get("instrument_token")
+                if tok:
+                    return int(tok)
+        # fallback to configured token (256265 is widely used for NIFTY index)
+        return int(getattr(Config, "INSTRUMENT_TOKEN", 256265))
+    except Exception as e:
+        logger.debug(f"[resolve_spot_token_from_cache] {e}")
+        return None
+
 
 def get_instrument_tokens(
     symbol: str,
@@ -184,7 +220,7 @@ def get_instrument_tokens(
     cached_nfo_instruments: List[Dict],
     cached_nse_instruments: List[Dict],
     offset: int = 0,
-    strike_range: int = 3
+    strike_range: int = 3,
 ) -> Optional[Dict[str, Any]]:
     """
     Get CE/PE instrument tokens for a given NIFTY symbol with offset.
@@ -207,7 +243,7 @@ def get_instrument_tokens(
         # 1) Spot LTP
         try:
             spot_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol_config])
-            spot_price = float(spot_data.get(spot_symbol_config, {}).get('last_price') or 0.0)
+            spot_price = float(spot_data.get(spot_symbol_config, {}).get("last_price") or 0.0)
             if not spot_price:
                 logger.error("[get_instrument_tokens] Could not fetch spot price.")
                 return None
@@ -225,16 +261,22 @@ def get_instrument_tokens(
             logger.error("[get_instrument_tokens] Could not resolve expiry.")
             return None
 
-        logger.info(f"[get_instrument_tokens] Spot:{spot_price:.2f} ATM:{atm} Target:{target} Expiry:{expiry} Offset:{offset}")
+        logger.info(
+            f"[get_instrument_tokens] Spot:{spot_price:.2f} ATM:{atm} Target:{target} "
+            f"Expiry:{expiry} Offset:{offset}"
+        )
 
-        # 4) Filter relevant instruments: name=NIFTY, expiry matches
-        # Note: cached instruments may store 'expiry' as datetime.date/datetime
         def _exp_str(x) -> str:
             if hasattr(x, "strftime"):
                 return x.strftime("%Y-%m-%d")
             return str(x)
 
-        candidates = [i for i in cached_nfo_instruments if i.get('name') == base_name and _exp_str(i.get('expiry')) == expiry]
+        # 4) Filter relevant instruments: name=NIFTY, expiry matches
+        candidates = [
+            i
+            for i in cached_nfo_instruments
+            if i.get("name") == base_name and _exp_str(i.get("expiry")) == expiry
+        ]
         if not candidates:
             logger.error(f"[get_instrument_tokens] No instruments for {base_name} @ {expiry}")
             return None
@@ -250,7 +292,7 @@ def get_instrument_tokens(
             "ce_token": None,
             "pe_symbol": None,
             "pe_token": None,
-            "spot_token": None
+            "spot_token": _resolve_spot_token_from_cache(cached_nse_instruments),
         }
 
         # 5) Search strikes outward from target for CE/PE
@@ -266,7 +308,10 @@ def get_instrument_tokens(
                         results[f"{side.lower()}_symbol"] = inst.get("tradingsymbol")
                         results[f"{side.lower()}_token"] = inst.get("instrument_token")
                         results["actual_strikes"][side.lower()] = int(strike)
-                        logger.info(f"[get_instrument_tokens] Found {side}: {inst.get('tradingsymbol')} ({inst.get('instrument_token')})")
+                        logger.info(
+                            f"[get_instrument_tokens] Found {side}: "
+                            f"{inst.get('tradingsymbol')} ({inst.get('instrument_token')})"
+                        )
                         found = True
                         break
                 if found:
@@ -292,6 +337,7 @@ def get_instrument_tokens(
         logger.error(f"[get_instrument_tokens] Unexpected error: {e}", exc_info=True)
         return None
 
+
 def is_trading_hours() -> bool:
     """Simple NSE hours gate: 09:15–15:30 IST, Mon–Fri."""
     try:
@@ -302,4 +348,46 @@ def is_trading_hours() -> bool:
         return (0 <= wd <= 4) and (start <= now.time() <= end)
     except Exception as e:
         logger.error(f"[is_trading_hours] {e}")
-        return True
+        return True  # fail open to avoid blocking unexpectedly
+
+
+# ---------------- Diagnostics ----------------
+def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
+    """
+    Lightweight readiness probe used by RealTimeTrader.
+    Checks LTP reachability and validates instruments cache fetch.
+    """
+    status = {"overall_status": "OK", "message": "", "checks": {}}
+    try:
+        if not kite:
+            status.update(overall_status="ERROR", message="Kite client unavailable")
+            return status
+
+        # LTP check
+        spot_sym = _get_spot_ltp_symbol()
+        try:
+            ltp = _rate_limited_api_call(kite.ltp, [spot_sym])
+            ok = bool(ltp.get(spot_sym, {}).get("last_price"))
+            status["checks"]["ltp"] = "OK" if ok else "FAIL"
+            if not ok:
+                status["overall_status"] = "ERROR"
+        except Exception as e:
+            status["checks"]["ltp"] = f"FAIL: {e}"
+            status["overall_status"] = "ERROR"
+
+        # Instruments check
+        try:
+            nfo = _rate_limited_api_call(kite.instruments, "NFO")
+            ok = isinstance(nfo, list) and len(nfo) > 0
+            status["checks"]["instruments"] = "OK" if ok else "FAIL"
+            if not ok:
+                status["overall_status"] = "ERROR"
+        except Exception as e:
+            status["checks"]["instruments"] = f"FAIL: {e}"
+            status["overall_status"] = "ERROR"
+
+        status["message"] = " | ".join(f"{k}:{v}" for k, v in status["checks"].items())
+        return status
+    except Exception as e:
+        logger.error(f"[health_check] {e}", exc_info=True)
+        return {"overall_status": "ERROR", "message": str(e), "checks": {}}
