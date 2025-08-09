@@ -134,7 +134,13 @@ class RealTimeTrader:
         )
         self.risk_manager = PositionSizing()
         self.order_executor = OrderExecutor()
-        self.telegram_controller = TelegramController()
+
+        # ---- TelegramController now requires callbacks; wire them here ----
+        self.telegram_controller = TelegramController(
+            status_callback=self.get_status,
+            control_callback=self._control_command,
+            summary_callback=self.get_summary
+        )
 
         # Instruments cache timestamp used in get_status()
         self._instruments_cache_timestamp: float = time.time()
@@ -148,6 +154,26 @@ class RealTimeTrader:
             pass  # Some environments don't allow setting signals
 
         self._lock = threading.RLock()
+
+    # ---------- Control callback for Telegram ----------
+
+    def _control_command(self, command: str) -> str:
+        """
+        Handle Telegram control actions. Expected commands:
+        'start', 'stop', 'status', 'summary'
+        """
+        cmd = (command or "").strip().lower()
+        if cmd == "start":
+            self.start_trading()
+            return "🟢 Trading ENABLED."
+        if cmd == "stop":
+            self.stop_trading()
+            return "🛑 Trading DISABLED."
+        if cmd == "status":
+            return str(self.get_status())
+        if cmd == "summary":
+            return self.get_summary()
+        return f"Unknown command: {command}. Try: start | stop | status | summary"
 
     # ---------- Internal helpers ----------
 
