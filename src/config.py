@@ -16,7 +16,7 @@ try:
     env_path = Path(__file__).parent.parent / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)
-        print(f"🔐 Loaded environment from {env_path}")  # Optional: visible confirmation
+        print(f"🔐 Loaded environment from {env_path}")
     else:
         print("⚠️  .env file not found at:", env_path)
 except ImportError:
@@ -25,8 +25,15 @@ except Exception as exc:
     print(f"❌ Failed to load .env: {exc}")
 
 # Fallback to current directory if __file__ is not available (rare)
-if not 'env_path' in locals():
-    env_path = Path('.env')
+if "env_path" not in locals():
+    env_path = Path(".env")
+
+
+def _get_env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name, "").strip().lower()
+    if not val:
+        return default
+    return val in ("1", "true", "yes", "on")
 
 
 class Config:
@@ -35,12 +42,18 @@ class Config:
     # ———————————————— ZERODHA CREDENTIALS ———————————————— #
     ZERODHA_API_KEY: str = os.getenv("ZERODHA_API_KEY", "")
     ZERODHA_API_SECRET: str = os.getenv("ZERODHA_API_SECRET", "")
-    KITE_ACCESS_TOKEN: str = os.getenv("KITE_ACCESS_TOKEN", "")
+
+    # Prefer KITE_ACCESS_TOKEN; fall back to legacy ZERODHA_ACCESS_TOKEN
+    _KITE_AT = os.getenv("KITE_ACCESS_TOKEN", "").strip()
+    if not _KITE_AT:
+        _KITE_AT = os.getenv("ZERODHA_ACCESS_TOKEN", "").strip()
+        if _KITE_AT:
+            print("ℹ️  Using ZERODHA_ACCESS_TOKEN as KITE_ACCESS_TOKEN (backward-compat).")
+    KITE_ACCESS_TOKEN: str = _KITE_AT
 
     # ———————————————— TELEGRAM BOT ———————————————— #
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-    # ✅ Use TELEGRAM_CHAT_ID
     try:
         TELEGRAM_CHAT_ID: int = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
     except (ValueError, TypeError):
@@ -74,35 +87,25 @@ class Config:
     MIN_LOTS: int = int(os.getenv("MIN_LOTS", "1"))
     MAX_LOTS: int = int(os.getenv("MAX_LOTS", "5"))
 
-    # TRADE_SYMBOL is used for futures trading or as a general symbol identifier.
-    # For Nifty 50 index futures, this might be 'NIFTY' or 'NIFTY50' depending on how
-    # it's referenced in your specific context or in kite.instruments("NFO").
-    # It's distinct from SPOT_SYMBOL which is used for fetching LTP.
-    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY") # Base symbol for futures/spot instrument lookup
-
+    # Symbol used for trade placement context (futures/spot identifier)
+    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY")
     TRADE_EXCHANGE: str = os.getenv("TRADE_EXCHANGE", "NFO")
 
-    # Add this line for the instrument token (if still used for futures)
-    # Default token 256265 is for NIFTY 50 Index on NSE. You MUST verify this is correct for your instrument.
-    # It's highly recommended to set this in your .env file.
+    # Useful if you still reference a direct token somewhere
     INSTRUMENT_TOKEN: int = int(os.getenv("INSTRUMENT_TOKEN", "256265"))
 
     # ———————————————— OPTIONS TRADING SETTINGS ———————————————— #
-    # SPOT_SYMBOL is specifically used for fetching the spot price LTP.
-    # It should be the full symbol including the exchange prefix.
-    # As confirmed and set in your .env file.
-    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NSE:NIFTY 50") # Full symbol for LTP request
-    OPTION_TYPE: str = os.getenv("OPTION_TYPE", "BOTH") # CE, PE, BOTH
-    STRIKE_SELECTION_TYPE: str = os.getenv("STRIKE_SELECTION_TYPE", "ATM") # ATM, ITM, OTM, OI_DELTA
-    STRIKE_RANGE: int = int(os.getenv("STRIKE_RANGE", "3")) # Number of strikes on either side of ATM to consider
-    DATA_LOOKBACK_MINUTES: int = int(os.getenv("DATA_LOOKBACK_MINUTES", "30")) # For OI/Delta analysis
+    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NSE:NIFTY 50")
+    OPTION_TYPE: str = os.getenv("OPTION_TYPE", "BOTH")  # CE, PE, BOTH
+    STRIKE_SELECTION_TYPE: str = os.getenv("STRIKE_SELECTION_TYPE", "ATM")  # ATM, ITM, OTM, OI_DELTA
+    STRIKE_RANGE: int = int(os.getenv("STRIKE_RANGE", "3"))
+    DATA_LOOKBACK_MINUTES: int = int(os.getenv("DATA_LOOKBACK_MINUTES", "30"))
 
-    # --- Optional Configurable Parameters for ScalpingStrategy ---
-    # These can be used by the EnhancedScalpingStrategy for options
-    OPTION_SL_PERCENT: float = float(os.getenv("OPTION_SL_PERCENT", "0.05")) # 5% Stop Loss
-    OPTION_TP_PERCENT: float = float(os.getenv("OPTION_TP_PERCENT", "0.15")) # 15% Target
-    OPTION_BREAKOUT_PCT: float = float(os.getenv("OPTION_BREAKOUT_PCT", "0.01")) # 1% Breakout
-    OPTION_SPOT_TREND_PCT: float = float(os.getenv("OPTION_SPOT_TREND_PCT", "0.005")) # 0.5% Spot Trend
+    # Optional Strategy Params for options
+    OPTION_SL_PERCENT: float = float(os.getenv("OPTION_SL_PERCENT", "0.05"))   # 5%
+    OPTION_TP_PERCENT: float = float(os.getenv("OPTION_TP_PERCENT", "0.15"))   # 15%
+    OPTION_BREAKOUT_PCT: float = float(os.getenv("OPTION_BREAKOUT_PCT", "0.01"))
+    OPTION_SPOT_TREND_PCT: float = float(os.getenv("OPTION_SPOT_TREND_PCT", "0.005"))
 
     # ———————————————— EXECUTION DEFAULTS ———————————————— #
     DEFAULT_PRODUCT: str = os.getenv("DEFAULT_PRODUCT", "MIS")
@@ -110,19 +113,17 @@ class Config:
     DEFAULT_VALIDITY: str = os.getenv("DEFAULT_VALIDITY", "DAY")
 
     # ———————————————— FEATURE TOGGLES ———————————————— #
-    ENABLE_LIVE_TRADING: bool = os.getenv("ENABLE_LIVE_TRADING", "false").lower() in ("true", "1", "yes")
-    ENABLE_TELEGRAM: bool = os.getenv("ENABLE_TELEGRAM", "true").lower() in ("true", "1", "yes")
+    ENABLE_LIVE_TRADING: bool = _get_env_bool("ENABLE_LIVE_TRADING", False)
+    ENABLE_TELEGRAM: bool = _get_env_bool("ENABLE_TELEGRAM", True)
 
     # ———————————————— LOGGING ———————————————— #
     LOG_FILE: str = os.getenv("LOG_FILE", "logs/trades.csv")
 
 
-# ———————————————— DEBUG: Print loaded config (optional) ———————————————— #
-# Remove in production
 if __name__ == "__main__":
     import pprint
+
     print("🔐 Final Config:")
-    pprint.pprint({
-        k: v for k, v in Config.__dict__.items()
-        if not k.startswith("__") and not callable(v)
-    })
+    pprint.pprint(
+        {k: v for k, v in Config.__dict__.items() if not k.startswith("__") and not callable(v)}
+    )
