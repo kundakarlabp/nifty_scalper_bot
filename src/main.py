@@ -1,105 +1,112 @@
-# main.py
-
+# src/main.py
 """
 Entry point for the Nifty Scalper Bot.
 
-Provides a CLI to control the bot:
-    python -m src.main start    → Initialize bot, start Telegram, and begin main processing loop
-    python -m src.main stop     → Stop only trading logic (polling stays alive)
-    python -m src.main status   → Print current bot status
+CLI:
+  python -m src.main start   -> init trader, start trading, run schedule loop
+  python -m src.main stop    -> stop trading (polling stays alive)
+  python -m src.main status  -> print current status
+  python -m src.main health  -> run health check and print
 
-The bot will respond to Telegram commands like /start, /stop, /mode live.
-Always run this as a module to ensure correct imports.
+The RealTimeTrader starts Telegram polling in a daemon thread on init.
+The main thread only runs schedule.run_pending() without blocking Telegram.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import sys
 import time
-import signal
-import schedule # Import schedule if your trader uses it
+from typing import Optional
 
-# ✅ Correct import path based on your actual file
+import schedule
+
 from src.data_streaming.realtime_trader import RealTimeTrader
 
-# Configure logging
+# ---------- logging ----------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
-# Singleton instance
-_trader: RealTimeTrader | None = None
+# ---------- singleton ----------
+_trader: Optional[RealTimeTrader] = None
 
 
 def get_trader() -> RealTimeTrader:
-    """Lazy-initialize the RealTimeTrader singleton."""
+    """Lazy-init singleton. Also starts Telegram polling (inside trader.__init__)."""
     global _trader
     if _trader is None:
-        logger.info("🧠 Initializing RealTimeTrader...")
-        _trader = RealTimeTrader() # This initializes and starts Telegram polling in a daemon thread
+        logger.info("🧠 Initializing RealTimeTrader…")
+        _trader = RealTimeTrader()
     return _trader
 
 
-def graceful_shutdown(signum, frame):
-    """Handle SIGINT/SIGTERM gracefully."""
-    logger.info(f"🛑 Received signal {signum}. Shutting down...")
-    if _trader:
-        _trader.shutdown()
-    sys.exit(0)
+# ---------- graceful shutdown ----------
+def _graceful_shutdown(signum, _frame):
+    logger.info("🛑 Received signal %s. Shutting down…", signum)
+    try:
+        if _trader:
+            _trader.shutdown()  # stops trading + stops telegram polling daemons
+    finally:
+        # give logs a moment to flush in containers
+        time.sleep(0.3)
+        sys.exit(0)
 
 
+# ---------- CLI ----------
 def main() -> None:
-    """CLI entry point."""
     if len(sys.argv) < 2:
-        print("Usage: python -m src.main [start|stop|status]")
+        print("Usage: python -m src.main [start|stop|status|health]")
         sys.exit(1)
 
-    command = sys.argv[1].lower().strip()
-    signal.signal(signal.SIGINT, graceful_shutdown)
-    signal.signal(signal.SIGTERM, graceful_shutdown)
+    command = sys.argv[1].strip().lower()
 
-    trader = get_trader() # This initializes the trader and starts Telegram polling in __init__
+    # Register signals early
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+    trader = get_trader()  # starts Telegram poller inside
 
     if command == "start":
-        logger.info("🚀 Starting Nifty Scalper Bot main processing loop...")
-        # Trader is initialized, Telegram polling started in __init__ (daemon thread)
-        # Now run the main processing loop in the main thread.
-        # This loop is responsible for running scheduled tasks or periodic checks.
+        logger.info("🚀 Starting trading loop…")
+        trader.start()  # flip is_trading = True (safe if already started)
+
+        # Foreground loop: run schedule jobs created by trader (e.g., _smart_fetch_and_process)
+        logger.info("🟢 Main loop active. Ctrl+C to stop.")
         try:
-            logger.info("🟢 Entering main processing loop. Press Ctrl+C to stop.")
-            # The main loop runs scheduled tasks or other periodic logic.
-            # If you have scheduled tasks set up elsewhere (e.g., in trader.__init__ or process_data_and_trade),
-            # this loop will execute them.
             while True:
-                # Run any scheduled tasks (e.g., data fetching, signal checking)
-                # Make sure you have scheduled tasks set up, e.g.:
-                # schedule.every(1).minutes.do(trader.some_periodic_method)
                 schedule.run_pending()
-                time.sleep(1) # Check for scheduled tasks every second
+                time.sleep(0.5)  # small sleep avoids CPU burn
         except KeyboardInterrupt:
-            logger.info("🛑 KeyboardInterrupt received in main loop.")
-            graceful_shutdown(signal.SIGINT, None)
+            _graceful_shutdown(signal.SIGINT, None)
 
     elif command == "stop":
-        logger.info("🛑 Stopping trading logic...")
-        trader.stop() # This sets trader.is_trading = False
-        logger.info("Trading logic stopped. Telegram polling remains active.")
+        logger.info("🛑 Stopping trading logic (Telegram polling stays alive)…")
+        trader.stop()
         sys.exit(0)
 
     elif command == "status":
-        logger.info("📊 Fetching bot status...")
+        logger.info("📊 Fetching bot status…")
         status = trader.get_status()
         print("📊 Bot Status:")
-        for key, value in status.items():
-            print(f"  {key}: {value}")
+        for k, v in status.items():
+            print(f"  {k}: {v}")
+        sys.exit(0)
+
+    elif command == "health":
+        logger.info("🩺 Running health check…")
+        trader._run_health_check()  # uses Telegram + logs; keep as is for parity
         sys.exit(0)
 
     else:
         print(f"❌ Unknown command: {command}")
-        print("Usage: python -m src.main [start|stop|status]")
+        print("Usage: python -m src.main [start|stop|status|health]")
         sys.exit(1)
 
 
