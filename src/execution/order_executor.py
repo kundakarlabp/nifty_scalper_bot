@@ -11,13 +11,13 @@ Public API:
 - get_active_orders()
 - get_positions()
 - cancel_all_orders()
-- get_last_price(symbol)             # NEW: for trailing worker
-- get_tick_size() -> float           # NEW: share broker tick size
-- sync_and_enforce_oco() -> list     # NEW: best-effort peer cancel & fill scan (returns filled [(order_id, fill_px)])
+- get_last_price(symbol)             # for trailing worker
+- get_tick_size() -> float           # share broker tick size
+- sync_and_enforce_oco() -> list     # best-effort peer cancel & fill scan: [(order_id, fill_px)]
 
 Notes:
 - Tries GTT OCO first (AUTO/GTT). If unavailable/fails, falls back to REGULAR exits
-  (SL order + TP limit). Your trader should still enforce OCO (we also provide a helper).
+  (SL order + TP limit). The trader still enforces OCO via sync_and_enforce_oco().
 - In REGULAR mode, update_trailing_stop() modifies the live SL.
 - In GTT mode, we only log the new stop (cancel & recreate is heavy).
 """
@@ -621,7 +621,7 @@ class OrderExecutor:
                     if not rec.is_open:
                         continue
 
-                    # Check REGULAR exits first
+                    # REGULAR exits – detect completed SL/TP and cancel the peer
                     if not rec.use_gtt:
                         sl_done = False
                         tp_done = False
@@ -655,8 +655,8 @@ class OrderExecutor:
                             closed.append((entry_id, float(fill_px) if fill_px else rec.target if tp_done else rec.stop_loss))
                             continue
 
-                    # GTT path – nothing to do unless we map gtt_id and query gtt list (not exposed in kiteconnect v4)
-                    # We leave it to the trader to mark exit on PnL or detect last_price breach.
+                    # GTT path – not enforced here due to API limitations.
+                    # Trader may mark exit via price breach or end-of-day cleanup.
 
             return closed
 
