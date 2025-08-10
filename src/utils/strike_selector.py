@@ -3,8 +3,16 @@
 Utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
 
-Keeps the original structure, adds robust symbol resolution, fallbacks,
-cached instruments usage, clearer logs, and a small health_check().
+- Robust symbol resolution and conservative fallbacks
+- Cached instruments usage (passed in), with rate-limited API wrappers
+- Spread-agnostic (selection only), used by the trader which applies its own guards
+- Lightweight health_check() for readiness probes
+
+Public functions used elsewhere:
+- _get_spot_ltp_symbol()
+- get_instrument_tokens(...)
+- get_next_expiry_date(...)
+- health_check(...)
 """
 
 from __future__ import annotations
@@ -18,14 +26,24 @@ from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
-# --- Global rate limiting and caching ---
+__all__ = [
+    "_get_spot_ltp_symbol",
+    "get_instrument_tokens",
+    "get_next_expiry_date",
+    "get_nearest_strikes",
+    "fetch_cached_instruments",
+    "is_trading_hours",
+    "health_check",
+]
+
+# --- Global rate limiting and basic call dedup ---
 _last_api_call: Dict[str, float] = {}
 _api_call_lock = threading.RLock()
-_MIN_API_INTERVAL = 0.5  # Minimum 500ms between API calls
+_MIN_API_INTERVAL = 0.5  # 500ms between calls per endpoint
 
 
 def _rate_limited_api_call(func, *args, **kwargs):
-    """Rate-limited API call wrapper with single retry on rate-limit."""
+    """Rate-limited API call wrapper with a single retry on rate-limit."""
     with _api_call_lock:
         call_key = getattr(func, "__name__", "api_call")
         now = time.time()
@@ -107,7 +125,7 @@ def _calculate_next_thursday(target_date: Optional[datetime] = None) -> str:
     """Pure calendar fallback for 'next Thursday' in YYYY-MM-DD."""
     d = target_date or datetime.now()
     days_ahead = (3 - d.weekday()) % 7
-    days_ahead = 7 if days_ahead == 0 else days_ahead
+    days_ahead = 7 if days_ahead == 0 else days_ahead  # if today is Thu, choose next week
     nxt = d + timedelta(days=days_ahead)
     return nxt.strftime("%Y-%m-%d")
 
@@ -140,7 +158,7 @@ def get_next_expiry_date(
 ) -> Optional[str]:
     """
     Resolve the nearest upcoming expiry for NIFTY options based on cached NFO instruments.
-    Falls back to 'next Thursday' if instruments unavailable.
+    Fallback: calendar 'next Thursday' if instruments unavailable.
     """
     if not kite_instance:
         logger.error("[get_next_expiry_date] KiteConnect instance is required.")
@@ -199,7 +217,7 @@ def _resolve_spot_token_from_cache(
     try:
         from src.config import Config
         # Common listing in instruments dump for the index:
-        # tradingsymbol == "NIFTY 50", exchange == "NSE", segment == "INDICES"
+        # tradingsymbol == "NIFTY 50", exchange == "NSE", segment contains "INDICES"
         for inst in cached_nse_instruments or []:
             tsym = (inst.get("tradingsymbol") or "").strip().upper()
             seg = (inst.get("segment") or "").upper()
@@ -225,6 +243,21 @@ def get_instrument_tokens(
     """
     Get CE/PE instrument tokens for a given NIFTY symbol with offset.
     Requires cached instruments to avoid API rate limits.
+
+    Returns dict with:
+      {
+        "spot_price": float,
+        "atm_strike": int,
+        "target_strike": int,
+        "offset": int,
+        "actual_strikes": {"ce": int?, "pe": int?},
+        "expiry": "YYYY-MM-DD",
+        "ce_symbol": str?,
+        "ce_token": int?,
+        "pe_symbol": str?,
+        "pe_token": int?,
+        "spot_token": int?,
+      }
     """
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
@@ -348,7 +381,7 @@ def is_trading_hours() -> bool:
         return (0 <= wd <= 4) and (start <= now.time() <= end)
     except Exception as e:
         logger.error(f"[is_trading_hours] {e}")
-        return True  # fail open to avoid blocking unexpectedly
+        return True  # fail-open to avoid unexpected blocking
 
 
 # ---------------- Diagnostics ----------------
@@ -360,7 +393,7 @@ def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
     status = {"overall_status": "OK", "message": "", "checks": {}}
     try:
         if not kite:
-            status.update(overall_status="ERROR", message="Kite client unavailable")
+            status.update(overall_status="ERROR", message="No Kite instance")
             return status
 
         # LTP check
