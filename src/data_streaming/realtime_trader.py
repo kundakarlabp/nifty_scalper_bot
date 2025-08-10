@@ -781,7 +781,7 @@ class RealTimeTrader:
         futures = {}
         with ThreadPoolExecutor(max_workers=8) as ex:
             for symbol, token in tasks:
-                futures[ex.submit(self._fetch_historical_data, token, start_time, end_time)] = symbol
+                futures[submit := ex.submit(self._fetch_historical_data, token, start_time, end_time)] = symbol
             for fut in as_completed(futures):
                 symbol = futures[fut]
                 try:
