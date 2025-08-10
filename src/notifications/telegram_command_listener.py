@@ -1,87 +1,99 @@
 """
 Backward-compatibility wrapper for the Telegram controller.
 
-In older setups this script was run standalone. It now just wires up
-dummy callbacks (when no live trader is bound) and starts the Telegram
-poller in a non-blocking daemon thread.
+In the original codebase, the Telegram bot command listener was a
+standalone script. This refactored version rolls command handling
+directly into ``TelegramController``. The separate listener is
+therefore no longer required, but this file remains to avoid import
+errors for existing tooling.
 
-You can still run:
-    python -m src.notifications.telegram_command_listener
+Running this module directly will simply instantiate a ``TelegramController``
+and begin polling for commands. The controller does not perform any
+trading itself; instead, it logs incoming commands.
 """
 
 from __future__ import annotations
 
 import logging
-import signal
-import sys
-import time
-from typing import Any, Dict
+from typing import Any, Dict, Callable
 
-# Try importing the real controller (project layout first, then flat file fallback)
+# --- NEW: .env auto-loader so this script is standalone-friendly ---
+def load_dotenv_if_present() -> None:
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+        here = Path(__file__).resolve()
+        candidates = [
+            here.parent / ".env",          # repo/.env if this file sits at repo root
+            here.parent.parent / ".env",   # repo/.env if this file is in a subfolder
+            Path.cwd() / ".env",
+        ]
+        for p in candidates:
+            if p.exists():
+                load_dotenv(p)
+                logging.getLogger(__name__).info(f"🔐 Loaded environment from {p}")
+                return
+        load_dotenv()
+    except Exception:
+        pass
+
+load_dotenv_if_present()
+# --- END NEW ---
+
+# Attempt to import the real controller
 try:
     from src.notifications.telegram_controller import TelegramController
 except (ImportError, ModuleNotFoundError):
     try:
-        from telegram_controller import TelegramController  # type: ignore
-    except Exception as e:
+        from telegram_controller import TelegramController
+    except ImportError:
         raise ImportError(
-            "Could not find 'TelegramController'. Ensure it exists at "
-            "'src/notifications/telegram_controller.py' or alongside this file."
-        ) from e
+            "Could not find 'TelegramController'. "
+            "Make sure 'telegram_controller.py' is in the path."
+        )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-# -------------------------- dummy callbacks -------------------------- #
-
+# Dummy callbacks for legacy mode (logging only)
 def _dummy_status() -> Dict[str, Any]:
     logger.info("⚠️ /status received, but no live trader connected.")
-    return {"is_trading": False, "live_mode": False, "trades_today": 0, "open_orders": 0, "daily_pnl": 0.0}
+    return {"is_trading": False, "live_mode": False, "trades_today": 0, "open_orders": 0}
+
 
 def _dummy_control(cmd: str, arg: str = "") -> bool:
-    logger.info("📩 Command received (no action): /%s %s", cmd, arg)
+    logger.info(f"📩 Command received (no action): /{cmd} {arg}".strip())
     return True
+
 
 def _dummy_summary() -> str:
     logger.info("⚠️ /summary requested, but no trade history available.")
     return "No trading context available in legacy listener mode."
 
 
-# ------------------------------ main -------------------------------- #
-
 def main() -> None:
-    """Start polling for Telegram commands with dummy callbacks (non-blocking)."""
+    """Start polling for Telegram commands with dummy callbacks."""
     try:
         controller = TelegramController(
             status_callback=_dummy_status,
             control_callback=_dummy_control,
             summary_callback=_dummy_summary,
         )
-    except Exception as e:
-        logger.error("Failed to initialize TelegramController: %s", e, exc_info=True)
-        logger.info("💡 Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your environment/.env")
-        sys.exit(1)
+    except TypeError as e:
+        logger.error(f"Failed to initialize TelegramController: {e}")
+        logger.info("💡 Hint: Ensure your TelegramController accepts optional callbacks.")
+        return
 
-    # Start the poller (daemon thread; returns immediately)
-    controller.start_polling()
     logger.info("📡 Telegram command listener started (legacy compatibility mode).")
+    controller.start_polling()
 
-    # Graceful shutdown on SIGINT/SIGTERM
-    def _shutdown(signum, _frame):
-        logger.info("🛑 Signal %s received. Stopping Telegram polling...", signum)
-        controller.stop_polling()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    # Keep the process alive without burning CPU
     try:
         while True:
-            time.sleep(0.5)
+            pass  # Keep main thread alive
     except KeyboardInterrupt:
-        _shutdown(signal.SIGINT, None)
+        logger.info("🛑 Telegram listener stopped via keyboard interrupt.")
+        controller.stop_polling()
 
 
 if __name__ == "__main__":
