@@ -301,12 +301,17 @@ class RealTimeTrader:
             if atr <= 0:
                 continue
 
-            ltp = self.order_executor.get_last_price(symbol)  # None on SIM
+            # Executor should expose a best-effort last price (SIM: may be None)
+            get_last = getattr(self.order_executor, "get_last_price", None)
+            ltp = get_last(symbol) if callable(get_last) else None
             if ltp is None:
+                # fallback to recent close we already fetched (kept in trade)
+                ltp = float(tr.get("last_close", 0.0) or 0.0)
+            if not ltp or ltp <= 0:
                 continue
 
             try:
-                self.order_executor.update_trailing_stop(oid, ltp, atr)
+                self.order_executor.update_trailing_stop(oid, float(ltp), float(atr))
             except Exception:
                 pass
 
@@ -314,13 +319,21 @@ class RealTimeTrader:
         # 1) Best-effort sync fills & enforce OCO
         filled = []
         try:
-            filled = self.order_executor.sync_and_enforce_oco()
+            sync = getattr(self.order_executor, "sync_and_enforce_oco", None)
+            filled = sync() if callable(sync) else []
         except Exception:
             filled = []
 
-        # 2) For SIM/broker paths without fills list, also prune actives that disappeared
-        actives = self.order_executor.get_active_orders()
-        active_ids = set(actives.keys())
+        # 2) Normalize actives view from executor (dict or list)
+        actives_raw = self.order_executor.get_active_orders()
+        if isinstance(actives_raw, dict):
+            active_ids = set(actives_raw.keys())
+        else:
+            # list of records having order_id
+            try:
+                active_ids = {getattr(o, "order_id", None) for o in (actives_raw or [])} - {None}
+            except Exception:
+                active_ids = set()
 
         with self._lock:
             to_finalize = []
@@ -337,8 +350,12 @@ class RealTimeTrader:
                 if tr.get("status") != "OPEN":
                     continue
                 if entry_id not in active_ids:
-                    # we don't know the exact exit; fall back to last known target/stop
-                    tr["exit_price"] = float(tr.get("target") if tr.get("direction") == "BUY" else tr.get("stop_loss", tr.get("target", 0.0)))
+                    # No exact exit; fall back to known target/SL depending on side
+                    if tr["direction"] == "BUY":
+                        fallback_px = float(tr.get("target") or tr.get("stop_loss", 0.0))
+                    else:
+                        fallback_px = float(tr.get("stop_loss") or tr.get("target", 0.0))
+                    tr["exit_price"] = fallback_px
                     to_finalize.append(entry_id)
 
             for entry_id in to_finalize:
@@ -624,7 +641,9 @@ class RealTimeTrader:
                 return
 
             # single-position policy
-            if len(self.order_executor.get_active_orders()) >= self.MAX_CONCURRENT_TRADES:
+            actives_raw = self.order_executor.get_active_orders()
+            active_count = len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            if active_count >= self.MAX_CONCURRENT_TRADES:
                 logger.debug("Single-position policy: already at max concurrent trades.")
                 return
 
@@ -706,7 +725,7 @@ class RealTimeTrader:
             return None
 
     def _fetch_historical_data(self, token: int, start_time: datetime, end_time: datetime) -> pd.DataFrame:
-        """Wraps kite.historical_data; returns DataFrame with DatetimeIndex & ['open','high','low','close','volume']."""
+        """Wraps kite.historical_data; returns DataFrame with DatetimeIndex & ['open','high','low','close','volume'].""" 
         try:
             k = self.order_executor.kite
             tf = self.HIST_TIMEFRAME
@@ -774,6 +793,18 @@ class RealTimeTrader:
                 except Exception as e:
                     logger.debug(f"Fetch failed for {symbol}: {e}")
 
+        # cache last close for trailing fallback
+        for sym, df in options_data.items():
+            try:
+                if not df.empty:
+                    last_close = float(df["close"].iloc[-1])
+                    with self._lock:
+                        for tr in self.active_trades.values():
+                            if tr.get("symbol") == sym and tr.get("status") == "OPEN":
+                                tr["last_close"] = last_close
+            except Exception:
+                pass
+
         return spot_df, options_data
 
     # ---------- Quotes / mid helpers ----------
@@ -786,7 +817,6 @@ class RealTimeTrader:
         if not kite:
             return {}
         try:
-            # Zerodha expects a list like ["NFO:NIFTY24AUG20000CE", ...]
             quotes = kite.quote(symbols)
             return quotes or {}
         except Exception as e:
@@ -960,7 +990,9 @@ class RealTimeTrader:
                 continue
 
             # single-position policy (again just before entry)
-            if len(self.order_executor.get_active_orders()) >= self.MAX_CONCURRENT_TRADES:
+            actives_raw = self.order_executor.get_active_orders()
+            active_count = len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            if active_count >= self.MAX_CONCURRENT_TRADES:
                 logger.debug("Single-position policy: already at max concurrent trades (pre-entry).")
                 break
 
@@ -1016,7 +1048,7 @@ class RealTimeTrader:
                 logger.warning(f"Entry order error for {sym}: {e}")
                 continue
 
-            # Bracket (GTT) orders
+            # Bracket (GTT) orders — keep your executor signature
             try:
                 self.order_executor.setup_gtt_orders(
                     entry_order_id=order_id,
@@ -1064,7 +1096,8 @@ class RealTimeTrader:
         # Obtain exit price if not present (fallback to ltp)
         exit_price = float(tr.get("exit_price", 0.0))
         if exit_price <= 0:
-            px = self.order_executor.get_last_price(tr["symbol"])
+            get_last = getattr(self.order_executor, "get_last_price", None)
+            px = get_last(tr["symbol"]) if callable(get_last) else None
             if px is not None:
                 exit_price = float(px)
             else:
@@ -1129,9 +1162,11 @@ class RealTimeTrader:
     # ---------- Status / summary ----------
 
     def get_status(self) -> Dict[str, Any]:
+        actives_raw = self.order_executor.get_active_orders()
+        open_orders = len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
         status: Dict[str, Any] = {
             "is_trading": self.is_trading,
-            "open_orders": len(self.order_executor.get_active_orders()),
+            "open_orders": open_orders,
             "trades_today": len(self.trades),
             "live_mode": self.live_mode,
         }
