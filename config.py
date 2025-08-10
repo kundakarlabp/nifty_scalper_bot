@@ -1,85 +1,156 @@
 # src/config.py
 """
-Global configuration for Nifty Scalper Bot.
+Centralised configuration for the scalper bot.
 
-All settings can be overridden via environment variables (.env).
+- Loads .env if present
+- Uses tolerant parsers so env like "8.0" works where an int is expected
+- Exposes settings via the Config class (static attributes)
 """
 
-import os
-from dotenv import load_dotenv
+from __future__ import annotations
 
-# Load env vars
-load_dotenv()
+import os
+from pathlib import Path
+
+# ------------------------------- .env loader ------------------------------- #
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+    # Resolve project root: src/config.py -> project/.env
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        print(f"🔐 Loaded environment from {env_path}")
+    else:
+        print(f"⚠️  .env file not found at: {env_path}")
+except Exception as exc:
+    # Don't crash if dotenv isn't installed or other issues happen
+    print(f"ℹ️ Skipping .env load ({exc})")
+
+# ------------------------------- helpers ---------------------------------- #
+
+def _getenv_str(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return v if v is not None and v != "" else default
+
+def _getenv_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("true", "1", "yes", "y", "on")
+
+def _getenv_float(key: str, default: float = 0.0) -> float:
+    v = os.getenv(key)
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except Exception:
+        try:
+            # Sometimes values come like "8," in certain locales; last resort cleanup
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return float(default)
+
+def _getenv_int(key: str, default: int = 0) -> int:
+    """
+    Tolerant int parser:
+    - Accepts "8" or "8.0" (casts via float first)
+    - Falls back to default on any error
+    """
+    v = os.getenv(key)
+    if v is None or v == "":
+        return int(default)
+    try:
+        return int(float(v))
+    except Exception:
+        return int(default)
+
+# ------------------------------- config ----------------------------------- #
 
 class Config:
-    # ======================
-    # API Keys / Tokens
-    # ======================
-    ZERODHA_API_KEY: str = os.getenv("ZERODHA_API_KEY", "")
-    ZERODHA_ACCESS_TOKEN: str = os.getenv("ZERODHA_ACCESS_TOKEN", "")
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    """Static configuration values pulled from environment variables."""
 
-    # ======================
-    # Trading Settings
-    # ======================
-    ENABLE_LIVE_TRADING: bool = os.getenv("ENABLE_LIVE_TRADING", "false").lower() in ("true", "1", "yes")
-    ALLOW_OFFHOURS_TESTING: bool = os.getenv("ALLOW_OFFHOURS_TESTING", "false").lower() in ("true", "1", "yes")
-    BASE_STOP_LOSS_POINTS: float = float(os.getenv("BASE_STOP_LOSS_POINTS", "5"))
-    BASE_TARGET_POINTS: float = float(os.getenv("BASE_TARGET_POINTS", "10"))
-    CONFIDENCE_THRESHOLD: int = int(os.getenv("CONFIDENCE_THRESHOLD", "8"))
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", "2"))
-    CAPITAL_PER_TRADE: float = float(os.getenv("CAPITAL_PER_TRADE", "30000"))
-    RISK_PER_TRADE_PERCENT: float = float(os.getenv("RISK_PER_TRADE_PERCENT", "1"))
+    # ———————————————— ZERODHA CREDENTIALS ———————————————— #
+    ZERODHA_API_KEY: str = _getenv_str("ZERODHA_API_KEY", "")
+    ZERODHA_API_SECRET: str = _getenv_str("ZERODHA_API_SECRET", "")
+    KITE_ACCESS_TOKEN: str = _getenv_str("KITE_ACCESS_TOKEN", _getenv_str("ZERODHA_ACCESS_TOKEN", ""))  # fallback
 
-    # ======================
-    # Risk & Position Sizing
-    # ======================
-    MIN_POSITION_QTY: int = int(os.getenv("MIN_POSITION_QTY", "50"))
-    MAX_POSITION_QTY: int = int(os.getenv("MAX_POSITION_QTY", "900"))
-    POSITION_QTY_STEP: int = int(os.getenv("POSITION_QTY_STEP", "50"))
+    # ———————————————— TELEGRAM BOT ———————————————— #
+    TELEGRAM_BOT_TOKEN: str = _getenv_str("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: int = _getenv_int("TELEGRAM_CHAT_ID", 0)
 
-    # ======================
-    # Execution Defaults
-    # ======================
-    DEFAULT_PRODUCT: str = os.getenv("DEFAULT_PRODUCT", "MIS")
-    DEFAULT_ORDER_TYPE: str = os.getenv("DEFAULT_ORDER_TYPE", "MARKET")
-    DEFAULT_VALIDITY: str = os.getenv("DEFAULT_VALIDITY", "DAY")
-    ATR_SL_MULTIPLIER: float = float(os.getenv("ATR_SL_MULTIPLIER", "1.0"))
-    TRAIL_COOLDOWN_SEC: int = int(os.getenv("TRAIL_COOLDOWN_SEC", "15"))
-    TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.05"))
-    PREFERRED_EXIT_MODE: str = os.getenv("PREFERRED_EXIT_MODE", "AUTO").upper()  # AUTO / GTT / REGULAR
+    # ———————————————— RISK & MONEY MANAGEMENT ———————————————— #
+    RISK_PER_TRADE: float = _getenv_float("RISK_PER_TRADE", 0.01)
+    MAX_DRAWDOWN: float = _getenv_float("MAX_DRAWDOWN", 0.05)
+    CONSECUTIVE_LOSS_LIMIT: int = _getenv_int("CONSECUTIVE_LOSS_LIMIT", 3)
 
-    # ======================
-    # Strategy Parameters
-    # ======================
-    EMA_FAST_PERIOD: int = int(os.getenv("EMA_FAST_PERIOD", "9"))
-    EMA_SLOW_PERIOD: int = int(os.getenv("EMA_SLOW_PERIOD", "21"))
-    RSI_PERIOD: int = int(os.getenv("RSI_PERIOD", "14"))
-    BB_WINDOW: int = int(os.getenv("BB_WINDOW", "20"))
-    BB_STD: int = int(os.getenv("BB_STD", "2"))
-    STOCH_K_PERIOD: int = int(os.getenv("STOCH_K_PERIOD", "14"))
-    STOCH_D_PERIOD: int = int(os.getenv("STOCH_D_PERIOD", "3"))
-    ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
-    SCORING_THRESHOLD: int = int(os.getenv("SCORING_THRESHOLD", "9"))
+    # ———————————————— STRATEGY TUNING ———————————————— #
+    BASE_STOP_LOSS_POINTS: float = _getenv_float("BASE_STOP_LOSS_POINTS", 20.0)
+    BASE_TARGET_POINTS: float = _getenv_float("BASE_TARGET_POINTS", 40.0)
+    # Accept "8" or "8.0" safely (was crashing earlier)
+    CONFIDENCE_THRESHOLD: int = _getenv_int("CONFIDENCE_THRESHOLD", 8)
+    MIN_SIGNAL_SCORE: int = _getenv_int("MIN_SIGNAL_SCORE", 7)
 
-    # ======================
-    # Logging / Monitoring
-    # ======================
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    BALANCE_LOG_INTERVAL_MIN: int = int(os.getenv("BALANCE_LOG_INTERVAL_MIN", "30"))
+    TIME_FILTER_START: str = _getenv_str("TIME_FILTER_START", "09:15")
+    TIME_FILTER_END: str = _getenv_str("TIME_FILTER_END", "15:15")
 
-    # ======================
-    # Scheduling
-    # ======================
-    FETCH_INTERVAL_SEC: int = int(os.getenv("FETCH_INTERVAL_SEC", "30"))
+    # ATR-based adaptive SL/TP
+    ATR_SL_MULTIPLIER: float = _getenv_float("ATR_SL_MULTIPLIER", 1.5)
+    ATR_TP_MULTIPLIER: float = _getenv_float("ATR_TP_MULTIPLIER", 3.0)
 
-    # ======================
-    # Strike Selector
-    # ======================
-    STRIKE_STEP: int = int(os.getenv("STRIKE_STEP", "50"))
+    # Confidence-based adjustments
+    SL_CONFIDENCE_ADJ: float = _getenv_float("SL_CONFIDENCE_ADJ", 0.2)
+    TP_CONFIDENCE_ADJ: float = _getenv_float("TP_CONFIDENCE_ADJ", 0.3)
 
-    # ======================
-    # Telegram Commands Control
-    # ======================
-    TELEGRAM_COMMAND_PREFIX: str = os.getenv("TELEGRAM_COMMAND_PREFIX", "/")
+    # ———————————————— INSTRUMENT SETTINGS ———————————————— #
+    NIFTY_LOT_SIZE: int = _getenv_int("NIFTY_LOT_SIZE", 75)
+    MIN_LOTS: int = _getenv_int("MIN_LOTS", 1)
+    MAX_LOTS: int = _getenv_int("MAX_LOTS", 5)
+
+    TRADE_SYMBOL: str = _getenv_str("TRADE_SYMBOL", "NIFTY")
+    TRADE_EXCHANGE: str = _getenv_str("TRADE_EXCHANGE", "NFO")
+    INSTRUMENT_TOKEN: int = _getenv_int("INSTRUMENT_TOKEN", 256265)  # verify for your instrument
+
+    # Options / spot LTP symbol
+    SPOT_SYMBOL: str = _getenv_str("SPOT_SYMBOL", "NSE:NIFTY 50")
+    OPTION_TYPE: str = _getenv_str("OPTION_TYPE", "BOTH")  # CE, PE, BOTH
+    STRIKE_SELECTION_TYPE: str = _getenv_str("STRIKE_SELECTION_TYPE", "ATM")  # ATM, ITM, OTM, OI_DELTA
+    STRIKE_RANGE: int = _getenv_int("STRIKE_RANGE", 3)
+    DATA_LOOKBACK_MINUTES: int = _getenv_int("DATA_LOOKBACK_MINUTES", 30)
+
+    # Options scalping tuning
+    OPTION_SL_PERCENT: float = _getenv_float("OPTION_SL_PERCENT", 0.05)
+    OPTION_TP_PERCENT: float = _getenv_float("OPTION_TP_PERCENT", 0.15)
+    OPTION_BREAKOUT_PCT: float = _getenv_float("OPTION_BREAKOUT_PCT", 0.01)
+    OPTION_SPOT_TREND_PCT: float = _getenv_float("OPTION_SPOT_TREND_PCT", 0.005)
+
+    # ———————————————— EXECUTION DEFAULTS ———————————————— #
+    DEFAULT_PRODUCT: str = _getenv_str("DEFAULT_PRODUCT", "MIS")
+    DEFAULT_ORDER_TYPE: str = _getenv_str("DEFAULT_ORDER_TYPE", "MARKET")
+    DEFAULT_VALIDITY: str = _getenv_str("DEFAULT_VALIDITY", "DAY")
+
+    # Exit order preferences used by OrderExecutor
+    DEFAULT_ORDER_TYPE_EXIT: str = _getenv_str("DEFAULT_ORDER_TYPE_EXIT", "LIMIT")  # exit legs
+    PREFERRED_EXIT_MODE: str = _getenv_str("PREFERRED_EXIT_MODE", "AUTO")  # AUTO | GTT | REGULAR
+    TICK_SIZE: float = _getenv_float("TICK_SIZE", 0.05)  # exchange tick size for NFO options
+    TRAIL_COOLDOWN_SEC: float = _getenv_float("TRAIL_COOLDOWN_SEC", 12.0)
+
+    # ———————————————— FEATURE TOGGLES ———————————————— #
+    ENABLE_LIVE_TRADING: bool = _getenv_bool("ENABLE_LIVE_TRADING", False)
+    ENABLE_TELEGRAM: bool = _getenv_bool("ENABLE_TELEGRAM", True)
+
+    # ———————————————— LOGGING ———————————————— #
+    LOG_FILE: str = _getenv_str("LOG_FILE", "logs/trades.csv")
+
+
+# Debug print (optional): comment out in production
+if __name__ == "__main__":
+    import pprint
+    cfg = {
+        k: v
+        for k, v in Config.__dict__.items()
+        if not k.startswith("__") and not callable(v)
+    }
+    print("🔐 Final Config:")
+    pprint.pprint(cfg)
