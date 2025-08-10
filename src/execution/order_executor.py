@@ -11,11 +11,14 @@ Public API preserved:
 - get_positions()
 - cancel_all_orders()
 
+Additions (optional to use):
+- sync_and_enforce_oco(): best-effort OCO enforcement using broker order states.
+
 Behavior:
 - Tries GTT OCO exits first (if allowed). If not supported/rejected, falls back to
-  REGULAR exit orders: SL (ORDER_TYPE_SL) + TP (LIMIT). Your trader enforces OCO.
+  REGULAR exit orders: SL (ORDER_TYPE_SL) + TP (LIMIT). Your trader can enforce OCO.
 - update_trailing_stop() actually modifies the live SL order (REGULAR path). For GTT,
-  trailing is logged — recommended to cancel & recreate (heavy), so default is REGULAR.
+  trailing is logged — cancel & recreate is heavy, so REGULAR is the default.
 """
 
 from __future__ import annotations
@@ -39,7 +42,10 @@ def _cfg(name: str, default: Any) -> Any:
 def _round_to_tick(x: float, tick: float) -> float:
     if tick <= 0:
         return float(x)
-    return round(float(x) / tick) * tick
+    try:
+        return round(float(x) / tick) * tick
+    except Exception:
+        return float(x)
 
 
 @dataclass
@@ -85,7 +91,8 @@ class OrderExecutor:
         self.atr_mult = float(_cfg("ATR_SL_MULTIPLIER", 1.5))
         self.tick_size = float(_cfg("TICK_SIZE", 0.05))
         self.trail_cooldown = float(_cfg("TRAIL_COOLDOWN_SEC", 12.0))
-        self.preferred_exit_mode = str(_cfg("PREFERRED_EXIT_MODE", "AUTO")).upper()  # AUTO | GTT | REGULAR
+        # AUTO | GTT | REGULAR
+        self.preferred_exit_mode = str(_cfg("PREFERRED_EXIT_MODE", "AUTO")).upper()
 
     # ------------------------------- helpers -------------------------------- #
 
@@ -119,8 +126,10 @@ class OrderExecutor:
         if not self.kite:
             # Simulate
             oid = self._generate_order_id()
-            logger.info("🧪 SIM order: %s %s x%d @ %s (price=%s trig=%s)",
-                        transaction_type, tradingsymbol, quantity, order_type, price, trigger_price)
+            logger.info(
+                "SIM order: %s %s x%d @ %s (price=%s trig=%s)",
+                transaction_type, tradingsymbol, quantity, order_type, price, trigger_price
+            )
             return oid
         try:
             params = dict(
@@ -142,10 +151,13 @@ class OrderExecutor:
             if isinstance(order_id, dict):
                 order_id = order_id.get("order_id") or order_id.get("data", {}).get("order_id")
             order_id = str(order_id)
-            logger.info("✅ Kite order placed: id=%s %s %s x%d (%s)", order_id, transaction_type, tradingsymbol, quantity, order_type)
+            logger.info(
+                "Kite order placed: id=%s %s %s x%d (%s)",
+                order_id, transaction_type, tradingsymbol, quantity, order_type
+            )
             return order_id
         except Exception as exc:
-            logger.error("💥 place_order failed: %s", exc, exc_info=True)
+            logger.error("place_order failed: %s", exc, exc_info=True)
             return None
 
     def _kite_place_gtt_oco(
@@ -161,7 +173,7 @@ class OrderExecutor:
     ) -> Optional[int]:
         """Place GTT OCO; return trigger_id or None."""
         if not self.kite:
-            logger.info("🧪 SIM GTT OCO created for %s (sl=%.2f, tp=%.2f)", tradingsymbol, sl_price, tp_price)
+            logger.info("SIM GTT OCO created for %s (sl=%.2f, tp=%.2f)", tradingsymbol, sl_price, tp_price)
             return None
         try:
             legs: List[Dict[str, Any]] = [
@@ -193,6 +205,7 @@ class OrderExecutor:
                     orders=legs,
                 )
             except TypeError:
+                # some lib versions don't accept last_price
                 resp = self.kite.place_gtt(
                     trigger_type=trigger_type,
                     tradingsymbol=tradingsymbol,
@@ -205,9 +218,9 @@ class OrderExecutor:
             if isinstance(resp, dict):
                 trig_id = resp.get("trigger_id") or resp.get("data", {}).get("trigger_id")
             if trig_id:
-                logger.info("✅ GTT OCO created: trigger_id=%s for %s", trig_id, tradingsymbol)
+                logger.info("GTT OCO created: trigger_id=%s for %s", trig_id, tradingsymbol)
                 return int(trig_id)
-            logger.info("✅ GTT OCO placed (no trigger_id returned).")
+            logger.info("GTT OCO placed (no trigger_id returned).")
             return None
         except Exception as exc:
             logger.warning("GTT OCO failed (fallback to REGULAR exits): %s", exc)
@@ -215,7 +228,7 @@ class OrderExecutor:
 
     def _kite_modify_sl(self, order_id: str, new_stop: float) -> bool:
         if not self.kite:
-            logger.info("🧪 SIM modify SL(%s) → %.2f", order_id, new_stop)
+            logger.info("SIM modify SL(%s) -> %.2f", order_id, new_stop)
             return True
         try:
             self.kite.modify_order(
@@ -226,25 +239,25 @@ class OrderExecutor:
                 trigger_price=float(new_stop),
                 validity=self.default_validity,
             )
-            logger.info("✏️  Modified SL %s → %.2f", order_id, new_stop)
+            logger.info("Modified SL %s -> %.2f", order_id, new_stop)
             return True
         except Exception as exc:
-            logger.error("💥 modify_order (SL) failed: %s", exc, exc_info=True)
+            logger.error("modify_order (SL) failed: %s", exc, exc_info=True)
             return False
 
     def _kite_cancel(self, order_id: str) -> bool:
         if not self.kite:
-            logger.info("🧪 SIM cancel %s", order_id)
+            logger.info("SIM cancel %s", order_id)
             return True
         try:
             self.kite.cancel_order(
                 variety=getattr(self.kite, "VARIETY_REGULAR", "regular"),
                 order_id=order_id,
             )
-            logger.info("🧹 Cancelled order: %s", order_id)
+            logger.info("Cancelled order: %s", order_id)
             return True
         except Exception as exc:
-            logger.error("💥 cancel_order failed: %s", exc, exc_info=True)
+            logger.error("cancel_order failed: %s", exc, exc_info=True)
             return False
 
     def _kite_orders(self) -> List[Dict[str, Any]]:
@@ -311,7 +324,7 @@ class OrderExecutor:
             tp = self._safe_float(target_price)
 
             if entry_price <= 0 or sl <= 0 or tp <= 0:
-                logger.warning("⚠️ Invalid SL/TP/entry for exits setup.")
+                logger.warning("Invalid SL/TP/entry for exits setup.")
                 return False
 
             exit_side = "SELL" if transaction_type.upper() == "BUY" else "BUY"
@@ -384,13 +397,13 @@ class OrderExecutor:
                 )
 
             logger.info(
-                "🔧 Exits set for %s | mode=%s sl_id=%s tp_id=%s gtt_id=%s",
+                "Exits set for %s | mode=%s sl_id=%s tp_id=%s gtt_id=%s",
                 entry_order_id, ("GTT" if use_gtt else "REGULAR"), sl_id, tp_id, gtt_id
             )
             return True
 
         except Exception as exc:
-            logger.error("💥 setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
+            logger.error("setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
             return False
 
     def update_trailing_stop(self, order_id: str, current_price: float, atr: float) -> None:
@@ -436,14 +449,16 @@ class OrderExecutor:
                 if not ok:
                     logger.warning("Trailing: failed to modify live SL (%s)", rec.sl_order_id)
             else:
-                logger.debug("Trailing (GTT mode): internal SL %.2f → %.2f (no live modify).", before, desired_sl)
+                logger.debug("Trailing (GTT mode): internal SL %.2f -> %.2f (no live modify).", before, desired_sl)
 
-            logger.info("Trailing SL %s: %.2f → %.2f (Px=%.2f, ATR=%.2f, mode=%s)",
-                        order_id, before, desired_sl, float(current_price), float(atr),
-                        "GTT" if rec.use_gtt else "REGULAR")
+            logger.info(
+                "Trailing SL %s: %.2f -> %.2f (Px=%.2f, ATR=%.2f, mode=%s)",
+                order_id, before, desired_sl, float(current_price), float(atr),
+                "GTT" if rec.use_gtt else "REGULAR"
+            )
 
         except Exception as exc:
-            logger.error("💥 trailing update failed for %s: %s", order_id, exc, exc_info=True)
+            logger.error("trailing update failed for %s: %s", order_id, exc, exc_info=True)
 
     def exit_order(self, order_id: str, exit_reason: str = "manual") -> None:
         """
@@ -452,7 +467,7 @@ class OrderExecutor:
         with self._lock:
             rec = self.orders.get(order_id)
         if not rec:
-            logger.warning("⚠️ exit_order on unknown ID: %s", order_id)
+            logger.warning("exit_order on unknown ID: %s", order_id)
             return
         if not rec.is_open:
             return
@@ -461,7 +476,7 @@ class OrderExecutor:
             if rec.use_gtt and rec.gtt_id is not None and self.kite:
                 try:
                     self.kite.delete_gtt(rec.gtt_id)
-                    logger.info("🧹 Deleted GTT trigger_id=%s for %s", rec.gtt_id, rec.symbol)
+                    logger.info("Deleted GTT trigger_id=%s for %s", rec.gtt_id, rec.symbol)
                 except TypeError:
                     self.kite.delete_gtt(trigger_id=rec.gtt_id)
             else:
@@ -476,7 +491,7 @@ class OrderExecutor:
             rec.is_open = False
             self.orders[order_id] = rec
 
-        logger.info("⏹️ Order exited (%s). ID=%s %s %s x%d",
+        logger.info("Order exited (%s). ID=%s %s %s x%d",
                     exit_reason, order_id, rec.transaction_type, rec.symbol, rec.quantity)
 
     def get_active_orders(self) -> Dict[str, OrderRecord]:
@@ -575,3 +590,48 @@ class OrderExecutor:
 
         logger.info("Cancelled %d exit orders/triggers.", cancelled)
         return cancelled
+
+    # -------------------------- optional utilities --------------------------- #
+
+    def sync_and_enforce_oco(self) -> None:
+        """
+        Optional: Call this periodically from your trader loop.
+        If we detect one exit leg is fully filled, cancel the sibling and mark trade closed.
+        """
+        if not self.kite:
+            return
+
+        try:
+            broker_orders = self._kite_orders()
+            if not broker_orders:
+                return
+
+            # Build quick lookup by id -> status
+            state: Dict[str, str] = {}
+            for o in broker_orders:
+                try:
+                    oid = str(o.get("order_id"))
+                    status = str(o.get("status") or "").lower()  # e.g., "COMPLETE", "CANCELLED", "REJECTED"
+                    state[oid] = status
+                except Exception:
+                    continue
+
+            with self._lock:
+                items = list(self.orders.items())
+
+            for entry_id, rec in items:
+                if not rec.is_open or rec.use_gtt:
+                    continue  # GTT path not modified here
+
+                sl_state = state.get(str(rec.sl_order_id or ""), "")
+                tp_state = state.get(str(rec.tp_order_id or ""), "")
+
+                # If either leg is complete, cancel the other and close
+                if sl_state == "complete" and rec.tp_order_id:
+                    self._kite_cancel(rec.tp_order_id)
+                    self.exit_order(entry_id, exit_reason="SL filled")
+                elif tp_state == "complete" and rec.sl_order_id:
+                    self._kite_cancel(rec.sl_order_id)
+                    self.exit_order(entry_id, exit_reason="TP filled")
+        except Exception as exc:
+            logger.debug("sync_and_enforce_oco warning: %s", exc)
