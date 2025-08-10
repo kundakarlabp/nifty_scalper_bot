@@ -113,7 +113,9 @@ class Config:
     DEFAULT_VALIDITY: str = os.getenv("DEFAULT_VALIDITY", "DAY")
 
     # ———————————————— FEATURE TOGGLES ———————————————— #
-    ENABLE_LIVE_TRADING: bool = _get_env_bool("ENABLE_LIVE_TRADING", False)
+    ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "False").lower() == "true"
+MARKET_OPEN_TIME = "09:15"
+MARKET_CLOSE_TIME = "15:30"
     ENABLE_TELEGRAM: bool = _get_env_bool("ENABLE_TELEGRAM", True)
 
     # ———————————————— LOGGING ———————————————— #
