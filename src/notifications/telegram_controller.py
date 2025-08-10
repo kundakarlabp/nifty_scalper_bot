@@ -1,3 +1,4 @@
+# src/notifications/telegram_controller.py
 import logging
 import threading
 import time
@@ -11,6 +12,10 @@ class TelegramController:
     """
     Telegram bot interface for receiving commands and sending alerts.
     Communicates with RealTimeTrader via callback functions.
+
+    Exposed commands:
+      /start, /stop, /mode live|shadow, /status, /summary,
+      /refresh, /health, /emergency, /help
     """
 
     def __init__(
@@ -40,9 +45,10 @@ class TelegramController:
 
         logger.info("TelegramController initialized with bot token and chat ID.")
 
+    # ---------- low-level send ----------
     def _send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
         url = f"{self.base_url}/sendMessage"
-        payload = {
+        payload: Dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text,
             "disable_notification": False,
@@ -61,11 +67,12 @@ class TelegramController:
             logger.error("Exception sending Telegram message: %s", exc, exc_info=True)
         return False
 
+    # ---------- public send helpers ----------
     def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
         return self._send_message(text, parse_mode=parse_mode)
 
     def send_startup_alert(self) -> None:
-        text = "🟢 Nifty Scalper Bot started.\nAwaiting commands..."
+        text = "🟢 Nifty Scalper Bot started.\nType /help for commands. Awaiting instructions…"
         self._send_message(text)
 
     def send_realtime_session_alert(self, action: str) -> None:
@@ -96,13 +103,14 @@ class TelegramController:
         )
         self._send_message(text, parse_mode="HTML")
 
+    # ---------- status/summary formatting ----------
     def _send_status(self, status: Dict[str, Any]) -> None:
         lines = [
             "📊 <b>Bot Status</b>",
-            f"🔁 <b>Trading:</b> {'🟢 Running' if status['is_trading'] else '🔴 Stopped'}",
-            f"🌐 <b>Mode:</b> {'🟢 LIVE' if status['live_mode'] else '🛡️ Shadow'}",
+            f"🔁 <b>Trading:</b> {'🟢 Running' if status.get('is_trading') else '🔴 Stopped'}",
+            f"🌐 <b>Mode:</b> {'🟢 LIVE' if status.get('live_mode') else '🛡️ Shadow'}",
             f"📦 <b>Open Orders:</b> {status.get('open_orders', 0)}",
-            f"📈 <b>Trades Today:</b> {status['trades_today']}",
+            f"📈 <b>Trades Today:</b> {status.get('trades_today', 0)}",
             f"💰 <b>Daily P&L:</b> {status.get('daily_pnl', 0.0):.2f}",
             f"⚖️ <b>Risk Level:</b> {status.get('risk_level', 'N/A')}",
         ]
@@ -112,28 +120,51 @@ class TelegramController:
     def _send_summary(self, summary: str) -> None:
         self._send_message(summary, parse_mode="HTML")
 
+    # ---------- command router ----------
     def _handle_command(self, command: str, arg: str = "") -> None:
         logger.info("📩 Received command: '%s %s'", command, arg)
+
+        if command == "help":
+            self._send_message(
+                "🤖 <b>Commands</b>\n"
+                "/start – start trading\n"
+                "/stop – stop trading\n"
+                "/mode live|shadow – switch mode\n"
+                "/status – bot status\n"
+                "/summary – daily summary\n"
+                "/refresh – refresh instruments cache\n"
+                "/health – system health\n"
+                "/emergency – stop & cancel orders",
+                parse_mode="HTML",
+            )
+            return
 
         if command == "status":
             status = self.status_callback()
             self._send_status(status)
+            return
 
-        elif command == "summary":
+        if command == "summary":
             summary = self.summary_callback()
             self._send_summary(summary)
+            return
 
-        elif command in ["start", "stop", "mode"]:
+        if command in ["start", "stop", "mode", "refresh", "health", "emergency"]:
             success = self.control_callback(command, arg)
             if not success:
                 logger.warning("Command '/%s %s' failed.", command, arg)
+                self._send_message(f"⚠️ Command '/{command} {arg}' failed.")
+            return
 
-        else:
-            self._send_message(f"❌ Unknown command: `{command}`\nUse /status or /help", parse_mode="Markdown")
+        self._send_message(
+            "❌ Unknown command.\n"
+            "Try: /start, /stop, /mode live, /mode shadow, /status, /summary, /refresh, /health, /emergency, /help"
+        )
 
+    # ---------- polling loop ----------
     def _poll_updates(self) -> None:
         url = f"{self.base_url}/getUpdates"
-        offset = None
+        offset: Optional[int] = None
         timeout = 30
 
         logger.info("📡 Telegram polling started. Awaiting commands...")
@@ -144,21 +175,24 @@ class TelegramController:
 
                 if response.status_code == 200:
                     data = response.json()
-                    if data.get("ok") and len(data.get("result", [])) > 0:
-                        for result in data["result"]:
-                            offset = result["update_id"] + 1
-                            message = result.get("message", {}) or result.get("edited_message", {})
-                            text = (message.get("text") or "").strip()
-                            if text.startswith("/"):
-                                cmd_parts = text[1:].split(maxsplit=1)
-                                command = cmd_parts[0].lower()
-                                arg = cmd_parts[1] if len(cmd_parts) > 1 else ""
-                                self._handle_command(command, arg)
+                    results = data.get("result", []) if data.get("ok") else []
+                    for result in results:
+                        offset = result["update_id"] + 1
+                        message = result.get("message") or result.get("edited_message") or {}
+                        text = (message.get("text") or "").strip()
+                        if not text.startswith("/"):
+                            continue
+                        cmd_parts = text[1:].split(maxsplit=1)
+                        command = cmd_parts[0].lower()
+                        arg = cmd_parts[1] if len(cmd_parts) > 1 else ""
+                        self._handle_command(command, arg)
+
                 elif response.status_code == 409:
                     logger.error("Conflict: Another webhook or polling instance is active. Stopping.")
                     self.polling = False
+
                 else:
-                    logger.error("Telegram getUpdates failed: %s", response.text)
+                    logger.error("Telegram getUpdates failed (%s): %s", response.status_code, response.text)
 
             except requests.exceptions.ReadTimeout:
                 logger.debug("Telegram polling timeout — continuing...")
@@ -168,6 +202,7 @@ class TelegramController:
 
         logger.info("🛑 Telegram polling stopped.")
 
+    # ---------- lifecycle ----------
     def start_polling(self) -> None:
         """Start long-polling for Telegram messages in a background thread."""
         if self.polling:
@@ -175,8 +210,11 @@ class TelegramController:
             return
 
         self.polling = True
-        # spawn the polling thread here and store it (important for clean shutdown)
-        self.polling_thread = threading.Thread(target=self._poll_updates, name="TelegramPolling", daemon=True)
+        self.polling_thread = threading.Thread(
+            target=self._poll_updates,
+            name="TelegramPolling",
+            daemon=True,
+        )
         self.polling_thread.start()
 
     def stop_polling(self) -> None:
@@ -185,4 +223,4 @@ class TelegramController:
         self.polling = False
         if self.polling_thread and self.polling_thread.is_alive():
             self.polling_thread.join(timeout=5)
-            self.polling_thread = None
+        self.polling_thread = None
