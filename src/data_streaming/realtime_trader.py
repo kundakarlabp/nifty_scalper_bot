@@ -6,9 +6,12 @@ Real-time trader with:
 - ATR trailing worker (background)
 - Circuit breaker (daily drawdown)
 - Single-position policy
-- Warmup filter, spread guard
+- Warmup filter
+- Spread guard:
+    • RANGE mode (old, candle-range proxy)
+    • LTP_MID mode (new, uses bid/ask depth mid via quote())
 - Slippage + fees model
-- Rate limit safety
+- Rate limit safety (bulk quote)
 - CSV trade log persistence
 - Daily session rollover
 """
@@ -54,7 +57,17 @@ class RealTimeTrader:
     # sensible defaults if Config misses keys
     MAX_CONCURRENT_TRADES = int(getattr(Config, "MAX_CONCURRENT_TRADES", 1))
     WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 60))
-    SPREAD_GUARD_PCT = float(getattr(Config, "SPREAD_GUARD_PCT", 0.012))  # 1.2% of price (approx guard)
+
+    # --- Spread guard config ---
+    # Mode: "LTP_MID" (use bid/ask depth) or "RANGE" (candle-range proxy)
+    SPREAD_GUARD_MODE = str(getattr(Config, "SPREAD_GUARD_MODE", "LTP_MID")).upper()
+    # Max relative bid/ask spread (ask-bid)/mid
+    SPREAD_GUARD_BA_MAX = float(getattr(Config, "SPREAD_GUARD_BA_MAX", 0.012))  # 1.2%
+    # Max relative LTP vs MID deviation |ltp-mid|/mid
+    SPREAD_GUARD_LTPMID_MAX = float(getattr(Config, "SPREAD_GUARD_LTPMID_MAX", 0.015))  # 1.5%
+    # Legacy RANGE guard (kept for fallback)
+    SPREAD_GUARD_PCT = float(getattr(Config, "SPREAD_GUARD_PCT", 0.02))  # 2% last-bar proxy
+
     SLIPPAGE_BPS = float(getattr(Config, "SLIPPAGE_BPS", 4.0))  # 4 bps per side
     FEES_PER_LOT = float(getattr(Config, "FEES_PER_LOT", 25.0))  # ₹ per lot round trip
     MAX_DAILY_DRAWDOWN_PCT = float(getattr(Config, "MAX_DAILY_DRAWDOWN_PCT", 0.03))  # 3%
@@ -509,7 +522,6 @@ class RealTimeTrader:
         # daily drawdown relative to start of day equity
         eq0 = max(1.0, float(self.daily_start_equity or 1.0))
         dd = -self.daily_pnl / eq0
-        # Trip if drawdown exceeds threshold and hasn't recovered by release pct
         return dd >= self.MAX_DAILY_DRAWDOWN_PCT
 
     # ---------- Cache handling ----------
@@ -648,9 +660,15 @@ class RealTimeTrader:
                 logger.debug("No spot candles.")
                 return
 
-            # 4) Pick strikes for processing
+            # Build list of candidate option symbols
+            candidate_symbols = list(options_data.keys())
+
+            # 3b) Bulk quotes for spread guard (rate-limit friendly)
+            quotes = self._bulk_quote(candidate_symbols) if candidate_symbols else {}
+
+            # 4) Pick strikes for processing (pass quotes for LTP_MID mode)
             if options_data:
-                selected_strikes_info = self._analyze_options_data_optimized(float(spot_price), options_data)
+                selected_strikes_info = self._analyze_options_data_optimized(float(spot_price), options_data, quotes)
             else:
                 selected_strikes_info = self._get_fallback_strikes(atm_strike, cached_nfo, cached_nse)
 
@@ -758,38 +776,120 @@ class RealTimeTrader:
 
         return spot_df, options_data
 
+    # ---------- Quotes / mid helpers ----------
+
+    def _bulk_quote(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch quote() for a list of symbols in one call. Returns symbol → quote dict."""
+        if not symbols:
+            return {}
+        kite = getattr(self.order_executor, "kite", None)
+        if not kite:
+            return {}
+        try:
+            # Zerodha expects a list like ["NFO:NIFTY24AUG20000CE", ...]
+            quotes = kite.quote(symbols)
+            return quotes or {}
+        except Exception as e:
+            logger.debug(f"bulk quote failed: {e}")
+            return {}
+
+    @staticmethod
+    def _mid_from_depth(q: Dict[str, Any]) -> Optional[float]:
+        """Compute mid from top-of-book depth if available."""
+        try:
+            depth = q.get("depth") or {}
+            buy = (depth.get("buy") or [])
+            sell = (depth.get("sell") or [])
+            best_bid = float(buy[0]["price"]) if buy else None
+            best_ask = float(sell[0]["price"]) if sell else None
+            if best_bid and best_ask and best_ask > 0:
+                return (best_bid + best_ask) / 2.0
+            return None
+        except Exception:
+            return None
+
     # ---------- Selection / processing ----------
 
-    def _analyze_options_data_optimized(self, spot_price: float, options_data: Dict[str, pd.DataFrame]) -> List[Dict]:
+    def _analyze_options_data_optimized(
+        self,
+        spot_price: float,
+        options_data: Dict[str, pd.DataFrame],
+        quotes: Dict[str, Dict[str, Any]] | None = None,
+    ) -> List[Dict]:
         """
-        Simple heuristic:
+        Selection logic:
         - Warmup filter
-        - Spread guard using last bar range
-        - Rank by absolute % change over last bar; pick top CE and top PE
+        - Spread guard
+            * LTP_MID: use bid/ask mid + ltp-mid deviation and raw bid/ask spread
+            * RANGE: last bar range proxy (legacy)
+        - Rank by absolute % change over last bar; pick top CE and PE
         """
         latest: List[Tuple[str, float]] = []
+        use_mid_mode = (self.SPREAD_GUARD_MODE == "LTP_MID")
+        quotes = quotes or {}
+
         for sym, df in options_data.items():
             if df is None or df.empty or "close" not in df.columns:
                 continue
             if len(df) < max(2, self.WARMUP_BARS):
                 continue
 
-            # Spread guard (proxy using last bar range)
             last = df.iloc[-1]
             c = float(last["close"])
-            h = float(last["high"])
-            l = float(last["low"])
             if c <= 0:
                 continue
-            proxy_spread = (h - l) / c
-            if proxy_spread > self.SPREAD_GUARD_PCT:
-                continue
 
-            prev = float(df["close"].iloc[-2])
-            if prev <= 0:
-                continue
-            chg = abs((c - prev) / prev)
-            latest.append((sym, chg))
+            # --- Spread guard ---
+            if use_mid_mode:
+                q = quotes.get(sym, {}) if quotes else {}
+                ltp = float((q.get("last_price") or c))
+                mid = self._mid_from_depth(q)
+                if mid is None or mid <= 0:
+                    # if depth missing, skip this symbol to be conservative
+                    logger.debug(f"Depth unavailable for {sym}; skipping in LTP_MID mode.")
+                    continue
+
+                # raw bid/ask spread (ask - bid)/mid
+                try:
+                    depth = q.get("depth") or {}
+                    buy = (depth.get("buy") or [])
+                    sell = (depth.get("sell") or [])
+                    best_bid = float(buy[0]["price"]) if buy else None
+                    best_ask = float(sell[0]["price"]) if sell else None
+                except Exception:
+                    best_bid = None
+                    best_ask = None
+
+                if not best_bid or not best_ask or best_bid <= 0 or best_ask <= 0:
+                    logger.debug(f"Top-of-book missing for {sym}; skipping.")
+                    continue
+
+                ba_spread = (best_ask - best_bid) / mid
+                ltp_mid_dev = abs(ltp - mid) / mid
+
+                if ba_spread > self.SPREAD_GUARD_BA_MAX or ltp_mid_dev > self.SPREAD_GUARD_LTPMID_MAX:
+                    logger.debug(f"Spread guard fail {sym}: BA={ba_spread:.4f}, DEV={ltp_mid_dev:.4f}")
+                    continue
+
+                prev = float(df["close"].iloc[-2])
+                if prev <= 0:
+                    continue
+                chg = abs((c - prev) / prev)
+                latest.append((sym, chg))
+
+            else:
+                # Legacy RANGE proxy
+                h = float(last["high"])
+                l = float(last["low"])
+                proxy_spread = (h - l) / c
+                if proxy_spread > self.SPREAD_GUARD_PCT:
+                    continue
+
+                prev = float(df["close"].iloc[-2])
+                if prev <= 0:
+                    continue
+                chg = abs((c - prev) / prev)
+                latest.append((sym, chg))
 
         if not latest:
             return []
