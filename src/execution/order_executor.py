@@ -1,8 +1,9 @@
 # src/execution/order_executor.py
 """
-Order execution module (live + simulation) with bracket-like behavior.
+Order execution module (live + simulation) with bracket-like behavior
+and trailing-SL support. Public API is kept stable.
 
-Public API preserved:
+Public API:
 - place_entry_order(...)
 - setup_gtt_orders(...)
 - update_trailing_stop(order_id, current_price, atr)
@@ -10,17 +11,15 @@ Public API preserved:
 - get_active_orders()
 - get_positions()
 - cancel_all_orders()
+- get_last_price(symbol)             # NEW: for trailing worker
+- get_tick_size() -> float           # NEW: share broker tick size
+- sync_and_enforce_oco() -> list     # NEW: best-effort peer cancel & fill scan (returns filled [(order_id, fill_px)])
 
-New:
-- sync_and_enforce_oco(): polls broker orders; if one exit fills/cancels, cancels the peer
-  and closes the internal record. Keeps your book clean even without GTT.
-
-Behavior:
-- Tries GTT OCO exits first (if allowed). If not supported/rejected, falls back to
-  REGULAR exit orders: SL (ORDER_TYPE_SL) + TP (LIMIT). Your trader can call
-  sync_and_enforce_oco periodically for OCO.
-- update_trailing_stop() modifies the live SL order (REGULAR path). For GTT, it only
-  updates internal state (cancel & recreate would be heavy).
+Notes:
+- Tries GTT OCO first (AUTO/GTT). If unavailable/fails, falls back to REGULAR exits
+  (SL order + TP limit). Your trader should still enforce OCO (we also provide a helper).
+- In REGULAR mode, update_trailing_stop() modifies the live SL.
+- In GTT mode, we only log the new stop (cancel & recreate is heavy).
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
 
 from src.config import Config
 
@@ -44,6 +43,7 @@ def _cfg(name: str, default: Any) -> Any:
 def _round_to_tick(x: float, tick: float) -> float:
     if tick <= 0:
         return float(x)
+    # round to nearest tick
     return round(float(x) / tick) * tick
 
 
@@ -54,7 +54,7 @@ class OrderRecord:
     symbol: str
     exchange: str
     transaction_type: str  # BUY/SELL (entry side)
-    quantity: int
+    quantity: int          # contracts (NOT lots)
     entry_price: float
     stop_loss: float
     target: float
@@ -68,17 +68,11 @@ class OrderRecord:
 
     is_open: bool = True
     last_trail_ts: float = 0.0
-    trailing_step_atr_multiplier: float = 1.5  # default; can be overridden via Config
-
-    # best-effort status snapshot
-    sl_status: str = "PENDING"  # PENDING/FILLED/CANCELLED/REJECTED
-    tp_status: str = "PENDING"
-    entry_status: str = "PLACED"
+    trailing_step_atr_multiplier: float = 1.5  # can be overridden via Config
 
 
 class OrderExecutor:
-    """
-    Thin wrapper around order placement and exit management.
+    """Thin wrapper around order placement and exit management.
 
     If `kite` is None: simulated mode (no network calls).
     """
@@ -88,7 +82,7 @@ class OrderExecutor:
         self._lock = threading.RLock()
         self.orders: Dict[str, OrderRecord] = {}
 
-        # Defaults
+        # Defaults (safe fallbacks if Config misses anything)
         self.default_product = _cfg("DEFAULT_PRODUCT", "MIS")
         self.default_order_type = _cfg("DEFAULT_ORDER_TYPE", "MARKET")
         self.default_validity = _cfg("DEFAULT_VALIDITY", "DAY")
@@ -98,6 +92,9 @@ class OrderExecutor:
         self.preferred_exit_mode = str(_cfg("PREFERRED_EXIT_MODE", "AUTO")).upper()  # AUTO | GTT | REGULAR
 
     # ------------------------------- helpers -------------------------------- #
+
+    def get_tick_size(self) -> float:
+        return float(self.tick_size)
 
     def _generate_order_id(self) -> str:
         return str(uuid.uuid4())
@@ -279,7 +276,7 @@ class OrderExecutor:
     ) -> Optional[str]:
         """
         Place the initial entry order. Returns order_id or None.
-        (Market by default. For limit, pass order_type='LIMIT' and price via your trader path.)
+        Quantity must be contracts. (If you size by lots, multiply before calling.)
         """
         if quantity <= 0:
             logger.warning("Attempted to place order with non-positive quantity: %s", quantity)
@@ -331,7 +328,6 @@ class OrderExecutor:
             sl_id = None
             tp_id = None
 
-            # choose mode
             mode = self.preferred_exit_mode  # AUTO | GTT | REGULAR
             try_gtt = (mode in ("AUTO", "GTT"))
 
@@ -454,87 +450,6 @@ class OrderExecutor:
 
         except Exception as exc:
             logger.error("💥 trailing update failed for %s: %s", order_id, exc, exc_info=True)
-
-    def sync_and_enforce_oco(self) -> None:
-        """
-        Check broker order book and enforce OCO for REGULAR exits.
-        - If SL filled/cancelled/rejected, cancel TP and close record (and vice versa).
-        - If both exits are gone, close record.
-        Safe to call periodically (e.g., every 15–30s) from the trader loop.
-        """
-        with self._lock:
-            open_items = [(oid, o) for oid, o in self.orders.items() if o.is_open]
-
-        if not open_items:
-            return
-
-        book = self._kite_orders()
-
-        # Build a quick status map for fast lookups
-        status_by_id: Dict[str, str] = {}
-        if isinstance(book, list):
-            for od in book:
-                try:
-                    oid = str(od.get("order_id") or "")
-                    status = (od.get("status") or "").upper()
-                    if oid:
-                        status_by_id[oid] = status
-                except Exception:
-                    continue
-
-        for oid, rec in open_items:
-            if rec.use_gtt:
-                # GTT is OCO at broker; nothing to enforce here.
-                continue
-
-            # Probe states
-            sl_state = status_by_id.get(rec.sl_order_id or "", "") if rec.sl_order_id else ""
-            tp_state = status_by_id.get(rec.tp_order_id or "", "") if rec.tp_order_id else ""
-
-            def _is_inactive(st: str) -> bool:
-                st = st.upper()
-                return (not st) or (st in ("CANCELLED", "REJECTED", "COMPLETE", "TRIGGER PENDING" and False))
-
-            def _is_filled(st: str) -> bool:
-                return st.upper() in ("COMPLETE", "FILLED")
-
-            # If one side filled, cancel the peer
-            try:
-                if rec.sl_order_id and _is_filled(sl_state):
-                    if rec.tp_order_id:
-                        self._kite_cancel(rec.tp_order_id)
-                        rec.tp_order_id = None
-                    rec.sl_status = "FILLED"
-                    rec.is_open = False
-                    with self._lock:
-                        self.orders[oid] = rec
-                    logger.info("OCO: SL filled for %s; TP cancelled; record closed.", oid)
-                    continue
-
-                if rec.tp_order_id and _is_filled(tp_state):
-                    if rec.sl_order_id:
-                        self._kite_cancel(rec.sl_order_id)
-                        rec.sl_order_id = None
-                    rec.tp_status = "FILLED"
-                    rec.is_open = False
-                    with self._lock:
-                        self.orders[oid] = rec
-                    logger.info("OCO: TP filled for %s; SL cancelled; record closed.", oid)
-                    continue
-
-                # If both are inactive (cancelled/rejected/not present), close
-                if (not rec.sl_order_id or _is_inactive(sl_state)) and (not rec.tp_order_id or _is_inactive(tp_state)):
-                    rec.sl_status = "CANCELLED" if rec.sl_order_id else rec.sl_status
-                    rec.tp_status = "CANCELLED" if rec.tp_order_id else rec.tp_status
-                    rec.sl_order_id = None
-                    rec.tp_order_id = None
-                    rec.is_open = False
-                    with self._lock:
-                        self.orders[oid] = rec
-                    logger.info("OCO: both exits inactive for %s; record closed.", oid)
-                    continue
-            except Exception as exc:
-                logger.debug("OCO sync warning for %s: %s", oid, exc)
 
     def exit_order(self, order_id: str, exit_reason: str = "manual") -> None:
         """
@@ -666,3 +581,85 @@ class OrderExecutor:
 
         logger.info("Cancelled %d exit orders/triggers.", cancelled)
         return cancelled
+
+    # ---------- helpers for trailing/oco workers ---------- #
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        """Return LTP for 'symbol' (None if not available)."""
+        if not symbol:
+            return None
+        if not self.kite:
+            # SIM path: we don't model a price feed — return None
+            return None
+        try:
+            data = self.kite.ltp([symbol])
+            p = data.get(symbol, {}).get("last_price")
+            return float(p) if p is not None else None
+        except Exception:
+            return None
+
+    def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
+        """
+        Best-effort detection of fills and peer-cancel enforcement.
+        Returns a list of finalized entries as [(entry_order_id, fill_price)].
+
+        Implementation notes:
+        - For a robust live solution, you'd map broker order IDs to our OrderRecord,
+          poll self.kite.orders(), and detect completed exit orders; then cancel the peer.
+        - This lightweight helper tries to do that when possible; otherwise it returns [].
+        """
+        if not self.kite:
+            # In simulation here we don't simulate fills; trader may treat "no actives" as closed.
+            return []
+
+        try:
+            broker_orders = self._kite_orders()
+            closed: List[Tuple[str, float]] = []
+
+            with self._lock:
+                for entry_id, rec in list(self.orders.items()):
+                    if not rec.is_open:
+                        continue
+
+                    # Check REGULAR exits first
+                    if not rec.use_gtt:
+                        sl_done = False
+                        tp_done = False
+                        fill_px = None
+
+                        for bo in broker_orders:
+                            oid = str(bo.get("order_id", ""))
+                            status = (bo.get("status") or "").lower()
+                            avg = bo.get("average_price", None)
+
+                            if rec.sl_order_id and oid == rec.sl_order_id and status in ("complete", "cancelled", "rejected"):
+                                sl_done = (status == "complete")
+                                if sl_done and avg:
+                                    fill_px = float(avg)
+                            if rec.tp_order_id and oid == rec.tp_order_id and status in ("complete", "cancelled", "rejected"):
+                                tp_done = (status == "complete")
+                                if tp_done and avg:
+                                    fill_px = float(avg)
+
+                        if sl_done or tp_done:
+                            # cancel peer if still open
+                            try:
+                                if sl_done and rec.tp_order_id:
+                                    self._kite_cancel(rec.tp_order_id)
+                                if tp_done and rec.sl_order_id:
+                                    self._kite_cancel(rec.sl_order_id)
+                            except Exception:
+                                pass
+                            rec.is_open = False
+                            self.orders[entry_id] = rec
+                            closed.append((entry_id, float(fill_px) if fill_px else rec.target if tp_done else rec.stop_loss))
+                            continue
+
+                    # GTT path – nothing to do unless we map gtt_id and query gtt list (not exposed in kiteconnect v4)
+                    # We leave it to the trader to mark exit on PnL or detect last_price breach.
+
+            return closed
+
+        except Exception as exc:
+            logger.debug("sync_and_enforce_oco error: %s", exc)
+            return []
