@@ -21,12 +21,13 @@ from src.utils.indicators import (
     calculate_ema,
     calculate_rsi,
     calculate_macd,
-    calculate_atr,
+    # calculate_atr,  # replaced by atr_helper for robustness
     calculate_supertrend,
     calculate_vwap,
     calculate_adx,
     calculate_bb_width,
 )
+from src.utils.atr_helper import compute_atr_df, latest_atr_value  # NEW
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class EnhancedScalpingStrategy:
         macd_fast_period: int = 12,
         macd_slow_period: int = 26,
         macd_signal_period: int = 9,
-        atr_period: int = 14,
+        atr_period: int = getattr(Config, "ATR_PERIOD", 14),  # align with Config
         supertrend_atr_multiplier: float = 2.0,
         bb_window: int = 20,
         bb_std_dev: float = 2.0,
@@ -123,8 +124,8 @@ class EnhancedScalpingStrategy:
         indicators["macd_signal"] = macd_signal
         indicators["macd_histogram"] = macd_hist
 
-        # ATR
-        indicators["atr"] = calculate_atr(df, period=self.atr_period)
+        # ATR (via atr_helper; returns full series)
+        indicators["atr"] = compute_atr_df(df, period=self.atr_period, method="rma")
 
         # Supertrend
         st_dir, st_u, st_l = calculate_supertrend(
@@ -326,6 +327,11 @@ class EnhancedScalpingStrategy:
             atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
 
             if atr_value <= 0:
+                # final fallback: compute latest via helper (in case indicator calc failed)
+                v = latest_atr_value(df, period=self.atr_period, method="rma")
+                atr_value = float(v) if v is not None else 0.0
+
+            if atr_value <= 0:
                 sl_points = self.base_stop_loss_points
                 tp_points = self.base_target_points
             else:
@@ -444,13 +450,17 @@ class EnhancedScalpingStrategy:
             spot_bonus = max(0.0, min(2.0, abs(spot_return) * 200.0))
             confidence = min(10.0, base_conf + vol_bonus + spot_bonus)
 
+            # Use option's own ATR as market_volatility if available
+            opt_atr = latest_atr_value(options_ohlc, period=getattr(Config, "ATR_PERIOD", 14), method="rma")
+            mv = float(opt_atr) if opt_atr is not None else 0.0
+
             signal.update(
                 {
                     "entry_price": round(entry, 2),
                     "stop_loss": sl,
                     "target": tp,
                     "confidence": round(confidence, 2),
-                    "market_volatility": 0.5,  # placeholder; could be IV/ATR of option
+                    "market_volatility": round(mv, 4),
                     "strategy_notes": f"{option_type} breakout with underlying confirmation",
                 }
             )
