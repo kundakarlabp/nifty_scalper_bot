@@ -12,13 +12,16 @@ Public functions used elsewhere:
 - _get_spot_ltp_symbol()
 - get_instrument_tokens(...)
 - get_next_expiry_date(...)
+- get_nearest_strikes(...)
+- fetch_cached_instruments(...)
+- is_trading_hours()
 - health_check(...)
 """
 
 from __future__ import annotations
 
 from kiteconnect import KiteConnect
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 import logging
 import time
 import threading
@@ -121,13 +124,14 @@ def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
         return []
 
 
-def _calculate_next_thursday(target_date: Optional[datetime] = None) -> str:
-    """Pure calendar fallback for 'next Thursday' in YYYY-MM-DD."""
-    d = target_date or datetime.now()
-    days_ahead = (3 - d.weekday()) % 7
-    days_ahead = 7 if days_ahead == 0 else days_ahead  # if today is Thu, choose next week
+def _calculate_next_thursday(target_date: Optional[date] = None) -> str:
+    """Pure calendar fallback for 'next Thursday' in YYYY-MM-DD (always a future Thursday)."""
+    d = target_date or date.today()
+    days_ahead = (3 - d.weekday()) % 7  # Thu=3
+    if days_ahead == 0:
+        days_ahead = 7
     nxt = d + timedelta(days=days_ahead)
-    return nxt.strftime("%Y-%m-%d")
+    return nxt.isoformat()
 
 
 # ---------------- Cached instruments helpers ----------------
@@ -158,7 +162,10 @@ def get_next_expiry_date(
 ) -> Optional[str]:
     """
     Resolve the nearest upcoming expiry for NIFTY options based on cached NFO instruments.
-    Fallback: calendar 'next Thursday' if instruments unavailable.
+    Returns ISO 'YYYY-MM-DD'. Fallback: calendar 'next Thursday' if instruments unavailable.
+
+    Fix: normalize instrument 'expiry' which may be datetime.date or datetime.datetime,
+    and DO NOT call .date() on a date.
     """
     if not kite_instance:
         logger.error("[get_next_expiry_date] KiteConnect instance is required.")
@@ -171,39 +178,43 @@ def get_next_expiry_date(
             try:
                 cached_nfo_instruments = _rate_limited_api_call(kite_instance.instruments, "NFO")
             except Exception as e:
-                logger.error(f"[get_next_expiry_date] instruments fetch failed: {e}")
+                logger.warning(f"[get_next_expiry_date] instruments fetch failed, fallback: {e}")
                 return _calculate_next_thursday()
 
-        index_instruments = [i for i in cached_nfo_instruments if i.get("name") == base_name_for_search]
+        index_instruments = [i for i in (cached_nfo_instruments or []) if i.get("name") == base_name_for_search]
         if not index_instruments:
-            logger.error(f"[get_next_expiry_date] No NFO instruments for '{base_name_for_search}'")
+            logger.warning(f"[get_next_expiry_date] No NFO instruments for '{base_name_for_search}', fallback.")
             return _calculate_next_thursday()
 
-        expiries: List[datetime] = []
+        candidates: set[date] = set()
         for inst in index_instruments:
             exp = inst.get("expiry")
-            if exp:
-                if hasattr(exp, "strftime"):
-                    expiries.append(exp)
-                else:
-                    try:
-                        expiries.append(datetime.strptime(str(exp), "%Y-%m-%d"))
-                    except Exception:
-                        pass
+            if not exp:
+                continue
+            # Normalize to date
+            if isinstance(exp, datetime):
+                exp_d = exp.date()
+            elif isinstance(exp, date):
+                exp_d = exp
+            else:
+                # Rare string case: try parse 'YYYY-MM-DD'
+                try:
+                    y, m, d = map(int, str(exp)[:10].split("-"))
+                    exp_d = date(y, m, d)
+                except Exception:
+                    continue
+            if exp_d >= date.today():
+                candidates.add(exp_d)
 
-        expiries = sorted(set(expiries))
-        if not expiries:
-            return _calculate_next_thursday()
+        if candidates:
+            nearest = min(candidates)
+            return nearest.isoformat()
 
-        today = datetime.now().date()
-        for exp in expiries:
-            if exp.date() >= today:
-                return exp.strftime("%Y-%m-%d")
+        # If everything is in the past, fallback to next Thursday (safer than returning stale)
+        return _calculate_next_thursday()
 
-        # All past? return the last one.
-        return expiries[-1].strftime("%Y-%m-%d")
     except Exception as e:
-        logger.error(f"[get_next_expiry_date] Error: {e}", exc_info=True)
+        logger.warning(f"[get_next_expiry_date] Error, using fallback: {e}", exc_info=True)
         return _calculate_next_thursday()
 
 
