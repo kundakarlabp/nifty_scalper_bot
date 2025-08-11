@@ -1,109 +1,55 @@
-"""
-CLI entry point for the Nifty Scalper Bot.
-
-Usage:
-  python -m src.main start   -> init bot, start Telegram, enter main loop (schedule)
-  python -m src.main stop    -> stop only trading logic (polling stays alive)
-  python -m src.main status  -> print current bot status
-"""
-
 from __future__ import annotations
-
+import argparse
 import logging
-import sys
-import time
+import os
 import signal
-from pathlib import Path
+import sys
+from threading import Event, Thread
 
-# --- Load .env automatically (works in Docker/Railway and locally) ---
-try:
-    from dotenv import load_dotenv
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-        print(f"✅ Loaded environment variables from {env_path}")
-    else:
-        print("⚠️  No .env file found — using system environment variables")
-except Exception as _e:
-    # Not fatal: Config also attempts to load .env itself.
-    pass
-
-import schedule  # ensure installed
 from src.data_streaming.realtime_trader import RealTimeTrader
+from src.server.health import run as run_health
 
-# Configure logging early
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# Singleton instance
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
+stop_event = Event()
 _trader: RealTimeTrader | None = None
 
-
-def get_trader() -> RealTimeTrader:
-    """Lazy-initialize the RealTimeTrader singleton."""
-    global _trader
-    if _trader is None:
-        logger.info("🧠 Initializing RealTimeTrader...")
-        _trader = RealTimeTrader()  # starts Telegram polling in its own daemon thread
-    return _trader
-
-
-def graceful_shutdown(signum, frame):
-    """Handle SIGINT/SIGTERM gracefully."""
-    logger.info(f"🛑 Received signal {signum}. Shutting down...")
+def _graceful_exit(*_):
     try:
         if _trader:
-            _trader.shutdown()
-    finally:
-        sys.exit(0)
+            _trader.stop()
+    except Exception:
+        pass
+    stop_event.set()
 
+def run():
+    global _trader
+    _trader = RealTimeTrader()
+    signal.signal(signal.SIGTERM, _graceful_exit)
+    signal.signal(signal.SIGINT, _graceful_exit)
+    # Health server in background
+    Thread(target=run_health, daemon=True).start()
+    # Start trading loop (non-blocking run loop)
+    Thread(target=_trader.run, daemon=True).start()
+    # Keep process alive until stop signal
+    stop_event.wait()
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python -m src.main [start|stop|status]")
-        sys.exit(1)
+def cli():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cmd", choices=["run", "start", "stop", "status"], help="Control trader")
+    args = parser.parse_args()
 
-    command = sys.argv[1].lower().strip()
-    signal.signal(signal.SIGINT, graceful_shutdown)
-    signal.signal(signal.SIGTERM, graceful_shutdown)
-
-    trader = get_trader()  # initializes the trader and starts Telegram polling in __init__
-
-    if command == "start":
-        logger.info("🚀 Starting Nifty Scalper Bot main processing loop...")
-        # Trader schedules its own tasks (e.g., smart_fetch_and_process) in __init__.
-        # We just run the scheduler tick.
-        try:
-            logger.info("🟢 Entering main processing loop. Press Ctrl+C to stop.")
-            while True:
-                schedule.run_pending()
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("🛑 KeyboardInterrupt received in main loop.")
-            graceful_shutdown(signal.SIGINT, None)
-
-    elif command == "stop":
-        logger.info("🛑 Stopping trading logic...")
-        trader.stop()  # sets is_trading = False; Telegram polling remains active
-        logger.info("Trading logic stopped. Telegram polling remains active.")
-        sys.exit(0)
-
-    elif command == "status":
-        logger.info("📊 Fetching bot status...")
-        status = trader.get_status()
-        print("📊 Bot Status:")
-        for key, value in status.items():
-            print(f"  {key}: {value}")
-        sys.exit(0)
-
+    global _trader
+    if args.cmd == "run":
+        run()
     else:
-        print(f"❌ Unknown command: {command}")
-        print("Usage: python -m src.main [start|stop|status]")
-        sys.exit(1)
-
+        # For start/stop/status we need a lightweight instance for Telegram control paths
+        _trader = RealTimeTrader()
+        if args.cmd == "start":
+            _trader.start()
+        elif args.cmd == "stop":
+            _trader.stop()
+        elif args.cmd == "status":
+            _trader.get_status()
 
 if __name__ == "__main__":
-    main()
+    cli()
