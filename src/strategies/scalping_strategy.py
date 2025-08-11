@@ -318,7 +318,7 @@ class EnhancedScalpingStrategy:
             confidence = max(1.0, min(10.0, normalized * 10.0))
 
             # ATR-based SL/TP (fallback to fixed points if ATR missing)
-            atr_series = indicators.get("atr", pd.Series([0], index=df.index))
+            atr_series = indicators.get("atr", pd.Series(0.0, index=df.index))
             atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
             if atr_value <= 0:
                 v = latest_atr_value(df, period=self.atr_period, method="rma")
