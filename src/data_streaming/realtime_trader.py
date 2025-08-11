@@ -1,3 +1,4 @@
+# src/data_streaming/realtime_trader.py
 """
 Real-time trader with:
 - Telegram control (daemon polling)
@@ -38,7 +39,7 @@ from src.notifications.telegram_controller import TelegramController
 from src.utils.strike_selector import (
     _get_spot_ltp_symbol,
     get_instrument_tokens,
-    get_next_expiry_date,
+    get_next_expiry_date,  # noqa: F401 (kept for parity)
     health_check as _health_check,
 )
 
@@ -55,7 +56,7 @@ class RealTimeTrader:
 
     # sensible defaults if Config misses keys
     MAX_CONCURRENT_TRADES = int(getattr(Config, "MAX_CONCURRENT_TRADES", 1))
-    # ↓ Default to 20 to avoid warmup starvation with short lookback
+    # default to 20 to avoid warmup starvation with short lookback
     WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 20))
 
     # --- Spread guard config ---
@@ -71,7 +72,7 @@ class RealTimeTrader:
     SLIPPAGE_BPS = float(getattr(Config, "SLIPPAGE_BPS", 4.0))  # 4 bps per side
     FEES_PER_LOT = float(getattr(Config, "FEES_PER_LOT", 25.0))  # ₹ per lot round trip
     MAX_DAILY_DRAWDOWN_PCT = float(getattr(Config, "MAX_DAILY_DRAWDOWN_PCT", 0.03))  # 3%
-    CIRCUIT_RELEASE_PCT = float(getattr(Config, "CIRCUIT_RELEASE_PCT", 0.015))  # 1.5% recovery required
+    CIRCUIT_RELEASE_PCT = float(getattr(Config, "CIRCUIT_RELEASE_PCT", 0.015))  # 1.5% recovery
     TRAILING_ENABLE = bool(getattr(Config, "TRAILING_ENABLE", True))
     TRAIL_ATR_MULTIPLIER = float(getattr(Config, "ATR_SL_MULTIPLIER", 1.5))
     WORKER_INTERVAL_SEC = int(getattr(Config, "WORKER_INTERVAL_SEC", 10))
@@ -160,7 +161,9 @@ class RealTimeTrader:
         from kiteconnect import KiteConnect
 
         api_key = getattr(Config, "ZERODHA_API_KEY", None)
-        access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(Config, "ZERODHA_ACCESS_TOKEN", None)
+        access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(
+            Config, "ZERODHA_ACCESS_TOKEN", None
+        )
         if not api_key or not access_token:
             raise RuntimeError("ZERODHA_API_KEY or KITE_ACCESS_TOKEN missing")
 
@@ -174,7 +177,9 @@ class RealTimeTrader:
             try:
                 return self._build_live_executor()
             except Exception as exc:
-                logger.error("Live init failed, falling back to simulation: %s", exc, exc_info=True)
+                logger.error(
+                    "Live init failed, falling back to simulation: %s", exc, exc_info=True
+                )
                 self.live_mode = False
         logger.info("Live trading disabled → simulation mode.")
         return OrderExecutor()
@@ -187,11 +192,23 @@ class RealTimeTrader:
             if not os.path.exists(self.LOG_TRADE_FILE):
                 with open(self.LOG_TRADE_FILE, "w", newline="", encoding="utf-8") as f:
                     w = csv.writer(f)
-                    w.writerow([
-                        "date", "order_id", "symbol", "direction", "contracts",
-                        "entry", "exit", "pnl", "fees", "net_pnl", "confidence",
-                        "atr", "mode"
-                    ])
+                    w.writerow(
+                        [
+                            "date",
+                            "order_id",
+                            "symbol",
+                            "direction",
+                            "contracts",
+                            "entry",
+                            "exit",
+                            "pnl",
+                            "fees",
+                            "net_pnl",
+                            "confidence",
+                            "atr",
+                            "mode",
+                        ]
+                    )
         except Exception as e:
             logger.warning(f"Trade log init failed: {e}")
 
@@ -236,7 +253,9 @@ class RealTimeTrader:
     def _smart_fetch_and_process(self) -> None:
         try:
             now = datetime.now()
-            if not self._is_trading_hours(now) and not getattr(Config, "ALLOW_OFFHOURS_TESTING", False):
+            if not self._is_trading_hours(now) and not getattr(
+                Config, "ALLOW_OFFHOURS_TESTING", False
+            ):
                 # heartbeat every ~5 minutes
                 if int(time.time()) % 300 < 2:
                     logger.info("⏳ Market closed. Skipping fetch.")
@@ -272,7 +291,11 @@ class RealTimeTrader:
         """Periodically trail SL for active trades (uses ATR multiplier)."""
         while not self._trailing_worker_stop.is_set():
             try:
-                if self.TRAILING_ENABLE and self.is_trading and not self._is_circuit_breaker_tripped():
+                if (
+                    self.TRAILING_ENABLE
+                    and self.is_trading
+                    and not self._is_circuit_breaker_tripped()
+                ):
                     self._trailing_tick()
             except Exception as e:
                 logger.debug(f"Trailing worker error: {e}")
@@ -331,7 +354,9 @@ class RealTimeTrader:
         else:
             # list of records having order_id
             try:
-                active_ids = {getattr(o, "order_id", None) for o in (actives_raw or [])} - {None}
+                active_ids = {getattr(o, "order_id", None) for o in (actives_raw or [])} - {
+                    None
+                }
             except Exception:
                 active_ids = set()
 
@@ -416,7 +441,9 @@ class RealTimeTrader:
         try:
             self.stop()
             self.order_executor.cancel_all_orders()
-            self._safe_send_message("🛑 Emergency stop executed. All open orders cancelled (best-effort).")
+            self._safe_send_message(
+                "🛑 Emergency stop executed. All open orders cancelled (best-effort)."
+            )
             return True
         except Exception as e:
             logger.error(f"Emergency stop failed: {e}")
@@ -436,7 +463,9 @@ class RealTimeTrader:
                     return self.enable_live_trading()
                 if arg in ("shadow", "paper", "sim", "s"):
                     return self.disable_live_trading()
-                self._safe_send_message("⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown")
+                self._safe_send_message(
+                    "⚠️ Usage: `/mode live` or `/mode shadow`", parse_mode="Markdown"
+                )
                 return False
             if command == "refresh":
                 return self._force_refresh_cache()
@@ -513,7 +542,9 @@ class RealTimeTrader:
         market_closed = now.hour > 15 or (now.hour == 15 and now.minute >= 31)
         if now.date() != self.session_date or market_closed:
             if self.trades or self.daily_pnl != 0:
-                logger.info(f"📘 Daily roll — Trades: {len(self.trades)}, PnL: ₹{self.daily_pnl:.2f}")
+                logger.info(
+                    f"📘 Daily roll — Trades: {len(self.trades)}, PnL: ₹{self.daily_pnl:.2f}"
+                )
             self.trades = []
             self.active_trades = {}
             self.daily_pnl = 0.0
@@ -565,7 +596,8 @@ class RealTimeTrader:
                 force
                 or self._nfo_instruments_cache is None
                 or self._nse_instruments_cache is None
-                or (current_time - self._instruments_cache_timestamp) > self._INSTRUMENT_CACHE_DURATION
+                or (current_time - self._instruments_cache_timestamp)
+                > self._INSTRUMENT_CACHE_DURATION
             )
 
             if needs_refresh:
@@ -596,7 +628,11 @@ class RealTimeTrader:
     def _send_detailed_status(self) -> bool:
         try:
             status = self.get_status()
-            cache_age = (time.time() - self._instruments_cache_timestamp) / 60 if self._instruments_cache_timestamp else -1
+            cache_age = (
+                (time.time() - self._instruments_cache_timestamp) / 60
+                if self._instruments_cache_timestamp
+                else -1
+            )
             status_msg = (
                 "📊 **Detailed Status**\n"
                 f"🔄 Trading: {'✅ Active' if status['is_trading'] else '❌ Stopped'}\n"
@@ -615,7 +651,11 @@ class RealTimeTrader:
     def _run_health_check(self) -> bool:
         try:
             kite = getattr(self.order_executor, "kite", None)
-            health_result = _health_check(kite) if kite else {"overall_status": "ERROR", "message": "No Kite instance"}
+            health_result = (
+                _health_check(kite)
+                if kite
+                else {"overall_status": "ERROR", "message": "No Kite instance"}
+            )
             health_msg = (
                 "🏥 **System Health Check**\n"
                 f"📊 Overall: {health_result.get('overall_status', 'UNKNOWN')}\n"
@@ -642,7 +682,9 @@ class RealTimeTrader:
 
             # single-position policy
             actives_raw = self.order_executor.get_active_orders()
-            active_count = len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            active_count = (
+                len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            )
             if active_count >= self.MAX_CONCURRENT_TRADES:
                 logger.debug("Single-position policy: already at max concurrent trades.")
                 return
@@ -679,6 +721,10 @@ class RealTimeTrader:
                 logger.debug("No spot candles.")
                 return
 
+            if not options_data:
+                logger.debug("No option candles fetched for any strike window.")
+                return
+
             # Build list of candidate option symbols
             candidate_symbols = list(options_data.keys())
 
@@ -687,12 +733,16 @@ class RealTimeTrader:
 
             # 4) Pick strikes for processing (pass quotes for LTP_MID mode)
             if options_data:
-                selected_strikes_info = self._analyze_options_data_optimized(float(spot_price), options_data, quotes)
+                selected_strikes_info = self._analyze_options_data_optimized(
+                    float(spot_price), options_data, quotes
+                )
             else:
-                selected_strikes_info = self._get_fallback_strikes(atm_strike, cached_nfo, cached_nse)
+                selected_strikes_info = self._get_fallback_strikes(
+                    atm_strike, cached_nfo, cached_nse
+                )
 
             if not selected_strikes_info:
-                logger.debug("No strikes selected for processing.")
+                logger.debug("No strikes selected for processing after filters.")
                 return
 
             # 5) Process the chosen strikes
@@ -712,7 +762,9 @@ class RealTimeTrader:
             logger.error(f"Exception fetching spot price: {e}")
             return None
 
-    def _get_instruments_data(self, cached_nfo: List[Dict], cached_nse: List[Dict]) -> Optional[Dict]:
+    def _get_instruments_data(
+        self, cached_nfo: List[Dict], cached_nse: List[Dict]
+    ) -> Optional[Dict]:
         try:
             return get_instrument_tokens(
                 symbol=Config.SPOT_SYMBOL,
@@ -724,8 +776,10 @@ class RealTimeTrader:
             logger.error(f"Error getting instruments data: {e}")
             return None
 
-    def _fetch_historical_data(self, token: int, start_time: datetime, end_time: datetime) -> pd.DataFrame:
-        """Wraps kite.historical_data; returns DataFrame with DatetimeIndex & ['open','high','low','close','volume'].""" 
+    def _fetch_historical_data(
+        self, token: int, start_time: datetime, end_time: datetime
+    ) -> pd.DataFrame:
+        """Wraps kite.historical_data; returns DataFrame with DatetimeIndex & ['open','high','low','close','volume']."""  # noqa: E501
         try:
             k = self.order_executor.kite
             tf = self.HIST_TIMEFRAME
@@ -745,7 +799,7 @@ class RealTimeTrader:
     def _fetch_all_data_parallel(
         self,
         spot_token: Optional[int],
-        atm_strike: int,
+        atm_strike: int,  # kept for parity, not used directly
         start_time: datetime,
         end_time: datetime,
         cached_nfo: List[Dict],
@@ -759,7 +813,7 @@ class RealTimeTrader:
             tasks.append(("SPOT", spot_token))
 
         try:
-            rng = int(getattr(Config, "STRIKE_RANGE", 2))
+            rng = max(1, int(getattr(Config, "STRIKE_RANGE", 2)))
             for offset in range(-rng, rng + 1):
                 info = get_instrument_tokens(
                     symbol=Config.SPOT_SYMBOL,
@@ -770,7 +824,10 @@ class RealTimeTrader:
                 )
                 if not info:
                     continue
-                for opt_type, token_key, symbol_key in (("CE", "ce_token", "ce_symbol"), ("PE", "pe_token", "pe_symbol")):
+                for opt_type, token_key, symbol_key in (
+                    ("CE", "ce_token", "ce_symbol"),
+                    ("PE", "pe_token", "pe_symbol"),
+                ):
                     token = info.get(token_key)
                     symbol = info.get(symbol_key)
                     if token and symbol:
@@ -781,7 +838,7 @@ class RealTimeTrader:
         futures = {}
         with ThreadPoolExecutor(max_workers=8) as ex:
             for symbol, token in tasks:
-                futures[submit := ex.submit(self._fetch_historical_data, token, start_time, end_time)] = symbol
+                futures[ex.submit(self._fetch_historical_data, token, start_time, end_time)] = symbol
             for fut in as_completed(futures):
                 symbol = futures[fut]
                 try:
@@ -855,7 +912,7 @@ class RealTimeTrader:
         - Rank by absolute % change over last bar; pick top CE and PE
         """
         latest: List[Tuple[str, float]] = []
-        use_mid_mode = (self.SPREAD_GUARD_MODE == "LTP_MID")
+        use_mid_mode = self.SPREAD_GUARD_MODE == "LTP_MID"
         quotes = quotes or {}
 
         for sym, df in options_data.items():
@@ -875,7 +932,6 @@ class RealTimeTrader:
                 ltp = float((q.get("last_price") or c))
                 mid = self._mid_from_depth(q)
                 if mid is None or mid <= 0:
-                    # if depth missing, skip this symbol to be conservative
                     logger.debug(f"Depth unavailable for {sym}; skipping in LTP_MID mode.")
                     continue
 
@@ -898,7 +954,9 @@ class RealTimeTrader:
                 ltp_mid_dev = abs(ltp - mid) / mid
 
                 if ba_spread > self.SPREAD_GUARD_BA_MAX or ltp_mid_dev > self.SPREAD_GUARD_LTPMID_MAX:
-                    logger.debug(f"Spread guard fail {sym}: BA={ba_spread:.4f}, DEV={ltp_mid_dev:.4f}")
+                    logger.debug(
+                        f"Spread guard fail {sym}: BA={ba_spread:.4f}, DEV={ltp_mid_dev:.4f}"
+                    )
                     continue
 
                 prev = float(df["close"].iloc[-2])
@@ -936,7 +994,9 @@ class RealTimeTrader:
             picks.append({"symbol": pe_list[0][0]})
         return picks
 
-    def _get_fallback_strikes(self, atm_strike: int, cached_nfo: List[Dict], cached_nse: List[Dict]) -> List[Dict]:
+    def _get_fallback_strikes(
+        self, atm_strike: int, cached_nfo: List[Dict], cached_nse: List[Dict]
+    ) -> List[Dict]:
         """Fallback: just use ATM CE and PE symbols."""
         try:
             info = get_instrument_tokens(
@@ -968,12 +1028,13 @@ class RealTimeTrader:
             return
 
         L = int(getattr(Config, "NIFTY_LOT_SIZE", 50))  # contracts per lot
+        warmup_need = max(self.WARMUP_BARS, 20)
 
         for pick in selected:
             sym = pick["symbol"]
             df = options_data.get(sym, pd.DataFrame())
-            if df.empty or len(df) < max(self.WARMUP_BARS, 30) or not isinstance(df.index, pd.DatetimeIndex):
-                logger.debug(f"[SKIP] {sym}: warmup {len(df)}/{max(self.WARMUP_BARS,30)} or bad index")
+            if df.empty or len(df) < warmup_need or not isinstance(df.index, pd.DatetimeIndex):
+                logger.debug(f"[SKIP] {sym}: warmup {len(df)}/{warmup_need} or bad index")
                 continue
 
             current_price = float(df["close"].iloc[-1])
@@ -991,17 +1052,23 @@ class RealTimeTrader:
 
             conf = float(signal.get("confidence", 0.0))
             if conf < float(Config.CONFIDENCE_THRESHOLD):
-                logger.debug(f"[SKIP] {sym}: confidence {conf:.2f} < threshold {Config.CONFIDENCE_THRESHOLD}")
+                logger.debug(
+                    f"[SKIP] {sym}: confidence {conf:.2f} < threshold {Config.CONFIDENCE_THRESHOLD}"
+                )
                 continue
 
             score = int(signal.get("score", -1))
             if score < int(getattr(Config, "MIN_SIGNAL_SCORE", 0)):
-                logger.debug(f"[SKIP] {sym}: score {score} < min_score {getattr(Config,'MIN_SIGNAL_SCORE',0)}")
+                logger.debug(
+                    f"[SKIP] {sym}: score {score} < min_score {getattr(Config,'MIN_SIGNAL_SCORE',0)}"
+                )
                 continue
 
             # single-position policy (again just before entry)
             actives_raw = self.order_executor.get_active_orders()
-            active_count = len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            active_count = (
+                len(actives_raw) if isinstance(actives_raw, dict) else len(actives_raw or [])
+            )
             if active_count >= self.MAX_CONCURRENT_TRADES:
                 logger.debug("Single-position policy: already at max concurrent trades (pre-entry).")
                 break
@@ -1081,7 +1148,7 @@ class RealTimeTrader:
                     "direction": txn_type,
                     "quantity": qty_contracts,
                     "lots": lots,
-                    "entry_price": entry_effective,   # include slippage
+                    "entry_price": entry_effective,  # include slippage
                     "raw_entry_price": entry_p,
                     "stop_loss": float(signal.get("stop_loss", current_price)),
                     "target": float(signal.get("target", current_price)),
@@ -1092,7 +1159,9 @@ class RealTimeTrader:
                     "ts": datetime.now().isoformat(timespec="seconds"),
                 }
 
-            logger.info(f"✅ Trade opened: {txn_type} {qty_contracts}c ({lots} lot) {sym} @ {entry_effective:.2f}")
+            logger.info(
+                f"✅ Trade opened: {txn_type} {qty_contracts}c ({lots} lot) {sym} @ {entry_effective:.2f}"
+            )
 
     # ---------- Finalize / PnL ----------
 
@@ -1148,25 +1217,32 @@ class RealTimeTrader:
         )
 
         # Append CSV log
-        self._append_trade_log([
-            datetime.now().strftime("%Y-%m-%d"),
-            tr["order_id"],
-            tr["symbol"],
-            tr["direction"],
-            tr["quantity"],
-            f"{tr['entry_price']:.2f}",
-            f"{exit_effective:.2f}",
-            f"{pnl_gross:.2f}",
-            f"{tr.get('fees', 0.0):.2f}",
-            f"{net_pnl:.2f}",
-            f"{tr['confidence']:.2f}",
-            f"{tr['atr']:.4f}",
-            "LIVE" if self.live_mode else "SHADOW",
-        ])
+        self._append_trade_log(
+            [
+                datetime.now().strftime("%Y-%m-%d"),
+                tr["order_id"],
+                tr["symbol"],
+                tr["direction"],
+                tr["quantity"],
+                f"{tr['entry_price']:.2f}",
+                f"{exit_effective:.2f}",
+                f"{pnl_gross:.2f}",
+                f"{tr.get('fees', 0.0):.2f}",
+                f"{net_pnl:.2f}",
+                f"{tr['confidence']:.2f}",
+                f"{tr['atr']:.4f}",
+                "LIVE" if self.live_mode else "SHADOW",
+            ]
+        )
 
         logger.info(
             "🏁 Trade closed %s %s x%d | entry %.2f → exit %.2f | net PnL ₹%.2f",
-            tr["direction"], tr["symbol"], tr["quantity"], tr["entry_price"], exit_effective, net_pnl
+            tr["direction"],
+            tr["symbol"],
+            tr["quantity"],
+            tr["entry_price"],
+            exit_effective,
+            net_pnl,
         )
 
     # ---------- Status / summary ----------
