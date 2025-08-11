@@ -3,9 +3,8 @@
 Advanced scalping strategy combining multiple technical indicators to
 generate trading signals for both spot/futures and options.
 
-Signals for spot/futures are scored on an integer scale and converted into a
-1–10 confidence score. SL/TP are adaptive with ATR, and regime detection
-(ADX/DI) nudges scoring in trends vs ranges.
+Signals are scored on an integer scale and converted into a 1–10 confidence
+score. SL/TP are ATR-adaptive; regime detection nudges scoring.
 """
 
 from __future__ import annotations
@@ -25,11 +24,22 @@ from src.utils.indicators import (
     calculate_supertrend,
     calculate_vwap,
     calculate_adx,
-    calculate_bb_width,
 )
-from src.utils.atr_helper import compute_atr_df, latest_atr_value  # NEW
+from src.utils.atr_helper import compute_atr_df, latest_atr_value  # robust ATR
 
 logger = logging.getLogger(__name__)
+
+
+def _bollinger_bands_from_close(close: pd.Series, window: int, std: float) -> Tuple[pd.Series, pd.Series]:
+    """
+    Compute Bollinger Bands (upper, lower) from the close series.
+    Uses population std (ddof=0) to be stable on short windows.
+    """
+    ma = close.rolling(window=window, min_periods=window).mean()
+    sd = close.rolling(window=window, min_periods=window).std(ddof=0)
+    upper = ma + std * sd
+    lower = ma - std * sd
+    return upper, lower
 
 
 class EnhancedScalpingStrategy:
@@ -39,24 +49,26 @@ class EnhancedScalpingStrategy:
         self,
         base_stop_loss_points: float = getattr(Config, "BASE_STOP_LOSS_POINTS", 20.0),
         base_target_points: float = getattr(Config, "BASE_TARGET_POINTS", 40.0),
-        confidence_threshold: float = getattr(Config, "CONFIDENCE_THRESHOLD", 8.0),
-        min_score_threshold: int = int(getattr(Config, "MIN_SIGNAL_SCORE", 7)),
+        # Align defaults with .env to avoid runner/strategy mismatch:
+        confidence_threshold: float = getattr(Config, "CONFIDENCE_THRESHOLD", 6.0),
+        min_score_threshold: int = int(getattr(Config, "MIN_SIGNAL_SCORE", 5)),
+        # Faster MACD for 1-min scalping:
         ema_fast_period: int = 9,
         ema_slow_period: int = 21,
         rsi_period: int = 14,
         rsi_overbought: int = 60,
         rsi_oversold: int = 40,
-        macd_fast_period: int = 12,
-        macd_slow_period: int = 26,
-        macd_signal_period: int = 9,
-        atr_period: int = getattr(Config, "ATR_PERIOD", 14),  # align with Config
+        macd_fast_period: int = 8,      # was 12
+        macd_slow_period: int = 17,     # was 26
+        macd_signal_period: int = 9,    # keep 9
+        atr_period: int = getattr(Config, "ATR_PERIOD", 14),
         supertrend_atr_multiplier: float = 2.0,
         bb_window: int = 20,
         bb_std_dev: float = 2.0,
         adx_period: int = 14,
         adx_trend_strength: int = 25,
         vwap_period: int = 20,
-        # --- options params (kept; used in generate_options_signal) ---
+        # --- options params (used in generate_options_signal) ---
         option_sl_percent: float = getattr(Config, "OPTION_SL_PERCENT", 0.05),
         option_tp_percent: float = getattr(Config, "OPTION_TP_PERCENT", 0.15),
     ) -> None:
@@ -84,8 +96,9 @@ class EnhancedScalpingStrategy:
         self.option_sl_percent = option_sl_percent
         self.option_tp_percent = option_tp_percent
 
-        # EMA (1), RSI (1), MACD (2 incl. zero-cross), Supertrend (1), BB (1), ADX/regime (1), VWAP (1) = 8
-        self.max_possible_score = 8
+        # We score 6 key “axes”: EMA, RSI, MACD hist sign, MACD zerocross, Supertrend dir, VWAP.
+        # (BB and regime nudge modify score but aren’t counted toward max_possible_score here)
+        self.max_possible_score = 6
         self.last_signal_hash: Optional[str] = None
 
     # ------------------------------- internals ------------------------------- #
@@ -104,9 +117,7 @@ class EnhancedScalpingStrategy:
         ) + 10
 
         if len(df) < min_len:
-            logger.warning(
-                f"Insufficient data for indicators. Need {min_len}, got {len(df)}"
-            )
+            logger.debug(f"Insufficient data for indicators. Need {min_len}, got {len(df)}")
             return indicators
 
         # EMA
@@ -124,7 +135,7 @@ class EnhancedScalpingStrategy:
         indicators["macd_signal"] = macd_signal
         indicators["macd_histogram"] = macd_hist
 
-        # ATR (via atr_helper; returns full series)
+        # ATR (robust)
         indicators["atr"] = compute_atr_df(df, period=self.atr_period, method="rma")
 
         # Supertrend
@@ -135,8 +146,8 @@ class EnhancedScalpingStrategy:
         indicators["supertrend_upper"] = st_u
         indicators["supertrend_lower"] = st_l
 
-        # Bollinger Bands (we only need U/L)
-        bb_u, bb_l = calculate_bb_width(df, window=self.bb_window, std=self.bb_std_dev)
+        # Bollinger (upper/lower) – compute locally to avoid API mismatch
+        bb_u, bb_l = _bollinger_bands_from_close(df["close"], self.bb_window, self.bb_std_dev)
         indicators["bb_upper"] = bb_u
         indicators["bb_lower"] = bb_l
 
@@ -146,7 +157,7 @@ class EnhancedScalpingStrategy:
         indicators["di_plus"] = di_pos
         indicators["di_minus"] = di_neg
 
-        # VWAP (rolling, not cumulative, to reduce session edge effects)
+        # VWAP (rolling)
         indicators["vwap"] = calculate_vwap(df, period=self.vwap_period)
 
         return indicators
@@ -192,91 +203,75 @@ class EnhancedScalpingStrategy:
         # 1) EMA
         if pd.notna(ema_fast) and pd.notna(ema_slow):
             if ema_fast > ema_slow:
-                score += 1
-                reasons.append("EMA Fast > EMA Slow")
+                score += 1; reasons.append("EMA Fast > EMA Slow")
             elif ema_fast < ema_slow:
-                score -= 1
-                reasons.append("EMA Fast < EMA Slow")
+                score -= 1; reasons.append("EMA Fast < EMA Slow")
 
         # 2) RSI
         if pd.notna(rsi):
             if rsi < self.rsi_oversold:
-                score += 1
-                reasons.append("RSI Oversold")
+                score += 1; reasons.append("RSI Oversold")
             elif rsi > self.rsi_overbought:
-                score -= 1
-                reasons.append("RSI Overbought")
+                score -= 1; reasons.append("RSI Overbought")
 
         # 3) MACD histogram sign
         if pd.notna(macd_hist):
             if macd_hist > 0:
-                score += 1
-                reasons.append("MACD Histogram > 0")
+                score += 1; reasons.append("MACD Histogram > 0")
             elif macd_hist < 0:
-                score -= 1
-                reasons.append("MACD Histogram < 0")
+                score -= 1; reasons.append("MACD Histogram < 0")
 
         # 4) MACD zero-cross (lookback 1)
         if len(indicators["macd_histogram"]) >= 2:
             prev_macd_hist = indicators["macd_histogram"].iloc[-2]
             if pd.notna(prev_macd_hist) and pd.notna(macd_hist):
                 if prev_macd_hist <= 0 < macd_hist:
-                    score += 1
-                    reasons.append("MACD Zero Cross Up")
+                    score += 1; reasons.append("MACD Zero Cross Up")
                 elif prev_macd_hist >= 0 > macd_hist:
-                    score -= 1
-                    reasons.append("MACD Zero Cross Down")
+                    score -= 1; reasons.append("MACD Zero Cross Down")
 
-        # 5) Supertrend dir
+        # 5) Supertrend dir (light touch with band alignment)
         if pd.notna(supertrend):
-            if current_price > indicators["supertrend_lower"].loc[last_idx] and supertrend == 1:
-                score += 1
-                reasons.append("Price aligned with Supertrend Up")
-            elif current_price < indicators["supertrend_upper"].loc[last_idx] and supertrend == -1:
-                score -= 1
-                reasons.append("Price aligned with Supertrend Down")
+            if supertrend == 1 and pd.notna(indicators["supertrend_lower"].loc[last_idx]) and current_price > indicators["supertrend_lower"].loc[last_idx]:
+                score += 1; reasons.append("Price aligned with Supertrend Up")
+            elif supertrend == -1 and pd.notna(indicators["supertrend_upper"].loc[last_idx]) and current_price < indicators["supertrend_upper"].loc[last_idx]:
+                score -= 1; reasons.append("Price aligned with Supertrend Down")
 
-        # 6) Bollinger bands
-        if pd.notna(bb_upper) and pd.notna(bb_lower):
-            if current_price < bb_lower:
-                score += 1
-                reasons.append("Price < BB Lower")
-            elif current_price > bb_upper:
-                score -= 1
-                reasons.append("Price > BB Upper")
-
-        # 7) Regime (ADX/DI)
-        regime = self._detect_market_regime(df, adx, di_plus, di_minus)
-        if regime == "trend_up" and score >= 0:
-            score += 1
-            reasons.append("Trending Up Regime")
-        elif regime == "trend_down" and score <= 0:
-            score -= 1
-            reasons.append("Trending Down Regime")
-        elif regime == "range":
-            score = int(score * 0.7)
-            reasons.append("Ranging Regime")
-
-        # 8) VWAP
+        # 6) VWAP
         if pd.notna(vwap):
             if current_price > vwap:
-                score += 1
-                reasons.append("Price > VWAP")
+                score += 1; reasons.append("Price > VWAP")
             elif current_price < vwap:
-                score -= 1
-                reasons.append("Price < VWAP")
+                score -= 1; reasons.append("Price < VWAP")
+
+        # BB as contextual filter (don’t count to max_possible_score)
+        if pd.notna(bb_upper) and pd.notna(bb_lower):
+            if current_price < bb_lower:
+                reasons.append("Price < BB Lower")
+            elif current_price > bb_upper:
+                reasons.append("Price > BB Upper")
+
+        # Regime nudge (softer than multiplicative scaling)
+        regime = self._detect_market_regime(df, adx, di_plus, di_minus)
+        if regime == "trend_up" and score >= 0:
+            score += 1; reasons.append("Trending Up Regime")
+        elif regime == "trend_down" and score <= 0:
+            score -= 1; reasons.append("Trending Down Regime")
+        elif regime == "range":
+            score -= 1 if score > 0 else 0  # soft penalty
+            reasons.append("Ranging Regime")
 
         return score, reasons
 
     # --------------------------- public API: spot/fut --------------------------- #
 
     def generate_signal(self, df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
-        """Generate a signal for spot/futures."""
+        """Generate a signal for spot/futures (also used on options DF by the runner)."""
         if df is None or df.empty:
-            logger.warning("Strategy received empty DataFrame")
+            logger.debug("Strategy received empty DataFrame")
             return None
 
-        required_cols = {"open", "high", "low", "close", "volume"}
+        required_cols = {"open", "high", "low", "close"}  # volume optional
         if not required_cols.issubset(df.columns):
             logger.error(f"DataFrame missing required columns: {required_cols - set(df.columns)}")
             return None
@@ -325,9 +320,7 @@ class EnhancedScalpingStrategy:
             # ATR-based SL/TP (fallback to fixed points if ATR missing)
             atr_series = indicators.get("atr", pd.Series([0], index=df.index))
             atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-
             if atr_value <= 0:
-                # final fallback: compute latest via helper (in case indicator calc failed)
                 v = latest_atr_value(df, period=self.atr_period, method="rma")
                 atr_value = float(v) if v is not None else 0.0
 
@@ -340,7 +333,7 @@ class EnhancedScalpingStrategy:
                 sl_points = atr_value * sl_mult
                 tp_points = atr_value * tp_mult
 
-            # Confidence adjustments (wide SL when low conf; larger TP when high conf)
+            # Confidence adjustments
             sl_adj = float(getattr(Config, "SL_CONFIDENCE_ADJ", 0.2))
             tp_adj = float(getattr(Config, "TP_CONFIDENCE_ADJ", 0.3))
             sl_points *= (1 + (10 - confidence) * sl_adj / 10.0)
@@ -450,7 +443,7 @@ class EnhancedScalpingStrategy:
             spot_bonus = max(0.0, min(2.0, abs(spot_return) * 200.0))
             confidence = min(10.0, base_conf + vol_bonus + spot_bonus)
 
-            # Use option's own ATR as market_volatility if available
+            # Option ATR as volatility proxy (if available)
             opt_atr = latest_atr_value(options_ohlc, period=getattr(Config, "ATR_PERIOD", 14), method="rma")
             mv = float(opt_atr) if opt_atr is not None else 0.0
 
