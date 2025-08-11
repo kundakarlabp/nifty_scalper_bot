@@ -1,4 +1,3 @@
-# src/data_streaming/realtime_trader.py
 """
 Real-time trader with:
 - Telegram control (daemon polling)
@@ -56,7 +55,8 @@ class RealTimeTrader:
 
     # sensible defaults if Config misses keys
     MAX_CONCURRENT_TRADES = int(getattr(Config, "MAX_CONCURRENT_TRADES", 1))
-    WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 60))
+    # ↓ Default to 20 to avoid warmup starvation with short lookback
+    WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 20))
 
     # --- Spread guard config ---
     # Mode: "LTP_MID" (use bid/ask depth) or "RANGE" (candle-range proxy)
@@ -973,7 +973,7 @@ class RealTimeTrader:
             sym = pick["symbol"]
             df = options_data.get(sym, pd.DataFrame())
             if df.empty or len(df) < max(self.WARMUP_BARS, 30) or not isinstance(df.index, pd.DatetimeIndex):
-                logger.debug(f"Insufficient data for {sym}")
+                logger.debug(f"[SKIP] {sym}: warmup {len(df)}/{max(self.WARMUP_BARS,30)} or bad index")
                 continue
 
             current_price = float(df["close"].iloc[-1])
@@ -985,8 +985,18 @@ class RealTimeTrader:
                 logger.debug(f"Strategy failed for {sym}: {e}")
                 continue
 
-            if not signal or float(signal.get("confidence", 0.0)) < float(Config.CONFIDENCE_THRESHOLD):
-                logger.debug(f"No valid signal for {sym}")
+            if not signal:
+                logger.debug(f"[SKIP] {sym}: strategy returned no signal")
+                continue
+
+            conf = float(signal.get("confidence", 0.0))
+            if conf < float(Config.CONFIDENCE_THRESHOLD):
+                logger.debug(f"[SKIP] {sym}: confidence {conf:.2f} < threshold {Config.CONFIDENCE_THRESHOLD}")
+                continue
+
+            score = int(signal.get("score", -1))
+            if score < int(getattr(Config, "MIN_SIGNAL_SCORE", 0)):
+                logger.debug(f"[SKIP] {sym}: score {score} < min_score {getattr(Config,'MIN_SIGNAL_SCORE',0)}")
                 continue
 
             # single-position policy (again just before entry)
