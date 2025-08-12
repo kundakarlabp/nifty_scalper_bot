@@ -20,7 +20,7 @@ except Exception as exc:
     print(f"dotenv not used: {exc}")
 
 
-def _as_bool(val: str, default: bool = False) -> bool:
+def _as_bool(val: str | None, default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
@@ -51,15 +51,19 @@ class Config:
     CONSECUTIVE_LOSS_LIMIT: int = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
 
     # Daily circuit breaker (amount OR pct). If both provided, stricter is used.
-    DAILY_MAX_LOSS_PCT: float = float(os.getenv("DAILY_MAX_LOSS_PCT", "0.05"))  # 5% of equity
+    DAILY_MAX_LOSS_PCT: float = float(os.getenv("DAILY_MAX_LOSS_PCT", "0.05"))  # legacy
     DAILY_MAX_LOSS_AMOUNT: float = float(os.getenv("DAILY_MAX_LOSS_AMOUNT", "0"))  # 0=disabled
     HALT_ON_DRAWDOWN: bool = _as_bool(os.getenv("HALT_ON_DRAWDOWN", "true"))
+
+    # Used by RealTimeTrader circuit breaker (preferred modern vars)
+    MAX_DAILY_DRAWDOWN_PCT: float = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.03"))
+    CIRCUIT_RELEASE_PCT: float = float(os.getenv("CIRCUIT_RELEASE_PCT", "0.015"))
 
     # ─────────── Strategy Tuning ─────────── #
     BASE_STOP_LOSS_POINTS: float = float(os.getenv("BASE_STOP_LOSS_POINTS", "20.0"))
     BASE_TARGET_POINTS: float = float(os.getenv("BASE_TARGET_POINTS", "40.0"))
-    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "8.0"))
-    MIN_SIGNAL_SCORE: float = float(os.getenv("MIN_SIGNAL_SCORE", "7.0"))
+    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "6.0"))
+    MIN_SIGNAL_SCORE: int = int(float(os.getenv("MIN_SIGNAL_SCORE", "5.0")))
 
     TIME_FILTER_START: str = os.getenv("TIME_FILTER_START", "09:15")
     TIME_FILTER_END: str = os.getenv("TIME_FILTER_END", "15:15")
@@ -96,13 +100,18 @@ class Config:
     OPTION_BREAKOUT_PCT: float = float(os.getenv("OPTION_BREAKOUT_PCT", "0.01"))
     OPTION_SPOT_TREND_PCT: float = float(os.getenv("OPTION_SPOT_TREND_PCT", "0.005"))
 
-    # Quotes / microstructure
-    SPREAD_GUARD_MAX_PCT: float = float(os.getenv("SPREAD_GUARD_MAX_PCT", "0.7"))  # e.g., 0.7% max spread of mid
+    # Quotes / microstructure (used by spread guard)
+    SPREAD_GUARD_MODE: str = os.getenv("SPREAD_GUARD_MODE", "LTP_MID").upper()
+    SPREAD_GUARD_BA_MAX: float = float(os.getenv("SPREAD_GUARD_BA_MAX", "0.012"))       # (ask-bid)/mid
+    SPREAD_GUARD_LTPMID_MAX: float = float(os.getenv("SPREAD_GUARD_LTPMID_MAX", "0.015"))  # |ltp-mid|/mid
+    SPREAD_GUARD_PCT: float = float(os.getenv("SPREAD_GUARD_PCT", "0.02"))               # RANGE proxy
+
     MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
 
     # Slippage & fees
-    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "5"))  # 5 bps = 0.05%
+    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "5"))       # 5 bps = 0.05%
     FEES_PCT_PER_SIDE: float = float(os.getenv("FEES_PCT_PER_SIDE", "0.03"))  # 0.03% per side (example)
+    FEES_PER_LOT: float = float(os.getenv("FEES_PER_LOT", "25.0"))    # ₹ per lot round trip (exec model)
 
     # Scheduling / rate limit
     JITTER_SECONDS_MAX: float = float(os.getenv("JITTER_SECONDS_MAX", "2.0"))
@@ -115,6 +124,10 @@ class Config:
     PREFERRED_EXIT_MODE: str = os.getenv("PREFERRED_EXIT_MODE", "AUTO")  # AUTO | GTT | REGULAR
     TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.05"))
     TRAIL_COOLDOWN_SEC: float = float(os.getenv("TRAIL_COOLDOWN_SEC", "12.0"))
+
+    # Trailing / workers
+    TRAILING_ENABLE: bool = _as_bool(os.getenv("TRAILING_ENABLE", "true"))
+    WORKER_INTERVAL_SEC: int = int(os.getenv("WORKER_INTERVAL_SEC", "10"))
 
     # ─────────── NEW: Partial TP + Breakeven hop + Hard Stop ─────────── #
     # Partial take profit
@@ -139,12 +152,16 @@ class Config:
 
     # Logging / persistence
     LOG_FILE: str = os.getenv("LOG_FILE", "logs/trades.csv")
+    LOGLEVEL: str = os.getenv("LOGLEVEL", os.getenv("LOG_LEVEL", "INFO")).upper()
 
     # Historical data timeframe
     HISTORICAL_TIMEFRAME: str = os.getenv("HISTORICAL_TIMEFRAME", "minute")
 
     # Session management
     SESSION_AUTO_EXIT_TIME: str = os.getenv("SESSION_AUTO_EXIT_TIME", "15:20")  # HH:MM IST
+
+    # Clock preference
+    USE_IST_CLOCK: bool = _as_bool(os.getenv("USE_IST_CLOCK", "true"))
 
 
 if __name__ == "__main__":
