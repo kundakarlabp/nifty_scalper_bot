@@ -5,6 +5,7 @@ for Nifty 50 options trading.
 
 - Robust symbol resolution and conservative fallbacks
 - Cached instruments usage (passed in), with rate-limited API wrappers
+- Optional Greeks-driven selection with OI/IV filters (delta targeting)
 - Spread-agnostic (selection only), used by the trader which applies its own guards
 - Lightweight health_check() for readiness probes
 
@@ -20,12 +21,21 @@ Public functions used elsewhere:
 
 from __future__ import annotations
 
+import os
 from kiteconnect import KiteConnect
 from datetime import datetime, date, timedelta
 import logging
 import time
 import threading
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
+
+# Greeks helpers (new)
+try:
+    from src.utils.greeks import implied_vol_bisection, estimate_delta
+except Exception:
+    # keep import-safe in environments where file isn't present yet
+    implied_vol_bisection = None
+    estimate_delta = None
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +237,6 @@ def _resolve_spot_token_from_cache(
     """
     try:
         from src.config import Config
-        # Common listing in instruments dump for the index:
-        # tradingsymbol == "NIFTY 50", exchange == "NSE", segment contains "INDICES"
         for inst in cached_nse_instruments or []:
             tsym = (inst.get("tradingsymbol") or "").strip().upper()
             seg = (inst.get("segment") or "").upper()
@@ -236,11 +244,162 @@ def _resolve_spot_token_from_cache(
                 tok = inst.get("instrument_token")
                 if tok:
                     return int(tok)
-        # fallback to configured token (256265 is widely used for NIFTY index)
         return int(getattr(Config, "INSTRUMENT_TOKEN", 256265))
     except Exception as e:
         logger.debug(f"[resolve_spot_token_from_cache] {e}")
         return None
+
+
+def _exp_to_date(exp: Any) -> Optional[date]:
+    """Normalize an instrument 'expiry' field to date."""
+    try:
+        if isinstance(exp, datetime):
+            return exp.date()
+        if isinstance(exp, date):
+            return exp
+        y, m, d = map(int, str(exp)[:10].split("-"))
+        return date(y, m, d)
+    except Exception:
+        return None
+
+
+def _find_instrument(
+    nfo_list: List[Dict[str, Any]],
+    *,
+    strike: int,
+    opt_type: str,
+    expiry: date
+) -> Optional[Dict[str, Any]]:
+    """Find a single NIFTY option instrument row for given strike/type/expiry."""
+    try:
+        for inst in nfo_list or []:
+            if inst.get("name") != "NIFTY":
+                continue
+            if inst.get("instrument_type") != opt_type:
+                continue
+            try:
+                if int(float(inst.get("strike", 0))) != int(strike):
+                    continue
+            except Exception:
+                continue
+            exp_d = _exp_to_date(inst.get("expiry"))
+            if not exp_d or exp_d != expiry:
+                continue
+            return inst
+        return None
+    except Exception:
+        return None
+
+
+def _greeks_pick_strikes(
+    *,
+    kite_instance: KiteConnect,
+    spot_price: float,
+    atm_strike: int,
+    expiry_dt: date,
+    nfo_list: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Greeks-driven CE/PE selection around ATM:
+    - Target deltas (±0.35 by default) with tolerance
+    - Require minimum OI (if enabled)
+    - IV estimated from LTP via inverse BS if available; fallback 20%
+    """
+    if implied_vol_bisection is None or estimate_delta is None:
+        logger.debug("[Greeks] utils.greeks not available; skipping Greeks mode.")
+        return None
+
+    # config knobs
+    rf = float(os.environ.get("RISK_FREE_RATE", "0.06"))
+    tgt_call = float(os.environ.get("TARGET_DELTA_CALL", "0.35"))
+    tgt_put = float(os.environ.get("TARGET_DELTA_PUT", "-0.35"))
+    tol = float(os.environ.get("DELTA_TOL", "0.05"))
+    min_oi = int(os.environ.get("MIN_OI", "50000"))
+    require_oi = str(os.environ.get("REQUIRE_OI", "true")).lower() in ("1", "true", "yes", "y", "on")
+    iv_mode = (os.environ.get("IV_SOURCE", "LTP_IMPLIED") or "LTP_IMPLIED").upper()
+
+    # strike window around ATM
+    step = 50
+    window = 6
+    strikes = [atm_strike + i * step for i in range(-window, window + 1)]
+
+    # days to expiry
+    now = datetime.now().date()
+    dte_days = max(0.5, (expiry_dt - now).days or 0.5)
+
+    def _pick(opt_type: str) -> Optional[Dict[str, Any]]:
+        best = None
+        best_err = 1e9
+        for k in strikes:
+            row = _find_instrument(nfo_list, strike=k, opt_type=opt_type, expiry=expiry_dt)
+            if not row:
+                continue
+
+            oi = int(row.get("oi") or 0)
+            if require_oi and oi < min_oi:
+                continue
+
+            ts = row.get("tradingsymbol")
+            exch = row.get("exchange") or "NFO"
+            try:
+                ltp = _rate_limited_api_call(kite_instance.ltp, [f"{exch}:{ts}"])[f"{exch}:{ts}"]["last_price"]
+            except Exception:
+                continue
+
+            # estimate IV from LTP
+            if iv_mode == "LTP_IMPLIED":
+                try:
+                    iv = implied_vol_bisection(
+                        target_price=float(ltp),
+                        spot=float(spot_price),
+                        strike=float(k),
+                        days_to_expiry=float(dte_days),
+                        opt_type=("CE" if opt_type == "CE" else "PE"),
+                        r=rf,
+                        q=0.0,
+                    )
+                except Exception:
+                    iv = 0.20
+            else:
+                iv = 0.20
+
+            dlt = estimate_delta(
+                spot=float(spot_price),
+                strike=float(k),
+                days_to_expiry=float(dte_days),
+                iv=float(iv),
+                opt_type=("CE" if opt_type == "CE" else "PE"),
+            )
+
+            target = tgt_call if opt_type == "CE" else tgt_put
+            err = abs(dlt - target)
+            if err <= tol and err < best_err:
+                best_err = err
+                best = {
+                    "tradingsymbol": ts,
+                    "token": int(row.get("instrument_token")),
+                    "strike": int(k),
+                    "delta": float(dlt),
+                    "iv": float(iv),
+                    "ltp": float(ltp),
+                }
+        return best
+
+    ce_best = _pick("CE")
+    pe_best = _pick("PE")
+    if ce_best and pe_best:
+        logger.info(
+            "[Greeks] Selected CE %s(Δ=%.2f), PE %s(Δ=%.2f)",
+            ce_best["tradingsymbol"], ce_best["delta"],
+            pe_best["tradingsymbol"], pe_best["delta"],
+        )
+        return {
+            "ce": ce_best,
+            "pe": pe_best,
+        }
+
+    logger.info("[Greeks] No strike within delta tolerance → fallback to ATM selector")
+    return None
 
 
 def get_instrument_tokens(
@@ -268,6 +427,9 @@ def get_instrument_tokens(
         "pe_symbol": str?,
         "pe_token": int?,
         "spot_token": int?,
+        # extras when Greeks used:
+        "ce_delta": float?,
+        "pe_delta": float?,
       }
     """
     if not kite_instance:
@@ -295,19 +457,21 @@ def get_instrument_tokens(
             logger.error(f"[get_instrument_tokens] LTP error: {e}")
             return None
 
-        # 2) ATM & target
+        # 2) ATM & target (for legacy/offset path)
         atm = get_atm_strike_price(spot_price)
         target = atm + (int(offset) * 50)
 
-        # 3) Expiry
-        expiry = get_next_expiry_date(kite_instance, cached_nfo_instruments)
-        if not expiry:
+        # 3) Expiry (ISO) and as date
+        expiry_iso = get_next_expiry_date(kite_instance, cached_nfo_instruments)
+        if not expiry_iso:
             logger.error("[get_instrument_tokens] Could not resolve expiry.")
             return None
+        y, m, d = map(int, expiry_iso.split("-"))
+        expiry_dt = date(y, m, d)
 
         logger.info(
             f"[get_instrument_tokens] Spot:{spot_price:.2f} ATM:{atm} Target:{target} "
-            f"Expiry:{expiry} Offset:{offset}"
+            f"Expiry:{expiry_iso} Offset:{offset}"
         )
 
         def _exp_str(x) -> str:
@@ -319,10 +483,10 @@ def get_instrument_tokens(
         candidates = [
             i
             for i in cached_nfo_instruments
-            if i.get("name") == base_name and _exp_str(i.get("expiry")) == expiry
+            if i.get("name") == base_name and _exp_str(i.get("expiry")) == expiry_iso
         ]
         if not candidates:
-            logger.error(f"[get_instrument_tokens] No instruments for {base_name} @ {expiry}")
+            logger.error(f"[get_instrument_tokens] No instruments for {base_name} @ {expiry_iso}")
             return None
 
         results: Dict[str, Any] = {
@@ -331,7 +495,7 @@ def get_instrument_tokens(
             "target_strike": target,
             "offset": int(offset),
             "actual_strikes": {},
-            "expiry": expiry,
+            "expiry": expiry_iso,
             "ce_symbol": None,
             "ce_token": None,
             "pe_symbol": None,
@@ -339,7 +503,30 @@ def get_instrument_tokens(
             "spot_token": _resolve_spot_token_from_cache(cached_nse_instruments),
         }
 
-        # 5) Search strikes outward from target for CE/PE
+        # 5) Greeks-driven selection (opt-in)
+        use_greeks = str(os.environ.get("USE_GREEKS_STRIKE_RANKING", "false")).lower() in ("1", "true", "yes", "y", "on")
+        if use_greeks:
+            picked = _greeks_pick_strikes(
+                kite_instance=kite_instance,
+                spot_price=spot_price,
+                atm_strike=atm,
+                expiry_dt=expiry_dt,
+                nfo_list=candidates,
+            )
+            if picked:
+                ce_best, pe_best = picked["ce"], picked["pe"]
+                results.update({
+                    "ce_symbol": ce_best["tradingsymbol"],
+                    "ce_token": ce_best["token"],
+                    "pe_symbol": pe_best["tradingsymbol"],
+                    "pe_token": pe_best["token"],
+                    "actual_strikes": {"ce": ce_best["strike"], "pe": pe_best["strike"]},
+                    "ce_delta": round(ce_best["delta"], 3),
+                    "pe_delta": round(pe_best["delta"], 3),
+                })
+                return results  # success; done
+
+        # 6) Legacy ATM/offset search (fallback or when Greeks disabled)
         search_order: List[int] = [target]
         for i in range(1, int(strike_range) + 1):
             search_order.extend([target + i * 50, target - i * 50])
@@ -363,13 +550,11 @@ def get_instrument_tokens(
             if not found:
                 logger.warning(f"[get_instrument_tokens] ❌ No {side} within ±{strike_range}*50 points")
 
-        # 6) Validation
         ok = any([results["ce_token"], results["pe_token"]])
         if not ok:
             logger.error("[get_instrument_tokens] ❌ No options found in range")
             return None
 
-        # Log any adjustment from target
         for side in ("ce", "pe"):
             a = results["actual_strikes"].get(side)
             if a and a != target:
