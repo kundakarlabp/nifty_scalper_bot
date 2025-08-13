@@ -969,14 +969,18 @@ class RealTimeTrader:
         dd = -self.daily_pnl / self.daily_start_equity
         return dd >= self.MAX_DAILY_DRAWDOWN_PCT
 
-    def get_status(self) -> str:
-        with self._lock:
-            open_n = len([t for t in self.active_trades.values() if t.get("status") == "OPEN"])
-        return (
-            f"is_trading={self.is_trading} live={self.live_mode} "
-            f"open_positions={open_n} daily_pnl=₹{round(self.daily_pnl,2)} "
-            f"closed_today={self._closed_trades_today}"
-        )
+    def get_status(self) -> dict:
+    """Return structured status for Telegram and other controllers."""
+    with self._lock:
+        open_n = len([t for t in self.active_trades.values() if t.get("status") == "OPEN"])
+        return {
+            "is_trading": self.is_trading,
+            "live_mode": self.live_mode,
+            "open_positions": open_n,
+            "daily_pnl": round(self.daily_pnl, 2),
+            "closed_today": self._closed_trades_today,
+            "account_size": round(self.daily_start_equity, 2),
+        }
 
     def get_summary(self) -> str:
         return f"Trades today: {len(self.trades)} | PnL: ₹{round(self.daily_pnl,2)}"
