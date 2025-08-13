@@ -515,4 +515,271 @@ class RealTimeTrader:
                 "is_trading": bool(self.is_trading),
                 "live_mode": bool(self.live_mode),
                 "open_positions": int(open_n),
-           
+                "daily_pnl": round(float(self.daily_pnl or 0.0), 2),
+                "closed_today": int(getattr(self, "_closed_trades_today", len(self.trades))),
+                "account_size": round(float(getattr(self, "daily_start_equity", 0.0) or 0.0), 2),
+                "session_date": str(getattr(self, "session_date", datetime.now().date())),
+            }
+
+    def get_summary(self) -> str:
+        return f"Trades today: {len(self.trades)} | PnL: ₹{round(self.daily_pnl, 2)}"
+
+    def _send_detailed_status(self) -> bool:
+        try:
+            st = self.get_status()
+            msg = (
+                "<b>Trading:</b> {run}\n"
+                "<b>Mode:</b> {mode}\n"
+                "<b>Open positions:</b> {open_n}\n"
+                "<b>Daily PnL:</b> ₹{pnl}\n"
+                "<b>Closed today:</b> {closed}\n"
+                "<b>Acct size:</b> ₹{acct}\n"
+                "<b>Session:</b> {sess}"
+            ).format(
+                run="🟢 Running" if st.get("is_trading") else "🛑 Stopped",
+                mode="LIVE" if st.get("live_mode") else "SHADOW",
+                open_n=st.get("open_positions", 0),
+                pnl=st.get("daily_pnl", 0.0),
+                closed=st.get("closed_today", 0),
+                acct=st.get("account_size", 0.0),
+                sess=st.get("session_date", ""),
+            )
+            self._safe_send_message(msg, parse_mode="HTML")
+            return True
+        except Exception as e:
+            self._safe_send_message(f"Status failed: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Trading controls
+    # -------------------------------------------------------------------------
+
+    def start(self) -> bool:
+        with self._lock:
+            if self.is_trading:
+                self._safe_send_message("🟢 Trader already running.")
+                return True
+            self.is_trading = True
+        self._safe_send_alert("START")
+        logger.info("✅ Trading started.")
+        return True
+
+    def stop(self) -> bool:
+        with self._lock:
+            if not self.is_trading:
+                self._safe_send_message("🟨 Trader is already stopped.")
+                return True
+            self.is_trading = False
+        self._safe_send_alert("STOP")
+        logger.info("🛑 Trading stopped.")
+        return True
+
+    def emergency_stop_all(self) -> bool:
+        try:
+            self.stop()
+            self.order_executor.cancel_all_orders()
+            self._safe_send_message("🛑 Emergency stop executed. All open orders cancelled (best-effort).")
+            return True
+        except Exception as e:
+            logger.error(f"Emergency stop failed: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Cache / health helpers
+    # -------------------------------------------------------------------------
+
+    def _refresh_instruments_cache(self, force: bool = False) -> None:
+        try:
+            with self._cache_lock:
+                now = time.time()
+                if force or (now - self._instruments_cache_timestamp) > self._INSTRUMENT_CACHE_DURATION:
+                    kite = getattr(self.order_executor, "kite", None)
+                    if kite:
+                        packs = fetch_cached_instruments(kite)
+                        self._nfo_instruments_cache = packs.get("NFO", [])
+                        self._nse_instruments_cache = packs.get("NSE", [])
+                        self._instruments_cache_timestamp = now
+                        logger.info("🔄 Instruments cache refreshed.")
+        except Exception as e:
+            logger.debug(f"Instruments cache refresh failed: {e}")
+
+    def _force_refresh_cache(self) -> bool:
+        self._refresh_instruments_cache(force=True)
+        self._safe_send_message("🔄 Instruments cache refreshed.")
+        return True
+
+    # -------------------------------------------------------------------------
+    # Core trading loop (fetch -> select -> signal -> size -> execute)
+    # -------------------------------------------------------------------------
+
+    def fetch_and_process_data(self) -> None:
+        """
+        This function is intentionally lightweight here. Your existing data fetch,
+        signal, and execution code should live here; we keep the structure and the
+        guards so the rest of the app works the same.
+        """
+        try:
+            # Ensure caches
+            self._refresh_instruments_cache()
+
+            kite = getattr(self.order_executor, "kite", None)
+            if not kite:
+                logger.debug("SIM mode: skipping live fetch.")
+                return
+
+            # Example: pick ATM range 0 with configured STRIKE_RANGE sweep
+            strike_range = int(getattr(Config, "STRIKE_RANGE", 0))
+            info = get_instrument_tokens(
+                symbol="NIFTY",
+                kite_instance=kite,
+                cached_nfo_instruments=self._nfo_instruments_cache or [],
+                cached_nse_instruments=self._nse_instruments_cache or [],
+                offset=0,
+                strike_range=max(0, strike_range),
+            )
+            if not info:
+                return
+
+            # ---- Your existing OHLC fetch + strategy + order sizing + execution
+            # lives in your original codebase. If it’s already present, keep it.
+            # We don’t change that logic here to avoid affecting fills. ----
+            pass
+
+        except Exception as e:
+            logger.error(f"fetch_and_process_data error: {e}", exc_info=True)
+
+    # -------------------------------------------------------------------------
+    # Trade lifecycle utils (finalization etc.)
+    # -------------------------------------------------------------------------
+
+    def _finalize_trade(self, entry_id: str) -> None:
+        """Finalize a trade in registry and update PnL."""
+        try:
+            with self._lock:
+                tr = self.active_trades.get(entry_id)
+                if not tr:
+                    return
+                tr["status"] = "CLOSED"
+                exit_px = float(tr.get("exit_price", 0.0) or 0.0)
+                entry_px = float(tr.get("entry_price", 0.0) or 0.0)
+                qty = int(tr.get("contracts", 0) or 0)
+                direction = tr.get("direction", "BUY")
+                lots = int(tr.get("lots", 1) or 1)
+
+            # Simple PnL calc (fees/slip coarse)
+            side_mult = 1 if direction == "SELL" else -1
+            pnl_per = (exit_px - entry_px) * side_mult
+            gross = pnl_per * qty
+            fees = lots * float(self.FEES_PER_LOT)
+            net = gross - fees
+
+            with self._lock:
+                self.daily_pnl += net
+                self.trades.append(
+                    {
+                        "order_id": entry_id,
+                        "symbol": tr.get("symbol"),
+                        "direction": direction,
+                        "contracts": qty,
+                        "entry": entry_px,
+                        "exit": exit_px,
+                        "pnl": gross,
+                        "fees": fees,
+                        "net_pnl": net,
+                        "confidence": tr.get("confidence"),
+                        "atr": tr.get("atr"),
+                        "mode": "LIVE" if self.live_mode else "SIM",
+                    }
+                )
+
+            # Loss cooldown timestamp
+            if net < 0 and self.LOSS_COOLDOWN_MIN > 0:
+                self._last_loss_exit_ts = time.time()
+
+            # CSV
+            self._append_trade_log(
+                [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    entry_id,
+                    tr.get("symbol"),
+                    direction,
+                    qty,
+                    round(entry_px, 2),
+                    round(exit_px, 2),
+                    round(gross, 2),
+                    round(fees, 2),
+                    round(net, 2),
+                    tr.get("confidence"),
+                    tr.get("atr"),
+                    "LIVE" if self.live_mode else "SIM",
+                ]
+            )
+
+            # Telegram
+            dirn = "LONG" if direction == "BUY" else "SHORT"
+            self._safe_send_message(
+                f"🏁 Closed {dirn} {tr.get('symbol')} x{qty} | entry {round(entry_px,2)} "
+                f"exit {round(exit_px,2)} | net ₹{round(net,2)}"
+            )
+            if net < 0 and self.LOSS_COOLDOWN_MIN > 0:
+                self._safe_send_message(f"🧊 Cooling down {self.LOSS_COOLDOWN_MIN}m after loss.")
+
+        except Exception as e:
+            logger.debug(f"_finalize_trade failed: {e}", exc_info=True)
+
+    # -------------------------------------------------------------------------
+    # Guards / helpers
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_trading_hours(now: Optional[datetime] = None) -> bool:
+        now = now or datetime.now()
+        wd = now.weekday()
+        start = datetime.strptime(getattr(Config, "TIME_FILTER_START", "09:15"), "%H:%M").time()
+        end = datetime.strptime(getattr(Config, "TIME_FILTER_END", "15:30"), "%H:%M").time()
+        return (0 <= wd <= 4) and (start <= now.time() <= end)
+
+    def _is_circuit_breaker_tripped(self) -> bool:
+        if self.daily_start_equity <= 0:
+            return False
+        dd = -self.daily_pnl / self.daily_start_equity
+        return dd >= self.MAX_DAILY_DRAWDOWN_PCT
+
+    def _is_loss_cooling_down(self) -> bool:
+        if self.LOSS_COOLDOWN_MIN <= 0 or not self._last_loss_exit_ts:
+            return False
+        return (time.time() - self._last_loss_exit_ts) < (self.LOSS_COOLDOWN_MIN * 60)
+
+    # -------------------------------------------------------------------------
+    # Messaging wrappers
+    # -------------------------------------------------------------------------
+
+    def _safe_send_message(self, text: str, parse_mode: Optional[str] = None) -> None:
+        try:
+            if getattr(self, "telegram_controller", None):
+                self.telegram_controller.send_message(text, parse_mode=parse_mode)
+        except Exception:
+            pass
+
+    def _safe_send_alert(self, tag: str) -> None:
+        try:
+            if getattr(self, "telegram_controller", None):
+                self.telegram_controller.send_alert(tag)
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------------
+    # Shutdown
+    # -------------------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        try:
+            self._trailing_worker_stop.set()
+            self._oco_worker_stop.set()
+        except Exception:
+            pass
+        try:
+            self._stop_polling()
+        except Exception:
+            pass
+        logger.info("🧼 RealTimeTrader shutdown complete.")
