@@ -13,7 +13,7 @@ class TelegramController:
     Telegram bot interface for receiving commands and sending alerts.
     Communicates with RealTimeTrader via callback functions.
 
-    Exposed commands:
+    Commands:
       /start, /stop, /mode live|shadow, /status, /summary,
       /refresh, /health, /emergency, /help
     """
@@ -84,6 +84,11 @@ class TelegramController:
             text = f"ℹ️ Session {action}."
         self._send_message(text)
 
+    # compatibility with RealTimeTrader._safe_send_alert()
+    def send_alert(self, action: str) -> None:
+        """Alias so either name can be used by the trader."""
+        self.send_realtime_session_alert(action)
+
     def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
         direction = signal.get("signal") or signal.get("direction", "ENTRY")
         entry = signal.get("entry_price", "N/A")
@@ -104,16 +109,50 @@ class TelegramController:
         self._send_message(text, parse_mode="HTML")
 
     # ---------- status/summary formatting ----------
-    def _send_status(self, status: Dict[str, Any]) -> None:
+    def _send_status(self, status: Any) -> None:
+        """
+        Accepts either a dict (preferred) or a plain string (legacy).
+        Maps common keys from RealTimeTrader.get_status().
+        """
+        if isinstance(status, str):
+            self._send_message(f"📊 Status:\n{status}")
+            return
+
+        # defaults
+        is_trading = bool(status.get("is_trading", False))
+        live_mode = bool(status.get("live_mode", False))
+
+        # map both old & new field names
+        open_positions = (
+            status.get("open_positions", None)
+            if isinstance(status, dict)
+            else None
+        )
+        if open_positions is None:
+            open_positions = status.get("open_orders", 0)
+
+        trades_today = status.get("closed_today", None)
+        if trades_today is None:
+            trades_today = status.get("trades_today", 0)
+
+        daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
+
         lines = [
             "📊 <b>Bot Status</b>",
-            f"🔁 <b>Trading:</b> {'🟢 Running' if status.get('is_trading') else '🔴 Stopped'}",
-            f"🌐 <b>Mode:</b> {'🟢 LIVE' if status.get('live_mode') else '🛡️ Shadow'}",
-            f"📦 <b>Open Orders:</b> {status.get('open_orders', 0)}",
-            f"📈 <b>Trades Today:</b> {status.get('trades_today', 0)}",
-            f"💰 <b>Daily P&L:</b> {status.get('daily_pnl', 0.0):.2f}",
-            f"⚖️ <b>Risk Level:</b> {status.get('risk_level', 'N/A')}",
+            f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
+            f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
+            f"📦 <b>Open Positions:</b> {open_positions}",
+            f"📈 <b>Closed Today:</b> {trades_today}",
+            f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
         ]
+        # optional fields if present
+        acct = status.get("account_size")
+        sess = status.get("session_date")
+        if acct is not None:
+            lines.append(f"🏦 <b>Acct Size:</b> ₹{acct}")
+        if sess is not None:
+            lines.append(f"📅 <b>Session:</b> {sess}")
+
         text = "\n".join(lines)
         self._send_message(text, parse_mode="HTML")
 
