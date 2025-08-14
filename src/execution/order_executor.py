@@ -2,13 +2,12 @@
 """
 Order execution module (live + simulation) with bracket-like behavior,
 lot-aware partial profit-taking, breakeven hop after TP1, trailing-SL support,
-hard-stop failsafe, and exchange freeze-quantity chunking.
+hard-stop failsafe hooks, and exchange freeze-quantity chunking.
 
 Public API:
 - place_entry_order(...)
 - setup_gtt_orders(...)
 - update_trailing_stop(order_id, current_price, atr)
-- hop_to_breakeven(order_id)                 # helper you can call after TP1
 - exit_order(order_id, exit_reason="manual")
 - get_active_orders()
 - get_positions()
@@ -16,15 +15,6 @@ Public API:
 - get_last_price(symbol)
 - get_tick_size() -> float
 - sync_and_enforce_oco() -> list[(order_id, fill_price)]
-
-Notes:
-- If PARTIAL_TP_ENABLE=true, exits are managed with REGULAR orders (GTT OCO
-  cannot split partials cleanly).
-- After TP1 fill we typically:
-    * shrink SL to remaining quantity
-    * optionally hop SL to breakeven ± ticks (tighten-only)
-- If USE_SLM_EXIT=true, SL uses market trigger (SL-M/SLM). Otherwise SL (limit)
-  with a protective offset.
 """
 
 from __future__ import annotations
@@ -103,7 +93,7 @@ class OrderRecord:
 
     is_open: bool = True
     last_trail_ts: float = 0.0
-    trailing_step_atr_multiplier: float = 1.5  # can be overridden via Config
+    trailing_step_atr_multiplier: float = 1.5  # override via Config if needed
 
     # --- Partial profits (REGULAR only) ---
     partial_enabled: bool = False
@@ -120,7 +110,7 @@ class OrderRecord:
     # track SL qty (so we can recreate/resize it after TP1)
     sl_qty: int = 0
 
-    # --- Hard stop bookkeeping (hook for future use) ---
+    # --- Hard stop bookkeeping (hook for future enforcement) ---
     breach_ts: Optional[float] = None
 
     # close info
@@ -158,9 +148,10 @@ class OrderExecutor:
 
         # Breakeven hop right after TP1
         self.breakeven_after_tp1 = bool(_cfg("BREAKEVEN_AFTER_TP1_ENABLE", True))
+        # move SL to entry ± N ticks
         self.breakeven_offset_ticks = int(_cfg("BREAKEVEN_OFFSET_TICKS", 1))
 
-        # Hard stop (failsafe) (placeholder hooks; not enforced here)
+        # Hard stop (failsafe) — hooks only; enforcement is handled in the runner
         self.hard_stop_enable = bool(_cfg("HARD_STOP_ENABLE", True))
         self.hard_stop_grace_sec = float(_cfg("HARD_STOP_GRACE_SEC", 3.0))
         self.hard_stop_slip_bps = float(_cfg("HARD_STOP_SLIPPAGE_BPS", _cfg("SLIPPAGE_BPS", 5.0)))
@@ -517,7 +508,7 @@ class OrderExecutor:
                     logger.info("ℹ️ Falling back to REGULAR exits (GTT not available / rejected).")
 
             if not use_gtt:
-                # -------------------- REGULAR exits --------------------
+                # REGULAR exits
                 # --- Stop Loss ---
                 sl_trig = _round_to_tick(sl, self.tick_size)
 
@@ -545,19 +536,13 @@ class OrderExecutor:
                 )
 
                 # --- Take Profits ---
-                ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
-
                 if want_partial:
-                    # Round TP sides favourably for exit side:
-                    if exit_side == "BUY":
-                        # covering a short -> buy lower better
-                        tp1_rounded = _round_down_to_tick(tp1, self.tick_size)
-                        tp2_rounded = _round_down_to_tick(tp2, self.tick_size)
-                    else:
-                        # selling longs -> sell higher better
-                        tp1_rounded = _round_up_to_tick(tp1, self.tick_size)
-                        tp2_rounded = _round_up_to_tick(tp2, self.tick_size)
+                    tp1_rounded = (_round_down_to_tick(tp1, self.tick_size) if exit_side == "BUY"
+                                   else _round_up_to_tick(tp1, self.tick_size))
+                    tp2_rounded = (_round_down_to_tick(tp2, self.tick_size) if exit_side == "BUY"
+                                   else _round_up_to_tick(tp2, self.tick_size))
 
+                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
                     tp1_id = self._place_in_chunks(
                         tradingsymbol=symbol,
                         exchange=exchange,
@@ -579,10 +564,9 @@ class OrderExecutor:
                         price=float(tp2_rounded),
                     )
                 else:
-                    if exit_side == "BUY":
-                        tp_rounded = _round_down_to_tick(tp, self.tick_size)
-                    else:
-                        tp_rounded = _round_up_to_tick(tp, self.tick_size)
+                    tp_rounded = (_round_down_to_tick(tp, self.tick_size) if exit_side == "BUY"
+                                  else _round_up_to_tick(tp, self.tick_size))
+                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
                     tp_id = self._place_in_chunks(
                         tradingsymbol=symbol,
                         exchange=exchange,
@@ -594,7 +578,7 @@ class OrderExecutor:
                         price=float(tp_rounded),
                     )
 
-            # -------------- record internal --------------
+            # record internal
             with self._lock:
                 rec = OrderRecord(
                     order_id=entry_order_id,
@@ -631,8 +615,6 @@ class OrderExecutor:
         except Exception as exc:
             logger.error("💥 setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
             return False
-
-    # ------------------------------- trailing / breakeven -------------------- #
 
     def update_trailing_stop(self, order_id: str, current_price: float, atr: float) -> None:
         """
@@ -679,38 +661,6 @@ class OrderExecutor:
         if rec.sl_order_id:
             self._kite_modify_sl(rec.sl_order_id, float(new_sl))
 
-    def hop_to_breakeven(self, order_id: str) -> bool:
-        """
-        Optional helper to move SL to breakeven (±offset ticks) after TP1 fill.
-        Returns True if SL was improved.
-        """
-        with self._lock:
-            rec = self.orders.get(order_id)
-        if not rec or not rec.is_open or not rec.sl_order_id:
-            return False
-
-        off_ticks = max(0, int(self.breakeven_offset_ticks))
-        if rec.transaction_type == "BUY":
-            be = _round_up_to_tick(rec.entry_price + off_ticks * self.tick_size, self.tick_size)
-            better = be > rec.stop_loss
-        else:
-            be = _round_down_to_tick(rec.entry_price - off_ticks * self.tick_size, self.tick_size)
-            better = be < rec.stop_loss
-
-        if not better:
-            return False
-
-        rec.stop_loss = float(be)
-        if not rec.use_gtt:
-            ok = self._kite_modify_sl(rec.sl_order_id, float(be))
-            if ok:
-                logger.info("⛳ Breakeven hop applied for %s → %.2f", order_id, be)
-            return ok
-        logger.info("⛳ Breakeven hop noted for %s (GTT not auto-modified).", order_id)
-        return True
-
-    # ------------------------------- force exit ------------------------------ #
-
     def exit_order(self, order_id: str, exit_reason: str = "manual") -> bool:
         """
         Market out whatever remains; cancel peer orders.
@@ -751,8 +701,6 @@ class OrderExecutor:
         except Exception as exc:
             logger.error("💥 exit_order failed: %s", exc, exc_info=True)
             return False
-
-    # ------------------------------- views / utils --------------------------- #
 
     def get_active_orders(self):
         with self._lock:
@@ -805,6 +753,7 @@ class OrderExecutor:
         Return list of (entry_order_id, exit_fill_price).
         In live, you should map fills via broker webhooks; this is a polling fallback.
         """
+        fills: List[Tuple[str, float]] = []
         # Simulation: nothing to do. In live, you may scan self.kite.orders()
         # and detect filled tp/sl to finalize locally.
-        return []
+        return fills
