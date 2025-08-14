@@ -72,7 +72,7 @@ class EnhancedScalpingStrategy:
         vwap_period: int = 20,
         # --- options params (used in generate_options_signal) ---
         option_sl_percent: float = float(getattr(Config, "OPTION_SL_PERCENT", 0.05)),
-        option_tp_percent: float = float(getattr(Config, "OPTION_TP_PERCENT", 0.15)),
+        option_tp_percent: float = float(getattr(Config, "OPTION_TP_PERCENT", 0.20)),
     ) -> None:
         self.base_stop_loss_points = float(base_stop_loss_points)
         self.base_target_points = float(base_target_points)
@@ -325,7 +325,7 @@ class EnhancedScalpingStrategy:
                 logger.debug(f"Score {score} below threshold {self.min_score_threshold}. No trade.")
                 return None
 
-            # De-duplicate signals based on price progress
+            # Re-arm based on price progress (avoid duplicate nudges)
             price_step = float(getattr(Config, "TICK_SIZE", 0.05))
             if self._last_dir == direction and self._last_entry_px is not None:
                 if abs(current_price - self._last_entry_px) < self._min_rearm_ticks * price_step:
@@ -467,14 +467,17 @@ class EnhancedScalpingStrategy:
             if not signal:
                 return None
 
+            # SL/TP from percents
             sl_pct = float(getattr(Config, "OPTION_SL_PERCENT", self.option_sl_percent))
             tp_pct = float(getattr(Config, "OPTION_TP_PERCENT", self.option_tp_percent))
-
             entry = float(current_option_price)
+            if entry <= 0:
+                return None
+
             sl = round(entry * (1 - sl_pct), 2)
             tp = round(entry * (1 + tp_pct), 2)
 
-            # Confidence: base 7 + bonuses from volume & spot strength (capped at 10)
+            # Confidence: base 7 + bonuses from vol & spot strength (capped at 10)
             base_conf = 7.0
             if "volume" in options_ohlc.columns and len(options_ohlc) > 10:
                 recent = options_ohlc["volume"].iloc[-10:-1]
@@ -483,14 +486,28 @@ class EnhancedScalpingStrategy:
                 vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
             else:
                 vol_ratio = 1.0
-
             vol_bonus = max(0.0, min(2.0, vol_ratio - 1.5))
             spot_bonus = max(0.0, min(2.0, abs(spot_return) * 200.0))
             confidence = min(10.0, base_conf + vol_bonus + spot_bonus)
 
             # Option ATR as volatility proxy (if available)
-            opt_atr = latest_atr_value(options_ohlc, period=getattr(Config, "ATR_PERIOD", 14), method="rma")
-            mv = float(opt_atr) if opt_atr is not None else 0.0
+            try:
+                opt_atr_series = compute_atr_df(options_ohlc, period=getattr(Config, "ATR_PERIOD", 14), method="rma")
+                mv = float(opt_atr_series.iloc[-1]) if not opt_atr_series.empty else 0.0
+            except Exception:
+                mv = 0.0
+
+            # De-dup hash using option symbol + price + bar time if available
+            bar_key = getattr(options_ohlc.index, "values", [None])[-1]
+            symbol_hint = (strike_info.get("symbol") or strike_info.get("tradingsymbol") or "")
+            signal_key = f"OPT_{symbol_hint}_{entry:.2f}_{bar_key}"
+            new_hash = hashlib.md5(signal_key.encode()).hexdigest()
+            if new_hash == self.last_signal_hash:
+                logger.debug("Duplicate option signal skipped (hash)")
+                return None
+            self.last_signal_hash = new_hash
+            self._last_dir = "BUY"  # options path only supports long entries here
+            self._last_entry_px = entry
 
             signal.update(
                 {
@@ -500,7 +517,7 @@ class EnhancedScalpingStrategy:
                     "confidence": round(confidence, 2),
                     "market_volatility": round(mv, 4),
                     "strategy_notes": f"{option_type} breakout"
-                    + (" with spot confirmation" if spot_conf_required else " (spot optional)"),
+                    + (" + spot confirm" if spot_conf_required else " (no spot confirm)"),
                 }
             )
             return signal
