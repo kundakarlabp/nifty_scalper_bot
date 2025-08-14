@@ -38,7 +38,11 @@ from src.utils.strike_selector import (
     get_instrument_tokens,
     fetch_cached_instruments,
 )
-from src.utils.atr_helper import compute_atr_df
+# Optional ATR helper (if available)
+try:
+    from src.utils.atr_helper import compute_atr_df  # type: ignore
+except Exception:  # keep module import-safe if helper absent
+    compute_atr_df = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------- helpers ----------------------------- #
 
 def _ist_now() -> datetime:
-    """IST clock without pytz (UTC+5:30 drift-insensitive for our usage)."""
+    """IST clock without pytz (UTC+5:30)."""
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 
@@ -491,7 +495,8 @@ class RealTimeTrader:
         try:
             new_bal = float(get_live_account_balance() or 0.0)
             if new_bal > 0:
-                self.daily_start_equity = new_bal if _ist_now().date() != self.session_date else self.daily_start_equity
+                if _ist_now().date() != self.session_date:
+                    self.daily_start_equity = new_bal
                 try:
                     self.risk.set_equity(new_bal)
                 except Exception:
@@ -509,421 +514,393 @@ class RealTimeTrader:
             pass
 
     def _is_trading_hours(self, now: Optional[datetime] = None) -> bool:
-        if not self.USE_IST_CLOCK:
-            return True
+        """IST market hours filter + first N minutes skip."""
         try:
-            if now is None:
-                now = _ist_now()
-            wd = now.weekday()
-            if wd > 4:
-                return False
+            if not self.USE_IST_CLOCK:
+                return True
+            now = _ist_now()
             if not _between_ist(self.TIME_FILTER_START, self.TIME_FILTER_END):
                 return False
-            # skip first N minutes after open to avoid churn
-            start_h, start_m = map(int, self.TIME_FILTER_START.split(":"))
-            start_dt = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            # skip first N minutes after start
+            s = datetime.strptime(self.TIME_FILTER_START, "%H:%M").time()
+            start_dt = now.replace(hour=s.hour, minute=s.minute, second=0, microsecond=0)
             if (now - start_dt).total_seconds() < self.SKIP_FIRST_MIN * 60:
                 return False
             return True
         except Exception:
             return True
 
-    def _is_circuit_breaker_tripped(self) -> bool:
-        if self.daily_start_equity <= 0:
-            return False
-        dd = -self.daily_pnl / self.daily_start_equity
-        return dd >= self.MAX_DAILY_DRAWDOWN_PCT
-
     def _in_loss_cooldown(self) -> bool:
-        return time.time() < self._cooldown_until_ts
+        return time.time() < float(self._cooldown_until_ts or 0.0)
 
-    # -------------------- instruments cache -------------------- #
+    def _trip_loss_cooldown(self) -> None:
+        self._cooldown_until_ts = time.time() + self.LOSS_COOLDOWN_MIN * 60
+        self._safe_send_message(f"🧊 Cooling down {self.LOSS_COOLDOWN_MIN}m after loss.")
+
+    def _is_circuit_breaker_tripped(self) -> bool:
+        try:
+            if self.daily_start_equity <= 0:
+                return False
+            dd = -float(self.daily_pnl) / float(self.daily_start_equity)
+            return dd >= self.MAX_DAILY_DRAWDOWN_PCT
+        except Exception:
+            return False
+
+    # -------------------- cache / instruments -------------------- #
 
     def _refresh_instruments_cache(self, force: bool = False) -> None:
-        if not self.live_mode:
-            return
         try:
-            now = time.time()
-            if (not force) and (now - self._cache_ts < self._CACHE_TTL):
-                return
-            kite = getattr(self.executor, "kite", None)
-            if not kite:
-                return
-            caches = fetch_cached_instruments(kite)
             with self._cache_lock:
-                self._nfo_cache = caches.get("NFO", []) or []
-                self._nse_cache = caches.get("NSE", []) or []
+                now = time.time()
+                if not force and (now - self._cache_ts) < self._CACHE_TTL:
+                    return
+                kite = getattr(self.executor, "kite", None)
+                if not kite:
+                    # simulation: leave empty but no crash
+                    self._nfo_cache = self._nfo_cache or []
+                    self._nse_cache = self._nse_cache or []
+                    self._cache_ts = now
+                    return
+                data = fetch_cached_instruments(kite)
+                self._nfo_cache = data.get("NFO", []) or []
+                self._nse_cache = data.get("NSE", []) or []
                 self._cache_ts = now
             logger.info("📦 Instruments cache refreshed.")
         except Exception as e:
             logger.warning(f"Instruments cache refresh failed: {e}")
 
     def _force_refresh_cache(self) -> bool:
-        try:
-            self._refresh_instruments_cache(force=True)
-            self._safe_send_message("🔁 Instruments cache refreshed.")
-            return True
-        except Exception:
-            return False
-
-    # -------------------- data fetch -------------------- #
-
-    def _fetch_ohlc(self, instrument_token: int, minutes: int) -> pd.DataFrame:
-        """
-        Fetch historical candles (minute bars) using Kite when live.
-        Returns DataFrame with columns open, high, low, close, volume, and datetime index (tz-naive).
-        """
-        if not (self.live_mode and getattr(self.executor, "kite", None)):
-            return pd.DataFrame()
-        try:
-            kite = self.executor.kite
-            to_dt = _ist_now()
-            from_dt = to_dt - timedelta(minutes=max(minutes, self.WARMUP_BARS))
-            data = kite.historical_data(
-                instrument_token=int(instrument_token),
-                from_date=from_dt,
-                to_date=to_dt,
-                interval=self.HIST_TIMEFRAME,
-                continuous=False,
-                oi=False,
-            )
-            if not data:
-                return pd.DataFrame()
-            df = pd.DataFrame(data)
-            df.rename(columns={"date": "datetime"}, inplace=True)
-            df.set_index("datetime", inplace=True)
-            return df[["open", "high", "low", "close", "volume"]].astype(float)
-        except Exception as e:
-            logger.debug(f"historical_data failed for {instrument_token}: {e}")
-            return pd.DataFrame()
+        self._refresh_instruments_cache(force=True)
+        return True
 
     # -------------------- main loop -------------------- #
 
     def _smart_fetch_and_process(self) -> None:
         try:
             now = _ist_now()
+            self._rollover_if_needed(now.date())
+
             if not self._is_trading_hours(now) and not getattr(Config, "ALLOW_OFFHOURS_TESTING", False):
                 if int(time.time()) % 300 < 2:
-                    logger.info("⏳ Market closed. Skipping.")
+                    logger.info("⏳ Market closed. Skipping fetch.")
                 return
+
             if not self.is_trading:
                 return
+
             if self._is_circuit_breaker_tripped():
-                logger.warning("🚫 Circuit breaker active — paused.")
+                logger.warning("🚫 Circuit breaker active — trading paused.")
                 return
+
             if self._in_loss_cooldown():
                 return
 
             self.fetch_and_process_data()
+
         except Exception as e:
-            logger.error(f"smart_fetch error: {e}", exc_info=True)
+            logger.error(f"Smart fetch/process error: {e}", exc_info=True)
 
     def fetch_and_process_data(self) -> None:
-        """
-        1) Refresh instruments cache
-        2) Resolve ATM CE/PE tokens (± range; selector already robust)
-        3) Pull option OHLC (last lookback), compute ATR
-        4) Ask strategy for CE/PE signals, tie-break if both appear
-        5) Size position by risk & place orders (with exits)
-        """
+        """Core one-tick decision path: resolve strikes → ask strategy → size → execute."""
+        # 1) Ensure instruments cache
         self._refresh_instruments_cache()
 
         kite = getattr(self.executor, "kite", None)
         if not kite:
-            logger.debug("No live kite; shadow mode fetch limited (skipping trade).")
-            return
+            logger.debug("No live Kite instance (simulation). Proceeding with logic but no orders.")
 
-        # Resolve strikes (ATM ± STRIKE_RANGE around target=ATM)
-        info = get_instrument_tokens(
-            symbol="NIFTY",
-            kite_instance=kite,
-            cached_nfo_instruments=self._nfo_cache,
-            cached_nse_instruments=self._nse_cache,
-            offset=0,
-            strike_range=max(0, int(self.STRIKE_RANGE)),
-        )
-        if not info:
-            logger.debug("instrument_tokens: no results")
-            return
-
-        # Choose a side to evaluate (both CE & PE)
-        ce_token = info.get("ce_token")
-        pe_token = info.get("pe_token")
-        if not ce_token and not pe_token:
-            return
-
-        # Fetch OHLC for available legs
-        ce_df = self._fetch_ohlc(int(ce_token), self.DATA_LOOKBACK_MINUTES) if ce_token else pd.DataFrame()
-        pe_df = self._fetch_ohlc(int(pe_token), self.DATA_LOOKBACK_MINUTES) if pe_token else pd.DataFrame()
-
-        # Require warmup
-        if ce_token and len(ce_df) < self.WARMUP_BARS:
-            ce_df = pd.DataFrame()
-        if pe_token and len(pe_df) < self.WARMUP_BARS:
-            pe_df = pd.DataFrame()
-
-        # Compute ATR for info/trailing (if present)
-        if not ce_df.empty:
-            ce_df["atr"] = compute_atr_df(ce_df, period=getattr(Config, "ATR_PERIOD", 14))
-        if not pe_df.empty:
-            pe_df["atr"] = compute_atr_df(pe_df, period=getattr(Config, "ATR_PERIOD", 14))
-
-        # Current LTPs
-        ltp_map = {}
+        # 2) Resolve CE/PE tokens around ATM (offset 0 by default)
         try:
-            q = kite.ltp([s for s in [info.get("ce_symbol"), info.get("pe_symbol")] if s]) or {}
-            for sym, obj in q.items():
-                ltp_map[sym] = float(obj.get("last_price") or 0.0)
+            toks = get_instrument_tokens(
+                symbol=str(getattr(Config, "TRADE_SYMBOL", "NIFTY")),
+                kite_instance=kite,
+                cached_nfo_instruments=self._nfo_cache,
+                cached_nse_instruments=self._nse_cache,
+                offset=0,
+                strike_range=int(self.STRIKE_RANGE),
+            )
+        except Exception as e:
+            logger.error(f"Strike resolution failed: {e}", exc_info=True)
+            toks = None
+
+        if not toks or (not toks.get("ce_symbol") and not toks.get("pe_symbol")):
+            return
+
+        spot = float(toks.get("spot_price") or 0.0)
+        atm = int(toks.get("atm_strike") or 0)
+
+        # 3) Get ATR if helper available (optional)
+        atr_val = 0.0
+        try:
+            if compute_atr_df and kite and toks.get("ce_symbol"):
+                # Example: compute ATR on spot for context (you may switch to option LTP if desired)
+                df = compute_atr_df(kite, instrument="NSE:NIFTY 50", period=14, lookback_minutes=self.DATA_LOOKBACK_MINUTES)  # type: ignore
+                if isinstance(df, pd.DataFrame) and not df.empty and "ATR" in df.columns:
+                    atr_val = float(df["ATR"].iloc[-1])  # last ATR on spot scale (points)
         except Exception:
-            pass
+            atr_val = 0.0
 
-        # Strategy signals (option breakout w/ underlying bias inside strategy)
-        signals: List[Tuple[str, Dict[str, Any], pd.DataFrame, str]] = []  # (side, sig, df, symbol)
-        if ce_token and not ce_df.empty and info.get("ce_symbol") in ltp_map:
-            s = self.strategy.generate_options_signal(
-                options_ohlc=ce_df, spot_ohlc=pd.DataFrame(), strike_info={"type": "CE"},
-                current_option_price=ltp_map[info["ce_symbol"]],
-            )
-            if s:
-                signals.append(("CE", s, ce_df, info["ce_symbol"]))
-        if pe_token and not pe_df.empty and info.get("pe_symbol") in ltp_map:
-            s = self.strategy.generate_options_signal(
-                options_ohlc=pe_df, spot_ohlc=pd.DataFrame(), strike_info={"type": "PE"},
-                current_option_price=ltp_map[info["pe_symbol"]],
-            )
-            if s:
-                signals.append(("PE", s, pe_df, info["pe_symbol"]))
+        # 4) Ask strategy for a signal
+        signal: Optional[Dict[str, Any]] = None
+        try:
+            # Strategy interface should be designed to accept basic context;
+            # keep this lenient to avoid runtime errors if strategy signature differs.
+            context = {
+                "spot": spot,
+                "atm": atm,
+                "time": _ist_now(),
+                "atr": atr_val,
+                "tokens": toks,
+            }
+            # Common return shape expected:
+            #  {'direction': 'LONG'|'SHORT', 'score': float, 'confidence': float,
+            #   'entry_price': float, 'stop_loss': float, 'target': float}
+            signal = self.strategy.generate_signal(context) if self.strategy else None  # type: ignore
+        except TypeError:
+            # very defensive: call with no args if signature differs
+            try:
+                signal = self.strategy.generate_signal() if self.strategy else None  # type: ignore
+            except Exception:
+                signal = None
+        except Exception:
+            signal = None
 
-        if not signals:
+        if not signal:
             return
 
-        # If both sides signal, choose with tie-breaker
-        side, sig, use_df, sym = self._choose_best_signal(signals)
-
-        # Spread guard
-        if not self._passes_spread_guard(sym, kite):
-            logger.debug("Spread guard blocked entry for %s", sym)
+        # Quick filters
+        score = float(signal.get("score", 0.0))
+        conf = float(signal.get("confidence", 0.0))
+        if score < float(getattr(Config, "MIN_SIGNAL_SCORE", 2)) or conf < float(getattr(Config, "CONFIDENCE_THRESHOLD", 5.2)):
             return
 
-        # Position size (contracts) based on risk
-        qty = self._compute_contracts(sig, use_df)
-        if qty <= 0:
-            logger.debug("Sizing returned 0; skipping.")
+        # 5) Choose side + tradingsymbol
+        dir_raw = str(signal.get("direction", "LONG")).upper()
+        is_long = dir_raw in ("LONG", "BUY", "BULL", "CALL", "CE")
+        side_symbol = toks.get("ce_symbol") if is_long else toks.get("pe_symbol")
+        side_token = toks.get("ce_token") if is_long else toks.get("pe_token")
+        if not side_symbol or not side_token:
             return
 
-        # Place entry
-        entry_side = "BUY"  # only long options in this scalper version
-        entry_id = self.executor.place_entry_order(
-            symbol=sym,
+        # 6) Prices (fallbacks)
+        entry = float(signal.get("entry_price") or 0.0)
+        stop = float(signal.get("stop_loss") or 0.0)
+        target = float(signal.get("target") or 0.0)
+
+        if entry <= 0 or stop <= 0 or target <= 0:
+            # if strategy didn't set, infer rough prices from LTP with Config base points
+            try:
+                ltp_map = kite.ltp([f"NFO:{side_symbol}"]) if kite else {}
+                ltp = float(ltp_map.get(f"NFO:{side_symbol}", {}).get("last_price") or 0.0)
+            except Exception:
+                ltp = 0.0
+            entry = entry or ltp or 1.0
+            base_sl_pts = float(getattr(Config, "BASE_STOP_LOSS_POINTS", 20.0))
+            base_tp_pts = float(getattr(Config, "BASE_TARGET_POINTS", 40.0))
+            if is_long:
+                stop = stop or max(0.5, entry - base_sl_pts)
+                target = target or (entry + base_tp_pts)
+            else:
+                stop = stop or (entry + base_sl_pts)
+                target = target or max(0.5, entry - base_tp_pts)
+
+        # 7) Position sizing (risk per trade of equity)
+        lots = self._compute_lots(entry, stop)
+        if lots <= 0:
+            return
+        lots = max(self.MIN_LOTS, min(lots, self.MAX_LOTS))
+        qty = lots * self.LOT_SIZE
+
+        # Respect max concurrent
+        with self._lock:
+            open_count = sum(1 for t in self.active_trades.values() if t.get("status") == "OPEN")
+        if open_count >= self.MAX_CONCURRENT_TRADES:
+            return
+
+        # 8) Place entry (simulation ok)
+        txn_side = "BUY" if is_long else "SELL"
+        oid = self.executor.place_entry_order(
+            symbol=side_symbol,
             exchange=str(getattr(Config, "TRADE_EXCHANGE", "NFO")),
-            transaction_type=entry_side,
+            transaction_type=txn_side,
             quantity=int(qty),
         )
-        if not entry_id:
-            logger.error("Entry placement failed.")
+        if not oid:
             return
 
-        # Set exits (partial TP / SL / TP or GTT)
+        # 9) Exits
         ok = self.executor.setup_gtt_orders(
-            entry_order_id=entry_id,
-            entry_price=float(sig["entry_price"]),
-            stop_loss_price=float(sig["stop_loss"]),
-            target_price=float(sig["target"]),
-            symbol=sym,
+            entry_order_id=oid,
+            entry_price=float(entry),
+            stop_loss_price=float(stop),
+            target_price=float(target),
+            symbol=side_symbol,
             exchange=str(getattr(Config, "TRADE_EXCHANGE", "NFO")),
             quantity=int(qty),
-            transaction_type=entry_side,
+            transaction_type=txn_side,
         )
         if not ok:
-            logger.warning("Failed to create exits for %s", entry_id)
+            logger.warning("Exits could not be set for %s; trade may be unmanaged.", oid)
 
-        # Register active
+        # 10) Register active trade
         with self._lock:
-            self.active_trades[entry_id] = {
+            self.active_trades[oid] = {
                 "status": "OPEN",
-                "symbol": sym,
-                "direction": entry_side,
-                "contracts": int(qty),
-                "entry": float(sig["entry_price"]),
-                "stop_loss": float(sig["stop_loss"]),
-                "target": float(sig["target"]),
-                "confidence": float(sig.get("confidence", 6.0)),
-                "atr": float(use_df.get("atr", pd.Series([0])).iloc[-1] if not use_df.empty else 0.0),
-                "open_time": _ist_now(),
-                "last_close": float(use_df["close"].iloc[-1] if not use_df.empty else ltp_map.get(sym, 0.0)),
+                "symbol": side_symbol,
+                "direction": txn_side,
+                "qty": int(qty),
+                "entry_price": float(entry),
+                "stop_loss": float(stop),
+                "target": float(target),
+                "atr": float(atr_val or 0.0),
+                "score": score,
+                "confidence": conf,
+                "opened_at": _ist_now().isoformat(timespec="seconds"),
             }
 
         self._safe_send_message(
-            f"🚀 Entry {entry_side} {sym} x{qty}\n"
-            f"entry {sig['entry_price']} | SL {sig['stop_loss']} | TP {sig['target']} | conf {sig.get('confidence', 0):.2f}"
+            f"🚀 Opened {txn_side} {side_symbol} x{lots} lots | "
+            f"entry {entry:.2f} SL {stop:.2f} TP {target:.2f}\n"
+            f"score={score:.2f} conf={conf:.2f}"
         )
 
-    # -------------------- tie-breaker & sizing -------------------- #
+    # -------------------- sizing / pnl -------------------- #
 
-    def _choose_best_signal(self, signals: List[Tuple[str, Dict[str, Any], pd.DataFrame, str]]) \
-            -> Tuple[str, Dict[str, Any], pd.DataFrame, str]:
-        if len(signals) == 1:
-            return signals[0]
-        # Prefer side with higher confidence; optionally nudge by short-term trend
-        if self.PREFERRED_TIE_RULE == "CONFIDENCE_ONLY":
-            return max(signals, key=lambda x: float(x[1].get("confidence", 0.0)))
-        # TREND: pick the one with stronger momentum (close vs SMA)
-        def _trend_score(df: pd.DataFrame) -> float:
-            try:
-                c = df["close"].iloc[-1]
-                sma = df["close"].rolling(10).mean().iloc[-1]
-                return float(c - sma)
-            except Exception:
-                return 0.0
-        scored = [(side, sig, df, sym, _trend_score(df), float(sig.get("confidence", 0.0)))
-                  for side, sig, df, sym in signals]
-        scored.sort(key=lambda x: (x[4], x[5]), reverse=True)
-        return scored[0][0], scored[0][1], scored[0][2], scored[0][3]
-
-    def _compute_contracts(self, signal: Dict[str, Any], df: pd.DataFrame) -> int:
+    def _compute_lots(self, entry: float, stop: float) -> int:
+        """Risk per trade sizing in lots: equity * RPT / (risk_per_lot)."""
         try:
-            equity = float(get_live_account_balance() or self.daily_start_equity or 0.0)
-            if equity <= 0:
+            eq = float(getattr(self.risk, "equity", 0.0) or 0.0) or float(self.daily_start_equity or 0.0)
+            if eq <= 0:
                 return 0
-            risk_amount = equity * max(0.0, min(self.RISK_PER_TRADE, 0.5))
-            entry = float(signal["entry_price"])
-            sl = float(signal["stop_loss"])
-            per_contract_risk = abs(entry - sl) * self.LOT_SIZE
-            if per_contract_risk <= 0:
+            per_trade = float(self.RISK_PER_TRADE or 0.02) * eq
+            risk_pts = abs(float(entry) - float(stop))
+            if risk_pts <= 0:
                 return 0
-            contracts = int(risk_amount // per_contract_risk)
-            # clamp to min/max lots
-            contracts = max(self.MIN_LOTS * self.LOT_SIZE, contracts)
-            contracts = min(contracts, self.MAX_LOTS * self.LOT_SIZE)
-            # ensure multiple of lot size
-            contracts = (contracts // self.LOT_SIZE) * self.LOT_SIZE
-            return int(contracts)
+            risk_per_lot = risk_pts * self.LOT_SIZE
+            lots = int(per_trade // risk_per_lot)
+            return max(0, lots)
         except Exception:
             return 0
 
-    # -------------------- spread guard -------------------- #
-
-    def _passes_spread_guard(self, symbol: str, kite) -> bool:
-        try:
-            if self.SPREAD_GUARD_MODE == "LTP_MID":
-                q = kite.quote([symbol]) or {}
-                qd = q.get(symbol, {})
-                depth = qd.get("depth", {})
-                bq = depth.get("buy", [])
-                aq = depth.get("sell", [])
-                best_bid = float(bq[0]["price"]) if bq else 0.0
-                best_ask = float(aq[0]["price"]) if aq else 0.0
-                ltp = float(qd.get("last_price") or 0.0)
-                if best_bid <= 0 or best_ask <= 0:
-                    return False
-                mid = (best_bid + best_ask) / 2.0
-                ba_rel = (best_ask - best_bid) / mid
-                ltmid_rel = abs((ltp - mid) / mid)
-                return (ba_rel <= self.SPREAD_GUARD_BA_MAX) and (ltmid_rel <= self.SPREAD_GUARD_LTPMID_MAX)
-            else:
-                # RANGE proxy: last candle range vs price
-                tok = None
-                # a quick way to get instrument token is not required here; we already fetched DF earlier
-                return True  # guard handled earlier by selection liquidity; keep permissive here
-        except Exception:
-            return True
-
-    # -------------------- finalize / status -------------------- #
+    # -------------------- finalization / logging -------------------- #
 
     def _finalize_trade(self, entry_id: str) -> None:
         tr = self.active_trades.get(entry_id)
         if not tr:
             return
-        tr["status"] = "CLOSED"
+
+        entry = float(tr.get("entry_price") or 0.0)
         exit_px = float(tr.get("exit_price") or 0.0)
-        entry_px = float(tr.get("entry") or 0.0)
-        qty = int(tr.get("contracts") or 0)
-        pnl = (exit_px - entry_px) * qty  # options: positive if profit in buy→sell
-        fees = (qty / self.LOT_SIZE) * self.FEES_PER_LOT
-        net = pnl - fees
-        self.daily_pnl += net
-        self._closed_trades_today += 1
-        self._last_closed_was_loss = net < 0
-        if self._last_closed_was_loss and self.LOSS_COOLDOWN_MIN > 0:
-            self._cooldown_until_ts = time.time() + self.LOSS_COOLDOWN_MIN * 60
+        qty = int(tr.get("qty") or 0)
+        direction = tr.get("direction") or "BUY"
 
-        self.trades.append({
-            "order_id": entry_id,
-            "symbol": tr["symbol"],
-            "direction": tr["direction"],
-            "contracts": qty,
-            "entry": entry_px,
-            "exit": exit_px,
-            "pnl": pnl,
-            "fees": fees,
-            "net": net,
-            "confidence": tr.get("confidence", 0.0),
-            "atr": tr.get("atr", 0.0),
-            "mode": "LIVE" if self.live_mode else "SIM",
-            "closed_at": _ist_now(),
-        })
-        self.active_trades.pop(entry_id, None)
+        if entry <= 0 or qty <= 0:
+            self.active_trades.pop(entry_id, None)
+            return
 
-        # log row
+        # PnL (approx; net of simple fees model)
+        gross = (exit_px - entry) * qty if direction == "BUY" else (entry - exit_px) * qty
+        fees = (qty / max(1, self.LOT_SIZE)) * float(self.FEES_PER_LOT)
+        net = gross - fees
+
+        with self._lock:
+            self.daily_pnl += float(net)
+            self._closed_trades_today += 1
+            self._last_closed_was_loss = net < 0
+            self.active_trades.pop(entry_id, None)
+
         self._append_trade_log([
-            _ist_now().strftime("%Y-%m-%d %H:%M:%S"),
-            entry_id, tr["symbol"], tr["direction"], qty,
-            round(entry_px, 2), round(exit_px, 2),
-            round(pnl, 2), round(fees, 2), round(net, 2),
-            round(tr.get("confidence", 0.0), 2), round(tr.get("atr", 0.0), 2),
-            "LIVE" if self.live_mode else "SIM",
+            _ist_now().strftime("%Y-%m-%d"),
+            entry_id,
+            tr.get("symbol"),
+            direction,
+            qty,
+            round(entry, 2),
+            round(exit_px, 2),
+            round(gross, 2),
+            round(fees, 2),
+            round(net, 2),
+            round(float(tr.get("confidence", 0.0)), 2),
+            round(float(tr.get("atr", 0.0)), 2),
+            "LIVE" if self.live_mode else "SHADOW",
         ])
 
         self._safe_send_message(
-            f"🏁 Closed {tr['direction']} {tr['symbol']} x{qty} | "
-            f"entry {round(entry_px,2)} exit {round(exit_px,2)} | net ₹{round(net,2)}"
+            f"{'✅' if net>=0 else '❌'} Closed {direction} {tr.get('symbol')} x{qty//self.LOT_SIZE} lots | "
+            f"entry {entry:.2f} exit {exit_px:.2f} | net ₹{net:.0f}"
         )
-        if self._last_closed_was_loss and self.LOSS_COOLDOWN_MIN:
-            self._safe_send_message(f"🧊 Cooling down {self.LOSS_COOLDOWN_MIN}m after loss.")
 
-    # -------------------- status / summary -------------------- #
+        if self._last_closed_was_loss:
+            self._trip_loss_cooldown()
+
+    # -------------------- day roll / status -------------------- #
+
+    def _rollover_if_needed(self, today: date) -> None:
+        if today == self.session_date:
+            return
+        # new day
+        self.session_date = today
+        self.daily_pnl = 0.0
+        self._closed_trades_today = 0
+        self._cooldown_until_ts = 0.0
+        self.refresh_account_balance()
+        self._safe_send_message("🔄 New session started. Stats reset.")
+
+    # -------------------- status / summary / health -------------------- #
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
-            open_n = len([t for t in self.active_trades.values() if t.get("status") == "OPEN"])
+            open_n = sum(1 for t in self.active_trades.values() if t.get("status") == "OPEN")
             return {
                 "is_trading": self.is_trading,
                 "live_mode": self.live_mode,
-                "open_positions": open_n,
+                "open_orders": open_n,
+                "trades_today": self._closed_trades_today,
                 "daily_pnl": round(self.daily_pnl, 2),
-                "closed_today": self._closed_trades_today,
+                "risk_level": f"{int(self.RISK_PER_TRADE*100)}%/trade",
             }
 
-    def get_summary(self) -> str:
-        return f"Trades today: {len(self.trades)} | PnL: ₹{round(self.daily_pnl,2)}"
-
     def _send_detailed_status(self) -> bool:
-        try:
-            msg = self.get_status()
-            if self.tg:
-                self.tg.send_message(
-                    f"<b>Trading:</b> {'Running' if msg['is_trading'] else 'Stopped'} | "
-                    f"<b>Mode:</b> {'LIVE' if msg['live_mode'] else 'SIM'}\n"
-                    f"<b>Open:</b> {msg['open_positions']} | "
-                    f"<b>Closed today:</b> {msg['closed_today']} | "
-                    f"<b>Daily PnL:</b> ₹{msg['daily_pnl']:.2f}",
-                    parse_mode="HTML",
-                )
-            return True
-        except Exception as e:
-            logger.debug(f"status send error: {e}")
-            return False
+        st = self.get_status()
+        msg = (
+            "📊 <b>Bot Status</b>\n"
+            f"🔁 <b>Trading:</b> {'🟢 Running' if st['is_trading'] else '🔴 Stopped'}\n"
+            f"🌐 <b>Mode:</b> {'🟢 LIVE' if st['live_mode'] else '🛡️ Shadow'}\n"
+            f"📦 <b>Open:</b> {st['open_orders']}\n"
+            f"📈 <b>Trades Today:</b> {st['trades_today']}\n"
+            f"💰 <b>Daily P&L:</b> {st['daily_pnl']:.2f}\n"
+            f"⚖️ <b>Risk:</b> {st['risk_level']}"
+        )
+        self._safe_send_message(msg, parse_mode="HTML")
+        return True
+
+    def get_summary(self) -> str:
+        return (
+            f"🗒️ Summary\n"
+            f"Date: {_ist_now().date().isoformat()}\n"
+            f"Trades closed: {self._closed_trades_today}\n"
+            f"Daily P&L: ₹{round(self.daily_pnl,2)}\n"
+            f"Mode: {'LIVE' if self.live_mode else 'SHADOW'}"
+        )
 
     def _run_health_check(self) -> bool:
-        try:
-            self._refresh_instruments_cache(force=True)
-            self._safe_send_message("✅ Health OK (LTP + instruments reachable).")
-            return True
-        except Exception as e:
-            self._safe_send_message(f"❌ Health check failed: {e}")
-            return False
+        ok = True
+        issues: List[str] = []
+        if self.live_mode and not getattr(self.executor, "kite", None):
+            ok = False
+            issues.append("live_mode but no Kite instance")
+        with self._cache_lock:
+            if not self._nfo_cache:
+                issues.append("NFO cache empty")
+            if not self._nse_cache:
+                issues.append("NSE cache empty")
+        if issues:
+            self._safe_send_message("⚠️ Health issues: " + "; ".join(issues))
+        else:
+            self._safe_send_message("✅ Health OK.")
+        return ok
 
-    # -------------------- utils -------------------- #
+    # -------------------- messaging -------------------- #
 
     def _safe_send_message(self, text: str, parse_mode: Optional[str] = None) -> None:
         try:
@@ -943,12 +920,8 @@ class RealTimeTrader:
 
     def shutdown(self) -> None:
         try:
+            self._trailing_evt.set()
+            self._oco_evt.set()
             self._stop_polling()
         except Exception:
             pass
-        try:
-            self._trailing_evt.set()
-            self._oco_evt.set()
-        except Exception:
-            pass
-        logger.info("🔻 RealTimeTrader shutdown complete.")
