@@ -8,6 +8,7 @@ Public API:
 - place_entry_order(...)
 - setup_gtt_orders(...)
 - update_trailing_stop(order_id, current_price, atr)
+- hop_to_breakeven(order_id)                 # helper you can call after TP1
 - exit_order(order_id, exit_reason="manual")
 - get_active_orders()
 - get_positions()
@@ -17,11 +18,13 @@ Public API:
 - sync_and_enforce_oco() -> list[(order_id, fill_price)]
 
 Notes:
-- If PARTIAL_TP_ENABLE=true, exits are managed with REGULAR orders (GTT OCO cannot split partials cleanly).
-- After TP1 fill we:
+- If PARTIAL_TP_ENABLE=true, exits are managed with REGULAR orders (GTT OCO
+  cannot split partials cleanly).
+- After TP1 fill we typically:
     * shrink SL to remaining quantity
     * optionally hop SL to breakeven ± ticks (tighten-only)
-- If USE_SLM_EXIT=true, SL uses market trigger (SL-M/SLM). Otherwise SL (limit) with a protective offset.
+- If USE_SLM_EXIT=true, SL uses market trigger (SL-M/SLM). Otherwise SL (limit)
+  with a protective offset.
 """
 
 from __future__ import annotations
@@ -155,7 +158,6 @@ class OrderExecutor:
 
         # Breakeven hop right after TP1
         self.breakeven_after_tp1 = bool(_cfg("BREAKEVEN_AFTER_TP1_ENABLE", True))
-        # move SL to entry ± N ticks
         self.breakeven_offset_ticks = int(_cfg("BREAKEVEN_OFFSET_TICKS", 1))
 
         # Hard stop (failsafe) (placeholder hooks; not enforced here)
@@ -515,7 +517,7 @@ class OrderExecutor:
                     logger.info("ℹ️ Falling back to REGULAR exits (GTT not available / rejected).")
 
             if not use_gtt:
-                # REGULAR exits
+                # -------------------- REGULAR exits --------------------
                 # --- Stop Loss ---
                 sl_trig = _round_to_tick(sl, self.tick_size)
 
@@ -543,13 +545,19 @@ class OrderExecutor:
                 )
 
                 # --- Take Profits ---
-                if want_partial:
-                    tp1_rounded = (_round_down_to_tick(tp1, self.tick_size) if exit_side == "BUY"
-                                   else _round_up_to_tick(tp1, self.tick_size))
-                    tp2_rounded = (_round_down_to_tick(tp2, self.tick_size) if exit_side == "BUY"
-                                   else _round_up_to_tick(tp2, self.tick_size))
+                ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
 
-                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
+                if want_partial:
+                    # Round TP sides favourably for exit side:
+                    if exit_side == "BUY":
+                        # covering a short -> buy lower better
+                        tp1_rounded = _round_down_to_tick(tp1, self.tick_size)
+                        tp2_rounded = _round_down_to_tick(tp2, self.tick_size)
+                    else:
+                        # selling longs -> sell higher better
+                        tp1_rounded = _round_up_to_tick(tp1, self.tick_size)
+                        tp2_rounded = _round_up_to_tick(tp2, self.tick_size)
+
                     tp1_id = self._place_in_chunks(
                         tradingsymbol=symbol,
                         exchange=exchange,
@@ -571,9 +579,10 @@ class OrderExecutor:
                         price=float(tp2_rounded),
                     )
                 else:
-                    tp_rounded = (_round_down_to_tick(tp, self.tick_size) if exit_side == "BUY"
-                                  else _round_up_to_tick(tp, self.tick_size))
-                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
+                    if exit_side == "BUY":
+                        tp_rounded = _round_down_to_tick(tp, self.tick_size)
+                    else:
+                        tp_rounded = _round_up_to_tick(tp, self.tick_size)
                     tp_id = self._place_in_chunks(
                         tradingsymbol=symbol,
                         exchange=exchange,
@@ -585,7 +594,7 @@ class OrderExecutor:
                         price=float(tp_rounded),
                     )
 
-            # record internal
+            # -------------- record internal --------------
             with self._lock:
                 rec = OrderRecord(
                     order_id=entry_order_id,
@@ -623,13 +632,7 @@ class OrderExecutor:
             logger.error("💥 setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
             return False
 
-    # ------------------------------- trailing & exit -------------------------- #
-
-    def _breakeven_price(self, rec: OrderRecord) -> float:
-        off = float(self.breakeven_offset_ticks) * float(self.tick_size)
-        if rec.transaction_type.upper() == "BUY":
-            return rec.entry_price + off
-        return rec.entry_price - off
+    # ------------------------------- trailing / breakeven -------------------- #
 
     def update_trailing_stop(self, order_id: str, current_price: float, atr: float) -> None:
         """
@@ -653,18 +656,19 @@ class OrderExecutor:
         if atr is None or atr <= 0 or current_price <= 0:
             return
 
-        if rec.transaction_type.upper() == "BUY":
+        if rec.transaction_type == "BUY":
             raw = current_price - mult * atr
             new_sl = _round_up_to_tick(raw, self.tick_size)
             better = new_sl > rec.stop_loss  # tighten only
         else:
             raw = current_price + mult * atr
             new_sl = _round_down_to_tick(raw, self.tick_size)
-            better = new_sl < rec.stop_loss  # tighten only
+            better = new_sl < rec.stop_loss
 
         if not better:
             return
 
+        # apply
         rec.stop_loss = float(new_sl)
         rec.last_trail_ts = now
 
@@ -675,8 +679,42 @@ class OrderExecutor:
         if rec.sl_order_id:
             self._kite_modify_sl(rec.sl_order_id, float(new_sl))
 
+    def hop_to_breakeven(self, order_id: str) -> bool:
+        """
+        Optional helper to move SL to breakeven (±offset ticks) after TP1 fill.
+        Returns True if SL was improved.
+        """
+        with self._lock:
+            rec = self.orders.get(order_id)
+        if not rec or not rec.is_open or not rec.sl_order_id:
+            return False
+
+        off_ticks = max(0, int(self.breakeven_offset_ticks))
+        if rec.transaction_type == "BUY":
+            be = _round_up_to_tick(rec.entry_price + off_ticks * self.tick_size, self.tick_size)
+            better = be > rec.stop_loss
+        else:
+            be = _round_down_to_tick(rec.entry_price - off_ticks * self.tick_size, self.tick_size)
+            better = be < rec.stop_loss
+
+        if not better:
+            return False
+
+        rec.stop_loss = float(be)
+        if not rec.use_gtt:
+            ok = self._kite_modify_sl(rec.sl_order_id, float(be))
+            if ok:
+                logger.info("⛳ Breakeven hop applied for %s → %.2f", order_id, be)
+            return ok
+        logger.info("⛳ Breakeven hop noted for %s (GTT not auto-modified).", order_id)
+        return True
+
+    # ------------------------------- force exit ------------------------------ #
+
     def exit_order(self, order_id: str, exit_reason: str = "manual") -> bool:
-        """Market out whatever remains; cancel peer orders."""
+        """
+        Market out whatever remains; cancel peer orders.
+        """
         with self._lock:
             rec = self.orders.get(order_id)
         if not rec or not rec.is_open:
@@ -687,7 +725,8 @@ class OrderExecutor:
             if qty <= 0:
                 qty = int(rec.quantity)
 
-            side = rec.exit_side or ("SELL" if rec.transaction_type.upper() == "BUY" else "BUY")
+            # send market order on exit side
+            side = rec.exit_side or ("SELL" if rec.transaction_type == "BUY" else "BUY")
             oid = self._place_in_chunks(
                 tradingsymbol=rec.symbol,
                 exchange=rec.exchange,
@@ -697,7 +736,7 @@ class OrderExecutor:
                 order_type=getattr(self.kite, "ORDER_TYPE_MARKET", "MARKET") if self.kite else "MARKET",
                 validity=self.default_validity,
             )
-            # best-effort cancel peers
+            # best-effort cancel others
             for x in (rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id):
                 if x:
                     self._kite_cancel(x)
@@ -705,18 +744,19 @@ class OrderExecutor:
             with self._lock:
                 rec.is_open = False
                 rec.exit_reason = exit_reason
-                rec.exit_price = None  # not guaranteed from here
+                rec.exit_price = None  # executor not guaranteed to know fill px here
 
-            logger.info("🏁 Forced exit %s (%s) x%d for %s (oid=%s)", side, exit_reason, qty, rec.symbol, oid)
+            logger.info("🏁 Forced exit %s (%s) x%d for %s", side, exit_reason, qty, rec.symbol)
             return True
         except Exception as exc:
             logger.error("💥 exit_order failed: %s", exc, exc_info=True)
             return False
 
-    # ------------------------------- queries & maintenance -------------------- #
+    # ------------------------------- views / utils --------------------------- #
 
     def get_active_orders(self):
         with self._lock:
+            # return a shallow copy
             return {k: v for k, v in self.orders.items() if v.is_open}
 
     def get_positions(self):
@@ -761,94 +801,10 @@ class OrderExecutor:
 
     def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
         """
-        Best-effort check to see if any exits imply the pair should be closed or resized.
-        - Detect TP1 fill -> shrink SL to remaining qty and hop to breakeven (optional).
-        - Detect final TP/SL fill -> mark closed and cancel siblings.
+        Best-effort check to see if any exits imply the pair should be closed.
         Return list of (entry_order_id, exit_fill_price).
+        In live, you should map fills via broker webhooks; this is a polling fallback.
         """
-        fills: List[Tuple[str, float]] = []
-        if not self.kite:
-            return fills
-
-        status = self._order_status_map()
-
-        with self._lock:
-            records = list(self.orders.values())
-
-        for rec in records:
-            if not rec.is_open:
-                continue
-
-            # --- TP1 filled handling (partial mode) ---
-            if rec.partial_enabled and rec.tp1_order_id and not rec.tp1_filled:
-                s = status.get(rec.tp1_order_id, {})
-                if str(s.get("status", "")).upper() == "COMPLETE":
-                    rec.tp1_filled = True
-                    remain_qty = max(0, int(rec.quantity - rec.tp1_qty))
-                    rec.sl_qty = remain_qty
-
-                    # Cancel old SL and recreate for remaining qty
-                    if rec.sl_order_id:
-                        self._kite_cancel(rec.sl_order_id)
-                        rec.sl_order_id = None
-
-                    new_sl = rec.stop_loss
-                    if self.breakeven_after_tp1 and remain_qty > 0:
-                        new_sl = self._breakeven_price(rec)
-
-                    trig = _round_to_tick(new_sl, self.tick_size)
-                    if self.use_slm_exit:
-                        ordtype = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M")
-                        px = None
-                    else:
-                        ordtype = getattr(self.kite, "ORDER_TYPE_SL", "SL")
-                        off = max(0, int(self.sl_limit_offset_ticks))
-                        if rec.exit_side == "SELL":
-                            px = _round_down_to_tick(trig - off * self.tick_size, self.tick_size)
-                        else:
-                            px = _round_up_to_tick(trig + off * self.tick_size, self.tick_size)
-
-                    if remain_qty > 0:
-                        rec.sl_order_id = self._place_in_chunks(
-                            tradingsymbol=rec.symbol,
-                            exchange=rec.exchange,
-                            side=rec.exit_side or ("SELL" if rec.transaction_type.upper() == "BUY" else "BUY"),
-                            quantity=int(remain_qty),
-                            product=self.default_product,
-                            order_type=ordtype if self.kite else ("SL-M" if self.use_slm_exit else "SL"),
-                            validity=self.default_validity,
-                            price=(None if self.use_slm_exit else float(px)),
-                            trigger_price=float(trig),
-                        )
-                    logger.info("♻️  TP1 filled for %s. SL resized to %d and moved to %.2f",
-                                rec.order_id, remain_qty, trig)
-
-            # --- Close detection: TP2 complete, (single) TP complete, or SL complete ---
-            closed = False
-            exit_px: Optional[float] = None
-            # prefer SL/TP2 completion as closure signal
-            candidate_ids = [rec.tp2_order_id, rec.tp_order_id, rec.sl_order_id]
-            # if no partial, tp1_order_id may be the actual TP
-            if not rec.partial_enabled and rec.tp1_order_id:
-                candidate_ids.insert(0, rec.tp1_order_id)
-
-            for oid in filter(None, candidate_ids):
-                s = status.get(oid, {})
-                if str(s.get("status", "")).upper() == "COMPLETE":
-                    closed = True
-                    px = s.get("average_price") or s.get("price")
-                    if px:
-                        exit_px = float(px)
-                    break
-
-            if closed:
-                with self._lock:
-                    rec.is_open = False
-                # best-effort cancel peers
-                for x in (rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id):
-                    if x:
-                        self._kite_cancel(x)
-                if exit_px is not None:
-                    fills.append((rec.order_id, exit_px))
-
-        return fills
+        # Simulation: nothing to do. In live, you may scan self.kite.orders()
+        # and detect filled tp/sl to finalize locally.
+        return []
