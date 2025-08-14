@@ -565,4 +565,11 @@ def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
             if not ok:
                 status["overall_status"] = "ERROR"
         except Exception as e:
-            status["checks"]["instruments"] = f"FAIL"
+            status["checks"]["instruments"] = f"FAIL: {e}"
+            status["overall_status"] = "ERROR"
+
+        status["message"] = " | ".join(f"{k}:{v}" for k, v in status["checks"].items())
+        return status
+    except Exception as e:
+        logger.error("[health_check] %s", e, exc_info=True)
+        return {"overall_status": "ERROR", "message": str(e), "checks": {}}
