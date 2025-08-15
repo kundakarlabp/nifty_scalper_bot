@@ -1,251 +1,203 @@
-# src/config.py
-from __future__ import annotations
-
 import os
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-# Optional: load .env if present (no hard dependency if you don't use python-dotenv)
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()  # loads from .env in project root if available
-except Exception:
-    pass
-
-
-# ----------------------------- helpers ----------------------------- #
-
-def _get_str(key: str, default: str = "") -> str:
-    v = os.getenv(key)
-    return v if v is not None and v != "" else default
-
-
-def _get_bool(key: str, default: bool = False) -> bool:
-    v = os.getenv(key)
-    if v is None or v == "":
+def _to_bool(x: str, default: bool = False) -> bool:
+    if x is None:
         return default
-    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+    return str(x).strip().lower() in ("1", "true", "yes", "y", "on")
 
-
-def _get_int(key: str, default: int = 0, *, minv: Optional[int] = None, maxv: Optional[int] = None) -> int:
-    v = os.getenv(key)
+def _to_int(x: str, default: int) -> int:
     try:
-        x = int(float(v)) if v is not None and v != "" else default  # tolerate "5.0"
+        return int(str(x).strip())
     except Exception:
-        x = default
-    if minv is not None:
-        x = max(minv, x)
-    if maxv is not None:
-        x = min(maxv, x)
-    return x
+        return default
 
-
-def _get_float(key: str, default: float = 0.0, *, minv: Optional[float] = None, maxv: Optional[float] = None) -> float:
-    v = os.getenv(key)
+def _to_float(x: str, default: float) -> float:
     try:
-        x = float(v) if v is not None and v != "" else default
+        return float(str(x).strip())
     except Exception:
-        x = default
-    if minv is not None:
-        x = max(minv, x)
-    if maxv is not None:
-        x = min(maxv, x)
-    return x
+        return default
 
+def _to_list_csv(x: str) -> List[str]:
+    if not x:
+        return []
+    return [p.strip() for p in str(x).split(",") if p.strip()]
 
-def _get_list(key: str, default: List[str] | None = None, sep: str = ",") -> List[str]:
-    v = os.getenv(key)
-    if v is None or str(v).strip() == "":
-        return list(default or [])
-    return [s.strip() for s in str(v).split(sep) if s.strip()]
+def _to_time_ranges(x: str) -> List[Tuple[str, str]]:
+    """
+    Parse "HH:MM-HH:MM,HH:MM-HH:MM" → [("HH:MM","HH:MM"), ...]
+    """
+    ranges: List[Tuple[str, str]] = []
+    for chunk in _to_list_csv(x):
+        if "-" in chunk:
+            a, b = chunk.split("-", 1)
+            a = a.strip()
+            b = b.strip()
+            if len(a) == 5 and len(b) == 5:
+                ranges.append((a, b))
+    return ranges
 
-
-def _get_time_hhmm(key: str, default: str) -> Tuple[int, int]:
-    """Returns (hour, minute) with basic validation."""
-    v = _get_str(key, default)
-    try:
-        hh, mm = v.split(":")
-        h, m = int(hh), int(mm)
-        h = max(0, min(23, h))
-        m = max(0, min(59, m))
-        return h, m
-    except Exception:
-        dh, dm = default.split(":")
-        return int(dh), int(dm)
-
-
-# ----------------------------- config object ----------------------------- #
-
-@dataclass(frozen=True)
 class Config:
-    # ===== MODES / TOGGLES =====
-    ENABLE_LIVE_TRADING: bool = _get_bool("ENABLE_LIVE_TRADING", True)
-    ENABLE_TELEGRAM: bool = _get_bool("ENABLE_TELEGRAM", True)
-    ALLOW_OFFHOURS_TESTING: bool = _get_bool("ALLOW_OFFHOURS_TESTING", False)
-    PREFERRED_EXIT_MODE: str = _get_str("PREFERRED_EXIT_MODE", "REGULAR").upper()  # AUTO|GTT|REGULAR
-    USE_SLM_EXIT: bool = _get_bool("USE_SLM_EXIT", True)
-    SL_LIMIT_OFFSET_TICKS: int = _get_int("SL_LIMIT_OFFSET_TICKS", 2, minv=0)
+    # ---- Modes ----
+    ENABLE_LIVE_TRADING = _to_bool(os.getenv("ENABLE_LIVE_TRADING"), False)
+    ENABLE_TELEGRAM = _to_bool(os.getenv("ENABLE_TELEGRAM"), True)
+    ALLOW_OFFHOURS_TESTING = _to_bool(os.getenv("ALLOW_OFFHOURS_TESTING"), False)
+    USE_IST_CLOCK = _to_bool(os.getenv("USE_IST_CLOCK"), True)
+    PREFERRED_EXIT_MODE = os.getenv("PREFERRED_EXIT_MODE", "REGULAR").upper()
 
-    # ===== STRATEGY CORE =====
-    MIN_SIGNAL_SCORE: int = _get_int("MIN_SIGNAL_SCORE", 2, minv=1)
-    CONFIDENCE_THRESHOLD: float = _get_float("CONFIDENCE_THRESHOLD", 5.2, minv=1.0, maxv=10.0)
-    BASE_STOP_LOSS_POINTS: float = _get_float("BASE_STOP_LOSS_POINTS", 20.0, minv=0.5)
-    BASE_TARGET_POINTS: float = _get_float("BASE_TARGET_POINTS", 40.0, minv=0.5)
-    ATR_PERIOD: int = _get_int("ATR_PERIOD", 14, minv=2)
-    ATR_SL_MULTIPLIER: float = _get_float("ATR_SL_MULTIPLIER", 1.5, minv=0.1)
-    ATR_TP_MULTIPLIER: float = _get_float("ATR_TP_MULTIPLIER", 3.0, minv=0.1)
-    SL_CONFIDENCE_ADJ: float = _get_float("SL_CONFIDENCE_ADJ", 0.12, minv=0.0)
-    TP_CONFIDENCE_ADJ: float = _get_float("TP_CONFIDENCE_ADJ", 0.35, minv=0.0)
+    # ---- Strategy core ----
+    MIN_SIGNAL_SCORE = _to_int(os.getenv("MIN_SIGNAL_SCORE"), 2)
+    CONFIDENCE_THRESHOLD = _to_float(os.getenv("CONFIDENCE_THRESHOLD"), 5.2)
+    BASE_STOP_LOSS_POINTS = _to_float(os.getenv("BASE_STOP_LOSS_POINTS"), 20.0)
+    BASE_TARGET_POINTS = _to_float(os.getenv("BASE_TARGET_POINTS"), 40.0)
+    ATR_PERIOD = _to_int(os.getenv("ATR_PERIOD"), 14)
+    ATR_SL_MULTIPLIER = _to_float(os.getenv("ATR_SL_MULTIPLIER"), 1.5)
+    ATR_TP_MULTIPLIER = _to_float(os.getenv("ATR_TP_MULTIPLIER"), 3.0)
+    SL_CONFIDENCE_ADJ = _to_float(os.getenv("SL_CONFIDENCE_ADJ"), 0.12)
+    TP_CONFIDENCE_ADJ = _to_float(os.getenv("TP_CONFIDENCE_ADJ"), 0.35)
 
-    # ===== DATA / WARMUP =====
-    WARMUP_BARS: int = _get_int("WARMUP_BARS", 25, minv=5)
-    DATA_LOOKBACK_MINUTES: int = _get_int("DATA_LOOKBACK_MINUTES", 45, minv=10)
-    HISTORICAL_TIMEFRAME: str = _get_str("HISTORICAL_TIMEFRAME", "minute")
-    SKIP_FIRST_MIN: int = _get_int("SKIP_FIRST_MIN", 5, minv=0, maxv=30)
+    # Regime-aware
+    REGIME_TREND_TP_MULT = _to_float(os.getenv("REGIME_TREND_TP_MULT"), 3.4)
+    REGIME_TREND_SL_MULT = _to_float(os.getenv("REGIME_TREND_SL_MULT"), 1.6)
+    REGIME_RANGE_TP_MULT = _to_float(os.getenv("REGIME_RANGE_TP_MULT"), 2.4)
+    REGIME_RANGE_SL_MULT = _to_float(os.getenv("REGIME_RANGE_SL_MULT"), 1.3)
+    REGIME_MRV_ENABLE = _to_bool(os.getenv("REGIME_MRV_ENABLE"), True)
+    REGIME_MOM_ENABLE = _to_bool(os.getenv("REGIME_MOM_ENABLE"), True)
 
-    # ===== INSTRUMENTS =====
-    SPOT_SYMBOL: str = _get_str("SPOT_SYMBOL", "NSE:NIFTY 50")
-    TRADE_SYMBOL: str = _get_str("TRADE_SYMBOL", "NIFTY")
-    TRADE_EXCHANGE: str = _get_str("TRADE_EXCHANGE", "NFO")
-    INSTRUMENT_TOKEN: int = _get_int("INSTRUMENT_TOKEN", 256265)
-    NIFTY_LOT_SIZE: int = _get_int("NIFTY_LOT_SIZE", 75, minv=1)
-    MIN_LOTS: int = _get_int("MIN_LOTS", 1, minv=1)
-    MAX_LOTS: int = _get_int("MAX_LOTS", 15, minv=1)
-    STRIKE_RANGE: int = _get_int("STRIKE_RANGE", 3, minv=0)
+    # Multi-timeframe
+    HTF_TIMEFRAME_MIN = _to_int(os.getenv("HTF_TIMEFRAME_MIN"), 5)
+    HTF_EMA_PERIOD = _to_int(os.getenv("HTF_EMA_PERIOD"), 20)
+    HTF_MIN_SLOPE = _to_float(os.getenv("HTF_MIN_SLOPE"), 0.0)
 
-    # ===== RISK / CIRCUIT BREAKERS =====
-    RISK_PER_TRADE: float = _get_float("RISK_PER_TRADE", 0.025, minv=0.001, maxv=0.2)
-    MAX_DRAWDOWN: float = _get_float("MAX_DRAWDOWN", 0.07, minv=0.01, maxv=0.99)
-    CONSECUTIVE_LOSS_LIMIT: int = _get_int("CONSECUTIVE_LOSS_LIMIT", 3, minv=1)
-    MAX_DAILY_DRAWDOWN_PCT: float = _get_float("MAX_DAILY_DRAWDOWN_PCT", 0.05, minv=0.005, maxv=0.99)
-    CIRCUIT_RELEASE_PCT: float = _get_float("CIRCUIT_RELEASE_PCT", 0.015, minv=0.001)
-    HALT_ON_DRAWDOWN: bool = _get_bool("HALT_ON_DRAWDOWN", True)
-    MAX_CONCURRENT_POSITIONS: int = _get_int("MAX_CONCURRENT_POSITIONS", 1, minv=1)
-    MAX_TRADES_PER_DAY: int = _get_int("MAX_TRADES_PER_DAY", 30, minv=1)
+    # Warmup / data
+    WARMUP_BARS = _to_int(os.getenv("WARMUP_BARS"), 25)
+    DATA_LOOKBACK_MINUTES = _to_int(os.getenv("DATA_LOOKBACK_MINUTES"), 45)
+    HISTORICAL_TIMEFRAME = os.getenv("HISTORICAL_TIMEFRAME", "minute")
+    SKIP_FIRST_MIN = _to_int(os.getenv("SKIP_FIRST_MIN"), 5)
 
-    # ===== OPTIONS BREAKOUT FILTERS =====
-    OPTION_TYPE: str = _get_str("OPTION_TYPE", "BOTH").upper()  # CE|PE|BOTH
-    OPTION_SL_PERCENT: float = _get_float("OPTION_SL_PERCENT", 0.05, minv=0.001, maxv=1.0)
-    OPTION_TP_PERCENT: float = _get_float("OPTION_TP_PERCENT", 0.20, minv=0.001, maxv=5.0)
-    OPTION_BREAKOUT_PCT: float = _get_float("OPTION_BREAKOUT_PCT", 0.003, minv=0.0001)
-    OPTION_SPOT_TREND_PCT: float = _get_float("OPTION_SPOT_TREND_PCT", 0.0025, minv=0.0)
-    OPTION_REQUIRE_SPOT_CONFIRM: bool = _get_bool("OPTION_REQUIRE_SPOT_CONFIRM", False)
+    # ---- Instruments / lots ----
+    SPOT_SYMBOL = os.getenv("SPOT_SYMBOL", "NSE:NIFTY 50")
+    TRADE_SYMBOL = os.getenv("TRADE_SYMBOL", "NIFTY")
+    TRADE_EXCHANGE = os.getenv("TRADE_EXCHANGE", "NFO")
+    INSTRUMENT_TOKEN = _to_int(os.getenv("INSTRUMENT_TOKEN"), 256265)
+    NIFTY_LOT_SIZE = _to_int(os.getenv("NIFTY_LOT_SIZE"), 75)
+    MIN_LOTS = _to_int(os.getenv("MIN_LOTS"), 1)
+    MAX_LOTS = _to_int(os.getenv("MAX_LOTS"), 15)
+    STRIKE_RANGE = _to_int(os.getenv("STRIKE_RANGE"), 3)
 
-    # ===== EXECUTION / WORKERS =====
-    DEFAULT_PRODUCT: str = _get_str("DEFAULT_PRODUCT", "MIS")
-    DEFAULT_ORDER_TYPE: str = _get_str("DEFAULT_ORDER_TYPE", "MARKET")
-    DEFAULT_VALIDITY: str = _get_str("DEFAULT_VALIDITY", "DAY")
-    TICK_SIZE: float = _get_float("TICK_SIZE", 0.05, minv=0.01)
-    TRAILING_ENABLE: bool = _get_bool("TRAILING_ENABLE", True)
-    TRAIL_COOLDOWN_SEC: float = _get_float("TRAIL_COOLDOWN_SEC", 8.0, minv=1.0)
-    WORKER_INTERVAL_SEC: int = _get_int("WORKER_INTERVAL_SEC", 4, minv=1)
-    NFO_FREEZE_QTY: int = _get_int("NFO_FREEZE_QTY", 1800, minv=1)
+    # ---- Risk / circuit breakers ----
+    RISK_PER_TRADE = _to_float(os.getenv("RISK_PER_TRADE"), 0.025)
+    MAX_DRAWDOWN = _to_float(os.getenv("MAX_DRAWDOWN"), 0.07)
+    CONSECUTIVE_LOSS_LIMIT = _to_int(os.getenv("CONSECUTIVE_LOSS_LIMIT"), 3)
+    MAX_DAILY_DRAWDOWN_PCT = _to_float(os.getenv("MAX_DAILY_DRAWDOWN_PCT"), 0.05)
+    CIRCUIT_RELEASE_PCT = _to_float(os.getenv("CIRCUIT_RELEASE_PCT"), 0.015)
+    HALT_ON_DRAWDOWN = _to_bool(os.getenv("HALT_ON_DRAWDOWN"), True)
+    MAX_CONCURRENT_POSITIONS = _to_int(os.getenv("MAX_CONCURRENT_POSITIONS"), 1)
+    MAX_TRADES_PER_DAY = _to_int(os.getenv("MAX_TRADES_PER_DAY"), 30)
+    LOSS_COOLDOWN_MIN = _to_int(os.getenv("LOSS_COOLDOWN_MIN"), 2)
 
-    # ===== SPREAD / MICROSTRUCTURE GUARDRAILS =====
-    SPREAD_GUARD_MODE: str = _get_str("SPREAD_GUARD_MODE", "RANGE").upper()  # RANGE|LTP_MID
-    SPREAD_GUARD_BA_MAX: float = _get_float("SPREAD_GUARD_BA_MAX", 0.015, minv=0.0001)
-    SPREAD_GUARD_LTPMID_MAX: float = _get_float("SPREAD_GUARD_LTPMID_MAX", 0.015, minv=0.0001)
-    SPREAD_GUARD_PCT: float = _get_float("SPREAD_GUARD_PCT", 0.03, minv=0.0001)
+    # Streak manager
+    LOSS_STREAK_HALVE_SIZE = _to_int(os.getenv("LOSS_STREAK_HALVE_SIZE"), 3)
+    LOSS_STREAK_PAUSE_MIN = _to_int(os.getenv("LOSS_STREAK_PAUSE_MIN"), 20)
 
-    # ===== FEES / SLIPPAGE =====
-    SLIPPAGE_BPS: float = _get_float("SLIPPAGE_BPS", 4.0, minv=0.0)
-    FEES_PER_LOT: float = _get_float("FEES_PER_LOT", 25.0, minv=0.0)
+    # Session R ladders
+    DAY_STOP_AFTER_POS_R = _to_float(os.getenv("DAY_STOP_AFTER_POS_R"), 4.0)
+    DAY_HALF_SIZE_AFTER_POS_R = _to_float(os.getenv("DAY_HALF_SIZE_AFTER_POS_R"), 2.0)
+    DAY_STOP_AFTER_NEG_R = _to_float(os.getenv("DAY_STOP_AFTER_NEG_R"), -3.0)
 
-    # ===== PARTIAL TP / BREAKEVEN / HARD STOP =====
-    PARTIAL_TP_ENABLE: bool = _get_bool("PARTIAL_TP_ENABLE", True)
-    PARTIAL_TP_RATIO: float = _get_float("PARTIAL_TP_RATIO", 0.50, minv=0.05, maxv=0.95)
-    PARTIAL_TP_USE_MIDPOINT: bool = _get_bool("PARTIAL_TP_USE_MIDPOINT", True)
-    BREAKEVEN_AFTER_TP1_ENABLE: bool = _get_bool("BREAKEVEN_AFTER_TP1_ENABLE", True)
-    BREAKEVEN_OFFSET_TICKS: int = _get_int("BREAKEVEN_OFFSET_TICKS", 1, minv=0)
-    HARD_STOP_ENABLE: bool = _get_bool("HARD_STOP_ENABLE", True)
-    HARD_STOP_GRACE_SEC: float = _get_float("HARD_STOP_GRACE_SEC", 3.0, minv=0.0)
-    HARD_STOP_SLIPPAGE_BPS: float = _get_float("HARD_STOP_SLIPPAGE_BPS", 6.0, minv=0.0)
-    PARTIAL_TP2_R_MULT: float = _get_float("PARTIAL_TP2_R_MULT", 2.0, minv=1.0)
+    # Volatility-scaled risk
+    ATR_TARGET = _to_float(os.getenv("ATR_TARGET"), 10.0)
+    ATR_MIN = _to_float(os.getenv("ATR_MIN"), 3.0)
+    VOL_RISK_CLAMP_MIN = _to_float(os.getenv("VOL_RISK_CLAMP_MIN"), 0.5)
+    VOL_RISK_CLAMP_MAX = _to_float(os.getenv("VOL_RISK_CLAMP_MAX"), 1.5)
 
-    # ===== LOGGING =====
-    LOG_FILE: str = _get_str("LOG_FILE", "logs/trades.csv")
-    DIAGNOSTIC_VERBOSE: bool = _get_bool("DIAGNOSTIC_VERBOSE", False)
-    LOG_LEVEL: str = _get_str("LOG_LEVEL", "INFO").upper()
-    BALANCE_LOG_INTERVAL_MIN: int = _get_int("BALANCE_LOG_INTERVAL_MIN", 30, minv=1)
+    # ---- Options filters ----
+    OPTION_TYPE = os.getenv("OPTION_TYPE", "BOTH").upper()
+    OPTION_SL_PERCENT = _to_float(os.getenv("OPTION_SL_PERCENT"), 0.05)
+    OPTION_TP_PERCENT = _to_float(os.getenv("OPTION_TP_PERCENT"), 0.20)
+    OPTION_BREAKOUT_PCT = _to_float(os.getenv("OPTION_BREAKOUT_PCT"), 0.003)
+    OPTION_SPOT_TREND_PCT = _to_float(os.getenv("OPTION_SPOT_TREND_PCT"), 0.0025)
+    OPTION_REQUIRE_SPOT_CONFIRM = _to_bool(os.getenv("OPTION_REQUIRE_SPOT_CONFIRM"), False)
 
-    # ===== HOURS (IST) =====
-    USE_IST_CLOCK: bool = _get_bool("USE_IST_CLOCK", True)
-    TIME_FILTER_START_HM: Tuple[int, int] = _get_time_hhmm("TIME_FILTER_START", "09:20")
-    TIME_FILTER_END_HM: Tuple[int, int] = _get_time_hhmm("TIME_FILTER_END", "15:20")
+    MIN_PREMIUM = _to_float(os.getenv("MIN_PREMIUM"), 12.0)
+    SPREAD_MEAN_PCT_MAX = _to_float(os.getenv("SPREAD_MEAN_PCT_MAX"), 0.03)
+    IV_SOURCE = os.getenv("IV_SOURCE", "LTP_IMPLIED").upper()
+    RISK_FREE_RATE = _to_float(os.getenv("RISK_FREE_RATE"), 0.06)
+    IV_MAX = _to_float(os.getenv("IV_MAX"), 0.70)
+    EXPIRY_PREFERENCE = os.getenv("EXPIRY_PREFERENCE", "NEAR").upper()
+    REQUIRE_OI = _to_bool(os.getenv("REQUIRE_OI"), False)
+    MIN_OI = _to_int(os.getenv("MIN_OI"), 30000)
 
-    # ===== STRIKE SELECTION WITH GREEKS =====
-    USE_GREEKS_STRIKE_RANKING: bool = _get_bool("USE_GREEKS_STRIKE_RANKING", True)
-    TARGET_DELTA_CALL: float = _get_float("TARGET_DELTA_CALL", 0.35)
-    TARGET_DELTA_PUT: float = _get_float("TARGET_DELTA_PUT", -0.35)
-    DELTA_TOL: float = _get_float("DELTA_TOL", 0.07, minv=0.0)
-    REQUIRE_OI: bool = _get_bool("REQUIRE_OI", False)
-    MIN_OI: int = _get_int("MIN_OI", 30000, minv=0)
-    RISK_FREE_RATE: float = _get_float("RISK_FREE_RATE", 0.06)
-    IV_SOURCE: str = _get_str("IV_SOURCE", "LTP_IMPLIED").upper()
-    EXPIRY_PREFERENCE: str = _get_str("EXPIRY_PREFERENCE", "NEAR").upper()
+    # ---- Execution / workers ----
+    DEFAULT_PRODUCT = os.getenv("DEFAULT_PRODUCT", "MIS")
+    DEFAULT_ORDER_TYPE = os.getenv("DEFAULT_ORDER_TYPE", "MARKET").upper()
+    DEFAULT_VALIDITY = os.getenv("DEFAULT_VALIDITY", "DAY").upper()
+    TICK_SIZE = _to_float(os.getenv("TICK_SIZE"), 0.05)
+    TRAILING_ENABLE = _to_bool(os.getenv("TRAILING_ENABLE"), True)
+    TRAIL_COOLDOWN_SEC = _to_float(os.getenv("TRAIL_COOLDOWN_SEC"), 8.0)
+    WORKER_INTERVAL_SEC = _to_int(os.getenv("WORKER_INTERVAL_SEC"), 4)
+    NFO_FREEZE_QTY = _to_int(os.getenv("NFO_FREEZE_QTY"), 1800)
 
-    # ===== ADAPTIVE SCHEDULING / LIMITS =====
-    PEAK_POLL_SEC: int = _get_int("PEAK_POLL_SEC", 12, minv=2)
-    OFFPEAK_POLL_SEC: int = _get_int("OFFPEAK_POLL_SEC", 25, minv=3)
-    LOSS_COOLDOWN_MIN: int = _get_int("LOSS_COOLDOWN_MIN", 2, minv=0)
-    PREFERRED_TIE_RULE: str = _get_str("PREFERRED_TIE_RULE", "TREND").upper()
+    MAX_ENTRY_SLIP_BPS = _to_float(os.getenv("MAX_ENTRY_SLIP_BPS"), 25.0)
+    ORDER_RETRY_LIMIT = _to_int(os.getenv("ORDER_RETRY_LIMIT"), 2)
+    ORDER_RETRY_TICK_OFFSET = _to_int(os.getenv("ORDER_RETRY_TICK_OFFSET"), 2)
 
-    # ===== NEW: MTF & ENTRY FILTERS =====
-    MTF_CONFIRM_ENABLE: bool = _get_bool("MTF_CONFIRM_ENABLE", False)
-    MTF_HIGHER_TF: str = _get_str("MTF_HIGHER_TF", "5min")
-    MTF_CONFIRM_RULE: str = _get_str("MTF_CONFIRM_RULE", "EMA/SUPERTREND").upper()
+    # Spread guard
+    SPREAD_GUARD_MODE = os.getenv("SPREAD_GUARD_MODE", "RANGE").upper()
+    SPREAD_GUARD_BA_MAX = _to_float(os.getenv("SPREAD_GUARD_BA_MAX"), 0.015)
+    SPREAD_GUARD_LTPMID_MAX = _to_float(os.getenv("SPREAD_GUARD_LTPMID_MAX"), 0.015)
+    SPREAD_GUARD_PCT = _to_float(os.getenv("SPREAD_GUARD_PCT"), 0.03)
+    DYNAMIC_SPREAD_GUARD = _to_bool(os.getenv("DYNAMIC_SPREAD_GUARD"), True)
+    SPREAD_VOL_LOOKBACK = _to_int(os.getenv("SPREAD_VOL_LOOKBACK"), 20)
 
-    PULLBACK_ENTRY_ENABLE: bool = _get_bool("PULLBACK_ENTRY_ENABLE", False)
-    PULLBACK_TYPES: List[str] = tuple(_get_list("PULLBACK_TYPES", ["RSI", "VWAP", "BB"]))
+    # ---- Exits / partials ----
+    PARTIAL_TP_ENABLE = _to_bool(os.getenv("PARTIAL_TP_ENABLE"), True)
+    PARTIAL_TP_RATIO = _to_float(os.getenv("PARTIAL_TP_RATIO"), 0.50)
+    PARTIAL_TP_USE_MIDPOINT = _to_bool(os.getenv("PARTIAL_TP_USE_MIDPOINT"), True)
+    PARTIAL_TP2_R_MULT = _to_float(os.getenv("PARTIAL_TP2_R_MULT"), 2.0)
 
-    PULLBACK_LOOKBACK: int = _get_int("PULLBACK_LOOKBACK", 7, minv=1)
-    PULLBACK_MIN_BOUNCE_PCT: float = _get_float("PULLBACK_MIN_BOUNCE_PCT", 0.20, minv=0.0)
-    PULLBACK_MAX_BB_TOUCHES: int = _get_int("PULLBACK_MAX_BB_TOUCHES", 2, minv=0)
+    BREAKEVEN_AFTER_TP1_ENABLE = _to_bool(os.getenv("BREAKEVEN_AFTER_TP1_ENABLE"), True)
+    BREAKEVEN_OFFSET_TICKS = _to_int(os.getenv("BREAKEVEN_OFFSET_TICKS"), 2)
 
-    # ===== NEW: EXECUTION GUARDS =====
-    EXECUTION_GUARDS_ENABLE: bool = _get_bool("EXECUTION_GUARDS_ENABLE", True)
-    LTP_DEPTH_ENABLE: bool = _get_bool("LTP_DEPTH_ENABLE", False)
-    LTP_DEPTH_MAX_SKEW_PCT: float = _get_float("LTP_DEPTH_MAX_SKEW_PCT", 0.30, minv=0.0)
-    LTP_DEPTH_MIN_QTY: int = _get_int("LTP_DEPTH_MIN_QTY", 150, minv=0)
+    HARD_STOP_ENABLE = _to_bool(os.getenv("HARD_STOP_ENABLE"), True)
+    HARD_STOP_GRACE_SEC = _to_float(os.getenv("HARD_STOP_GRACE_SEC"), 3.0)
+    HARD_STOP_SLIPPAGE_BPS = _to_float(os.getenv("HARD_STOP_SLIPPAGE_BPS"), 6.0)
 
-    # ===== NEW: PROFIT-LOCK LADDER =====
-    PROFIT_LOCK_ENABLE: bool = _get_bool("PROFIT_LOCK_ENABLE", True)
-    PROFIT_LOCK_STEPS: int = _get_int("PROFIT_LOCK_STEPS", 3, minv=0, maxv=10)
-    PROFIT_LOCK_STEP_TICKS: int = _get_int("PROFIT_LOCK_STEP_TICKS", 5, minv=1)
-    PROFIT_LOCK_STEP_SL_BACK_TICKS: int = _get_int("PROFIT_LOCK_STEP_SL_BACK_TICKS", 2, minv=0)
+    CHANDELIER_N = _to_int(os.getenv("CHANDELIER_N"), 22)
+    CHANDELIER_K = _to_float(os.getenv("CHANDELIER_K"), 2.5)
+    VWAP_TRAIL_ENABLE = _to_bool(os.getenv("VWAP_TRAIL_ENABLE"), True)
 
-    # ===== NEW: REGIME SPLIT =====
-    REGIME_SPLIT_ENABLE: bool = _get_bool("REGIME_SPLIT_ENABLE", True)
-    REGIME_ADX_TREND: int = _get_int("REGIME_ADX_TREND", 22, minv=5, maxv=60)
-    REGIME_BBWIDTH_TREND: float = _get_float("REGIME_BBWIDTH_TREND", 0.018, minv=0.0)
-    REGIME_ATR_MIN: float = _get_float("REGIME_ATR_MIN", 5.0, minv=0.0)
-    REGIME_WARMUP_BARS: int = _get_int("REGIME_WARMUP_BARS", 30, minv=5)
+    MAX_HOLD_MIN = _to_int(os.getenv("MAX_HOLD_MIN"), 25)
+    BOX_HOLD_PCT = _to_float(os.getenv("BOX_HOLD_PCT"), 0.01)
 
-    TREND_TP_MULT: float = _get_float("TREND_TP_MULT", 3.4, minv=0.5)
-    TREND_SL_MULT: float = _get_float("TREND_SL_MULT", 1.4, minv=0.1)
-    RANGE_TP_MULT: float = _get_float("RANGE_TP_MULT", 2.4, minv=0.5)
-    RANGE_SL_MULT: float = _get_float("RANGE_SL_MULT", 1.2, minv=0.1)
+    # ---- Scheduling / hours ----
+    PEAK_POLL_SEC = _to_int(os.getenv("PEAK_POLL_SEC"), 12)
+    OFFPEAK_POLL_SEC = _to_int(os.getenv("OFFPEAK_POLL_SEC"), 25)
+    TIME_FILTER_START = os.getenv("TIME_FILTER_START", "09:20")
+    TIME_FILTER_END = os.getenv("TIME_FILTER_END", "15:20")
 
-    COOLDOWN_AFTER_LOSS_MIN: int = _get_int("COOLDOWN_AFTER_LOSS_MIN", 2, minv=0)
-    COOLDOWN_AFTER_WIN_MIN: int = _get_int("COOLDOWN_AFTER_WIN_MIN", 0, minv=0)
+    ENABLE_TIME_BUCKETS = _to_bool(os.getenv("ENABLE_TIME_BUCKETS"), False)
+    TIME_BUCKETS = _to_time_ranges(os.getenv("TIME_BUCKETS", ""))
 
-    # ===== OPTIONAL: SECRETS (do not print) =====
-    ZERODHA_API_KEY: str = _get_str("ZERODHA_API_KEY", "")
-    KITE_ACCESS_TOKEN: str = _get_str("KITE_ACCESS_TOKEN", "")
-    ZERODHA_ACCESS_TOKEN: str = _get_str("ZERODHA_ACCESS_TOKEN", "")
-    TELEGRAM_BOT_TOKEN: str = _get_str("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str = _get_str("TELEGRAM_CHAT_ID", "")
+    ENABLE_EVENT_WINDOWS = _to_bool(os.getenv("ENABLE_EVENT_WINDOWS"), False)
+    EVENT_WINDOWS = _to_time_ranges(os.getenv("EVENT_WINDOWS", ""))
 
-    # -------- convenience accessors --------
-    @staticmethod
-    def market_time_window() -> Tuple[Tuple[int, int], Tuple[int, int]]:
-        """(start_h, start_m), (end_h, end_m) in IST by default."""
-        return Config.TIME_FILTER_START_HM, Config.TIME_FILTER_END_HM
+    # ---- Fees / slippage ----
+    SLIPPAGE_BPS = _to_float(os.getenv("SLIPPAGE_BPS"), 4.0)
+    FEES_PER_LOT = _to_float(os.getenv("FEES_PER_LOT"), 25.0)
 
-    @staticmethod
-    def has_live_creds() -> bool:
-        return bool(Config.ZERODHA_API_KEY and (Config.KITE_ACCESS_TOKEN or Config.ZERODHA_ACCESS_TOKEN))
+    # ---- Logging / diagnostics ----
+    LOG_FILE = os.getenv("LOG_FILE", "logs/trades.csv")
+    DIAGNOSTIC_VERBOSE = _to_bool(os.getenv("DIAGNOSTIC_VERBOSE"), False)
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    BALANCE_LOG_INTERVAL_MIN = _to_int(os.getenv("BALANCE_LOG_INTERVAL_MIN"), 30)
+    DETAIL_LOGS_ENABLE = _to_bool(os.getenv("DETAIL_LOGS_ENABLE"), True)
+    HEARTBEAT_MIN = _to_int(os.getenv("HEARTBEAT_MIN"), 3)
 
-    @staticmethod
-    def has_telegram() -> bool:
-        return bool(Config.TELEGRAM_BOT_TOKEN and Config.TELEGRAM_CHAT_ID)
+    # ---- Telegram ----
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or ""
+
+    # ---- Order safety / state ----
+    IDEMP_TTL_SEC = _to_int(os.getenv("IDEMP_TTL_SEC"), 60)
+    PERSIST_REATTACH_ON_START = _to_bool(os.getenv("PERSIST_REATTACH_ON_START"), True)
