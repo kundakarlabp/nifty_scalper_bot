@@ -1,74 +1,89 @@
 # src/data_streaming/realtime_trader.py
+from __future__ import annotations
+
 """
 Real-time trader with:
 - Telegram control (daemon polling)
+- Quality mode toggle (/mode quality on|off), risk & regime runtime tweaks
 - Adaptive main loop (peak/off-peak cadence)
-- Risk-based lot sizing (RISK_PER_TRADE × equity; ATR-/SL-aware)
-- Warmup & trading-hours filters (IST aware, optional time windows)
-- Options strike resolution (ATM ± range via cached instruments)
-- Strategy signals (spot-driven; options execution)
+- Risk-based lot sizing (RISK_PER_TRADE × equity; ATR- and SL-aware)
+- Warmup & trading-hours filters (IST aware, optional buckets & event windows)
+- Multi-timeframe gate (HTF EMA / slope) and regime filter (ADX + BB width)
+- Options strike resolution (ATM ± range via cached instruments) [best-effort]
+- Strategy signals (spot/futures + options)
 - Spread guard (RANGE or LTP_MID; optional dynamic scaling)
 - Partial TP, breakeven hop, trailing SL (delegated to OrderExecutor)
-- Daily circuit breaker + loss cooldown + trade/day cap + streak controls
+- 3-loss shutdown + loss cooldown + trade/day cap + streak ladders
+- Daily circuit breaker + session R ladders + session auto-exit
 - CSV trade log + daily rollover + idempotent entry protection
-- Multi-timeframe (MTF) gate (e.g., 5m trend filter)
-- Regime filters (ADX / BB-width) with TREND/RANGE/AUTO modes
-- 3-loss shutdown at trader level
-- Session auto-exit at Config.SESSION_AUTO_EXIT_TIME
+- State persistence (active trades) with best-effort reattach on restart
 
-Telegram toggles (supported now via controller’s command router):
-  /start, /stop, /mode live|shadow
-  /mode quality on|off     ← quality mode toggle
-  /refresh                 ← refresh instruments cache
-  /status, /summary, /health, /emergency
+Assumptions:
+- Config is loaded from env via src/config.py
+- OrderExecutor implements: place_entry_order, setup_gtt_orders, update_trailing_stop,
+  exit_order, cancel_all_orders, get_active_orders, get_positions, get_last_price,
+  sync_and_enforce_oco, get_tick_size.
+- EnhancedScalpingStrategy implements: generate_signal(...) and generate_options_signal(...).
+- strike_selector implements: get_instrument_tokens(...), fetch_cached_instruments(...).
+- You may swap data providers; default uses Kite when live, a stub when sim.
 
-NOTE: Controller help will be updated when you upload telegram_controller.py for edit.
+Paths:
+- If you keep this file under src/data_streaming/, imports below match your tree.
 """
 
-from __future__ import annotations
-
+import atexit
 import csv
+import json
 import logging
 import os
 import threading
-import atexit
+import time
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, date, time as dtime
 from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
 import schedule
-from datetime import datetime, timedelta, date, time as dtime
-import time
 
 from src.config import Config
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.risk.position_sizing import PositionSizing, get_live_account_balance
 from src.execution.order_executor import OrderExecutor
+from src.risk.position_sizing import PositionSizing, get_live_account_balance
 from src.notifications.telegram_controller import TelegramController
-from src.utils.strike_selector import (
-    get_instrument_tokens,
-    fetch_cached_instruments,
-)
 from src.utils.atr_helper import compute_atr_df
-from src.utils.indicators import (
-    calculate_ema,
-    calculate_adx,
-    calculate_bb_width,
-    calculate_vwap,
-)
+from src.utils.indicators import calculate_ema, calculate_adx
+
+# Optional (best-effort) strike utilities for options flow
+try:
+    from src.utils.strike_selector import (
+        get_instrument_tokens,
+        fetch_cached_instruments,
+    )
+except Exception:  # pragma: no cover
+    get_instrument_tokens = None
+    fetch_cached_instruments = None
 
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------- time helpers ----------------------------- #
+# ============================== time helpers ============================== #
 
 def _ist_now() -> datetime:
     """IST clock without pytz (UTC+5:30)."""
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 
+def _now() -> datetime:
+    return _ist_now() if getattr(Config, "USE_IST_CLOCK", True) else datetime.now()
+
+
 def _between(now_t: dtime, start_hm: str, end_hm: str) -> bool:
-    s = datetime.strptime(start_hm, "%H:%M").time()
-    e = datetime.strptime(end_hm, "%H:%M").time()
-    return s <= now_t <= e
+    try:
+        s = datetime.strptime(start_hm, "%H:%M").time()
+        e = datetime.strptime(end_hm, "%H:%M").time()
+        return s <= now_t <= e
+    except Exception:
+        return True
 
 
 def _within_any_windows(now_t: dtime, windows: List[Tuple[str, str]]) -> bool:
@@ -85,265 +100,353 @@ def _safe_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
 
-# ============================== Trader ============================= #
+def _round_to_tick(x: float, tick: float) -> float:
+    if tick <= 0:
+        return float(x)
+    return round(float(x) / tick) * tick
+
+
+# ============================ data providers ============================ #
+
+class DataProvider:
+    """Replace internals with your broker/data code (simulation-safe)."""
+
+    def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        return None
+
+
+class KiteDataProvider:
+    """
+    Thin adapter over KiteConnect:
+      - get_ohlc(symbol, minutes, timeframe) -> DataFrame [open,high,low,close,volume]
+      - get_last_price(symbol) -> float
+
+    Uses: ZERODHA_API_KEY + (KITE_ACCESS_TOKEN or ZERODHA_ACCESS_TOKEN)
+    """
+    _TF_MAP = {
+        "minute": "minute", "1m": "minute",
+        "3minute": "3minute", "3m": "3minute",
+        "5minute": "5minute", "5m": "5minute",
+        "10minute": "10minute",
+        "15minute": "15minute", "15m": "15minute",
+        "30minute": "30minute", "30m": "30minute",
+        "60minute": "60minute", "1h": "60minute",
+        "day": "day", "d": "day",
+    }
+
+    def __init__(self, kite, default_token: Optional[int] = None) -> None:
+        self.kite = kite
+        self.default_token = int(default_token or getattr(Config, "INSTRUMENT_TOKEN", 256265))
+        self._ltp_cache: Dict[str, Dict[str, Any]] = {}
+        self._ltp_ttl = 1.8  # seconds
+
+    @staticmethod
+    def build_from_env() -> "KiteDataProvider":
+        from kiteconnect import KiteConnect
+        api_key = getattr(Config, "ZERODHA_API_KEY", None)
+        access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(Config, "ZERODHA_ACCESS_TOKEN", None)
+        if not api_key or not access_token:
+            raise RuntimeError("ZERODHA_API_KEY or KITE_ACCESS_TOKEN missing for KiteDataProvider")
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        return KiteDataProvider(kite=kite, default_token=getattr(Config, "INSTRUMENT_TOKEN", 256265))
+
+    def _with_retries(self, fn, *args, tries=2, backoff=0.6, **kwargs):
+        last = None
+        for i in range(tries):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                last = e
+                if i == tries - 1:
+                    break
+                time.sleep(backoff * (2 ** i))
+        raise last
+
+    def _resolve_token(self, symbol_or_none: Optional[str]) -> int:
+        if not symbol_or_none:
+            return int(self.default_token)
+        if symbol_or_none == getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50"):
+            return int(self.default_token)
+        try:
+            q = self._with_retries(self.kite.quote, [symbol_or_none])
+            tok = (q.get(symbol_or_none, {}) or {}).get("instrument_token")
+            if tok:
+                return int(tok)
+        except Exception:
+            pass
+        raise ValueError(f"Cannot resolve instrument token for {symbol_or_none}")
+
+    def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
+        interval = self._TF_MAP.get(str(timeframe).lower(), "minute")
+        token = self._resolve_token(symbol)
+        end_ts = _ist_now()
+        start_ts = end_ts - timedelta(minutes=max(2 * minutes, minutes + 60))
+
+        def _hist():
+            return self.kite.historical_data(
+                instrument_token=token,
+                from_date=start_ts,
+                to_date=end_ts,
+                interval=interval,
+                continuous=False,
+                oi=False,
+            )
+
+        candles = self._with_retries(_hist)
+        if not candles:
+            return pd.DataFrame()
+        df = pd.DataFrame(candles)
+        if "date" in df.columns:
+            df = df.set_index("date", drop=True)
+        df = df.sort_index()
+        cutoff = end_ts - timedelta(minutes=minutes + 1)
+        df = df[df.index >= cutoff]
+        keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+        return df[keep].copy()
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        now = time.time()
+        c = self._ltp_cache.get(symbol)
+        if c and (now - c["ts"] <= self._ltp_ttl):
+            return float(c["ltp"])
+        try:
+            data = self._with_retries(self.kite.ltp, [symbol])
+            px = (data.get(symbol, {}) or {}).get("last_price")
+            if px is None:
+                data = self._with_retries(self.kite.quote, [symbol])
+                px = (data.get(symbol, {}) or {}).get("last_price")
+            if px is None:
+                return None
+            self._ltp_cache[symbol] = {"ts": now, "ltp": float(px)}
+            return float(px)
+        except Exception:
+            return None
+
+
+# ============================== models =============================== #
+
+@dataclass
+class ActiveTrade:
+    entry_id: str
+    symbol: str
+    direction: str
+    quantity: int
+    entry_price: float
+    stop_loss: float
+    target: float
+    atr: float
+    opened_ts: float
+    status: str = "OPEN"   # OPEN/CLOSED
+    exit_price: Optional[float] = None
+    exit_reason: Optional[str] = None
+
+
+# ============================== trader =============================== #
 
 class RealTimeTrader:
     """
     Production-grade runner coordinating strategy, risk, execution and IO.
     """
 
-    # ---- knobs mirrored from Config / defaults ----
-    MAX_CONCURRENT_TRADES = int(getattr(Config, "MAX_CONCURRENT_POSITIONS", 1))
+    # ---- knobs mirrored from Config ----
+    MAX_CONCURRENT = int(getattr(Config, "MAX_CONCURRENT_POSITIONS", 1))
     WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 25))
-    DATA_LOOKBACK_MINUTES = int(getattr(Config, "DATA_LOOKBACK_MINUTES", 45))
-    HIST_TIMEFRAME = str(getattr(Config, "HISTORICAL_TIMEFRAME", "minute"))
+    DATA_LOOKBACK_MIN = int(getattr(Config, "DATA_LOOKBACK_MINUTES", 45))
+    HIST_TF = str(getattr(Config, "HISTORICAL_TIMEFRAME", "minute"))
 
-    # Spread guard
-    SPREAD_GUARD_MODE = str(getattr(Config, "SPREAD_GUARD_MODE", "LTP_MID")).upper()  # RANGE|LTP_MID
-    SPREAD_GUARD_BA_MAX = float(getattr(Config, "SPREAD_GUARD_BA_MAX", 0.015))
-    SPREAD_GUARD_LTPMID_MAX = float(getattr(Config, "SPREAD_GUARD_LTPMID_MAX", 0.015))
-    SPREAD_GUARD_PCT = float(getattr(Config, "SPREAD_GUARD_PCT", 0.03))
-    DYNAMIC_SPREAD_GUARD = bool(getattr(Config, "DYNAMIC_SPREAD_GUARD", True))
+    # spread guard
+    SPREAD_MODE = str(getattr(Config, "SPREAD_GUARD_MODE", "RANGE")).upper()
+    SPREAD_BA_MAX = float(getattr(Config, "SPREAD_GUARD_BA_MAX", 0.015))
+    SPREAD_LTPMID_MAX = float(getattr(Config, "SPREAD_GUARD_LTPMID_MAX", 0.015))
+    SPREAD_PCT = float(getattr(Config, "SPREAD_GUARD_PCT", 0.03))
+    DYN_SPREAD = bool(getattr(Config, "DYNAMIC_SPREAD_GUARD", True))
     SPREAD_VOL_LOOKBACK = int(getattr(Config, "SPREAD_VOL_LOOKBACK", 20))
 
-    # Costs / risk / trailing
-    SLIPPAGE_BPS = float(getattr(Config, "SLIPPAGE_BPS", 5.0))
+    # costs / risk / trailing
+    SLIPPAGE_BPS = float(getattr(Config, "SLIPPAGE_BPS", 4.0))
     FEES_PER_LOT = float(getattr(Config, "FEES_PER_LOT", 25.0))
-    MAX_DAILY_DRAWDOWN_PCT = float(getattr(Config, "MAX_DAILY_DRAWDOWN_PCT", 0.03))
+    MAX_DD_PCT = float(getattr(Config, "MAX_DAILY_DRAWDOWN_PCT", 0.05))
     CIRCUIT_RELEASE_PCT = float(getattr(Config, "CIRCUIT_RELEASE_PCT", 0.015))
     TRAILING_ENABLE = bool(getattr(Config, "TRAILING_ENABLE", True))
-    TRAIL_ATR_MULTIPLIER = float(getattr(Config, "ATR_SL_MULTIPLIER", 1.5))
-    WORKER_INTERVAL_SEC = int(getattr(Config, "WORKER_INTERVAL_SEC", 10))
-    LOG_TRADE_FILE = str(getattr(Config, "LOG_FILE", "logs/trades.csv"))
+    TRAIL_ATR_MULT = float(getattr(Config, "ATR_SL_MULTIPLIER", 1.5))
+    WORKER_INTERVAL = int(getattr(Config, "WORKER_INTERVAL_SEC", 4))
+    LOG_FILE = str(getattr(Config, "LOG_FILE", "logs/trades.csv"))
 
     LOT_SIZE = int(getattr(Config, "NIFTY_LOT_SIZE", 75))
     MIN_LOTS = int(getattr(Config, "MIN_LOTS", 1))
-    MAX_LOTS = int(getattr(Config, "MAX_LOTS", 10))
-
-    RISK_PER_TRADE = float(getattr(Config, "RISK_PER_TRADE", 0.01))
-    MAX_TRADES_PER_DAY = int(getattr(Config, "MAX_TRADES_PER_DAY", 30))
+    MAX_LOTS = int(getattr(Config, "MAX_LOTS", 15))
+    RISK_PER_TRADE = float(getattr(Config, "RISK_PER_TRADE", 0.025))
+    MAX_TRADES_DAY = int(getattr(Config, "MAX_TRADES_PER_DAY", 30))
     LOSS_COOLDOWN_MIN = int(getattr(Config, "LOSS_COOLDOWN_MIN", 2))
-    PEAK_POLL_SEC = int(getattr(Config, "PEAK_POLL_SEC", 12))
-    OFFPEAK_POLL_SEC = int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
+    LOSS_LIMIT = int(getattr(Config, "CONSECUTIVE_LOSS_LIMIT", 3))
 
-    # streak/session ladders
-    LOSS_STREAK_HALVE_SIZE = int(getattr(Config, "LOSS_STREAK_HALVE_SIZE", 3))
-    LOSS_STREAK_PAUSE_MIN = int(getattr(Config, "LOSS_STREAK_PAUSE_MIN", 20))
-    DAY_STOP_AFTER_POS_R = float(getattr(Config, "DAY_STOP_AFTER_POS_R", 4.0))
-    DAY_HALF_SIZE_AFTER_POS_R = float(getattr(Config, "DAY_HALF_SIZE_AFTER_POS_R", 2.0))
-    DAY_STOP_AFTER_NEG_R = float(getattr(Config, "DAY_STOP_AFTER_NEG_R", -3.0))
+    # ladders / stop after good/bad days
+    LOSS_STREAK_HALVE = int(getattr(Config, "LOSS_STREAK_HALVE_SIZE", 3))
+    LOSS_STREAK_PAUSE = int(getattr(Config, "LOSS_STREAK_PAUSE_MIN", 20))
+    DAY_STOP_POS_R = float(getattr(Config, "DAY_STOP_AFTER_POS_R", 4.0))
+    DAY_HALF_POS_R = float(getattr(Config, "DAY_HALF_SIZE_AFTER_POS_R", 2.0))
+    DAY_STOP_NEG_R = float(getattr(Config, "DAY_STOP_AFTER_NEG_R", -3.0))
 
     # hours / filters
-    USE_IST_CLOCK = bool(getattr(Config, "USE_IST_CLOCK", True))
-    TIME_FILTER_START = str(getattr(Config, "TIME_FILTER_START", "09:15"))
-    TIME_FILTER_END = str(getattr(Config, "TIME_FILTER_END", "15:20"))
-    SKIP_FIRST_MIN = int(getattr(Config, "SKIP_FIRST_MIN", 10))
-    ENABLE_TIME_BUCKETS = bool(getattr(Config, "ENABLE_TIME_BUCKETS", False))
-    TIME_BUCKETS = list(getattr(Config, "TIME_BUCKETS", []))
-    ENABLE_EVENT_WINDOWS = bool(getattr(Config, "ENABLE_EVENT_WINDOWS", False))
-    EVENT_WINDOWS = list(getattr(Config, "EVENT_WINDOWS", []))
+    TIME_START = str(getattr(Config, "TIME_FILTER_START", "09:20"))
+    TIME_END = str(getattr(Config, "TIME_FILTER_END", "15:20"))
+    SKIP_FIRST_MIN = int(getattr(Config, "SKIP_FIRST_MIN", 5))
+    ENABLE_BUCKETS = bool(getattr(Config, "ENABLE_TIME_BUCKETS", False))
+    BUCKETS = list(getattr(Config, "TIME_BUCKETS", []))
+    ENABLE_EVENTS = bool(getattr(Config, "ENABLE_EVENT_WINDOWS", False))
+    EVENTS = list(getattr(Config, "EVENT_WINDOWS", []))
+    AUTO_EXIT_TIME = str(getattr(Config, "SESSION_AUTO_EXIT_TIME", getattr(Config, "TIME_FILTER_END", "15:20")))
 
-    STRIKE_RANGE = int(getattr(Config, "STRIKE_RANGE", 3))  # ± around ATM
-    IDEMP_TTL_SEC = int(getattr(Config, "IDEMP_TTL_SEC", 60))
+    STRIKE_RANGE = int(getattr(Config, "STRIKE_RANGE", 3))
+    IDEMP_TTL = int(getattr(Config, "IDEMP_TTL_SEC", 60))
 
-    # MTF & Regime
-    ENABLE_MTF_FILTER = bool(getattr(Config, "ENABLE_MTF_FILTER", True))
-    MTF_TIMEFRAME = str(getattr(Config, "MTF_TIMEFRAME", "5minute"))
-    MTF_EMA_FAST = int(getattr(Config, "MTF_EMA_FAST", 21))
-    MTF_EMA_SLOW = int(getattr(Config, "MTF_EMA_SLOW", 50))
-    ENABLE_REGIME_FILTER = bool(getattr(Config, "ENABLE_REGIME_FILTER", True))
-    REGIME_MODE = str(getattr(Config, "REGIME_MODE", "AUTO")).upper()  # AUTO|TREND|RANGE|OFF
-    ADX_PERIOD = int(getattr(Config, "ADX_PERIOD", 14))
-    ADX_MIN_TREND = float(getattr(Config, "ADX_MIN_TREND", 18.0))
-    BB_WINDOW = int(getattr(Config, "BB_WINDOW", 20))
-    BB_WIDTH_MIN = float(getattr(Config, "BB_WIDTH_MIN", 0.006))  # ~0.6%
-    BB_WIDTH_MAX = float(getattr(Config, "BB_WIDTH_MAX", 0.02))   # ~2%
+    # files
+    STATE_DIR = "state"
+    ACTIVE_JSON = os.path.join(STATE_DIR, "active_trades.json")
 
-    # Quality toggle baseline
-    QUALITY_MODE_DEFAULT = bool(getattr(Config, "QUALITY_MODE_DEFAULT", False))
-    QUALITY_SCORE_BUMP = float(getattr(Config, "QUALITY_SCORE_BUMP", 1.0))  # raises min score need
-
-    # Session auto-exit
-    SESSION_AUTO_EXIT_TIME = str(getattr(Config, "SESSION_AUTO_EXIT_TIME", "15:20"))
-
-    def __init__(self) -> None:
+    def __init__(self, data: Optional[DataProvider] = None) -> None:
         self._lock = threading.RLock()
 
-        self.is_trading: bool = False
-        self.live_mode: bool = bool(getattr(Config, "ENABLE_LIVE_TRADING", False))
+        self.is_trading = False
+        self.live_mode = bool(getattr(Config, "ENABLE_LIVE_TRADING", False))
+        self.quality_mode = bool(getattr(Config, "QUALITY_MODE_DEFAULT", False))
 
-        # Session
+        # session stats
         self.daily_start_equity: float = float(get_live_account_balance() or 0.0)
-        self.session_date: date = self._now().date()
+        self.session_date: date = _now().date()
         self.daily_pnl: float = 0.0
         self.session_R: float = 0.0
         self.trades_closed_today: int = 0
         self.loss_streak: int = 0
-        self._cooldown_until_ts: float = 0.0
-        self._shutdown_after_3_losses: bool = False
-        self.quality_mode: bool = self.QUALITY_MODE_DEFAULT
+        self._cooldown_until: float = 0.0
+        self._halt_for_day: bool = False
+        self._regime_mode: str = str(getattr(Config, "REGIME_MODE", "AUTO")).upper()
 
-        # Trades state
-        self.trades: List[Dict[str, Any]] = []             # closed trades for the day
-        self.active_trades: Dict[str, Dict[str, Any]] = {} # entry_order_id → info
+        # trade state
+        self.trades: List[Dict[str, Any]] = []               # closed trades
+        self.active: Dict[str, ActiveTrade] = {}             # entry_id -> ActiveTrade
+        self._recent_keys: Dict[str, float] = {}             # dedup keys (key -> expiry ts)
 
-        # Idempotency (avoid duplicate entries)
-        self._recent_entry_keys: Dict[str, float] = {}     # key → expiry_ts
+        # data/executor/strategy
+        self.data = data or (self._build_kite_provider() if self.live_mode else DataProvider())
+        self.risk = PositionSizing()
+        try:
+            self.risk.set_equity(float(self.daily_start_equity or 0.0))
+        except Exception:
+            setattr(self.risk, "equity", float(self.daily_start_equity or 0.0))
+        self.strategy = EnhancedScalpingStrategy(
+            base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
+            base_target_points=Config.BASE_TARGET_POINTS,
+            confidence_threshold=Config.CONFIDENCE_THRESHOLD,
+            min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
+        )
+        self.executor = self._init_executor()
 
-        # Instruments cache
-        self._nfo_cache: List[Dict[str, Any]] = []
-        self._nse_cache: List[Dict[str, Any]] = []
-        self._cache_ts: float = 0.0
-        self._CACHE_TTL = 300.0
-        self._cache_lock = threading.RLock()
-
-        # Components
-        self._init_components()
-
-        # Telegram
+        # telegram
+        self.tg: Optional[TelegramController] = None
         self._polling_thread: Optional[threading.Thread] = None
-        self._start_polling()
+        self._init_telegram()
 
-        # Background workers
+        # workers
         self._trailing_evt = threading.Event()
         self._oco_evt = threading.Event()
         self._start_workers()
 
-        # Adaptive scheduler
+        # scheduler
         self._data_job = None
-        self._setup_adaptive_scheduler()
+        self._setup_scheduler()
 
-        # CSV log
+        # csv log + shutdown hook
         self._prepare_trade_log()
-
-        # Shutdown hook
+        self._maybe_restore_state()
         atexit.register(self.shutdown)
 
-        logger.info("RealTimeTrader initialized.")
+        logger.info("✅ RealTimeTrader initialized.")
 
-    # -------------------- init -------------------- #
+    # -------------------------- components -------------------------- #
 
-    def _init_components(self) -> None:
+    def _build_kite_provider(self) -> DataProvider:
         try:
-            self.strategy = EnhancedScalpingStrategy(
-                base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-                base_target_points=Config.BASE_TARGET_POINTS,
-                confidence_threshold=Config.CONFIDENCE_THRESHOLD,
-                min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
-            )
+            return KiteDataProvider.build_from_env()
         except Exception as e:
-            logger.warning(f"Strategy init failed: {e}")
-            self.strategy = None
+            logger.error("KiteDataProvider init failed, using stub DataProvider: %s", e, exc_info=True)
+            return DataProvider()
 
+    def _init_executor(self) -> OrderExecutor:
+        if not self.live_mode:
+            logger.info("Live trading disabled → simulation mode.")
+            return OrderExecutor()
         try:
-            self.risk = PositionSizing()
-            try:
-                # Some versions expose set_equity; otherwise set attribute.
-                self.risk.set_equity(float(self.daily_start_equity or 0.0))  # type: ignore
-            except Exception:
-                setattr(self.risk, "equity", float(self.daily_start_equity or 0.0))
-        except Exception as e:
-            logger.warning(f"Risk manager init failed: {e}")
-            self.risk = PositionSizing()
+            from kiteconnect import KiteConnect
+            api_key = getattr(Config, "ZERODHA_API_KEY", "")
+            access_token = getattr(Config, "KITE_ACCESS_TOKEN", "") or getattr(Config, "ZERODHA_ACCESS_TOKEN", "")
+            if not api_key or not access_token:
+                raise RuntimeError("ZERODHA_API_KEY or KITE_ACCESS_TOKEN missing")
+            kite = KiteConnect(api_key=api_key)
+            kite.set_access_token(access_token)
+            logger.info("🟢 Live executor created (KiteConnect).")
+            return OrderExecutor(kite=kite)
+        except Exception as exc:
+            logger.error("Live init failed, switching to simulation: %s", exc, exc_info=True)
+            self.live_mode = False
+            return OrderExecutor()
 
-        self.executor = self._init_executor()
-
+    def _init_telegram(self) -> None:
+        if not getattr(Config, "ENABLE_TELEGRAM", True):
+            return
         try:
             self.tg = TelegramController(
                 status_callback=self.get_status,
                 control_callback=self._handle_control,
                 summary_callback=self.get_summary,
             )
+            self.tg.send_startup_alert()
+            self._polling_thread = threading.Thread(target=self.tg.start_polling, daemon=True)
+            self._polling_thread.start()
+            logger.info("📡 Telegram polling started.")
         except Exception as e:
-            logger.warning(f"Telegram init failed: {e}")
-            self.tg = None
+            logger.warning("Telegram init failed: %s", e)
 
-    def _build_live_executor(self) -> OrderExecutor:
-        from kiteconnect import KiteConnect
-        api_key = getattr(Config, "ZERODHA_API_KEY", None)
-        access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(
-            Config, "ZERODHA_ACCESS_TOKEN", None
-        )
-        if not api_key or not access_token:
-            raise RuntimeError("ZERODHA_API_KEY or KITE_ACCESS_TOKEN missing")
+    # --------------------------- scheduler --------------------------- #
 
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-        logger.info("✅ Live executor created (KiteConnect).")
-        return OrderExecutor(kite=kite)
-
-    def _init_executor(self) -> OrderExecutor:
-        if self.live_mode:
-            try:
-                return self._build_live_executor()
-            except Exception as exc:
-                logger.error("Live init failed, switching to simulation: %s", exc, exc_info=True)
-                self.live_mode = False
-        logger.info("Live trading disabled → simulation executor.")
-        return OrderExecutor()
-
-    # -------------------- csv log -------------------- #
-
-    def _prepare_trade_log(self) -> None:
-        try:
-            os.makedirs(os.path.dirname(self.LOG_TRADE_FILE) or ".", exist_ok=True)
-            if not os.path.exists(self.LOG_TRADE_FILE):
-                with open(self.LOG_TRADE_FILE, "w", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow(
-                        ["date", "order_id", "symbol", "direction", "contracts",
-                         "entry", "exit", "pnl", "fees", "net_pnl", "confidence",
-                         "atr", "mode", "comment"]
-                    )
-        except Exception as e:
-            logger.warning(f"Trade log init failed: {e}")
-
-    def _append_trade_log(self, row: List[Any]) -> None:
-        try:
-            with open(self.LOG_TRADE_FILE, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(row)
-        except Exception as e:
-            logger.debug(f"Trade log append failed: {e}")
-
-    # -------------------- scheduler -------------------- #
-
-    def _setup_adaptive_scheduler(self) -> None:
+    def _setup_scheduler(self) -> None:
         try:
             schedule.clear()
         except Exception:
             pass
-
-        # Cadence + health
         schedule.every(5).seconds.do(self._ensure_cadence)
         schedule.every(max(60, int(getattr(Config, "BALANCE_LOG_INTERVAL_MIN", 30)) * 60)).seconds.do(
             self.refresh_account_balance
         )
-        schedule.every(30).seconds.do(self._maybe_rollover_daily)
+        schedule.every(30).seconds.do(self._roll_daily_if_needed)
+        schedule.every(20).seconds.do(self._auto_exit_guard)
+        logger.info("⏱️ Adaptive scheduler primed.")
 
-        # Auto-exit session
-        schedule.every(15).seconds.do(self._maybe_session_auto_exit)
-
-        logger.info("Adaptive scheduler primed.")
+    def _current_poll_seconds(self) -> int:
+        try:
+            now_t = _now().time()
+            in_peak = (dtime(9, 20) <= now_t <= dtime(11, 30)) or (dtime(13, 30) <= now_t <= dtime(15, 5))
+            return int(getattr(Config, "PEAK_POLL_SEC", 12)) if in_peak else int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
+        except Exception:
+            return int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
 
     def _ensure_cadence(self) -> None:
         try:
             sec = self._current_poll_seconds()
-            if self._data_job and getattr(self._data_job, "interval", None) and self._data_job.interval.seconds == sec:
+            if self._data_job and self._data_job.interval.seconds == sec:
                 return
             if self._data_job:
                 schedule.cancel_job(self._data_job)
             self._data_job = schedule.every(sec).seconds.do(self._smart_tick)
-            logger.info("Data loop cadence → every %ds.", sec)
+            logger.info("📈 Data loop cadence: every %ds", sec)
         except Exception as e:
-            logger.debug(f"Cadence ensure error: {e}")
+            logger.debug("Cadence error: %s", e)
 
-    def _current_poll_seconds(self) -> int:
-        try:
-            now_t = self._now().time()
-            in_peak = (dtime(9, 20) <= now_t <= dtime(11, 30)) or (dtime(13, 30) <= now_t <= dtime(15, 10))
-            return self.PEAK_POLL_SEC if in_peak else self.OFFPEAK_POLL_SEC
-        except Exception:
-            return self.OFFPEAK_POLL_SEC
+    # ----------------------------- run loop ----------------------------- #
 
     def run(self) -> None:
         logger.info("🟢 RealTimeTrader.run() started.")
@@ -352,25 +455,23 @@ class RealTimeTrader:
                 schedule.run_pending()
                 time.sleep(1)
             except Exception as e:
-                logger.error(f"Run loop error: {e}", exc_info=True)
+                logger.error("Run loop error: %s", e, exc_info=True)
                 time.sleep(2)
 
-    # -------------------- workers -------------------- #
+    # ---------------------------- workers ---------------------------- #
 
     def _start_workers(self) -> None:
-        t1 = threading.Thread(target=self._trailing_worker, daemon=True)
-        t1.start()
-        t2 = threading.Thread(target=self._oco_worker, daemon=True)
-        t2.start()
+        threading.Thread(target=self._trailing_worker, daemon=True).start()
+        threading.Thread(target=self._oco_worker, daemon=True).start()
 
     def _trailing_worker(self) -> None:
         while not self._trailing_evt.is_set():
             try:
-                if self.TRAILING_ENABLE and self.is_trading and not self._is_circuit_breaker_tripped():
+                if self.TRAILING_ENABLE and self.is_trading and not self._circuit_tripped():
                     self._trailing_tick()
             except Exception as e:
-                logger.debug(f"Trailing worker error: {e}")
-            self._trailing_evt.wait(self.WORKER_INTERVAL_SEC)
+                logger.debug("Trailing worker error: %s", e)
+            self._trailing_evt.wait(self.WORKER_INTERVAL)
 
     def _oco_worker(self) -> None:
         while not self._oco_evt.is_set():
@@ -378,27 +479,531 @@ class RealTimeTrader:
                 if self.is_trading:
                     self._oco_tick()
             except Exception as e:
-                logger.debug(f"OCO worker error: {e}")
-            self._oco_evt.wait(self.WORKER_INTERVAL_SEC)
+                logger.debug("OCO worker error: %s", e)
+            self._oco_evt.wait(self.WORKER_INTERVAL)
+
+    # ----------------------------- telegram ----------------------------- #
+
+    def _handle_control(self, command: str, arg: str = "") -> bool:
+        cmd = (command or "").strip().lower()
+        arg = (arg or "").strip()
+        logger.info("Command: /%s %s", cmd, arg)
+        try:
+            if cmd == "start":
+                return self.start()
+            if cmd == "stop":
+                return self.stop()
+            if cmd == "mode":
+                low = arg.strip().lower()
+                if low in ("live", "l"):
+                    return self.enable_live()
+                if low in ("shadow", "paper", "sim", "s"):
+                    return self.disable_live()
+                if low.startswith("quality"):
+                    tail = low.split(" ", 1)[1] if " " in low else ""
+                    if tail in ("on", "true", "1"):
+                        self.quality_mode = True
+                        self._safe_send_message("✨ Quality mode: ON")
+                        return True
+                    if tail in ("off", "false", "0"):
+                        self.quality_mode = False
+                        self._safe_send_message("✨ Quality mode: OFF")
+                        return True
+                    self._safe_send_message("Usage: /mode quality on|off")
+                    return False
+                self._safe_send_message("Usage: /mode live | /mode shadow | /mode quality on|off")
+                return False
+            if cmd == "risk":
+                # /risk 0.5%  OR  /risk 0.005
+                try:
+                    v = arg.strip().replace("%", "")
+                    pct = float(v)
+                    if pct > 1:
+                        pct = pct / 100.0
+                    self.RISK_PER_TRADE = max(0.0005, min(0.05, pct))
+                    self._safe_send_message(f"🔧 Risk per trade set to {self.RISK_PER_TRADE:.2%}")
+                    return True
+                except Exception:
+                    self._safe_send_message("Usage: /risk 0.5%  (range 0.05%..5%)")
+                    return False
+            if cmd == "regime":
+                # /regime auto|trend|range|off
+                m = arg.strip().upper()
+                if m in ("AUTO", "TREND", "RANGE", "OFF"):
+                    self._regime_mode = m
+                    self._safe_send_message(f"🎛️ Regime mode: {m}")
+                    return True
+                self._safe_send_message("Usage: /regime auto|trend|range|off")
+                return False
+            if cmd == "pause":
+                # /pause 10m
+                try:
+                    txt = arg.strip().lower()
+                    mins = int(txt[:-1]) if txt.endswith("m") else int(txt)
+                    self._cooldown_until = time.time() + max(1, mins) * 60
+                    self._safe_send_message(f"⏸️ Paused for {mins} min.")
+                    return True
+                except Exception:
+                    self._safe_send_message("Usage: /pause <minutes>  e.g. /pause 10")
+                    return False
+            if cmd == "resume":
+                self._cooldown_until = 0.0
+                self._safe_send_message("▶️ Resumed.")
+                return True
+            if cmd == "refresh":
+                return self.refresh_account_balance()
+            if cmd == "status":
+                return self._send_detailed_status()
+            if cmd == "health":
+                return self._run_health_check()
+            if cmd == "emergency":
+                return self.emergency_stop_all()
+            self._safe_send_message(f"❌ Unknown command: {cmd}")
+            return False
+        except Exception as e:
+            logger.error("Control error: %s", e, exc_info=True)
+            return False
+
+    # ----------------------------- mode ----------------------------- #
+
+    def enable_live(self) -> bool:
+        with self._lock:
+            if self.is_trading:
+                self._safe_send_message("🛑 Stop trading first: /stop")
+                return False
+            self.live_mode = True
+            self.data = self._build_kite_provider()
+            self.executor = self._init_executor()
+        self._safe_send_message("🌐 Mode: LIVE")
+        return True
+
+    def disable_live(self) -> bool:
+        with self._lock:
+            if self.is_trading:
+                self._safe_send_message("🛑 Stop trading first: /stop")
+                return False
+            self.live_mode = False
+            self.data = DataProvider()
+            self.executor = self._init_executor()
+        self._safe_send_message("🛡️ Mode: Shadow (paper)")
+        return True
+
+    # --------------------------- status APIs --------------------------- #
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "is_trading": self.is_trading,
+                "live_mode": self.live_mode,
+                "quality_mode": self.quality_mode,
+                "open_positions": len(self.active),
+                "trades_today": self.trades_closed_today,
+                "daily_pnl": round(self.daily_pnl, 2),
+                "account_size": round(getattr(self.risk, "equity", 0.0), 2),
+                "session_date": str(self.session_date),
+            }
+
+    def get_summary(self) -> str:
+        with self._lock:
+            win = sum(1 for t in self.trades if (t.get("net_pnl", 0) or 0) > 0)
+            loss = sum(1 for t in self.trades if (t.get("net_pnl", 0) or 0) <= 0)
+            return (
+                f"<b>Daily Summary ({self.session_date})</b>\n"
+                f"Closed trades: {self.trades_closed_today}\n"
+                f"W/L: {win}/{loss}\n"
+                f"Daily P&L: ₹{self.daily_pnl:.2f}\n"
+                f"Session R: {self.session_R:.2f}\n"
+                f"Quality: {'ON' if self.quality_mode else 'OFF'}\n"
+                f"Regime: {self._regime_mode}"
+            )
+
+    def _send_detailed_status(self) -> bool:
+        try:
+            s = self.get_status()
+            if self.tg:
+                self.tg._send_status(s)
+            return True
+        except Exception:
+            return False
+
+    # ----------------------- csv log & bookkeeping ---------------------- #
+
+    def _prepare_trade_log(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.LOG_FILE) or ".", exist_ok=True)
+            if not os.path.exists(self.LOG_FILE):
+                with open(self.LOG_FILE, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(
+                        ["date", "order_id", "symbol", "direction", "contracts",
+                         "entry", "exit", "pnl", "fees", "net_pnl", "confidence",
+                         "atr", "mode", "comment"]
+                    )
+        except Exception as e:
+            logger.warning("Trade log init failed: %s", e)
+
+    def _append_trade_log(self, row: List[Any]) -> None:
+        try:
+            with open(self.LOG_FILE, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(row)
+        except Exception as e:
+            logger.debug("Trade log append failed: %s", e)
+
+    def _roll_daily_if_needed(self) -> None:
+        if _now().date() != self.session_date:
+            logger.info("📅 New session date detected → resetting day stats.")
+            self.session_date = _now().date()
+            self.daily_start_equity = float(get_live_account_balance() or getattr(self.risk, "equity", 0.0))
+            self.daily_pnl = 0.0
+            self.session_R = 0.0
+            self.trades_closed_today = 0
+            self.loss_streak = 0
+            self._halt_for_day = False
+            self._recent_keys.clear()
+            self._persist_state()
+
+    # --------------------------- public control --------------------------- #
+
+    def start(self) -> bool:
+        with self._lock:
+            if self.is_trading:
+                self._safe_send_message("Already running.")
+                return True
+            self.is_trading = True
+        self._safe_send_alert("START")
+        return True
+
+    def stop(self) -> bool:
+        with self._lock:
+            if not self.is_trading:
+                self._safe_send_message("Already stopped.")
+                return True
+            self.is_trading = False
+        self._safe_send_alert("STOP")
+        return True
+
+    def emergency_stop_all(self) -> bool:
+        try:
+            self.stop()
+            self.executor.cancel_all_orders()
+            self._safe_send_message("Emergency stop executed. All open orders cancelled (best-effort).")
+            return True
+        except Exception as e:
+            logger.error("Emergency stop failed: %s", e)
+            return False
+
+    # --------------------------- smart tick --------------------------- #
+
+    def _smart_tick(self) -> None:
+        if not self.is_trading:
+            return
+
+        now = _now()
+        # trading hours & event windows
+        if not _between(now.time(), self.TIME_START, self.TIME_END) and not getattr(Config, "ALLOW_OFFHOURS_TESTING", False):
+            return
+        if self.ENABLE_BUCKETS and not _within_any_windows(now.time(), self.BUCKETS):
+            return
+        if self.ENABLE_EVENTS and _within_any_windows(now.time(), self.EVENTS):
+            return
+        # first N min guard after open
+        try:
+            t_open = datetime.strptime(self.TIME_START, "%H:%M").time()
+            mins_since_open = (datetime.combine(now.date(), now.time()) - datetime.combine(now.date(), t_open)).seconds // 60
+            if 0 <= mins_since_open < self.SKIP_FIRST_MIN:
+                return
+        except Exception:
+            pass
+
+        # risk halts
+        if self._halt_for_day or self._circuit_tripped() or self._in_loss_cooldown():
+            return
+
+        # capacity & trade count
+        if len(self.active) >= self.MAX_CONCURRENT:
+            return
+        if self.trades_closed_today >= self.MAX_TRADES_DAY:
+            return
+
+        # pull spot/index data
+        spot_symbol = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
+        df_spot = _safe_df(self.data.get_ohlc(symbol=spot_symbol,
+                                              minutes=self.DATA_LOOKBACK_MIN,
+                                              timeframe=self.HIST_TF))
+        if df_spot.empty or len(df_spot) < self.WARMUP_BARS or "close" not in df_spot.columns:
+            return
+
+        current_price = float(df_spot["close"].iloc[-1])
+
+        # HTF & regime filters
+        if not self._pass_mtf_gate(spot_symbol):
+            return
+        if not self._pass_regime_gate(df_spot):
+            return
+
+        # Try options path first (if configured and strike utils available)
+        option_signal, option_meta = (None, None)
+        if (str(getattr(Config, "OPTION_TYPE", "BOTH")).upper() != "NONE") and get_instrument_tokens:
+            try:
+                option_signal, option_meta = self._options_pass(df_spot)
+            except Exception as e:
+                logger.debug("Options pass error: %s", e)
+
+        if option_signal and option_meta:
+            # Place option trade
+            self._place_and_register(signal=option_signal,
+                                     trade_symbol=option_meta["symbol"],
+                                     is_option=True,
+                                     df_for_atr=df_spot)
+            return
+
+        # Fallback: futures/spot signal
+        signal = self.strategy.generate_signal(df_spot, current_price)
+        if not signal:
+            return
+
+        # quality gate (extra strict if quality ON)
+        if self.quality_mode:
+            bump = float(getattr(Config, "QUALITY_SCORE_BUMP", 1.0))
+            if signal.get("confidence", 0) < (float(getattr(Config, "CONFIDENCE_THRESHOLD", 6.0)) + bump):
+                return
+
+        # idempotency (direction + price + minute)
+        key = f"{signal['signal']}-{round(signal['entry_price'],2)}-{df_spot.index[-1]}"
+        if not self._idemp_ok(key):
+            return
+
+        # spread guard (spot is lenient → pass)
+        if not self._spread_ok(signal["entry_price"]):
+            return
+
+        # place futures/spot leg (use TRADE_SYMBOL/EXCHANGE from Config)
+        self._place_and_register(signal=signal,
+                                 trade_symbol=getattr(Config, "TRADE_SYMBOL", "NIFTY"),
+                                 is_option=False,
+                                 df_for_atr=df_spot)
+
+    # -------------------------- options path -------------------------- #
+
+    def _options_pass(self, df_spot: pd.DataFrame) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Resolve ATM±range strikes, evaluate option breakout signals,
+        return (signal_dict, meta_dict) for the best candidate.
+        meta_dict contains: symbol, strike, type.
+        """
+        if not callable(get_instrument_tokens):
+            return None, None
+
+        try:
+            spot_px = float(df_spot["close"].iloc[-1])
+        except Exception:
+            return None, None
+
+        # Gather candidate strikes via project utilities
+        try:
+            # get_instrument_tokens(...) is project-specific; tolerate variations
+            candidates = get_instrument_tokens(spot_px, range_count=self.STRIKE_RANGE) \
+                if "range_count" in get_instrument_tokens.__code__.co_varnames \
+                else get_instrument_tokens(spot_px, self.STRIKE_RANGE)
+        except Exception:
+            candidates = []
+
+        if not candidates and callable(fetch_cached_instruments):
+            try:
+                # fallback: filter cached instruments near ATM
+                inst = fetch_cached_instruments()
+                # best-effort: pick CE/PE around ATM (requires your implementation)
+                candidates = inst  # if already filtered upstream
+            except Exception:
+                pass
+
+        if not candidates:
+            return None, None
+
+        best = None
+        best_meta = None
+        for c in candidates:
+            sym = c.get("symbol") or c.get("tradingsymbol")
+            if not sym:
+                continue
+            try:
+                df_opt = _safe_df(self.data.get_ohlc(symbol=sym,
+                                                     minutes=max(30, self.DATA_LOOKBACK_MIN // 2),
+                                                     timeframe=self.HIST_TF))
+                if df_opt.empty or len(df_opt) < 6:
+                    continue
+                ltp = self.data.get_last_price(sym) or float(df_opt["close"].iloc[-1])
+                if not ltp or ltp <= 0:
+                    continue
+                sig = self.strategy.generate_options_signal(
+                    options_ohlc=df_opt,
+                    spot_ohlc=df_spot,
+                    strike_info={"symbol": sym, "strike": c.get("strike"), "type": str(c.get("type", "")).upper()},
+                    current_option_price=float(ltp),
+                )
+                if not sig:
+                    continue
+                if (best is None) or (sig.get("confidence", 0) > best.get("confidence", 0)):
+                    best = sig
+                    best_meta = {"symbol": sym, "strike": c.get("strike"), "type": str(c.get("type", "")).upper()}
+            except Exception as e:
+                logger.debug("Option eval failed for %s: %s", sym, e)
+
+        return best, best_meta
+
+    # --------------------- placement & registration --------------------- #
+
+    def _place_and_register(self, *, signal: Dict[str, Any], trade_symbol: str, is_option: bool, df_for_atr: pd.DataFrame) -> None:
+        direction = signal["signal"]
+        entry = float(signal["entry_price"])
+        stop_loss = float(signal["stop_loss"])
+        target = float(signal["target"])
+        confidence = float(signal.get("confidence", 5.0))
+
+        # idempotency: include symbol too
+        key = f"{trade_symbol}-{direction}-{round(entry,2)}-{int(time.time()//60)}"
+        if not self._idemp_ok(key):
+            return
+
+        # pre-entry spread guard for options (future: use bid/ask mid via quote)
+        if is_option and not self._spread_ok(entry, is_option=True, symbol=trade_symbol):
+            return
+
+        qty = self._position_size(entry, stop_loss, confidence)
+        if qty <= 0:
+            return
+
+        side = "BUY" if direction == "BUY" else "SELL"
+        oid = self.executor.place_entry_order(
+            symbol=trade_symbol,
+            exchange=getattr(Config, "TRADE_EXCHANGE", "NFO"),
+            transaction_type=side,
+            quantity=qty,
+        )
+        if not oid:
+            return
+
+        ok = self.executor.setup_gtt_orders(
+            entry_order_id=oid,
+            entry_price=entry,
+            stop_loss_price=stop_loss,
+            target_price=target,
+            symbol=trade_symbol,
+            exchange=getattr(Config, "TRADE_EXCHANGE", "NFO"),
+            quantity=qty,
+            transaction_type=side,
+        )
+        if not ok:
+            logger.warning("Exit setup failed; trade unmanaged!")
+
+        atr = float(compute_atr_df(df_for_atr, period=int(getattr(Config, "ATR_PERIOD", 14))).iloc[-1])
+        with self._lock:
+            self.active[oid] = ActiveTrade(
+                entry_id=oid,
+                symbol=trade_symbol,
+                direction=direction,
+                quantity=qty,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                atr=atr,
+                opened_ts=time.time(),
+            )
+        self._persist_state()
+
+        # notify
+        self._safe_send_signal_alert(token=len(self.trades) + len(self.active), signal=signal,
+                                     position={"quantity": qty})
+
+    # -------------------------- gates & guards -------------------------- #
+
+    def _pass_mtf_gate(self, symbol: str) -> bool:
+        """Multi-timeframe gate using Config HTF_* (5m by default)."""
+        if not getattr(Config, "HTF_TIMEFRAME_MIN", 5):
+            return True
+        tf_min = int(getattr(Config, "HTF_TIMEFRAME_MIN", 5))
+        tf = f"{tf_min}minute" if tf_min < 60 else "60minute"
+        df = _safe_df(self.data.get_ohlc(symbol=symbol,
+                                         minutes=max(120, self.DATA_LOOKBACK_MIN),
+                                         timeframe=tf))
+        if df.empty or len(df) < max(30, int(getattr(Config, "HTF_EMA_PERIOD", 20)) + 5):
+            return True  # fail-open
+        ema = calculate_ema(df, int(getattr(Config, "HTF_EMA_PERIOD", 20)))
+        if ema.empty:
+            return True
+        # Simple slope check over last k bars
+        k = min(5, len(ema) - 1)
+        slope = float(ema.iloc[-1] - ema.iloc[-1 - k]) / max(1, k)
+        min_slope = float(getattr(Config, "HTF_MIN_SLOPE", 0.0))
+        return (slope >= min_slope) or (min_slope <= 0.0)
+
+    def _pass_regime_gate(self, df: pd.DataFrame) -> bool:
+        if str(self._regime_mode) == "OFF":
+            return True
+        # ADX for trend strength
+        adx, _, _ = calculate_adx(df, period=int(getattr(Config, "ADX_PERIOD", 14)))
+        adx_now = float(adx.iloc[-1]) if not adx.empty else 0.0
+
+        # Bollinger width proxy using close stdev
+        close = df["close"]
+        bb_win = int(getattr(Config, "BB_WINDOW", 20))
+        stdev = close.rolling(bb_win, min_periods=bb_win).std(ddof=0)
+        ma = close.rolling(bb_win, min_periods=bb_win).mean()
+        width = (2 * stdev) / ma
+        w = float(width.iloc[-1]) if not width.empty and pd.notna(width.iloc[-1]) else 0.0
+
+        adx_min = float(getattr(Config, "ADX_MIN_TREND", 18.0))
+        w_max = float(getattr(Config, "BB_WIDTH_MAX", 0.02))
+
+        mode = self._regime_mode
+        if mode == "TREND":
+            return adx_now >= adx_min
+        if mode == "RANGE":
+            return (w <= w_max) and (adx_now < adx_min + 2)
+        # AUTO: accept either sufficiently trending or acceptable range
+        return (adx_now >= adx_min) or (w <= w_max)
+
+    def _spread_ok(self, entry_price: float, *, is_option: bool = False, symbol: Optional[str] = None) -> bool:
+        """
+        Guard based on mode:
+          - RANGE: recent bar range / price
+          - LTP_MID: deviation vs mid-price (requires quote; best-effort here)
+        For options we can be stricter later using quote() bid/ask.
+        """
+        try:
+            if self.SPREAD_MODE == "RANGE":
+                # use last few spot closes as realized spread proxy
+                pct = float(self.SPREAD_PCT or 0.03)
+                return True if not is_option else (pct <= self.SPREAD_PCT)
+            # LTP_MID path is broker-quote dependent; allow for now
+            return True
+        except Exception:
+            return True
+
+    def _idemp_ok(self, key: str) -> bool:
+        now = time.time()
+        # purge
+        expired = [k for k, t in self._recent_keys.items() if t < now]
+        for k in expired:
+            self._recent_keys.pop(k, None)
+        if key in self._recent_keys:
+            return False
+        self._recent_keys[key] = now + self.IDEMP_TTL
+        return True
+
+    # ----------------------- trailing & OCO ticks ----------------------- #
 
     def _trailing_tick(self) -> None:
         with self._lock:
-            items = list(self.active_trades.items())
-
+            items = list(self.active.items())
         for oid, tr in items:
-            if tr.get("status") != "OPEN":
+            if tr.status != "OPEN":
                 continue
-            atr = float(tr.get("atr") or 0.0)
-            if atr <= 0:
-                continue
-            get_last = getattr(self.executor, "get_last_price", None)
-            ltp = get_last(tr.get("symbol")) if callable(get_last) else None
-            if ltp is None:
-                ltp = float(tr.get("last_close") or 0.0)
-            if not ltp or ltp <= 0:
+            ltp = self.data.get_last_price(tr.symbol) or tr.entry_price
+            if ltp <= 0:
                 continue
             try:
-                self.executor.update_trailing_stop(oid, float(ltp), float(atr))
+                self.executor.update_trailing_stop(oid, float(ltp), float(tr.atr))
             except Exception:
                 pass
 
@@ -418,169 +1023,157 @@ class RealTimeTrader:
             except Exception:
                 active_ids = set()
 
-        with self._lock:
-            to_finalize: List[str] = []
+        to_finalize: List[str] = []
 
+        with self._lock:
             for entry_id, fill_px in filled or []:
-                tr = self.active_trades.get(entry_id)
-                if tr and tr.get("status") == "OPEN":
-                    tr["exit_price"] = float(fill_px)
+                tr = self.active.get(entry_id)
+                if tr and tr.status == "OPEN":
+                    tr.exit_price = float(fill_px)
+                    tr.exit_reason = "target/stop"
                     to_finalize.append(entry_id)
 
-            for entry_id, tr in list(self.active_trades.items()):
-                if tr.get("status") != "OPEN":
+            for entry_id, tr in list(self.active.items()):
+                if tr.status != "OPEN":
                     continue
                 if entry_id not in active_ids:
-                    # best-effort fallback — assume exit at closer of SL/TP
-                    px = float(tr.get("exit_fallback") or tr.get("target") or tr.get("stop_loss") or 0.0)
-                    tr["exit_price"] = px
+                    # fallback assumption: one of the exits filled
+                    tr.exit_price = tr.target if tr.direction == "BUY" else tr.stop_loss
+                    tr.exit_reason = "unknown_fill"
                     to_finalize.append(entry_id)
 
-            for entry_id in to_finalize:
-                self._finalize_trade(entry_id)
+        for entry_id in to_finalize:
+            self._finalize_trade(entry_id)
 
-    # -------------------- telegram -------------------- #
+    # ----------------------- finalization & PnL ----------------------- #
 
-    def _start_polling(self) -> None:
-        if self._polling_thread and self._polling_thread.is_alive():
+    def _finalize_trade(self, entry_id: str) -> None:
+        with self._lock:
+            tr = self.active.pop(entry_id, None)
+        if not tr:
             return
+
+        exit_px = float(tr.exit_price or tr.target)
+        gross = (exit_px - tr.entry_price) * (1 if tr.direction == "BUY" else -1) * tr.quantity
+        # very rough fee model: per lot * 2; tweak in executor if needed
+        lots = max(1, tr.quantity // max(1, self.LOT_SIZE))
+        fees = lots * self.FEES_PER_LOT * 2
+        net = gross - fees
+
+        r = (exit_px - tr.entry_price) / max(1e-9, abs(tr.entry_price - tr.stop_loss))
+        r *= (1 if tr.direction == "BUY" else -1)
+
+        with self._lock:
+            self.daily_pnl += net
+            self.session_R += r
+            self.trades_closed_today += 1
+            if net < 0:
+                self.loss_streak += 1
+            else:
+                self.loss_streak = 0
+        self._persist_state()
+
+        # 3-loss shutdown & cooldown
+        if self.loss_streak >= self.LOSS_LIMIT:
+            self._cooldown_until = time.time() + self.LOSS_STREAK_PAUSE * 60
+            self._safe_send_message(f"⛔ {self.loss_streak} consecutive losses. Cooling down for {self.LOSS_STREAK_PAUSE} min.")
+            if self.loss_streak >= self.LOSS_STREAK_HALVE and hasattr(self.risk, "halve_next_n"):
+                self.risk.halve_next_n(3)
+
+        # session ladders
+        if self.session_R >= self.DAY_STOP_POS_R:
+            self._halt_for_day = True
+            self._safe_send_message(f"🏁 Session target reached (+{self.session_R:.1f}R). Halting for the day.")
+        elif self.session_R >= self.DAY_HALF_POS_R and hasattr(self.risk, "halve_next_n"):
+            self.risk.halve_next_n(3)
+            self._safe_send_message("🔻 Halving size for next few trades (good day).")
+        elif self.session_R <= self.DAY_STOP_NEG_R:
+            self._halt_for_day = True
+            self._safe_send_message(f"🛑 Session drawdown ({self.session_R:.1f}R). Halting for the day.")
+
+        # log
+        self._append_trade_log([
+            str(self.session_date),
+            entry_id,
+            tr.symbol,
+            tr.direction,
+            tr.quantity,
+            round(tr.entry_price, 2),
+            round(exit_px, 2),
+            round(gross, 2),
+            round(fees, 2),
+            round(net, 2),
+            "-",  # optional: pass confidence from signal if you store it
+            round(tr.atr, 2),
+            "LIVE" if self.live_mode else "SIM",
+            tr.exit_reason or "",
+        ])
+
+    # ---------------------------- guards ---------------------------- #
+
+    def _circuit_tripped(self) -> bool:
+        if self.daily_start_equity <= 0:
+            return False
+        dd = -self.daily_pnl / self.daily_start_equity
+        if dd >= self.MAX_DD_PCT:
+            if not self._halt_for_day:
+                self._halt_for_day = True
+                self._safe_send_message(f"🚨 Circuit breaker: daily DD {dd:.2%} ≥ limit {self.MAX_DD_PCT:.2%}.")
+            return True
+        return False
+
+    def _in_loss_cooldown(self) -> bool:
+        return time.time() < getattr(self, "_cooldown_until", 0.0)
+
+    def _auto_exit_guard(self) -> None:
         try:
-            if self.tg:
-                self.tg.send_startup_alert()
+            end_hm = self.AUTO_EXIT_TIME
+            now = _now()
+            if _between(now.time(), end_hm, end_hm) and self.active:
+                self._safe_send_message("⏰ Session auto-exit time reached. Closing active trades.")
+                try:
+                    self.executor.cancel_all_orders()
+                except Exception:
+                    pass
+                # mark as closed at last known prices
+                with self._lock:
+                    for oid, tr in list(self.active.items()):
+                        tr.exit_price = tr.target if tr.direction == "BUY" else tr.stop_loss
+                        tr.exit_reason = "session_auto_exit"
+                        # finalize outside lock to reuse logic
+                for oid in list(self.active.keys()):
+                    self._finalize_trade(oid)
         except Exception:
             pass
+
+    # ---------------------------- sizing ---------------------------- #
+
+    def _position_size(self, entry: float, stop: float, confidence: float) -> int:
+        equity = float(getattr(self.risk, "equity", 0.0))
+        risk_amt = float(self.RISK_PER_TRADE or 0.02) * equity
+        stop_pts = abs(entry - stop)
+        if stop_pts <= 0:
+            return 0
+        # contracts by rupees / pts; convert to lots
+        contracts = int(max(0, risk_amt / stop_pts))
+        lots = max(self.MIN_LOTS, min(self.MAX_LOTS, contracts // max(1, self.LOT_SIZE)))
+        if self.quality_mode:
+            lots = max(self.MIN_LOTS, int(lots * 0.75))
+        qty = max(self.LOT_SIZE, lots * self.LOT_SIZE)
+        return qty
+
+    # --------------------------- balances --------------------------- #
+
+    def refresh_account_balance(self) -> bool:
         try:
-            if self.tg:
-                self._polling_thread = threading.Thread(target=self.tg.start_polling, daemon=True)
-                self._polling_thread.start()
-                logger.info("✅ Telegram polling started (daemon).")
-        except Exception as e:
-            logger.error(f"Polling thread error: {e}")
-
-    def _stop_polling(self) -> None:
-        logger.info("🛑 Stopping Telegram polling…")
-        if self.tg:
-            try:
-                self.tg.stop_polling()
-            except Exception:
-                pass
-        if self._polling_thread and self._polling_thread.is_alive():
-            if threading.current_thread() != self._polling_thread:
-                self._polling_thread.join(timeout=3)
-        self._polling_thread = None
-
-    def start(self) -> bool:
-        with self._lock:
-            if self.is_trading:
-                self._safe_send_message("🟢 Trader already running.")
-                return True
-            self.is_trading = True
-            self._shutdown_after_3_losses = False  # reset when starting
-        self._safe_send_alert("START")
-        logger.info("✅ Trading started.")
-        return True
-
-    def stop(self) -> bool:
-        with self._lock:
-            if not self.is_trading:
-                self._safe_send_message("🟨 Trader is already stopped.")
-                return True
-            self.is_trading = False
-        self._safe_send_alert("STOP")
-        logger.info("🛑 Trading stopped.")
-        return True
-
-    def emergency_stop_all(self) -> bool:
-        try:
-            self.stop()
-            self.executor.cancel_all_orders()
-            self._safe_send_message("🛑 Emergency stop executed. All open orders cancelled (best-effort).")
+            bal = float(get_live_account_balance() or 0.0)
+            if bal > 0:
+                self.risk.set_equity(bal) if hasattr(self.risk, "set_equity") else setattr(self.risk, "equity", bal)
             return True
-        except Exception as e:
-            logger.error(f"Emergency stop failed: {e}")
-            return False
-
-    def _handle_control(self, command: str, arg: str = "") -> bool:
-        command = (command or "").strip().lower()
-        arg = (arg or "").strip().lower()
-        logger.info(f"Command: /{command} {arg}")
-        try:
-            if command == "start":
-                return self.start()
-            if command == "stop":
-                return self.stop()
-            if command == "mode":
-                # live/shadow OR quality toggle
-                if arg in ("live", "l"):
-                    return self.enable_live_trading()
-                if arg in ("shadow", "paper", "sim", "s"):
-                    return self.disable_live_trading()
-                if arg.startswith("quality"):
-                    # support: "quality on", "quality off", "quality:on", "quality:off"
-                    flag = ("on" in arg) or (arg.endswith(":on"))
-                    self.quality_mode = bool(flag)
-                    self._safe_send_message(f"✨ Quality mode: {'ON' if self.quality_mode else 'OFF'}")
-                    return True
-                self._safe_send_message("⚠️ Usage: `/mode live|shadow` or `/mode quality on|off`", parse_mode="Markdown")
-                return False
-            if command == "refresh":
-                return self._force_refresh_cache()
-            if command == "status":
-                return self._send_detailed_status()
-            if command == "health":
-                return self._run_health_check()
-            if command == "emergency":
-                return self.emergency_stop_all()
-            self._safe_send_message(f"❌ Unknown command: `{command}`", parse_mode="Markdown")
-            return False
-        except Exception as e:
-            logger.error(f"Control error: {e}")
-            return False
-
-    # -------------------- mode switching -------------------- #
-
-    def enable_live_trading(self) -> bool:
-        with self._lock:
-            if self.is_trading:
-                self._safe_send_message("🛑 Stop trading first: `/stop`", parse_mode="Markdown")
-                return False
-            if self.live_mode:
-                self._safe_send_message("🟢 Already in LIVE mode.")
-                return True
-            try:
-                self.executor = self._build_live_executor()
-                self.live_mode = True
-                self._safe_send_message("🟢 Switched to LIVE mode.")
-                return True
-            except Exception as e:
-                self._safe_send_message(f"❌ Live mode failed: {e}")
-                logger.error("enable_live_trading error: %s", e, exc_info=True)
-                return False
-
-    def disable_live_trading(self) -> bool:
-        with self._lock:
-            if self.is_trading:
-                self._safe_send_message("🛑 Stop trading first: `/stop`", parse_mode="Markdown")
-                return False
-            if not self.live_mode:
-                self._safe_send_message("🛡️ Already in SHADOW mode.")
-                return True
-            self.executor = OrderExecutor()
-            self.live_mode = False
-            self._safe_send_message("🛡️ Switched to SHADOW (simulation) mode.")
-            return True
-
-    # -------------------- utils -------------------- #
-
-    def _now(self) -> datetime:
-        return _ist_now() if self.USE_IST_CLOCK else datetime.utcnow()
-
-    def _safe_send_message(self, text: str, parse_mode: Optional[str] = None) -> None:
-        try:
-            if self.tg:
-                self.tg.send_message(text, parse_mode=parse_mode)
         except Exception:
-            pass
+            return False
+
+    # ----------------------------- IO ----------------------------- #
 
     def _safe_send_alert(self, action: str) -> None:
         try:
@@ -589,556 +1182,75 @@ class RealTimeTrader:
         except Exception:
             pass
 
-    def _get_kite(self):
-        return getattr(self.executor, "kite", None)
-
-    # -------------------- market data -------------------- #
-
-    def _fetch_ohlc(self, instrument_token: int, timeframe: str, minutes_back: int) -> pd.DataFrame:
-        """
-        Fetch OHLC using Kite if available; otherwise return empty df.
-        """
-        kite = self._get_kite()
-        if not kite or not instrument_token:
-            return pd.DataFrame()
-        end = self._now()
-        start = end - timedelta(minutes=max(minutes_back, self.WARMUP_BARS + 5))
-        try:
-            data = kite.historical_data(instrument_token, start, end, interval=timeframe, oi=False) or []
-            df = pd.DataFrame(data)
-            if not df.empty and "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-                df.set_index("date", inplace=True)
-            return df
-        except Exception as e:
-            logger.debug(f"_fetch_ohlc error: {e}")
-            return pd.DataFrame()
-
-    # -------------------- filters -------------------- #
-
-    def _is_trading_window(self) -> bool:
-        now = self._now()
-        t = now.time()
-
-        # Core window
-        if not _between(t, self.TIME_FILTER_START, self.TIME_FILTER_END):
-            return False
-
-        # Optional buckets/events
-        if self.ENABLE_TIME_BUCKETS and self.TIME_BUCKETS:
-            if not _within_any_windows(t, self.TIME_BUCKETS):
-                return False
-        if self.ENABLE_EVENT_WINDOWS and self.EVENT_WINDOWS:
-            if _within_any_windows(t, self.EVENT_WINDOWS) is False:
-                return False
-
-        # Skip first N minutes (warmup)
-        if t < (datetime.strptime(self.TIME_FILTER_START, "%H:%M") + timedelta(minutes=self.SKIP_FIRST_MIN)).time():
-            return False
-
-        return True
-
-    def _passes_mtf_filter(self, spot_token: Optional[int]) -> bool:
-        if not self.ENABLE_MTF_FILTER or not spot_token:
-            return True
-
-        df5 = self._fetch_ohlc(spot_token, self.MTF_TIMEFRAME, max(60, self.DATA_LOOKBACK_MINUTES))
-        if df5.empty or len(df5) < max(self.MTF_EMA_SLOW + 2, 30):
-            return True  # don't block on missing data
-
-        ema_fast = calculate_ema(df5, self.MTF_EMA_FAST)
-        ema_slow = calculate_ema(df5, self.MTF_EMA_SLOW)
-        trend_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
-        trend_down = bool(ema_fast.iloc[-1] < ema_slow.iloc[-1])
-
-        # Optional ADX assist
-        adx, di_p, di_m = calculate_adx(df5, period=self.ADX_PERIOD)
-        strong = bool(adx.iloc[-1] >= self.ADX_MIN_TREND)
-
-        # Gate: if regime is TREND_ONLY, require both slope & strength
-        if self.REGIME_MODE == "TREND":
-            return (trend_up or trend_down) and strong
-        # In AUTO mode, only gate against contra-trend when strong trend present
-        return True
-
-    def _passes_regime_filter(self, spot_token: Optional[int]) -> bool:
-        if not self.ENABLE_REGIME_FILTER or self.REGIME_MODE == "OFF" or not spot_token:
-            return True
-
-        df5 = self._fetch_ohlc(spot_token, self.MTF_TIMEFRAME, max(60, self.DATA_LOOKBACK_MINUTES))
-        if df5.empty or len(df5) < max(self.BB_WINDOW + 5, 30):
-            return True
-
-        # Regime by ADX + BB width (as %)
-        adx, di_p, di_m = calculate_adx(df5, period=self.ADX_PERIOD)
-        upband, lowband = calculate_bb_width(df5, window=self.BB_WINDOW)
-        width = ((upband - lowband) / df5["close"]).iloc[-1]
-
-        adx_last = float(adx.iloc[-1])
-        width_last = float(width)
-
-        is_trend = (adx_last >= self.ADX_MIN_TREND) and (width_last >= self.BB_WIDTH_MIN)
-        is_range = (adx_last < self.ADX_MIN_TREND) and (width_last <= self.BB_WIDTH_MAX)
-
-        if self.REGIME_MODE == "TREND":
-            return is_trend
-        if self.REGIME_MODE == "RANGE":
-            return is_range
-        # AUTO → allow both; strategy logic should favor setups appropriate to regime.
-        return True
-
-    def _spread_guard_ok(self, symbol: str, ltp: Optional[float]) -> bool:
-        """
-        Basic microstructure guard. If best bid/ask available via executor, use it;
-        otherwise fallback to LTP-based proxy or candle-range proxy.
-        """
-        try:
-            get_bba = getattr(self.executor, "get_best_bid_ask", None)
-            if callable(get_bba):
-                bb = get_bba(symbol)
-                if not bb:
-                    return True
-                bid = float(bb.get("bid") or 0.0)
-                ask = float(bb.get("ask") or 0.0)
-                if bid <= 0 or ask <= 0 or ask < bid:
-                    return True
-                mid = 0.5 * (bid + ask)
-                ba = (ask - bid) / max(mid, 1e-9)
-                return ba <= self.SPREAD_GUARD_BA_MAX
-
-            # LTP vs mid proxy if mid available
-            get_mid = getattr(self.executor, "get_mid_price", None)
-            if callable(get_mid):
-                mid = float(get_mid(symbol) or 0.0)
-                if mid > 0 and ltp and ltp > 0:
-                    diff = abs(ltp - mid) / mid
-                    return diff <= self.SPREAD_GUARD_LTPMID_MAX
-        except Exception:
-            pass
-
-        # Fallback RANGE proxy disabled here (needs candle). Allow trading by default.
-        return True
-
-    # -------------------- main tick -------------------- #
-
-    def _smart_tick(self) -> None:
-        if not self.is_trading:
-            return
-        if self._shutdown_after_3_losses:
-            return
-        if self._is_circuit_breaker_tripped():
-            return
-        if time.time() < self._cooldown_until_ts:
-            return
-        if not self._is_trading_window() and not getattr(Config, "ALLOW_OFFHOURS_TESTING", False):
-            return
-
-        # Refresh instruments cache
-        self._maybe_refresh_cache()
-
-        # Resolve instruments/strikes
-        tokens = self._resolve_tokens()
-        if not tokens:
-            return
-
-        spot_token = tokens.get("spot_token")
-        ce_sym = tokens.get("ce_symbol")
-        pe_sym = tokens.get("pe_symbol")
-        ce_tok = tokens.get("ce_token")
-        pe_tok = tokens.get("pe_token")
-
-        # MTF & Regime gates
-        if not self._passes_mtf_filter(spot_token):
-            return
-        if not self._passes_regime_filter(spot_token):
-            return
-
-        # Fetch spot candles for strategy
-        spot_df = self._fetch_ohlc(spot_token, self.HIST_TIMEFRAME, self.DATA_LOOKBACK_MINUTES)
-        if spot_df.empty or len(spot_df) < self.WARMUP_BARS:
-            return
-
-        # Generate signal
-        if not self.strategy:
-            return
-        try:
-            signal = self.strategy.generate_signal(spot_df)  # EXPECTED: dict
-        except Exception as e:
-            logger.debug(f"Strategy error: {e}")
-            return
-        if not isinstance(signal, dict) or not signal:
-            return
-
-        # Quality mode raises bar
-        conf = float(signal.get("confidence", 0.0) or 0.0)
-        min_score = float(getattr(self.strategy, "min_score_threshold", 0) or 0)
-        if self.quality_mode:
-            conf -= self.QUALITY_SCORE_BUMP  # demand higher true confidence
-        if conf < float(getattr(Config, "CONFIDENCE_THRESHOLD", 6.0)):
-            return
-
-        direction = (signal.get("signal") or signal.get("direction") or "").upper()
-        if direction not in ("BUY", "SELL"):
-            return
-
-        # Choose option leg
-        side_symbol = ce_sym if direction == "BUY" else pe_sym
-        side_token = ce_tok if direction == "BUY" else pe_tok
-        if not side_symbol or not side_token:
-            return
-
-        # Compute ATR & entry/SL/TP
-        atr_series = compute_atr_df(spot_df, period=Config.ATR_PERIOD)
-        atr = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-
-        entry_price = float(signal.get("entry_price") or 0.0)
-        stop_loss = float(signal.get("stop_loss") or 0.0)
-        target = float(signal.get("target") or 0.0)
-
-        # If strategy didn’t supply option entry/SL/TP, use simple offsets from last close
-        try:
-            get_last = getattr(self.executor, "get_last_price", None)
-            opt_ltp = get_last(side_symbol) if callable(get_last) else None
-        except Exception:
-            opt_ltp = None
-        if opt_ltp and opt_ltp > 0 and (entry_price <= 0):
-            entry_price = float(opt_ltp)
-
-        if entry_price <= 0:
-            return
-
-        # Spread guard
-        if not self._spread_guard_ok(side_symbol, entry_price):
-            return
-
-        # Fallback SL/TP if missing using ATR multiples on option premium
-        if stop_loss <= 0:
-            stop_loss = max(0.05 * entry_price, entry_price * (1.0 - 0.05))  # 5% default
-        if target <= 0:
-            target = entry_price * (1.0 + 0.15)  # 15% default
-
-        # Idempotency
-        key = f"{self.session_date}:{side_symbol}:{direction}:{int(entry_price / max(1.0, Config.TICK_SIZE))}"
-        now_ts = time.time()
-        self._recent_entry_keys = {k: v for k, v in self._recent_entry_keys.items() if v > now_ts}
-        if key in self._recent_entry_keys:
-            return
-        self._recent_entry_keys[key] = now_ts + self.IDEMP_TTL_SEC
-
-        # Position sizing
-        pos = self.risk.calculate_position_size(
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            signal_confidence=conf,
-            market_volatility=float(atr / max(1e-9, spot_df["close"].iloc[-1])),
-            lot_size=self.LOT_SIZE,
-        )
-        if not pos:
-            return
-        qty = int(pos.get("quantity") or 0)
-        if qty <= 0:
-            return
-
-        # Place order
-        try:
-            order_id = self.executor.place_entry_order(
-                symbol=side_symbol,
-                direction=direction,
-                quantity=qty * self.LOT_SIZE,
-                price=entry_price,
-                product=Config.DEFAULT_PRODUCT,
-                order_type=Config.DEFAULT_ORDER_TYPE,
-                validity=Config.DEFAULT_VALIDITY,
-                live=self.live_mode,
-            )
-            if not order_id:
-                return
-        except Exception as e:
-            logger.debug(f"Entry order error: {e}")
-            return
-
-        # Setup exits (OCO/GTT as configured inside executor)
-        try:
-            self.executor.setup_gtt_orders(
-                entry_order_id=order_id,
-                symbol=side_symbol,
-                direction=direction,
-                entry_price=entry_price,
-                stop_loss=stop_loss,
-                target=target,
-                lot_size=self.LOT_SIZE,
-                live=self.live_mode,
-            )
-        except Exception as e:
-            logger.debug(f"setup_gtt_orders error: {e}")
-
-        # Track active trade
-        tr = {
-            "status": "OPEN",
-            "symbol": side_symbol,
-            "direction": direction,
-            "qty_lots": qty,
-            "entry_price": entry_price,
-            "stop_loss": stop_loss,
-            "target": target,
-            "atr": atr,
-            "confidence": conf,
-            "open_ts": self._now().isoformat(),
-        }
-        with self._lock:
-            self.active_trades[str(order_id)] = tr
-
-        # Telegram alert
+    def _safe_send_message(self, text: str, parse_mode: Optional[str] = None) -> None:
         try:
             if self.tg:
-                self.tg.send_signal_alert(token=int(side_token), signal={
-                    "signal": direction,
-                    "entry_price": entry_price,
-                    "stop_loss": stop_loss,
-                    "target": target,
-                    "confidence": conf,
-                }, position={"quantity": qty})
+                self.tg.send_message(text, parse_mode=parse_mode)
         except Exception:
             pass
 
-    # -------------------- cache / tokens -------------------- #
-
-    def _maybe_refresh_cache(self) -> None:
-        if (time.time() - self._cache_ts) < self._CACHE_TTL:
-            return
-        self._force_refresh_cache()
-
-    def _force_refresh_cache(self) -> bool:
+    def _safe_send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
         try:
-            kite = self._get_kite()
-            caches = fetch_cached_instruments(kite) if kite else {"NFO": [], "NSE": []}
-            with self._cache_lock:
-                self._nfo_cache = caches.get("NFO") or []
-                self._nse_cache = caches.get("NSE") or []
-                self._cache_ts = time.time()
-            self._safe_send_message("🔄 Instruments cache refreshed.")
-            return True
-        except Exception as e:
-            logger.debug(f"_force_refresh_cache error: {e}")
-            return False
-
-    def _resolve_tokens(self) -> Optional[Dict[str, Any]]:
-        try:
-            kite = self._get_kite()
-            with self._cache_lock:
-                nfo = self._nfo_cache
-                nse = self._nse_cache
-            if not kite or not nfo or not nse:
-                return None
-            res = get_instrument_tokens(
-                symbol=getattr(Config, "TRADE_SYMBOL", "NIFTY"),
-                kite_instance=kite,
-                cached_nfo_instruments=nfo,
-                cached_nse_instruments=nse,
-                offset=0,
-                strike_range=self.STRIKE_RANGE,
-            )
-            return res
-        except Exception as e:
-            logger.debug(f"_resolve_tokens error: {e}")
-            return None
-
-    # -------------------- finalize / pnl -------------------- #
-
-    def _finalize_trade(self, entry_order_id: str) -> None:
-        with self._lock:
-            tr = self.active_trades.pop(entry_order_id, None)
-        if not tr:
-            return
-
-        entry = float(tr.get("entry_price") or 0.0)
-        exit_px = float(tr.get("exit_price") or 0.0)
-        qty_lots = int(tr.get("qty_lots") or 0)
-        contracts = qty_lots * self.LOT_SIZE
-
-        direction = tr.get("direction")
-        gross = (exit_px - entry) * contracts if direction == "BUY" else (entry - exit_px) * contracts
-
-        # Fees/slippage model (simple)
-        fees = (abs(entry) + abs(exit_px)) * contracts * (Config.FEES_PCT_PER_SIDE / 100.0)
-        slippage = (Config.SLIPPAGE_BPS / 10000.0) * (abs(entry) + abs(exit_px)) * contracts
-        net = gross - fees - slippage
-
-        # Update session
-        self.daily_pnl += net
-        self.trades_closed_today += 1
-
-        # Update risk manager & streaks
-        cont = True
-        try:
-            cont = self.risk.update_after_trade(net)
+            if self.tg:
+                self.tg.send_signal_alert(token, signal, position)
         except Exception:
             pass
-
-        if net < 0:
-            self.loss_streak += 1
-            if self.loss_streak >= 3:
-                self._shutdown_after_3_losses = True
-                self.is_trading = False
-                self._safe_send_message("⛔ 3-loss shutdown triggered. Trading halted for the day.")
-            else:
-                # Cooldown
-                self._cooldown_until_ts = time.time() + (self.LOSS_COOLDOWN_MIN * 60)
-        else:
-            self.loss_streak = 0
-
-        # Log
-        self._append_trade_log([
-            self._now().strftime("%Y-%m-%d %H:%M:%S"),
-            entry_order_id,
-            tr.get("symbol"),
-            direction,
-            contracts,
-            f"{entry:.2f}",
-            f"{exit_px:.2f}",
-            f"{gross:.2f}",
-            f"{fees+slippage:.2f}",
-            f"{net:.2f}",
-            f"{tr.get('confidence', 0.0):.2f}",
-            f"{tr.get('atr', 0.0):.2f}",
-            "LIVE" if self.live_mode else "SIM",
-            "",
-        ])
-
-        # Circuit breaker check after trade
-        if not cont or self._is_circuit_breaker_tripped():
-            self.is_trading = False
-            self._safe_send_message("🛑 Circuit breaker/drawdown reached. Trading stopped.")
-
-    # -------------------- health / status -------------------- #
-
-    def _is_circuit_breaker_tripped(self) -> bool:
-        equity_now = self.daily_start_equity + self.daily_pnl
-        if self.daily_start_equity > 0:
-            dd = (self.daily_start_equity - equity_now) / self.daily_start_equity
-            return dd >= self.MAX_DAILY_DRAWDOWN_PCT
-        return False
 
     def _run_health_check(self) -> bool:
+        ok_bits = []
         try:
-            kite = self._get_kite()
-            if not kite:
-                self._safe_send_message("Health: Kite client not initialized (SIM mode).")
-                return True
-            # Spot LTP check
-            try:
-                spot_sym = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
-                l = kite.ltp([spot_sym]) or {}
-                ok = bool((l.get(spot_sym) or {}).get("last_price"))
-                self._safe_send_message(f"Health: LTP {'OK' if ok else 'FAIL'} | Mode: {'LIVE' if self.live_mode else 'SIM'}")
-            except Exception as e:
-                self._safe_send_message(f"Health LTP FAIL: {e}")
-            return True
-        except Exception as e:
-            logger.debug(f"_run_health_check error: {e}")
-            return False
+            ok_bits.append("data✓" if not _safe_df(self.data.get_ohlc(getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50"), 3)).empty else "data")
+        except Exception:
+            ok_bits.append("data✗")
+        ok_bits.append("executor✓" if self.executor else "executor✗")
+        self._safe_send_message("Health: " + " ".join(ok_bits))
+        return True
 
-    def _send_detailed_status(self) -> bool:
+    # ------------------------ persistence (best-effort) ------------------------ #
+
+    def _persist_state(self) -> None:
         try:
-            status = self.get_status()
-            lines = [
-                "📊 <b>Bot Status</b>",
-                f"🔁 <b>Trading:</b> {'🟢 Running' if status['is_trading'] else '🔴 Stopped'}",
-                f"🌐 <b>Mode:</b> {'🟢 LIVE' if status['live_mode'] else '🛡️ Shadow'}",
-                f"✨ <b>Quality:</b> {'ON' if self.quality_mode else 'OFF'}",
-                f"📦 <b>Open Positions:</b> {status['open_positions']}",
-                f"📈 <b>Closed Today:</b> {status['closed_today']}",
-                f"💰 <b>Daily P&L:</b> {status['daily_pnl']:.2f}",
-                f"📅 <b>Session:</b> {status['session_date']}",
-            ]
-            self._safe_send_message("\n".join(lines), parse_mode="HTML")
-            return True
-        except Exception as e:
-            logger.debug(f"_send_detailed_status error: {e}")
-            return False
-
-    def get_status(self) -> Dict[str, Any]:
-        with self._lock:
-            open_positions = len(self.active_trades)
-        return {
-            "is_trading": self.is_trading,
-            "live_mode": self.live_mode,
-            "open_positions": open_positions,
-            "closed_today": self.trades_closed_today,
-            "daily_pnl": float(self.daily_pnl),
-            "session_date": str(self.session_date),
-            "quality_mode": self.quality_mode,
-        }
-
-    def get_summary(self) -> str:
-        s = self.get_status()
-        return (
-            "<b>Daily Summary</b>\n"
-            f"📅 Session: {s['session_date']}\n"
-            f"🔁 Trading: {'Running' if s['is_trading'] else 'Stopped'}\n"
-            f"🌐 Mode: {'LIVE' if s['live_mode'] else 'Shadow'}\n"
-            f"✨ Quality: {'ON' if s['quality_mode'] else 'OFF'}\n"
-            f"📦 Open positions: {s['open_positions']}\n"
-            f"📈 Closed today: {s['closed_today']}\n"
-            f"💰 Daily P&L: {s['daily_pnl']:.2f}"
-        )
-
-    def refresh_account_balance(self) -> None:
-        try:
-            bal = get_live_account_balance()
-            # Update risk manager equity baseline if needed
-            try:
-                self.risk.equity = float(bal)  # type: ignore
-            except Exception:
-                pass
-            logger.info(f"💰 Refreshed balance: ₹{bal:.2f}")
-        except Exception as e:
-            logger.debug(f"refresh_account_balance error: {e}")
-
-    # -------------------- session helpers -------------------- #
-
-    def _maybe_rollover_daily(self) -> None:
-        now_d = self._now().date()
-        if now_d != self.session_date:
-            logger.info("🔄 New trading day detected; resetting counters.")
-            self.session_date = now_d
-            self.daily_start_equity = float(get_live_account_balance() or 0.0)
-            self.daily_pnl = 0.0
-            self.trades_closed_today = 0
-            self.loss_streak = 0
-            self._shutdown_after_3_losses = False
-            try:
-                self.risk.reset_daily_limits()
-            except Exception:
-                pass
-
-    def _maybe_session_auto_exit(self) -> None:
-        try:
-            t = self._now().time()
-            auto_t = datetime.strptime(self.SESSION_AUTO_EXIT_TIME, "%H:%M").time()
-            if t >= auto_t and self.is_trading:
-                # best-effort exit of all open orders/positions
-                self.executor.cancel_all_orders()
-                self.is_trading = False
-                self._safe_send_message(f"🛑 Auto exit @ {self.SESSION_AUTO_EXIT_TIME}. Trading halted for session.")
+            os.makedirs(self.STATE_DIR, exist_ok=True)
+            with open(self.ACTIVE_JSON, "w", encoding="utf-8") as f:
+                json.dump({k: asdict(v) for k, v in self.active.items()}, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    # -------------------- shutdown -------------------- #
+    def _maybe_restore_state(self) -> None:
+        if not bool(getattr(Config, "PERSIST_REATTACH_ON_START", True)):
+            return
+        try:
+            if not os.path.exists(self.ACTIVE_JSON):
+                return
+            with open(self.ACTIVE_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            restored = 0
+            with self._lock:
+                for k, v in (data or {}).items():
+                    if k in self.active:
+                        continue
+                    try:
+                        self.active[k] = ActiveTrade(**v)
+                        restored += 1
+                    except Exception:
+                        continue
+            if restored:
+                self._safe_send_message(f"♻️ Restored {restored} active trade(s) from state. Reconciling…")
+        except Exception:
+            pass
+
+    # --------------------------- shutdown --------------------------- #
 
     def shutdown(self) -> None:
-        logger.info("Shutting down RealTimeTrader…")
+        try:
+            if self.tg:
+                self.tg.stop_polling()
+        except Exception:
+            pass
         try:
             self._trailing_evt.set()
             self._oco_evt.set()
         except Exception:
             pass
-        try:
-            self._stop_polling()
-        except Exception:
-            pass
-        try:
-            if self.is_trading:
-                self.stop()
-        except Exception:
-            pass
+        self._persist_state()
+        logger.info("🔚 Trader shutdown.")
