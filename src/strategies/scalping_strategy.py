@@ -45,6 +45,12 @@ def _bollinger_bands_from_close(close: pd.Series, window: int, std: float) -> Tu
     return upper, lower
 
 
+def _round_to_tick(x: float, tick: float) -> float:
+    if tick <= 0:
+        return float(x)
+    return round(float(x) / tick) * tick
+
+
 class EnhancedScalpingStrategy:
     """A dynamic scalping strategy for Nifty spot/futures/options."""
 
@@ -315,6 +321,10 @@ class EnhancedScalpingStrategy:
 
             score, reasons = self._score_signal(df, indicators, current_price)
 
+            # Quality mode (tighten score threshold slightly)
+            if getattr(Config, "QUALITY_MODE_DEFAULT", False):
+                score += int(getattr(Config, "QUALITY_SCORE_BUMP", 1.0))
+
             direction: Optional[str] = None
             if score >= self.min_score_threshold:
                 direction = "BUY"
@@ -372,8 +382,8 @@ class EnhancedScalpingStrategy:
             entry_price = float(current_price)
             stop_loss = entry_price - sl_points if direction == "BUY" else entry_price + sl_points
             target = entry_price + tp_points if direction == "BUY" else entry_price - tp_points
-            stop_loss = max(0.0, float(stop_loss))
-            target = max(0.0, float(target))
+            stop_loss = max(0.0, float(_round_to_tick(stop_loss, tick)))
+            target = max(0.0, float(_round_to_tick(target, tick)))
 
             # Duplicate hash
             signal_key = f"{direction}_{round(entry_price, 2)}_{df.index[-1]}"
@@ -466,54 +476,62 @@ class EnhancedScalpingStrategy:
 
             # SL/TP via percent with floors
             px = float(current_option_price)
+            tick = float(getattr(Config, "TICK_SIZE", 0.05))
+            min_premium = float(getattr(Config, "MIN_PREMIUM", 12.0))
+
+            if px < max(min_premium, tick):
+                logger.debug(f"Option premium too low ({px}) < min {min_premium}. Skip.")
+                return None
+
             sl_pct = float(getattr(Config, "OPTION_SL_PERCENT", self.option_sl_percent))
             tp_pct = float(getattr(Config, "OPTION_TP_PERCENT", self.option_tp_percent))
-            tick = float(getattr(Config, "TICK_SIZE", 0.05))
 
-            # Ensure meaningful floors for options (min ₹0.75 SL / ₹1.25 TP typical for NIFTY weeklys)
-            sl_points = max(px * sl_pct, max(0.75, 3 * tick))
-            tp_points = max(px * tp_pct, max(1.25, 5 * tick))
-
+            # Compute TP/SL
+            direction = "BUY"  # options leg is directional long in this simple framework
             entry_price = px
-            stop_loss = max(0.0, entry_price - sl_points)
-            target = max(0.0, entry_price + tp_points)
+            stop_loss = max(tick, entry_price * (1.0 - sl_pct))
+            target = entry_price * (1.0 + tp_pct)
 
-            # Confidence heuristic (option-led): stronger when spot confirms & bigger impulse
-            base_conf = 6.0
+            stop_loss = float(_round_to_tick(stop_loss, tick))
+            target = float(_round_to_tick(target, tick))
+
+            # Confidence (lighter than futures): scale by breakout strength & volume impulse
+            strength = (curr_close / last_close) - 1.0 if last_close > 0 else 0.0
+            base_conf = min(max(strength / max(1e-6, breakout_pct), 0.0), 2.0)  # 0..2
+            conf = 5.0 + 2.0 * base_conf                            # ~5..9
+            if not volume_condition:
+                conf -= 1.0
+            conf = max(1.0, min(10.0, conf))
+
+            # Optional quality bump
+            if getattr(Config, "QUALITY_MODE_DEFAULT", False):
+                conf += min(1.0, float(getattr(Config, "QUALITY_SCORE_BUMP", 1.0)))
+                conf = min(10.0, conf)
+
+            # Reasons
+            reasons: List[str] = ["Option breakout"]
             if volume_condition:
-                base_conf += 1.0
-            if breakout_pct >= 0.01:
-                base_conf += 0.5
-            if (option_type == "CE" and spot_trend_bullish) or (option_type == "PE" and spot_trend_bearish):
-                base_conf += 1.0
-            confidence = min(10.0, base_conf)
-
-            if confidence < float(self.confidence_threshold)):
-                return None
-
-            # Duplicate hash using last bar timestamp
-            signal_key = f"OPT_{option_type}_{round(entry_price, 2)}_{options_ohlc.index[-1]}"
-            new_hash = hashlib.md5(signal_key.encode()).hexdigest()
-            if new_hash == self.last_signal_hash:
-                return None
-            self.last_signal_hash = new_hash
-            self._last_dir = "BUY"
-            self._last_entry_px = entry_price
+                reasons.append("Volume impulse")
+            if spot_conf_required:
+                reasons.append("Spot confirm required")
+                if option_type == "CE" and ok_spot_ce:
+                    reasons.append("Spot bullish trend")
+                if option_type == "PE" and ok_spot_pe:
+                    reasons.append("Spot bearish trend")
 
             result = {
-                "signal": "BUY",
-                "score": self.min_score_threshold + 1,  # ensure it passes generic gate if checked
-                "confidence": round(confidence, 2),
+                "signal": direction,                 # BUY the option leg
+                "option_type": option_type,          # CE / PE
+                "score": 0,                          # not used for options path
+                "confidence": round(conf, 2),
                 "entry_price": round(entry_price, 2),
                 "stop_loss": round(stop_loss, 2),
                 "target": round(target, 2),
-                "reasons": [
-                    f"{option_type} breakout {breakout_pct*100:.1f}%",
-                    "Volume impulse" if volume_condition else "Volume neutral",
-                    "Spot confirms" if (ok_spot_ce or ok_spot_pe) else "Spot not required",
-                ],
-                "market_volatility": 0.0,  # not used for option-led right now
+                "reasons": reasons,
+                "strike": strike_info.get("strike"),
+                "symbol": strike_info.get("symbol"),
             }
+            logger.debug(f"Option signal: {result}")
             return result
 
         except Exception as e:
