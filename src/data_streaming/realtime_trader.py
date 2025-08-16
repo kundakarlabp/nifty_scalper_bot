@@ -5,16 +5,14 @@ from __future__ import annotations
 Real-time trader orchestrator.
 
 Highlights
-- KiteDataProvider (LTP + historical OHLC) with tiny cache & retry
+- Data provider: KiteDataProvider (LTP + historical OHLC) with tiny cache & retry
 - Telegram control (/start /stop /mode live|shadow /status /summary /health /emergency)
 - Adaptive loop cadence (peak/off-peak), warmup, trading-hour gates + optional buckets/events
-- Strategy: EnhancedScalpingStrategy for spot/futures + options (fallback)
-- Options strike resolution via strike_selector (cached instruments, Greeks optional)
-- Risk sizing by RISK_PER_TRADE × equity (ATR/SL aware) via PositionSizing
-- Spread guard (RANGE or LTP_MID) with optional dynamic scaling
-- Trailing/partials delegated to OrderExecutor; OCO worker; idempotent entries
-- Loss cooldown, 3-loss stop, trade/day cap, day circuit breakers, session R ladders
-- CSV trade log + active state persistence & best-effort reattach-on-restart
+- Strategy: EnhancedScalpingStrategy for spot/futures (options flow hooks left as best-effort)
+- Risk sizing via PositionSizing (RISK_PER_TRADE × equity; ATR/SL aware)
+- Spread/circuit hygiene hooks (kept lightweight)
+- Exits managed by OrderExecutor (GTT/Regular + partials + trailing)
+- Loss cooldown, trade/day cap, session ladders, CSV log, state persistence
 """
 
 import atexit
@@ -34,35 +32,57 @@ import schedule
 from src.config import Config
 from src.notifications.telegram_controller import TelegramController
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.utils.atr_helper import compute_atr_df
-from src.utils.indicators import calculate_adx, calculate_ema
+from src.utils.indicators import calculate_ema
 
-# optional best-effort imports (kept safe)
+# ----- providers / executor / risk -----
+
+# Minimal stub provider (simulation)
+class DataProvider:
+    def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        return None
+
+# Use the shared, dedicated provider (de-duplicated)
+try:
+    from src.data_providers.kite_data_provider import KiteDataProvider  # type: ignore
+except Exception:  # pragma: no cover
+    KiteDataProvider = None  # type: ignore
+
+# Order executor
 try:
     from src.execution.order_executor import OrderExecutor
 except Exception:  # pragma: no cover
     OrderExecutor = object  # type: ignore
 
+# Risk manager
 try:
     from src.risk.position_sizing import PositionSizing, get_live_account_balance
 except Exception:  # pragma: no cover
     class PositionSizing:  # minimal fallback
         def __init__(self, account_size: float = 0.0) -> None:
             self.equity = float(account_size)
+            self.min_lots = int(getattr(Config, "MIN_LOTS", 1))
+            self.max_lots = int(getattr(Config, "MAX_LOTS", 15))
 
         def set_equity(self, x: float) -> None:
             self.equity = float(x)
 
-        def calc_size_by_risk(self, entry: float, stop: float, lot_size: int) -> int:
+        def calculate_position_size(self, entry_price: float, stop_loss: float,
+                                    signal_confidence: float, market_volatility: float = 0.0,
+                                    lot_size: Optional[int] = None) -> Optional[Dict[str, int]]:
             risk_amt = float(getattr(Config, "RISK_PER_TRADE", 0.02)) * float(self.equity or 0)
-            per_lot_risk = max(0.01, abs(entry - stop)) * lot_size
+            L = int(lot_size or getattr(Config, "NIFTY_LOT_SIZE", 75))
+            per_lot_risk = max(0.01, abs(entry_price - stop_loss)) * L
             lots = int(max(0, risk_amt // per_lot_risk))
-            return max(int(getattr(Config, "MIN_LOTS", 1)), min(lots, int(getattr(Config, "MAX_LOTS", 15))))
+            lots = max(self.min_lots, min(lots, self.max_lots))
+            return {"quantity": lots} if lots > 0 else None
 
     def get_live_account_balance() -> float:
         return float(getattr(Config, "ACCOUNT_SIZE", 0.0))
 
-# strike utils (optional)
+# Optional strike utils (kept best-effort)
 try:
     from src.utils.strike_selector import fetch_cached_instruments, get_instrument_tokens
 except Exception:  # pragma: no cover
@@ -72,7 +92,7 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-# ---------- time helpers ----------
+# ============================== time helpers ============================== #
 
 def _ist_now() -> datetime:
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -107,159 +127,36 @@ def _round_to_tick(x: float, tick: float) -> float:
     return round(float(x) / tick) * tick
 
 
-# ---------- data providers ----------
-
-class DataProvider:
-    def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
-        return pd.DataFrame()
-
-    def get_last_price(self, symbol: str) -> Optional[float]:
-        return None
-
-
-class KiteDataProvider(DataProvider):
-    """
-    Minimal adapter around kiteconnect with retries and small LTP cache.
-    """
-    _TF_MAP = {
-        "minute": "minute", "1m": "minute",
-        "3minute": "3minute", "3m": "3minute",
-        "5minute": "5minute", "5m": "5minute",
-        "10minute": "10minute",
-        "15minute": "15minute", "15m": "15minute",
-        "30minute": "30minute", "30m": "30minute",
-        "60minute": "60minute", "1h": "60minute",
-        "day": "day", "d": "day",
-    }
-
-    def __init__(self, kite, default_token: Optional[int] = None) -> None:
-        self.kite = kite
-        self.default_token = int(default_token or getattr(Config, "INSTRUMENT_TOKEN", 256265))
-        self._ltp_cache: Dict[str, Dict[str, Any]] = {}
-        self._ltp_ttl = 1.8  # seconds
-
-    @staticmethod
-    def build_from_env() -> "KiteDataProvider":
-        from kiteconnect import KiteConnect
-        api_key = getattr(Config, "ZERODHA_API_KEY", None)
-        access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(Config, "ZERODHA_ACCESS_TOKEN", None)
-        if not api_key or not access_token:
-            raise RuntimeError("ZERODHA_API_KEY or KITE_ACCESS_TOKEN missing for KiteDataProvider")
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
-        return KiteDataProvider(kite=kite, default_token=getattr(Config, "INSTRUMENT_TOKEN", 256265))
-
-    def _with_retries(self, fn, *args, tries=2, backoff=0.7, **kwargs):
-        last = None
-        for i in range(tries):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                last = e
-                if i == tries - 1:
-                    break
-                time.sleep(backoff * (2 ** i))
-        raise last
-
-    def _resolve_token(self, symbol: Optional[str]) -> int:
-        if not symbol:
-            return int(self.default_token)
-        if symbol == getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50"):
-            return int(self.default_token)
-        try:
-            q = self._with_retries(self.kite.quote, [symbol])
-            tok = (q.get(symbol, {}) or {}).get("instrument_token")
-            if tok:
-                return int(tok)
-        except Exception:
-            pass
-        raise ValueError(f"Cannot resolve instrument token for {symbol}")
-
-    def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
-        interval = self._TF_MAP.get(str(timeframe).lower(), "minute")
-        token = self._resolve_token(symbol)
-        end_ts = _ist_now()
-        start_ts = end_ts - timedelta(minutes=max(2 * minutes, minutes + 60))
-
-        def _hist():
-            return self.kite.historical_data(
-                instrument_token=token,
-                from_date=start_ts,
-                to_date=end_ts,
-                interval=interval,
-                continuous=False,
-                oi=False,
-            )
-
-        candles = self._with_retries(_hist)
-        if not candles:
-            return pd.DataFrame()
-        df = pd.DataFrame(candles)
-        if "date" in df.columns:
-            df = df.set_index("date", drop=True)
-        df = df.sort_index()
-        cutoff = end_ts - timedelta(minutes=minutes + 1)
-        df = df[df.index >= cutoff]
-        keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
-        return df[keep].copy()
-
-    def get_last_price(self, symbol: str) -> Optional[float]:
-        now = time.time()
-        c = self._ltp_cache.get(symbol)
-        if c and (now - c["ts"] <= self._ltp_ttl):
-            return float(c["ltp"])
-        try:
-            data = self._with_retries(self.kite.ltp, [symbol])
-            px = (data.get(symbol, {}) or {}).get("last_price")
-            if px is None:
-                data = self._with_retries(self.kite.quote, [symbol])
-                px = (data.get(symbol, {}) or {}).get("last_price")
-            if px is None:
-                return None
-            self._ltp_cache[symbol] = {"ts": now, "ltp": float(px)}
-            return float(px)
-        except Exception:
-            return None
-
-
-# ---------- models ----------
+# ============================== models ============================== #
 
 @dataclass
 class ActiveTrade:
     entry_id: str
     symbol: str
-    direction: str
-    quantity: int
+    direction: str          # BUY / SELL
+    quantity: int           # contracts
     entry_price: float
     stop_loss: float
     target: float
     atr: float
     opened_ts: float
-    status: str = "OPEN"   # OPEN/CLOSED
+    status: str = "OPEN"    # OPEN / CLOSED
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None
 
 
-# ---------- RealTimeTrader ----------
+# ============================ RealTimeTrader ============================ #
 
 class RealTimeTrader:
-    # config mirrors
+    # ---- config mirrors ----
     MAX_CONCURRENT = int(getattr(Config, "MAX_CONCURRENT_POSITIONS", 1))
     WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 25))
     DATA_LOOKBACK_MIN = int(getattr(Config, "DATA_LOOKBACK_MINUTES", 45))
     HIST_TF = str(getattr(Config, "HISTORICAL_TIMEFRAME", "minute"))
 
-    SPREAD_MODE = str(getattr(Config, "SPREAD_GUARD_MODE", "RANGE")).upper()
-    SPREAD_BA_MAX = float(getattr(Config, "SPREAD_GUARD_BA_MAX", 0.015))
-    SPREAD_LTPMID_MAX = float(getattr(Config, "SPREAD_GUARD_LTPMID_MAX", 0.015))
-    SPREAD_PCT = float(getattr(Config, "SPREAD_GUARD_PCT", 0.03))
-    DYN_SPREAD = bool(getattr(Config, "DYNAMIC_SPREAD_GUARD", True))
-    SPREAD_VOL_LOOKBACK = int(getattr(Config, "SPREAD_VOL_LOOKBACK", 20))
-
     SLIPPAGE_BPS = float(getattr(Config, "SLIPPAGE_BPS", 4.0))
     FEES_PER_LOT = float(getattr(Config, "FEES_PER_LOT", 25.0))
     MAX_DD_PCT = float(getattr(Config, "MAX_DAILY_DRAWDOWN_PCT", 0.05))
-    CIRCUIT_RELEASE_PCT = float(getattr(Config, "CIRCUIT_RELEASE_PCT", 0.015))
     TRAILING_ENABLE = bool(getattr(Config, "TRAILING_ENABLE", True))
     WORKER_INTERVAL = int(getattr(Config, "WORKER_INTERVAL_SEC", 4))
     LOG_FILE = str(getattr(Config, "LOG_FILE", "logs/trades.csv"))
@@ -271,8 +168,8 @@ class RealTimeTrader:
     MAX_TRADES_DAY = int(getattr(Config, "MAX_TRADES_PER_DAY", 30))
     LOSS_COOLDOWN_MIN = int(getattr(Config, "LOSS_COOLDOWN_MIN", 2))
     LOSS_LIMIT = int(getattr(Config, "CONSECUTIVE_LOSS_LIMIT", 3))
-    LOSS_STREAK_HALVE = int(getattr(Config, "LOSS_STREAK_HALVE_SIZE", 3))
     LOSS_STREAK_PAUSE = int(getattr(Config, "LOSS_STREAK_PAUSE_MIN", 20))
+
     DAY_STOP_POS_R = float(getattr(Config, "DAY_STOP_AFTER_POS_R", 4.0))
     DAY_HALF_POS_R = float(getattr(Config, "DAY_HALF_SIZE_AFTER_POS_R", 2.0))
     DAY_STOP_NEG_R = float(getattr(Config, "DAY_STOP_AFTER_NEG_R", -3.0))
@@ -286,7 +183,6 @@ class RealTimeTrader:
     EVENTS = list(getattr(Config, "EVENT_WINDOWS", []))
     AUTO_EXIT_TIME = str(getattr(Config, "SESSION_AUTO_EXIT_TIME", getattr(Config, "TIME_FILTER_END", "15:20")))
 
-    STRIKE_RANGE = int(getattr(Config, "STRIKE_RANGE", 3))
     IDEMP_TTL = int(getattr(Config, "IDEMP_TTL_SEC", 60))
 
     # files
@@ -316,10 +212,14 @@ class RealTimeTrader:
         self._recent_keys: Dict[str, float] = {}
 
         # components
-        self.data = data or (self._build_kite_provider() if self.live_mode else DataProvider())
-        self.risk = PositionSizing(account_size=self.daily_start_equity) if "account_size" in PositionSizing.__init__.__code__.co_varnames else PositionSizing()
+        self.data = data or (self._build_kite_provider() if self.live_mode and KiteDataProvider else DataProvider())
+        # PositionSizing constructor could be different across your versions; try best-effort:
         try:
-            self.risk.set_equity(float(self.daily_start_equity or 0.0))
+            self.risk = PositionSizing(account_size=self.daily_start_equity)  # type: ignore
+        except Exception:
+            self.risk = PositionSizing()  # type: ignore
+        try:
+            self.risk.set_equity(float(self.daily_start_equity or 0.0))  # type: ignore
         except Exception:
             pass
 
@@ -352,11 +252,11 @@ class RealTimeTrader:
 
         logger.info("✅ RealTimeTrader initialized (live=%s).", self.live_mode)
 
-    # -------- components --------
+    # ---------------- components ---------------- #
 
     def _build_kite_provider(self) -> DataProvider:
         try:
-            return KiteDataProvider.build_from_env()
+            return KiteDataProvider.build_from_env()  # type: ignore
         except Exception as e:
             logger.error("KiteDataProvider init failed, using stub DataProvider: %s", e, exc_info=True)
             return DataProvider()
@@ -395,7 +295,7 @@ class RealTimeTrader:
         except Exception as e:
             logger.warning("Telegram init failed: %s", e)
 
-    # -------- scheduler / cadence --------
+    # --------------- scheduler / cadence --------------- #
 
     def _setup_scheduler(self) -> None:
         try:
@@ -418,18 +318,21 @@ class RealTimeTrader:
             return int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
 
     def _ensure_cadence(self) -> None:
+        """Keep the data loop running at a dynamic cadence."""
         try:
             sec = self._current_poll_seconds()
-            if self._data_job and self._data_job.interval.seconds == sec:
+            if self._data_job and (getattr(self._data_job, "interval", None) == sec) and \
+               (getattr(self._data_job, "unit", None) == "seconds"):
                 return
             if self._data_job:
                 schedule.cancel_job(self._data_job)
             self._data_job = schedule.every(sec).seconds.do(self._smart_tick)
             logger.info("📈 Data loop cadence: every %ds", sec)
         except Exception as e:
+            # FIX: don't access .seconds on an int; just log and continue
             logger.debug("Cadence error: %s", e)
 
-    # -------- public lifecycle --------
+    # ---------------- lifecycle ---------------- #
 
     def run(self) -> None:
         logger.info("🟢 RealTimeTrader.run() started.")
@@ -467,7 +370,7 @@ class RealTimeTrader:
         logger.info("Mode switched to SHADOW.")
         return True
 
-    # -------- telegram handler --------
+    # ---------------- telegram handler ---------------- #
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         cmd = (command or "").strip().lower()
@@ -499,23 +402,24 @@ class RealTimeTrader:
                 return True
             if cmd == "emergency":
                 try:
-                    self.executor.cancel_all_orders()
+                    self.executor.cancel_all_orders()  # type: ignore
                 except Exception:
                     pass
                 self.active.clear()
                 if self.tg:
-                    self.tg.send_message("🛑 Emergency: All orders canceled, positions cleared (best‑effort).")
+                    self.tg.send_message("🛑 Emergency: All orders canceled, positions cleared (best-effort).")
                 return True
         except Exception as e:
             logger.error("Control error: %s", e, exc_info=True)
         return False
 
-    # -------- status / summary --------
+    # ---------------- status / summary ---------------- #
 
     def get_status(self) -> Dict[str, Any]:
         return {
             "is_trading": self.is_trading,
             "live_mode": self.live_mode,
+            "quality_mode": self.quality_mode,
             "open_positions": len(self.active),
             "closed_today": self.trades_closed_today,
             "daily_pnl": round(self.daily_pnl, 2),
@@ -537,14 +441,15 @@ class RealTimeTrader:
         try:
             bal = float(get_live_account_balance() or 0.0)
             if bal > 0:
+                # keep daily_start_equity such that account_size = start + pnl
                 self.daily_start_equity = bal - self.daily_pnl
                 if hasattr(self.risk, "set_equity"):
-                    self.risk.set_equity(bal)
+                    self.risk.set_equity(bal)  # type: ignore
             logger.info("💰 Equity refresh: %.2f", bal)
         except Exception as e:
             logger.debug("Balance refresh error: %s", e)
 
-    # -------- main tick --------
+    # ---------------- main tick ---------------- #
 
     def _smart_tick(self) -> None:
         if not self.is_trading:
@@ -560,7 +465,11 @@ class RealTimeTrader:
         if self.ENABLE_EVENTS and _within_any_windows(now_t, self.EVENTS):
             return
 
-        # Idempotent key cleanup
+        # skip first minutes of day
+        if (now.hour == 9 and now.minute < max(16, self.SKIP_FIRST_MIN + 15)):
+            return
+
+        # Clean recent keys
         self._prune_recent_keys()
 
         # pull spot data
@@ -569,15 +478,10 @@ class RealTimeTrader:
         if df is None or df.empty or len(df) < max(self.WARMUP_BARS, 25):
             return
 
-        # skip first minutes of day
-        if (now.hour == 9 and now.minute < max(16, self.SKIP_FIRST_MIN + 15)):
-            return
-
-        # HTF/Regime gates (lightweight)
+        # simple HTF gate (EMA slope)
         if not self._htf_ok(df):
             return
 
-        # Strategy generic spot/futures signal
         try:
             last_price = float(df["close"].iloc[-1])
         except Exception:
@@ -588,14 +492,14 @@ class RealTimeTrader:
             self._place_trade(spot_symbol, sig, last_price)
             return
 
-        # Options path (best‑effort)
+        # options flow (left best-effort / optional)
         if get_instrument_tokens and fetch_cached_instruments:
             self._maybe_try_options_flow(last_price)
 
-        # housekeeping
+        # check for exits and book P&L
         self._process_active_trades()
 
-    # -------- gates / regime --------
+    # ---------------- gates / strategy ---------------- #
 
     def _htf_ok(self, df: pd.DataFrame) -> bool:
         try:
@@ -608,65 +512,20 @@ class RealTimeTrader:
         except Exception:
             return True
 
-    # -------- strategy wrappers --------
-
     def _generate_spot_signal(self, df: pd.DataFrame, last_price: float) -> Optional[Dict[str, Any]]:
         try:
-            res = self.strategy.generate_signal(df, last_price)
-            return res
+            return self.strategy.generate_signal(df, last_price)
         except Exception as e:
             logger.debug("spot signal error: %s", e)
             return None
 
     def _maybe_try_options_flow(self, spot_last: float) -> None:
-        try:
-            # resolve CE/PE tokens around ATM
-            from kiteconnect import KiteConnect  # for type only
-            api_key = getattr(Config, "ZERODHA_API_KEY", "")
-            access_token = getattr(Config, "KITE_ACCESS_TOKEN", "") or getattr(Config, "ZERODHA_ACCESS_TOKEN", "")
-            if not api_key or not access_token:
-                return
-            kite = None
-            try:
-                Kite = KiteConnect  # type: ignore
-                kite = Kite(api_key=api_key)
-                kite.set_access_token(access_token)
-            except Exception:
-                return
+        # Hook left intentionally light; extend as you wire proper option candles.
+        pass
 
-            cache = fetch_cached_instruments(kite) if fetch_cached_instruments else {}
-            nfo = cache.get("NFO", [])
-            nse = cache.get("NSE", [])
-
-            toks = get_instrument_tokens(
-                symbol="NIFTY",
-                kite_instance=kite,
-                cached_nfo_instruments=nfo,
-                cached_nse_instruments=nse,
-                offset=0,
-                strike_range=self.STRIKE_RANGE,
-            )
-            if not toks:
-                return
-
-            # Build option OHLC quickly (lightweight minute pull)
-            for side in ("ce_symbol", "pe_symbol"):
-                sym = toks.get(side)
-                if not sym:
-                    continue
-                # For options, we prefer LTP led simple breakout in strategy:
-                # feed a tiny window from spot as placeholder if option candles are heavy to fetch.
-                # If you want true option candles, wire another provider that resolves token → historical.
-                # Here we just run generic fallback on spot df again (safe) or skip.
-                # You can extend: self.strategy.generate_options_signal(option_df, spot_df, strike_info, ltp)
-                pass
-        except Exception as e:
-            logger.debug("options flow error: %s", e)
-
-    # -------- spread/circuit/hygiene --------
+    # ---------------- hygiene / circuit ---------------- #
 
     def _entry_guard(self, key: str) -> bool:
-        """Simple idempotency: reject repeats inside TTL."""
         now = time.time()
         exp = self._recent_keys.get(key)
         if exp and exp > now:
@@ -684,29 +543,23 @@ class RealTimeTrader:
         if eq <= 0:
             return False
         drawdown = (cur - eq) / eq
-        if drawdown <= -abs(self.MAX_DD_PCT):
-            return True
-        if self._halt_for_day:
-            return True
-        return False
+        return drawdown <= -abs(self.MAX_DD_PCT) or self._halt_for_day
 
-    # -------- execution path --------
+    # ---------------- execution path ---------------- #
 
     def _place_trade(self, symbol: str, sig: Dict[str, Any], mark_price: float) -> None:
         try:
-            direction = str(sig["signal"]).upper()
+            direction = str(sig["signal"]).upper()        # BUY / SELL
             entry = float(sig.get("entry_price", mark_price))
             sl = float(sig.get("stop_loss"))
             tp = float(sig.get("target"))
+            conf = float(sig.get("confidence", 5.0))
             atr = float(sig.get("market_volatility", 0.0))
         except Exception:
             return
 
         # circuit/loss cooldown/limits
-        if self._circuit_tripped():
-            logger.info("Circuit tripped; skipping entries.")
-            return
-        if time.time() < self._cooldown_until:
+        if self._circuit_tripped() or (time.time() < self._cooldown_until):
             return
         if len(self.active) >= self.MAX_CONCURRENT:
             return
@@ -718,25 +571,52 @@ class RealTimeTrader:
         if not self._entry_guard(key):
             return
 
-        # size by risk
-        lots = 1
-        if hasattr(self.risk, "calc_size_by_risk"):
-            lots = self.risk.calc_size_by_risk(entry, sl, self.LOT_SIZE)
-        lots = max(self.MIN_LOTS, min(int(lots), self.MAX_LOTS))
-        qty = lots * self.LOT_SIZE
+        # size by risk (lots)
+        qty_lots = None
+        try:
+            res = self.risk.calculate_position_size(entry_price=entry, stop_loss=sl,
+                                                    signal_confidence=conf,
+                                                    market_volatility=atr,
+                                                    lot_size=self.LOT_SIZE)  # type: ignore
+            qty_lots = int(res["quantity"]) if (isinstance(res, dict) and "quantity" in res) else None
+        except Exception:
+            pass
+        if qty_lots is None:
+            qty_lots = max(self.MIN_LOTS, 1)
+        qty_lots = max(self.MIN_LOTS, min(int(qty_lots), self.MAX_LOTS))
+        qty = qty_lots * self.LOT_SIZE
         if qty <= 0:
             return
 
-        # executor: place entry
+        # place entry (MARKET by default)
         try:
-            order_id = self.executor.place_entry_order(symbol, direction, qty, entry_price=entry)  # type: ignore
+            entry_id = self.executor.place_entry_order(  # type: ignore
+                symbol, direction=direction, quantity=qty
+            )
+            if not entry_id:
+                logger.warning("Entry placement returned no order id.")
+                return
         except Exception as e:
-            logger.error("Entry order failed: %s", e)
+            logger.error("Entry order failed: %s", e, exc_info=True)
             return
 
-        # record active
+        # set up exits (TP/SL/partials or GTT)
+        try:
+            self.executor.setup_gtt_orders(  # type: ignore
+                entry_order_id=str(entry_id),
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry,
+                stop_loss=sl,
+                target=tp,
+                lot_size=self.LOT_SIZE,
+            )
+        except Exception as e:
+            logger.warning("setup_gtt_orders error: %s", e)
+
+        # track active
         at = ActiveTrade(
-            entry_id=str(order_id or f"sim-{int(time.time())}"),
+            entry_id=str(entry_id),
             symbol=symbol,
             direction=direction,
             quantity=qty,
@@ -750,11 +630,12 @@ class RealTimeTrader:
         self._persist_state()
 
         if self.tg:
-            self.tg.send_signal_alert(token=len(self.trades) + len(self.active), signal=sig, position={"quantity": qty})
+            self.tg.send_signal_alert(token=len(self.trades) + len(self.active), signal=sig,
+                                      position={"quantity": qty})
 
         logger.info("▶️ Placed %s x%d @ %.2f SL %.2f TP %.2f", direction, qty, entry, sl, tp)
 
-    # -------- workers --------
+    # ---------------- workers ---------------- #
 
     def _trailing_worker(self) -> None:
         while not self._trailing_evt.is_set():
@@ -777,73 +658,104 @@ class RealTimeTrader:
     def _trailing_tick(self) -> None:
         for at in list(self.active.values()):
             try:
-                self.executor.update_trailing_stop(at.entry_id)  # type: ignore
+                # get best current price
+                cur = None
+                try:
+                    cur = self.data.get_last_price(at.symbol)
+                except Exception:
+                    cur = None
+                if cur is None:
+                    try:
+                        cur = self.executor.get_last_price(at.symbol)  # type: ignore
+                    except Exception:
+                        cur = None
+                if cur is None:
+                    continue
+                self.executor.update_trailing_stop(at.entry_id, float(cur), float(at.atr))  # type: ignore
             except Exception:
                 pass
 
     def _oco_tick(self) -> None:
+        # Let executor detect fills and convert to a list of (entry_id, exit_price)
         try:
-            self.executor.sync_and_enforce_oco()  # type: ignore
+            filled = self.executor.sync_and_enforce_oco()  # type: ignore
+            if filled:
+                self._finalize_fills(filled)
         except Exception:
             pass
 
     def _process_active_trades(self) -> None:
-        """
-        Best-effort polling to detect exits and book PnL.
-        """
+        """Periodic close detection (rely on executor’s OCO sync)."""
+        try:
+            filled = self.executor.sync_and_enforce_oco()  # type: ignore
+            if filled:
+                self._finalize_fills(filled)
+        except Exception:
+            pass
+
+    def _finalize_fills(self, filled: List[Tuple[str, float]]) -> None:
         closed_ids: List[str] = []
-        for at in list(self.active.values()):
-            try:
-                status = self.executor.get_order_status(at.entry_id)  # type: ignore
-            except Exception:
-                status = None
-            if not status:
+        for entry_id, exit_px in filled:
+            at = self.active.get(str(entry_id))
+            if not at:
                 continue
-            if status.get("status") == "CLOSED":
-                at.status = "CLOSED"
-                at.exit_price = float(status.get("exit_price", at.entry_price))
-                at.exit_reason = status.get("exit_reason", "unknown")
-                pnl = (at.exit_price - at.entry_price) * (at.quantity if at.direction == "BUY" else -at.quantity)
-                self.daily_pnl += float(pnl)
-                self.trades_closed_today += 1
-                self.trades.append(asdict(at))
-                closed_ids.append(at.entry_id)
-                self._log_trade(at, pnl)
-                logger.info("⏹ Closed %s @ %.2f (%s) PnL=%.2f", at.symbol, at.exit_price, at.exit_reason, pnl)
+            at.status = "CLOSED"
+            at.exit_price = float(exit_px)
+            # attempt to infer exit_reason from executor’s internal record if available
+            exit_reason = None
+            try:
+                rec = getattr(self.executor, "orders", {}).get(str(entry_id))  # type: ignore
+                exit_reason = getattr(rec, "exit_reason", None) if rec else None
+            except Exception:
+                exit_reason = None
+            at.exit_reason = exit_reason or "exit-filled"
 
-                # loss streak / cooldown
-                if pnl < 0:
-                    self.loss_streak += 1
-                    if self.loss_streak >= self.LOSS_LIMIT:
-                        self._cooldown_until = time.time() + self.LOSS_STREAK_PAUSE * 60
-                else:
-                    self.loss_streak = 0
+            # PnL (direction-aware)
+            direction_mult = 1 if at.direction == "BUY" else -1
+            pnl = (at.exit_price - at.entry_price) * direction_mult * at.quantity
+            self.daily_pnl += float(pnl)
+            self.trades_closed_today += 1
+            self.trades.append(asdict(at))
+            self._log_trade(at, pnl)
+            closed_ids.append(at.entry_id)
 
-                # session ladders
-                r = pnl / max(1.0, abs(at.entry_price - at.stop_loss) * at.quantity)
-                self.session_R += r
-                if self.session_R >= self.DAY_STOP_POS_R:
-                    self._halt_for_day = True
-                elif self.session_R >= self.DAY_HALF_POS_R:
-                    try:
-                        # halve min/max lots
-                        self.MAX_LOTS = max(self.MIN_LOTS, max(1, self.MAX_LOTS // 2))
-                    except Exception:
-                        pass
+            logger.info("⏹ Closed %s @ %.2f (%s) PnL=%.2f",
+                        at.symbol, at.exit_price, at.exit_reason, pnl)
+
+            # loss streak / cooldown
+            if pnl < 0:
+                self.loss_streak += 1
+                if self.loss_streak >= self.LOSS_LIMIT:
+                    self._cooldown_until = time.time() + self.LOSS_STREAK_PAUSE * 60
+            else:
+                self.loss_streak = 0
+
+            # session ladders (R-based)
+            r = pnl / max(1.0, abs(at.entry_price - at.stop_loss) * at.quantity)
+            self.session_R += r
+            if self.session_R >= self.DAY_STOP_POS_R:
+                self._halt_for_day = True
+            elif self.session_R >= self.DAY_HALF_POS_R:
+                try:
+                    self.MAX_LOTS = max(self.MIN_LOTS, max(1, self.MAX_LOTS // 2))
+                except Exception:
+                    pass
 
         for oid in closed_ids:
             self.active.pop(oid, None)
         if closed_ids:
             self._persist_state()
 
-    # -------- daily cycle / auto-exit --------
+    # ---------------- daily / auto-exit ---------------- #
 
     def _roll_daily_if_needed(self) -> None:
         if _now().date() != self.session_date:
             self.session_date = _now().date()
             self.daily_start_equity = float(get_live_account_balance() or (self.daily_start_equity + self.daily_pnl))
-            if hasattr(self.risk, "set_equity"):
-                self.risk.set_equity(self.daily_start_equity)
+            try:
+                self.risk.set_equity(self.daily_start_equity)  # type: ignore
+            except Exception:
+                pass
             self.daily_pnl = 0.0
             self.session_R = 0.0
             self.trades_closed_today = 0
@@ -863,7 +775,7 @@ class RealTimeTrader:
                     pass
                 for at in list(self.active.values()):
                     try:
-                        self.executor.exit_order(at.entry_id)  # type: ignore
+                        self.executor.exit_order(at.entry_id, exit_reason="auto-exit")  # type: ignore
                     except Exception:
                         pass
                 self.active.clear()
@@ -871,11 +783,11 @@ class RealTimeTrader:
         except Exception:
             pass
 
-    # -------- files / persistence --------
+    # ---------------- files / persistence ---------------- #
 
     def _prepare_trade_log(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self.LOG_FILE), exist_ok=True)
+            os.makedirs(os.path.dirname(self.LOG_FILE) or ".", exist_ok=True)
             if not os.path.exists(self.LOG_FILE):
                 with open(self.LOG_FILE, "w", newline="") as f:
                     w = csv.writer(f)
@@ -887,7 +799,11 @@ class RealTimeTrader:
         try:
             with open(self.LOG_FILE, "a", newline="") as f:
                 w = csv.writer(f)
-                w.writerow([datetime.utcnow().isoformat(), at.symbol, at.direction, at.quantity, at.entry_price, at.exit_price, at.exit_reason, round(pnl, 2)])
+                w.writerow([
+                    datetime.utcnow().isoformat(), at.symbol, at.direction, at.quantity,
+                    round(at.entry_price, 2), round(at.exit_price or 0.0, 2),
+                    at.exit_reason or "", round(float(pnl), 2)
+                ])
         except Exception:
             pass
 
@@ -908,13 +824,14 @@ class RealTimeTrader:
             self.active = {k: ActiveTrade(**v) for k, v in (raw or {}).items()}
             if getattr(Config, "PERSIST_REATTACH_ON_START", True):
                 try:
+                    # allow executor to reconcile with broker/sim state if it supports it
                     self.executor.reattach(self.active)  # type: ignore
                 except Exception:
                     pass
         except Exception:
             self.active = {}
 
-    # -------- shutdown --------
+    # ---------------- shutdown ---------------- #
 
     def shutdown(self) -> None:
         try:
