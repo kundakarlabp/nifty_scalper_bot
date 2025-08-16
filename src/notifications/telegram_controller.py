@@ -7,16 +7,14 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-
 class TelegramController:
     """
     Telegram bot interface for receiving commands and sending alerts.
     Communicates with RealTimeTrader via callback functions.
 
     Commands:
-      /start, /stop,
-      /mode live|shadow|quality on|off,
-      /status, /summary, /refresh, /health, /emergency, /help
+      /start, /stop, /mode live|shadow|quality on|off, /risk <pct>, /regime <mode>,
+      /pause <min>, /resume, /status, /summary, /refresh, /health, /emergency, /help
     """
 
     def __init__(
@@ -87,7 +85,6 @@ class TelegramController:
 
     # compatibility with RealTimeTrader._safe_send_alert()
     def send_alert(self, action: str) -> None:
-        """Alias so either name can be used by the trader."""
         self.send_realtime_session_alert(action)
 
     def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
@@ -111,48 +108,26 @@ class TelegramController:
 
     # ---------- status/summary formatting ----------
     def _send_status(self, status: Any) -> None:
-        """
-        Accepts either a dict (preferred) or a plain string (legacy).
-        Maps common keys from RealTimeTrader.get_status().
-        """
         if isinstance(status, str):
             self._send_message(f"📊 Status:\n{status}")
             return
 
-        # defaults
         is_trading = bool(status.get("is_trading", False))
         live_mode = bool(status.get("live_mode", False))
-
-        # map both old & new field names
-        open_positions = (
-            status.get("open_positions", None)
-            if isinstance(status, dict)
-            else None
-        )
-        if open_positions is None:
-            open_positions = status.get("open_orders", 0)
-
-        trades_today = status.get("closed_today", None)
-        if trades_today is None:
-            trades_today = status.get("trades_today", 0)
-
+        quality_mode = bool(status.get("quality_mode", False))
+        open_positions = status.get("open_positions", status.get("open_orders", 0))
+        trades_today = status.get("trades_today", status.get("closed_today", 0))
         daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
-        quality = status.get("quality_mode")
-        quality_str = None if quality is None else ("ON" if quality else "OFF")
 
         lines = [
             "📊 <b>Bot Status</b>",
             f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
             f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
-        ]
-        if quality_str:
-            lines.append(f"✨ <b>Quality:</b> {quality_str}")
-        lines += [
+            f"✨ <b>Quality:</b> {'ON' if quality_mode else 'OFF'}",
             f"📦 <b>Open Positions:</b> {open_positions}",
             f"📈 <b>Closed Today:</b> {trades_today}",
             f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
         ]
-        # optional fields if present
         acct = status.get("account_size")
         sess = status.get("session_date")
         if acct is not None:
@@ -169,45 +144,48 @@ class TelegramController:
     # ---------- command router ----------
     def _handle_command(self, command: str, arg: str = "") -> None:
         logger.info("📩 Received command: '%s %s'", command, arg)
+        cmd = command.lower()
 
-        if command == "help":
+        if cmd == "help":
             self._send_message(
                 "🤖 <b>Commands</b>\n"
                 "/start – start trading\n"
                 "/stop – stop trading\n"
-                "/mode live|shadow – switch execution mode\n"
-                "/mode quality on|off – toggle quality mode (stricter signal gating)\n"
+                "/mode live|shadow|quality on|off – switch mode\n"
+                "/risk <pct> – e.g. /risk 0.5%\n"
+                "/regime auto|trend|range|off – set regime gate\n"
+                "/pause <min> – pause entries\n"
+                "/resume – resume entries\n"
                 "/status – bot status\n"
                 "/summary – daily summary\n"
-                "/refresh – refresh instruments cache\n"
+                "/refresh – refresh balance/instruments\n"
                 "/health – system health\n"
                 "/emergency – stop & cancel orders",
                 parse_mode="HTML",
             )
             return
 
-        if command == "status":
+        if cmd == "status":
             status = self.status_callback()
             self._send_status(status)
             return
 
-        if command == "summary":
+        if cmd == "summary":
             summary = self.summary_callback()
             self._send_summary(summary)
             return
 
-        # Accept /mode quality on|off (two-word arg), as well as /mode live|shadow
-        if command in ["start", "stop", "mode", "refresh", "health", "emergency"]:
-            success = self.control_callback(command, arg.strip())
+        # Forward all control commands to the trader
+        if cmd in ["start", "stop", "mode", "risk", "regime", "pause", "resume", "refresh", "health", "emergency"]:
+            success = self.control_callback(cmd, arg)
             if not success:
-                logger.warning("Command '/%s %s' failed.", command, arg)
-                self._send_message(f"⚠️ Command '/{command} {arg}' failed.")
+                logger.warning("Command '/%s %s' failed.", cmd, arg)
+                self._send_message(f"⚠️ Command '/{cmd} {arg}' failed.")
             return
 
         self._send_message(
             "❌ Unknown command.\n"
-            "Try: /start, /stop, /mode live, /mode shadow, /mode quality on|off, "
-            "/status, /summary, /refresh, /health, /emergency, /help"
+            "Try /help for the list of commands."
         )
 
     # ---------- polling loop ----------
@@ -239,7 +217,6 @@ class TelegramController:
                 elif response.status_code == 409:
                     logger.error("Conflict: Another webhook or polling instance is active. Stopping.")
                     self.polling = False
-
                 else:
                     logger.error("Telegram getUpdates failed (%s): %s", response.status_code, response.text)
 
@@ -253,11 +230,9 @@ class TelegramController:
 
     # ---------- lifecycle ----------
     def start_polling(self) -> None:
-        """Start long-polling for Telegram messages in a background thread."""
         if self.polling:
             logger.warning("Polling already active.")
             return
-
         self.polling = True
         self.polling_thread = threading.Thread(
             target=self._poll_updates,
@@ -267,7 +242,6 @@ class TelegramController:
         self.polling_thread.start()
 
     def stop_polling(self) -> None:
-        """Stop the polling loop gracefully."""
         logger.info("🛑 Stopping Telegram polling...")
         self.polling = False
         if self.polling_thread and self.polling_thread.is_alive():
