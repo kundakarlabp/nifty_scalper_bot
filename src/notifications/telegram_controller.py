@@ -14,8 +14,9 @@ class TelegramController:
     Communicates with RealTimeTrader via callback functions.
 
     Commands:
-      /start, /stop, /mode live|shadow, /status, /summary,
-      /refresh, /health, /emergency, /help
+      /start, /stop,
+      /mode live|shadow|quality on|off,
+      /status, /summary, /refresh, /health, /emergency, /help
     """
 
     def __init__(
@@ -136,11 +137,17 @@ class TelegramController:
             trades_today = status.get("trades_today", 0)
 
         daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
+        quality = status.get("quality_mode")
+        quality_str = None if quality is None else ("ON" if quality else "OFF")
 
         lines = [
             "📊 <b>Bot Status</b>",
             f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
             f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
+        ]
+        if quality_str:
+            lines.append(f"✨ <b>Quality:</b> {quality_str}")
+        lines += [
             f"📦 <b>Open Positions:</b> {open_positions}",
             f"📈 <b>Closed Today:</b> {trades_today}",
             f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
@@ -168,7 +175,8 @@ class TelegramController:
                 "🤖 <b>Commands</b>\n"
                 "/start – start trading\n"
                 "/stop – stop trading\n"
-                "/mode live|shadow – switch mode\n"
+                "/mode live|shadow – switch execution mode\n"
+                "/mode quality on|off – toggle quality mode (stricter signal gating)\n"
                 "/status – bot status\n"
                 "/summary – daily summary\n"
                 "/refresh – refresh instruments cache\n"
@@ -188,8 +196,9 @@ class TelegramController:
             self._send_summary(summary)
             return
 
+        # Accept /mode quality on|off (two-word arg), as well as /mode live|shadow
         if command in ["start", "stop", "mode", "refresh", "health", "emergency"]:
-            success = self.control_callback(command, arg)
+            success = self.control_callback(command, arg.strip())
             if not success:
                 logger.warning("Command '/%s %s' failed.", command, arg)
                 self._send_message(f"⚠️ Command '/{command} {arg}' failed.")
@@ -197,7 +206,8 @@ class TelegramController:
 
         self._send_message(
             "❌ Unknown command.\n"
-            "Try: /start, /stop, /mode live, /mode shadow, /status, /summary, /refresh, /health, /emergency, /help"
+            "Try: /start, /stop, /mode live, /mode shadow, /mode quality on|off, "
+            "/status, /summary, /refresh, /health, /emergency, /help"
         )
 
     # ---------- polling loop ----------
