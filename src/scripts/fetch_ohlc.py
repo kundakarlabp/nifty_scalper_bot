@@ -1,173 +1,98 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Fetch OHLC candles from Kite and save to CSV.
 
-Features
-- Reads API creds from env (.env supported)
-- Accepts either instrument_token or tradingsymbol (e.g. NFO:NIFTY24AUG24600CE)
-- Auto-chunks long ranges to respect Kite limits
-- Optional OI column
-- Robust CSV writing with path auto-create
-- Retries with backoff on transient errors
+Examples:
+  python -m src.scripts.fetch_ohlc --token 256265 --from 2024-07-01 --to 2024-07-12 --interval 5minute
+  python -m src.scripts.fetch_ohlc --symbol NSE:NIFTY\ 50 --from 2024-07-01 --to 2024-07-12
+
+Env:
+  ZERODHA_API_KEY, ZERODHA_ACCESS_TOKEN  (loaded from .env if present)
 """
 
 from __future__ import annotations
-
 import argparse
 import os
 import sys
-import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
-
+from datetime import datetime
 import pandas as pd
 
-# Optional: python-dotenv if installed (won't crash if missing)
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    pass
+def _load_env():
+    # load .env if present (without external deps)
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
-from kiteconnect import KiteConnect
+def _kite():
+    from kiteconnect import KiteConnect
+    api_key = os.environ.get("ZERODHA_API_KEY")
+    access_token = os.environ.get("ZERODHA_ACCESS_TOKEN")
+    if not api_key or not access_token:
+        print("❌ Missing ZERODHA_API_KEY or ZERODHA_ACCESS_TOKEN.", file=sys.stderr)
+        sys.exit(2)
+    k = KiteConnect(api_key=api_key)
+    k.set_access_token(access_token)
+    return k
 
+def _parse_date(d: str) -> datetime:
+    return datetime.strptime(d, "%Y-%m-%d")
 
-def _env(key: str, default: Optional[str] = None) -> str:
-    v = os.environ.get(key, default)
-    if v is None:
-        raise RuntimeError(f"Missing environment variable: {key}")
-    return v
+def main():
+    _load_env()
 
+    p = argparse.ArgumentParser(description="Download OHLC to CSV")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--token", type=int, help="instrument_token")
+    g.add_argument("--symbol", type=str, help="exchange:tradingsymbol (e.g. NSE:NIFTY 50)")
+    p.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
+    p.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
+    p.add_argument("--interval", default="5minute",
+                   choices=["minute","3minute","5minute","10minute","15minute","30minute","60minute","day"])
+    p.add_argument("--out", default="data/ohlc.csv")
+    args = p.parse_args()
 
-def _parse_date(s: str) -> datetime:
-    # Accept YYYY-MM-DD or full ISO 8601
-    try:
-        if len(s) == 10:
-            return datetime.strptime(s, "%Y-%m-%d")
-        return datetime.fromisoformat(s)
-    except Exception:
-        raise argparse.ArgumentTypeError(f"Invalid date: {s}")
+    k = _kite()
 
+    # Resolve token from symbol if needed
+    token = args.token
+    if not token:
+        q = k.ltp([args.symbol])
+        lp = q.get(args.symbol)
+        if not lp:
+            print(f"❌ LTP lookup failed for {args.symbol}", file=sys.stderr)
+            sys.exit(3)
+        token = lp.get("instrument_token") or lp.get("instrument_token", None)
+        # Some Kite versions don't return token in ltp; fallback via instruments
+        if not token:
+            exch, ts = args.symbol.split(":", 1)
+            cats = k.instruments(exch)
+            for row in cats or []:
+                if row.get("tradingsymbol") == ts:
+                    token = row.get("instrument_token")
+                    break
+        if not token:
+            print("❌ Could not resolve instrument_token from symbol.", file=sys.stderr)
+            sys.exit(4)
 
-def _chunks(start: datetime, end: datetime, interval: str) -> List[tuple[datetime, datetime]]:
-    """
-    Split request range into safe windows. Kite daily limits are generous,
-    but minute endpoints work best with ≤60 days per call.
-    """
-    spans: List[tuple[datetime, datetime]] = []
-    if interval.endswith("minute"):
-        max_days = 60
-    else:
-        max_days = 200  # conservative for day/others
+    start, end = _parse_date(args.date_from), _parse_date(args.date_to)
+    candles = k.historical_data(token, start, end, args.interval, oi=False) or []
+    if not candles:
+        print("⚠️ No candles returned.", file=sys.stderr)
 
-    cur = start
-    while cur < end:
-        nxt = min(cur + timedelta(days=max_days), end)
-        spans.append((cur, nxt))
-        cur = nxt
-    return spans
+    df = pd.DataFrame(candles)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df.set_index("date", inplace=True)
 
-
-def _historical(
-    kite: KiteConnect,
-    instrument_token: int,
-    start: datetime,
-    end: datetime,
-    interval: str,
-    include_oi: bool,
-    tries: int = 3,
-    backoff: float = 0.75,
-) -> List[Dict[str, Any]]:
-    last_exc = None
-    for i in range(tries):
-        try:
-            return kite.historical_data(
-                instrument_token=instrument_token,
-                from_date=start,
-                to_date=end,
-                interval=interval,
-                continuous=False,
-                oi=include_oi,
-            ) or []
-        except Exception as exc:
-            last_exc = exc
-            if i == tries - 1:
-                break
-            sleep_s = backoff * (2 ** i)
-            time.sleep(sleep_s)
-    raise last_exc  # type: ignore
-
-
-def _lookup_token(kite: KiteConnect, tradingsymbol: str) -> int:
-    """
-    Resolve "EXCHANGE:SYMBOL" → token using instruments cache.
-    Examples: "NSE:NIFTY 50", "NFO:NIFTY24AUG24600CE"
-    """
-    if ":" not in tradingsymbol:
-        raise ValueError("tradingsymbol must be like 'NSE:XXXX' or 'NFO:XXXX'")
-    exch, sym = tradingsymbol.split(":", 1)
-    rows = kite.instruments(exch.upper()) or []
-    for r in rows:
-        if str(r.get("tradingsymbol", "")).strip().upper() == sym.strip().upper():
-            tok = r.get("instrument_token")
-            if tok:
-                return int(tok)
-    raise ValueError(f"Could not resolve token for {tradingsymbol}")
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Fetch OHLC from Kite → CSV")
-    ap.add_argument("--token", type=int, help="Instrument token")
-    ap.add_argument("--symbol", type=str, help="Exchange-qualified symbol, e.g. 'NSE:NIFTY 50'")
-    ap.add_argument("--from", dest="from_date", type=_parse_date, required=True, help="From date (YYYY-MM-DD or ISO)")
-    ap.add_argument("--to", dest="to_date", type=_parse_date, required=True, help="To date (YYYY-MM-DD or ISO)")
-    ap.add_argument("--interval", default="5minute", help="minute|3minute|5minute|15minute|30minute|60minute|day")
-    ap.add_argument("--oi", action="store_true", help="Include OI where available")
-    ap.add_argument("--out", default="data/ohlc.csv", help="Output CSV path")
-    ap.add_argument("--drop-partial", action="store_true", help="Drop last (possibly partial) candle")
-    args = ap.parse_args()
-
-    if not args.token and not args.symbol:
-        ap.error("Provide either --token or --symbol")
-
-    api_key = _env("ZERODHA_API_KEY")
-    access_token = _env("ZERODHA_ACCESS_TOKEN")
-
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
-
-    token = args.token or _lookup_token(kite, args.symbol)  # type: ignore
-
-    spans = _chunks(args.from_date, args.to_date, args.interval)
-    frames: List[pd.DataFrame] = []
-
-    for i, (s, e) in enumerate(spans, 1):
-        data = _historical(kite, token, s, e, args.interval, include_oi=args.oi)
-        df = pd.DataFrame(data)
-        if df.empty:
-            continue
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date")
-        frames.append(df)
-        # Light pacing between chunks
-        time.sleep(0.25)
-
-    if not frames:
-        print("No data returned for given range.", file=sys.stderr)
-        return 2
-
-    out = pd.concat(frames).sort_index()
-    if args.drop_partial and len(out) > 1:
-        out = out.iloc[:-1]
-
-    # Ensure directory
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    out.to_csv(args.out)
-    print(f"✅ Saved: {args.out}  rows={len(out)}  first={out.index[0]}  last={out.index[-1]}")
-    return 0
-
+    df.to_csv(args.out)
+    print(f"✅ Saved {len(df):,} rows → {args.out}")
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
