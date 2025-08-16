@@ -1,25 +1,19 @@
 # src/utils/greeks.py
 from __future__ import annotations
 """
-Lightweight Black–Scholes Greeks utilities for options on indices/stocks.
+Lightweight Black–Scholes + Greeks utilities for index/stock options.
 
-- Works with CE/PE (call/put)
-- Inputs:
-    spot: current underlying price (S)
-    strike: option strike (K)
-    days_to_expiry: calendar days to expiry (float); internally converted to years
-    iv: implied volatility as a decimal (e.g. 0.20 = 20%)
-    r: risk-free rate (annualized, decimal). Default 0.0 (or set ~0.06 for INR).
-    q: dividend yield (annualized, decimal). Default 0.0.
+Public API (stable):
+- bs_price(...)
+- bs_delta(...), bs_gamma(...), bs_theta(...), bs_vega(...)
+- implied_vol_bisection(...)
+- estimate_delta(...)
+- estimate_all_greeks(...)
 
-Key functions:
-    bs_price(...)
-    bs_delta(...), bs_gamma(...), bs_theta(...), bs_vega(...)
-    implied_vol_bisection(...)
-    estimate_delta(...)            # convenience wrapper used by ranking
-    estimate_all_greeks(...)       # returns a dict of greeks
-
-All functions are defensive: inputs are clamped to safe minimums to avoid NaNs.
+Design notes:
+- Handles CE/PE (call/put) via tolerant type normalization.
+- Inputs clamped to safe minimums (no NaNs, no div-by-zero).
+- IV solver uses robust bracketing (auto-widens upper bound).
 """
 
 import math
@@ -27,8 +21,19 @@ from typing import Literal, Tuple, Dict
 
 OptType = Literal["CE", "PE", "CALL", "PUT"]
 
+__all__ = [
+    "bs_price",
+    "bs_delta",
+    "bs_gamma",
+    "bs_theta",
+    "bs_vega",
+    "implied_vol_bisection",
+    "estimate_delta",
+    "estimate_all_greeks",
+]
 
-# --------------------------- Normal distribution --------------------------- #
+
+# --------------------------- helpers & clamps --------------------------- #
 
 def _norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
@@ -39,15 +44,17 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-# --------------------------- Core Black–Scholes ---------------------------- #
+def _norm_opt_type(opt_type: OptType) -> str:
+    t = str(opt_type or "").strip().upper()
+    return "CE" if t in ("CE", "CALL") else "PE"
+
 
 def _clamp_inputs(
     spot: float, strike: float, days_to_expiry: float, iv: float, r: float, q: float
 ) -> Tuple[float, float, float, float, float, float]:
     S = max(1e-9, float(spot))
     K = max(1e-9, float(strike))
-    # Convert to years; ensure strictly positive to avoid division by zero
-    T = max(1e-6, float(days_to_expiry) / 365.0)
+    T = max(1e-6, float(days_to_expiry) / 365.0)  # days → years
     sigma = max(1e-6, float(iv))
     r = float(r)
     q = float(q)
@@ -55,13 +62,27 @@ def _clamp_inputs(
 
 
 def _d1_d2(S: float, K: float, T: float, r: float, q: float, sigma: float) -> Tuple[float, float]:
-    # d1, d2 per Black–Scholes with continuous dividend yield q
     num = math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T
     den = sigma * math.sqrt(T)
     d1 = num / den
     d2 = d1 - sigma * math.sqrt(T)
     return d1, d2
 
+
+def _price_bounds(S: float, K: float, T: float, r: float, q: float, opt_type: str) -> Tuple[float, float]:
+    """Simple theoretical bounds based on put–call parity (lower, upper)."""
+    disc_r = math.exp(-r * T)
+    disc_q = math.exp(-q * T)
+    if opt_type == "CE":
+        lower = max(0.0, disc_q * S - disc_r * K)
+        upper = disc_q * S  # loose
+    else:
+        lower = max(0.0, disc_r * K - disc_q * S)
+        upper = disc_r * K  # loose
+    return lower, upper
+
+
+# --------------------------- Black–Scholes core --------------------------- #
 
 def bs_price(
     spot: float,
@@ -73,16 +94,16 @@ def bs_price(
     r: float = 0.0,
     q: float = 0.0,
 ) -> float:
-    """Black–Scholes price for European options (continuous dividend yield)."""
+    """Black–Scholes price (continuous dividend yield)."""
     S, K, T, sigma, r, q = _clamp_inputs(spot, strike, days_to_expiry, iv, r, q)
     d1, d2 = _d1_d2(S, K, T, r, q, sigma)
     disc_r = math.exp(-r * T)
     disc_q = math.exp(-q * T)
+    t = _norm_opt_type(opt_type)
 
-    t = str(opt_type).upper()
-    if t in ("CE", "CALL"):
+    if t == "CE":
         return disc_q * S * _norm_cdf(d1) - disc_r * K * _norm_cdf(d2)
-    else:  # PE/PUT
+    else:
         return disc_r * K * _norm_cdf(-d2) - disc_q * S * _norm_cdf(-d1)
 
 
@@ -100,8 +121,8 @@ def bs_delta(
     S, K, T, sigma, r, q = _clamp_inputs(spot, strike, days_to_expiry, iv, r, q)
     d1, _ = _d1_d2(S, K, T, r, q, sigma)
     disc_q = math.exp(-q * T)
-    t = str(opt_type).upper()
-    if t in ("CE", "CALL"):
+    t = _norm_opt_type(opt_type)
+    if t == "CE":
         return disc_q * _norm_cdf(d1)
     else:
         return disc_q * (_norm_cdf(d1) - 1.0)
@@ -134,15 +155,18 @@ def bs_theta(
     q: float = 0.0,
     per_day: bool = True,
 ) -> float:
-    """Theta (time decay). By default returns *per day*."""
+    """
+    Theta (time decay).
+    Returns per-day if per_day=True, else annualised.
+    """
     S, K, T, sigma, r, q = _clamp_inputs(spot, strike, days_to_expiry, iv, r, q)
     d1, d2 = _d1_d2(S, K, T, r, q, sigma)
     disc_r = math.exp(-r * T)
     disc_q = math.exp(-q * T)
 
     first = -disc_q * S * _norm_pdf(d1) * sigma / (2.0 * math.sqrt(T))
-    t = str(opt_type).upper()
-    if t in ("CE", "CALL"):
+    t = _norm_opt_type(opt_type)
+    if t == "CE":
         second = q * disc_q * S * _norm_cdf(d1)
         third = -r * disc_r * K * _norm_cdf(d2)
     else:
@@ -150,9 +174,7 @@ def bs_theta(
         third = r * disc_r * K * _norm_cdf(-d2)
 
     theta_annual = first + second + third
-    if per_day:
-        return theta_annual / 365.0
-    return theta_annual
+    return theta_annual / 365.0 if per_day else theta_annual
 
 
 def bs_vega(
@@ -165,7 +187,10 @@ def bs_vega(
     q: float = 0.0,
     per_1pct: bool = True,
 ) -> float:
-    """Vega: sensitivity to volatility. If per_1pct=True, returns change per +1% vol."""
+    """
+    Vega: sensitivity to volatility.
+    If per_1pct=True, returns change per +1% vol (i.e., divide by 100).
+    """
     S, K, T, sigma, r, q = _clamp_inputs(spot, strike, days_to_expiry, iv, r, q)
     d1, _ = _d1_d2(S, K, T, r, q, sigma)
     disc_q = math.exp(-q * T)
@@ -173,7 +198,7 @@ def bs_vega(
     return vega / 100.0 if per_1pct else vega
 
 
-# --------------------------- Implied volatility ---------------------------- #
+# --------------------------- Implied volatility --------------------------- #
 
 def implied_vol_bisection(
     target_price: float,
@@ -190,33 +215,65 @@ def implied_vol_bisection(
     max_iter: int = 100,
 ) -> float:
     """
-    Robust IV solver by bisection. Returns IV as decimal (e.g., 0.20).
-    If target is out of theoretical bounds, clamps to [low, high].
+    Robust IV solver (bisection).
+    - Ensures target is bracketed: widens `high` if needed up to ~10.0 vol.
+    - Clamps to [low, high] if still not bracketed (e.g., absurd targets).
+    Returns IV as decimal (e.g., 0.20).
     """
     target = max(0.0, float(target_price))
-    lo, hi = float(low), float(high)
+    dte_days = float(days_to_expiry)
+    S, K, T, _, r, q = _clamp_inputs(spot, strike, dte_days, max(low, 1e-4), r, q)
+    t = _norm_opt_type(opt_type)
 
-    # Check bounds
+    # Parity sanity (lower bound on price)
+    lb, _ub = _price_bounds(S, K, T, r, q, t)
+    target = max(target, lb)
+
+    lo = max(1e-6, float(low))
+    hi = max(lo * 2.0, float(high))
+
+    price_lo = bs_price(S, K, dte_days, lo, opt_type=t, r=r, q=q)
+    price_hi = bs_price(S, K, dte_days, hi, opt_type=t, r=r, q=q)
+
+    # If target below price at lo (near-zero vol), return lo (degenerate case)
+    if target <= price_lo:
+        return lo
+
+    # Widen hi until we bracket the target or hit safety cap
+    widen_cap = 10.0
+    tries = 0
+    while price_hi < target and hi < widen_cap:
+        hi *= 1.5
+        price_hi = bs_price(S, K, dte_days, hi, opt_type=t, r=r, q=q)
+        tries += 1
+        if tries > 20:
+            break
+
+    # If still not bracketed, clamp to hi
+    if price_hi < target:
+        return max(lo, min(widen_cap, hi))
+
+    # Bisection
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        price = bs_price(spot, strike, days_to_expiry, mid, opt_type=opt_type, r=r, q=q)
-        if abs(price - target) <= tol:
-            return max(low, min(high, mid))
-        if price > target:
+        price_mid = bs_price(S, K, dte_days, mid, opt_type=t, r=r, q=q)
+        diff = price_mid - target
+        if abs(diff) <= tol:
+            return max(low, min(hi, mid))
+        if diff > 0.0:
             hi = mid
         else:
             lo = mid
-    return max(low, min(high, 0.5 * (lo + hi)))
+
+    return max(low, min(hi, 0.5 * (lo + hi)))
 
 
-# -------------------------- Convenience wrappers --------------------------- #
+# -------------------------- Convenience wrappers ------------------------- #
 
 def estimate_delta(
     spot: float, strike: float, days_to_expiry: float, iv: float, opt_type: OptType
 ) -> float:
-    """
-    Convenience wrapper used by strike ranking. Assumes r=q=0 for simplicity.
-    """
+    """Convenience wrapper used by strike ranking (assumes r=q=0)."""
     try:
         return float(bs_delta(spot, strike, days_to_expiry, iv, opt_type=opt_type, r=0.0, q=0.0))
     except Exception:
@@ -234,7 +291,8 @@ def estimate_all_greeks(
     q: float = 0.0,
 ) -> Dict[str, float]:
     """
-    Returns a dict with price and Greeks. Theta is per-day; Vega is per +1% vol.
+    Returns a dict with price and Greeks.
+    Theta is per-day; Vega is per +1% vol.
     """
     try:
         return {
@@ -248,17 +306,15 @@ def estimate_all_greeks(
         return {"price": 0.0, "delta": 0.0, "gamma": 0.0, "theta_per_day": 0.0, "vega_per_1pct": 0.0}
 
 
-# ------------------------------- Quick demo -------------------------------- #
+# ------------------------------- quick demo ------------------------------ #
 
 if __name__ == "__main__":
-    # Example: NIFTY-like numbers
     S = 24600.0
     K = 24600.0
-    dte = 7.0          # days
-    iv = 0.20          # 20%
-    r = 0.0            # set ~0.06 if you prefer INR risk-free
+    dte = 7.0
+    iv = 0.20
+    r = 0.0
     q = 0.0
-
     for typ in ("CE", "PE"):
         print(f"\n{typ} @ S={S}, K={K}, dte={dte}d, iv={iv*100:.1f}%")
         print("price:", bs_price(S, K, dte, iv, opt_type=typ, r=r, q=q))
