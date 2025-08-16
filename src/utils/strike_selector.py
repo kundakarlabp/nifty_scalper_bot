@@ -3,10 +3,11 @@
 Utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
 
-- Robust symbol resolution + conservative fallbacks
+Features
+- Robust symbol/expiry/strike resolution with conservative fallbacks
 - Uses cached instruments (passed in) with rate-limited Kite API wrappers
-- Optional Greeks-driven selection with OI/IV/premium filters and looser fallback
-- ATM/offset legacy fallback path for reliability
+- Optional Greeks-driven selection with OI/IV/premium filters + loose fallback
+- Legacy ATM/offset fallback for reliability (no Greeks required)
 - Lightweight health_check() for readiness probes
 """
 
@@ -17,9 +18,12 @@ import logging
 import threading
 import time
 from datetime import datetime, date, timedelta
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
-from kiteconnect import KiteConnect
+try:
+    from kiteconnect import KiteConnect
+except Exception:  # Make import safe if not installed in test env
+    KiteConnect = Any  # type: ignore
 
 # Greeks helpers (optional)
 try:
@@ -43,10 +47,11 @@ __all__ = [
 # ---------------- Rate limit wrapper ----------------
 _last_api_call: Dict[str, float] = {}
 _api_call_lock = threading.RLock()
-_MIN_API_INTERVAL = 0.5  # per-endpoint cadence
+_MIN_API_INTERVAL = 0.50  # seconds, per-endpoint cadence
 
 
 def _rate_limited_api_call(func, *args, **kwargs):
+    """Serialize calls per function name with a minimal cadence and retry once on 429-ish errors."""
     with _api_call_lock:
         key = getattr(func, "__name__", "api_call")
         now = time.time()
@@ -80,6 +85,7 @@ def _get_spot_ltp_symbol() -> str:
 
 
 def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
+    """YYMonDD for display/debug (not used for lookups)."""
     try:
         dt = datetime.strptime(expiry_str, "%Y-%m-%d")
         return dt.strftime("%y%b%d").upper()
@@ -89,6 +95,7 @@ def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
 
 
 def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type: str) -> str:
+    """NIFTY24AUG22CE style formatter (for logs/UI; actual lookup uses instrument rows)."""
     try:
         exp = _format_expiry_for_symbol_primary(expiry)
         return f"{base_symbol}{exp}{int(strike)}{option_type}" if exp else ""
@@ -98,6 +105,7 @@ def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type
 
 
 def get_atm_strike_price(spot_price: float) -> int:
+    """Round to the nearest 50 for NIFTY options."""
     try:
         return int(round(float(spot_price) / 50.0) * 50)
     except Exception as e:
@@ -106,6 +114,7 @@ def get_atm_strike_price(spot_price: float) -> int:
 
 
 def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
+    """Symmetric list of nearest strikes around ATM (step=50)."""
     try:
         atm = get_atm_strike_price(spot_price)
         half = max(1, strike_count // 2)
@@ -116,6 +125,7 @@ def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
 
 
 def _calculate_next_thursday(target_date: Optional[date] = None) -> str:
+    """Calendar fallback for weekly expiry (next Thursday)."""
     d = target_date or date.today()
     days_ahead = (3 - d.weekday()) % 7  # Thu=3
     if days_ahead == 0:
@@ -125,6 +135,7 @@ def _calculate_next_thursday(target_date: Optional[date] = None) -> str:
 
 # ---------------- Cached instruments helpers ----------------
 def fetch_cached_instruments(kite: KiteConnect) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch NFO+NSE instrument master (best-effort) for in-memory searches."""
     try:
         nfo = _rate_limited_api_call(kite.instruments, "NFO")
     except Exception as e:
@@ -143,6 +154,7 @@ def get_next_expiry_date(
     kite_instance: KiteConnect,
     cached_nfo_instruments: Optional[List[Dict]] = None,
 ) -> Optional[str]:
+    """Resolve the nearest *future* expiry for NIFTY index options from cache; calendar fallback."""
     if not kite_instance:
         logger.error("[get_next_expiry_date] KiteConnect instance is required.")
         return _calculate_next_thursday()
@@ -185,6 +197,7 @@ def get_next_expiry_date(
 
 
 def _resolve_spot_token_from_cache(cached_nse_instruments: List[Dict]) -> Optional[int]:
+    """Find NIFTY 50 index token; fallback to Config.INSTRUMENT_TOKEN."""
     try:
         from src.config import Config
         for inst in cached_nse_instruments or []:
@@ -211,7 +224,10 @@ def _exp_to_date(x: Any) -> Optional[date]:
         return None
 
 
-def _find_instrument(nfo_list: List[Dict[str, Any]], *, strike: int, opt_type: str, expiry: date) -> Optional[Dict]:
+def _find_instrument(
+    nfo_list: List[Dict[str, Any]], *, strike: int, opt_type: str, expiry: date
+) -> Optional[Dict]:
+    """Find one instrument row by (strike, type, expiry)."""
     for inst in nfo_list or []:
         if inst.get("name") != "NIFTY":
             continue
@@ -249,10 +265,10 @@ def _greeks_pick_strikes(
     global _last_no_pick_log_ts
 
     if implied_vol_bisection is None or estimate_delta is None:
-        logger.debug("[Greeks] greeks utils unavailable; skipping Greeks mode.")
+        logger.debug("[Greeks] utils unavailable; skipping Greeks mode.")
         return None
 
-    # Config knobs
+    # Config knobs via env (kept decoupled from Config to allow quick tweaks)
     rf = float(os.environ.get("RISK_FREE_RATE", "0.06"))
     tgt_call = float(os.environ.get("TARGET_DELTA_CALL", "0.35"))
     tgt_put = float(os.environ.get("TARGET_DELTA_PUT", "-0.35"))
@@ -275,7 +291,7 @@ def _greeks_pick_strikes(
     dte_days = max(0.5, (expiry_dt - datetime.now().date()).days or 0.5)
 
     # Build symbol list once → bulk LTP to minimize rate calls
-    sym_rows = []
+    sym_rows: List[Tuple[str, Dict[str, Any], int, str]] = []
     for k in strikes:
         for side in ("CE", "PE"):
             row = _find_instrument(nfo_list, strike=k, opt_type=side, expiry=expiry_dt)
@@ -311,7 +327,7 @@ def _greeks_pick_strikes(
             if ltp <= 0.0 or ltp < min_prem:
                 continue
 
-            # IV estimate
+            # IV estimate (approx)
             if iv_mode == "LTP_IMPLIED":
                 try:
                     iv = float(
@@ -378,6 +394,7 @@ def _greeks_pick_strikes(
 
     # Throttled info log to avoid spam
     now = time.time()
+    global _last_no_pick_log_ts
     if now - _last_no_pick_log_ts > log_throttle:
         _last_no_pick_log_ts = now
         logger.info("[Greeks] No strike within tolerance — using ATM/offset fallback")
@@ -393,6 +410,15 @@ def get_instrument_tokens(
     offset: int = 0,
     strike_range: int = 3,
 ) -> Optional[Dict[str, Any]]:
+    """
+    Resolve CE/PE tokens for the current/next expiry.
+    Returns dict with keys:
+      - spot_price, atm_strike, target_strike, expiry
+      - ce_symbol, ce_token, pe_symbol, pe_token
+      - spot_token
+      - actual_strikes: {'ce': int, 'pe': int}
+      - ce_delta, pe_delta (if Greeks mode used)
+    """
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
         return None
@@ -433,7 +459,10 @@ def get_instrument_tokens(
         def _exp_str(x) -> str:
             return x.strftime("%Y-%m-%d") if hasattr(x, "strftime") else str(x)
 
-        candidates = [i for i in cached_nfo_instruments if i.get("name") == "NIFTY" and _exp_str(i.get("expiry")) == expiry_iso]
+        candidates = [
+            i for i in cached_nfo_instruments
+            if i.get("name") == "NIFTY" and _exp_str(i.get("expiry")) == expiry_iso
+        ]
         if not candidates:
             logger.error("[get_instrument_tokens] No NIFTY instruments @ %s", expiry_iso)
             return None
@@ -455,7 +484,7 @@ def get_instrument_tokens(
             "pe_delta": None,
         }
 
-        # Greeks mode (opt-in)
+        # Greeks mode (opt-in via env)
         use_greeks = _env_bool("USE_GREEKS_STRIKE_RANKING", False)
         if use_greeks:
             picked = _greeks_pick_strikes(
@@ -472,10 +501,11 @@ def get_instrument_tokens(
                     ce_token=ce["token"],
                     pe_symbol=pe["tradingsymbol"],
                     pe_token=pe["token"],
-                    actual_strikes={"ce": ce["strike"], "pe": pe["strike"]},
                     ce_delta=round(ce["delta"], 3),
                     pe_delta=round(pe["delta"], 3),
                 )
+                res["actual_strikes"]["ce"] = ce["strike"]
+                res["actual_strikes"]["pe"] = pe["strike"]
                 return res
 
         # Legacy ATM/offset fallback search (or Greeks disabled)
@@ -528,6 +558,7 @@ def get_instrument_tokens(
 
 # ---------------- Trading-hours + health ----------------
 def is_trading_hours() -> bool:
+    """NSE equity/derivatives hours (Mon-Fri 09:15-15:30 IST)."""
     try:
         now = datetime.now()
         wd = now.weekday()
@@ -539,7 +570,12 @@ def is_trading_hours() -> bool:
 
 
 def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
-    status = {"overall_status": "OK", "message": "", "checks": {}}
+    """
+    Basic readiness probes:
+    - can fetch LTP for the spot index
+    - instruments endpoint responds and contains NIFTY rows
+    """
+    status: Dict[str, Any] = {"overall_status": "OK", "message": "", "checks": {}}
     try:
         if not kite:
             status.update(overall_status="ERROR", message="No Kite instance")
@@ -557,19 +593,30 @@ def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
             status["checks"]["ltp"] = f"FAIL: {e}"
             status["overall_status"] = "ERROR"
 
-        # Instruments
+        # Instruments (NFO + NSE partial)
         try:
-            nfo = _rate_limited_api_call(kite.instruments, "NFO")
-            ok = isinstance(nfo, list) and len(nfo) > 0
-            status["checks"]["instruments"] = "OK" if ok else "FAIL"
-            if not ok:
+            nfo = _rate_limited_api_call(kite.instruments, "NFO") or []
+            ok_nfo = isinstance(nfo, list) and any(r.get("name") == "NIFTY" for r in nfo)
+            status["checks"]["instruments_nfo"] = "OK" if ok_nfo else "FAIL"
+            if not ok_nfo:
                 status["overall_status"] = "ERROR"
         except Exception as e:
-            status["checks"]["instruments"] = f"FAIL: {e}"
+            status["checks"]["instruments_nfo"] = f"FAIL: {e}"
             status["overall_status"] = "ERROR"
 
-        status["message"] = " | ".join(f"{k}:{v}" for k, v in status["checks"].items())
+        try:
+            nse = _rate_limited_api_call(kite.instruments, "NSE") or []
+            ok_nse = isinstance(nse, list) and len(nse) > 0
+            status["checks"]["instruments_nse"] = "OK" if ok_nse else "FAIL"
+            if not ok_nse:
+                status["overall_status"] = "ERROR"
+        except Exception as e:
+            status["checks"]["instruments_nse"] = f"FAIL: {e}"
+            status["overall_status"] = "ERROR"
+
+        if status["overall_status"] != "OK":
+            status["message"] = "One or more checks failed."
         return status
+
     except Exception as e:
-        logger.error("[health_check] %s", e, exc_info=True)
-        return {"overall_status": "ERROR", "message": str(e), "checks": {}}
+        return {"overall_status": "ERROR", "message": f"health_check exception: {e}", "checks": {}}
