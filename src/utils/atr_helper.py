@@ -3,10 +3,12 @@
 Average True Range (ATR) utilities for real-time options/indices trading.
 
 Features
-- compute_atr_df: Vectorized ATR (SMA/EMA/RMA) from a pandas DataFrame of OHLCV
+- compute_atr_df: Vectorized ATR (SMA/EMA/RMA) from a pandas DataFrame of OHLC(V)
 - compute_atr_arrays: Same as above, but accepts Python lists/arrays for speed
-- incremental_wilder_update: O(1) ATR update (Wilder/RMA) from the last bar and previous ATR
-- get_realtime_atr: Convenience wrapper to pull candles via KiteConnect and return latest ATR
+- incremental_wilder_update: O(1) ATR update (Wilder/RMA) from the last bar + prev ATR
+- ATRTracker: stateful, streaming-friendly ATR updater (RMA/Wilder)
+- latest_atr_value: Convenience to get last non-NaN ATR
+- get_realtime_atr: Pull candles via KiteConnect and return latest ATR
 
 Design notes
 - Default method is Wilder's RMA (classic ATR), period=14.
@@ -26,6 +28,15 @@ logger = logging.getLogger(__name__)
 
 ATRMethod = Literal["rma", "ema", "sma"]
 
+__all__ = [
+    "compute_atr_df",
+    "compute_atr_arrays",
+    "incremental_wilder_update",
+    "latest_atr_value",
+    "get_realtime_atr",
+    "ATRTracker",
+]
+
 
 # ---------- Core math helpers ----------
 
@@ -40,25 +51,24 @@ def _true_range_series(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.
 
 
 def _ema(s: pd.Series, period: int) -> pd.Series:
-    return s.ewm(span=period, adjust=False, min_periods=period).mean()
+    return s.ewm(span=max(1, int(period)), adjust=False, min_periods=max(1, int(period))).mean()
 
 
 def _rma_wilder(s: pd.Series, period: int) -> pd.Series:
     """Wilder's RMA (a.k.a. smoothed moving average) commonly used for ATR."""
-    # Start with SMA seed, then recursive smoothing
+    period = max(1, int(period))
     sma = s.rolling(window=period, min_periods=period).mean()
     rma = sma.copy()
     alpha = 1.0 / period
+    # iterative smoothing
     for i in range(period, len(s)):
-        if pd.isna(rma.iat[i - 1]):
-            rma.iat[i] = sma.iat[i]
-        else:
-            rma.iat[i] = rma.iat[i - 1] + alpha * (s.iat[i] - rma.iat[i - 1])
+        prev = rma.iat[i - 1]
+        rma.iat[i] = (sma.iat[i] if pd.isna(prev) else prev + alpha * (s.iat[i] - prev))
     return rma
 
 
 def _sma(s: pd.Series, period: int) -> pd.Series:
-    return s.rolling(window=period, min_periods=period).mean()
+    return s.rolling(window=max(1, int(period)), min_periods=max(1, int(period))).mean()
 
 
 # ---------- Public APIs ----------
@@ -88,7 +98,7 @@ def compute_atr_df(
 
     tr = _true_range_series(high, low, close)
 
-    m = method.lower()
+    m = (method or "rma").lower()
     if m == "ema":
         atr = _ema(tr, period)
     elif m == "sma":
@@ -110,9 +120,7 @@ def compute_atr_arrays(
     Fast path returning ONLY the latest ATR value from arrays/lists.
     """
     try:
-        df = pd.DataFrame(
-            {"high": list(highs), "low": list(lows), "close": list(closes)}
-        )
+        df = pd.DataFrame({"high": list(highs), "low": list(lows), "close": list(closes)})
         atr = compute_atr_df(df, period=period, method=method)
         if atr.empty:
             return None
@@ -140,8 +148,7 @@ def incremental_wilder_update(
     Returns newATR or None if inputs invalid.
     """
     try:
-        if period <= 0:
-            return None
+        period = max(1, int(period))
         if any(v is None for v in (prev_atr, prev_close, high, low, close)):
             return None
         tr1 = abs(high - low)
@@ -179,6 +186,52 @@ def latest_atr_value(
     return float(v) if pd.notna(v) else None
 
 
+# ---------- Streaming helper (stateful) ----------
+
+class ATRTracker:
+    """
+    Stateful ATR updater (Wilder/RMA) for streaming candles.
+
+    Usage:
+        tracker = ATRTracker(period=14)
+        tracker.seed_from_df(df)    # optional seed from history (needs >= period rows)
+        ...
+        new_atr = tracker.update(prev_close, high, low, close)
+
+    Attributes:
+        period (int): ATR period
+        value (Optional[float]): latest ATR or None if not seeded yet
+    """
+
+    def __init__(self, period: int = 14):
+        self.period = max(1, int(period))
+        self.value: Optional[float] = None
+
+    def seed_from_df(self, df: pd.DataFrame, method: ATRMethod = "rma") -> Optional[float]:
+        """Seed internal ATR from a historical DataFrame (uses latest non-NaN)."""
+        try:
+            v = latest_atr_value(df, period=self.period, method=method)
+            self.value = v
+            return self.value
+        except Exception:
+            return None
+
+    def update(self, prev_close: float, high: float, low: float, close: float) -> Optional[float]:
+        """Incrementally update the ATR with the just-closed bar."""
+        if self.value is None:
+            # cannot update without seed; caller should seed_from_df first
+            return None
+        self.value = incremental_wilder_update(
+            prev_atr=float(self.value),
+            prev_close=float(prev_close),
+            high=float(high),
+            low=float(low),
+            close=float(close),
+            period=self.period,
+        )
+        return self.value
+
+
 # ---------- Kite convenience wrapper (optional) ----------
 
 def get_realtime_atr(
@@ -208,28 +261,32 @@ def get_realtime_atr(
             return None
 
         end = datetime.now()
-        # +10% buffer on lookback minutes for safety on gaps
+        # pick a lookback that comfortably covers `bars` even with gaps
         if timeframe == "minute":
-            start = end - timedelta(minutes=max(bars * 1.1, period * 2))
+            minutes = max(int(bars * 1.25), period * 3)
+            start = end - timedelta(minutes=minutes)
         elif timeframe.endswith("minute"):
             mult = int(timeframe.replace("minute", "")) if timeframe != "minute" else 1
-            start = end - timedelta(minutes=int(max(bars * mult * 1.1, period * mult * 2)))
+            minutes = max(int(bars * mult * 1.25), period * mult * 3)
+            start = end - timedelta(minutes=minutes)
         elif timeframe == "day":
-            start = end - timedelta(days=max(int(bars * 1.1), period * 2))
+            start = end - timedelta(days=max(int(bars * 1.25), period * 3))
         else:
-            # default fallback
-            start = end - timedelta(minutes=max(bars, period) * 2)
+            # fallback: assume minutes
+            start = end - timedelta(minutes=max(bars, period) * 3)
 
-        candles = kite.historical_data(
-            instrument_token, start, end, timeframe, oi=False
-        ) or []
+        candles = kite.historical_data(instrument_token, start, end, timeframe, oi=False) or []
         if not candles:
             return None
+
         df = pd.DataFrame(candles)
+        # Kite returns keys: date, open, high, low, close, volume
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"])
             df.set_index("date", inplace=True)
 
+        # Ensure essential columns
         cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
         if len(cols) < 3:
             return None
