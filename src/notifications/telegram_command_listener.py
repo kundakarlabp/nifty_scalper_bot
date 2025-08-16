@@ -1,79 +1,100 @@
+# src/notifications/telegram_listener.py
 """
-Backward-compatibility wrapper for the Telegram controller.
+Legacy-compatible Telegram command listener.
 
-In the original codebase, the Telegram bot command listener was a
-standalone script. This refactored version rolls command handling
-directly into ``TelegramController``. The separate listener is
-therefore no longer required, but this file remains to avoid import
-errors for existing tooling.
+This script exists for setups that previously launched a standalone
+Telegram listener. It wires up the existing TelegramController with
+dummy callbacks (log-only) and starts polling. No trading actions
+are performed here.
 
-Running this module directly will simply instantiate a ``TelegramController``
-and begin polling for commands. The controller does not perform any
-trading itself; instead, it logs incoming commands.
+Usage:
+    python -m src.notifications.telegram_listener
+    # or
+    python src/notifications/telegram_listener.py
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Callable
+import time
+from typing import Any, Dict
 
-# --- NEW: .env auto-loader so this script is standalone-friendly ---
-def load_dotenv_if_present() -> None:
+# --- optional .env auto-loader so this script is standalone-friendly ---
+def _load_dotenv_if_present() -> None:
     try:
         from pathlib import Path
         from dotenv import load_dotenv
         here = Path(__file__).resolve()
-        candidates = [
-            here.parent / ".env",          # repo/.env if this file sits at repo root
-            here.parent.parent / ".env",   # repo/.env if this file is in a subfolder
-            Path.cwd() / ".env",
-        ]
-        for p in candidates:
+        # Try a few common locations
+        for p in (here.parent / ".env", here.parent.parent / ".env", Path.cwd() / ".env"):
             if p.exists():
                 load_dotenv(p)
-                logging.getLogger(__name__).info(f"🔐 Loaded environment from {p}")
+                logging.getLogger(__name__).info("🔐 Loaded environment from %s", p)
                 return
+        # Fallback to default behavior (env var file in CWD if any)
         load_dotenv()
     except Exception:
+        # It's fine if dotenv isn't installed — controller will use env as-is
         pass
 
-load_dotenv_if_present()
-# --- END NEW ---
+_load_dotenv_if_present()
+# --- end env loader ---
 
-# Attempt to import the real controller
+# Prefer your packaged controller; fall back to flat import for older trees
 try:
     from src.notifications.telegram_controller import TelegramController
 except (ImportError, ModuleNotFoundError):
     try:
-        from telegram_controller import TelegramController
-    except ImportError:
+        from telegram_controller import TelegramController  # legacy flat file
+    except Exception as exc:  # pragma: no cover
         raise ImportError(
-            "Could not find 'TelegramController'. "
-            "Make sure 'telegram_controller.py' is in the path."
-        )
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+            "Could not import TelegramController. Ensure src/notifications/telegram_controller.py "
+            "(or telegram_controller.py) is on PYTHONPATH."
+        ) from exc
 
 
-# Dummy callbacks for legacy mode (logging only)
+# ---- logging ---------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("telegram_listener")
+
+
+# ---- dummy callbacks (log-only) -------------------------------------------
 def _dummy_status() -> Dict[str, Any]:
-    logger.info("⚠️ /status received, but no live trader connected.")
-    return {"is_trading": False, "live_mode": False, "trades_today": 0, "open_orders": 0}
+    """
+    Returned to /status in legacy mode. Does NOT query a live trader.
+    """
+    logger.info("⚠️ /status received (legacy listener; no live trader attached).")
+    return {
+        "is_trading": False,
+        "live_mode": False,
+        "trades_today": 0,
+        "open_positions": 0,
+        "daily_pnl": 0.0,
+        "session_date": None,
+    }
 
 
 def _dummy_control(cmd: str, arg: str = "") -> bool:
-    logger.info(f"📩 Command received (no action): /{cmd} {arg}".strip())
+    """
+    Log-only handler for commands like /start, /stop, /mode, etc.
+    """
+    logger.info("📩 Command received (no action taken): /%s %s", cmd, arg)
     return True
 
 
 def _dummy_summary() -> str:
-    logger.info("⚠️ /summary requested, but no trade history available.")
-    return "No trading context available in legacy listener mode."
+    """
+    Returned to /summary in legacy mode.
+    """
+    logger.info("⚠️ /summary requested (no trade history in legacy mode).")
+    return "<b>No trading context available in legacy listener mode.</b>"
 
 
+# ---- main -----------------------------------------------------------------
 def main() -> None:
-    """Start polling for Telegram commands with dummy callbacks."""
     try:
         controller = TelegramController(
             status_callback=_dummy_status,
@@ -81,8 +102,11 @@ def main() -> None:
             summary_callback=_dummy_summary,
         )
     except TypeError as e:
-        logger.error(f"Failed to initialize TelegramController: {e}")
-        logger.info("💡 Hint: Ensure your TelegramController accepts optional callbacks.")
+        logger.error("Failed to initialize TelegramController: %s", e)
+        logger.info("💡 Ensure TelegramController accepts status/control/summary callbacks.")
+        return
+    except Exception as e:
+        logger.error("TelegramController init error: %s", e, exc_info=True)
         return
 
     logger.info("📡 Telegram command listener started (legacy compatibility mode).")
@@ -90,10 +114,18 @@ def main() -> None:
 
     try:
         while True:
-            pass  # Keep main thread alive
+            # Keep main thread alive without busy-looping
+            time.sleep(1.0)
     except KeyboardInterrupt:
-        logger.info("🛑 Telegram listener stopped via keyboard interrupt.")
-        controller.stop_polling()
+        logger.info("🛑 Stopping Telegram listener (KeyboardInterrupt).")
+    except Exception as e:  # pragma: no cover
+        logger.error("Listener error: %s", e, exc_info=True)
+    finally:
+        try:
+            controller.stop_polling()
+        except Exception:
+            pass
+        logger.info("✅ Telegram listener stopped gracefully.")
 
 
 if __name__ == "__main__":
