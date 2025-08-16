@@ -1,539 +1,333 @@
 # src/strategies/scalping_strategy.py
-"""
-Advanced scalping strategy combining multiple technical indicators to
-generate trading signals for both spot/futures and options.
-
-Key features:
-- Confidence gate (uses Config.CONFIDENCE_THRESHOLD)
-- Soft regime nudge (trend vs range) that adjusts signal score
-- NaN guards on last-bar indicators
-- SL/TP floors to avoid paper-thin stops
-- Warmup respects Config.WARMUP_BARS
-- Optional spot-trend confirmation for options (Config.OPTION_REQUIRE_SPOT_CONFIRM)
-- Price-movement re-arm to avoid duplicate signals without progress
-- Option-first flow: lightweight breakout + volume impulse, then fallback to generic signal
-"""
-
 from __future__ import annotations
+"""
+EnhancedScalpingStrategy
+------------------------
 
-import hashlib
-import logging
-from typing import Dict, Optional, Tuple, List, Any
+Signal engine used by RealTimeTrader.
 
+Design:
+- Multi-indicator blend (EMA slope/cross, MACD, Supertrend, VWAP, ADX, BB width)
+- Regime gating: TREND vs RANGE decided by ADX + BB width
+- Score -> confidence on 0–10 scale (PositionSizing expects 0..10)
+- ATR-aware SL/TP with sensible fallbacks to Config base points
+- Options-friendly: also returns 'sl_points'/'tp_points' for convenience
+
+Output (when a signal is present):
+{
+  "signal": "BUY"|"SELL",
+  "direction": "BUY"|"SELL",       # alias
+  "entry_price": float,            # use last close
+  "stop_loss": float,              # absolute price
+  "target": float,                 # absolute price
+  "sl_points": float,              # distance in points
+  "tp_points": float,              # distance in points
+  "atr": float,
+  "score": int,                    # 0..100
+  "confidence": float,             # 0..10
+  "regime": "TREND"|"RANGE",
+}
+"""
+
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 
 from src.config import Config
 from src.utils.indicators import (
     calculate_ema,
-    calculate_rsi,
     calculate_macd,
+    calculate_adx,
+    calculate_bb_width,
     calculate_supertrend,
     calculate_vwap,
-    calculate_adx,
+    calculate_atr,
 )
-from src.utils.atr_helper import compute_atr_df, latest_atr_value  # robust ATR
-
-logger = logging.getLogger(__name__)
 
 
-def _bollinger_bands_from_close(close: pd.Series, window: int, std: float) -> Tuple[pd.Series, pd.Series]:
-    """Compute Bollinger Bands (upper, lower) from the close series (ddof=0)."""
-    ma = close.rolling(window=window, min_periods=window).mean()
-    sd = close.rolling(window=window, min_periods=window).std(ddof=0)
-    upper = ma + std * sd
-    lower = ma - std * sd
-    return upper, lower
+def _cfg(name: str, default):
+    return getattr(Config, name, default)
 
 
-def _round_to_tick(x: float, tick: float) -> float:
-    if tick <= 0:
-        return float(x)
-    return round(float(x) / tick) * tick
-
-
+@dataclass
 class EnhancedScalpingStrategy:
-    """A dynamic scalping strategy for Nifty spot/futures/options."""
+    # Base point stops/targets used if ATR info is weak/unavailable
+    base_stop_loss_points: float = float(_cfg("BASE_STOP_LOSS_POINTS", 8.0))
+    base_target_points: float = float(_cfg("BASE_TARGET_POINTS", 14.0))
 
-    def __init__(
-        self,
-        # Base point SL/TP (used if ATR missing)
-        base_stop_loss_points: float = getattr(Config, "BASE_STOP_LOSS_POINTS", 20.0),
-        base_target_points: float = getattr(Config, "BASE_TARGET_POINTS", 40.0),
-        # Confidence & score
-        confidence_threshold: float = float(getattr(Config, "CONFIDENCE_THRESHOLD", 6.0)),
-        min_score_threshold: int = int(getattr(Config, "MIN_SIGNAL_SCORE", 5)),
-        # Fast-moving scalper defaults (1-min)
-        ema_fast_period: int = 9,
-        ema_slow_period: int = 21,
-        rsi_period: int = 14,
-        rsi_overbought: int = 60,
-        rsi_oversold: int = 40,
-        macd_fast_period: int = 8,      # faster than classical (12)
-        macd_slow_period: int = 17,     # faster than classical (26)
-        macd_signal_period: int = 9,
-        atr_period: int = getattr(Config, "ATR_PERIOD", 14),
-        supertrend_atr_multiplier: float = 2.0,
-        bb_window: int = 20,
-        bb_std_dev: float = 2.0,
-        adx_period: int = 14,
-        adx_trend_strength: int = 25,
-        vwap_period: int = 20,
-        # --- options params ---
-        option_sl_percent: float = float(getattr(Config, "OPTION_SL_PERCENT", 0.05)),
-        option_tp_percent: float = float(getattr(Config, "OPTION_TP_PERCENT", 0.20)),
-    ) -> None:
-        self.base_stop_loss_points = float(base_stop_loss_points)
-        self.base_target_points = float(base_target_points)
-        self.confidence_threshold = float(confidence_threshold)
-        self.min_score_threshold = int(min_score_threshold)
+    # How strong a setup must be on 0..10 to emit a signal
+    confidence_threshold: float = float(_cfg("CONFIDENCE_THRESHOLD", 6.0))
+    # If caller passes MIN_SIGNAL_SCORE as int (e.g., 6), we compare to 0..10 confidence
+    min_score_threshold: int = int(_cfg("MIN_SIGNAL_SCORE", 6))
 
-        self.ema_fast_period = int(ema_fast_period)
-        self.ema_slow_period = int(ema_slow_period)
-        self.rsi_period = int(rsi_period)
-        self.rsi_overbought = int(rsi_overbought)
-        self.rsi_oversold = int(rsi_oversold)
-        self.macd_fast_period = int(macd_fast_period)
-        self.macd_slow_period = int(macd_slow_period)
-        self.macd_signal_period = int(macd_signal_period)
-        self.atr_period = int(atr_period)
-        self.supertrend_atr_multiplier = float(supertrend_atr_multiplier)
-        self.bb_window = int(bb_window)
-        self.bb_std_dev = float(bb_std_dev)
-        self.adx_period = int(adx_period)
-        self.adx_trend_strength = int(adx_trend_strength)
-        self.vwap_period = int(vwap_period)
+    # Indicator params (can be overridden via Config)
+    ema_fast: int = int(_cfg("EMA_FAST", 12))
+    ema_slow: int = int(_cfg("EMA_SLOW", 26))
+    macd_fast: int = int(_cfg("MACD_FAST", 12))
+    macd_slow: int = int(_cfg("MACD_SLOW", 26))
+    macd_signal: int = int(_cfg("MACD_SIGNAL", 9))
+    adx_period: int = int(_cfg("ADX_PERIOD", 14))
+    bb_window: int = int(_cfg("BB_WINDOW", 20))
+    bb_std: float = float(_cfg("BB_STD", 2.0))
+    st_period: int = int(_cfg("SUPERTREND_PERIOD", 10))
+    st_mult: float = float(_cfg("SUPERTREND_MULT", 3.0))
+    atr_period: int = int(_cfg("ATR_PERIOD", 14))
 
-        self.option_sl_percent = float(option_sl_percent)
-        self.option_tp_percent = float(option_tp_percent)
+    # Regime gates
+    trend_adx_min: float = float(_cfg("TREND_ADX_MIN", 18.0))  # > this → trending
+    range_adx_max: float = float(_cfg("RANGE_ADX_MAX", 15.0))  # < this → ranging
 
-        # Score axes: EMA, RSI, MACD hist sign, MACD zero-cross, Supertrend align, VWAP
-        self.max_possible_score = 6
+    # ATR scaling for SL (e.g., 1.1 * ATR)
+    atr_sl_mult: float = float(_cfg("ATR_SL_MULTIPLIER", 1.5))
+    atr_tp_mult: float = float(_cfg("ATR_TP_MULTIPLIER", 2.2))
 
-        # Duplicate control
-        self.last_signal_hash: Optional[str] = None
-        self._last_dir: Optional[str] = None
-        self._last_entry_px: Optional[float] = None
-        self._min_rearm_ticks: int = 2  # require ≥ N ticks progress before a same-direction re-signal
+    # Misc
+    use_close_for_entry: bool = True
 
-    # ------------------------------- internals ------------------------------- #
+    # ------------------------------- public -------------------------------- #
 
-    def _calculate_indicators(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-        """Calculate indicators needed by the scoring function."""
-        indicators: Dict[str, pd.Series] = {}
+    def generate_signal(self, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Emit a directional signal using the latest completed bar.
 
-        min_required = max(
-            self.ema_slow_period,
-            self.rsi_period,
-            self.atr_period,
-            self.bb_window,
-            self.adx_period,
-            self.vwap_period,
-            int(getattr(Config, "WARMUP_BARS", 30)),
-        )
-        if len(df) < min_required:
-            logger.debug(f"Insufficient data for indicators. Need {min_required}, got {len(df)}")
-            return indicators
+        Expects df with columns: open, high, low, close, (volume optional).
+        """
+        if not isinstance(df, pd.DataFrame) or len(df) < max(50, self.bb_window + 5, self.ema_slow + 5):
+            return None
 
-        # EMA
-        indicators["ema_fast"] = calculate_ema(df, self.ema_fast_period)
-        indicators["ema_slow"] = calculate_ema(df, self.ema_slow_period)
-
-        # RSI
-        indicators["rsi"] = calculate_rsi(df, self.rsi_period)
-
-        # MACD
-        macd_line, macd_signal, macd_hist = calculate_macd(
-            df, self.macd_fast_period, self.macd_slow_period, self.macd_signal_period
-        )
-        indicators["macd_line"] = macd_line
-        indicators["macd_signal"] = macd_signal
-        indicators["macd_histogram"] = macd_hist
-
-        # ATR (robust)
-        indicators["atr"] = compute_atr_df(df, period=self.atr_period, method="rma")
-
-        # Supertrend
-        st_dir, st_u, st_l = calculate_supertrend(
-            df, period=self.atr_period, multiplier=self.supertrend_atr_multiplier
-        )
-        indicators["supertrend"] = st_dir
-        indicators["supertrend_upper"] = st_u
-        indicators["supertrend_lower"] = st_l
-
-        # Bollinger (upper/lower)
-        bb_u, bb_l = _bollinger_bands_from_close(df["close"], self.bb_window, self.bb_std_dev)
-        indicators["bb_upper"] = bb_u
-        indicators["bb_lower"] = bb_l
-
-        # ADX + DI
-        adx, di_pos, di_neg = calculate_adx(df, period=self.adx_period)
-        indicators["adx"] = adx
-        indicators["di_plus"] = di_pos
-        indicators["di_minus"] = di_neg
-
-        # VWAP (rolling)
-        indicators["vwap"] = calculate_vwap(df, period=self.vwap_period)
-
-        return indicators
-
-    def _detect_market_regime(
-        self, df: pd.DataFrame, adx: pd.Series, di_plus: pd.Series, di_minus: pd.Series
-    ) -> str:
-        """Rough regime classification for nudging the score."""
-        if len(adx) < 2 or len(di_plus) < 2 or len(di_minus) < 2:
-            return "unknown"
-
-        current_adx = adx.iloc[-1]
-        current_di_plus = di_plus.iloc[-1]
-        current_di_minus = di_minus.iloc[-1]
-
-        if current_adx > self.adx_trend_strength and abs(current_di_plus - current_di_minus) > 10:
-            return "trend_up" if current_di_plus > current_di_minus else "trend_down"
-        return "range"
-
-    def _score_signal(
-        self, df: pd.DataFrame, indicators: Dict[str, pd.Series], current_price: float
-    ) -> Tuple[int, List[str]]:
-        """Scoring based on indicator confluence with regime nudge."""
-        if not indicators:
-            return 0, ["No indicators calculated"]
-
+        df = df.copy()
         last_idx = df.index[-1]
 
-        # Guard against NaN on last bar; skip if any core indicator is NaN
-        for k in ("ema_fast", "ema_slow", "rsi", "macd_histogram", "supertrend", "bb_upper", "bb_lower", "vwap"):
-            s = indicators.get(k)
-            if s is not None and pd.isna(s.loc[last_idx]):
-                logger.debug(f"Indicator {k} NaN at last bar — skip")
-                return 0, ["Indicator NaN"]
+        # --- indicators ---
+        ema_f = calculate_ema(df, self.ema_fast)
+        ema_s = calculate_ema(df, self.ema_slow)
+        macd_line, macd_sig, macd_hist = calculate_macd(df, self.macd_fast, self.macd_slow, self.macd_signal)
+        adx, di_pos, di_neg = calculate_adx(df, period=self.adx_period)
+        bb_u, bb_l = calculate_bb_width(df, window=self.bb_window, std=self.bb_std)
+        st_dir, st_up, st_lo = calculate_supertrend(df, period=self.st_period, multiplier=self.st_mult)
+        vwap = calculate_vwap(df)
 
-        score = 0
-        reasons: List[str] = []
+        # Attach
+        df["ema_f"] = ema_f
+        df["ema_s"] = ema_s
+        df["macd"] = macd_line
+        df["macd_sig"] = macd_sig
+        df["macd_hist"] = macd_hist
+        df["adx"] = adx
+        df["di_pos"] = di_pos
+        df["di_neg"] = di_neg
+        df["bb_u"] = bb_u
+        df["bb_l"] = bb_l
+        df["st_dir"] = st_dir
+        df["st_up"] = st_up
+        df["st_lo"] = st_lo
+        df["vwap"] = vwap
+        df["atr"] = calculate_atr(df, period=self.atr_period)
 
-        ema_fast = indicators["ema_fast"].loc[last_idx]
-        ema_slow = indicators["ema_slow"].loc[last_idx]
-        rsi = indicators["rsi"].loc[last_idx]
-        macd_hist = indicators["macd_histogram"].loc[last_idx]
-        supertrend = indicators["supertrend"].loc[last_idx]
-        bb_upper = indicators["bb_upper"].loc[last_idx]
-        bb_lower = indicators["bb_lower"].loc[last_idx]
-        adx = indicators["adx"]
-        di_plus = indicators["di_plus"]
-        di_minus = indicators["di_minus"]
-        vwap = indicators["vwap"].loc[last_idx]
+        row = df.iloc[-1]
+        px = float(row["close"])
+        atr = float(row.get("atr") or 0.0)
 
-        # 1) EMA
-        if pd.notna(ema_fast) and pd.notna(ema_slow):
-            if ema_fast > ema_slow:
-                score += 1; reasons.append("EMA Fast > EMA Slow")
-            elif ema_fast < ema_slow:
-                score -= 1; reasons.append("EMA Fast < EMA Slow")
+        # --- regime ---
+        regime = self._regime(df)
 
-        # 2) RSI
-        if pd.notna(rsi):
-            if rsi < self.rsi_oversold:
-                score += 1; reasons.append("RSI Oversold")
-            elif rsi > self.rsi_overbought:
-                score -= 1; reasons.append("RSI Overbought")
+        # --- directional scoring ---
+        long_score, short_score = self._scores(df)
 
-        # 3) MACD histogram sign
-        if pd.notna(macd_hist):
-            if macd_hist > 0:
-                score += 1; reasons.append("MACD Histogram > 0")
-            elif macd_hist < 0:
-                score -= 1; reasons.append("MACD Histogram < 0")
+        # Turn 0..100 → 0..10 confidence
+        long_conf = self._to_conf(long_score)
+        short_conf = self._to_conf(short_score)
 
-        # 4) MACD zero-cross (lookback 1)
-        if len(indicators["macd_histogram"]) >= 2:
-            prev = indicators["macd_histogram"].iloc[-2]
-            if pd.notna(prev) and pd.notna(macd_hist):
-                if prev <= 0 < macd_hist:
-                    score += 1; reasons.append("MACD Zero Cross Up")
-                elif prev >= 0 > macd_hist:
-                    score -= 1; reasons.append("MACD Zero Cross Down")
+        # Gate by regime and threshold
+        chosen = None
+        if long_conf >= max(self.confidence_threshold, float(self.min_score_threshold)):
+            if regime == "TREND" or self._near_band_breakout(row, direction="BUY"):
+                chosen = ("BUY", long_conf)
+        if short_conf >= max(self.confidence_threshold, float(self.min_score_threshold)):
+            if chosen is None and (regime == "TREND" or self._near_band_breakout(row, direction="SELL")):
+                chosen = ("SELL", short_conf)
 
-        # 5) Supertrend dir + band alignment
-        if pd.notna(supertrend):
-            if supertrend == 1 and pd.notna(indicators["supertrend_lower"].loc[last_idx]) and current_price > indicators["supertrend_lower"].loc[last_idx]:
-                score += 1; reasons.append("Price aligned with Supertrend Up")
-            elif supertrend == -1 and pd.notna(indicators["supertrend_upper"].loc[last_idx]) and current_price < indicators["supertrend_upper"].loc[last_idx]:
-                score -= 1; reasons.append("Price aligned with Supertrend Down")
-
-        # 6) VWAP
-        if pd.notna(vwap):
-            if current_price > vwap:
-                score += 1; reasons.append("Price > VWAP")
-            elif current_price < vwap:
-                score -= 1; reasons.append("Price < VWAP")
-
-        # BB context (doesn’t change score but logged)
-        if pd.notna(bb_upper) and pd.notna(bb_lower):
-            if current_price < bb_lower:
-                reasons.append("Price < BB Lower")
-            elif current_price > bb_upper:
-                reasons.append("Price > BB Upper")
-
-        # Regime nudge (soft)
-        regime = self._detect_market_regime(df, adx, di_plus, di_minus)
-        if regime == "trend_up" and score >= 0:
-            score += 1; reasons.append("Trending Up Regime")
-        elif regime == "trend_down" and score <= 0:
-            score -= 1; reasons.append("Trending Down Regime")
-        elif regime == "range":
-            if abs(score) <= 2:
-                score -= 1 if score > 0 else 0
-                reasons.append("Ranging Regime (soft nudge)")
-            else:
-                reasons.append("Ranging Regime (no penalty)")
-
-        return score, reasons
-
-    # --------------------------- public API: generic signal --------------------------- #
-
-    def generate_signal(self, df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
-        """Generate a signal for spot/futures (and used as fallback on option series)."""
-        if df is None or df.empty:
-            logger.debug("Strategy received empty DataFrame")
+        if not chosen:
             return None
 
-        required_cols = {"open", "high", "low", "close"}  # volume optional
-        if not required_cols.issubset(df.columns):
-            logger.error(f"DataFrame missing required columns: {required_cols - set(df.columns)}")
-            return None
+        side, conf = chosen
+        sl, tp, sl_pts, tp_pts = self._sl_tp(px, atr, side)
 
-        min_required = max(
-            self.ema_slow_period,
-            self.rsi_period,
-            self.atr_period,
-            self.bb_window,
-            self.adx_period,
-            self.vwap_period,
-            int(getattr(Config, "WARMUP_BARS", 30)),
-        )
-        if len(df) < min_required:
-            logger.debug(f"Insufficient data for signal generation. Need {min_required}, got {len(df)}")
-            return None
+        out = {
+            "signal": side,
+            "direction": side,
+            "entry_price": float(px),
+            "stop_loss": float(sl),
+            "target": float(tp),
+            "sl_points": float(sl_pts),
+            "tp_points": float(tp_pts),
+            "atr": float(atr or 0.0),
+            "score": int(max(long_score, short_score)),
+            "confidence": float(conf),
+            "regime": regime,
+        }
+        return out
 
-        try:
-            indicators = self._calculate_indicators(df)
-            if not indicators:
-                return None
-
-            score, reasons = self._score_signal(df, indicators, current_price)
-
-            # Quality mode (tighten score threshold slightly)
-            if getattr(Config, "QUALITY_MODE_DEFAULT", False):
-                score += int(getattr(Config, "QUALITY_SCORE_BUMP", 1.0))
-
-            direction: Optional[str] = None
-            if score >= self.min_score_threshold:
-                direction = "BUY"
-            elif score <= -self.min_score_threshold:
-                direction = "SELL"
-
-            if not direction:
-                logger.debug(f"Score {score} below threshold {self.min_score_threshold}. No trade.")
-                return None
-
-            # De-duplicate by price progress
-            price_step = float(getattr(Config, "TICK_SIZE", 0.05))
-            if self._last_dir == direction and self._last_entry_px is not None:
-                if abs(current_price - self._last_entry_px) < self._min_rearm_ticks * price_step:
-                    logger.debug("Re-arming not met (price change too small); skip duplicate")
-                    return None
-
-            # Confidence 0..10
-            normalized = min(abs(score) / max(1, self.max_possible_score), 1.0)
-            confidence = max(1.0, min(10.0, normalized * 10.0))
-
-            if confidence < float(self.confidence_threshold):
-                logger.debug(f"Confidence {confidence} < threshold {self.confidence_threshold}. No trade.")
-                return None
-
-            # ATR-based SL/TP with fallback to base points
-            atr_series = indicators.get("atr", pd.Series(0.0, index=df.index))
-            atr_value = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
-            if atr_value <= 0:
-                v = latest_atr_value(df, period=self.atr_period, method="rma")
-                atr_value = float(v) if v is not None else 0.0
-
-            if atr_value <= 0:
-                sl_points = self.base_stop_loss_points
-                tp_points = self.base_target_points
-            else:
-                sl_mult = float(getattr(Config, "ATR_SL_MULTIPLIER", 1.5))
-                tp_mult = float(getattr(Config, "ATR_TP_MULTIPLIER", 3.0))
-                sl_points = atr_value * sl_mult
-                tp_points = atr_value * tp_mult
-
-            # Confidence adjustments
-            sl_adj = float(getattr(Config, "SL_CONFIDENCE_ADJ", 0.2))
-            tp_adj = float(getattr(Config, "TP_CONFIDENCE_ADJ", 0.3))
-            sl_points *= (1 + (10 - confidence) * sl_adj / 10.0)  # lower confidence => slightly wider stop
-            tp_points *= (1 + (confidence - 5) * tp_adj / 10.0)   # higher confidence => slightly bigger TP
-
-            # Floors
-            tick = float(getattr(Config, "TICK_SIZE", 0.05))
-            min_sl_points = max(4 * tick, 2.0)   # ≥ 2 pts
-            min_tp_points = max(6 * tick, 3.0)   # ≥ 3 pts
-            sl_points = max(sl_points, min_sl_points)
-            tp_points = max(tp_points, min_tp_points)
-
-            entry_price = float(current_price)
-            stop_loss = entry_price - sl_points if direction == "BUY" else entry_price + sl_points
-            target = entry_price + tp_points if direction == "BUY" else entry_price - tp_points
-            stop_loss = max(0.0, float(_round_to_tick(stop_loss, tick)))
-            target = max(0.0, float(_round_to_tick(target, tick)))
-
-            # Duplicate hash
-            signal_key = f"{direction}_{round(entry_price, 2)}_{df.index[-1]}"
-            new_hash = hashlib.md5(signal_key.encode()).hexdigest()
-            if new_hash == self.last_signal_hash:
-                logger.debug("Duplicate signal skipped (hash)")
-                return None
-            self.last_signal_hash = new_hash
-            self._last_dir = direction
-            self._last_entry_px = entry_price
-
-            result = {
-                "signal": direction,
-                "score": int(score),
-                "confidence": round(confidence, 2),
-                "entry_price": round(entry_price, 2),
-                "stop_loss": round(stop_loss, 2),
-                "target": round(target, 2),
-                "reasons": reasons,
-                "market_volatility": round(float(atr_value), 2) if atr_value > 0 else 0.0,
-            }
-            logger.debug(f"Signal: {result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error generating signal: {e}", exc_info=True)
-            return None
-
-    # --------------------------- public API: options --------------------------- #
-
-    def generate_options_signal(
-        self,
-        options_ohlc: pd.DataFrame,
-        spot_ohlc: pd.DataFrame,
-        strike_info: Dict[str, Any],
-        current_option_price: float,
-    ) -> Optional[Dict[str, Any]]:
+    def generate_options_signal(self, df: pd.DataFrame) -> Optional[Dict]:
         """
-        Lightweight options signal framework:
-        - Option breakout vs previous close by OPTION_BREAKOUT_PCT
-        - Volume impulse (if volume is present)
-        - Optional spot confirmation (Config.OPTION_REQUIRE_SPOT_CONFIRM with OPTION_SPOT_TREND_PCT)
-        - SL/TP via option % with floors to tick-size
+        Same signal as generate_signal(), just returned with keys that are
+        convenient for options legs. (RealTimeTrader handles strikes.)
+        """
+        sig = self.generate_signal(df)
+        if not sig:
+            return None
+        # Keep payload identical — options flow upstream just needs entry/SL/TP
+        return sig
+
+    # ------------------------------- internals ------------------------------ #
+
+    def _regime(self, df: pd.DataFrame) -> str:
+        """TREND if ADX strong; otherwise RANGE. BB width can be added if desired."""
+        adx = df["adx"].iloc[-1]
+        if float(adx) >= self.trend_adx_min:
+            return "TREND"
+        if float(adx) <= self.range_adx_max:
+            return "RANGE"
+        # Fuzzy middle: look at BB compression/expansion around last n bars
+        try:
+            last = df.iloc[-1]
+            width = float((last["bb_u"] - last["bb_l"]) / last["close"])
+            if width <= 0.008:  # ~0.8% band width → range-ish
+                return "RANGE"
+            return "TREND"
+        except Exception:
+            return "TREND"
+
+    def _ema_slope(self, s: pd.Series, lookback: int = 3) -> float:
+        if len(s) < lookback + 1:
+            return 0.0
+        # simple slope normalized by price
+        y2 = float(s.iloc[-1])
+        y1 = float(s.iloc[-1 - lookback])
+        return (y2 - y1) / max(1e-6, y1)
+
+    def _scores(self, df: pd.DataFrame) -> Tuple[int, int]:
+        """
+        Compute long/short scores on 0..100.
+        Heuristic blend (tunable; keep simple & fast for real-time).
+        """
+        row = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        px = float(row["close"])
+        ema_f = float(row["ema_f"])
+        ema_s = float(row["ema_s"])
+        macd = float(row["macd"])
+        macd_sig = float(row["macd_sig"])
+        macd_hist = float(row["macd_hist"])
+        adx = float(row["adx"])
+        di_pos = float(row["di_pos"])
+        di_neg = float(row["di_neg"])
+        vwap = float(row.get("vwap") or px)
+        st_dir = int(row["st_dir"])
+
+        # Slopes
+        slope_f = self._ema_slope(df["ema_f"], 3)
+        slope_s = self._ema_slope(df["ema_s"], 5)
+
+        long = 0.0
+        short = 0.0
+
+        # Trend alignment
+        if ema_f > ema_s:
+            long += 15
+        if ema_f < ema_s:
+            short += 15
+
+        # Slope
+        if slope_f > 0:
+            long += min(15, 100 * slope_f)
+        else:
+            short += min(15, 100 * abs(slope_f))
+        if slope_s > 0:
+            long += min(10, 100 * slope_s)
+        else:
+            short += min(10, 100 * abs(slope_s))
+
+        # MACD cross & histogram
+        if macd > macd_sig:
+            long += 15
+        else:
+            short += 15
+        if macd_hist > 0:
+            long += 10
+        else:
+            short += 10
+
+        # DI dominance
+        if di_pos > di_neg:
+            long += 10
+        if di_neg > di_pos:
+            short += 10
+
+        # Above/below VWAP
+        if px > vwap:
+            long += 10
+        else:
+            short += 10
+
+        # Supertrend filter
+        if st_dir > 0:
+            long += 10
+        else:
+            short += 10
+
+        # Recent momentum (close vs previous close)
+        if px > float(prev["close"]):
+            long += 5
+        else:
+            short += 5
+
+        return int(round(long)), int(round(short))
+
+    def _to_conf(self, score_100: int) -> float:
+        """
+        Map 0..100 → 0..10 (cap).
+        """
+        return float(max(0.0, min(10.0, score_100 / 10.0)))
+
+    def _near_band_breakout(self, row: pd.Series, direction: str) -> bool:
+        """
+        If in RANGE regime but price is near BB edge, allow breakouts.
         """
         try:
-            if options_ohlc is None or options_ohlc.empty:
-                return None
-            if len(options_ohlc) < 6:
-                return None
-
-            last_close = float(options_ohlc["close"].iloc[-2])
-            curr_close = float(options_ohlc["close"].iloc[-1])
-
-            # Volume impulse (graceful if missing or zeros)
-            if "volume" in options_ohlc.columns and len(options_ohlc) > 12:
-                recent = options_ohlc["volume"].iloc[-12:-1]
-                avg_vol = float(recent.mean()) if recent.notna().any() else 0.0
-                curr_vol = float(options_ohlc["volume"].iloc[-1] or 0.0)
-                volume_condition = (avg_vol > 0) and (curr_vol > 1.5 * avg_vol)
+            u = float(row["bb_u"])
+            l = float(row["bb_l"])
+            c = float(row["close"])
+            if direction == "BUY":
+                return c >= (u - 0.1 * (u - l))
             else:
-                volume_condition = True
+                return c <= (l + 0.1 * (u - l))
+        except Exception:
+            return False
 
-            breakout_pct = float(getattr(Config, "OPTION_BREAKOUT_PCT", 0.01))
-            breakout_condition = curr_close > last_close * (1.0 + breakout_pct)
+    def _sl_tp(self, entry: float, atr: float, side: str) -> Tuple[float, float, float, float]:
+        """
+        Compute absolute SL/TP and their point distances.
+        Prefer ATR-based distances; fallback to base points.
+        """
+        # Robust guards
+        atr = float(atr or 0.0)
+        use_atr = np.isfinite(atr) and atr > 0
 
-            # Spot confirmation (optional)
-            spot_conf_required = bool(getattr(Config, "OPTION_REQUIRE_SPOT_CONFIRM", False))
-            spot_trend_bullish = False
-            spot_trend_bearish = False
-            if spot_ohlc is not None and not spot_ohlc.empty and len(spot_ohlc) >= 5:
-                spot_return = (spot_ohlc["close"].iloc[-1] / spot_ohlc["close"].iloc[-5]) - 1.0
-                th = float(getattr(Config, "OPTION_SPOT_TREND_PCT", 0.005))
-                if spot_return > th:
-                    spot_trend_bullish = True
-                elif spot_return < -th:
-                    spot_trend_bearish = True
+        sl_pts = (self.atr_sl_mult * atr) if use_atr else float(self.base_stop_loss_points)
+        tp_pts = (self.atr_tp_mult * atr) if use_atr else float(self.base_target_points)
 
-            option_type = str(strike_info.get("type", "")).upper()
-            ok_spot_ce = (spot_trend_bullish or not spot_conf_required)
-            ok_spot_pe = (spot_trend_bearish or not spot_conf_required)
+        sl_pts = max(0.5, float(sl_pts))
+        tp_pts = max(sl_pts * 1.2, float(tp_pts))  # keep TP > SL
 
-            take = False
-            if option_type == "CE" and breakout_condition and volume_condition and ok_spot_ce:
-                take = True
-            if option_type == "PE" and breakout_condition and volume_condition and ok_spot_pe:
-                take = True
+        if side == "BUY":
+            sl = entry - sl_pts
+            tp = entry + tp_pts
+        else:
+            sl = entry + sl_pts
+            tp = entry - tp_pts
 
-            if not take:
-                return None
-
-            # SL/TP via percent with floors
-            px = float(current_option_price)
-            tick = float(getattr(Config, "TICK_SIZE", 0.05))
-            min_premium = float(getattr(Config, "MIN_PREMIUM", 12.0))
-
-            if px < max(min_premium, tick):
-                logger.debug(f"Option premium too low ({px}) < min {min_premium}. Skip.")
-                return None
-
-            sl_pct = float(getattr(Config, "OPTION_SL_PERCENT", self.option_sl_percent))
-            tp_pct = float(getattr(Config, "OPTION_TP_PERCENT", self.option_tp_percent))
-
-            # Compute TP/SL
-            direction = "BUY"  # options leg is directional long in this simple framework
-            entry_price = px
-            stop_loss = max(tick, entry_price * (1.0 - sl_pct))
-            target = entry_price * (1.0 + tp_pct)
-
-            stop_loss = float(_round_to_tick(stop_loss, tick))
-            target = float(_round_to_tick(target, tick))
-
-            # Confidence (lighter than futures): scale by breakout strength & volume impulse
-            strength = (curr_close / last_close) - 1.0 if last_close > 0 else 0.0
-            base_conf = min(max(strength / max(1e-6, breakout_pct), 0.0), 2.0)  # 0..2
-            conf = 5.0 + 2.0 * base_conf                            # ~5..9
-            if not volume_condition:
-                conf -= 1.0
-            conf = max(1.0, min(10.0, conf))
-
-            # Optional quality bump
-            if getattr(Config, "QUALITY_MODE_DEFAULT", False):
-                conf += min(1.0, float(getattr(Config, "QUALITY_SCORE_BUMP", 1.0)))
-                conf = min(10.0, conf)
-
-            # Reasons
-            reasons: List[str] = ["Option breakout"]
-            if volume_condition:
-                reasons.append("Volume impulse")
-            if spot_conf_required:
-                reasons.append("Spot confirm required")
-                if option_type == "CE" and ok_spot_ce:
-                    reasons.append("Spot bullish trend")
-                if option_type == "PE" and ok_spot_pe:
-                    reasons.append("Spot bearish trend")
-
-            result = {
-                "signal": direction,                 # BUY the option leg
-                "option_type": option_type,          # CE / PE
-                "score": 0,                          # not used for options path
-                "confidence": round(conf, 2),
-                "entry_price": round(entry_price, 2),
-                "stop_loss": round(stop_loss, 2),
-                "target": round(target, 2),
-                "reasons": reasons,
-                "strike": strike_info.get("strike"),
-                "symbol": strike_info.get("symbol"),
-            }
-            logger.debug(f"Option signal: {result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error generating options signal: {e}", exc_info=True)
-            return None
+        return float(sl), float(tp), float(sl_pts), float(tp_pts)
