@@ -20,7 +20,7 @@ class TelegramController:
     Commands:
       /start
       /stop
-      /mode live|shadow|quality on|off
+      /mode live|shadow|quality on|off|auto
       /risk <pct>                  (e.g. /risk 0.5 or /risk 0.5%)
       /regime auto|trend|range|off
       /pause <minutes>
@@ -203,6 +203,28 @@ class TelegramController:
 
     # --- formatting helpers -----------------------------------------------
 
+    @staticmethod
+    def _fmt_quality_line(status: Dict[str, Any]) -> str:
+        # Backward compatible: if policy not provided, infer from boolean flag
+        policy = (status.get("quality_policy") or "").strip().lower()
+        qm = status.get("quality_mode")  # boolean, legacy
+        if not policy:
+            policy = "on" if qm else "off"
+
+        label = {"on": "ON", "off": "OFF", "auto": "AUTO"}.get(policy, policy.upper() or "OFF")
+
+        # Optional: reason text and regime metrics (if trader provides them)
+        reason = status.get("quality_reason")
+        parts = [f"✨ <b>Quality:</b> {label}"]
+        if policy == "auto":
+            if reason:
+                parts.append(f"(auto: {html.escape(str(reason))})")
+            # If regime supplied, display succinctly
+            regime = (status.get("regime") or status.get("regime_mode") or "").upper()
+            if regime:
+                parts.append(f"[{regime}]")
+        return " ".join(parts)
+
     def _format_status(self, status: Any) -> Tuple[str, str]:
         """Returns (text, parse_mode)."""
         if isinstance(status, str):
@@ -210,18 +232,23 @@ class TelegramController:
 
         is_trading = bool(status.get("is_trading", False))
         live_mode = bool(status.get("live_mode", False))
-        quality_mode = bool(status.get("quality_mode", False))
         open_positions = int(status.get("open_positions", status.get("open_orders", 0)) or 0)
         trades_today = int(status.get("trades_today", status.get("closed_today", 0)) or 0)
         daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
         acct = status.get("account_size")
         sess = status.get("session_date")
 
+        # Optional extras that may be present:
+        regime = (status.get("regime") or status.get("regime_mode") or "")
+        adx = status.get("adx")
+        bbw = status.get("bb_width")
+        slope = status.get("ema_slope")
+
         lines = [
             "📊 <b>Bot Status</b>",
             f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
             f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
-            f"✨ <b>Quality:</b> {'ON' if quality_mode else 'OFF'}",
+            self._fmt_quality_line(status),
             f"📦 <b>Open Positions:</b> {open_positions}",
             f"📈 <b>Closed Today:</b> {trades_today}",
             f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
@@ -230,6 +257,19 @@ class TelegramController:
             lines.append(f"🏦 <b>Acct Size:</b> ₹{html.escape(str(acct))}")
         if sess is not None:
             lines.append(f"📅 <b>Session:</b> {html.escape(str(sess))}")
+
+        # Append a compact regime diagnostics line when available
+        diag_bits = []
+        if regime:
+            diag_bits.append(f"Regime={html.escape(str(regime)).upper()}")
+        if isinstance(adx, (int, float)):
+            diag_bits.append(f"ADX={float(adx):.1f}")
+        if isinstance(bbw, (int, float)):
+            diag_bits.append(f"BBWidth={float(bbw):.3%}")
+        if isinstance(slope, (int, float)):
+            diag_bits.append(f"EMAΔ={float(slope):.2f}")
+        if diag_bits:
+            lines.append("🧭 " + " | ".join(diag_bits))
 
         return "\n".join(lines), "HTML"
 
@@ -279,7 +319,7 @@ class TelegramController:
                 "🤖 <b>Commands</b>\n"
                 "/start – start trading\n"
                 "/stop – stop trading\n"
-                "/mode live|shadow|quality on|off – switch mode\n"
+                "/mode live|shadow|quality on|off|auto – switch mode or quality policy\n"
                 "/risk &lt;pct&gt; – e.g. <code>/risk 0.5</code> (means 0.5%)\n"
                 "/regime auto|trend|range|off – set regime gate\n"
                 "/pause &lt;min&gt; – pause entries\n"
@@ -313,14 +353,19 @@ class TelegramController:
             self._send_summary(summary)
             return
 
-        # Normalize /mode and /risk arguments for the trader
         if cmd == "mode":
+            # Accepts:
+            #   /mode live
+            #   /mode shadow
+            #   /mode quality on
+            #   /mode quality off
+            #   /mode quality auto
             a = (arg or "").strip().lower()
-            # accept "quality on|off" as well as "live" or "shadow"
-            # pass-through to trader unchanged
             ok = self.control_callback("mode", a)
             if not ok:
                 self._send_message("⚠️ Failed to change mode.")
+            else:
+                self._send_message(f"✅ Mode updated: <code>{html.escape(a)}</code>", parse_mode="HTML")
             return
 
         if cmd == "risk":
