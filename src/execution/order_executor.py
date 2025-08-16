@@ -8,6 +8,7 @@ Order execution (LIVE + SIM) with:
 - Hard-stop failsafe if SL is breached but broker modify fails
 - Exchange freeze-quantity chunking for entries/exits
 - Utility quotes: best bid/ask, mid, last
+- ✅ PnL helpers: gross/net, MTM, session summary, cost estimates (fees + slippage)
 
 Public API (used by RealTimeTrader):
 - place_entry_order(...)
@@ -22,6 +23,12 @@ Public API (used by RealTimeTrader):
 - get_mid_price(symbol)
 - get_tick_size() -> float
 - sync_and_enforce_oco() -> list[(entry_order_id, fill_price)]
+
+New helpers (optional upstream use):
+- estimate_round_trip_cost(entry_px, qty) -> dict
+- compute_pnl(side, entry_px, exit_px, qty, include_costs=True) -> dict
+- unrealized_pnl(entry_id, current_px=None, include_costs=True) -> dict | None
+- session_pnl_summary(mark_to_market=True) -> dict
 """
 
 from __future__ import annotations
@@ -197,6 +204,11 @@ class OrderExecutor:
 
         # Trailing floor (points)
         self.trail_min_points = float(getattr(Config, "TRAIL_MIN_POINTS", 1.0))
+
+        # Costs (used by PnL helpers)
+        self.slippage_bps = float(_cfg("SLIPPAGE_BPS", 4.0))          # per side
+        self.fees_per_lot = float(_cfg("FEES_PER_LOT", 25.0))         # round-figure per lot per side
+        self.taxes_bps = float(_cfg("TAXES_BPS", 0.0))                # optional, applied on notional per side
 
         # best-effort last price cache for SIM / slow APIs
         self._last_price_cache: Dict[str, float] = {}
@@ -904,5 +916,127 @@ class OrderExecutor:
             return 0.5 * (bb["bid"] + bb["ask"])
         lp = self.get_last_price(symbol)
         return float(lp) if lp else None
+
+    # ---------------------------- PnL helpers ----------------------------- #
+
+    def estimate_round_trip_cost(self, entry_price: float, quantity: int) -> Dict[str, float]:
+        """
+        Estimate total costs for a trade (both entry & exit).
+        - Slippage: applied as bps on price, both sides.
+        - Fees per lot: applied both sides.
+        - Taxes (optional bps on notional): both sides.
+        Returns a dict with breakdown and total_cost.
+        """
+        try:
+            L = max(1, int(self.lot_size))
+            lots = _lots_from_qty(quantity, L)
+            fees = float(self.fees_per_lot) * lots * 2.0
+
+            # Notional approx: entry side (exit will be similar scale)
+            notional = abs(float(entry_price)) * float(quantity)
+            taxes = (float(self.taxes_bps) / 10000.0) * notional * 2.0
+
+            # Slippage: bps * price * quantity * 2 sides
+            slippage_val = (float(self.slippage_bps) / 10000.0) * abs(float(entry_price)) * float(quantity) * 2.0
+
+            total = fees + taxes + slippage_val
+            return {
+                "fees": round(fees, 2),
+                "taxes": round(taxes, 2),
+                "slippage": round(slippage_val, 2),
+                "total_cost": round(total, 2),
+            }
+        except Exception:
+            return {"fees": 0.0, "taxes": 0.0, "slippage": 0.0, "total_cost": 0.0}
+
+    def compute_pnl(
+        self,
+        side: str,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+        include_costs: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Gross/Net PnL in currency terms.
+        - side: 'BUY' or 'SELL' (entry side)
+        """
+        try:
+            side = (side or "").upper()
+            q = int(quantity)
+            entry = float(entry_price)
+            exitp = float(exit_price)
+
+            move = (exitp - entry) if side == "BUY" else (entry - exitp)
+            gross = move * q
+
+            costs = self.estimate_round_trip_cost(entry, q)["total_cost"] if include_costs else 0.0
+            net = gross - float(costs)
+            return {
+                "gross": float(round(gross, 2)),
+                "net": float(round(net, 2)),
+                "costs": float(round(costs, 2)),
+                "points": float(round(move, 2)),
+            }
+        except Exception:
+            return {"gross": 0.0, "net": 0.0, "costs": 0.0, "points": 0.0}
+
+    def unrealized_pnl(
+        self,
+        entry_order_id: str,
+        current_price: Optional[float] = None,
+        include_costs: bool = True,
+    ) -> Optional[Dict[str, float]]:
+        """
+        MTM PnL for an open record. If current_price is None, uses mid/ltp.
+        Returns dict like compute_pnl() or None if entry not found/open.
+        """
+        try:
+            with self._lock:
+                rec = self.orders.get(str(entry_order_id))
+            if not rec or not rec.is_open:
+                return None
+
+            px = float(current_price) if current_price is not None else (
+                self.get_mid_price(rec.symbol) or self.get_last_price(rec.symbol) or rec.entry_price
+            )
+            return self.compute_pnl(
+                rec.transaction_type, rec.entry_price, float(px), rec.quantity, include_costs=include_costs
+            )
+        except Exception:
+            return None
+
+    def session_pnl_summary(self, mark_to_market: bool = True) -> Dict[str, float]:
+        """
+        Aggregate PnL across records.
+        - If mark_to_market=True, open records contribute MTM net PnL.
+        """
+        try:
+            gross = 0.0
+            net = 0.0
+            costs = 0.0
+
+            with self._lock:
+                items = list(self.orders.values())
+
+            for rec in items:
+                if rec.is_open and mark_to_market:
+                    mtm = self.unrealized_pnl(rec.order_id, include_costs=True) or {}
+                    gross += float(mtm.get("gross", 0.0))
+                    net += float(mtm.get("net", 0.0))
+                    costs += float(mtm.get("costs", 0.0))
+                elif not rec.is_open and rec.exit_price is not None:
+                    p = self.compute_pnl(rec.transaction_type, rec.entry_price, rec.exit_price, rec.quantity, True)
+                    gross += p["gross"]
+                    net += p["net"]
+                    costs += p["costs"]
+
+            return {
+                "gross": round(gross, 2),
+                "net": round(net, 2),
+                "costs": round(costs, 2),
+            }
+        except Exception:
+            return {"gross": 0.0, "net": 0.0, "costs": 0.0}
 
     # --------------------------- END CLASS ----------------------------------- #
