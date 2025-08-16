@@ -1,153 +1,210 @@
+# src/backtesting/backtest_runner.py
 """
-Main entry point for running backtests for the Nifty Scalper Bot.
-Loads historical data, initializes the strategy and backtest engine, and executes the backtest.
+Backtest runner for the Nifty Scalper Bot.
+
+Features
+- Loads data from either a local CSV or Zerodha (KiteConnect)
+- Minimal, robust CLI with sensible defaults
+- Validates columns and date range
+- Runs BacktestEngine and writes results to logs/
+- Prints a one-line summary at the end
+
+Usage:
+  python -m src.backtesting.backtest_runner \
+    --from 2024-06-01 --to 2024-06-30 --interval 5minute --token 256265
+  # or from CSV:
+  python -m src.backtesting.backtest_runner --csv data/nifty_ohlc.csv
 """
 
+from __future__ import annotations
+
+import argparse
+import json
+import logging
 import os
 import sys
-import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
 import pandas as pd
 
-# Ensure correct path resolution for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Ensure repo root on path for "config" when invoked as a script
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-# Import configuration
-from config import Config
+# Config & modules
+from config import Config  # noqa: E402
+from src.backtesting.data_loader import load_zerodha_historical_data  # noqa: E402
+from src.backtesting.backtest_engine import BacktestEngine  # noqa: E402
 
-# Import KiteConnect
-from kiteconnect import KiteConnect
+# Optional: load .env if present so Config can read env-backed values
+try:  # noqa: SIM105
+    from dotenv import load_dotenv  # type: ignore
+    for p in (REPO_ROOT / ".env", Path.cwd() / ".env"):
+        if p.exists():
+            load_dotenv(p)
+            break
+except Exception:
+    pass
 
-# Import backtesting modules
-from src.backtesting.data_loader import load_zerodha_historical_data
-from src.backtesting.backtest_engine import BacktestEngine
 
-# Optional: Import strategy if using live strategy in backtest
-# from src.strategies.scalping_strategy import DynamicScalpingStrategy
+# -------------------------- logging -------------------------- #
 
-# Setup logging
+LOG_DIR = REPO_ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=os.environ.get("LOGLEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("logs/backtest.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.FileHandler(LOG_DIR / "backtest.log"),
+        logging.StreamHandler(sys.stdout),
+    ],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("backtest_runner")
 
+
+# -------------------------- helpers -------------------------- #
+
+REQUIRED_COLS = {"open", "high", "low", "close"}
+
+def _normalize_ohlc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Case-insensitive rename for OHLC columns; returns a copy."""
+    lower_map = {c.lower(): c for c in df.columns}
+    rename = {lower_map[c]: c for c in REQUIRED_COLS if c in lower_map and lower_map[c] != c}
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
+
+def _load_from_csv(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df = _normalize_ohlc_columns(df)
+    if not REQUIRED_COLS.issubset(df.columns):
+        raise ValueError(f"CSV missing columns {sorted(REQUIRED_COLS)}; got {df.columns.tolist()}")
+    # Promote/ensure a datetime index named 'date' for the engine logs
+    if "date" in df.columns:
+        try:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+        except Exception:
+            pass
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    return df
+
+
+def _load_from_zerodha(token: int, from_date: str, to_date: str, interval: str) -> pd.DataFrame:
+    # Late import to avoid hard dependency if running CSV-only backtests
+    from kiteconnect import KiteConnect  # type: ignore
+
+    api_key = getattr(Config, "ZERODHA_API_KEY", None)
+    access_token = getattr(Config, "KITE_ACCESS_TOKEN", None) or getattr(Config, "ZERODHA_ACCESS_TOKEN", None)
+    if not api_key or not access_token:
+        raise RuntimeError("ZERODHA_API_KEY and KITE_ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN) are required in Config/env.")
+
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+
+    df = load_zerodha_historical_data(kite, token, from_date, to_date, interval)
+    if df is None or df.empty:
+        raise RuntimeError("No historical data returned from Zerodha.")
+    return df
+
+
+def _write_results(metrics: dict, out_dir: Path, tag: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"results_{tag}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    logger.info("📄 Results written to %s", path)
+
+
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Backtest runner for Nifty Scalper Bot")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--csv", help="Path to CSV with OHLC data")
+    src.add_argument("--token", type=int, help="Kite instrument token (e.g., 256265 for NIFTY)")
+
+    p.add_argument("--from", dest="from_date", help="From date YYYY-MM-DD (for Zerodha source)")
+    p.add_argument("--to", dest="to_date", help="To date YYYY-MM-DD (for Zerodha source)")
+    p.add_argument("--interval", default="5minute", help="Interval (minute, 3minute, 5minute, 15minute, day)")
+    p.add_argument("--symbol", default="NIFTY", help="Symbol label for reports")
+    p.add_argument("--tag", default=datetime.now().strftime("%Y%m%d_%H%M%S"), help="Tag appended to outputs")
+    return p.parse_args(argv)
+
+
+# -------------------------- main -------------------------- #
 
 def run_backtest(
-    instrument_token: int,
-    from_date: str,
-    to_date: str,
+    *,
+    csv_file_path: Optional[str] = None,
+    instrument_token: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     interval: str = "5minute",
-    csv_file_path: Optional[str] = None
-) -> None:
-    """
-    Runs a backtest for a given instrument and date range.
+    symbol: str = "NIFTY",
+    tag: Optional[str] = None,
+) -> dict:
+    """Programmatic entrypoint (also used by CLI wrapper below)."""
+    tag = tag or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    Args:
-        instrument_token (int): The Kite instrument token.
-        from_date (str): Start date in 'YYYY-MM-DD' format.
-        to_date (str): End date in 'YYYY-MM-DD' format.
-        interval (str): Data interval (e.g., 'minute', '5minute').
-        csv_file_path (str, optional): Path to a local CSV file containing historical data.
-    """
-    logger.info("🚀 Starting Backtest Runner...")
-    logger.info(f"📋 Parameters: Token={instrument_token}, From={from_date}, To={to_date}, Interval={interval}")
-
-    df: pd.DataFrame = pd.DataFrame()
-
-    # --- 1. Load Data ---
-    if csv_file_path and os.path.exists(csv_file_path):
-        logger.info(f"📂 Loading data from local CSV: {csv_file_path}")
-        try:
-            df = pd.read_csv(csv_file_path, index_col='date', parse_dates=True)
-            logger.info(f"✅ Loaded {len(df)} rows from CSV.")
-        except Exception as e:
-            logger.error(f"❌ Error loading CSV data: {e}")
-            return
+    # Load data
+    if csv_file_path:
+        logger.info("📂 Loading OHLC from CSV: %s", csv_file_path)
+        df = _load_from_csv(csv_file_path)
     else:
-        if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
-            logger.critical("❌ Zerodha API credentials (ZERODHA_API_KEY, KITE_ACCESS_TOKEN) missing in config.")
-            return
+        if not (instrument_token and from_date and to_date):
+            raise ValueError("--token, --from and --to are required when not using --csv.")
+        logger.info("☁️  Fetching OHLC from Zerodha: token=%s from=%s to=%s interval=%s",
+                    instrument_token, from_date, to_date, interval)
+        df = _load_from_zerodha(instrument_token, from_date, to_date, interval)
 
-        kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
-        try:
-            kite.set_access_token(Config.KITE_ACCESS_TOKEN)
-            logger.info("✅ Zerodha Kite Connect client initialized.")
-        except Exception as e:
-            logger.critical(f"❌ Failed to authenticate Kite client: {e}")
-            return
-
-        logger.info("📥 Fetching historical data from Zerodha Kite...")
-        try:
-            df = load_zerodha_historical_data(kite, instrument_token, from_date, to_date, interval)
-            if df.empty:
-                logger.error("❌ No historical data loaded from Zerodha. Exiting.")
-                return
-            logger.info(f"✅ Successfully loaded {len(df)} rows of historical data from Zerodha.")
-        except Exception as e:
-            logger.error(f"❌ Error fetching data from Zerodha: {e}")
-            return
-
-    # --- 2. Validate Data ---
+    # Validate
     if df.empty:
-        logger.error("❌ No data available for backtesting. Exiting.")
-        return
+        raise RuntimeError("No data available after load.")
+    if not REQUIRED_COLS.issubset(df.columns):
+        raise RuntimeError(f"Data missing columns: needed {sorted(REQUIRED_COLS)}, got {df.columns.tolist()}")
 
-    required_columns = ['open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_columns):
-        logger.error(f"❌ Data missing required columns. Found: {df.columns.tolist()}")
-        return
+    start, end = (df.index.min(), df.index.max())
+    logger.info("📊 Data ready: %d rows, range: %s → %s", len(df), start, end)
 
-    logger.info(f"📊 Data Summary: {len(df)} rows, Date Range: {df.index.min()} to {df.index.max()}")
+    # Engine
+    engine = BacktestEngine(df, symbol=symbol, log_file=str(LOG_DIR / f"backtest_trades_{tag}.csv"))
 
-    # --- 3. Initialize Strategy (Optional) ---
-    # strategy = DynamicScalpingStrategy(
-    #     base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-    #     base_target_points=Config.BASE_TARGET_POINTS,
-    #     confidence_threshold=Config.CONFIDENCE_THRESHOLD
-    # )
+    # Run
+    t0 = datetime.now()
+    metrics = engine.run()
+    dt = (datetime.now() - t0).total_seconds()
+    logger.info("✅ Backtest complete in %.2fs | trades=%s | win=%.1f%% | net=%.2f | avgR=%.3f | maxDD(R)=%.3f",
+                dt, metrics.get("trades", 0), metrics.get("win_rate", 0.0),
+                metrics.get("net_pnl", 0.0), metrics.get("avg_R", 0.0),
+                metrics.get("max_dd_R", 0.0))
 
-    # --- 4. Initialize and Run Backtest Engine ---
-    logger.info("⚙️ Initializing Backtest Engine...")
-    engine = BacktestEngine(df)  # Optionally: BacktestEngine(df, strategy=strategy)
+    # Save JSON summary
+    _write_results(metrics, LOG_DIR, tag)
+    return metrics
 
-    logger.info("🏁 Running Backtest...")
-    start_time = datetime.now()
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = _parse_args(argv)
+
     try:
-        engine.run()
-        end_time = datetime.now()
-        duration = end_time - start_time
-        logger.info(f"✅ Backtest completed successfully in {duration.total_seconds():.2f} seconds.")
-
-        # --- 5. Generate Report (Optional) ---
-        # report = engine.generate_report()
-        # print(report)
-        # logger.info("📄 Backtest Report Generated.")
-
-    except Exception as e:
-        logger.error(f"❌ Error during backtest execution: {e}", exc_info=True)
-        return
-
-    logger.info("🏁 Backtest Runner finished.")
+        run_backtest(
+            csv_file_path=args.csv,
+            instrument_token=args.token,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            interval=args.interval,
+            symbol=args.symbol,
+            tag=args.tag,
+        )
+    except Exception as exc:
+        logger.error("💥 Backtest failed: %s", exc, exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    # --- Configuration ---
-    INSTRUMENT_TOKEN = 256265  # Nifty 50 Index on NSE
-    FROM_DATE = "2024-06-01"
-    TO_DATE = "2024-06-30"
-    INTERVAL = "5minute"
-    CSV_PATH = None  # Replace with local path if needed
-
-    run_backtest(
-        instrument_token=INSTRUMENT_TOKEN,
-        from_date=FROM_DATE,
-        to_date=TO_DATE,
-        interval=INTERVAL,
-        csv_file_path=CSV_PATH
-    )
+    main()
