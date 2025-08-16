@@ -48,9 +48,19 @@ class Config:
     USE_IST_CLOCK = _to_bool(os.getenv("USE_IST_CLOCK"), True)
     PREFERRED_EXIT_MODE = (os.getenv("PREFERRED_EXIT_MODE") or "REGULAR").upper()  # AUTO|GTT|REGULAR
 
-    # Quality mode (Telegram toggle controls runtime)
-    QUALITY_MODE_DEFAULT = _to_bool(os.getenv("QUALITY_MODE_DEFAULT"), False)
+    # --- Quality mode (runtime switch; kept for backward compatibility) ---
+    QUALITY_MODE_DEFAULT = _to_bool(os.getenv("QUALITY_MODE_DEFAULT"), False)  # legacy: initial ON/OFF
     QUALITY_SCORE_BUMP = _to_float(os.getenv("QUALITY_SCORE_BUMP"), 1.0)
+
+    # New: quality switch controller (parsed by trader & telegram)
+    #   QUALITY_MODE: AUTO | ON | OFF
+    QUALITY_MODE = (os.getenv("QUALITY_MODE") or ("ON" if QUALITY_MODE_DEFAULT else "AUTO")).upper()
+    # Auto thresholds (trend ⇒ turn ON, range/noise ⇒ turn OFF)
+    QUALITY_AUTO_ADX_MIN = _to_float(os.getenv("QUALITY_AUTO_ADX_MIN"), 20.0)     # turn ON above this
+    QUALITY_AUTO_BB_WIDTH_MAX = _to_float(os.getenv("QUALITY_AUTO_BB_WIDTH_MAX"), 0.008)  # turn OFF if <= 0.8%
+    QUALITY_AUTO_EVAL_MIN_BARS = _to_int(os.getenv("QUALITY_AUTO_EVAL_MIN_BARS"), 120)    # ~ last 2 hours on 1-min
+    QUALITY_AUTO_HYSTERESIS_SEC = _to_int(os.getenv("QUALITY_AUTO_HYSTERESIS_SEC"), 90)   # avoid flip-flop
+    QUALITY_VERBOSE_REASON = _to_bool(os.getenv("QUALITY_VERBOSE_REASON"), True)  # show reason in /status
 
     # Session auto-exit time (HH:MM IST)
     SESSION_AUTO_EXIT_TIME = os.getenv("SESSION_AUTO_EXIT_TIME", "15:20")
