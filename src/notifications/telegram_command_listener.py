@@ -16,6 +16,8 @@ Usage:
 from __future__ import annotations
 
 import logging
+import signal
+import sys
 import time
 from typing import Any, Dict
 
@@ -25,14 +27,12 @@ def _load_dotenv_if_present() -> None:
         from pathlib import Path
         from dotenv import load_dotenv
         here = Path(__file__).resolve()
-        # Try a few common locations
         for p in (here.parent / ".env", here.parent.parent / ".env", Path.cwd() / ".env"):
             if p.exists():
                 load_dotenv(p)
                 logging.getLogger(__name__).info("🔐 Loaded environment from %s", p)
                 return
-        # Fallback to default behavior (env var file in CWD if any)
-        load_dotenv()
+        load_dotenv()  # fallback: cwd default behavior if present
     except Exception:
         # It's fine if dotenv isn't installed — controller will use env as-is
         pass
@@ -81,6 +81,8 @@ def _dummy_control(cmd: str, arg: str = "") -> bool:
     """
     Log-only handler for commands like /start, /stop, /mode, etc.
     """
+    cmd = (cmd or "").strip()
+    arg = (arg or "").strip()
     logger.info("📩 Command received (no action taken): /%s %s", cmd, arg)
     return True
 
@@ -109,24 +111,45 @@ def main() -> None:
         logger.error("TelegramController init error: %s", e, exc_info=True)
         return
 
-    logger.info("📡 Telegram command listener started (legacy compatibility mode).")
-    controller.start_polling()
+    # graceful shutdown wiring
+    stopping = {"flag": False}
 
-    try:
-        while True:
-            # Keep main thread alive without busy-looping
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        logger.info("🛑 Stopping Telegram listener (KeyboardInterrupt).")
-    except Exception as e:  # pragma: no cover
-        logger.error("Listener error: %s", e, exc_info=True)
-    finally:
+    def _stop(_sig=None, _frm=None):
+        if stopping["flag"]:
+            return
+        stopping["flag"] = True
+        logger.info("🛑 Stopping Telegram listener...")
         try:
             controller.stop_polling()
         except Exception:
             pass
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _stop)
+        except Exception:
+            pass
+
+    logger.info("📡 Telegram command listener started (legacy compatibility mode).")
+    controller.start_polling()
+
+    # keep main thread alive
+    try:
+        while not stopping["flag"]:
+            time.sleep(1.0)
+    finally:
+        _stop()
         logger.info("✅ Telegram listener stopped gracefully.")
 
 
 if __name__ == "__main__":
-    main()
+    # allow `python -m src.notifications.telegram_listener`
+    # and `python src/notifications/telegram_listener.py`
+    try:
+        main()
+    except SystemExit:
+        # let normal sys.exit() pass through
+        raise
+    except Exception as e:
+        logger.error("Fatal error in telegram_listener: %s", e, exc_info=True)
+        sys.exit(1)
