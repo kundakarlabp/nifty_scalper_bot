@@ -9,12 +9,14 @@ Adaptive position sizing.
 
 Public API:
     get_live_account_balance(fallback: float = 30000.0) -> float
+    refresh_live_account_balance(force: bool = False) -> float
     class PositionSizing:
         calculate_position_size(...)
         update_after_trade(...)
         reset_daily_limits()
         get_risk_status()
         update_position_status(...)
+        refresh_equity_from_live()
         # QoL setters / helpers:
         set_equity(value: float) -> None
         set_risk_per_trade(value: float) -> None
@@ -32,7 +34,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from src.config import Config
-from src.auth.zerodha_auth import get_kite_client  # live capital
+
+# Zerodha client (optional import to keep module robust in shadow/backtests)
+try:
+    from src.auth.zerodha_auth import get_kite_client  # live capital
+except Exception:  # pragma: no cover
+    get_kite_client = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -40,47 +47,82 @@ logger = logging.getLogger(__name__)
 
 _BALANCE_CACHE_VALUE: Optional[float] = None
 _BALANCE_CACHE_TS: float = 0.0
-_BALANCE_TTL_SEC: int = int(getattr(Config, "BALANCE_TTL_SEC", 60))  # refresh at most once per minute
 _BAL_LOCK = threading.RLock()
+
+_BALANCE_TTL_SEC: int = int(getattr(Config, "BALANCE_TTL_SEC", 60))
+_BALANCE_SEGMENT: str = str(getattr(Config, "BALANCE_SEGMENT", "equity")).lower()
+_BALANCE_SOURCE: str = str(getattr(Config, "BALANCE_SOURCE", "NET")).upper()  # NET | CASH
+_FALLBACK_ACCOUNT_SIZE: float = float(getattr(Config, "ACCOUNT_SIZE", 30000.0))
+
+
+def _parse_margin_available(avail: dict) -> Optional[float]:
+    """
+    Prefer 'net' if BALANCE_SOURCE=NET else 'cash'.
+    Fall back gracefully across common Zerodha margin payload keys.
+    """
+    try:
+        if not isinstance(avail, dict):
+            return None
+        if _BALANCE_SOURCE == "NET":
+            for k in ("net", "live_balance", "opening_balance"):
+                if k in avail and avail[k] is not None:
+                    return float(avail[k])
+        # CASH path and general fallbacks
+        for k in ("cash", "net", "opening_balance", "adhoc_margin"):
+            if k in avail and avail[k] is not None:
+                return float(avail[k])
+    except Exception:
+        return None
+    return None
 
 
 def _fetch_live_cash_balance() -> Optional[float]:
     """Low-level fetch from Kite; return None on failure."""
+    if get_kite_client is None:  # no live integration available
+        return None
     try:
         kite = get_kite_client()
-        margins = kite.margins(segment="equity") or {}
-        # Prefer 'available.net' if you want to include collateral offsets; keep 'cash' for strict cash.
+        # Zerodha supports 'equity' or 'commodity'
+        margins = kite.margins(segment=_BALANCE_SEGMENT) or {}
         avail = margins.get("available", {}) or {}
-        cash = avail.get("cash")
-        if cash is None:
-            # Broker payloads can differ; try a couple of fallbacks without being brittle.
-            cash = avail.get("adhoc_margin") or avail.get("opening_balance") or 0.0
-        return float(cash)
+        val = _parse_margin_available(avail)
+        return float(val) if val is not None else None
     except Exception as e:
         logger.warning("⚠️ Failed to fetch live account balance: %s", e)
         return None
 
 
-def get_live_account_balance(fallback: float = 30000.0) -> float:
+def refresh_live_account_balance(force: bool = False, fallback: Optional[float] = None) -> float:
     """
-    Get cached live balance; refresh only if TTL expired.
-    Returns `fallback` if live fetch fails.
-    Thread-safe.
+    Refresh the cached live balance if TTL expired or force=True.
+    Returns the cached (possibly refreshed) value.
     """
     global _BALANCE_CACHE_VALUE, _BALANCE_CACHE_TS
     now = time.time()
     with _BAL_LOCK:
-        if _BALANCE_CACHE_VALUE is None or (now - _BALANCE_CACHE_TS) > _BALANCE_TTL_SEC:
+        if force or (_BALANCE_CACHE_VALUE is None) or ((now - _BALANCE_CACHE_TS) > _BALANCE_TTL_SEC):
             val = _fetch_live_cash_balance()
             if val is None:
+                # Keep previous cache if present; otherwise seed with fallback
                 if _BALANCE_CACHE_VALUE is None:
-                    _BALANCE_CACHE_VALUE = float(fallback)
+                    _BALANCE_CACHE_VALUE = float(fallback if fallback is not None else _FALLBACK_ACCOUNT_SIZE)
                     logger.info("💰 Using fallback account balance: ₹%.2f", _BALANCE_CACHE_VALUE)
+                else:
+                    logger.debug("Live balance fetch failed; keeping cached ₹%.2f", _BALANCE_CACHE_VALUE)
             else:
                 _BALANCE_CACHE_VALUE = float(val)
                 logger.info("💰 Live account balance fetched: ₹%.2f", _BALANCE_CACHE_VALUE)
             _BALANCE_CACHE_TS = now
-        return float(_BALANCE_CACHE_VALUE or fallback)
+        return float(_BALANCE_CACHE_VALUE if _BALANCE_CACHE_VALUE is not None else (fallback or _FALLBACK_ACCOUNT_SIZE))
+
+
+def get_live_account_balance(fallback: float = 30000.0) -> float:
+    """
+    Get cached live balance; refresh only if TTL expired.
+    Returns `fallback` if live fetch fails on cold start.
+    Thread-safe.
+    """
+    return refresh_live_account_balance(force=False, fallback=fallback)
 
 
 # --------------------------------- class ---------------------------------- #
@@ -91,7 +133,7 @@ class PositionSizing:
     Risk manager that calculates position sizes and tracks drawdown.
     """
 
-    account_size: float = field(default_factory=lambda: get_live_account_balance())
+    account_size: float = field(default_factory=lambda: get_live_account_balance(_FALLBACK_ACCOUNT_SIZE))
     risk_per_trade: float = float(getattr(Config, "RISK_PER_TRADE", 0.01))          # 1% default
     daily_risk: float = float(getattr(Config, "MAX_DRAWDOWN", 0.05))                # day cap proxy
     max_drawdown: float = float(getattr(Config, "MAX_DRAWDOWN", 0.05))              # equity peak drawdown
@@ -107,7 +149,8 @@ class PositionSizing:
     consecutive_losses: int = 0
 
     def __post_init__(self) -> None:
-        self.account_size = max(0.0, float(self.account_size or 0.0))
+        # Force a fresh balance read on construction (within TTL rules)
+        self.account_size = refresh_live_account_balance(fallback=_FALLBACK_ACCOUNT_SIZE)
         self.equity = self.account_size
         self.equity_peak = self.account_size
         # Clamp obvious misconfigs
@@ -116,8 +159,10 @@ class PositionSizing:
         self.max_drawdown = float(max(1e-6, min(self.max_drawdown, 0.9)))       # <=90% guardrail
         self.min_lots = max(0, int(self.min_lots))
         self.max_lots = max(self.min_lots, int(self.max_lots))
-        logger.info("💰 Account size set: ₹%.2f (risk/trade=%.2f%%, DD cap=%.2f%%)",
-                    self.account_size, self.risk_per_trade * 100, self.max_drawdown * 100)
+        logger.info(
+            "💰 Account size set: ₹%.2f (risk/trade=%.2f%%, DD cap=%.2f%%)",
+            self.account_size, self.risk_per_trade * 100.0, self.max_drawdown * 100.0
+        )
 
     # --------------------------- core calculation --------------------------- #
 
@@ -131,13 +176,6 @@ class PositionSizing:
     ) -> Optional[Dict[str, int]]:
         """
         Calculate number of lots to trade.
-
-        Args:
-            entry_price: Proposed entry price.
-            stop_loss: Absolute stop price (not distance).
-            signal_confidence: 0–10 scale (used to scale qty).
-            market_volatility: 0.0–1.0 (high volatility shrinks qty).
-            lot_size: Optional override for the contract lot size.
 
         Returns:
             {"quantity": <int>} or None if blocked by risk rules.
@@ -283,6 +321,15 @@ class PositionSizing:
         logger.debug("🧾 Position status updated: is_open=%s", bool(is_open))
 
     # ---------------------------- QoL helpers -------------------------------- #
+
+    def refresh_equity_from_live(self, *, force: bool = False) -> float:
+        """
+        Refresh internal equity numbers from live balance cache.
+        Useful for /refresh or scheduled equity syncs.
+        """
+        bal = refresh_live_account_balance(force=force, fallback=_FALLBACK_ACCOUNT_SIZE)
+        self.set_equity(bal)
+        return bal
 
     def set_equity(self, value: float) -> None:
         """Safely set current equity & adjust peak if needed."""
