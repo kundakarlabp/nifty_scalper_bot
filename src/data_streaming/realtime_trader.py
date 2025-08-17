@@ -3,15 +3,40 @@ from __future__ import annotations
 """
 Real-time trader orchestrator.
 
-Highlights
-- Data provider: KiteDataProvider (LTP + historical OHLC) with tiny cache & retry
-- Telegram control (/start /stop /mode live|shadow|quality on|off /regime auto|trend|range|off /status /summary /health /emergency)
-- Adaptive loop cadence (peak/off-peak), warmup, trading-hour gates + optional buckets/events
-- Strategy: EnhancedScalpingStrategy for spot/futures (options flow hooks left as best-effort)
-- Risk sizing via PositionSizing (RISK_PER_TRADE × equity; ATR/SL aware)
-- Spread/circuit hygiene hooks (kept lightweight)
-- Exits managed by OrderExecutor (GTT/Regular + partials + trailing)
-- Loss cooldown, trade/day cap, session ladders, CSV log, state persistence
+What this file does
+- Streams market data (Kite provider when available, stub fallback).
+- Receives Telegram commands via TelegramController (runs in its own worker thread).
+- Generates signals with EnhancedScalpingStrategy and manages orders via OrderExecutor.
+- Enforces risk via PositionSizing (RISK_PER_TRADE × equity; loss streak cooldown; day ladders).
+- Handles auto regime detection (TREND/RANGE) and auto "quality" switching (confidence bump).
+- Keeps a dynamic loop cadence, trading-hour gates, and optional time bucket/event windows.
+- Persists active state and writes CSV trade logs.
+
+Key changes (this version)
+- Clean, explicit Quality control:
+  * quality_setting: "AUTO" | "ON" | "OFF" (default "AUTO")
+  * quality_effective: True/False (used to bump confidence)
+  * quality_reason: human-readable reason; shown in Telegram /status
+- Regime control kept distinct:
+  * regime_mode: "AUTO" | "TREND" | "RANGE" | "OFF" (default "AUTO")
+  * current_regime: effective TREND/RANGE used to bias TP/SL
+  * regime_reason: why the regime was chosen (bbw/adx/slope)
+- New Telegram commands supported in _handle_control:
+  * /quality auto|on|off
+  * /regime auto|trend|range|off
+  * /risk <fraction or percent>  (e.g., "0.5" or "0.5%" ⇒ 0.5%)
+  * /pause <minutes>  (defaults handled in TelegramController; trader uses same cooldown path)
+  * /resume
+- Safer Telegram polling: background worker started once here; the controller self-stops on 409 conflicts.
+- Status now exposes uptime_sec, quality_* and effective regime so the controller can render a compact card.
+
+How to use
+- Construct RealTimeTrader() and call .run() in your main process.
+- Start/stop trading with Telegram: /start /stop
+- Switch live/shadow: /mode live | /mode shadow
+- Quality: /quality auto|on|off  (AUTO by default; recommended)
+- Regime: /regime auto|trend|range|off (AUTO by default)
+- Risk: /risk 0.5  (means 0.5%)
 """
 
 import atexit
@@ -33,11 +58,13 @@ from src.notifications.telegram_controller import TelegramController
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.utils.indicators import calculate_ema
 
-# ----- providers / executor / risk -----
+# ----- providers / executor / risk ----------------------------------------
 
 class DataProvider:
+    """Minimal stub when live provider isn't available."""
     def get_ohlc(self, symbol: str, minutes: int, timeframe: str = "minute") -> pd.DataFrame:
         return pd.DataFrame()
+
     def get_last_price(self, symbol: str) -> Optional[float]:
         return None
 
@@ -59,17 +86,32 @@ except Exception:  # pragma: no cover
             self.equity = float(account_size)
             self.min_lots = int(getattr(Config, "MIN_LOTS", 1))
             self.max_lots = int(getattr(Config, "MAX_LOTS", 15))
+            self._risk_per_trade = float(getattr(Config, "RISK_PER_TRADE", 0.02))
+
         def set_equity(self, x: float) -> None:
             self.equity = float(x)
-        def calculate_position_size(self, entry_price: float, stop_loss: float,
-                                    signal_confidence: float, market_volatility: float = 0.0,
-                                    lot_size: Optional[int] = None) -> Optional[Dict[str, int]]:
-            risk_amt = float(getattr(Config, "RISK_PER_TRADE", 0.02)) * float(self.equity or 0)
+
+        def set_risk_per_trade(self, value: float) -> None:
+            try:
+                self._risk_per_trade = max(1e-6, float(value))
+            except Exception:
+                pass
+
+        def calculate_position_size(
+            self,
+            entry_price: float,
+            stop_loss: float,
+            signal_confidence: float,
+            market_volatility: float = 0.0,
+            lot_size: Optional[int] = None
+        ) -> Optional[Dict[str, int]]:
+            risk_amt = float(self._risk_per_trade) * float(self.equity or 0)
             L = int(lot_size or getattr(Config, "NIFTY_LOT_SIZE", 75))
-            per_lot_risk = max(0.01, abs(entry_price - stop_loss)) * L
+            per_lot_risk = max(0.01, abs(float(entry_price) - float(stop_loss))) * L
             lots = int(max(0, risk_amt // per_lot_risk))
             lots = max(self.min_lots, min(lots, self.max_lots))
             return {"quantity": lots} if lots > 0 else None
+
     def get_live_account_balance() -> float:
         return float(getattr(Config, "ACCOUNT_SIZE", 0.0))
 
@@ -111,7 +153,7 @@ def _round_to_tick(x: float, tick: float) -> float:
         return float(x)
     return round(float(x) / tick) * tick
 
-# ============================== models ============================== #
+# ============================== models ==================================== #
 
 @dataclass
 class ActiveTrade:
@@ -128,9 +170,10 @@ class ActiveTrade:
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None
 
-# ============================ RealTimeTrader ============================ #
+# ============================ RealTimeTrader ============================== #
 
 class RealTimeTrader:
+    # ---- Config mirrors ----
     MAX_CONCURRENT = int(getattr(Config, "MAX_CONCURRENT_POSITIONS", 1))
     WARMUP_BARS = int(getattr(Config, "WARMUP_BARS", 25))
     DATA_LOOKBACK_MIN = int(getattr(Config, "DATA_LOOKBACK_MINUTES", 45))
@@ -179,36 +222,47 @@ class RealTimeTrader:
     BB_WIDTH_MIN = float(getattr(Config, "BB_WIDTH_MIN", 0.006))
     BB_WIDTH_MAX = float(getattr(Config, "BB_WIDTH_MAX", 0.02))
 
+    # Files
     STATE_DIR = "state"
     ACTIVE_JSON = os.path.join(STATE_DIR, "active_trades.json")
 
     def __init__(self, data: Optional[DataProvider] = None) -> None:
         self._lock = threading.RLock()
+        self._start_ts = time.time()
 
+        # Trading toggles / modes
         self.is_trading = False
         self.live_mode = bool(getattr(Config, "ENABLE_LIVE_TRADING", False))
-        self.quality_mode = bool(getattr(Config, "QUALITY_MODE_DEFAULT", False))
 
-        # runtime regime state
+        # Quality (control vs effect)
+        self.quality_setting: str = "AUTO"  # "AUTO" | "ON" | "OFF"
+        # Backward compat: honor QUALITY_MODE_DEFAULT only if AUTO disabled via env
+        if not self.QUALITY_AUTO_ENABLE:
+            self.quality_setting = "ON" if bool(getattr(Config, "QUALITY_MODE_DEFAULT", False)) else "OFF"
+        self.quality_effective: bool = False
+        self.quality_reason: str = "boot"
+
+        # Regime control
         self.regime_mode: str = str(getattr(Config, "REGIME_MODE", "AUTO")).upper()  # AUTO|TREND|RANGE|OFF
+        self.current_regime: str = "RANGE"
         self.regime_reason: str = "boot"
 
-        # session
+        # Session & risk state
         self.daily_start_equity: float = float(get_live_account_balance() or 0.0)
         self.session_date: date = _now().date()
         self.daily_pnl: float = 0.0
         self.session_R: float = 0.0
         self.trades_closed_today: int = 0
         self.loss_streak: int = 0
-        self._cooldown_until: float = 0.0
+        self._cooldown_until: float = 0.0   # used for both loss streak & /pause
         self._halt_for_day: bool = False
 
-        # state
+        # Orders / state
         self.trades: List[Dict[str, Any]] = []
         self.active: Dict[str, ActiveTrade] = {}
         self._recent_keys: Dict[str, float] = {}
 
-        # components
+        # Components
         self.data = data or (self._build_kite_provider() if self.live_mode and KiteDataProvider else DataProvider())
         try:
             self.risk = PositionSizing(account_size=self.daily_start_equity)  # type: ignore
@@ -227,28 +281,28 @@ class RealTimeTrader:
         )
         self.executor = self._init_executor()
 
-        # telegram
+        # Telegram
         self.tg: Optional[TelegramController] = None
         self._init_telegram()
 
-        # workers
+        # Background workers
         self._trailing_evt = threading.Event()
         self._oco_evt = threading.Event()
-        threading.Thread(target=self._trailing_worker, daemon=True).start()
-        threading.Thread(target=self._oco_worker, daemon=True).start()
+        threading.Thread(target=self._trailing_worker, name="TrailingWorker", daemon=True).start()
+        threading.Thread(target=self._oco_worker, name="OcoWorker", daemon=True).start()
 
-        # scheduler
+        # Scheduler
         self._data_job = None
         self._setup_scheduler()
 
-        # files
+        # Files
         self._prepare_trade_log()
         self._maybe_restore_state()
         atexit.register(self.shutdown)
 
         logger.info("✅ RealTimeTrader initialized (live=%s).", self.live_mode)
 
-    # ---------------- components ---------------- #
+    # ---------------- components ------------------------------------------
 
     def _build_kite_provider(self) -> DataProvider:
         try:
@@ -286,12 +340,13 @@ class RealTimeTrader:
                 summary_callback=self.get_summary,
             )
             self.tg.send_startup_alert()
-            threading.Thread(target=self.tg.start_polling, daemon=True).start()
-            logger.info("📡 Telegram polling started.")
+            # Run the controller's long-poll in a dedicated worker thread
+            threading.Thread(target=self.tg.start_polling, name="TelegramPollingStart", daemon=True).start()
+            logger.info("📡 Telegram polling worker started.")
         except Exception as e:
             logger.warning("Telegram init failed: %s", e)
 
-    # --------------- scheduler / cadence --------------- #
+    # --------------- scheduler / cadence -----------------------------------
 
     def _setup_scheduler(self) -> None:
         try:
@@ -314,6 +369,7 @@ class RealTimeTrader:
             return int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
 
     def _ensure_cadence(self) -> None:
+        """Keep the data loop running at a dynamic cadence."""
         try:
             sec = self._current_poll_seconds()
             if self._data_job and (getattr(self._data_job, "interval", None) == sec) and \
@@ -326,7 +382,7 @@ class RealTimeTrader:
         except Exception as e:
             logger.debug("Cadence error: %s", e)
 
-    # ---------------- lifecycle ---------------- #
+    # ---------------- lifecycle -------------------------------------------
 
     def run(self) -> None:
         logger.info("🟢 RealTimeTrader.run() started.")
@@ -364,7 +420,7 @@ class RealTimeTrader:
         logger.info("Mode switched to SHADOW.")
         return True
 
-    # ---------------- telegram handler ---------------- #
+    # ---------------- telegram handler ------------------------------------
 
     def _handle_control(self, command: str, arg: str = "") -> bool:
         cmd = (command or "").strip().lower()
@@ -375,36 +431,77 @@ class RealTimeTrader:
                 return self.start()
             if cmd == "stop":
                 return self.stop()
+
             if cmd == "mode":
                 low = arg.strip().lower()
                 if low in ("live", "l"):
                     return self.enable_live()
                 if low in ("shadow", "paper", "sim", "s"):
                     return self.disable_live()
-                if low.startswith("quality"):
-                    # /mode quality on|off
-                    self.quality_mode = ("on" in low) or low.endswith("1")
-                    logger.info("Quality mode set to %s", self.quality_mode)
-                    return True
                 return False
+
+            if cmd == "quality":
+                low = arg.strip().lower() or "auto"
+                if low not in ("auto", "on", "off"):
+                    return False
+                self.quality_setting = low.upper()
+                if self.quality_setting == "ON":
+                    self.quality_effective, self.quality_reason = True, "manual"
+                elif self.quality_setting == "OFF":
+                    self.quality_effective, self.quality_reason = False, "manual"
+                else:
+                    self.quality_reason = "auto-enabled"
+                logger.info("Quality setting → %s", self.quality_setting)
+                return True
+
             if cmd == "regime":
-                low = arg.strip().lower()
+                low = arg.strip().lower() or "auto"
                 if low in ("auto", "trend", "range", "off"):
                     self.regime_mode = low.upper()
                     self.regime_reason = "manual"
-                    if self.tg:
-                        self.tg.send_message(f"🧭 Regime set to <b>{self.regime_mode}</b>.", parse_mode="HTML")
-                    logger.info("Regime switched to %s", self.regime_mode)
+                    logger.info("Regime mode → %s", self.regime_mode)
                     return True
                 return False
+
+            if cmd == "risk":
+                try:
+                    # arg normalized by controller to fraction (e.g., 0.005 for 0.5%)
+                    val = float(arg)
+                except Exception:
+                    return False
+                self.RISK_PER_TRADE = max(1e-6, float(val))
+                try:
+                    self.risk.set_risk_per_trade(self.RISK_PER_TRADE)  # type: ignore
+                except Exception:
+                    pass
+                logger.info("Risk per trade set to %.4f (fraction)", self.RISK_PER_TRADE)
+                return True
+
+            if cmd == "pause":
+                mins = 1
+                try:
+                    mins = max(1, int(float(arg or "1")))
+                except Exception:
+                    mins = 1
+                self._cooldown_until = time.time() + mins * 60
+                logger.info("Paused entries for %d minutes.", mins)
+                return True
+
+            if cmd == "resume":
+                self._cooldown_until = 0.0
+                logger.info("Resumed entries.")
+                return True
+
             if cmd == "refresh":
                 self.refresh_account_balance()
                 return True
+
             if cmd == "health":
                 ok = not self._circuit_tripped()
                 if self.tg:
                     self.tg.send_message("System health: OK" if ok else "System health: CIRCUIT")
                 return True
+
             if cmd == "emergency":
                 try:
                     self.executor.cancel_all_orders()  # type: ignore
@@ -414,24 +511,33 @@ class RealTimeTrader:
                 if self.tg:
                     self.tg.send_message("🛑 Emergency: All orders canceled, positions cleared (best-effort).")
                 return True
+
         except Exception as e:
             logger.error("Control error: %s", e, exc_info=True)
         return False
 
-    # ---------------- status / summary ---------------- #
+    # ---------------- status / summary ------------------------------------
 
     def get_status(self) -> Dict[str, Any]:
+        uptime = max(0.0, time.time() - self._start_ts)
+        # choose an effective regime to show
+        regime_to_show = self.current_regime if self.regime_mode == "AUTO" else self.regime_mode
         return {
             "is_trading": self.is_trading,
             "live_mode": self.live_mode,
-            "quality_mode": self.quality_mode,
-            "regime_mode": self.regime_mode,
+            # quality presentation (controller expects flexible types)
+            "quality_mode": self.quality_setting,
+            "quality_auto": self.quality_setting == "AUTO",
+            "quality_reason": self.quality_reason,
+            # regime presentation
+            "regime_mode": regime_to_show,
             "regime_reason": self.regime_reason,
             "open_positions": len(self.active),
             "closed_today": self.trades_closed_today,
             "daily_pnl": round(self.daily_pnl, 2),
             "account_size": round(self.daily_start_equity + self.daily_pnl, 2),
             "session_date": str(self.session_date),
+            "uptime_sec": round(uptime, 1),
         }
 
     def get_summary(self) -> str:
@@ -448,6 +554,7 @@ class RealTimeTrader:
         try:
             bal = float(get_live_account_balance() or 0.0)
             if bal > 0:
+                # keep daily_start_equity such that account_size = start + pnl
                 self.daily_start_equity = bal - self.daily_pnl
                 if hasattr(self.risk, "set_equity"):
                     self.risk.set_equity(bal)  # type: ignore
@@ -455,7 +562,7 @@ class RealTimeTrader:
         except Exception as e:
             logger.debug("Balance refresh error: %s", e)
 
-    # ---------------- main tick ---------------- #
+    # ---------------- main tick -------------------------------------------
 
     def _smart_tick(self) -> None:
         if not self.is_trading:
@@ -471,8 +578,12 @@ class RealTimeTrader:
         if self.ENABLE_EVENTS and _within_any_windows(now_t, self.EVENTS):
             return
 
-        # Skip choppy opening minutes
+        # Skip opening chop
         if (now.hour == 9 and now.minute < max(16, self.SKIP_FIRST_MIN + 15)):
+            return
+
+        # Loss streak cooldown or /pause
+        if time.time() < self._cooldown_until:
             return
 
         self._prune_recent_keys()
@@ -486,61 +597,74 @@ class RealTimeTrader:
         if not self._htf_ok(df):
             return
 
-        # Auto regime + quality
+        # Determine regime & quality effect each tick
         try:
-            if self.regime_mode in ("AUTO", "OFF"):
+            # Regime
+            if self.regime_mode == "AUTO":
                 regime, why, bbw, adxv, slope = self._infer_regime(df)
-                if self.regime_mode == "AUTO":
-                    self.regime_reason = f"{why} (bbw={bbw:.4f}, adx={adxv:.2f}, slope={slope:.2f})"
-                # When OFF, we still compute quality auto below
+                self.current_regime = regime
+                self.regime_reason = f"{why} (bbw={bbw:.4f}, adx={adxv:.2f}, slope={slope:.2f})"
+            elif self.regime_mode == "OFF":
+                # No regime gating but still compute for quality auto
+                regime, _why, _bbw, _adxv, _slope = self._infer_regime(df)
+                self.current_regime = regime
             else:
-                regime = self.regime_mode
+                self.current_regime = self.regime_mode
         except Exception:
-            regime, self.regime_reason = "RANGE", "calc-failed"
+            self.current_regime, self.regime_reason = "RANGE", "calc-failed"
 
-        if self.QUALITY_AUTO_ENABLE:
+        # Quality
+        if self.quality_setting == "AUTO" and self.QUALITY_AUTO_ENABLE:
             self._maybe_auto_quality(df)
+        elif self.quality_setting == "ON":
+            self.quality_effective, self.quality_reason = True, "manual"
+        else:
+            self.quality_effective, self.quality_reason = False, "manual"
 
         try:
             last_price = float(df["close"].iloc[-1])
         except Exception:
             return
 
-        # Strategy (your strategy can read regime via Config if needed;
-        # here we simply generate and place)
+        # Strategy
         sig = self._generate_spot_signal(df, last_price)
         if sig:
-            # optionally nudge target/SL per regime
+            # Nudge TP/SL by regime if strategy exposes ATR
             try:
-                if regime == "TREND":
+                if self.current_regime == "TREND":
                     tp_mult = float(getattr(Config, "REGIME_TREND_TP_MULT", 3.4))
                     sl_mult = float(getattr(Config, "REGIME_TREND_SL_MULT", 1.6))
                 else:
                     tp_mult = float(getattr(Config, "REGIME_RANGE_TP_MULT", 2.4))
                     sl_mult = float(getattr(Config, "REGIME_RANGE_SL_MULT", 1.3))
-                if "atr" in sig and isinstance(sig["atr"], (int, float)):
-                    atr = float(sig["atr"])
-                    sig["target"] = last_price + (tp_mult * atr) * (1 if sig["signal"].upper() == "BUY" else -1)
-                    base_sl = last_price - (sl_mult * atr) * (1 if sig["signal"].upper() == "BUY" else -1)
-                    sig["stop_loss"] = base_sl
+                atr = float(sig.get("atr", sig.get("market_volatility", 0.0)) or 0.0)
+                if atr > 0:
+                    # Direction-aware adjust
+                    dir_mult = 1 if str(sig["signal"]).upper() == "BUY" else -1
+                    sig["target"] = last_price + (tp_mult * atr) * dir_mult
+                    sig["stop_loss"] = last_price - (sl_mult * atr) * dir_mult
             except Exception:
                 pass
 
             self._place_trade(spot_symbol, sig, last_price)
             return
 
-        # options flow (left best-effort)
+        # Options flow (optional hook)
         if get_instrument_tokens and fetch_cached_instruments:
             self._maybe_try_options_flow(last_price)
 
+        # Check for exits and book P&L
         self._process_active_trades()
 
-    # ---------------- regime / quality helpers ---------------- #
+    # ---------------- regime / quality helpers -----------------------------
 
     def _infer_regime(self, df: pd.DataFrame) -> Tuple[str, str, float, float, float]:
         """
         Return (regime, reason, bb_width, adx_value, ema_slope).
-        Simplified: BB width on close & pseudo-ADX from price moves.
+        Simplified proxy:
+          - BB width (% of price) from 20-period band
+          - pseudo-ADX from mean absolute returns
+          - EMA slope as directional hint
         """
         try:
             closes = df["close"].astype(float)
@@ -555,7 +679,7 @@ class RealTimeTrader:
             lower = ma - 2 * std
             bb_width = float(((upper - lower) / ma).iloc[-1])
 
-            # Pseudo ADX: use absolute 1-bar returns as proxy for directional movement smoothness
+            # Pseudo ADX: mean absolute returns × 100
             ret = closes.pct_change().abs()
             adx_val = float((ret.rolling(self.ADX_PERIOD).mean() * 100).iloc[-1])
 
@@ -583,20 +707,20 @@ class RealTimeTrader:
             if abs(slope) >= self.QUALITY_AUTO_SLOPE_MIN:
                 good = True
             new_q = bool(good and regime == "TREND")
-            if new_q != self.quality_mode:
-                self.quality_mode = new_q
-                logger.info("✨ Auto-quality → %s (bbw=%.4f, adx=%.2f, slope=%.2f, regime=%s)",
-                            self.quality_mode, bbw, adxv, slope, regime)
+            if new_q != self.quality_effective:
+                self.quality_effective = new_q
+                self.quality_reason = f"auto (bbw={bbw:.4f}, adx={adxv:.2f}, slope={slope:.2f}, regime={regime})"
+                logger.info("✨ Auto-quality → %s | %s", self.quality_effective, self.quality_reason)
                 if self.tg:
                     self.tg.send_message(
-                        f"✨ Quality <b>{'ON' if self.quality_mode else 'OFF'}</b> "
+                        f"✨ Quality <b>{'ON' if self.quality_effective else 'OFF'}</b> "
                         f"(bbw={bbw:.4f}, adx={adxv:.2f}, slope={slope:.2f}, regime={regime})",
                         parse_mode="HTML",
                     )
         except Exception as e:
             logger.debug("auto-quality failed: %s", e)
 
-    # ---------------- gates / strategy ---------------- #
+    # ---------------- gates / strategy -------------------------------------
 
     def _htf_ok(self, df: pd.DataFrame) -> bool:
         try:
@@ -612,8 +736,7 @@ class RealTimeTrader:
     def _generate_spot_signal(self, df: pd.DataFrame, last_price: float) -> Optional[Dict[str, Any]]:
         try:
             sig = self.strategy.generate_signal(df, last_price)
-            # light bump for quality ON
-            if sig and self.quality_mode:
+            if sig and self.quality_effective:
                 sig["confidence"] = float(sig.get("confidence", 5.0)) + float(getattr(Config, "QUALITY_SCORE_BUMP", 1.0))
             return sig
         except Exception as e:
@@ -624,7 +747,7 @@ class RealTimeTrader:
         # Hook intentionally empty. Wire your options leg builder here if needed.
         pass
 
-    # ---------------- hygiene / circuit ---------------- #
+    # ---------------- hygiene / circuit ------------------------------------
 
     def _entry_guard(self, key: str) -> bool:
         now = time.time()
@@ -646,7 +769,7 @@ class RealTimeTrader:
         drawdown = (cur - eq) / eq
         return drawdown <= -abs(self.MAX_DD_PCT) or self._halt_for_day
 
-    # ---------------- execution path ---------------- #
+    # ---------------- execution path ---------------------------------------
 
     def _place_trade(self, symbol: str, sig: Dict[str, Any], mark_price: float) -> None:
         try:
@@ -736,7 +859,7 @@ class RealTimeTrader:
 
         logger.info("▶️ Placed %s x%d @ %.2f SL %.2f TP %.2f", direction, qty, entry, sl, tp)
 
-    # ---------------- workers ---------------- #
+    # ---------------- workers ---------------------------------------------
 
     def _trailing_worker(self) -> None:
         while not self._trailing_evt.is_set():
@@ -847,7 +970,7 @@ class RealTimeTrader:
         if closed_ids:
             self._persist_state()
 
-    # ---------------- daily / auto-exit ---------------- #
+    # ---------------- daily / auto-exit ------------------------------------
 
     def _roll_daily_if_needed(self) -> None:
         if _now().date() != self.session_date:
@@ -884,7 +1007,7 @@ class RealTimeTrader:
         except Exception:
             pass
 
-    # ---------------- files / persistence ---------------- #
+    # ---------------- files / persistence ----------------------------------
 
     def _prepare_trade_log(self) -> None:
         try:
@@ -932,7 +1055,7 @@ class RealTimeTrader:
         except Exception:
             self.active = {}
 
-    # ---------------- shutdown ---------------- #
+    # ---------------- shutdown ---------------------------------------------
 
     def shutdown(self) -> None:
         try:
