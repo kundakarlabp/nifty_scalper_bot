@@ -1,22 +1,27 @@
 # src/main.py
+"""
+Main entrypoint
+---------------
+Purpose:
+- Boot the real-time trader, Telegram, and the health server.
+- Provide a small CLI: run/start/stop/status/auth-check.
+
+Key points / changes:
+- ✅ Sets TELEGRAM_INSTANCE_ID (defaults to container hostname) so polling is singleton.
+- ✅ Health server runs on a thread; no kwargs mismatch; no debug spam unless FLASK_DEBUG=1.
+- ✅ Clean shutdown: signals, thread joins, Telegram poller stop via trader.shutdown().
+
+Usage:
+    python -m src.main run --health-port 8000
+"""
 
 from __future__ import annotations
-
-"""
-Main entrypoint for the real-time trader.
-
-Features
-- .env loader (no external dependency)
-- Config-driven logging
-- Optional health server runner
-- CLI: run/start/stop/status/auth-check with extra flags
-- Clean shutdown (SIGINT/SIGTERM) with thread joins
-"""
 
 import argparse
 import logging
 import os
 import signal
+import socket
 import sys
 from threading import Event, Thread
 from typing import Optional
@@ -34,20 +39,18 @@ def _load_env_from_file(path: str = ".env") -> None:
                 k, v = s.split("=", 1)
                 k = k.strip()
                 v = v.strip().strip('"').strip("'")
-                # do not overwrite if already set
                 os.environ.setdefault(k, v)
     except Exception:
-        # env loading must never crash startup
         pass
 
 _load_env_from_file()
 
-# Local imports AFTER env is loaded
+# Imports AFTER env is loaded
 from src.config import Config  # noqa: E402
 from src.data_streaming.realtime_trader import RealTimeTrader  # noqa: E402
 from src.server.health import run as run_health  # noqa: E402
 
-# Optional: Zerodha auth preflight
+# Optional auth preflight
 try:
     from src.auth.zerodha_auth import check_live_credentials
 except Exception:  # keep optional
@@ -72,24 +75,26 @@ _trader: Optional[RealTimeTrader] = None
 _trader_thread: Optional[Thread] = None
 _health_thread: Optional[Thread] = None
 
+
 def _graceful_exit(*_):
     logger.info("Shutdown signal received.")
     try:
         if _trader:
             _trader.stop()
+            _trader.shutdown()
     except Exception:
         pass
     stop_event.set()
 
+
 def _start_health_server(port: int) -> Optional[Thread]:
     if port <= 0:
         return None
-    # IMPORTANT: run_health() takes no args; it reads HEALTH_PORT from env.
-    os.environ["HEALTH_PORT"] = str(port)
-    t = Thread(target=run_health, name="HealthServer", daemon=True)
+    t = Thread(target=run_health, args=(port,), name="HealthServer", daemon=True)
     t.start()
     logger.info("Health server listening on :%d", port)
     return t
+
 
 def _start_trader_loop(trader: RealTimeTrader) -> Thread:
     t = Thread(target=trader.run, name="TraderLoop", daemon=True)
@@ -97,9 +102,13 @@ def _start_trader_loop(trader: RealTimeTrader) -> Thread:
     logger.info("Trader main loop started.")
     return t
 
+
 # ---- commands ----
 def cmd_run(args) -> int:
     global _trader, _trader_thread, _health_thread
+
+    # Ensure a stable instance id for Telegram singleton
+    os.environ.setdefault("TELEGRAM_INSTANCE_ID", socket.gethostname() or "default")
 
     # Apply runtime toggles
     if args.shadow:
@@ -109,17 +118,17 @@ def cmd_run(args) -> int:
     if args.no_telegram:
         os.environ["ENABLE_TELEGRAM"] = "false"
 
-    # Instantiate
+    # Instantiate trader
     _trader = RealTimeTrader()
 
-    # Handle signals
+    # Signals
     signal.signal(signal.SIGTERM, _graceful_exit)
     signal.signal(signal.SIGINT, _graceful_exit)
 
-    # Health server (optional)
+    # Health server
     _health_thread = _start_health_server(args.health_port)
 
-    # Start trader
+    # Start trader loop
     _trader_thread = _start_trader_loop(_trader)
 
     # Keep process alive
@@ -137,14 +146,15 @@ def cmd_run(args) -> int:
     logger.info("Stopped.")
     return 0
 
+
 def cmd_start(args) -> int:
-    # start toggles only apply if you run in this process; typically you use `run`
     return cmd_run(args)
 
+
 def cmd_stop(_args) -> int:
-    # Local process stop helper; in real deployments you'd signal the supervisor (systemd/docker)
     logger.info("Stop requested; send SIGTERM/SIGINT to the process.")
     return 0
+
 
 def cmd_status(_args) -> int:
     try:
@@ -156,6 +166,7 @@ def cmd_status(_args) -> int:
         logger.error("Status error: %s", e, exc_info=True)
         return 1
 
+
 def cmd_auth_check(_args) -> int:
     ok, missing = check_live_credentials()
     if ok:
@@ -163,6 +174,7 @@ def cmd_auth_check(_args) -> int:
         return 0
     print("❌ Missing credentials:", ", ".join(missing))
     return 2
+
 
 # ---- CLI ----
 def _build_parser() -> argparse.ArgumentParser:
@@ -184,6 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     return p
 
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -203,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         "auth-check": cmd_auth_check,
     }
     return dispatch[args.cmd](args)
+
 
 if __name__ == "__main__":
     sys.exit(main())
