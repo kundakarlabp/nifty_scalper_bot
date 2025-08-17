@@ -1,8 +1,29 @@
 # src/notifications/telegram_controller.py
+"""
+TelegramController
+------------------
+Purpose:
+- Poll Telegram long-poll API and route commands to the trader.
+- Send formatted alerts (startup, status, signals, etc.).
+
+Key points / changes:
+- ✅ Singleton poller: lock-file at /tmp/tgpoll_<bot>_<instance>.lock prevents double polling.
+- ✅ 409 auto-stop kept as a backstop, but we *proactively* avoid starting a 2nd poller.
+- ✅ Clean stop() that releases the lock every time (incl. during exceptions).
+- ✅ Small QoL: /mode live|shadow|quality on|off, /risk, /regime, /pause, /resume, /status…
+
+Config knobs (env via Config):
+- TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+- TELEGRAM_INSTANCE_ID (optional; default: hostname or 'default')
+- TELEGRAM_POLL_TIMEOUT (default 30s), TELEGRAM_MIN_SEND_GAP_SEC (default 0.4s)
+"""
+
 from __future__ import annotations
 
 import html
 import logging
+import os
+import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -10,6 +31,45 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+class _FileLock:
+    """Lightweight file lock to ensure only one poller instance per bot+instance id."""
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._fd = None
+        self._lock = threading.RLock()
+
+    def acquire(self) -> bool:
+        with self._lock:
+            if self._fd is not None:
+                return True
+            try:
+                # Use os.O_EXCL to fail if the file already exists.
+                self._fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.write(self._fd, str(os.getpid()).encode("utf-8"))
+                os.fsync(self._fd)
+                logger.debug("Telegram lock acquired: %s", self.path)
+                return True
+            except FileExistsError:
+                logger.warning("Telegram polling lock already present: %s", self.path)
+                return False
+            except Exception as e:
+                logger.error("Failed to acquire Telegram lock: %s", e)
+                return False
+
+    def release(self) -> None:
+        with self._lock:
+            try:
+                if self._fd is not None:
+                    os.close(self._fd)
+                    self._fd = None
+                if os.path.exists(self.path):
+                    os.unlink(self.path)
+                logger.debug("Telegram lock released: %s", self.path)
+            except Exception:
+                # Do not raise in release path
+                pass
 
 
 class TelegramController:
@@ -20,7 +80,7 @@ class TelegramController:
     Commands:
       /start
       /stop
-      /mode live|shadow|quality on|off|auto
+      /mode live|shadow|quality on|off
       /risk <pct>                  (e.g. /risk 0.5 or /risk 0.5%)
       /regime auto|trend|range|off
       /pause <minutes>
@@ -32,8 +92,6 @@ class TelegramController:
       /emergency
       /help
     """
-
-    # --- lifecycle ---------------------------------------------------------
 
     def __init__(
         self,
@@ -50,6 +108,11 @@ class TelegramController:
             raise ValueError("TELEGRAM_BOT_TOKEN is required in Config")
         if not self.chat_id:
             raise ValueError("TELEGRAM_CHAT_ID is required in Config")
+
+        # Instance id (for multi-deploy environments)
+        instance_id = os.getenv("TELEGRAM_INSTANCE_ID") or socket.gethostname() or "default"
+        self._lock_path = f"/tmp/tgpoll_{self.bot_token.split(':',1)[0]}_{instance_id}.lock"
+        self._poll_lock = _FileLock(self._lock_path)
 
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.polling = False
@@ -72,7 +135,7 @@ class TelegramController:
 
         logger.info("TelegramController initialized.")
 
-    # --- HTTP helpers ------------------------------------------------------
+    # ---------------- HTTP helpers ---------------- #
 
     def _post(self, method: str, payload: Dict[str, Any], *, json_mode: bool = True) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/{method}"
@@ -81,29 +144,24 @@ class TelegramController:
         last_exc = None
         for i in range(tries):
             try:
-                if json_mode:
-                    resp = requests.post(url, json=payload, timeout=self._request_timeout_s)
-                else:
-                    resp = requests.post(url, data=payload, timeout=self._request_timeout_s)
-
+                resp = requests.post(url, json=payload if json_mode else None, data=None if json_mode else payload,
+                                     timeout=self._request_timeout_s)
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("ok"):
                         return data
                     logger.error("Telegram API error: %s", data)
                     return None
-
-                # 409 = another poller/webhook active, stop polling
                 if resp.status_code == 409:
+                    # Another poller/webhook exists
                     logger.error("Telegram conflict (409). Another instance is active. Stopping polling.")
                     self.stop_polling()
                     return None
-
                 logger.warning("Telegram POST %s failed (%s): %s", method, resp.status_code, resp.text)
             except Exception as exc:
                 last_exc = exc
                 logger.debug("Telegram POST %s error (attempt %d): %s", method, i + 1, exc)
-            time.sleep(backoff * (2**i))
+            time.sleep(backoff * (2 ** i))
         if last_exc:
             logger.error("Telegram POST %s failed after retries: %s", method, last_exc)
         return None
@@ -122,22 +180,20 @@ class TelegramController:
                         return data
                     logger.error("Telegram API error: %s", data)
                     return None
-
                 if resp.status_code == 409:
                     logger.error("Telegram conflict (409). Another instance is active. Stopping polling.")
                     self.stop_polling()
                     return None
-
                 logger.warning("Telegram GET %s failed (%s): %s", method, resp.status_code, resp.text)
             except Exception as exc:
                 last_exc = exc
                 logger.debug("Telegram GET %s error (attempt %d): %s", method, i + 1, exc)
-            time.sleep(backoff * (2**i))
+            time.sleep(backoff * (2 ** i))
         if last_exc:
             logger.error("Telegram GET %s failed after retries: %s", method, last_exc)
         return None
 
-    # --- sending -----------------------------------------------------------
+    # ---------------- sending ---------------- #
 
     def _throttle(self) -> None:
         now = time.time()
@@ -164,9 +220,7 @@ class TelegramController:
             logger.error("Failed to send Telegram message.")
         return ok
 
-    # public simple wrapper
     def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
-        # default to HTML for your formatted strings; call with None for plain text
         return self._send_message(text, parse_mode=parse_mode or "HTML")
 
     def send_startup_alert(self) -> None:
@@ -177,19 +231,16 @@ class TelegramController:
                "STOP": "🛑 Real-time trading session <b>STOPPED</b>."}.get(action.upper(), f"ℹ️ Session {html.escape(action)}.")
         self._send_message(msg, parse_mode="HTML")
 
-    # compatibility with RealTimeTrader._safe_send_alert()
     def send_alert(self, action: str) -> None:
         self.send_realtime_session_alert(action)
 
     def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
-        # HTML-escape dynamic bits
         direction = html.escape(str(signal.get("signal") or signal.get("direction") or "ENTRY"))
         entry = html.escape(f"{signal.get('entry_price', 'N/A')}")
         sl = html.escape(f"{signal.get('stop_loss', 'N/A')}")
         target = html.escape(f"{signal.get('target', 'N/A')}")
         conf = float(signal.get("confidence", 0.0) or 0.0)
         qty = html.escape(f"{position.get('quantity', 'N/A')}")
-
         text = (
             f"🔥 <b>NEW SIGNAL #{token}</b>\n"
             f"🎯 Direction: <b>{direction}</b>\n"
@@ -201,54 +252,26 @@ class TelegramController:
         )
         self._send_message(text, parse_mode="HTML")
 
-    # --- formatting helpers -----------------------------------------------
-
-    @staticmethod
-    def _fmt_quality_line(status: Dict[str, Any]) -> str:
-        # Backward compatible: if policy not provided, infer from boolean flag
-        policy = (status.get("quality_policy") or "").strip().lower()
-        qm = status.get("quality_mode")  # boolean, legacy
-        if not policy:
-            policy = "on" if qm else "off"
-
-        label = {"on": "ON", "off": "OFF", "auto": "AUTO"}.get(policy, policy.upper() or "OFF")
-
-        # Optional: reason text and regime metrics (if trader provides them)
-        reason = status.get("quality_reason")
-        parts = [f"✨ <b>Quality:</b> {label}"]
-        if policy == "auto":
-            if reason:
-                parts.append(f"(auto: {html.escape(str(reason))})")
-            # If regime supplied, display succinctly
-            regime = (status.get("regime") or status.get("regime_mode") or "").upper()
-            if regime:
-                parts.append(f"[{regime}]")
-        return " ".join(parts)
+    # ---------------- formatting helpers ---------------- #
 
     def _format_status(self, status: Any) -> Tuple[str, str]:
-        """Returns (text, parse_mode)."""
         if isinstance(status, str):
             return f"📊 Status:\n{html.escape(status)}", "HTML"
 
         is_trading = bool(status.get("is_trading", False))
         live_mode = bool(status.get("live_mode", False))
+        quality_mode = bool(status.get("quality_mode", False))
         open_positions = int(status.get("open_positions", status.get("open_orders", 0)) or 0)
         trades_today = int(status.get("trades_today", status.get("closed_today", 0)) or 0)
         daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
         acct = status.get("account_size")
         sess = status.get("session_date")
 
-        # Optional extras that may be present:
-        regime = (status.get("regime") or status.get("regime_mode") or "")
-        adx = status.get("adx")
-        bbw = status.get("bb_width")
-        slope = status.get("ema_slope")
-
         lines = [
             "📊 <b>Bot Status</b>",
             f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
             f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
-            self._fmt_quality_line(status),
+            f"✨ <b>Quality:</b> {'ON' if quality_mode else 'OFF'}",
             f"📦 <b>Open Positions:</b> {open_positions}",
             f"📈 <b>Closed Today:</b> {trades_today}",
             f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
@@ -258,19 +281,6 @@ class TelegramController:
         if sess is not None:
             lines.append(f"📅 <b>Session:</b> {html.escape(str(sess))}")
 
-        # Append a compact regime diagnostics line when available
-        diag_bits = []
-        if regime:
-            diag_bits.append(f"Regime={html.escape(str(regime)).upper()}")
-        if isinstance(adx, (int, float)):
-            diag_bits.append(f"ADX={float(adx):.1f}")
-        if isinstance(bbw, (int, float)):
-            diag_bits.append(f"BBWidth={float(bbw):.3%}")
-        if isinstance(slope, (int, float)):
-            diag_bits.append(f"EMAΔ={float(slope):.2f}")
-        if diag_bits:
-            lines.append("🧭 " + " | ".join(diag_bits))
-
         return "\n".join(lines), "HTML"
 
     def _send_status(self, status: Any) -> None:
@@ -278,10 +288,9 @@ class TelegramController:
         self._send_message(txt, parse_mode=mode)
 
     def _send_summary(self, summary: str) -> None:
-        # summary is already formatted HTML upstream
         self._send_message(summary, parse_mode="HTML")
 
-    # --- command parsing/router -------------------------------------------
+    # ---------------- command router ---------------- #
 
     @staticmethod
     def _parse_command_and_arg(text: str) -> Tuple[str, str]:
@@ -298,13 +307,10 @@ class TelegramController:
 
     @staticmethod
     def _normalize_risk_arg(arg: str) -> str:
-        """
-        Accepts '0.5' or '0.5%' or '1' (=> 1%). Returns a normalized string the trader can parse.
-        """
         a = (arg or "").strip().replace("%", "")
         try:
             val = float(a)
-            if val > 1.5:  # user probably meant percent, not fraction
+            if val > 1.5:
                 val = val / 100.0
             return f"{val:.4f}"
         except Exception:
@@ -319,7 +325,7 @@ class TelegramController:
                 "🤖 <b>Commands</b>\n"
                 "/start – start trading\n"
                 "/stop – stop trading\n"
-                "/mode live|shadow|quality on|off|auto – switch mode or quality policy\n"
+                "/mode live|shadow|quality on|off – switch mode\n"
                 "/risk &lt;pct&gt; – e.g. <code>/risk 0.5</code> (means 0.5%)\n"
                 "/regime auto|trend|range|off – set regime gate\n"
                 "/pause &lt;min&gt; – pause entries\n"
@@ -354,18 +360,10 @@ class TelegramController:
             return
 
         if cmd == "mode":
-            # Accepts:
-            #   /mode live
-            #   /mode shadow
-            #   /mode quality on
-            #   /mode quality off
-            #   /mode quality auto
             a = (arg or "").strip().lower()
             ok = self.control_callback("mode", a)
             if not ok:
                 self._send_message("⚠️ Failed to change mode.")
-            else:
-                self._send_message(f"✅ Mode updated: <code>{html.escape(a)}</code>", parse_mode="HTML")
             return
 
         if cmd == "risk":
@@ -386,7 +384,7 @@ class TelegramController:
 
         self._send_message("❌ Unknown command. Try <code>/help</code>.", parse_mode="HTML")
 
-    # --- polling loop ------------------------------------------------------
+    # ---------------- polling loop ---------------- #
 
     def _poll_updates(self) -> None:
         logger.info("📡 Telegram polling started. Awaiting commands...")
@@ -396,7 +394,7 @@ class TelegramController:
                 params = {"timeout": self._timeout_s}
                 if self._offset is not None:
                     params["offset"] = self._offset
-                data = self._get("getUpdates", params)  # handles retries & 409
+                data = self._get("getUpdates", params)
                 if not data:
                     continue
                 results = data.get("result", [])
@@ -414,20 +412,22 @@ class TelegramController:
             except Exception as exc:
                 logger.error("Error in Telegram polling: %s", exc, exc_info=True)
                 time.sleep(3.0)
-
         logger.info("🛑 Telegram polling stopped.")
 
-    # --- public lifecycle --------------------------------------------------
+    # ---------------- public lifecycle ---------------- #
 
     def start_polling(self) -> None:
         if self.polling:
             logger.warning("Polling already active.")
             return
+        # SINGLETON GUARD
+        if not self._poll_lock.acquire():
+            logger.error("Another poller holds the lock. Not starting polling.")
+            return
+
         self.polling = True
         self.polling_thread = threading.Thread(
-            target=self._poll_updates,
-            name="TelegramPolling",
-            daemon=True,
+            target=self._poll_updates, name="TelegramPolling", daemon=True
         )
         self.polling_thread.start()
 
@@ -436,5 +436,10 @@ class TelegramController:
         self.polling = False
         self._stop_evt.set()
         if self.polling_thread and self.polling_thread.is_alive():
-            self.polling_thread.join(timeout=5)
+            try:
+                self.polling_thread.join(timeout=5)
+            except Exception:
+                pass
         self.polling_thread = None
+        # Always release lock on stop
+        self._poll_lock.release()
