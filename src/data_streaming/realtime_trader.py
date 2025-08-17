@@ -222,6 +222,22 @@ class RealTimeTrader:
     BB_WIDTH_MIN = float(getattr(Config, "BB_WIDTH_MIN", 0.006))
     BB_WIDTH_MAX = float(getattr(Config, "BB_WIDTH_MAX", 0.02))
 
+    # Cadence controls (NEW)
+    # If POLL_SEC is set (>0), it forces a fixed cadence.
+    # Otherwise we use peak/off-peak with 5s defaults.
+    try:
+        FORCED_POLL_SEC = int(getattr(Config, "POLL_SEC", 0) or 0)
+    except Exception:
+        FORCED_POLL_SEC = 0
+    try:
+        PEAK_POLL_SEC = int(getattr(Config, "PEAK_POLL_SEC", getattr(Config, "DEFAULT_POLL_SEC", 5)))
+    except Exception:
+        PEAK_POLL_SEC = 5
+    try:
+        OFFPEAK_POLL_SEC = int(getattr(Config, "OFFPEAK_POLL_SEC", getattr(Config, "DEFAULT_POLL_SEC", 5)))
+    except Exception:
+        OFFPEAK_POLL_SEC = 5
+
     # Files
     STATE_DIR = "state"
     ACTIVE_JSON = os.path.join(STATE_DIR, "active_trades.json")
@@ -236,7 +252,6 @@ class RealTimeTrader:
 
         # Quality (control vs effect)
         self.quality_setting: str = "AUTO"  # "AUTO" | "ON" | "OFF"
-        # Backward compat: honor QUALITY_MODE_DEFAULT only if AUTO disabled via env
         if not self.QUALITY_AUTO_ENABLE:
             self.quality_setting = "ON" if bool(getattr(Config, "QUALITY_MODE_DEFAULT", False)) else "OFF"
         self.quality_effective: bool = False
@@ -361,12 +376,23 @@ class RealTimeTrader:
         schedule.every(20).seconds.do(self._auto_exit_guard)
 
     def _current_poll_seconds(self) -> int:
+        """
+        Cadence order:
+        1) If POLL_SEC>0, use it (fixed cadence).
+        2) Else use PEAK_POLL_SEC vs OFFPEAK_POLL_SEC with 5s defaults.
+        """
+        try:
+            if int(self.FORCED_POLL_SEC) > 0:
+                return int(self.FORCED_POLL_SEC)
+        except Exception:
+            pass
         try:
             now_t = _now().time()
             in_peak = (dtime(9, 20) <= now_t <= dtime(11, 30)) or (dtime(13, 30) <= now_t <= dtime(15, 5))
-            return int(getattr(Config, "PEAK_POLL_SEC", 12)) if in_peak else int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
+            return int(self.PEAK_POLL_SEC) if in_peak else int(self.OFFPEAK_POLL_SEC)
         except Exception:
-            return int(getattr(Config, "OFFPEAK_POLL_SEC", 25))
+            # final fallback: 5s
+            return 5
 
     def _ensure_cadence(self) -> None:
         """Keep the data loop running at a dynamic cadence."""
@@ -465,7 +491,6 @@ class RealTimeTrader:
 
             if cmd == "risk":
                 try:
-                    # arg normalized by controller to fraction (e.g., 0.005 for 0.5%)
                     val = float(arg)
                 except Exception:
                     return False
@@ -520,16 +545,13 @@ class RealTimeTrader:
 
     def get_status(self) -> Dict[str, Any]:
         uptime = max(0.0, time.time() - self._start_ts)
-        # choose an effective regime to show
         regime_to_show = self.current_regime if self.regime_mode == "AUTO" else self.regime_mode
         return {
             "is_trading": self.is_trading,
             "live_mode": self.live_mode,
-            # quality presentation (controller expects flexible types)
             "quality_mode": self.quality_setting,
             "quality_auto": self.quality_setting == "AUTO",
             "quality_reason": self.quality_reason,
-            # regime presentation
             "regime_mode": regime_to_show,
             "regime_reason": self.regime_reason,
             "open_positions": len(self.active),
@@ -554,7 +576,6 @@ class RealTimeTrader:
         try:
             bal = float(get_live_account_balance() or 0.0)
             if bal > 0:
-                # keep daily_start_equity such that account_size = start + pnl
                 self.daily_start_equity = bal - self.daily_pnl
                 if hasattr(self.risk, "set_equity"):
                     self.risk.set_equity(bal)  # type: ignore
@@ -599,13 +620,11 @@ class RealTimeTrader:
 
         # Determine regime & quality effect each tick
         try:
-            # Regime
             if self.regime_mode == "AUTO":
                 regime, why, bbw, adxv, slope = self._infer_regime(df)
                 self.current_regime = regime
                 self.regime_reason = f"{why} (bbw={bbw:.4f}, adx={adxv:.2f}, slope={slope:.2f})"
             elif self.regime_mode == "OFF":
-                # No regime gating but still compute for quality auto
                 regime, _why, _bbw, _adxv, _slope = self._infer_regime(df)
                 self.current_regime = regime
             else:
@@ -629,7 +648,6 @@ class RealTimeTrader:
         # Strategy
         sig = self._generate_spot_signal(df, last_price)
         if sig:
-            # Nudge TP/SL by regime if strategy exposes ATR
             try:
                 if self.current_regime == "TREND":
                     tp_mult = float(getattr(Config, "REGIME_TREND_TP_MULT", 3.4))
@@ -639,7 +657,6 @@ class RealTimeTrader:
                     sl_mult = float(getattr(Config, "REGIME_RANGE_SL_MULT", 1.3))
                 atr = float(sig.get("atr", sig.get("market_volatility", 0.0)) or 0.0)
                 if atr > 0:
-                    # Direction-aware adjust
                     dir_mult = 1 if str(sig["signal"]).upper() == "BUY" else -1
                     sig["target"] = last_price + (tp_mult * atr) * dir_mult
                     sig["stop_loss"] = last_price - (sl_mult * atr) * dir_mult
@@ -692,7 +709,6 @@ class RealTimeTrader:
             if bb_width > self.BB_WIDTH_MAX and adx_val < self.ADX_MIN_TREND:
                 return "RANGE", "wide+weak-dm", bb_width, adx_val, slope
 
-            # fallback by slope + adx
             if adx_val >= self.ADX_MIN_TREND or abs(slope) >= self.QUALITY_AUTO_SLOPE_MIN:
                 return "TREND", "slope/dir", bb_width, adx_val, slope
             return "RANGE", "default", bb_width, adx_val, slope
@@ -782,7 +798,6 @@ class RealTimeTrader:
         except Exception:
             return
 
-        # circuit/loss cooldown/limits
         if self._circuit_tripped() or (time.time() < self._cooldown_until):
             return
         if len(self.active) >= self.MAX_CONCURRENT:
@@ -790,12 +805,10 @@ class RealTimeTrader:
         if self.trades_closed_today >= self.MAX_TRADES_DAY:
             return
 
-        # idempotency
         key = f"{symbol}|{direction}|{round(entry,2)}|{self.session_date}"
         if not self._entry_guard(key):
             return
 
-        # size by risk (lots)
         qty_lots = None
         try:
             res = self.risk.calculate_position_size(entry_price=entry, stop_loss=sl,
@@ -812,7 +825,6 @@ class RealTimeTrader:
         if qty <= 0:
             return
 
-        # place entry (MARKET by default)
         try:
             entry_id = self.executor.place_entry_order(  # type: ignore
                 symbol, direction=direction, quantity=qty
@@ -824,7 +836,6 @@ class RealTimeTrader:
             logger.error("Entry order failed: %s", e, exc_info=True)
             return
 
-        # set up exits (TP/SL/partials or GTT)
         try:
             self.executor.setup_gtt_orders(  # type: ignore
                 entry_order_id=str(entry_id),
@@ -838,7 +849,6 @@ class RealTimeTrader:
         except Exception as e:
             logger.warning("setup_gtt_orders error: %s", e)
 
-        # track active
         at = ActiveTrade(
             entry_id=str(entry_id),
             symbol=symbol,
@@ -882,7 +892,6 @@ class RealTimeTrader:
     def _trailing_tick(self) -> None:
         for at in list(self.active.values()):
             try:
-                # get best current price
                 cur = None
                 try:
                     cur = self.data.get_last_price(at.symbol)
@@ -900,7 +909,6 @@ class RealTimeTrader:
                 pass
 
     def _oco_tick(self) -> None:
-        # Let executor detect fills and convert to a list of (entry_id, exit_price)
         try:
             filled = self.executor.sync_and_enforce_oco()  # type: ignore
             if filled:
@@ -909,7 +917,6 @@ class RealTimeTrader:
             pass
 
     def _process_active_trades(self) -> None:
-        """Periodic close detection (rely on executor’s OCO sync)."""
         try:
             filled = self.executor.sync_and_enforce_oco()  # type: ignore
             if filled:
@@ -925,7 +932,6 @@ class RealTimeTrader:
                 continue
             at.status = "CLOSED"
             at.exit_price = float(exit_px)
-            # attempt to infer exit_reason from executor’s internal record if available
             exit_reason = None
             try:
                 rec = getattr(self.executor, "orders", {}).get(str(entry_id))  # type: ignore
@@ -934,7 +940,6 @@ class RealTimeTrader:
                 exit_reason = None
             at.exit_reason = exit_reason or "exit-filled"
 
-            # PnL (direction-aware)
             direction_mult = 1 if at.direction == "BUY" else -1
             pnl = (at.exit_price - at.entry_price) * direction_mult * at.quantity
             self.daily_pnl += float(pnl)
@@ -946,7 +951,6 @@ class RealTimeTrader:
             logger.info("⏹ Closed %s @ %.2f (%s) PnL=%.2f",
                         at.symbol, at.exit_price, at.exit_reason, pnl)
 
-            # loss streak / cooldown
             if pnl < 0:
                 self.loss_streak += 1
                 if self.loss_streak >= self.LOSS_LIMIT:
@@ -954,7 +958,6 @@ class RealTimeTrader:
             else:
                 self.loss_streak = 0
 
-            # session ladders (R-based)
             r = pnl / max(1.0, abs(at.entry_price - at.stop_loss) * at.quantity)
             self.session_R += r
             if self.session_R >= self.DAY_STOP_POS_R:
@@ -992,7 +995,6 @@ class RealTimeTrader:
         try:
             t = _now().time()
             if _between(t, self.AUTO_EXIT_TIME, self.AUTO_EXIT_TIME):
-                # best-effort flatten
                 try:
                     self.executor.cancel_all_orders()  # type: ignore
                 except Exception:
@@ -1048,7 +1050,6 @@ class RealTimeTrader:
             self.active = {k: ActiveTrade(**v) for k, v in (raw or {}).items()}
             if getattr(Config, "PERSIST_REATTACH_ON_START", True):
                 try:
-                    # allow executor to reconcile with broker/sim state if it supports it
                     self.executor.reattach(self.active)  # type: ignore
                 except Exception:
                     pass
