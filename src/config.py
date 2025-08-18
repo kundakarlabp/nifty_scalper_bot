@@ -4,25 +4,51 @@ Centralised configuration loader for the scalper bot.
 Reads environment variables at import time and exposes them via the `Config` class.
 """
 
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
-# Load .env if present
-try:
-    from dotenv import load_dotenv
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-        print(f"Loaded environment from {env_path}")
-    else:
-        print("No .env found at:", env_path)
-except Exception as exc:
-    print(f"dotenv not used: {exc}")
+
+def _load_env():
+    """
+    Load .env from (in order):
+      1) src/.env
+      2) repo root .env
+      3) /app/.env   (common in containers like Railway/Render)
+    Uses python-dotenv if installed, otherwise no-op.
+    """
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        # dotenv not installed; silently skip
+        return
+
+    candidates = [
+        Path(__file__).parent / ".env",           # src/.env
+        Path(__file__).parent.parent / ".env",    # repo root .env
+        Path("/app/.env"),                        # container path
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                load_dotenv(dotenv_path=p)
+                # Print once only in __main__ preview; avoid noisy logs on imports
+                os.environ.setdefault("_ENV_LOADED_FROM", str(p))
+                break
+            except Exception:
+                # Fallback to next candidate
+                continue
 
 
-def _as_bool(val: str, default: bool = False) -> bool:
+def _as_bool(val: str | None, default: bool = False) -> bool:
     if val is None:
         return default
-    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# Load environment before reading keys
+_load_env()
 
 
 class Config:
@@ -31,6 +57,7 @@ class Config:
     # ─────────── Zerodha ─────────── #
     ZERODHA_API_KEY: str = os.getenv("ZERODHA_API_KEY", "")
     ZERODHA_API_SECRET: str = os.getenv("ZERODHA_API_SECRET", "")
+
     # Access token var name unified across project:
     KITE_ACCESS_TOKEN: str = os.getenv("KITE_ACCESS_TOKEN", "")
     # Back-compat (if someone sets ZERODHA_ACCESS_TOKEN)
@@ -115,18 +142,15 @@ class Config:
     TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.05"))
     TRAIL_COOLDOWN_SEC: float = float(os.getenv("TRAIL_COOLDOWN_SEC", "12.0"))
 
-    # ─────────── NEW: Partial TP + Breakeven hop + Hard Stop ─────────── #
-    # Partial take profit
+    # ─────────── Partial TP + Breakeven hop + Hard Stop ─────────── #
     PARTIAL_TP_ENABLE: bool = _as_bool(os.getenv("PARTIAL_TP_ENABLE", "true"))
     PARTIAL_TP_RATIO: float = float(os.getenv("PARTIAL_TP_RATIO", "0.5"))  # fraction at TP1 (0–1)
     PARTIAL_TP_USE_MIDPOINT: bool = _as_bool(os.getenv("PARTIAL_TP_USE_MIDPOINT", "true"))
     PARTIAL_TP2_R_MULT: float = float(os.getenv("PARTIAL_TP2_R_MULT", "2.0"))  # only if not using midpoint
 
-    # Move SL to breakeven after TP1
     BREAKEVEN_AFTER_TP1_ENABLE: bool = _as_bool(os.getenv("BREAKEVEN_AFTER_TP1_ENABLE", "true"))
     BREAKEVEN_OFFSET_TICKS: int = int(os.getenv("BREAKEVEN_OFFSET_TICKS", "1"))
 
-    # Hard stop safeguard
     HARD_STOP_ENABLE: bool = _as_bool(os.getenv("HARD_STOP_ENABLE", "true"))
     HARD_STOP_GRACE_SEC: float = float(os.getenv("HARD_STOP_GRACE_SEC", "3.0"))
     HARD_STOP_SLIPPAGE_BPS: float = float(os.getenv("HARD_STOP_SLIPPAGE_BPS", "5"))
@@ -146,10 +170,43 @@ class Config:
     SESSION_AUTO_EXIT_TIME: str = os.getenv("SESSION_AUTO_EXIT_TIME", "15:20")  # HH:MM IST
 
 
+def _validate_for_live():
+    """Print a clear message if live trading is enabled but credentials are missing."""
+    if not Config.ENABLE_LIVE_TRADING:
+        return
+    missing = []
+    if not Config.ZERODHA_API_KEY:
+        missing.append("ZERODHA_API_KEY")
+    if not Config.ZERODHA_API_SECRET:
+        missing.append("ZERODHA_API_SECRET")
+    if not Config.KITE_ACCESS_TOKEN:
+        missing.append("KITE_ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN)")
+    if Config.ENABLE_TELEGRAM and not Config.TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if missing:
+        raise SystemExit(
+            "Live trading is enabled but required environment variables are missing: "
+            + ", ".join(missing)
+        )
+
+
 if __name__ == "__main__":
-    import pprint
-    print("Final Config:")
-    pprint.pprint({
+    # Safe preview of loaded configuration
+    from pprint import pprint
+    preview = {
         k: v for k, v in Config.__dict__.items()
         if not k.startswith("__") and not callable(v)
-    })
+    }
+    # Redact secrets
+    if preview.get("ZERODHA_API_SECRET"):
+        preview["ZERODHA_API_SECRET"] = "***"
+    if preview.get("KITE_ACCESS_TOKEN"):
+        preview["KITE_ACCESS_TOKEN"] = "***"
+    if preview.get("TELEGRAM_BOT_TOKEN"):
+        preview["TELEGRAM_BOT_TOKEN"] = "***"
+
+    loaded_from = os.environ.get("_ENV_LOADED_FROM", "auto")
+    print(f"Environment loaded from: {loaded_from}")
+    print("Final Config:")
+    pprint(preview)
+    _validate_for_live()
