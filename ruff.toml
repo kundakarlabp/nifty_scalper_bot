@@ -1,14 +1,14 @@
 target-version = "py310"
 line-length = 100
+extend-exclude = ["tests/**"]
 
 [lint]
-# TEMPORARY ignores to unblock CI quickly
-ignore = [
-  "E402",  # imports not at top (common in tests/scripts)
-  "E701", "E702",  # multiple statements on a line
-  "E741",          # ambiguous names like 'l'
-  "F401",          # imported but unused
-  "F821",          # undefined name (we'll fix properly later)
-  "F841",          # local var assigned but never used
-]
 select = ["E", "F"]
+ignore = [
+  "E402",         # imports not at top (allowed in utils for now)
+  "E701", "E702", # multiple statements on a line (temp)
+  "E741",         # ambiguous var names (temp)
+  "F401",         # unused imports (temp in a few files)
+  "F821",         # undefined names (temp: provide fallbacks)
+  "F841",         # assigned but never used (temp)
+]

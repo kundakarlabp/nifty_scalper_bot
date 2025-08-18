@@ -1,4 +1,3 @@
-# ruff: noqa
 import pandas as pd
 """
 Tests for the PositionSizing module.

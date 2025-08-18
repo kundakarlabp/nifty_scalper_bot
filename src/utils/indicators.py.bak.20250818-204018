@@ -1,4 +1,3 @@
-# ruff: noqa: E741
 # src/utils/indicators.py
 """
 Helper functions to calculate technical indicators used by the scalping strategy.
@@ -18,7 +17,7 @@ Return shapes are aligned with scalping_strategy.py:
 
 from __future__ import annotations
 
-, Tuple, Optional, Union
+from typing import Dict, Tuple, Optional, Union
 import pandas as pd
 import numpy as np
 
