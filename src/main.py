@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 from threading import Event, Thread
+from typing import Dict, Any
 
 # Optional import to avoid hard crash if kiteconnect not installed
 try:
@@ -21,13 +22,16 @@ from src.risk.session import TradingSession
 from src.server.health import run as run_health_server
 from src.strategies.runner import StrategyRunner
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.utils.strike_selector import health_check as kite_health
 
-logging.basicConfig(level=settings.log_level)
-logger = logging.getLogger(__name__)
+# Logging
+_LOG_LEVEL = getattr(logging, str(settings.log_level).upper(), logging.INFO)
+logging.basicConfig(level=_LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("main")
 
 
 class Application:
-    def __init__(self):
+    def __init__(self) -> None:
         self._stop_event = Event()
         self.settings = settings
 
@@ -35,29 +39,41 @@ class Application:
             logger.critical("kiteconnect not installed. pip install kiteconnect")
             sys.exit(1)
 
+        # --- Broker client ---
         try:
-            self.kite = KiteConnect(api_key=self.settings.api.zerodha_api_key)
-            self.kite.set_access_token(self.settings.api.zerodha_access_token)
+            api_key = self.settings.api.zerodha_api_key
+            access_token = self.settings.api.zerodha_access_token
+            if not api_key or not access_token:
+                raise RuntimeError("ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN missing in environment")
+
+            self.kite = KiteConnect(api_key=api_key)
+            self.kite.set_access_token(access_token)
         except Exception as e:
-            logger.critical(f"Kite init failed: {e}", exc_info=True)
+            logger.critical("Kite init failed: %s", e, exc_info=True)
             sys.exit(1)
 
+        # --- Core components ---
         self.data_source = LiveKiteSource(self.kite)
         self.strategy = EnhancedScalpingStrategy(self.settings.strategy)
         self.executor = OrderExecutor(self.settings.executor, self.kite)
         self.sizer = PositionSizer(self.settings.risk)
-        self.session = TradingSession(self.settings.risk, self.settings.executor, starting_equity=100000.0)
+        self.session = TradingSession(self.settings.risk, self.settings.executor, starting_equity=100_000.0)
 
+        # --- Telegram (optional) ---
         self.telegram = None
-        if self.settings.enable_telegram:
+        if self.settings.enable_telegram and self.settings.telegram.bot_token:
             self.telegram = TelegramController(
-                config=self.settings.telegram,
-                status_callback=self.get_status,
-                control_callback=self.control_bot,
-                summary_callback=lambda: f"Daily PnL: {self.session.daily_pnl:.2f}",
-                # config callbacks are plugged by StrategyRunner init
+                bot_token=self.settings.telegram.bot_token,
+                chat_id=self.settings.telegram.chat_id,
+            )
+            # Runner will wire config get/set; we wire session/executor & health now
+            self.telegram.set_context(
+                session=self.session,
+                executor=self.executor,
+                health_getter=self.get_health,
             )
 
+        # --- Runner ---
         self.runner = StrategyRunner(
             data_source=self.data_source,
             strategy=self.strategy,
@@ -67,59 +83,78 @@ class Application:
             telegram_controller=self.telegram,
         )
 
-    def start(self):
-        signal.signal(signal.SIGINT, self.shutdown)
-        signal.signal(signal.SIGTERM, self.shutdown)
+        self._runner_thread: Thread | None = None
+        self._health_thread: Thread | None = None
 
-        health_thread = Thread(target=run_health_server, args=(self.get_status,), daemon=True)
-        health_thread.start()
+    # ---------------- lifecycle ----------------
 
+    def start(self) -> None:
+        signal.signal(signal.SIGINT, self._on_signal)
+        signal.signal(signal.SIGTERM, self._on_signal)
+
+        # Health server (binds $PORT if provided)
+        self._health_thread = Thread(target=run_health_server, args=(self.get_health,), daemon=True)
+        self._health_thread.start()
+
+        # Telegram
         if self.telegram:
-            self.telegram.start_polling()
+            self.telegram.start()
 
-        self.runner.start()
+        # Strategy runner loop (on a thread so signals can stop it)
+        self._runner_thread = Thread(target=self.runner.start, name="runner", daemon=True)
+        self._runner_thread.start()
+
+        logger.info("Application started. Live mode: %s", self.settings.enable_live_trading)
         self._stop_event.wait()
+        logger.info("Application exiting.")
 
-    def shutdown(self, signum, frame):
+    def _on_signal(self, signum, _frame) -> None:
+        logger.info("Signal received: %s – shutting down…", signum)
+        self.stop()
+
+    def stop(self) -> None:
         if not self._stop_event.is_set():
-            logger.info(f"Shutting down ({signum})...")
-            self.runner.stop()
-            if self.telegram:
-                self.telegram.stop_polling()
+            try:
+                self.runner.stop()
+            except Exception:
+                pass
+            try:
+                if self.telegram:
+                    self.telegram.stop()
+            except Exception:
+                pass
             self._stop_event.set()
 
-    def get_status(self):
-        return {
-            "is_trading": self.runner._running if self.runner else False,
-            "live_mode": self.settings.enable_live_trading,
-            "open_positions": len(self.session.active_trades),
-            "closed_today": len(self.session.trade_history),
-            "daily_pnl": self.session.daily_pnl,
+    # ---------------- status / health ----------------
+
+    def get_health(self) -> Dict[str, Any]:
+        """Aggregated health for /healthz and Telegram /health."""
+        base = {}
+        try:
+            base = kite_health(self.kite)  # LTP + instruments check
+        except Exception as e:
+            base = {"overall_status": "ERROR", "message": f"health_check failed: {e}", "checks": {}}
+
+        # augment with runner/session info
+        base["runner"] = {
+            "running": bool(self.runner and self.runner._running),
+            "live_mode": bool(self.settings.enable_live_trading),
         }
-
-    def control_bot(self, command: str, value: str) -> bool:
-        # Extend as needed
-        if command == "start":
-            return True
-        if command == "stop":
-            self.shutdown("USR", None); return True
-        if command == "mode":
-            # wire your live/shadow toggle here
-            return True
-        if command == "panic":
-            try:
-                self.executor.cancel_all_orders(); return True
-            except Exception:
-                return False
-        return False
+        base["session"] = {
+            "open_positions": len(self.session.active_trades),
+            "trades_today": self.session.trades_today,
+            "daily_pnl": self.session.daily_pnl,
+            "consecutive_losses": self.session.consecutive_losses,
+        }
+        return base
 
 
-def main():
+def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "start":
         app = Application()
         app.start()
     else:
-        print("Usage: python3 -m src.main start", file=sys.stderr)
+        print("Usage: python -m src.main start", file=sys.stderr)
         sys.exit(1)
 
 
