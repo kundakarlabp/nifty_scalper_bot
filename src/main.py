@@ -1,31 +1,32 @@
 from __future__ import annotations
-import os
-import sys
-import time
-import logging
+import os, sys, time, logging
 
-# Ensure local project imports work if PYTHONPATH not set
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(PROJECT_ROOT)
+# Ensure project root is on sys.path (works in Docker, Railway, Codespaces)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.data_streaming.realtime_trader import RealTimeTrader  # noqa
-from src.utils.config import load_env  # if your config loader differs, keep existing
+# ---- config loader (support both layouts) ----
+try:
+    # Preferred (new layout)
+    from src.utils.config import load_env  # type: ignore
+except ModuleNotFoundError:
+    # Fallback (existing layout)
+    from src.config import load_env  # type: ignore
+
+from src.data_streaming.realtime_trader import RealTimeTrader
 
 log = logging.getLogger("main")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 def start():
-    load_env()  # prints “Loaded environment …” in your build
+    load_env()  # prints "Loaded environment from ..."
     trader = RealTimeTrader()
     try:
-        trader.start()  # schedules jobs, starts Telegram polling
+        trader.start()
         log.info("🧭 Entering main loop (Ctrl+C to stop)...")
         while True:
-            # If your trader exposes a tick/scheduler runner, call it here.
-            # Otherwise just sleep; internal scheduler threads will run jobs.
-            time.sleep(1)
+            time.sleep(1)  # keep process alive
     except KeyboardInterrupt:
         log.info("👋 KeyboardInterrupt received.")
     finally:
@@ -34,7 +35,6 @@ def start():
         log.info("✅ Exit complete.")
 
 if __name__ == "__main__":
-    # Support `python3 -m src.main start`
     if len(sys.argv) == 1 or sys.argv[1] == "start":
         start()
     else:
