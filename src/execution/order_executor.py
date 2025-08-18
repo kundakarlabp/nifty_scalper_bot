@@ -34,15 +34,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, Optional, Any, List, Tuple
 
-from src.config import Config
+from src.config import ExecutorConfig
+from src.utils.retry import retry
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------- config helpers ---------------------------- #
-
-def _cfg(name: str, default: Any) -> Any:
-    return getattr(Config, name, default)
 
 
 # ---------------------------- rounding helpers -------------------------- #
@@ -128,55 +123,24 @@ class OrderRecord:
 # ---------------------------- executor ---------------------------------- #
 
 class OrderExecutor:
-    """Thin wrapper around order placement and exit management.
-
-    If `kite` is None: simulated mode (no network calls).
+    """
+    Thin wrapper around order placement and exit management.
+    If `kite` is None, it runs in simulation mode.
     """
 
-    def __init__(self, kite: Optional[Any] = None) -> None:
+    def __init__(self, config: ExecutorConfig, kite: Optional[Any] = None):
+        if not isinstance(config, ExecutorConfig):
+            raise TypeError("A valid ExecutorConfig instance is required.")
+
+        self.config = config
         self.kite = kite
         self._lock = threading.RLock()
         self.orders: Dict[str, OrderRecord] = {}
 
-        # Defaults (safe fallbacks if Config misses anything)
-        self.default_product = _cfg("DEFAULT_PRODUCT", "MIS")
-        self.default_order_type = _cfg("DEFAULT_ORDER_TYPE", "MARKET")
-        self.default_validity = _cfg("DEFAULT_VALIDITY", "DAY")
-        self.atr_mult = float(_cfg("ATR_SL_MULTIPLIER", 1.5))
-        self.tick_size = float(_cfg("TICK_SIZE", 0.05))
-        self.trail_cooldown = float(_cfg("TRAIL_COOLDOWN_SEC", 12.0))
-        self.preferred_exit_mode = str(_cfg("PREFERRED_EXIT_MODE", "AUTO")).upper()  # AUTO | GTT | REGULAR
-
-        # Partial profits
-        self.partial_enable = bool(_cfg("PARTIAL_TP_ENABLE", True))
-        self.partial_ratio = float(_cfg("PARTIAL_TP_RATIO", 0.5))  # fraction of qty at TP1 (by lots)
-        self.partial_use_midpoint = bool(_cfg("PARTIAL_TP_USE_MIDPOINT", True))
-        self.partial_tp2_r_mult = float(_cfg("PARTIAL_TP2_R_MULT", 2.0))  # if not using midpoint
-
-        # Breakeven hop right after TP1
-        self.breakeven_after_tp1 = bool(_cfg("BREAKEVEN_AFTER_TP1_ENABLE", True))
-        # move SL to entry ± N ticks
-        self.breakeven_offset_ticks = int(_cfg("BREAKEVEN_OFFSET_TICKS", 1))
-
-        # Hard stop (failsafe) (placeholder hooks; not enforced here)
-        self.hard_stop_enable = bool(_cfg("HARD_STOP_ENABLE", True))
-        self.hard_stop_grace_sec = float(_cfg("HARD_STOP_GRACE_SEC", 3.0))
-        self.hard_stop_slip_bps = float(_cfg("HARD_STOP_SLIPPAGE_BPS", _cfg("SLIPPAGE_BPS", 5.0)))
-
-        # SL management
-        self.use_slm_exit = bool(_cfg("USE_SLM_EXIT", True))
-        self.sl_limit_offset_ticks = int(_cfg("SL_LIMIT_OFFSET_TICKS", 2))
-
-        # Exchange freeze qty (per order)
-        self.freeze_qty = int(_cfg("NFO_FREEZE_QTY", 1800))
-
-        # Lot size guard
-        self.lot_size = int(_cfg("NIFTY_LOT_SIZE", 75))
-
     # ------------------------------- helpers -------------------------------- #
 
     def get_tick_size(self) -> float:
-        return float(self.tick_size)
+        return self.config.tick_size
 
     def _generate_order_id(self) -> str:
         return str(uuid.uuid4())
@@ -200,7 +164,7 @@ class OrderExecutor:
             return None
         anchor_id = None
         while remain > 0:
-            q = min(remain, self.freeze_qty if self.freeze_qty > 0 else remain)
+            q = min(remain, self.config.nfo_freeze_qty if self.config.nfo_freeze_qty > 0 else remain)
             oid = self._kite_place_order(
                 tradingsymbol=tradingsymbol,
                 exchange=exchange,
@@ -221,6 +185,7 @@ class OrderExecutor:
 
     # ------------------------------- live API -------------------------------- #
 
+    @retry(tries=3, delay=1, backoff=2)
     def _kite_place_order(
         self,
         *,
@@ -267,6 +232,7 @@ class OrderExecutor:
             logger.error("💥 place_order failed: %s", exc, exc_info=True)
             return None
 
+    @retry(tries=3, delay=1, backoff=2)
     def _kite_place_gtt_oco(
         self,
         *,
@@ -287,15 +253,15 @@ class OrderExecutor:
                 {
                     "transaction_type": exit_side,
                     "quantity": int(quantity),
-                    "product": self.default_product,
-                    "order_type": _cfg("DEFAULT_ORDER_TYPE_EXIT", "LIMIT"),
+                    "product": self.config.default_product,
+                    "order_type": "LIMIT", # GTT legs are limit orders
                     "price": float(sl_price),
                 },
                 {
                     "transaction_type": exit_side,
                     "quantity": int(quantity),
-                    "product": self.default_product,
-                    "order_type": _cfg("DEFAULT_ORDER_TYPE_EXIT", "LIMIT"),
+                    "product": self.config.default_product,
+                    "order_type": "LIMIT",
                     "price": float(tp_price),
                 },
             ]
@@ -333,12 +299,13 @@ class OrderExecutor:
             logger.info("ℹ️ GTT OCO rejected/unavailable, falling back to REGULAR: %s", exc)
             return None
 
+    @retry(tries=3, delay=1, backoff=2)
     def _kite_modify_sl(self, order_id: str, new_stop: float) -> bool:
         if not self.kite:
             logger.info("🧪 SIM modify SL(%s) → %.2f", order_id, new_stop)
             return True
         try:
-            ordertype = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M") if self.use_slm_exit \
+            ordertype = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M") if self.config.use_slm_exit \
                         else getattr(self.kite, "ORDER_TYPE_SL", "SL")
             self.kite.modify_order(
                 variety=getattr(self.kite, "VARIETY_REGULAR", "regular"),
@@ -346,7 +313,7 @@ class OrderExecutor:
                 order_type=ordertype,
                 price=(None if ordertype in ("SLM", "SL-M") else float(new_stop)),
                 trigger_price=float(new_stop),
-                validity=self.default_validity,
+                validity=self.config.default_validity,
             )
             logger.info("✏️  Modified SL %s → trig %.2f (%s)", order_id, new_stop, ordertype)
             return True
@@ -354,6 +321,7 @@ class OrderExecutor:
             logger.error("💥 modify_order (SL) failed: %s", exc, exc_info=True)
             return False
 
+    @retry(tries=3, delay=1, backoff=2)
     def _kite_cancel(self, order_id: str) -> bool:
         if not self.kite:
             logger.info("🧪 SIM cancel %s", order_id)
@@ -391,39 +359,35 @@ class OrderExecutor:
         exchange: str,
         transaction_type: str,
         quantity: int,
-        product: str = None,
-        order_type: str = None,
-        validity: str = None,
     ) -> Optional[str]:
         """
         Place the initial entry order. Returns order_id or None.
-        Quantity must be contracts. (If you size by lots, multiply before calling.)
+        Quantity must be contracts.
         """
         if quantity <= 0:
             logger.warning("Attempted to place order with non-positive quantity: %s", quantity)
             return None
 
-        # lot integrity guard
-        L = int(self.lot_size)
-        if L > 0 and quantity % L != 0:
-            adj = (quantity // L) * L
-            logger.warning("Quantity %d not a multiple of lot size %d; adjusting down to %d.", quantity, L, adj)
-            quantity = adj
+        # Lot size integrity guard
+        lot_size = self.config.nifty_lot_size
+        if lot_size > 0 and quantity % lot_size != 0:
+            adj_qty = (quantity // lot_size) * lot_size
+            logger.warning(
+                "Quantity %d not a multiple of lot size %d; adjusting down to %d.",
+                quantity, lot_size, adj_qty
+            )
+            quantity = adj_qty
             if quantity <= 0:
                 return None
-
-        product = product or self.default_product
-        order_type = order_type or self.default_order_type
-        validity = validity or self.default_validity
 
         oid = self._place_in_chunks(
             tradingsymbol=symbol,
             exchange=exchange,
             side=transaction_type.upper(),
             quantity=int(quantity),
-            product=product,
-            order_type=order_type,
-            validity=validity,
+            product=self.config.default_product,
+            order_type=self.config.default_order_type,
+            validity=self.config.default_validity,
         )
         return oid
 
@@ -455,7 +419,7 @@ class OrderExecutor:
             exit_side = "SELL" if transaction_type.upper() == "BUY" else "BUY"
 
             # Decide partials
-            want_partial = self.partial_enable and quantity >= 2  # need at least 2 contracts
+            want_partial = self.config.partial_tp_enable and quantity >= 2
             use_gtt = False
             gtt_id = None
             sl_id = None
@@ -469,35 +433,28 @@ class OrderExecutor:
             tp2_id = None
 
             if want_partial:
-                # Compute 1R
+                # R-multiples for TP calculation
                 r = abs(entry_price - sl)
-                if self.partial_use_midpoint:
-                    # TP2 = strategy TP; TP1 = midpoint between entry and TP2
-                    tp2 = tp
-                    tp1 = entry_price + (tp2 - entry_price) / 2.0
+                if transaction_type.upper() == "BUY":
+                    tp1 = entry_price + r * 1.0
+                    tp2 = entry_price + r * max(1.0, self.config.partial_tp2_r_mult)
                 else:
-                    # R-multiples
-                    if transaction_type.upper() == "BUY":
-                        tp1 = entry_price + r * 1.0
-                        tp2 = entry_price + r * max(1.0, float(self.partial_tp2_r_mult))
-                    else:
-                        tp1 = entry_price - r * 1.0
-                        tp2 = entry_price - r * max(1.0, float(self.partial_tp2_r_mult))
+                    tp1 = entry_price - r * 1.0
+                    tp2 = entry_price - r * max(1.0, self.config.partial_tp2_r_mult)
 
-                # Quantities by lots (not raw contracts)
-                L = max(1, self.lot_size)
-                total_lots = _lots_from_qty(quantity, L)
-
-                tp1_lots = max(1, int(round(total_lots * self.partial_ratio)))
+                # Quantities by lots
+                lot_size = self.config.nifty_lot_size
+                total_lots = _lots_from_qty(quantity, lot_size)
+                tp1_lots = max(1, int(round(total_lots * self.config.partial_tp_ratio)))
                 tp2_lots = max(0, int(total_lots - tp1_lots))
                 if tp2_lots == 0 and tp1_lots > 1:
                     tp1_lots -= 1
                     tp2_lots = 1
 
-                tp1_qty = _qty_from_lots(tp1_lots, L)
-                tp2_qty = _qty_from_lots(tp2_lots, L)
+                tp1_qty = _qty_from_lots(tp1_lots, lot_size)
+                tp2_qty = _qty_from_lots(tp2_lots, lot_size)
 
-            mode = self.preferred_exit_mode  # AUTO | GTT | REGULAR
+            mode = self.config.preferred_exit_mode
             try_gtt = (mode in ("AUTO", "GTT")) and not want_partial
 
             if try_gtt:
@@ -507,8 +464,8 @@ class OrderExecutor:
                     last_price=entry_price,
                     exit_side=exit_side,
                     quantity=int(quantity),
-                    sl_price=_round_to_tick(sl, self.tick_size),
-                    tp_price=_round_to_tick(tp, self.tick_size),
+                    sl_price=_round_to_tick(sl, self.config.tick_size),
+                    tp_price=_round_to_tick(tp, self.config.tick_size),
                 )
                 use_gtt = gtt_id is not None
                 if not use_gtt:
@@ -516,92 +473,59 @@ class OrderExecutor:
 
             if not use_gtt:
                 # REGULAR exits
-                # --- Stop Loss ---
-                sl_trig = _round_to_tick(sl, self.tick_size)
+                sl_trig = _round_to_tick(sl, self.config.tick_size)
 
-                if self.use_slm_exit:
-                    sl_ordertype = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M")
+                if self.config.use_slm_exit:
+                    sl_ordertype = "SL-M"
                     sl_price = None
                 else:
-                    sl_ordertype = getattr(self.kite, "ORDER_TYPE_SL", "SL")
-                    off = max(0, int(self.sl_limit_offset_ticks))
+                    sl_ordertype = "SL"
+                    off = self.config.sl_limit_offset_ticks
                     if exit_side == "SELL":
-                        sl_price = _round_down_to_tick(sl_trig - off * self.tick_size, self.tick_size)
+                        sl_price = _round_down_to_tick(sl_trig - off * self.config.tick_size, self.config.tick_size)
                     else:
-                        sl_price = _round_up_to_tick(sl_trig + off * self.tick_size, self.tick_size)
+                        sl_price = _round_up_to_tick(sl_trig + off * self.config.tick_size, self.config.tick_size)
 
                 sl_id = self._place_in_chunks(
                     tradingsymbol=symbol,
                     exchange=exchange,
                     side=exit_side,
                     quantity=int(quantity),
-                    product=self.default_product,
-                    order_type=sl_ordertype if self.kite else ("SL-M" if self.use_slm_exit else "SL"),
-                    validity=self.default_validity,
-                    price=(None if self.use_slm_exit else float(sl_price)),
+                    product=self.config.default_product,
+                    order_type=sl_ordertype,
+                    validity=self.config.default_validity,
+                    price=(None if self.config.use_slm_exit else float(sl_price)),
                     trigger_price=float(sl_trig),
                 )
 
-                # --- Take Profits ---
                 if want_partial:
-                    tp1_rounded = (_round_down_to_tick(tp1, self.tick_size) if exit_side == "BUY"
-                                   else _round_up_to_tick(tp1, self.tick_size))
-                    tp2_rounded = (_round_down_to_tick(tp2, self.tick_size) if exit_side == "BUY"
-                                   else _round_up_to_tick(tp2, self.tick_size))
-
-                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
+                    tp1_rounded = _round_to_tick(tp1, self.config.tick_size)
+                    tp2_rounded = _round_to_tick(tp2, self.config.tick_size)
                     tp1_id = self._place_in_chunks(
-                        tradingsymbol=symbol,
-                        exchange=exchange,
-                        side=exit_side,
-                        quantity=int(tp1_qty),
-                        product=self.default_product,
-                        order_type=ordtype_lim,
-                        validity=self.default_validity,
-                        price=float(tp1_rounded),
+                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
+                        quantity=int(tp1_qty), product=self.config.default_product,
+                        order_type="LIMIT", validity=self.config.default_validity, price=float(tp1_rounded),
                     )
                     tp2_id = self._place_in_chunks(
-                        tradingsymbol=symbol,
-                        exchange=exchange,
-                        side=exit_side,
-                        quantity=int(tp2_qty),
-                        product=self.default_product,
-                        order_type=ordtype_lim,
-                        validity=self.default_validity,
-                        price=float(tp2_rounded),
+                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
+                        quantity=int(tp2_qty), product=self.config.default_product,
+                        order_type="LIMIT", validity=self.config.default_validity, price=float(tp2_rounded),
                     )
                 else:
-                    tp_rounded = (_round_down_to_tick(tp, self.tick_size) if exit_side == "BUY"
-                                  else _round_up_to_tick(tp, self.tick_size))
-                    ordtype_lim = getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT") if self.kite else "LIMIT"
+                    tp_rounded = _round_to_tick(tp, self.config.tick_size)
                     tp_id = self._place_in_chunks(
-                        tradingsymbol=symbol,
-                        exchange=exchange,
-                        side=exit_side,
-                        quantity=int(quantity),
-                        product=self.default_product,
-                        order_type=ordtype_lim,
-                        validity=self.default_validity,
-                        price=float(tp_rounded),
+                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
+                        quantity=int(quantity), product=self.config.default_product,
+                        order_type="LIMIT", validity=self.config.default_validity, price=float(tp_rounded),
                     )
 
-            # record internal
             with self._lock:
                 rec = OrderRecord(
-                    order_id=entry_order_id,
-                    symbol=symbol,
-                    exchange=exchange,
-                    transaction_type=transaction_type.upper(),
-                    quantity=int(quantity),
-                    entry_price=entry_price,
-                    stop_loss=sl,
-                    target=tp,
-                    use_gtt=use_gtt,
-                    gtt_id=gtt_id,
-                    sl_order_id=sl_id,
-                    tp_order_id=tp_id,
-                    exit_side=exit_side,
-                    trailing_step_atr_multiplier=float(_cfg("ATR_SL_MULTIPLIER", 1.5)),
+                    order_id=entry_order_id, symbol=symbol, exchange=exchange,
+                    transaction_type=transaction_type.upper(), quantity=int(quantity),
+                    entry_price=entry_price, stop_loss=sl, target=tp,
+                    use_gtt=use_gtt, gtt_id=gtt_id, sl_order_id=sl_id,
+                    tp_order_id=tp_id, exit_side=exit_side,
                     partial_enabled=bool(want_partial),
                     tp1_price=(float(tp1) if want_partial else None),
                     tp1_order_id=(tp1_id if want_partial else None),
@@ -621,17 +545,23 @@ class OrderExecutor:
 
         except Exception as exc:
             logger.error("💥 setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
+            # Attempt to cancel the entry order if exits failed
+            self.cancel_order(entry_order_id)
             return False
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancels a single order by its ID."""
+        return self._kite_cancel(order_id)
 
     # ------------------------------- trailing & exit -------------------------- #
 
     def _breakeven_price(self, rec: OrderRecord) -> float:
-        off = float(self.breakeven_offset_ticks) * float(self.tick_size)
+        off = self.config.breakeven_offset_ticks * self.config.tick_size
         if rec.transaction_type.upper() == "BUY":
             return rec.entry_price + off
         return rec.entry_price - off
 
-    def update_trailing_stop(self, order_id: str, current_price: float, atr: float) -> None:
+    def update_trailing_stop(self, order_id: str, current_price: float, atr: float, atr_multiplier: float) -> None:
         """
         Trailing SL:
         - New SL = price ± (ATR * multiplier), rounded to tick; tighten only.
@@ -646,21 +576,20 @@ class OrderExecutor:
             return
 
         now = time.time()
-        if now - rec.last_trail_ts < self.trail_cooldown:
+        if now - rec.last_trail_ts < self.config.trail_cooldown_sec:
             return
 
-        mult = float(rec.trailing_step_atr_multiplier or self.atr_mult)
         if atr is None or atr <= 0 or current_price <= 0:
             return
 
         if rec.transaction_type.upper() == "BUY":
-            raw = current_price - mult * atr
-            new_sl = _round_up_to_tick(raw, self.tick_size)
-            better = new_sl > rec.stop_loss  # tighten only
+            raw = current_price - atr_multiplier * atr
+            new_sl = _round_up_to_tick(raw, self.config.tick_size)
+            better = new_sl > rec.stop_loss
         else:
-            raw = current_price + mult * atr
-            new_sl = _round_down_to_tick(raw, self.tick_size)
-            better = new_sl < rec.stop_loss  # tighten only
+            raw = current_price + atr_multiplier * atr
+            new_sl = _round_down_to_tick(raw, self.config.tick_size)
+            better = new_sl < rec.stop_loss
 
         if not better:
             return

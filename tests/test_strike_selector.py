@@ -1,0 +1,88 @@
+"""
+Tests for the strike selector and market hours utilities.
+"""
+
+from datetime import datetime
+from unittest.mock import MagicMock
+
+import pytest
+from freezegun import freeze_time
+
+from src.utils.strike_selector import is_market_open, get_instrument_tokens
+
+
+# Test cases for is_market_open
+# Note: These dates are chosen as examples.
+# A trading day (Monday) during hours.
+@freeze_time("2024-08-05 11:00:00", tz_offset=datetime.strptime("+0530", "%z").utcoffset())
+def test_market_open_during_hours():
+    assert is_market_open() is True
+
+# A trading day (Monday) after hours.
+@freeze_time("2024-08-05 16:00:00", tz_offset=datetime.strptime("+0530", "%z").utcoffset())
+def test_market_closed_after_hours():
+    assert is_market_open() is False
+
+# A weekend (Saturday).
+@freeze_time("2024-08-10 11:00:00", tz_offset=datetime.strptime("+0530", "%z").utcoffset())
+def test_market_closed_on_weekend():
+    assert is_market_open() is False
+
+# A known NSE holiday (Independence Day).
+@freeze_time("2024-08-15 11:00:00", tz_offset=datetime.strptime("+0530", "%z").utcoffset())
+def test_market_closed_on_holiday():
+    assert is_market_open() is False
+
+
+@pytest.fixture
+def mock_kite():
+    """Provides a mock KiteConnect instance."""
+    kite = MagicMock()
+
+    # Mock for get_instrument_tokens
+    kite.ltp.return_value = {
+        "NSE:NIFTY 50": {"instrument_token": 256265, "last_price": 19525.50}
+    }
+
+    # Mock for get_next_expiry_date
+    kite.instruments.return_value = [
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "CE", "strike": 19500, "tradingsymbol": "NIFTY2480819500CE", "instrument_token": 1},
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "PE", "strike": 19500, "tradingsymbol": "NIFTY2480819500PE", "instrument_token": 2},
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "CE", "strike": 19550, "tradingsymbol": "NIFTY2480819550CE", "instrument_token": 3},
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "PE", "strike": 19550, "tradingsymbol": "NIFTY2480819550PE", "instrument_token": 4},
+    ]
+    return kite
+
+@freeze_time("2024-08-05 10:00:00") # A monday before weekly expiry
+def test_get_instrument_tokens_weekly_expiry(mock_kite):
+    """Tests instrument selection for a standard weekly expiry."""
+    mock_nse_instruments = [
+        {"instrument_token": 256265, "tradingsymbol": "NIFTY 50", "segment": "INDICES"},
+    ]
+    tokens = get_instrument_tokens(
+        kite_instance=mock_kite,
+        spot_symbol="NSE:NIFTY 50",
+        cached_nfo_instruments=mock_kite.instruments("NFO"),
+        cached_nse_instruments=mock_nse_instruments,
+    )
+    assert tokens is not None
+    assert tokens["expiry"] == "2024-08-08"
+
+@freeze_time("2024-08-26 10:00:00") # A monday before monthly expiry
+def test_get_instrument_tokens_monthly_expiry(mock_kite):
+    """Tests instrument selection for a monthly expiry."""
+    mock_kite.instruments.return_value = [
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 29).date(), "instrument_type": "CE", "strike": 19500, "tradingsymbol": "NIFTY24AUG19500CE", "instrument_token": 5},
+        {"name": "NIFTY", "expiry": datetime(2024, 8, 29).date(), "instrument_type": "PE", "strike": 19500, "tradingsymbol": "NIFTY24AUG19500PE", "instrument_token": 6},
+    ]
+    mock_nse_instruments = [
+        {"instrument_token": 256265, "tradingsymbol": "NIFTY 50", "segment": "INDICES"},
+    ]
+    tokens = get_instrument_tokens(
+        kite_instance=mock_kite,
+        spot_symbol="NSE:NIFTY 50",
+        cached_nfo_instruments=mock_kite.instruments("NFO"),
+        cached_nse_instruments=mock_nse_instruments,
+    )
+    assert tokens is not None
+    assert tokens["expiry"] == "2024-08-29"

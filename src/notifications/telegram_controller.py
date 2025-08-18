@@ -20,21 +20,18 @@ class TelegramController:
 
     def __init__(
         self,
+        config: "TelegramConfig",
         status_callback: Callable[[], Dict[str, Any]],
         control_callback: Callable[[str, str], bool],
         summary_callback: Callable[[], str],
     ) -> None:
-        from src.config import Config
+        from src.config import TelegramConfig
 
-        self.bot_token = Config.TELEGRAM_BOT_TOKEN
-        self.chat_id = Config.TELEGRAM_CHAT_ID
+        if not isinstance(config, TelegramConfig):
+            raise TypeError("A valid TelegramConfig instance is required.")
 
-        if not self.bot_token:
-            raise ValueError("TELEGRAM_BOT_TOKEN is required in Config")
-        if not self.chat_id:
-            raise ValueError("TELEGRAM_CHAT_ID is required in Config")
-
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.config = config
+        self.base_url = f"https://api.telegram.org/bot{self.config.bot_token}"
         self.polling = False
         self.polling_thread: Optional[threading.Thread] = None
 
@@ -46,25 +43,37 @@ class TelegramController:
         logger.info("TelegramController initialized with bot token and chat ID.")
 
     # ---------- low-level send ----------
-    def _send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
+    def _send_message(self, text: str, parse_mode: Optional[str] = None, retries: int = 3, backoff_sec: int = 1) -> bool:
         url = f"{self.base_url}/sendMessage"
         payload: Dict[str, Any] = {
-            "chat_id": self.chat_id,
+            "chat_id": self.config.chat_id,
             "text": text,
             "disable_notification": False,
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
 
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                logger.debug("Telegram message sent successfully.")
-                return True
-            else:
-                logger.error("Failed to send Telegram message: %s", response.text)
-        except Exception as exc:
-            logger.error("Exception sending Telegram message: %s", exc, exc_info=True)
+        for attempt in range(retries):
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    logger.debug("Telegram message sent successfully.")
+                    return True
+                else:
+                    logger.warning(
+                        "Failed to send Telegram message (attempt %d/%d): %s",
+                        attempt + 1, retries, response.text
+                    )
+            except requests.exceptions.RequestException as exc:
+                logger.warning(
+                    "Exception sending Telegram message (attempt %d/%d): %s",
+                    attempt + 1, retries, exc
+                )
+
+            if attempt < retries - 1:
+                time.sleep(backoff_sec)
+
+        logger.error("Failed to send Telegram message after %d retries.", retries)
         return False
 
     # ---------- public send helpers ----------

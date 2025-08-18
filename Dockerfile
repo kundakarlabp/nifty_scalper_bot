@@ -1,48 +1,36 @@
-# Use official Python slim image
-FROM python:3.10-slim
+# Stage 1: Builder
+FROM python:3.11-slim as builder
 
-# Set non-root user (security best practice)
-ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
-
-# Set working directory
 WORKDIR /app
 
-# Ensure unbuffered logs
-ENV PYTHONUNBUFFERED=1
+# Install build dependencies
+RUN pip install --upgrade pip
 
-# Set PYTHONPATH
-ENV PYTHONPATH=/app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python packages
+# Copy requirements and install dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /app/wheels -r requirements.txt
 
-# Copy project files
+
+# Stage 2: Final Image
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Create a non-root user
+RUN addgroup --system app && adduser --system --group app
+
+# Copy installed dependencies from builder stage
+COPY --from=builder /app/wheels /wheels
+RUN pip install --no-cache /wheels/*
+
+# Copy application code
 COPY . .
 
-# ✅ Set executable permission as ROOT (before switching user)
-RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
+# Change ownership to non-root user
+RUN chown -R app:app /app
 
-# ✅ Switch to non-root user LAST
-USER appuser
+# Switch to non-root user
+USER app
 
-# Run using module for correct imports
-CMD ["python3", "-m", "src.main"]
+# Command to run the application
+CMD ["python3", "-m", "src.main", "start"]

@@ -80,17 +80,6 @@ def _rate_limited_api_call(func, *args, **kwargs):
             raise
 
 
-def _get_spot_ltp_symbol() -> str:
-    """Read SPOT_SYMBOL from Config; fall back to 'NSE:NIFTY 50'."""
-    try:
-        from src.config import Config
-        sym = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
-        return sym or "NSE:NIFTY 50"
-    except Exception as e:
-        logger.debug(f"SPOT_SYMBOL fallback due to: {e}")
-        return "NSE:NIFTY 50"
-
-
 def _format_expiry_for_symbol_primary(expiry_str: str) -> str:
     """Format: YYMONDD (e.g., '2025-08-07' -> '25AUG07')."""
     try:
@@ -233,10 +222,9 @@ def _resolve_spot_token_from_cache(
 ) -> Optional[int]:
     """
     Try to find the NSE instrument token for NIFTY 50 index from cached instruments.
-    Fallback to Config.INSTRUMENT_TOKEN if not found.
+    Fallback to a hardcoded default if not found.
     """
     try:
-        from src.config import Config
         for inst in cached_nse_instruments or []:
             tsym = (inst.get("tradingsymbol") or "").strip().upper()
             seg = (inst.get("segment") or "").upper()
@@ -244,7 +232,8 @@ def _resolve_spot_token_from_cache(
                 tok = inst.get("instrument_token")
                 if tok:
                     return int(tok)
-        return int(getattr(Config, "INSTRUMENT_TOKEN", 256265))
+        # Fallback to a known NIFTY 50 token if not found in cache
+        return 256265
     except Exception as e:
         logger.debug(f"[resolve_spot_token_from_cache] {e}")
         return None
@@ -402,9 +391,13 @@ def _greeks_pick_strikes(
     return None
 
 
+import pytz
+import exchange_calendars as tcals
+
+
 def get_instrument_tokens(
-    symbol: str,
     kite_instance: KiteConnect,
+    spot_symbol: str,
     cached_nfo_instruments: List[Dict],
     cached_nse_instruments: List[Dict],
     offset: int = 0,
@@ -413,24 +406,6 @@ def get_instrument_tokens(
     """
     Get CE/PE instrument tokens for a given NIFTY symbol with offset.
     Requires cached instruments to avoid API rate limits.
-
-    Returns dict with:
-      {
-        "spot_price": float,
-        "atm_strike": int,
-        "target_strike": int,
-        "offset": int,
-        "actual_strikes": {"ce": int?, "pe": int?},
-        "expiry": "YYYY-MM-DD",
-        "ce_symbol": str?,
-        "ce_token": int?,
-        "pe_symbol": str?,
-        "pe_token": int?,
-        "spot_token": int?,
-        # extras when Greeks used:
-        "ce_delta": float?,
-        "pe_delta": float?,
-      }
     """
     if not kite_instance:
         logger.error("[get_instrument_tokens] KiteConnect instance is required.")
@@ -443,13 +418,12 @@ def get_instrument_tokens(
         return None
 
     try:
-        spot_symbol_config = _get_spot_ltp_symbol()  # e.g., 'NSE:NIFTY 50'
         base_name = "NIFTY"  # Zerodha 'name' for NIFTY options
 
         # 1) Spot LTP
         try:
-            spot_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol_config])
-            spot_price = float(spot_data.get(spot_symbol_config, {}).get("last_price") or 0.0)
+            spot_data = _rate_limited_api_call(kite_instance.ltp, [spot_symbol])
+            spot_price = float(spot_data.get(spot_symbol, {}).get("last_price") or 0.0)
             if not spot_price:
                 logger.error("[get_instrument_tokens] Could not fetch spot price.")
                 return None
@@ -567,23 +541,51 @@ def get_instrument_tokens(
         return None
 
 
-def is_trading_hours() -> bool:
-    """Simple NSE hours gate: 09:15–15:30 IST, Mon–Fri."""
+def is_market_open(
+    time_filter_start: str = "09:15",
+    time_filter_end: str = "15:30",
+    exchange: str = "XNSE"
+) -> bool:
+    """
+    Checks if the specified exchange is open, considering market holidays
+    and standard trading hours.
+    """
     try:
-        now = datetime.now()
-        wd = now.weekday()
-        start = datetime.strptime("09:15", "%H:%M").time()
-        end = datetime.strptime("15:30", "%H:%M").time()
-        return (0 <= wd <= 4) and (start <= now.time() <= end)
+        cal = tcals.get_calendar(exchange)
+        now_utc = datetime.now(pytz.utc)
+
+        # Check if today is a trading day
+        if not cal.is_session(now_utc.date()):
+            return False
+
+        # Check if current time is within trading hours
+        market_open, market_close = cal.open_and_close_for_session(now_utc.date())
+
+        # Check against the broader exchange hours
+        if not (market_open <= now_utc <= market_close):
+            return False
+
+        # Check against the user-defined tighter time filter
+        tz_ist = pytz.timezone("Asia/Kolkata")
+        now_ist = now_utc.astimezone(tz_ist)
+
+        start_h, start_m = map(int, time_filter_start.split(":"))
+        end_h, end_m = map(int, time_filter_end.split(":"))
+
+        start_time = now_ist.replace(hour=start_h, minute=start_m, second=0, microsecond=0).time()
+        end_time = now_ist.replace(hour=end_h, minute=end_m, second=0, microsecond=0).time()
+
+        return start_time <= now_ist.time() <= end_time
+
     except Exception as e:
-        logger.error(f"[is_trading_hours] {e}")
-        return True  # fail-open to avoid unexpected blocking
+        logger.error(f"[is_market_open] Error checking market hours: {e}", exc_info=True)
+        return True  # Fail-open to avoid unexpected blocking
 
 
 # ---------------- Diagnostics ----------------
-def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
+def health_check(kite: Optional[KiteConnect], spot_symbol: str) -> Dict[str, Any]:
     """
-    Lightweight readiness probe used by RealTimeTrader.
+    Lightweight readiness probe.
     Checks LTP reachability and validates instruments cache fetch.
     """
     status = {"overall_status": "OK", "message": "", "checks": {}}
@@ -593,10 +595,9 @@ def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
             return status
 
         # LTP check
-        spot_sym = _get_spot_ltp_symbol()
         try:
-            ltp = _rate_limited_api_call(kite.ltp, [spot_sym])
-            ok = bool(ltp.get(spot_sym, {}).get("last_price"))
+            ltp = _rate_limited_api_call(kite.ltp, [spot_symbol])
+            ok = bool(ltp.get(spot_symbol, {}).get("last_price"))
             status["checks"]["ltp"] = "OK" if ok else "FAIL"
             if not ok:
                 status["overall_status"] = "ERROR"
