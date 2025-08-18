@@ -1,7 +1,7 @@
 # Use official Python slim image
 FROM python:3.10-slim
 
-# Set non-root user (security best practice)
+# --- Security: non-root user ---
 ARG UID=10001
 RUN adduser \
     --disabled-password \
@@ -12,37 +12,33 @@ RUN adduser \
     --uid "${UID}" \
     appuser
 
-# Set working directory
+# Workdir
 WORKDIR /app
 
-# Ensure unbuffered logs
+# Logs unbuffered
 ENV PYTHONUNBUFFERED=1
 
-# Set PYTHONPATH
-ENV PYTHONPATH=/app
+# ✅ Make both /app and /app/src importable everywhere
+ENV PYTHONPATH="/app:/app/src"
 
-# Install system dependencies
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential libffi-dev libssl-dev curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python packages
+# Python deps
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
+# App source
 COPY . .
 
-# ✅ Set executable permission as ROOT (before switching user)
+# Ensure .sh is executable before switching user
 RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
 
-# ✅ Switch to non-root user LAST
+# Use non-root
 USER appuser
 
-# Run using module for correct imports
-CMD ["python3", "-m", "src.main"]
+# ✅ Run module with explicit 'start' arg so the process keeps running
+CMD ["python3", "-m", "src.main", "start"]
