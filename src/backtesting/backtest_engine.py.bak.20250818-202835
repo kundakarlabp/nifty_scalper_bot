@@ -36,7 +36,7 @@ class BacktestEngine:
                 if signal:
                     entry_price = row['close']
                     stop_loss = entry_price - signal.get("sl", 5)
-                    # target_price (removed as unused)
+                    target_price = entry_price + signal.get("tp", 10)
 
                     position_size = self.risk_manager.calculate_position_size(entry_price, stop_loss)
                     if position_size == 0:

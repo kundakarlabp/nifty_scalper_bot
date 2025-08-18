@@ -4,6 +4,7 @@ Centralised configuration loader for the scalper bot.
 Reads environment variables at import time and exposes them via the `Config` class.
 """
 
+import os
 from pathlib import Path
 
 # Load .env if present
