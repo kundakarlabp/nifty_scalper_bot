@@ -1,22 +1,24 @@
-# Use slim python with build tools for numpy/pandas
+# Dockerfile
 FROM python:3.11-slim
 
-# System deps for numpy/pandas/scipy
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gfortran libatlas-base-dev liblapack-dev libblas-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Speed up pip & avoid cache bloat
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Copy requirements first for caching
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip tooling first (important for manylinux wheels)
+RUN python -m pip install --upgrade pip setuptools wheel
 
-# Copy source
+# Copy requirements first for better layer caching
+COPY requirements.txt /app/requirements.txt
+
+# Prefer prebuilt wheels; no OS build deps needed
+RUN pip install --prefer-binary -r requirements.txt
+
+# Copy the rest of the source
 COPY . /app
 
-# Default env
-ENV PYTHONUNBUFFERED=1
-
-# Railway/Heroku style: PORT provided; our health server reads it
-CMD ["python", "-m", "src.main", "start"]
+# Default command (Railway worker or web both fine)
+CMD ["bash", "manage_bot.sh", "run"]
