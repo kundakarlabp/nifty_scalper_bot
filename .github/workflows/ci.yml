@@ -27,18 +27,14 @@ jobs:
           pip install ruff==0.6.2 mypy==1.10.0 pytest==8.2.0
 
       - name: Ruff lint (src only)
-        run: |
-          ruff check --output-format=github src
+        run: ruff check --output-format=github src
 
       - name: Ruff format check (src only)
-        run: |
-          ruff format --check src
+        run: ruff format --check src
 
       - name: Mypy (src only)
-        run: |
-          mypy src
+        run: mypy --config-file mypy.ini src
 
-      # Make tests non-blocking for now; flip to blocking after code cleanups
+      # Keep tests running, but don't fail CI while we clean them up
       - name: Pytest (non-blocking temporarily)
-        run: |
-          pytest -q || echo "⚠️ tests failed (non-blocking for now)"
+        run: pytest -q || echo "⚠️ tests failed (non-blocking for now)"
