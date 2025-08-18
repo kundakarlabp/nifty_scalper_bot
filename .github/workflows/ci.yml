@@ -9,6 +9,9 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11"]
+    env:
+      ENV_FILE: tests/.env.test
+      TZ: Asia/Kolkata
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -20,16 +23,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff==0.6.2 mypy==1.10.0 pytest==8.2.0
-      - name: Ruff check (won't fail build)
-        run: |
-          ruff check src --output-format=github --exit-zero
-      - name: Ruff format check (won't fail build)
-        run: |
-          ruff format --check src || true
-      - name: Mypy type check (won't fail build)
-        run: |
-          mypy src || true
-      - name: Run tests (won't fail build)
-        run: |
-          pytest -q || echo "Tests failed (non-blocking)"
+          pip install ruff==0.6.2 mypy==1.10.0 pytest==8.2.0 freezegun exchange-calendars pytz
+      - name: Lint (non-fatal while stabilizing)
+        run: ruff check --output-format=github src || true
+      - name: Type check (non-fatal while stabilizing)
+        run: mypy src || true
+      - name: Tests (with IST + test env)
+        run: pytest -q
