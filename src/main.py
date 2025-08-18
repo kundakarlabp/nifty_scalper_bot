@@ -1,55 +1,41 @@
 from __future__ import annotations
-import argparse
-import logging
 import os
-import signal
 import sys
-from threading import Event, Thread
+import time
+import logging
 
-from src.data_streaming.realtime_trader import RealTimeTrader
-from src.server.health import run as run_health
+# Ensure local project imports work if PYTHONPATH not set
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(PROJECT_ROOT)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
-stop_event = Event()
-_trader: RealTimeTrader | None = None
+from src.data_streaming.realtime_trader import RealTimeTrader  # noqa
+from src.utils.config import load_env  # if your config loader differs, keep existing
 
-def _graceful_exit(*_):
+log = logging.getLogger("main")
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+def start():
+    load_env()  # prints “Loaded environment …” in your build
+    trader = RealTimeTrader()
     try:
-        if _trader:
-            _trader.stop()
-    except Exception:
-        pass
-    stop_event.set()
-
-def run():
-    global _trader
-    _trader = RealTimeTrader()
-    signal.signal(signal.SIGTERM, _graceful_exit)
-    signal.signal(signal.SIGINT, _graceful_exit)
-    # Health server in background
-    Thread(target=run_health, daemon=True).start()
-    # Start trading loop (non-blocking run loop)
-    Thread(target=_trader.run, daemon=True).start()
-    # Keep process alive until stop signal
-    stop_event.wait()
-
-def cli():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("cmd", choices=["run", "start", "stop", "status"], help="Control trader")
-    args = parser.parse_args()
-
-    global _trader
-    if args.cmd == "run":
-        run()
-    else:
-        # For start/stop/status we need a lightweight instance for Telegram control paths
-        _trader = RealTimeTrader()
-        if args.cmd == "start":
-            _trader.start()
-        elif args.cmd == "stop":
-            _trader.stop()
-        elif args.cmd == "status":
-            _trader.get_status()
+        trader.start()  # schedules jobs, starts Telegram polling
+        log.info("🧭 Entering main loop (Ctrl+C to stop)...")
+        while True:
+            # If your trader exposes a tick/scheduler runner, call it here.
+            # Otherwise just sleep; internal scheduler threads will run jobs.
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.info("👋 KeyboardInterrupt received.")
+    finally:
+        log.info("🔻 Shutting down…")
+        trader.shutdown()
+        log.info("✅ Exit complete.")
 
 if __name__ == "__main__":
-    cli()
+    # Support `python3 -m src.main start`
+    if len(sys.argv) == 1 or sys.argv[1] == "start":
+        start()
+    else:
+        print("Usage: python -m src.main start")
