@@ -2,16 +2,17 @@
 """
 Utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
-...
+
 """
 from __future__ import annotations
 
-import os
-# Optional import to avoid hard crash when kiteconnect is absent
+# Optional import to avoid import-time crash when kiteconnect is absent
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:
     KiteConnect = None  # type: ignore
+
+
 from datetime import datetime, date, timedelta
 import logging
 import time
