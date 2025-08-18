@@ -18,10 +18,17 @@ def risk_config() -> RiskConfig:
         max_lots=10,
     )
 
+from src.config import ExecutorConfig
+
 @pytest.fixture
-def session(risk_config: RiskConfig) -> TradingSession:
+def executor_config() -> ExecutorConfig:
+    """Provides a default ExecutorConfig for tests."""
+    return ExecutorConfig()
+
+@pytest.fixture
+def session(risk_config: RiskConfig, executor_config: ExecutorConfig) -> TradingSession:
     """Provides a TradingSession with 100k equity."""
-    return TradingSession(risk_config=risk_config, starting_equity=100_000.0)
+    return TradingSession(risk_config=risk_config, executor_config=executor_config, starting_equity=100_000.0)
 
 
 def test_session_initialization(session: TradingSession):

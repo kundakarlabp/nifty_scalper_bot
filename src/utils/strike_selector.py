@@ -544,7 +544,7 @@ def get_instrument_tokens(
 def is_market_open(
     time_filter_start: str = "09:15",
     time_filter_end: str = "15:30",
-    exchange: str = "XNSE"
+    exchange: str = "XBOM" # Bombay Stock Exchange, which follows the same calendar as NSE
 ) -> bool:
     """
     Checks if the specified exchange is open, considering market holidays
