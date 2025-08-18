@@ -1,110 +1,155 @@
 # src/data/source.py
 """
-Defines the data source abstraction for fetching market data.
-This allows the application to seamlessly switch between live data from an API
-and historical data from a file for backtesting.
+DataSource abstraction + LiveKiteSource implementation.
+
+- get_historical_ohlc(...) returns a pandas DataFrame indexed by 'datetime'
+  with columns: open, high, low, close, volume
+- Lightweight rate-limiter + single retry on Kite rate errors
 """
 
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
+import time
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional, Sequence
 
 import pandas as pd
 
-# Optional import to avoid hard crash when kiteconnect is absent (e.g., CI/backtests)
-try:
-    from kiteconnect import KiteConnect  # type: ignore
-except Exception:  # ImportError or anything else
-    KiteConnect = None  # type: ignore
-
 logger = logging.getLogger(__name__)
 
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:
+    KiteConnect = None  # type: ignore
 
-class DataSource(ABC):
-    """Abstract base class for market data sources."""
 
-    @abstractmethod
-    def connect(self) -> None: ...
+class DataSource:
+    """Interface for live/backfill data sources."""
+    def connect(self) -> None:  # pragma: no cover
+        raise NotImplementedError
 
-    @abstractmethod
-    def get_spot_price(self, symbol: str) -> Optional[float]: ...
-
-    @abstractmethod
     def get_historical_ohlc(
         self,
         instrument_token: int,
-        from_date: datetime,
-        to_date: datetime,
+        start: datetime,
+        end: datetime,
         interval: str = "minute",
-    ) -> pd.DataFrame: ...
+    ) -> pd.DataFrame:  # pragma: no cover
+        raise NotImplementedError
 
 
 class LiveKiteSource(DataSource):
-    """Live data source using Zerodha KiteConnect."""
+    """
+    Zerodha Kite-backed source.
 
-    def __init__(self, kite: object):
-        if KiteConnect is None:
-            raise ImportError("kiteconnect is not installed. Install with: pip install kiteconnect")
-        if not isinstance(kite, KiteConnect):
-            raise TypeError("LiveKiteSource expects a KiteConnect instance.")
-        self.kite: KiteConnect = kite
-        self.is_connected = False
+    Notes:
+    - interval accepts: "minute", "3minute", "5minute", "15minute", "day" etc.
+    - DataFrame is guaranteed to have ['open','high','low','close','volume'].
+    """
+
+    def __init__(self, kite: Optional[Any]):
+        self.kite: Optional[Any] = kite
+        self._min_interval_sec: float = 0.40  # throttle API a bit
+        self._last_call_ts: float = 0.0
+
+    # ---------- plumbing ----------
 
     def connect(self) -> None:
-        """Confirm connectivity by fetching profile."""
-        try:
-            self.kite.profile()
-            self.is_connected = True
-            logger.info("Successfully connected to Kite API.")
-        except Exception as e:
-            self.is_connected = False
-            logger.error(f"Failed to connect to Kite API: {e}", exc_info=True)
-            raise ConnectionError("Could not connect to Kite API.") from e
+        if KiteConnect is None:
+            raise RuntimeError("kiteconnect not installed. pip install kiteconnect")
+        if self.kite is None:
+            raise RuntimeError("Kite client is None. Provide an authenticated KiteConnect instance.")
+        logger.info("LiveKiteSource connected.")
 
-    def get_spot_price(self, symbol: str) -> Optional[float]:
-        """Fetch last traded price for a symbol 'EXCHANGE:TRADINGSYMBOL'."""
-        if not self.is_connected:
-            logger.warning("Not connected to Kite. Cannot fetch spot price.")
-            return None
+    def _rate_limited(self, func, *args, **kwargs):
+        now = time.time()
+        since = now - self._last_call_ts
+        if since < self._min_interval_sec:
+            time.sleep(self._min_interval_sec - since)
+
         try:
-            response = self.kite.ltp([symbol])
-            price = response.get(symbol, {}).get("last_price")
-            return float(price) if price is not None else None
+            out = func(*args, **kwargs)
+            self._last_call_ts = time.time()
+            return out
         except Exception as e:
-            logger.error(f"Error fetching spot price for {symbol}: {e}", exc_info=True)
-            return None
+            msg = str(e).lower()
+            if "too many" in msg or "rate" in msg:
+                logger.warning("Rate limit hit; retrying in 1.5s...")
+                time.sleep(1.5)
+                out = func(*args, **kwargs)
+                self._last_call_ts = time.time()
+                return out
+            raise
+
+    # ---------- public ----------
 
     def get_historical_ohlc(
         self,
         instrument_token: int,
-        from_date: datetime,
-        to_date: datetime,
+        start: datetime,
+        end: datetime,
         interval: str = "minute",
     ) -> pd.DataFrame:
-        """Fetch OHLCV via KiteConnect.historical_data."""
-        try:
-            records = self.kite.historical_data(
-                instrument_token=instrument_token,
-                from_date=from_date,
-                to_date=to_date,
-                interval=interval,
-                oi=False,
-            )
-            if not records:
-                return pd.DataFrame()
-
-            df = pd.DataFrame(records)
-            df.rename(columns={"date": "datetime"}, inplace=True)
-            # Ensure timezone-naive timestamps for consistency
-            if pd.api.types.is_datetime64_any_dtype(df["datetime"]):
-                df["datetime"] = df["datetime"].dt.tz_localize(None)
-            df.set_index("datetime", inplace=True)
-
-            required = ["open", "high", "low", "close", "volume"]
-            return df[required]
-        except Exception as e:
-            logger.error("Error fetching historical data: %s", e, exc_info=True)
+        if self.kite is None:
+            logger.error("get_historical_ohlc: no Kite client")
             return pd.DataFrame()
+
+        # Zerodha expects specific interval strings; pass through if already valid
+        valid = {
+            "minute", "3minute", "5minute", "10minute", "15minute",
+            "30minute", "60minute", "day"
+        }
+        api_interval = interval if interval in valid else "minute"
+
+        try:
+            raw = self._rate_limited(
+                self.kite.historical_data,  # type: ignore[attr-defined]
+                instrument_token,
+                start,
+                end,
+                api_interval,
+            )
+        except Exception as e:
+            logger.error("historical_data failed: %s", e, exc_info=True)
+            return pd.DataFrame()
+
+        if not raw:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(raw)
+        # normalise datetime index
+        dt_col = "date" if "date" in df.columns else ("datetime" if "datetime" in df.columns else None)
+        if dt_col is None:
+            logger.error("historical_data returned payload without datetime field")
+            return pd.DataFrame()
+
+        df.rename(columns={dt_col: "datetime"}, inplace=True)
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=False).dt.tz_localize(None)
+        df.set_index("datetime", inplace=True)
+
+        # keep standard OHLCV; fill missing volume if absent
+        out_cols = []
+        for c in ("open", "high", "low", "close"):
+            if c not in df.columns:
+                logger.error("historical_data missing column: %s", c)
+                return pd.DataFrame()
+            out_cols.append(c)
+
+        if "volume" in df.columns:
+            out_cols.append("volume")
+        else:
+            df["volume"] = 0
+            out_cols.append("volume")
+
+        return df[out_cols].sort_index()
+
+    # Convenience wrapper if you need raw LTP (not used in runner)
+    def ltp(self, symbols: Sequence[str]) -> Dict[str, Dict[str, float]]:
+        if self.kite is None:
+            return {}
+        try:
+            return self._rate_limited(self.kite.ltp, list(symbols))  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.error("ltp() failed: %s", e)
+            return {}
