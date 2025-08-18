@@ -3,12 +3,4 @@ line-length = 100
 extend-exclude = ["tests/**"]
 
 [lint]
-select = ["E", "F"]
-ignore = [
-  "E402",         # imports not at top (allowed in utils for now)
-  "E701", "E702", # multiple statements on a line (temp)
-  "E741",         # ambiguous var names (temp)
-  "F401",         # unused imports (temp in a few files)
-  "F821",         # undefined names (temp: provide fallbacks)
-  "F841",         # assigned but never used (temp)
-]
+ignore = ["E", "F"]
