@@ -1,54 +1,47 @@
 import pandas as pd
 import logging
-from kiteconnect import KiteConnect
+from typing import Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 def load_zerodha_historical_data(
-    kite: KiteConnect,
+    kite: Any,
     instrument_token: int,
     from_date: str,
     to_date: str,
-    interval: str = "5minute"
+    interval: str = "5minute",
 ) -> pd.DataFrame:
-    """
-    Loads historical OHLCV data from Zerodha Kite Connect API.
+    """Load historical OHLCV data from Zerodha KiteConnect API.
 
-    Args:
-        kite (KiteConnect): Authenticated KiteConnect client.
-        instrument_token (int): Zerodha instrument token (e.g., 256265 for NIFTY).
-        from_date (str): Start date in 'YYYY-MM-DD' format.
-        to_date (str): End date in 'YYYY-MM-DD' format.
-        interval (str): Interval for data (e.g., 'day', '5minute', 'minute').
-
-    Returns:
-        pd.DataFrame: DataFrame with timestamp index and columns: open, high, low, close, volume.
+    This keeps type-hints generic so the module can be imported without
+    requiring the broker SDK at import time.
     """
     try:
         from_dt = datetime.strptime(from_date, "%Y-%m-%d")
         to_dt = datetime.strptime(to_date, "%Y-%m-%d")
 
-        logger.info(f"📥 Fetching Zerodha data: {instrument_token} | {interval} | {from_date} to {to_date}")
+        logger.info("📥 Fetching Zerodha data: %s | %s | %s to %s", instrument_token, interval, from_date, to_date)
         data = kite.historical_data(instrument_token, from_dt, to_dt, interval)
 
         if not data:
-            logger.warning("⚠️ Zerodha returned empty data.")
+            logger.warning("No historical data returned for token %s", instrument_token)
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
-        df['timestamp'] = pd.to_datetime(df['date'])
-        df.set_index('timestamp', inplace=True)
-        df.drop(columns=['date'], inplace=True, errors='ignore')
-        df.sort_index(inplace=True)
+        if "date" in df.columns:
+            df.rename(columns={"date": "datetime"}, inplace=True)
+        if "datetime" not in df.columns:
+            logger.error("Historical data missing 'datetime' column")
+            return pd.DataFrame()
 
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            logger.warning(f"⚠️ Missing columns in data: {missing_cols}")
+        # Normalize timestamps
+        if pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+            df["datetime"] = df["datetime"].dt.tz_localize(None)
 
-        return df
-
+        df.set_index("datetime", inplace=True)
+        keep = [c for c in ("open","high","low","close","volume") if c in df.columns]
+        return df[keep]
     except Exception as e:
-        logger.error(f"❌ Exception in loading Zerodha historical data: {e}", exc_info=True)
+        logger.error("Error loading historical data: %s", e, exc_info=True)
         return pd.DataFrame()
