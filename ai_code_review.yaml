@@ -1,0 +1,144 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "openai>=1.30.0,<2" requests tiktoken
+
+      - name: Run AI review
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_BASE_REF: ${{ github.base_ref }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # You can override these in repo or org secrets if you like:
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          MAX_FILES: ${{ vars.AI_REVIEW_MAX_FILES || 30 }}
+          MAX_CHARS_PER_FILE: ${{ vars.AI_REVIEW_MAX_CHARS || 12000 }}
+        run: |
+          python - << 'PY'
+          import os, json, subprocess, textwrap, requests
+          from pathlib import Path
+          from typing import List, Tuple
+
+          REPO = os.environ["GH_REPO"]
+          PR = int(os.environ["GH_PR_NUMBER"])
+          BASE = os.environ.get("GH_BASE_REF") or "origin/main"
+          HEAD = os.environ.get("GH_HEAD_REF") or "HEAD"
+          GH_TOKEN = os.environ["GH_TOKEN"]
+          OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+          MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+          MAX_FILES = int(os.environ.get("MAX_FILES", "30"))
+          MAX_CHARS = int(os.environ.get("MAX_CHARS_PER_FILE", "12000"))
+
+          # --- get changed files (names only) ---
+          def sh(cmd: List[str]) -> str:
+              return subprocess.check_output(cmd, text=True).strip()
+
+          # Make sure we have both refs
+          sh(["git", "fetch", "origin", BASE, HEAD, "--depth=50"])
+          diff_names = sh(["git", "diff", "--name-only", f"origin/{BASE}" if not BASE.startswith("origin/") else BASE, f"origin/{HEAD}" if not HEAD.startswith("origin/") else HEAD]).splitlines()
+
+          # Filter to code-ish files
+          exts = {".py",".js",".ts",".tsx",".jsx",".json",".yaml",".yml",".sh",".md",".toml",".ini",".cfg",".env",".txt",".rs",".go",".java",".kt",".c",".h",".hpp",".cpp",".cs",".rb",".php"}
+          code_files = [p for p in diff_names if Path(p).suffix.lower() in exts and Path(p).is_file()]
+          code_files = code_files[:MAX_FILES]
+
+          # Collect unified diffs per file (bounded)
+          chunks = []
+          for p in code_files:
+              try:
+                  diff = sh(["git", "diff", "--unified=0", f"origin/{BASE}" if not BASE.startswith("origin/") else BASE, f"origin/{HEAD}" if not HEAD.startswith("origin/") else HEAD, "--", p])
+                  if not diff.strip():
+                      continue
+                  # cap per-file payload
+                  if len(diff) > MAX_CHARS:
+                      diff = diff[:MAX_CHARS] + "\n... [truncated]\n"
+                  chunks.append(f"--- FILE: {p} ---\n{diff}")
+              except Exception as e:
+                  continue
+
+          if not chunks:
+              body = "AI Review: No significant code diffs detected or file types ignored."
+              requests.post(f"https://api.github.com/repos/{REPO}/issues/{PR}/comments",
+                            headers={"Authorization": f"Bearer {GH_TOKEN}",
+                                     "Accept":"application/vnd.github+json"},
+                            json={"body": body})
+              raise SystemExit(0)
+
+          payload = "\n\n".join(chunks)
+
+          # Build system & user prompts (short, structured)
+          sys_prompt = """You are a senior code reviewer for a production trading bot (NIFTY options).
+          Review diffs for: correctness, security, race conditions, API misuse, error handling,
+          performance, logging, config handling, and testability. Be concise, actionable, and
+          reference files/lines when possible using the diff hunk context. Suggest exact code
+          patches where easy. Avoid nitpicks. Prioritize high-severity issues first."""
+
+          user_prompt = f"""Repository: {REPO}
+          Pull Request: #{PR}
+
+          Provide:
+          1) High-severity issues (with file + hunk cues)
+          2) Functional bugs or broken flows
+          3) Risk & safety (order placement, SL/TP logic, env/secret handling)
+          4) Performance and rate-limit risks (Zerodha/Telegram)
+          5) Concrete fixes/patchlets
+          6) Quick wins & tests to add
+
+          Diffs:
+          {payload}
+          """
+
+          # --- OpenAI call ---
+          from openai import OpenAI
+          client = OpenAI(api_key=OPENAI_API_KEY)
+          resp = client.chat.completions.create(
+              model=MODEL,
+              messages=[
+                  {"role":"system","content":sys_prompt},
+                  {"role":"user","content":user_prompt}
+              ],
+              temperature=0.2,
+              max_tokens=1500
+          )
+          review = resp.choices[0].message.content.strip()
+
+          # Post single consolidated review comment
+          requests.post(
+              f"https://api.github.com/repos/{REPO}/issues/{PR}/comments",
+              headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept":"application/vnd.github+json"},
+              json={"body": f"### 🤖 AI Code Review ({MODEL})\n\n{review}"}
+          )
+          PY
