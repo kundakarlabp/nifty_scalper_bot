@@ -41,4 +41,4 @@ RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
 USER appuser
 
 # ✅ Run module with explicit 'start' arg so the process keeps running
-CMD ["python3", "-m", "src.main", "start"]
+CMD ["python3","-m","src.main","start"]
