@@ -4,7 +4,7 @@ Centralized, validated configuration for the Nifty Scalper Bot using Pydantic.
 """
 
 from __future__ import annotations
-import os
+
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     Field,
     field_validator,
+    model_validator,
     PositiveFloat,
     PositiveInt,
     NonNegativeFloat,
@@ -39,14 +40,14 @@ class ExecutorConfig(BaseModel):
 
 
 class APIConfig(BaseModel):
-    """Credentials for brokers and services."""
+    """Credentials for brokers and services (from .env)."""
     zerodha_api_key: str = Field("DUMMY_KEY", alias="ZERODHA_API_KEY")
     zerodha_api_secret: str = Field("DUMMY_SECRET", alias="ZERODHA_API_SECRET")
     zerodha_access_token: str = Field("DUMMY_TOKEN", alias="ZERODHA_ACCESS_TOKEN")
 
 
 class TelegramConfig(BaseModel):
-    """Configuration for Telegram notifications."""
+    """Configuration for Telegram notifications (from .env)."""
     bot_token: str = Field("DUMMY_BOT_TOKEN", alias="TELEGRAM_BOT_TOKEN")
     chat_id: str = Field("12345", alias="TELEGRAM_CHAT_ID")
 
@@ -82,7 +83,7 @@ class AppSettings(BaseSettings):
     def find_dotenv() -> Path | None:
         """Find the .env file by searching upward from the current directory."""
         cwd = Path.cwd()
-        for parent in [cwd, *cwd.parents]:
+        for parent in (cwd, *cwd.parents):
             env_file = parent / ".env"
             if env_file.exists():
                 return env_file
@@ -94,10 +95,14 @@ class AppSettings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    # App toggles
     enable_live_trading: bool = Field(False, alias="ENABLE_LIVE_TRADING")
     enable_telegram: bool = Field(True, alias="ENABLE_TELEGRAM")
     allow_offhours_testing: bool = Field(False, alias="ALLOW_OFFHOURS_TESTING")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+
+    # Composed configs
     api: APIConfig = Field(default_factory=APIConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
@@ -112,12 +117,41 @@ class AppSettings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid_levels}")
         return v.upper()
 
+    @model_validator(mode="after")
+    def validate_live_trading_credentials(self) -> "AppSettings":
+        """
+        If live trading is enabled, ensure we are NOT on dummy credentials.
+        """
+        if self.enable_live_trading:
+            bad = []
+            if self.api.zerodha_api_key == "DUMMY_KEY":
+                bad.append("ZERODHA_API_KEY")
+            if self.api.zerodha_api_secret == "DUMMY_SECRET":
+                bad.append("ZERODHA_API_SECRET")
+            if self.api.zerodha_access_token == "DUMMY_TOKEN":
+                bad.append("ZERODHA_ACCESS_TOKEN")
+            if self.enable_telegram and self.telegram.bot_token == "DUMMY_BOT_TOKEN":
+                bad.append("TELEGRAM_BOT_TOKEN")
+            if bad:
+                raise ValueError(
+                    "Live trading is enabled but the following required environment "
+                    f"variables are missing or dummy: {', '.join(bad)}"
+                )
+        return self
+
+
 try:
     settings = AppSettings()
 except Exception as e:
     print(f"FATAL: Could not load application settings. Error: {e}")
-    exit(1)
+    raise SystemExit(1)
 
 if __name__ == "__main__":
-    print("--- Application Settings ---")
-    print(settings.model_dump_json(indent=2))
+    # Safe preview without leaking secrets
+    safe = settings.model_dump()
+    safe["api"]["zerodha_api_secret"] = "***"
+    safe["api"]["zerodha_access_token"] = "***"
+    safe["telegram"]["bot_token"] = "***"
+    print("--- Application Settings (safe) ---")
+    import json
+    print(json.dumps(safe, indent=2))
