@@ -3,20 +3,19 @@
 Order execution module (live + simulation) with:
 - Market / marketable-limit / pure limit entries (freeze-qty aware).
 - GTT OCO setup for TP/SL + fallback to regular legs.
-- TP1/TP2 partials, breakeven hop, ATR-based trailing.
-- Optional GTT trailing: cancel-and-recreate OCO on trail updates (guarded, rate-limited).
+- Breakeven + ATR-based trailing (with optional GTT reissue to mimic trailing).
 - Best-effort cleanup on exits.
 
 Public API:
 - place_entry_order(...)
 - setup_gtt_orders(...)
 - update_trailing_stop(order_id, current_price, atr, trail_mult=1.0)
-- maybe_trail_gtt(order_id, new_sl)  # optional GTT trailing
-- exit_order(order_id, exit_reason="manual")
+- maybe_trail_gtt(entry_order_id, new_sl)   # optional GTT trailing
+- exit_order(entry_order_id, exit_reason="manual")
 - get_active_orders()
 - get_positions()
 - cancel_all_orders()
-- get_last_price(symbol)
+- get_last_price(symbol, exchange=None)
 - get_tick_size() -> float
 """
 
@@ -25,8 +24,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 # Optional import to avoid import-time crash if kiteconnect is not installed
 try:
@@ -69,9 +68,8 @@ class OrderExecutor:
         self.gtt_trail_min_step: float = 2.0  # Rs; minimum delta to reissue
         self.gtt_trail_cooldown_s: int = 5
 
-        self._last_gtt_trail_ts: Dict[str, float] = {}  # order_id -> last ts
-
-        self._active: Dict[str, OrderRecord] = {}  # order_id -> record
+        self._last_gtt_trail_ts: Dict[str, float] = {}  # entry_order_id -> last ts
+        self._active: Dict[str, OrderRecord] = {}       # entry_order_id -> record
 
     # --------------- utilities ---------------
 
@@ -101,7 +99,7 @@ class OrderExecutor:
             raise RuntimeError("Live orders require kiteconnect and an authenticated client.")
 
         if order_type == "MARKET":
-            oid = self._kite.place_order(
+            resp = self._kite.place_order(
                 tradingsymbol=symbol,
                 exchange=exchange,
                 transaction_type=transaction_type,
@@ -109,15 +107,16 @@ class OrderExecutor:
                 quantity=quantity,
                 product="MIS",
                 variety="regular",
-            )["order_id"]
-            entry_price = float(self.get_last_price(symbol))
+            )
+            oid = resp["order_id"]
+            entry_price = float(self.get_last_price(symbol, exchange=exchange))
         elif order_type in ("MARKETABLE_LIMIT", "LIMIT"):
-            ltp = float(self.get_last_price(symbol))
-            px = price if (order_type == "LIMIT" and price) else (
-                ltp + slippage_guard if transaction_type == "BUY" else ltp - slippage_guard
+            ltp = float(self.get_last_price(symbol, exchange=exchange))
+            px = price if (order_type == "LIMIT" and price is not None) else (
+                ltp + slippage_guard if transaction_type.upper() == "BUY" else ltp - slippage_guard
             )
             px = self._round_to_tick(px)
-            oid = self._kite.place_order(
+            resp = self._kite.place_order(
                 tradingsymbol=symbol,
                 exchange=exchange,
                 transaction_type=transaction_type,
@@ -126,7 +125,8 @@ class OrderExecutor:
                 quantity=quantity,
                 product="MIS",
                 variety="regular",
-            )["order_id"]
+            )
+            oid = resp["order_id"]
             entry_price = px
         else:
             raise ValueError("order_type must be MARKET | MARKETABLE_LIMIT | LIMIT")
@@ -134,7 +134,7 @@ class OrderExecutor:
         with self._lock:
             self._active[oid] = OrderRecord(
                 order_id=oid, symbol=symbol, exchange=exchange, qty=quantity,
-                transaction_type=transaction_type, entry_price=entry_price
+                transaction_type=transaction_type.upper(), entry_price=entry_price
             )
 
         logger.info("Entry placed %s %s x%d @ %.2f (order_id=%s)", transaction_type, symbol, quantity, entry_price, oid)
@@ -166,9 +166,10 @@ class OrderExecutor:
         tp_px = self._round_to_tick(target_price)
 
         use_gtt = False
-        gtt_id = None
+        gtt_id: Optional[str] = None
         try:
-            gtt_id = self._kite.gtt_place_oco(
+            # NOTE: many codebases wrap KiteConnect's GTT API. Keeping your original call:
+            gtt_id = self._kite.gtt_place_oco(  # type: ignore[attr-defined]
                 tradingsymbol=symbol,
                 exchange=exchange,
                 transaction_type=transaction_type,
@@ -190,14 +191,14 @@ class OrderExecutor:
         if not use_gtt:
             # Regular SL/TP orders as fallback (IDs stored back to rec)
             try:
-                side = "SELL" if transaction_type == "BUY" else "BUY"
+                exit_side = "SELL" if transaction_type.upper() == "BUY" else "BUY"
                 sl_id = self._kite.place_order(
-                    tradingsymbol=symbol, exchange=exchange, transaction_type=side,
+                    tradingsymbol=symbol, exchange=exchange, transaction_type=exit_side,
                     order_type="SL-M", trigger_price=sl_px, quantity=quantity,
                     product="MIS", variety="regular"
                 )["order_id"]
                 tp_id = self._kite.place_order(
-                    tradingsymbol=symbol, exchange=exchange, transaction_type=side,
+                    tradingsymbol=symbol, exchange=exchange, transaction_type=exit_side,
                     order_type="LIMIT", price=tp_px, quantity=quantity,
                     product="MIS", variety="regular"
                 )["order_id"]
@@ -229,11 +230,16 @@ class OrderExecutor:
         try:
             # cancel old
             if rec.gtt_id:
-                self._kite.gtt_cancel(rec.gtt_id)
-            # recreate with tighter SL; target unchanged (re-use a reasonable default if unknown)
-            tp_guess = rec.entry_price + (rec.entry_price - new_sl) if rec.transaction_type == "BUY" else rec.entry_price - (new_sl - rec.entry_price)
+                self._kite.gtt_cancel(rec.gtt_id)  # type: ignore[attr-defined]
+
+            # recreate with tighter SL; target guessed if unknown (keeps OCO nature)
+            if rec.transaction_type == "BUY":
+                tp_guess = rec.entry_price + max(0.05, rec.entry_price - new_sl)
+            else:
+                tp_guess = rec.entry_price - max(0.05, new_sl - rec.entry_price)
             tp_guess = self._round_to_tick(tp_guess)
-            new_id = self._kite.gtt_place_oco(
+
+            new_id = self._kite.gtt_place_oco(  # type: ignore[attr-defined]
                 tradingsymbol=rec.symbol,
                 exchange=rec.exchange,
                 transaction_type=rec.transaction_type,
@@ -329,10 +335,19 @@ class OrderExecutor:
                 except Exception:
                     pass
 
-    def get_last_price(self, symbol: str) -> float:
+    def get_last_price(self, symbol: str, exchange: Optional[str] = None) -> float:
+        """
+        Robust LTP fetch:
+        - Accepts "NFO:SYMBOL" / "NSE:SYMBOL" fully-qualified OR plain tradingsymbol with exchange provided.
+        """
         try:
-            q = self._kite.ltp([symbol])
-            return float(q.get(symbol, {}).get("last_price"))
+            if ":" in symbol:
+                key = symbol
+            else:
+                ex = (exchange or "NFO").upper()
+                key = f"{ex}:{symbol}"
+            q = self._kite.ltp([key])
+            return float(q.get(key, {}).get("last_price", 0.0))
         except Exception as e:
             logger.error("ltp failed for %s: %s", symbol, e)
             return 0.0
