@@ -1,27 +1,17 @@
-# ruff: noqa: E402
 # src/utils/strike_selector.py
 """
 Utility functions for selecting strike prices and fetching instrument tokens
 for Nifty 50 options trading.
-
-- Robust symbol resolution and conservative fallbacks
-- Cached instruments usage (passed in), with rate-limited API wrappers
-- Spread-agnostic (selection only), used by the trader which applies its own guards
-- Lightweight health_check() for readiness probes
-
-Public functions used elsewhere:
-- _get_spot_ltp_symbol()
-- get_instrument_tokens(...)
-- get_next_expiry_date(...)
-- get_nearest_strikes(...)
-- fetch_cached_instruments(...)
-- is_trading_hours()
-- health_check(...)
+...
 """
-
 from __future__ import annotations
 
-from kiteconnect import KiteConnect
+import os
+# Optional import to avoid hard crash when kiteconnect is absent
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:
+    KiteConnect = None  # type: ignore
 from datetime import datetime, date, timedelta
 import logging
 import time
