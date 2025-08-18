@@ -1,3 +1,4 @@
+# trigger: ai code review smoke test
 # src/main.py
 """
 Main entrypoint
