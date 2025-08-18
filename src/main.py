@@ -1,18 +1,18 @@
 from __future__ import annotations
 import os, sys, time, logging
 
-# Ensure project root is on sys.path (works in Docker, Railway, Codespaces)
+# Ensure project root in sys.path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-# ---- config loader (support both layouts) ----
+# ---- config loader ----
 try:
-    # Preferred (new layout)
+    # If utils.config exists
     from src.utils.config import load_env  # type: ignore
 except ModuleNotFoundError:
-    # Fallback (existing layout)
-    from src.config import load_env  # type: ignore
+    # fallback: use load_dotenv from python-dotenv
+    from dotenv import load_dotenv as load_env
 
 from src.data_streaming.realtime_trader import RealTimeTrader
 
@@ -20,17 +20,18 @@ log = logging.getLogger("main")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 def start():
-    load_env()  # prints "Loaded environment from ..."
+    # Load environment variables
+    load_env()
+    log.info("✅ Environment loaded")
     trader = RealTimeTrader()
     try:
         trader.start()
         log.info("🧭 Entering main loop (Ctrl+C to stop)...")
         while True:
-            time.sleep(1)  # keep process alive
+            time.sleep(1)
     except KeyboardInterrupt:
         log.info("👋 KeyboardInterrupt received.")
     finally:
-        log.info("🔻 Shutting down…")
         trader.shutdown()
         log.info("✅ Exit complete.")
 
