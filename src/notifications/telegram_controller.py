@@ -1,4 +1,3 @@
-# src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import asyncio
@@ -23,25 +22,30 @@ logger = logging.getLogger(__name__)
 
 class TelegramController:
     """
-    Minimal, production-safe Telegram bot.
+    Production-safe Telegram bot (python-telegram-bot v20+).
 
-    - Start in a background thread: start()
-    - Safe cross-thread send_message()
-    - Commands:
-        /start
-        /status
-        /summary
-        /health
-        /config get
-        /config set <key> <value>
-        /emergency   (flatten positions & cancel orders)
+    Lifecycle:
+      - start()  -> spawn polling thread
+      - stop()   -> stop gracefully from any thread
+      - send_message(text) -> thread-safe outbound
 
-    Inject runtime context with set_context(...).
-    Expose config bridges by setting _config_getter/_config_setter from the runner.
+    Commands:
+      /start
+      /status
+      /summary
+      /health
+      /config get
+      /config set <key> <value>
+      /emergency  (flatten positions & cancel orders)
+      /panic      (alias for /emergency)
+
+    Context wiring:
+      call set_context(session=..., executor=..., health_getter=callable)
+      StrategyRunner sets _config_getter/_config_setter bridges.
     """
 
     def __init__(self, bot_token: str, chat_id: Optional[int] = None) -> None:
-        self.bot_token = bot_token.strip()
+        self.bot_token = (bot_token or "").strip()
         self.chat_id = int(chat_id or 0)
 
         self._application: Optional[Application] = None
@@ -80,26 +84,37 @@ class TelegramController:
         logger.info("Telegram bot started.")
 
     def stop(self) -> None:
-        try:
-            if self._application:
-                self._application.stop()
-        except Exception:
-            pass
+        """Stop polling gracefully from any thread."""
+        app = self._application
+        loop = self._loop
+        if app and loop and loop.is_running():
+            try:
+                # Stop polling and close all connections cleanly
+                fut = asyncio.run_coroutine_threadsafe(app.stop(), loop)
+                fut.result(timeout=5.0)
+            except Exception as e:
+                logger.debug("telegram stop() scheduling failed: %s", e)
+        # Optional: wait a bit for the thread to end
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=5.0)
+            except Exception:
+                pass
 
     # ---------------- messaging (thread-safe) ----------------
 
     def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
         """
-        Thread-safe send. No-op if bot not yet running.
+        Thread-safe send. Returns False if bot not yet running or first chat not latched.
         """
         app = self._application
         loop = self._loop
-        if not app or not loop or not loop.is_running():
+        if not app or not loop or not loop.is_running() or not self.chat_id:
             return False
         try:
             fut = asyncio.run_coroutine_threadsafe(
                 app.bot.send_message(
-                    chat_id=self.chat_id if self.chat_id else None,
+                    chat_id=self.chat_id,
                     text=text,
                     parse_mode=parse_mode or ParseMode.HTML,
                 ),
@@ -129,11 +144,17 @@ class TelegramController:
             app.add_handler(CommandHandler("health", self._cmd_health))
             app.add_handler(CommandHandler("config", self._cmd_config, block=False))
             app.add_handler(CommandHandler("emergency", self._cmd_emergency))
-            # Fallback: treat plain text as /config set key value or help
+            app.add_handler(CommandHandler("panic", self._cmd_emergency))  # alias
+
+            # Fallback: treat plain text as "config set k v" or help
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
-            # Run (non-blocking loop kept open)
-            app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
+            # Run (non-blocking loop kept open by close_loop=False)
+            app.run_polling(
+                close_loop=False,
+                drop_pending_updates=True,  # avoid backlog on restart
+                allowed_updates=Update.ALL_TYPES,
+            )
         except Exception as e:
             logger.error("Telegram polling error: %s", e, exc_info=True)
 
@@ -148,7 +169,7 @@ class TelegramController:
                 return True
             except Exception:
                 return False
-        return update.effective_chat and update.effective_chat.id == self.chat_id
+        return bool(update.effective_chat and update.effective_chat.id == self.chat_id)
 
     async def _reply(self, update: Update, text: str) -> None:
         if not self._authorized(update):
@@ -161,9 +182,7 @@ class TelegramController:
     @staticmethod
     def _fmt_json(obj: Any, limit: int = 3500) -> str:
         s = json.dumps(obj, indent=2, default=str)
-        if len(s) > limit:
-            return s[:limit] + "\n… (truncated)"
-        return s
+        return s if len(s) <= limit else s[:limit] + "\n… (truncated)"
 
     # ---------------- command handlers ----------------
 
@@ -182,13 +201,13 @@ class TelegramController:
             return
         lines = [
             "<b>Status</b>",
-            f"Equity: <code>{s.equity:.2f}</code>",
-            f"PnL (today): <code>{s.daily_pnl:.2f}</code>",
-            f"Trades (today): <code>{s.trades_today}</code>",
-            f"Consec losses: <code>{s.consecutive_losses}</code>",
+            f"Equity: <code>{getattr(s, 'equity', 0.0):.2f}</code>",
+            f"PnL (today): <code>{getattr(s, 'daily_pnl', 0.0):.2f}</code>",
+            f"Trades (today): <code>{getattr(s, 'trades_today', 0)}</code>",
+            f"Consec losses: <code>{getattr(s, 'consecutive_losses', 0)}</code>",
         ]
-        if ex:
-            active = getattr(ex, "get_active_orders", lambda: [])()
+        if ex and callable(getattr(ex, "get_active_orders", None)):
+            active = ex.get_active_orders()
             lines.append(f"Open orders: <code>{len(active)}</code>")
             for r in active[:5]:
                 lines.append(f"• {r.transaction_type} {r.symbol} qty={r.qty} SL={r.hard_stop_price}")
@@ -198,15 +217,15 @@ class TelegramController:
         if not self._authorized(update):
             return
         s = self._session
-        if not s or not s.trade_history:
+        hist = getattr(s, "trade_history", None) if s else None
+        if not hist:
             await self._reply(update, "No closed trades yet.")
             return
-        # Last 5 trades
-        last = s.trade_history[-5:]
+        last = hist[-5:]
         lines = ["<b>Recent trades</b>"]
         for t in last:
-            pnl = f"{t.pnl:.2f}"
-            lines.append(f"• {t.side} {t.symbol} qty={t.qty} @ {t.entry_price:.2f} → {t.exit_price:.2f}  PnL=<code>{pnl}</code>")
+            pnl = getattr(t, "pnl", 0.0)
+            lines.append(f"• {t.side} {t.symbol} qty={t.qty} @ {t.entry_price:.2f} → {t.exit_price:.2f}  PnL=<code>{pnl:.2f}</code>")
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
@@ -280,22 +299,25 @@ class TelegramController:
                 ex.cancel_all_orders()
             except Exception:
                 pass
+
+            # If session supports full flatten, use a price_fn that doesn't capture 'r'
             if s and callable(getattr(s, "flatten_all", None)):
-                # If a price provider is needed, use executor.get_last_price
-                price_fn = lambda sym: getattr(ex, "get_last_price")(sym, exchange=getattr(r, "exchange", None))  # type: ignore[name-defined]
+                price_fn = lambda sym: ex.get_last_price(sym)  # exchange auto-resolved by executor
                 s.flatten_all(price_fn)
+
             await self._reply(update, "❗ Emergency flatten executed.")
         except Exception as e:
             logger.error("Emergency handler failed: %s", e, exc_info=True)
             await self._reply(update, f"Emergency failed: <code>{e}</code>")
 
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        # Allow quick "/config set k v" style without slash
+        # Allow quick "config set k v" style without slash
         if not self._authorized(update):
             return
-        text = (update.message.text or "").strip().lower()
-        if text.startswith("config set "):
-            parts = update.message.text.split(maxsplit=3)  # keep case/value
+        raw = update.message.text or ""
+        lower = raw.strip().lower()
+        if lower.startswith("config set "):
+            parts = raw.split(maxsplit=3)  # keep case/value
             if len(parts) >= 4:
                 _, _, key, val = parts
                 setter = self._config_setter
@@ -306,4 +328,4 @@ class TelegramController:
                         msg = f"error: {e}"
                     await self._reply(update, f"<code>{msg}</code>")
                     return
-        await self._reply(update, "Unknown. Try: /status /summary /health /config get /config set <k> <v> /emergency")
+        await self._reply(update, "Unknown. Try: /status /summary /health /config get /config set <k> <v> /emergency /panic")
