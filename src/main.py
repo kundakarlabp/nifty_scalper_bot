@@ -22,6 +22,7 @@ from src.risk.session import TradingSession
 from src.server.health import run as run_health_server
 from src.strategies.runner import StrategyRunner
 from src.utils import strike_selector as sel
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 
 _LOG_LEVEL = getattr(logging, str(settings.log_level).upper(), logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -42,7 +43,6 @@ class Application:
             access_token = self.settings.api.zerodha_access_token
             if not api_key or not access_token:
                 raise RuntimeError("ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN missing in environment")
-
             self.kite = KiteConnect(api_key=api_key)
             self.kite.set_access_token(access_token)
         except Exception as e:
@@ -78,7 +78,6 @@ class Application:
     def start(self) -> None:
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
-
         os.environ.setdefault("TZ", "Asia/Kolkata")
 
         self._health_thread = Thread(target=run_health_server, args=(self.get_health,), daemon=True)
@@ -100,15 +99,11 @@ class Application:
 
     def stop(self) -> None:
         if not self._stop_event.is_set():
+            try: self.runner.stop()
+            except Exception: pass
             try:
-                self.runner.stop()
-            except Exception:
-                pass
-            try:
-                if self.telegram:
-                    self.telegram.stop()
-            except Exception:
-                pass
+                if self.telegram: self.telegram.stop()
+            except Exception: pass
             self._stop_event.set()
 
     def get_health(self) -> Dict[str, Any]:
@@ -116,11 +111,7 @@ class Application:
             base = sel.health_check(self.kite)
         except Exception as e:
             base = {"overall_status": "ERROR", "message": f"health_check failed: {e}", "checks": {}}
-
-        base["runner"] = {
-            "running": bool(self.runner and self.runner._running),
-            "live_mode": bool(self.settings.enable_live_trading),
-        }
+        base["runner"] = {"running": bool(self.runner and self.runner._running), "live_mode": bool(self.settings.enable_live_trading)}
         base["session"] = {
             "open_positions": len(self.session.active_trades),
             "trades_today": self.session.trades_today,
@@ -138,9 +129,6 @@ def main() -> None:
         print("Usage: python -m src.main start", file=sys.stderr)
         sys.exit(1)
 
-
-# Late import to avoid circular at module-top
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy  # noqa: E402
 
 if __name__ == "__main__":
     main()
