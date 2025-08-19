@@ -26,6 +26,7 @@ class Signal:
     atr: float
     confidence: float
     reason: str = ""
+    trail_mult: float = 1.0
 
 
 class StrategyRunner:
@@ -52,6 +53,7 @@ class StrategyRunner:
         self._cache_ts: float = 0.0
         self._cache_ttl_sec: int = 300
 
+        # Option SL/TP expressed as PERCENT of option LTP
         self._opt_sl_pct: float = float(os.getenv("OPTION_SL_PERCENT", "0.06"))
         self._opt_tp_pct: float = float(os.getenv("OPTION_TP_PERCENT", "0.20"))
 
@@ -59,6 +61,7 @@ class StrategyRunner:
         self._conf_threshold: float = float(settings.strategy.confidence_threshold)
 
         if self.tg:
+            # allow live config via Telegram
             self.tg._config_getter = self._config_get  # type: ignore[attr-defined]
             self.tg._config_setter = self._config_set  # type: ignore[attr-defined]
 
@@ -80,7 +83,8 @@ class StrategyRunner:
         while self._running:
             try:
                 if not self._is_ok_to_trade_now():
-                    time.sleep(self._sleep_sec); continue
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 self._maybe_refresh_instruments(kite)
 
@@ -94,38 +98,70 @@ class StrategyRunner:
                     strike_range=int(strike_range),
                 )
                 if not tokens or not tokens.get("spot_token"):
-                    time.sleep(self._sleep_sec); continue
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 spot_token = int(tokens["spot_token"])
                 end = datetime.now()
                 start = end - timedelta(minutes=max(5, settings.executor.data_lookback_minutes))
                 df = self.ds.get_historical_ohlc(spot_token, start, end, interval="minute")
                 if df.empty or len(df) < max(20, settings.strategy.min_bars_for_signal):
-                    time.sleep(self._sleep_sec); continue
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 sig = self._get_signal(df)
                 if not sig or sig.side is None:
-                    self._housekeeping(); time.sleep(self._sleep_sec); continue
+                    self._housekeeping()
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 if int(sig.score) < self._min_score or sig.confidence < self._conf_threshold:
-                    self._housekeeping(); time.sleep(self._sleep_sec); continue
+                    self._housekeeping()
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 if sig.side == "UP":
                     opt_sym, leg = tokens.get("ce_symbol"), "CE"
                 else:
                     opt_sym, leg = tokens.get("pe_symbol"), "PE"
                 if not opt_sym:
-                    self._housekeeping(); time.sleep(self._sleep_sec); continue
+                    self._housekeeping()
+                    time.sleep(self._sleep_sec)
+                    continue
 
-                lot_size = int(settings.executor.nifty_lot_size)  # set 75 in env/config
-                qty = self.sizer.size_for_account(self.session, lot_size)
-                qty = max(lot_size, (qty // lot_size) * lot_size)
-                if qty <= 0:
-                    self._housekeeping(); time.sleep(self._sleep_sec); continue
-
+                # --- Fetch option LTP BEFORE sizing so SL distance is known ---
                 opt_ltp = self.exec.get_last_price(opt_sym, exchange=settings.executor.trade_exchange)
                 if opt_ltp <= 0.0:
-                    self._housekeeping(); time.sleep(self._sleep_sec); continue
+                    self._housekeeping()
+                    time.sleep(self._sleep_sec)
+                    continue
+
+                # Compute SL/TP levels from option LTP %
+                sl_px, tp_px = self._compute_option_levels(entry_price=opt_ltp)
+
+                # Derive SL distance in points for risk sizing
+                tick = max(self.exec.get_tick_size(), 0.05)
+                sl_points = max(tick, abs(opt_ltp - sl_px))
+
+                lot_size = int(settings.executor.nifty_lot_size)  # e.g., 75
+                qty: int
+
+                # Prefer risk-aware lot sizing if available
+                if hasattr(self.sizer, "calculate_lot_quantity"):
+                    lots = int(self.sizer.calculate_lot_quantity(lot_size=lot_size, sl_points=sl_points))
+                    qty = max(lot_size, lots * lot_size)
+                elif hasattr(self.sizer, "size_for_account"):
+                    # Fallback to legacy API (may not use SL distance)
+                    qty = int(self.sizer.size_for_account(self.session, lot_size))
+                    qty = max(lot_size, (qty // lot_size) * lot_size)
+                else:
+                    # Safe minimum
+                    qty = lot_size
+
+                if qty <= 0:
+                    self._housekeeping()
+                    time.sleep(self._sleep_sec)
+                    continue
 
                 order_id = self.exec.place_entry_order(
                     symbol=opt_sym,
@@ -134,8 +170,6 @@ class StrategyRunner:
                     transaction_type="BUY",
                     order_type="MARKET",
                 )
-
-                sl_px, tp_px = self._compute_option_levels(entry_price=opt_ltp)
 
                 self.exec.setup_gtt_orders(
                     entry_order_id=order_id,
@@ -155,8 +189,14 @@ class StrategyRunner:
                         f"(leg={leg}, score={sig.score}, conf={sig.confidence})"
                     )
 
+                # Use strategy-provided ATR & trail multiplier if present
                 if sig.atr > 0:
-                    self.exec.update_trailing_stop(order_id, current_price=opt_ltp, atr=max(0.5, sig.atr * 0.2))
+                    self.exec.update_trailing_stop(
+                        order_id,
+                        current_price=opt_ltp,
+                        atr=max(0.5, sig.atr * 0.2),
+                        trail_mult=max(0.1, float(sig.trail_mult or 1.0)),
+                    )
 
                 self._housekeeping()
 
@@ -174,7 +214,11 @@ class StrategyRunner:
     def _is_ok_to_trade_now(self) -> bool:
         if settings.allow_offhours_testing:
             return True
-        return sel.is_trading_hours(settings.executor.market_open, settings.executor.market_close, tz_name=os.getenv("TZ"))
+        return sel.is_trading_hours(
+            settings.executor.market_open,
+            settings.executor.market_close,
+            tz_name=os.getenv("TZ"),
+        )
 
     def _maybe_refresh_instruments(self, kite) -> None:
         now = time.time()
@@ -192,28 +236,36 @@ class StrategyRunner:
                 res = self.strategy.compute_signal(df)
             else:
                 return None
-            side = res.get("side") or res.get("direction")
+
+            # Accept any of these keys; map to UP/DOWN
+            side = res.get("side") or res.get("direction") or res.get("signal")
             if isinstance(side, str):
                 s = side.upper()
                 side = "UP" if s in ("BUY", "LONG", "UP") else ("DOWN" if s in ("SELL", "SHORT", "DOWN") else None)
+
             score = float(res.get("score", 0.0))
             confidence = float(res.get("confidence", 0.0))
             atr = float(res.get("atr", 0.0))
-            reason = str(res.get("reason", ""))
-            return Signal(side=side, score=score, atr=atr, confidence=confidence, reason=reason)
+            reason = res.get("reason") or ", ".join(res.get("reasons", [])) if isinstance(res.get("reasons"), list) else str(res.get("reason", ""))
+            trail_mult = float(res.get("trail_mult", 1.0))
+
+            return Signal(side=side, score=score, atr=atr, confidence=confidence, reason=reason, trail_mult=trail_mult)
         except Exception:
             return None
 
     def _compute_option_levels(self, entry_price: float) -> tuple[float, float]:
+        # SL/TP based on option-LTP percentages; ensure TP > SL by at least one tick
         sl = max(1.0, entry_price * (1.0 - self._opt_sl_pct))
         tp = max(sl + self.exec.get_tick_size(), entry_price * (1.0 + self._opt_tp_pct))
         return (round(sl, 2), round(tp, 2))
 
     def _housekeeping(self) -> None:
+        # Trailing & partials management for currently active orders
         for rec in self.exec.get_active_orders():
             ltp = self.exec.get_last_price(rec.symbol, exchange=rec.exchange)
             if ltp > 0:
                 atr_proxy = max(0.5, ltp * 0.02)
+                # Default trail_mult for housekeeping if not in Signal context
                 self.exec.update_trailing_stop(rec.order_id, current_price=ltp, atr=atr_proxy, trail_mult=0.6)
         self.exec.manage_partials()
 
@@ -238,26 +290,46 @@ class StrategyRunner:
         }
 
     def _config_set(self, key: str, value: str) -> str:
-        key = key.strip().lower(); v = value.strip(); ex = self.exec
-        def as_bool(s: str) -> bool: return s.lower() in ("1", "true", "yes", "y", "on")
+        key = key.strip().lower()
+        v = value.strip()
+        ex = self.exec
+
+        def as_bool(s: str) -> bool:
+            return s.lower() in ("1", "true", "yes", "y", "on")
+
         try:
-            if key == "poll.sec":               self._sleep_sec = max(1, int(float(v)))
-            elif key == "opt.sl_pct":           self._opt_sl_pct = max(0.0, float(v))
-            elif key == "opt.tp_pct":           self._opt_tp_pct = max(0.0, float(v))
-            elif key == "strategy.min_score":   self._min_score = max(0, int(float(v)))
-            elif key == "strategy.conf_threshold": self._conf_threshold = max(0.0, float(v))
-            elif key == "tp.enable":            ex.partial_tp_enable = as_bool(v)
+            if key == "poll.sec":
+                self._sleep_sec = max(1, int(float(v)))
+            elif key == "opt.sl_pct":
+                self._opt_sl_pct = max(0.0, float(v))
+            elif key == "opt.tp_pct":
+                self._opt_tp_pct = max(0.0, float(v))
+            elif key == "strategy.min_score":
+                self._min_score = max(0, int(float(v)))
+            elif key == "strategy.conf_threshold":
+                self._conf_threshold = max(0.0, float(v))
+            elif key == "tp.enable":
+                ex.partial_tp_enable = as_bool(v)
             elif key == "tp.ratio":
                 r = float(v)
-                if not (0.05 <= r <= 0.95): return "tp.ratio must be between 0.05 and 0.95"
+                if not (0.05 <= r <= 0.95):
+                    return "tp.ratio must be between 0.05 and 0.95"
                 ex.partial_tp_ratio = r
-            elif key == "tp2.rmult":            ex.partial_tp2_r_mult = max(0.5, float(v))
-            elif key == "be.after_tp1":         ex.breakeven_after_tp1 = as_bool(v)
-            elif key == "be.offset_ticks":      ex.breakeven_offset_ticks = max(0, int(float(v)))
-            elif key == "gtt.trail":            ex.allow_gtt_trailing = as_bool(v)
-            elif key == "gtt.min_step":         ex.gtt_trail_min_step = max(0.0, float(v))
-            elif key == "gtt.cooldown":         ex.gtt_trail_cooldown_s = max(1, int(float(v)))
-            else:                                return f"unknown key: {key}"
+            elif key == "tp2.rmult":
+                ex.partial_tp2_r_mult = max(0.5, float(v))
+            elif key == "be.after_tp1":
+                ex.breakeven_after_tp1 = as_bool(v)
+            elif key == "be.offset_ticks":
+                ex.breakeven_offset_ticks = max(0, int(float(v)))
+            elif key == "gtt.trail":
+                ex.allow_gtt_trailing = as_bool(v)
+            elif key == "gtt.min_step":
+                ex.gtt_trail_min_step = max(0.0, float(v))
+            elif key == "gtt.cooldown":
+                ex.gtt_trail_cooldown_s = max(1, int(float(v)))
+            else:
+                return f"unknown key: {key}"
         except Exception as e:
             return f"error: {e}"
         return f"ok: {key} = {v}"
+```0
