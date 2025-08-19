@@ -1,327 +1,579 @@
 # src/notifications/telegram_controller.py
 from __future__ import annotations
 
-import asyncio
-import inspect
+import html
 import json
 import logging
+import os
 import threading
-from typing import Any, Callable, Dict, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+import requests
 
 logger = logging.getLogger(__name__)
 
 
+def _bool_env(v: Optional[str], default: bool = False) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y"}
+
+
 class TelegramController:
     """
-    Production-safe Telegram bot (python-telegram-bot v20+).
+    Lightweight, dependency-free Telegram long-polling controller (requests-based).
 
-    Lifecycle:
-      - start()  -> spawn polling thread
-      - stop()   -> stop gracefully from any thread
-      - send_message(text) -> thread-safe outbound
+    Core contract (same as your previous version):
+        status_callback() -> dict
+        control_callback(cmd: str, arg: str) -> bool
+        summary_callback() -> str
+
+    Optional config bridges (if you want /config get|set):
+        set_config_bridges(getter: () -> dict, setter: (key: str, val: str) -> str)
 
     Commands:
-      /start /status /summary /health
+      /help
+      /start /stop /refresh /health /emergency
+      /status /summary /id /ping
+      /mode [live|shadow]              (default: live)
+      /quality [auto|on|off]           (default: auto)
+      /regime [auto|trend|range|off]   (default: auto)
+      /risk <pct>                      (e.g. 0.5 = 0.5%)
+      /pause [minutes]                 (default: 1)
+      /resume
       /config get
       /config set <key> <value>
-      /emergency  (flatten positions & cancel orders)
-      /panic      (alias)
+
+    Startup behavior:
+      - Deletes webhook (prevents 409 conflicts)
+      - Optionally sets bot command menu
+      - Can auto-latch first chat ID if not provided (toggle via env/arg)
     """
 
-    def __init__(self, bot_token: str, chat_id: Optional[int] = None) -> None:
-        self.bot_token = (bot_token or "").strip()
-        self.chat_id = int(chat_id or 0)
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
 
-        self._application: Optional[Application] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+    def __init__(
+        self,
+        status_callback: Callable[[], Dict[str, Any]],
+        control_callback: Callable[[str, str], bool],
+        summary_callback: Callable[[], str],
+        *,
+        bot_token: Optional[str] = None,
+        chat_id: Optional[int | str] = None,
+        latch_first_chat: Optional[bool] = None,
+        poll_timeout_sec: Optional[int] = None,
+        min_send_gap_sec: Optional[float] = None,
+    ) -> None:
+        self.status_callback = status_callback
+        self.control_callback = control_callback
+        self.summary_callback = summary_callback
+
+        # Allow wiring either directly or via settings/env
+        if bot_token is None or chat_id is None:
+            # Try pydantic settings first
+            try:
+                from src.config import settings  # pydantic v2 settings
+                bot_token = bot_token or getattr(getattr(settings, "telegram", object()), "bot_token", None)
+                chat_id = chat_id or getattr(getattr(settings, "telegram", object()), "chat_id", None)
+            except Exception:
+                pass
+        # Finally, env fallback
+        bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+        if not bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN not provided (arg/settings/env).")
+        self.bot_token: str = bot_token
+
+        # Auto-latch toggle: default False unless explicitly enabled via env/arg
+        if latch_first_chat is None:
+            latch_first_chat = _bool_env(os.getenv("TELEGRAM_LATCH_FIRST_CHAT"), False)
+        self._latch_first_chat: bool = bool(latch_first_chat)
+
+        self.chat_id: str | int | None = None
+        if str(chat_id).strip():
+            try:
+                self.chat_id = int(str(chat_id).strip())
+            except Exception:
+                self.chat_id = str(chat_id).strip()
+
+        # Networking/polling config
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self._timeout_s: int = int(poll_timeout_sec or int(os.getenv("TELEGRAM_POLL_TIMEOUT", "30")))
+        self._request_timeout_s: int = self._timeout_s + 5
+        self._min_send_gap_s: float = float(min_send_gap_sec or float(os.getenv("TELEGRAM_MIN_SEND_GAP_SEC", "0.4")))
+
+        # Poll state
+        self.polling = False
+        self._offset: Optional[int] = None
+        self._stop_evt = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # Optional context set by runner
-        self._session = None          # TradingSession
-        self._executor = None         # OrderExecutor
-        self._health_getter: Optional[Callable[[], Dict[str, Any]]] = None
+        # Rate-limit on sends
+        self._last_send_ts: float = 0.0
 
-        # Config bridges (wired by StrategyRunner)
+        # Optional config bridges
         self._config_getter: Optional[Callable[[], Dict[str, Any]]] = None
         self._config_setter: Optional[Callable[[str, str], str]] = None
 
-    # ---------------- public lifecycle ----------------
+        logger.info("TelegramController initialized (latch_first_chat=%s).", self._latch_first_chat)
 
-    def set_context(
+    def set_config_bridges(
         self,
-        session=None,
-        executor=None,
-        health_getter: Optional[Callable[[], Dict[str, Any]]] = None,
+        getter: Optional[Callable[[], Dict[str, Any]]] = None,
+        setter: Optional[Callable[[str, str], str]] = None,
     ) -> None:
-        self._session = session
-        self._executor = executor
-        self._health_getter = health_getter
+        self._config_getter = getter
+        self._config_setter = setter
 
-    def start(self) -> None:
-        if not self.bot_token:
-            logger.warning("TelegramController: missing bot token; not starting.")
-            return
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run_polling, name="tg-bot", daemon=True)
-        self._thread.start()
-        logger.info("Telegram bot started.")
+    # ------------------------------------------------------------------ #
+    # HTTP helpers
+    # ------------------------------------------------------------------ #
 
-    def stop(self) -> None:
-        """Stop polling gracefully from any thread."""
-        app = self._application
-        loop = self._loop
-        if app and loop and loop.is_running():
+    def _post(self, method: str, payload: Dict[str, Any], *, json_mode: bool = True) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/{method}"
+        tries = 3
+        backoff = 0.9
+        last_exc = None
+        for i in range(tries):
             try:
-                fut = asyncio.run_coroutine_threadsafe(app.stop(), loop)
-                fut.result(timeout=5.0)
-            except Exception as e:
-                logger.debug("telegram stop() scheduling failed: %s", e)
-        if self._thread and self._thread.is_alive():
-            try:
-                self._thread.join(timeout=5.0)
-            except Exception:
-                pass
+                resp = requests.post(url, json=payload, timeout=self._request_timeout_s) if json_mode \
+                    else requests.post(url, data=payload, timeout=self._request_timeout_s)
 
-    # ---------------- messaging (thread-safe) ----------------
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        return data
+                    logger.error("Telegram API error (%s): %s", method, data)
+                    return None
+
+                if resp.status_code == 409:
+                    # Another poller/webhook active: stop gracefully
+                    logger.error("Telegram 409 conflict on %s. Stopping polling.", method)
+                    self.stop_polling()
+                    return None
+
+                logger.warning("Telegram POST %s failed (%s): %s", method, resp.status_code, resp.text[:180])
+            except Exception as exc:
+                last_exc = exc
+                logger.debug("Telegram POST %s error (attempt %d): %s", method, i + 1, exc)
+            time.sleep(backoff * (2**i))
+        if last_exc:
+            logger.error("Telegram POST %s failed after retries: %s", method, last_exc)
+        return None
+
+    def _get(self, method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        url = f"{self.base_url}/{method}"
+        tries = 3
+        backoff = 0.9
+        last_exc = None
+        for i in range(tries):
+            try:
+                resp = requests.get(url, params=params, timeout=self._request_timeout_s)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        return data
+                    logger.error("Telegram API error (%s): %s", method, data)
+                    return None
+
+                if resp.status_code == 409:
+                    logger.error("Telegram 409 conflict on %s. Stopping polling.", method)
+                    self.stop_polling()
+                    return None
+
+                logger.warning("Telegram GET %s failed (%s): %s", method, resp.status_code, resp.text[:180])
+            except Exception as exc:
+                last_exc = exc
+                logger.debug("Telegram GET %s error (attempt %d): %s", method, i + 1, exc)
+            time.sleep(backoff * (2**i))
+        if last_exc:
+            logger.error("Telegram GET %s failed after retries: %s", method, last_exc)
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Sending helpers
+    # ------------------------------------------------------------------ #
+
+    def _throttle(self) -> None:
+        now = time.time()
+        gap = now - self._last_send_ts
+        if gap < self._min_send_gap_s:
+            time.sleep(self._min_send_gap_s - gap)
+        self._last_send_ts = time.time()
+
+    def _send_message(
+        self,
+        text: str,
+        parse_mode: Optional[str] = None,
+        disable_web_page_preview: bool = True,
+        chat_id: Optional[int | str] = None,
+    ) -> bool:
+        if not text:
+            return False
+        target = chat_id or self.chat_id
+        if not target:
+            return False
+        self._throttle()
+        payload: Dict[str, Any] = {
+            "chat_id": target,
+            "text": text,
+            "disable_notification": False,
+            "disable_web_page_preview": disable_web_page_preview,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        data = self._post("sendMessage", payload)
+        return bool(data and data.get("ok"))
 
     def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
-        """
-        Thread-safe send. Returns False if bot not yet running or first chat not latched.
-        """
-        app = self._application
-        loop = self._loop
-        if not app or not loop or not loop.is_running() or not self.chat_id:
-            return False
-        try:
-            fut = asyncio.run_coroutine_threadsafe(
-                app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=text,
-                    parse_mode=parse_mode or ParseMode.HTML,
-                ),
-                loop,
-            )
-            fut.result(timeout=5.0)
-            return True
-        except Exception as e:
-            logger.warning("Telegram send failed: %s", e)
-            return False
+        # default to HTML for formatted strings
+        return self._send_message(text, parse_mode=parse_mode or "HTML")
 
-    # ---------------- internals ----------------
-
-    def _run_polling(self) -> None:
-        try:
-            # Create a fresh loop in this thread
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            self._loop = asyncio.get_event_loop()
-
-            app = ApplicationBuilder().token(self.bot_token).build()
-            self._application = app
-
-            # Handlers
-            app.add_handler(CommandHandler("start", self._cmd_start))
-            app.add_handler(CommandHandler("status", self._cmd_status))
-            app.add_handler(CommandHandler("summary", self._cmd_summary))
-            app.add_handler(CommandHandler("health", self._cmd_health))
-            app.add_handler(CommandHandler("config", self._cmd_config, block=False))
-            app.add_handler(CommandHandler("emergency", self._cmd_emergency))
-            app.add_handler(CommandHandler("panic", self._cmd_emergency))  # alias
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
-
-            # ---- IMPORTANT: don't register signal handlers in a non-main thread ----
-            kwargs: Dict[str, Any] = {
-                "close_loop": False,
-                "drop_pending_updates": True,
-                "allowed_updates": Update.ALL_TYPES,
-            }
-            # PTB v20+ exposes 'stop_signals' on run_polling; use it if available
-            if "stop_signals" in inspect.signature(app.run_polling).parameters:
-                kwargs["stop_signals"] = None  # disables loop.add_signal_handler
-            # Run (non-blocking; loop stays open)
-            app.run_polling(**kwargs)
-
-        except Exception as e:
-            logger.error("Telegram polling error: %s", e, exc_info=True)
-
-    # ---------------- auth / helpers ----------------
-
-    def _authorized(self, update: Update) -> bool:
-        if not self.chat_id:
-            # First contact: latch to this chat for safety
-            try:
-                self.chat_id = update.effective_chat.id  # type: ignore[assignment]
-                logger.info("TelegramController: latched chat_id=%s", self.chat_id)
-                return True
-            except Exception:
-                return False
-        return bool(update.effective_chat and update.effective_chat.id == self.chat_id)
-
-    async def _reply(self, update: Update, text: str) -> None:
-        if not self._authorized(update):
-            return
-        try:
-            await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML)  # type: ignore[union-attr]
-        except Exception as e:
-            logger.debug("Telegram reply failed: %s", e)
+    # ------------------------------------------------------------------ #
+    # Formatting helpers
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _fmt_json(obj: Any, limit: int = 3500) -> str:
-        s = json.dumps(obj, indent=2, default=str)
-        return s if len(s) <= limit else s[:limit] + "\n… (truncated)"
+    def _fmt_uptime(seconds: Optional[float]) -> str:
+        if not seconds or seconds <= 0:
+            return "—"
+        s = int(seconds)
+        h, r = divmod(s, 3600)
+        m, _ = divmod(r, 60)
+        return f"{h}h {m}m" if h else f"{m}m"
 
-    # ---------------- command handlers ----------------
+    def _format_status(self, status: Any) -> Tuple[str, str]:
+        """Returns (text, parse_mode)."""
+        if isinstance(status, str):
+            return f"📊 Status:\n{html.escape(status)}", "HTML"
 
-    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
-        if not self._authorized(update):
-            return
-        await self._reply(update, "🤖 Bot online.\nUse /status, /summary, /health, /config get, /config set <k> <v>, /emergency")
+        is_trading = bool(status.get("is_trading", False))
+        live_mode = bool(status.get("live_mode", False))
 
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
-        if not self._authorized(update):
-            return
-        s = self._session
-        ex = self._executor
-        if not s:
-            await self._reply(update, "No session context.")
-            return
-        lines = [
-            "<b>Status</b>",
-            f"Equity: <code>{getattr(s, 'equity', 0.0):.2f}</code>",
-            f"PnL (today): <code>{getattr(s, 'daily_pnl', 0.0):.2f}</code>",
-            f"Trades (today): <code>{getattr(s, 'trades_today', 0)}</code>",
-            f"Consec losses: <code>{getattr(s, 'consecutive_losses', 0)}</code>",
-        ]
-        if ex and callable(getattr(ex, "get_active_orders", None)):
-            active = ex.get_active_orders()
-            lines.append(f"Open orders: <code>{len(active)}</code>")
-            for r in active[:5]:
-                lines.append(f"• {r.transaction_type} {r.symbol} qty={r.qty} SL={r.hard_stop_price}")
-        await self._reply(update, "\n".join(lines))
-
-    async def _cmd_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
-        if not self._authorized(update):
-            return
-        s = self._session
-        hist = getattr(s, "trade_history", None) if s else None
-        if not hist:
-            await self._reply(update, "No closed trades yet.")
-            return
-        last = hist[-5:]
-        lines = ["<b>Recent trades</b>"]
-        for t in last:
-            pnl = getattr(t, "pnl", 0.0)
-            lines.append(f"• {t.side} {t.symbol} qty={t.qty} @ {t.entry_price:.2f} → {t.exit_price:.2f}  PnL=<code>{pnl:.2f}</code>")
-        await self._reply(update, "\n".join(lines))
-
-    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
-        if not self._authorized(update):
-            return
-        if self._health_getter:
-            try:
-                h = self._health_getter()
-            except Exception as e:
-                await self._reply(update, f"health error: <code>{e}</code>")
-                return
-            await self._reply(update, self._fmt_json(h))
+        q_mode_raw = status.get("quality_mode", "AUTO")
+        q_auto = bool(status.get("quality_auto", False))
+        q_reason = status.get("quality_reason")
+        if isinstance(q_mode_raw, str):
+            q_mode_label = q_mode_raw.upper()
+        elif isinstance(q_mode_raw, bool):
+            q_mode_label = "ON" if q_mode_raw else "OFF"
         else:
-            await self._reply(update, '{"status":"unknown"}')
+            q_mode_label = "AUTO" if q_auto else "OFF"
 
-    async def _cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return
-        args = context.args or []
-        if not args:
-            await self._reply(update, "Usage:\n/config get\n/config set <key> <value>")
-            return
+        regime_mode = (status.get("regime_mode") or "AUTO")
+        regime_reason = status.get("regime_reason")
 
-        sub = args[0].lower()
-        if sub == "get":
-            getter = self._config_getter
-            if not getter:
-                await self._reply(update, "Config getter not wired.")
-                return
-            cfg = getter()
-            await self._reply(update, self._fmt_json(cfg))
-            return
+        open_positions = int(status.get("open_positions", status.get("open_orders", 0)) or 0)
+        trades_today = int(status.get("trades_today", status.get("closed_today", 0)) or 0)
+        daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
+        acct = status.get("account_size")
+        sess = status.get("session_date")
+        uptime = self._fmt_uptime(float(status.get("uptime_sec", 0.0) or 0.0))
 
-        if sub == "set":
-            if len(args) < 3:
-                await self._reply(update, "Usage: /config set <key> <value>")
-                return
-            key = args[1]
-            val = " ".join(args[2:])
-            setter = self._config_setter
-            if not setter:
-                await self._reply(update, "Config setter not wired.")
-                return
-            try:
-                msg = setter(key, val)
-            except Exception as e:
-                msg = f"error: {e}"
-            await self._reply(update, f"<code>{msg}</code>")
-            return
+        lines = [
+            "📊 <b>Bot Status</b>",
+            f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
+            f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
+            f"✨ <b>Quality:</b> {html.escape(q_mode_label)}" + (f" <i>({html.escape(q_reason)})</i>" if q_reason else ""),
+            f"🧭 <b>Regime:</b> {html.escape(str(regime_mode))}" + (f" <i>({html.escape(str(regime_reason))})</i>" if regime_reason else ""),
+            f"📦 <b>Open Positions:</b> {open_positions}",
+            f"📈 <b>Closed Today:</b> {trades_today}",
+            f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
+        ]
+        if acct is not None:
+            lines.append(f"🏦 <b>Acct Size:</b> ₹{html.escape(str(acct))}")
+        if sess is not None:
+            lines.append(f"📅 <b>Session:</b> {html.escape(str(sess))}")
+        if uptime != "—":
+            lines.append(f"⏱️ <b>Uptime:</b> {uptime}")
+        return "\n".join(lines), "HTML"
 
-        await self._reply(update, "Usage:\n/config get\n/config set <key> <value>")
+    def _send_status(self, status: Any) -> None:
+        txt, mode = self._format_status(status)
+        self._send_message(txt, parse_mode=mode)
 
-    async def _cmd_emergency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: ARG002
-        if not self._authorized(update):
-            return
-        ex = self._executor
-        s = self._session
-        if not ex:
-            await self._reply(update, "No executor context.")
-            return
+    def _send_summary(self, summary: str) -> None:
+        self._send_message(summary, parse_mode="HTML")
 
+    # ------------------------------------------------------------------ #
+    # Command parsing/router
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _parse_command_and_arg(text: str) -> Tuple[str, str]:
+        t = (text or "").strip()
+        if not t.startswith("/"):
+            return "", ""
+        body = t[1:].strip()
+        if not body:
+            return "", ""
+        parts = body.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+        return cmd, arg
+
+    @staticmethod
+    def _normalize_risk_arg(arg: str) -> str:
+        """
+        Accepts '0.5' or '0.5%' or '1' (=> 1%). Returns normalized percent string.
+        """
+        a = (arg or "").strip().replace("%", "")
         try:
-            # Flatten: best-effort using executor’s market exit + cancel pending legs
-            active = list(getattr(ex, "get_active_orders", lambda: [])())
-            for r in active:
-                try:
-                    ex.exit_order(r.order_id, exit_reason="emergency")
-                except Exception:
-                    pass
-            try:
-                ex.cancel_all_orders()
-            except Exception:
-                pass
+            val = float(a)
+            if val > 1.5:  # user probably meant percent, not fraction
+                val = val / 100.0
+            return f"{val:.4f}"
+        except Exception:
+            return ""
 
-            if s and callable(getattr(s, "flatten_all", None)):
-                price_fn = lambda sym: ex.get_last_price(sym)
-                s.flatten_all(price_fn)
+    def _handle_command(self, message: Dict[str, Any]) -> None:
+        text = (message.get("text") or "").strip()
+        chat = message.get("chat") or {}
+        cid = chat.get("id")
 
-            await self._reply(update, "❗ Emergency flatten executed.")
-        except Exception as e:
-            logger.error("Emergency handler failed: %s", e, exc_info=True)
-            await self._reply(update, f"Emergency failed: <code>{e}</code>")
+        # latch first chat if enabled and not set
+        if not self.chat_id and self._latch_first_chat and cid:
+            self.chat_id = cid
+            logger.info("Telegram latched chat_id=%s", cid)
 
-    async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        # Allow quick "config set k v" style without slash
-        if not self._authorized(update):
+        # Enforce chat_id if configured
+        if self.chat_id and cid and str(cid) != str(self.chat_id):
+            logger.info("Telegram unauthorized chat: got %s expected %s", cid, self.chat_id)
             return
-        raw = update.message.text or ""
-        lower = raw.strip().lower()
-        if lower.startswith("config set "):
-            parts = raw.split(maxsplit=3)  # keep case/value
-            if len(parts) >= 4:
-                _, _, key, val = parts
-                setter = self._config_setter
-                if setter:
-                    try:
-                        msg = setter(key, val)
-                    except Exception as e:
-                        msg = f"error: {e}"
-                    await self._reply(update, f"<code>{msg}</code>")
+
+        cmd, arg = self._parse_command_and_arg(text)
+        if not cmd:
+            return
+
+        logger.info("📩 Telegram cmd: /%s %s", cmd, arg)
+
+        if cmd == "help":
+            self._send_message(
+                "🤖 <b>Commands</b>\n"
+                "/start – start trading\n"
+                "/stop – stop trading\n"
+                "/mode [live|shadow] – default <code>live</code>\n"
+                "/quality [auto|on|off] – default <code>auto</code>\n"
+                "/regime [auto|trend|range|off] – default <code>auto</code>\n"
+                "/risk &lt;pct&gt; – e.g. <code>/risk 0.5</code> (0.5%)\n"
+                "/pause [min] – default <code>1</code>\n"
+                "/resume – resume entries\n"
+                "/status – bot status\n"
+                "/summary – daily summary\n"
+                "/refresh – refresh state\n"
+                "/health – system health\n"
+                "/id – show chat id\n"
+                "/ping – latency check\n"
+                "/config get | /config set &lt;k&gt; &lt;v&gt;\n"
+                "/emergency – cancel orders & flatten (best-effort).",
+                parse_mode="HTML",
+            )
+            return
+
+        if cmd == "ping":
+            self._send_message("pong")
+            return
+
+        if cmd == "id":
+            self._send_message(f"chat_id: <code>{cid}</code>", parse_mode="HTML")
+            return
+
+        if cmd == "status":
+            try:
+                status = self.status_callback()
+                self._send_status(status)
+            except Exception as e:
+                logger.error("/status error: %s", e, exc_info=True)
+                self._send_message("⚠️ Failed to fetch status.")
+            return
+
+        if cmd == "summary":
+            try:
+                summary = self.summary_callback()
+                self._send_summary(summary)
+            except Exception as e:
+                logger.error("/summary error: %s", e, exc_info=True)
+                self._send_message("⚠️ Failed to fetch summary.")
+            return
+
+        if cmd == "mode":
+            mode_arg = (arg.lower() if arg else "live")
+            if mode_arg not in {"live", "shadow"}:
+                self._send_message("⚠️ Usage: /mode [live|shadow]. Default is <code>live</code>.", parse_mode="HTML")
+                return
+            ok = self.control_callback("mode", mode_arg)
+            self._send_message("✅ Mode set to <b>%s</b>." % mode_arg.upper() if ok else "⚠️ Failed to change mode.", parse_mode="HTML")
+            return
+
+        if cmd == "quality":
+            q_arg = (arg.lower() if arg else "auto")
+            if q_arg not in {"auto", "on", "off"}:
+                self._send_message("⚠️ Usage: /quality [auto|on|off]. Default is <code>auto</code>.", parse_mode="HTML")
+                return
+            ok = self.control_callback("quality", q_arg)
+            self._send_message("✅ Quality set to <b>%s</b>." % q_arg.upper() if ok else "⚠️ Failed to set quality.", parse_mode="HTML")
+            return
+
+        if cmd == "regime":
+            r_arg = (arg.lower() if arg else "auto")
+            if r_arg not in {"auto", "trend", "range", "off"}:
+                self._send_message("⚠️ Usage: /regime [auto|trend|range|off]. Default is <code>auto</code>.", parse_mode="HTML")
+                return
+            ok = self.control_callback("regime", r_arg)
+            self._send_message("✅ Regime set to <b>%s</b>." % r_arg.upper() if ok else "⚠️ Failed to set regime.", parse_mode="HTML")
+            return
+
+        if cmd == "risk":
+            norm = self._normalize_risk_arg(arg)
+            ok = bool(norm) and self.control_callback("risk", norm)
+            self._send_message(f"✅ Risk per trade set to <b>{norm}%</b>." if ok else "⚠️ Usage: /risk 0.5", parse_mode="HTML")
+            return
+
+        if cmd == "pause":
+            mins = 1
+            if arg:
+                try:
+                    mins = max(1, int(float(arg)))
+                except Exception:
+                    mins = 1
+            ok = self.control_callback("pause", str(mins))
+            self._send_message(f"⏸️ Paused entries for <b>{mins} min</b>." if ok else "⚠️ Failed to pause.", parse_mode="HTML")
+            return
+
+        if cmd == "resume":
+            ok = self.control_callback("resume", "")
+            self._send_message("▶️ Resumed entries." if ok else "⚠️ Failed to resume.", parse_mode="HTML")
+            return
+
+        if cmd == "config":
+            parts = (arg or "").split()
+            if len(parts) == 0:
+                self._send_message("Usage:\n/config get\n/config set <key> <value>")
+                return
+            sub = parts[0].lower()
+            if sub == "get":
+                if not self._config_getter:
+                    self._send_message("Config getter not wired.")
                     return
-        await self._reply(update, "Unknown. Try: /status /summary /health /config get /config set <k> <v> /emergency /panic")
+                try:
+                    cfg = self._config_getter()
+                except Exception as e:
+                    self._send_message(f"error: {e}")
+                    return
+                text = json.dumps(cfg, indent=2, default=str)
+                self._send_message(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+                return
+            if sub == "set":
+                if not self._config_setter:
+                    self._send_message("Config setter not wired.")
+                    return
+                if len(parts) < 3:
+                    self._send_message("Usage: /config set <key> <value>")
+                    return
+                key, value = parts[1], " ".join(parts[2:])
+                try:
+                    msg = self._config_setter(key, value)
+                except Exception as e:
+                    msg = f"error: {e}"
+                self._send_message(f"<code>{html.escape(str(msg))}</code>", parse_mode="HTML")
+                return
+            self._send_message("Usage:\n/config get\n/config set <key> <value>")
+            return
+
+        if cmd in {"start", "stop", "refresh", "health", "emergency"}:
+            ok = self.control_callback(cmd, "")
+            if not ok:
+                self._send_message(f"⚠️ Command '/{cmd}' failed.")
+            return
+
+        self._send_message("❌ Unknown command. Try <code>/help</code>.", parse_mode="HTML")
+
+    # ------------------------------------------------------------------ #
+    # Polling lifecycle
+    # ------------------------------------------------------------------ #
+
+    def _delete_webhook(self) -> None:
+        self._post("deleteWebhook", {})
+
+    def _set_my_commands(self) -> None:
+        commands: List[Dict[str, str]] = [
+            {"command": "status", "description": "Bot status"},
+            {"command": "summary", "description": "Recent trades summary"},
+            {"command": "mode", "description": "Mode: live | shadow"},
+            {"command": "quality", "description": "Quality: auto | on | off"},
+            {"command": "regime", "description": "Regime: auto | trend | range | off"},
+            {"command": "risk", "description": "Risk per trade (e.g. 0.5)"},
+            {"command": "pause", "description": "Pause entries (minutes)"},
+            {"command": "resume", "description": "Resume entries"},
+            {"command": "refresh", "description": "Refresh state"},
+            {"command": "health", "description": "System health"},
+            {"command": "emergency", "description": "Flatten & cancel"},
+            {"command": "id", "description": "Show chat id"},
+            {"command": "ping", "description": "Ping"},
+            {"command": "help", "description": "Help"},
+            {"command": "config", "description": "Get/Set runtime config"},
+        ]
+        self._post("setMyCommands", {"commands": commands})
+
+    def _poll_updates(self) -> None:
+        logger.info("📡 Telegram polling started. Awaiting commands...")
+        self._stop_evt.clear()
+        while self.polling and not self._stop_evt.is_set():
+            try:
+                params: Dict[str, Any] = {"timeout": self._timeout_s}
+                if self._offset is not None:
+                    params["offset"] = self._offset
+                data = self._get("getUpdates", params)
+                if not data:
+                    continue
+                for item in data.get("result", []):
+                    self._offset = int(item["update_id"]) + 1
+                    message = item.get("message") or item.get("edited_message") or {}
+                    if not message or not (message.get("text") or "").startswith("/"):
+                        # Allow auto-latch even if text isn't a command
+                        if self._latch_first_chat and not self.chat_id and message.get("chat", {}).get("id"):
+                            self.chat_id = message["chat"]["id"]
+                            logger.info("Telegram latched chat_id=%s (non-command message).", self.chat_id)
+                        continue
+                    self._handle_command(message)
+            except requests.exceptions.ReadTimeout:
+                logger.debug("Telegram polling timeout — continuing…")
+            except Exception as exc:
+                logger.error("Error in Telegram polling: %s", exc, exc_info=True)
+                time.sleep(3.0)
+        logger.info("🛑 Telegram polling stopped.")
+
+    def start_polling(self) -> None:
+        if self.polling:
+            logger.warning("Polling already active.")
+            return
+        # Clean webhook to avoid 409 conflicts
+        self._delete_webhook()
+        # Expose commands in Telegram UI
+        self._set_my_commands()
+
+        self.polling = True
+        self._thread = threading.Thread(target=self._poll_updates, name="TelegramPolling", daemon=True)
+        self._thread.start()
+        logger.info("Telegram polling thread started.")
+
+        # Optional startup ping if chat is known
+        if self.chat_id:
+            self._send_message(
+                "🟢 <b>Nifty Scalper Bot</b> online.\nUse /status, /summary, /health, /config get, /config set <k> <v>, /emergency",
+                parse_mode="HTML",
+            )
+
+    def stop_polling(self) -> None:
+        if not self.polling:
+            return
+        logger.info("🛑 Stopping Telegram polling…")
+        self.polling = False
+        self._stop_evt.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self._thread = None
