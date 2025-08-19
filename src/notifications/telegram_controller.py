@@ -1,6 +1,8 @@
+# src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -30,18 +32,11 @@ class TelegramController:
       - send_message(text) -> thread-safe outbound
 
     Commands:
-      /start
-      /status
-      /summary
-      /health
+      /start /status /summary /health
       /config get
       /config set <key> <value>
       /emergency  (flatten positions & cancel orders)
-      /panic      (alias for /emergency)
-
-    Context wiring:
-      call set_context(session=..., executor=..., health_getter=callable)
-      StrategyRunner sets _config_getter/_config_setter bridges.
+      /panic      (alias)
     """
 
     def __init__(self, bot_token: str, chat_id: Optional[int] = None) -> None:
@@ -89,12 +84,10 @@ class TelegramController:
         loop = self._loop
         if app and loop and loop.is_running():
             try:
-                # Stop polling and close all connections cleanly
                 fut = asyncio.run_coroutine_threadsafe(app.stop(), loop)
                 fut.result(timeout=5.0)
             except Exception as e:
                 logger.debug("telegram stop() scheduling failed: %s", e)
-        # Optional: wait a bit for the thread to end
         if self._thread and self._thread.is_alive():
             try:
                 self._thread.join(timeout=5.0)
@@ -145,16 +138,20 @@ class TelegramController:
             app.add_handler(CommandHandler("config", self._cmd_config, block=False))
             app.add_handler(CommandHandler("emergency", self._cmd_emergency))
             app.add_handler(CommandHandler("panic", self._cmd_emergency))  # alias
-
-            # Fallback: treat plain text as "config set k v" or help
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
-            # Run (non-blocking loop kept open by close_loop=False)
-            app.run_polling(
-                close_loop=False,
-                drop_pending_updates=True,  # avoid backlog on restart
-                allowed_updates=Update.ALL_TYPES,
-            )
+            # ---- IMPORTANT: don't register signal handlers in a non-main thread ----
+            kwargs: Dict[str, Any] = {
+                "close_loop": False,
+                "drop_pending_updates": True,
+                "allowed_updates": Update.ALL_TYPES,
+            }
+            # PTB v20+ exposes 'stop_signals' on run_polling; use it if available
+            if "stop_signals" in inspect.signature(app.run_polling).parameters:
+                kwargs["stop_signals"] = None  # disables loop.add_signal_handler
+            # Run (non-blocking; loop stays open)
+            app.run_polling(**kwargs)
+
         except Exception as e:
             logger.error("Telegram polling error: %s", e, exc_info=True)
 
@@ -300,9 +297,8 @@ class TelegramController:
             except Exception:
                 pass
 
-            # If session supports full flatten, use a price_fn that doesn't capture 'r'
             if s and callable(getattr(s, "flatten_all", None)):
-                price_fn = lambda sym: ex.get_last_price(sym)  # exchange auto-resolved by executor
+                price_fn = lambda sym: ex.get_last_price(sym)
                 s.flatten_all(price_fn)
 
             await self._reply(update, "❗ Emergency flatten executed.")
