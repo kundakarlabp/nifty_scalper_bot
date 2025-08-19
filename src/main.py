@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 from threading import Event, Thread
@@ -66,7 +67,7 @@ class Application:
                 bot_token=self.settings.telegram.bot_token,
                 chat_id=self.settings.telegram.chat_id,
             )
-            # Runner will wire config get/set; we wire session/executor & health now
+            # Runner wires config get/set; we wire session/executor & health now
             self.telegram.set_context(
                 session=self.session,
                 executor=self.executor,
@@ -92,6 +93,9 @@ class Application:
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
 
+        # Set default TZ to IST if not provided (keeps trading-hours gate correct on Railway)
+        os.environ.setdefault("TZ", "Asia/Kolkata")
+
         # Health server (binds $PORT if provided)
         self._health_thread = Thread(target=run_health_server, args=(self.get_health,), daemon=True)
         self._health_thread.start()
@@ -104,7 +108,7 @@ class Application:
         self._runner_thread = Thread(target=self.runner.start, name="runner", daemon=True)
         self._runner_thread.start()
 
-        logger.info("Application started. Live mode: %s", self.settings.enable_live_trading)
+        logger.info("Application started. Live mode: %s, TZ=%s", self.settings.enable_live_trading, os.getenv("TZ"))
         self._stop_event.wait()
         logger.info("Application exiting.")
 
