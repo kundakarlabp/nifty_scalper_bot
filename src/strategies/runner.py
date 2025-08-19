@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Signal:
-    side: Optional[str]          # "UP" or "DOWN" or None
+    side: Optional[str]
     score: float
     atr: float
     confidence: float
@@ -50,7 +50,7 @@ class StrategyRunner:
 
         self._cache: Dict[str, Any] = {"NFO": [], "NSE": []}
         self._cache_ts: float = 0.0
-        self._cache_ttl_sec: int = 300  # 5 min
+        self._cache_ttl_sec: int = 300
 
         self._opt_sl_pct: float = float(os.getenv("OPTION_SL_PERCENT", "0.06"))
         self._opt_tp_pct: float = float(os.getenv("OPTION_TP_PERCENT", "0.20"))
@@ -75,7 +75,7 @@ class StrategyRunner:
             logger.error("Runner requires LiveKiteSource with kite client.")
             return
 
-        logger.info("Runner started. Live: %s TZ=%s", settings.enable_live_trading, os.getenv("TZ", "unset"))
+        logger.info("Runner started. Live:%s TZ=%s", settings.enable_live_trading, os.getenv("TZ", "unset"))
 
         while self._running:
             try:
@@ -84,13 +84,14 @@ class StrategyRunner:
 
                 self._maybe_refresh_instruments(kite)
 
+                strike_range = getattr(settings.strategy, "strike_selection_range", 3)
                 tokens = sel.get_instrument_tokens(
                     symbol=settings.executor.trade_symbol,
                     kite_instance=kite,
                     cached_nfo_instruments=self._cache["NFO"],
                     cached_nse_instruments=self._cache["NSE"],
                     offset=0,
-                    strike_range=settings.strategy.strike_selection_range,
+                    strike_range=int(strike_range),
                 )
                 if not tokens or not tokens.get("spot_token"):
                     time.sleep(self._sleep_sec); continue
@@ -116,8 +117,9 @@ class StrategyRunner:
                 if not opt_sym:
                     self._housekeeping(); time.sleep(self._sleep_sec); continue
 
-                lot_size = int(settings.executor.nifty_lot_size)
+                lot_size = int(settings.executor.nifty_lot_size)  # set 75 in env/config
                 qty = self.sizer.size_for_account(self.session, lot_size)
+                qty = max(lot_size, (qty // lot_size) * lot_size)
                 if qty <= 0:
                     self._housekeeping(); time.sleep(self._sleep_sec); continue
 
@@ -167,7 +169,7 @@ class StrategyRunner:
     def stop(self) -> None:
         self._running = False
 
-    # ------------- internals -------------
+    # ----- internals -----
 
     def _is_ok_to_trade_now(self) -> bool:
         if settings.allow_offhours_testing:
@@ -190,12 +192,10 @@ class StrategyRunner:
                 res = self.strategy.compute_signal(df)
             else:
                 return None
-
             side = res.get("side") or res.get("direction")
             if isinstance(side, str):
                 s = side.upper()
                 side = "UP" if s in ("BUY", "LONG", "UP") else ("DOWN" if s in ("SELL", "SHORT", "DOWN") else None)
-
             score = float(res.get("score", 0.0))
             confidence = float(res.get("confidence", 0.0))
             atr = float(res.get("atr", 0.0))
@@ -217,7 +217,7 @@ class StrategyRunner:
                 self.exec.update_trailing_stop(rec.order_id, current_price=ltp, atr=atr_proxy, trail_mult=0.6)
         self.exec.manage_partials()
 
-    # ------------- Telegram /config -------------
+    # ----- Telegram /config -----
 
     def _config_get(self) -> Dict[str, Any]:
         ex = self.exec
