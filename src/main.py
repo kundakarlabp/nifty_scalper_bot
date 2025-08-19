@@ -8,11 +8,6 @@ import sys
 from threading import Event, Thread
 from typing import Dict, Any
 
-try:
-    from kiteconnect import KiteConnect  # type: ignore
-except Exception:
-    KiteConnect = None  # type: ignore
-
 from src.config import settings
 from src.data.source import LiveKiteSource
 from src.execution.order_executor import OrderExecutor
@@ -22,6 +17,7 @@ from src.risk.session import TradingSession
 from src.server.health import run as run_health_server
 from src.strategies.runner import StrategyRunner
 from src.utils import strike_selector as sel
+from src.utils.kite_auth import build_kite_from_env
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 
 _LOG_LEVEL = getattr(logging, str(settings.log_level).upper(), logging.INFO)
@@ -34,19 +30,13 @@ class Application:
         self._stop_event = Event()
         self.settings = settings
 
-        if KiteConnect is None:
-            logger.critical("kiteconnect not installed. pip install kiteconnect")
-            sys.exit(1)
+        os.environ.setdefault("TZ", "Asia/Kolkata")
 
+        # Build authenticated Kite client (validates token or auto-generates)
         try:
-            api_key = self.settings.api.zerodha_api_key
-            access_token = self.settings.api.zerodha_access_token
-            if not api_key or not access_token:
-                raise RuntimeError("ZERODHA_API_KEY / ZERODHA_ACCESS_TOKEN missing in environment")
-            self.kite = KiteConnect(api_key=api_key)
-            self.kite.set_access_token(access_token)
+            self.kite = build_kite_from_env()
         except Exception as e:
-            logger.critical("Kite init failed: %s", e, exc_info=True)
+            logger.critical("Kite init/auth failed: %s", e, exc_info=True)
             sys.exit(1)
 
         self.data_source = LiveKiteSource(self.kite)
@@ -78,7 +68,6 @@ class Application:
     def start(self) -> None:
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
-        os.environ.setdefault("TZ", "Asia/Kolkata")
 
         self._health_thread = Thread(target=run_health_server, args=(self.get_health,), daemon=True)
         self._health_thread.start()
