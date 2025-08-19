@@ -8,7 +8,6 @@ import sys
 from threading import Event, Thread
 from typing import Dict, Any
 
-# Optional import to avoid hard crash if kiteconnect not installed
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:
@@ -22,10 +21,8 @@ from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession
 from src.server.health import run as run_health_server
 from src.strategies.runner import StrategyRunner
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.utils.strike_selector import health_check as kite_health
+from src.utils import strike_selector as sel
 
-# Logging
 _LOG_LEVEL = getattr(logging, str(settings.log_level).upper(), logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -40,7 +37,6 @@ class Application:
             logger.critical("kiteconnect not installed. pip install kiteconnect")
             sys.exit(1)
 
-        # --- Broker client ---
         try:
             api_key = self.settings.api.zerodha_api_key
             access_token = self.settings.api.zerodha_access_token
@@ -53,28 +49,20 @@ class Application:
             logger.critical("Kite init failed: %s", e, exc_info=True)
             sys.exit(1)
 
-        # --- Core components ---
         self.data_source = LiveKiteSource(self.kite)
         self.strategy = EnhancedScalpingStrategy(self.settings.strategy)
         self.executor = OrderExecutor(self.settings.executor, self.kite)
         self.sizer = PositionSizer(self.settings.risk)
         self.session = TradingSession(self.settings.risk, self.settings.executor, starting_equity=100_000.0)
 
-        # --- Telegram (optional) ---
         self.telegram = None
         if self.settings.enable_telegram and self.settings.telegram.bot_token:
             self.telegram = TelegramController(
                 bot_token=self.settings.telegram.bot_token,
                 chat_id=self.settings.telegram.chat_id,
             )
-            # Runner wires config get/set; we wire session/executor & health now
-            self.telegram.set_context(
-                session=self.session,
-                executor=self.executor,
-                health_getter=self.get_health,
-            )
+            self.telegram.set_context(session=self.session, executor=self.executor, health_getter=self.get_health)
 
-        # --- Runner ---
         self.runner = StrategyRunner(
             data_source=self.data_source,
             strategy=self.strategy,
@@ -87,24 +75,18 @@ class Application:
         self._runner_thread: Thread | None = None
         self._health_thread: Thread | None = None
 
-    # ---------------- lifecycle ----------------
-
     def start(self) -> None:
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
 
-        # Set default TZ to IST if not provided (keeps trading-hours gate correct on Railway)
         os.environ.setdefault("TZ", "Asia/Kolkata")
 
-        # Health server (binds $PORT if provided)
         self._health_thread = Thread(target=run_health_server, args=(self.get_health,), daemon=True)
         self._health_thread.start()
 
-        # Telegram
         if self.telegram:
             self.telegram.start()
 
-        # Strategy runner loop (on a thread so signals can stop it)
         self._runner_thread = Thread(target=self.runner.start, name="runner", daemon=True)
         self._runner_thread.start()
 
@@ -129,17 +111,12 @@ class Application:
                 pass
             self._stop_event.set()
 
-    # ---------------- status / health ----------------
-
     def get_health(self) -> Dict[str, Any]:
-        """Aggregated health for /healthz and Telegram /health."""
-        base = {}
         try:
-            base = kite_health(self.kite)  # LTP + instruments check
+            base = sel.health_check(self.kite)
         except Exception as e:
             base = {"overall_status": "ERROR", "message": f"health_check failed: {e}", "checks": {}}
 
-        # augment with runner/session info
         base["runner"] = {
             "running": bool(self.runner and self.runner._running),
             "live_mode": bool(self.settings.enable_live_trading),
@@ -161,6 +138,9 @@ def main() -> None:
         print("Usage: python -m src.main start", file=sys.stderr)
         sys.exit(1)
 
+
+# Late import to avoid circular at module-top
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy  # noqa: E402
 
 if __name__ == "__main__":
     main()
