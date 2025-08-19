@@ -13,10 +13,9 @@ Design notes
 - NaNs and short histories are handled gracefully (returns None if insufficient).
 - No external TA libs required.
 """
-
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Iterable, Any, Literal
 import logging
 from datetime import datetime, timedelta
 
@@ -35,8 +34,7 @@ def _true_range_series(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.
     tr1 = (high - low).abs()
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr
+    return pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
 
 def _ema(s: pd.Series, period: int) -> pd.Series:
@@ -45,7 +43,6 @@ def _ema(s: pd.Series, period: int) -> pd.Series:
 
 def _rma_wilder(s: pd.Series, period: int) -> pd.Series:
     """Wilder's RMA (a.k.a. smoothed moving average) commonly used for ATR."""
-    # Start with SMA seed, then recursive smoothing
     sma = s.rolling(window=period, min_periods=period).mean()
     rma = sma.copy()
     alpha = 1.0 / period
@@ -71,9 +68,7 @@ def compute_atr_df(
     low_col: str = "low",
     close_col: str = "close",
 ) -> pd.Series:
-    """
-    Compute ATR for an OHLC DataFrame. Returns a pd.Series aligned to df.index.
-    """
+    """Compute ATR for an OHLC DataFrame. Returns a pd.Series aligned to df.index."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
@@ -88,7 +83,7 @@ def compute_atr_df(
 
     tr = _true_range_series(high, low, close)
 
-    m = method.lower()
+    m = (method or "rma").lower()
     if m == "ema":
         atr = _ema(tr, period)
     elif m == "sma":
@@ -106,13 +101,9 @@ def compute_atr_arrays(
     period: int = 14,
     method: ATRMethod = "rma",
 ) -> Optional[float]:
-    """
-    Fast path returning ONLY the latest ATR value from arrays/lists.
-    """
+    """Fast path returning ONLY the latest ATR value from arrays/lists."""
     try:
-        df = pd.DataFrame(
-            {"high": list(highs), "low": list(lows), "close": list(closes)}
-        )
+        df = pd.DataFrame({"high": list(highs), "low": list(lows), "close": list(closes)})
         atr = compute_atr_df(df, period=period, method=method)
         if atr.empty:
             return None
@@ -136,8 +127,6 @@ def incremental_wilder_update(
 
     newTR  = max(high - low, abs(high - prev_close), abs(low - prev_close))
     newATR = prev_atr + (newTR - prev_atr) / period
-
-    Returns newATR or None if inputs invalid.
     """
     try:
         if period <= 0:
@@ -162,9 +151,7 @@ def latest_atr_value(
     low_col: str = "low",
     close_col: str = "close",
 ) -> Optional[float]:
-    """
-    Convenience: compute ATR series and return the latest non-NaN value.
-    """
+    """Convenience: compute ATR series and return the latest non-NaN value."""
     s = compute_atr_df(
         df,
         period=period,
@@ -199,42 +186,35 @@ def get_realtime_atr(
       bars: number of recent bars to fetch (>= period+1 recommended)
       timeframe: 'minute'|'3minute'|'5minute'|'15minute'|'day' (as supported by Kite)
       include_partial: if True, includes the last (possibly forming) candle
-
-    Returns:
-      float or None
     """
     try:
         if not kite or not instrument_token:
             return None
 
         end = datetime.now()
-        # +10% buffer on lookback minutes for safety on gaps
         if timeframe == "minute":
-            start = end - timedelta(minutes=max(bars * 1.1, period * 2))
+            start = end - timedelta(minutes=max(int(bars * 1.1), period * 2))
         elif timeframe.endswith("minute"):
-            mult = int(timeframe.replace("minute", "")) if timeframe != "minute" else 1
-            start = end - timedelta(minutes=int(max(bars * mult * 1.1, period * mult * 2)))
+            mult = int(timeframe.replace("minute", ""))  # e.g., '3minute' -> 3
+            start = end - timedelta(minutes=max(int(bars * mult * 1.1), period * mult * 2))
         elif timeframe == "day":
             start = end - timedelta(days=max(int(bars * 1.1), period * 2))
         else:
-            # default fallback
             start = end - timedelta(minutes=max(bars, period) * 2)
 
-        candles = kite.historical_data(
-            instrument_token, start, end, timeframe, oi=False
-        ) or []
+        candles = kite.historical_data(instrument_token, start, end, timeframe, oi=False) or []
         if not candles:
             return None
+
         df = pd.DataFrame(candles)
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
             df.set_index("date", inplace=True)
 
-        cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
-        if len(cols) < 3:
+        # ensure required columns exist
+        if not set(("high", "low", "close")).issubset(df.columns):
             return None
 
-        # Optionally drop the last partial bar
         if not include_partial and len(df) >= 2:
             df = df.iloc[:-1]
 
