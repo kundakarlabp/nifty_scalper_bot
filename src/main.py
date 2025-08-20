@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from src.config import settings
@@ -19,27 +20,21 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+# Optional import of KiteConnect
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
 
-def _load_data_source() -> Optional[Any]:
-    try:
-        from src.data.source import LiveKiteSource  # type: ignore
-        return LiveKiteSource()
-    except Exception:
-        pass
-    try:
-        from src.data.live import LiveKiteSource  # type: ignore
-        return LiveKiteSource()
-    except Exception:
-        pass
-    return None
+def _now_ist_naive() -> datetime:
+    """Naive IST timestamp for convenience."""
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.replace(tzinfo=None)
 
 
 def _build_kite() -> Optional[Any]:
+    """Create a KiteConnect if creds exist; else return None."""
     if KiteConnect is None:
         log.warning("kiteconnect not installed; running without live feed.")
         return None
@@ -57,6 +52,25 @@ def _build_kite() -> Optional[Any]:
         return None
 
 
+def _load_data_source(kite: Optional[Any]) -> Optional[Any]:
+    """
+    Use your concrete LiveKiteSource from src.data.source (requires connect()).
+    """
+    try:
+        from src.data.source import LiveKiteSource  # type: ignore
+    except Exception:
+        log.warning("LiveKiteSource not found; data source unavailable.")
+        return None
+
+    try:
+        ds = LiveKiteSource(kite=kite) if kite is not None else LiveKiteSource(kite=None)  # type: ignore[arg-type]
+        ds.connect()  # may raise; we treat failure as 'no live data'
+        return ds
+    except Exception as e:
+        log.warning("Data source connect failed: %s", e)
+        return None
+
+
 class Application:
     """
     Orchestrator: health server + StrategyRunner loop + Telegram control.
@@ -67,16 +81,16 @@ class Application:
         self.settings = settings
         self.live_trading = bool(self.settings.enable_live_trading)  # LIVE vs SHADOW
         self.quality = "AUTO"   # AUTO | CONSERVATIVE | AGGRESSIVE
-        self.regime = "auto"    # placeholder (hook your regime detector if you have one)
+        self.regime = "auto"    # placeholder (wire your detector if you have one)
 
         self._started_ts = time.time()
         self._shutdown = False
 
-        # Dependencies (optional)
+        # Dependencies
         self.kite = _build_kite()
-        self.data_source = _load_data_source()
+        self.data_source = _load_data_source(self.kite)
         if self.data_source is None:
-            log.warning("Data source not available (no Kite or module missing). Running without live feed.")
+            log.warning("Data source not available. Running without live feed.")
 
         self.runner = StrategyRunner(data_source=self.data_source, kite=self.kite)
 
@@ -96,7 +110,7 @@ class Application:
             "open_positions": 0,         # plug in your live state if available
             "closed_today": 0,           # plug in actual count if tracked
             "daily_pnl": 0.0,            # plug in actual P&L if tracked
-            "session_date": time.strftime("%Y-%m-%d"),
+            "session_date": _now_ist_naive().strftime("%Y-%m-%d"),
             "uptime_seconds": float(uptime),
             "kite": bool(self.kite is not None),
             "data_source": bool(self.data_source is not None),
