@@ -21,16 +21,17 @@ Public functions used elsewhere:
 
 from __future__ import annotations
 
-from kiteconnect import KiteConnect
-from datetime import datetime, date, timedelta
 import logging
-import time
 import threading
-from typing import Optional, Dict, List, Any
+import time
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+from kiteconnect import KiteConnect
 
 logger = logging.getLogger(__name__)
 
-# __all__ removed to avoid F822 undefined names
+__all__ = [
     "_get_spot_ltp_symbol",
     "get_instrument_tokens",
     "get_next_expiry_date",
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
     "fetch_cached_instruments",
     "is_trading_hours",
     "health_check",
+    "format_option_symbol",
+    "get_atm_strike_price",
 ]
 
 # --- Global rate limiting and basic call dedup ---
@@ -72,10 +75,11 @@ def _rate_limited_api_call(func, *args, **kwargs):
 
 
 def _get_spot_ltp_symbol() -> str:
-    """Read SPOT_SYMBOL from Config; fall back to 'NSE:NIFTY 50'."""
+    """Read SPOT_SYMBOL from settings; fall back to 'NSE:NIFTY 50'."""
     try:
         from src.config import settings
-        sym = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
+
+        sym = getattr(settings, "SPOT_SYMBOL", "NSE:NIFTY 50")
         return sym or "NSE:NIFTY 50"
     except Exception as e:
         logger.debug(f"SPOT_SYMBOL fallback due to: {e}")
@@ -103,20 +107,21 @@ def format_option_symbol(base_symbol: str, expiry: str, strike: int, option_type
 
 
 def get_atm_strike_price(spot_price: float) -> int:
-    """Nearest 50-step strike."""
+    """Nearest 50-step strike from the spot."""
     try:
         return int(round(float(spot_price) / 50.0) * 50)
     except Exception as e:
         logger.error(f"[get_atm_strike_price] {e}")
+        # Safe fallback
         return 24500
 
 
 def get_nearest_strikes(spot_price: float, strike_count: int = 5) -> List[int]:
-    """Centered range around ATM."""
+    """Centered strike range around ATM, spaced by 50."""
     try:
         atm = get_atm_strike_price(spot_price)
         half = max(1, strike_count // 2)
-        strikes = sorted(set(atm + i * 50 for i in range(-half, half + 1)))
+        strikes = sorted({atm + i * 50 for i in range(-half, half + 1)})
         if strikes:
             logger.info(f"🎯 Strike range: {min(strikes)} - {max(strikes)} ({len(strikes)} strikes)")
         return strikes
@@ -159,7 +164,7 @@ def fetch_cached_instruments(kite: KiteConnect) -> Dict[str, List[Dict[str, Any]
 # ---------------- Core selection functions ----------------
 def get_next_expiry_date(
     kite_instance: KiteConnect,
-    cached_nfo_instruments: Optional[List[Dict]] = None
+    cached_nfo_instruments: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
     Resolve the nearest upcoming expiry for NIFTY options based on cached NFO instruments.
@@ -219,26 +224,25 @@ def get_next_expiry_date(
         return _calculate_next_thursday()
 
 
-def _resolve_spot_token_from_cache(
-    cached_nse_instruments: List[Dict],
-) -> Optional[int]:
+def _resolve_spot_token_from_cache(cached_nse_instruments: List[Dict[str, Any]]) -> Optional[int]:
     """
     Try to find the NSE instrument token for NIFTY 50 index from cached instruments.
     Fallback to settings.INSTRUMENT_TOKEN if not found.
     """
     try:
         from src.config import settings
+
         # Common listing in instruments dump for the index:
         # tradingsymbol == "NIFTY 50", exchange == "NSE", segment contains "INDICES"
         for inst in cached_nse_instruments or []:
             tsym = (inst.get("tradingsymbol") or "").strip().upper()
             seg = (inst.get("segment") or "").upper()
-            if tsym == "NIFTY 50" and "INDICE" in seg:
+            if tsym == "NIFTY 50" and "INDICE" in seg:  # matches "INDICES"
                 tok = inst.get("instrument_token")
                 if tok:
                     return int(tok)
         # fallback to configured token (256265 is widely used for NIFTY index)
-        return int(getattr(Config, "INSTRUMENT_TOKEN", 256265))
+        return int(getattr(settings, "INSTRUMENT_TOKEN", 256265))
     except Exception as e:
         logger.debug(f"[resolve_spot_token_from_cache] {e}")
         return None
@@ -247,8 +251,8 @@ def _resolve_spot_token_from_cache(
 def get_instrument_tokens(
     symbol: str,
     kite_instance: KiteConnect,
-    cached_nfo_instruments: List[Dict],
-    cached_nse_instruments: List[Dict],
+    cached_nfo_instruments: List[Dict[str, Any]],
+    cached_nse_instruments: List[Dict[str, Any]],
     offset: int = 0,
     strike_range: int = 3,
 ) -> Optional[Dict[str, Any]]:
@@ -402,7 +406,7 @@ def health_check(kite: Optional[KiteConnect]) -> Dict[str, Any]:
     Lightweight readiness probe used by RealTimeTrader.
     Checks LTP reachability and validates instruments cache fetch.
     """
-    status = {"overall_status": "OK", "message": "", "checks": {}}
+    status: Dict[str, Any] = {"overall_status": "OK", "message": "", "checks": {}}
     try:
         if not kite:
             status.update(overall_status="ERROR", message="No Kite instance")
