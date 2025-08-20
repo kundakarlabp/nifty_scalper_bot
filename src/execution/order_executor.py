@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, Optional, Any, List, Tuple
 
-from src.config import Config
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 

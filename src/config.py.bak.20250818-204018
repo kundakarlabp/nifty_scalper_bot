@@ -150,6 +150,6 @@ if __name__ == "__main__":
     import pprint
     print("Final Config:")
     pprint.pprint({
-        k: v for k, v in Config.__dict__.items()
+        k: v for k, v in settings.__dict__.items()
         if not k.startswith("__") and not callable(v)
     })

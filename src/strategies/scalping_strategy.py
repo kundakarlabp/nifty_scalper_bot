@@ -16,7 +16,7 @@ from typing import Dict, Optional, Tuple, List, Any
 
 import pandas as pd
 
-from src.config import Config
+from src.config import settings
 from src.utils.indicators import (
     calculate_ema,
     calculate_rsi,

@@ -24,10 +24,10 @@ class TelegramController:
         control_callback: Callable[[str, str], bool],
         summary_callback: Callable[[], str],
     ) -> None:
-        from src.config import Config
+        from src.config import settings
 
-        self.bot_token = Config.TELEGRAM_BOT_TOKEN
-        self.chat_id = Config.TELEGRAM_CHAT_ID
+        self.bot_token = settings.TELEGRAM_BOT_TOKEN
+        self.chat_id = settings.TELEGRAM_CHAT_ID
 
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required in Config")

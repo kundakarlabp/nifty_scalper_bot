@@ -31,7 +31,7 @@ import time
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.config import Config
+from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizing, get_live_account_balance
 from src.execution.order_executor import OrderExecutor
@@ -130,10 +130,10 @@ class RealTimeTrader:
     def _init_components(self) -> None:
         try:
             self.strategy = EnhancedScalpingStrategy(
-                base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-                base_target_points=Config.BASE_TARGET_POINTS,
-                confidence_threshold=Config.CONFIDENCE_THRESHOLD,
-                min_score_threshold=int(Config.MIN_SIGNAL_SCORE),
+                base_stop_loss_points=settings.BASE_STOP_LOSS_POINTS,
+                base_target_points=settings.BASE_TARGET_POINTS,
+                confidence_threshold=settings.CONFIDENCE_THRESHOLD,
+                min_score_threshold=int(settings.MIN_SIGNAL_SCORE),
             )
         except Exception as e:
             logger.warning(f"Failed to initialize strategy: {e}")
@@ -767,7 +767,7 @@ class RealTimeTrader:
     ) -> Optional[Dict]:
         try:
             return get_instrument_tokens(
-                symbol=Config.SPOT_SYMBOL,
+                symbol=settings.SPOT_SYMBOL,
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo,
                 cached_nse_instruments=cached_nse,
@@ -816,7 +816,7 @@ class RealTimeTrader:
             rng = max(1, int(getattr(Config, "STRIKE_RANGE", 2)))
             for offset in range(-rng, rng + 1):
                 info = get_instrument_tokens(
-                    symbol=Config.SPOT_SYMBOL,
+                    symbol=settings.SPOT_SYMBOL,
                     offset=offset,
                     kite_instance=self.order_executor.kite,
                     cached_nfo_instruments=cached_nfo,
@@ -1000,7 +1000,7 @@ class RealTimeTrader:
         """Fallback: just use ATM CE and PE symbols."""
         try:
             info = get_instrument_tokens(
-                symbol=Config.SPOT_SYMBOL,
+                symbol=settings.SPOT_SYMBOL,
                 offset=0,
                 kite_instance=self.order_executor.kite,
                 cached_nfo_instruments=cached_nfo,
@@ -1051,9 +1051,9 @@ class RealTimeTrader:
                 continue
 
             conf = float(signal.get("confidence", 0.0))
-            if conf < float(Config.CONFIDENCE_THRESHOLD):
+            if conf < float(settings.CONFIDENCE_THRESHOLD):
                 logger.debug(
-                    f"[SKIP] {sym}: confidence {conf:.2f} < threshold {Config.CONFIDENCE_THRESHOLD}"
+                    f"[SKIP] {sym}: confidence {conf:.2f} < threshold {settings.CONFIDENCE_THRESHOLD}"
                 )
                 continue
 

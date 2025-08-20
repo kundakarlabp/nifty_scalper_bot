@@ -70,13 +70,13 @@ def run_backtest(
             logger.error(f"❌ Error loading CSV data: {e}")
             return
     else:
-        if not Config.ZERODHA_API_KEY or not Config.KITE_ACCESS_TOKEN:
+        if not settings.ZERODHA_API_KEY or not settings.KITE_ACCESS_TOKEN:
             logger.critical("❌ Zerodha API credentials (ZERODHA_API_KEY, KITE_ACCESS_TOKEN) missing in config.")
             return
 
-        kite = KiteConnect(api_key=Config.ZERODHA_API_KEY)
+        kite = KiteConnect(api_key=settings.ZERODHA_API_KEY)
         try:
-            kite.set_access_token(Config.KITE_ACCESS_TOKEN)
+            kite.set_access_token(settings.KITE_ACCESS_TOKEN)
             logger.info("✅ Zerodha Kite Connect client initialized.")
         except Exception as e:
             logger.critical(f"❌ Failed to authenticate Kite client: {e}")
@@ -107,9 +107,9 @@ def run_backtest(
 
     # --- 3. Initialize Strategy (Optional) ---
     # strategy = DynamicScalpingStrategy(
-    #     base_stop_loss_points=Config.BASE_STOP_LOSS_POINTS,
-    #     base_target_points=Config.BASE_TARGET_POINTS,
-    #     confidence_threshold=Config.CONFIDENCE_THRESHOLD
+    #     base_stop_loss_points=settings.BASE_STOP_LOSS_POINTS,
+    #     base_target_points=settings.BASE_TARGET_POINTS,
+    #     confidence_threshold=settings.CONFIDENCE_THRESHOLD
     # )
 
     # --- 4. Initialize and Run Backtest Engine ---

@@ -74,7 +74,7 @@ def _rate_limited_api_call(func, *args, **kwargs):
 def _get_spot_ltp_symbol() -> str:
     """Read SPOT_SYMBOL from Config; fall back to 'NSE:NIFTY 50'."""
     try:
-        from src.config import Config
+        from src.config import settings
         sym = getattr(Config, "SPOT_SYMBOL", "NSE:NIFTY 50")
         return sym or "NSE:NIFTY 50"
     except Exception as e:
@@ -224,10 +224,10 @@ def _resolve_spot_token_from_cache(
 ) -> Optional[int]:
     """
     Try to find the NSE instrument token for NIFTY 50 index from cached instruments.
-    Fallback to Config.INSTRUMENT_TOKEN if not found.
+    Fallback to settings.INSTRUMENT_TOKEN if not found.
     """
     try:
-        from src.config import Config
+        from src.config import settings
         # Common listing in instruments dump for the index:
         # tradingsymbol == "NIFTY 50", exchange == "NSE", segment contains "INDICES"
         for inst in cached_nse_instruments or []:

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from src.config import Config
+from src.config import settings
 from src.auth.zerodha_auth import get_kite_client  # fetch live capital
 
 logger = logging.getLogger(__name__)
