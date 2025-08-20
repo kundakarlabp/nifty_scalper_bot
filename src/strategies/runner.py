@@ -7,22 +7,23 @@ to run the main trading loop.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Any
 
 import pandas as pd
 from ta.trend import ADXIndicator
 
 from src.config import settings
-from src.risk.position_sizing import PositionSizer
+# Your implemented class name is PositionSizing; alias it locally to PositionSizer
+from src.risk.position_sizing import PositionSizing as PositionSizer
 from src.risk.session import Trade
-from src.signals.signal import Signal
 from src.signals.regime_detector import detect_market_regime
 from src.utils.strike_selector import (
     get_instrument_tokens,
-    is_market_open,
+    is_market_open,             # simple time-window gate (no exchange_calendars)
     fetch_cached_instruments,
 )
 
@@ -60,7 +61,7 @@ class StrategyRunner:
         self.poll_interval_sec = 15
 
         # Instrument cache (NSE/NFO) refreshed periodically
-        self.instrument_cache: Dict[str, object] = {}
+        self.instrument_cache: Dict[str, Any] = {}
         self.cache_ttl_sec = 300
 
         # De-dup signals per symbol
@@ -68,7 +69,7 @@ class StrategyRunner:
 
     # ----------------------- lifecycle -----------------------
 
-    def start(self):
+    def start(self) -> None:
         self._running = True
         logger.info("StrategyRunner started.")
         while self._running:
@@ -83,15 +84,15 @@ class StrategyRunner:
                 logger.error("Runner tick error: %s", e, exc_info=True)
                 time.sleep(1)
 
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
         logger.info("StrategyRunner stopped.")
 
     # ----------------------- internals -----------------------
 
-    def _refresh_instrument_cache(self):
-        ts = self.instrument_cache.get("timestamp", 0)
-        if not self.instrument_cache or (time.time() - float(ts)) > self.cache_ttl_sec:
+    def _refresh_instrument_cache(self) -> None:
+        ts = float(self.instrument_cache.get("timestamp", 0.0) or 0.0)
+        if not self.instrument_cache or (time.time() - ts) > self.cache_ttl_sec:
             logger.info("Refreshing instrument cache...")
             kite = getattr(self.executor, "kite", None)
             if kite:
@@ -108,17 +109,22 @@ class StrategyRunner:
         if df is None or df.empty:
             return df
 
-        cols = set(df.columns.str.lower())
+        cols = {str(c).lower() for c in df.columns}
         need_calc = not {"adx", "di_plus", "di_minus"}.issubset(cols)
         if not need_calc:
-            # Normalize column names to lower-case for consistency
             out = df.copy()
-            if "ADX" in df.columns:
-                out.rename(columns={"ADX": "adx"}, inplace=True)
-            if "DI+" in df.columns or "di+" in df.columns:
-                out.rename(columns={"DI+": "di_plus", "di+": "di_plus"}, inplace=True)
-            if "DI-" in df.columns or "di-" in df.columns:
-                out.rename(columns={"DI-": "di_minus", "di-": "di_minus"}, inplace=True)
+            # Normalize common variants
+            ren = {}
+            for c in df.columns:
+                lc = str(c).lower()
+                if lc == "adx" and c != "adx":
+                    ren[c] = "adx"
+                elif lc in {"di+", "di_plus"} and c != "di_plus":
+                    ren[c] = "di_plus"
+                elif lc in {"di-", "di_minus"} and c != "di_minus":
+                    ren[c] = "di_minus"
+            if ren:
+                out = out.rename(columns=ren)
             return out
 
         try:
@@ -132,13 +138,12 @@ class StrategyRunner:
             out["di_minus"] = adx_ind.adx_neg()
             return out
         except KeyError:
-            # Missing required OHLC columns
             return df
         except Exception as e:
             logger.debug("Failed to compute ADX/DI: %s", e)
             return df
 
-    def _finalize_fills_if_any(self):
+    def _finalize_fills_if_any(self) -> None:
         """
         Ask executor to sync OCO state and finalize session trades for any fills detected.
         """
@@ -164,7 +169,7 @@ class StrategyRunner:
 
     # ----------------------- main tick -----------------------
 
-    def tick(self):
+    def tick(self) -> None:
         # 1) Market hours & risk gates
         if not is_market_open(settings.strategy.time_filter_start, settings.strategy.time_filter_end):
             logger.debug("Market is closed. Skipping tick.")
@@ -185,10 +190,11 @@ class StrategyRunner:
 
         instruments = get_instrument_tokens(
             kite_instance=kite,
-            spot_symbol=settings.strategy.spot_symbol,
+            symbol="NIFTY",  # base name for selection inside helper
             cached_nfo_instruments=self.instrument_cache.get("NFO", []),
             cached_nse_instruments=self.instrument_cache.get("NSE", []),
-            strike_range=settings.strategy.strike_selection_range,
+            offset=0,
+            strike_range=int(settings.strategy.strike_selection_range),
         )
         if not instruments:
             logger.debug("No instruments found for the current spot price.")
@@ -251,25 +257,29 @@ class StrategyRunner:
                 continue
             ltp = float(ltp)
 
-            # Ask strategy for a signal
-            signal: Optional[Signal] = None
+            # Ask strategy for a signal (strategy returns a dict)
+            sig: Optional[Dict[str, Any]] = None
             try:
-                signal = self.strategy.generate_signal(df=opt_df, current_price=ltp, spot_df=spot_df)
+                # EnhancedScalpingStrategy now accepts spot_df= for context
+                sig = self.strategy.generate_signal(df=opt_df, current_price=ltp, spot_df=spot_df)  # type: ignore[arg-type]
+            except TypeError:
+                # Older signature without spot_df
+                sig = self.strategy.generate_signal(df=opt_df, current_price=ltp)  # type: ignore[call-arg]
             except Exception as e:
                 logger.error("Strategy error for %s: %s", option_symbol, e, exc_info=True)
                 continue
 
-            if not signal:
+            if not sig:
                 continue
 
-            # Ensure hashed identity for dedupe
-            if not getattr(signal, "hash", None):
-                try:
-                    signal.compute_hash()
-                except Exception:
-                    pass
+            # Compute a stable hash for dedupe
+            try:
+                hbase = f"{sig.get('signal')}|{sig.get('entry_price')}|{sig.get('stop_loss')}|{sig.get('target')}|{sig.get('score')}|{option_symbol}"
+                shash = hashlib.md5(hbase.encode()).hexdigest()
+            except Exception:
+                shash = ""
 
-            # Regime-aware filter
+            # Regime-aware filter on the spot
             try:
                 regime = detect_market_regime(
                     spot_df,
@@ -281,27 +291,29 @@ class StrategyRunner:
             except Exception:
                 regime = "unknown"
 
-            if regime == "range" and int(signal.score) < (int(settings.strategy.min_signal_score) + 1):
+            if regime == "range" and int(sig.get("score", 0)) < (int(settings.strategy.min_signal_score) + 1):
                 logger.debug("Skipping %s in range regime due to low score.", option_symbol)
                 continue
 
             # Per-symbol dedupe
             last_h = self._last_signal_hash_by_symbol.get(option_symbol)
-            if signal.hash and last_h and signal.hash == last_h:
-                logger.debug("Duplicate signal %s for %s. Skipping.", signal.hash, option_symbol)
+            if shash and last_h and shash == last_h:
+                logger.debug("Duplicate signal %s for %s. Skipping.", shash, option_symbol)
                 continue
-            if signal.hash:
-                self._last_signal_hash_by_symbol[option_symbol] = signal.hash
+            if shash:
+                self._last_signal_hash_by_symbol[option_symbol] = shash
 
-            logger.info("Signal for %s: %s", option_symbol, signal.to_dict() if hasattr(signal, "to_dict") else signal)
+            logger.info("Signal for %s: %s", option_symbol, sig)
 
             # Position sizing (contracts, multiple of lot size)
-            quantity = self.sizer.calculate_quantity(
-                session=self.session,
-                entry_price=float(signal.entry_price),
-                stop_loss_price=float(signal.stop_loss),
+            qty_info = self.sizer.calculate_position_size(
+                entry_price=float(sig["entry_price"]),
+                stop_loss=float(sig["stop_loss"]),
+                signal_confidence=float(sig.get("confidence", 5.0)),
+                market_volatility=float(sig.get("market_volatility", 0.0) or 0.0),
                 lot_size=int(settings.executor.nifty_lot_size),
             )
+            quantity = int(qty_info["quantity"]) if qty_info and "quantity" in qty_info else 0
             if quantity <= 0:
                 logger.debug("Sizer returned 0 for %s; skipping.", option_symbol)
                 continue
@@ -310,7 +322,7 @@ class StrategyRunner:
             order_id = self.executor.place_entry_order(
                 symbol=str(option_symbol),
                 exchange="NFO",
-                transaction_type=str(signal.signal),
+                transaction_type=str(sig["signal"]),
                 quantity=int(quantity),
             )
             if not order_id:
@@ -320,45 +332,40 @@ class StrategyRunner:
             # Register trade in session
             trade = Trade(
                 symbol=str(option_symbol),
-                direction=str(signal.signal),
-                entry_price=float(signal.entry_price),
+                direction=str(sig["signal"]),
+                entry_price=float(sig["entry_price"]),
                 quantity=int(quantity),
                 order_id=str(order_id),
-                atr=float(getattr(signal, "market_volatility", 0.0) or 0.0),
+                atr=float(sig.get("market_volatility", 0.0) or 0.0),
             )
             self.session.add_trade(trade)
 
             # Setup exits (GTT or regular)
             ok = self.executor.setup_gtt_orders(
                 entry_order_id=str(order_id),
-                entry_price=float(signal.entry_price),
-                stop_loss_price=float(signal.stop_loss),
-                target_price=float(signal.target),
+                entry_price=float(sig["entry_price"]),
+                stop_loss_price=float(sig["stop_loss"]),
+                target_price=float(sig["target"]),
                 symbol=str(option_symbol),
                 exchange="NFO",
                 quantity=int(quantity),
-                transaction_type=str(signal.signal),
+                transaction_type=str(sig["signal"]),
             )
             if not ok:
                 logger.warning("Failed to create exits for %s (oid=%s).", option_symbol, order_id)
 
-            # Telegram alert (structured)
+            # Telegram alert
             if self.telegram:
                 try:
                     self.telegram.send_signal_alert(
                         token=int(option_token),
-                        signal=(signal.to_dict() if hasattr(signal, "to_dict") else {
-                            "signal": signal.signal,
-                            "entry_price": signal.entry_price,
-                            "stop_loss": signal.stop_loss,
-                            "target": signal.target,
-                            "confidence": signal.confidence,
-                        }),
+                        signal=sig,
                         position={"quantity": int(quantity)},
                     )
                 except Exception:
-                    # fallback to simple text on any failure
-                    self.telegram.send_message(f"Trade executed: {option_symbol} {signal.signal} x{quantity} @ {signal.entry_price}")
+                    self.telegram.send_message(
+                        f"Trade executed: {option_symbol} {sig['signal']} x{quantity} @ {sig['entry_price']}"
+                    )
 
         # 6) After placing / managing orders, sync for any fills and finalize
         self._finalize_fills_if_any()
