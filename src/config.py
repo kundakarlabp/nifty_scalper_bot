@@ -1,7 +1,8 @@
 # src/config.py
 """
 Centralised configuration loader for the scalper bot.
-Reads environment variables at import time and exposes them via the  class.
+Reads environment variables at import time and exposes them via the Config class
+(and a convenience alias: `settings`).
 """
 
 from __future__ import annotations
@@ -10,16 +11,16 @@ import os
 from pathlib import Path
 
 
-def _load_env():
+def _load_env() -> None:
     """
     Load .env from (in order):
       1) src/.env
       2) repo root .env
       3) /app/.env   (common in containers like Railway/Render)
-    Uses python-dotenv if installed, otherwise no-op.
+    Uses python-dotenv if installed; otherwise no-op.
     """
     try:
-        from dotenv import load_dotenv
+        from dotenv import load_dotenv  # type: ignore
     except Exception:
         # dotenv not installed; silently skip
         return
@@ -33,7 +34,7 @@ def _load_env():
         if p.exists():
             try:
                 load_dotenv(dotenv_path=p)
-                # Print once only in __main__ preview; avoid noisy logs on imports
+                # Mark where we loaded from; useful for debug prints
                 os.environ.setdefault("_ENV_LOADED_FROM", str(p))
                 break
             except Exception:
@@ -85,7 +86,7 @@ class Config:
     BASE_STOP_LOSS_POINTS: float = float(os.getenv("BASE_STOP_LOSS_POINTS", "20.0"))
     BASE_TARGET_POINTS: float = float(os.getenv("BASE_TARGET_POINTS", "40.0"))
     CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "8.0"))
-    MIN_SIGNAL_SCORE: float = float(os.getenv("MIN_SIGNAL_SCORE", "7.0"))
+    MIN_SIGNAL_SCORE: int = int(float(os.getenv("MIN_SIGNAL_SCORE", "7")))  # ensure int
 
     TIME_FILTER_START: str = os.getenv("TIME_FILTER_START", "09:15")
     TIME_FILTER_END: str = os.getenv("TIME_FILTER_END", "15:15")
@@ -123,7 +124,7 @@ class Config:
     OPTION_SPOT_TREND_PCT: float = float(os.getenv("OPTION_SPOT_TREND_PCT", "0.005"))
 
     # Quotes / microstructure
-    SPREAD_GUARD_MAX_PCT: float = float(os.getenv("SPREAD_GUARD_MAX_PCT", "0.7"))  # e.g., 0.7% max spread of mid
+    SPREAD_GUARD_MAX_PCT: float = float(os.getenv("SPREAD_GUARD_MAX_PCT", "0.7"))  # max spread % of mid
     MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
 
     # Slippage & fees
@@ -170,18 +171,22 @@ class Config:
     SESSION_AUTO_EXIT_TIME: str = os.getenv("SESSION_AUTO_EXIT_TIME", "15:20")  # HH:MM IST
 
 
-def _validate_for_live():
-    """Print a clear message if live trading is enabled but credentials are missing."""
-    if not Config.ENABLE_LIVE_TRADING:
+# Compatibility alias so modules can `from src.config import settings`
+settings = Config
+
+
+def _validate_for_live() -> None:
+    """Raise a clear error if live trading is enabled but credentials are missing."""
+    if not settings.ENABLE_LIVE_TRADING:  # type: ignore[attr-defined]
         return
     missing = []
-    if not Config.ZERODHA_API_KEY:
+    if not settings.ZERODHA_API_KEY:  # type: ignore[attr-defined]
         missing.append("ZERODHA_API_KEY")
-    if not Config.ZERODHA_API_SECRET:
+    if not settings.ZERODHA_API_SECRET:  # type: ignore[attr-defined]
         missing.append("ZERODHA_API_SECRET")
-    if not Config.KITE_ACCESS_TOKEN:
+    if not settings.KITE_ACCESS_TOKEN:  # type: ignore[attr-defined]
         missing.append("KITE_ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN)")
-    if Config.ENABLE_TELEGRAM and not Config.TELEGRAM_BOT_TOKEN:
+    if settings.ENABLE_TELEGRAM and not settings.TELEGRAM_BOT_TOKEN:  # type: ignore[attr-defined]
         missing.append("TELEGRAM_BOT_TOKEN")
     if missing:
         raise SystemExit(
@@ -193,6 +198,7 @@ def _validate_for_live():
 if __name__ == "__main__":
     # Safe preview of loaded configuration
     from pprint import pprint
+
     preview = {
         k: v for k, v in Config.__dict__.items()
         if not k.startswith("__") and not callable(v)
@@ -210,6 +216,3 @@ if __name__ == "__main__":
     print("Final Config:")
     pprint(preview)
     _validate_for_live()
-\PY
-
-python -m src.config  # prints safe config and validates if live trading is on
