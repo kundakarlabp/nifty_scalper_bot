@@ -1,8 +1,9 @@
+# src/utils/strike_selector.py
 """
 Strike resolution helpers and market-time gates.
 
-Clean signatures (no exchange-calendars, no spot_symbol arg).
-- get_instrument_tokens(kite_instance, ...) reads symbols from `settings`
+Clean signatures (no external spot args; no exchange-calendars).
+- get_instrument_tokens(kite_instance=None) reads symbols from `settings`
 - is_market_open() -> bool, pure IST gate 09:15–15:30 Mon–Fri
 - All functions are safe when `kite_instance` is None (shadow mode).
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
@@ -22,7 +23,6 @@ try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:  # pragma: no cover
     KiteConnect = object  # type: ignore
-
 
 logger = logging.getLogger(__name__)
 
@@ -44,195 +44,183 @@ def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
         return False
 
 
-def _rate_call(fn, call_key: str, *args, **kwargs):
-    """
-    Execute a Kite API call with conservative rate limiting + 1 retry on rate error.
-    """
-    if _rate_limited(call_key):
-        time.sleep(0.3)
-    try:
-        return fn(*args, **kwargs)
-    except Exception as e:
-        msg = str(e).lower()
-        if "rate" in msg or "too many" in msg:
-            logger.warning("Rate limited on %s; retrying...", call_key)
-            time.sleep(2.0)
-            return fn(*args, **kwargs)
-        raise
+def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
+    """Helper to rate-limit a function call."""
+    while _rate_limited(call_key):
+        time.sleep(0.05)  # cooperative wait
+    return fn(*args, **kwargs)
 
-
-# ---------- Time gates (IST) ----------
 
 def is_market_open() -> bool:
     """
-    NSE gate: 09:15–15:30 Asia/Kolkata, Mon–Fri.
-    No exchange_calendars dependency.
-    """
-    try:
-        import pytz  # optional
-        now = datetime.now(pytz.timezone("Asia/Kolkata"))
-    except Exception:
-        from datetime import timezone
-        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    Checks if the market is currently open in IST (Indian Standard Time).
 
-    if now.weekday() > 4:  # Sat/Sun
+    Trading hours are from 09:15 to 15:30, Monday to Friday.
+    """
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    weekday = now.weekday()  # Monday is 0, Sunday is 6
+    if weekday > 4:  # Saturday or Sunday
         return False
-    start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return start <= now <= end
+    start_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    end_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return start_time <= now < end_time
 
 
-def is_trading_hours() -> bool:
-    """Alias retained for older callers."""
-    return is_market_open()
-
-
-# ---------- Instruments cache ----------
-
-def fetch_cached_instruments(kite_instance: Optional[KiteConnect]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _fetch_cached_instruments(kite: Optional[KiteConnect] = None) -> Optional[List[Dict[str, Any]]]:
     """
-    Return (NFO_list, NSE_list) instrument dumps.
-
-    Shadow-mode safe: if `kite_instance` is None or lacks .instruments, returns ([], []).
+    Fetch the full list of NFO instruments (options).
+    Uses a simple rate-limiting wrapper. Safe when kite is None.
     """
-    try:
-        if kite_instance is None or not hasattr(kite_instance, "instruments"):
-            logger.debug("fetch_cached_instruments: kite_instance missing; returning empty lists (shadow mode).")
-            return [], []
-        nfo = _rate_call(kite_instance.instruments, "instruments_NFO", "NFO")
-        nse = _rate_call(kite_instance.instruments, "instruments_NSE", "NSE")
-        return nfo or [], nse or []
-    except Exception as e:
-        logger.warning("fetch_cached_instruments failed: %s", e)
-        return [], []
-
-
-# ---------- Spot helpers ----------
-
-def _get_spot_ltp_symbol() -> str:
-    """
-    Read SPOT_SYMBOL from settings; fallback to 'NSE:NIFTY 50'.
-    """
-    sym = getattr(settings, "SPOT_SYMBOL", None) or getattr(settings.instruments, "spot_symbol", None)
-    return sym or "NSE:NIFTY 50"
-
-
-def _spot_ltp(kite_instance: Optional[KiteConnect]) -> float:
-    """
-    Fetch NIFTY 50 spot LTP; return fallback 25000.0 on failure or when kite is None.
-    """
-    if kite_instance is None or not hasattr(kite_instance, "ltp"):
-        return 25000.0
-    try:
-        symbol = _get_spot_ltp_symbol()
-        out = _rate_call(kite_instance.ltp, "ltp_spot", [symbol])
-        if isinstance(out, dict) and out:
-            payload = next(iter(out.values()))
-            return float(payload.get("last_price") or payload.get("last_price", 0.0))
-    except Exception as e:
-        logger.warning("Spot LTP fetch failed: %s", e)
-    return 25000.0
-
-
-# ---------- Strike math ----------
-
-def get_atm_strike(spot_price: float, step: int = 50) -> int:
-    """
-    Round to nearest strike increment.
-    """
-    if step <= 0:
-        step = 50
-    return int(round(spot_price / step) * step)
-
-
-def _calculate_next_thursday(base_dt: Optional[datetime] = None) -> str:
-    """
-    If instrument dump unavailable, approximate “next Thursday” for NIFTY weekly expiry.
-    """
-    base = base_dt or datetime.utcnow()
-    # 3 == Thursday (Mon=0)
-    days_ahead = (3 - base.weekday()) % 7
-    if days_ahead == 0:
-        days_ahead = 7
-    d = base + timedelta(days=days_ahead)
-    return d.strftime("%Y-%m-%d")
-
-
-def _resolve_nfo_weekly_expiry(cached_nfo: List[Dict[str, Any]]) -> str:
-    """
-    Parse earliest future expiry from instrument dump. Fallback to next Thursday calc.
-    """
-    try:
-        expiries = sorted(
-            {
-                (r.get("expiry").strftime("%Y-%m-%d") if hasattr(r.get("expiry"), "strftime") else str(r.get("expiry")))
-                for r in cached_nfo
-                if (r.get("name") == "NIFTY" and r.get("segment") == "NFO-OPT")
-            }
-        )
-        if expiries:
-            return expiries[0]
-    except Exception:
-        pass
-    return _calculate_next_thursday()
-
-
-# ---------- Public API ----------
-
-def get_instrument_tokens(
-    kite_instance: Optional[KiteConnect],
-    cached_nfo_instruments: Optional[List[Dict[str, Any]]] = None,
-    *,
-    offset: int = 0,
-    strike_range: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Resolve CE/PE instrument tokens around ATM with `offset` steps (0 == ATM, 1 == ATM+50, etc).
-
-    Reads base symbol/exchange from `settings`—no spot_symbol arg required.
-
-    Returns dict or None (when kite is not available in shadow mode).
-    """
-    # Shadow mode: cannot resolve tokens without Kite
-    if kite_instance is None:
-        logger.debug("get_instrument_tokens: kite_instance missing; returning None (shadow mode).")
+    if not kite or kite is object:
+        logger.warning("Kite instance missing; cannot fetch instruments.")
         return None
 
     try:
-        nfo = cached_nfo_instruments
-        if nfo is None:
-            nfo, _ = fetch_cached_instruments(kite_instance)
+        call_key = "kite-instruments-nfo"
+        instruments = _rate_call(kite.instruments, call_key, segment="NFO")
+        return instruments
+    except Exception as e:
+        logger.exception("Failed to fetch instruments from Kite: %s", e)
+        return None
 
-        spot = _spot_ltp(kite_instance)
-        atm = get_atm_strike(spot, step=50)
-        _ = int(strike_range if strike_range is not None else getattr(settings.instruments, "strike_selection_range", 3))
-        step = 50
 
-        target = atm + offset * step
-        expiry = _resolve_nfo_weekly_expiry(nfo or [])
+def _resolve_nfo_weekly_expiry(nfo_instruments: List[Dict[str, Any]]) -> str:
+    """
+    Finds the nearest weekly expiry date for Nifty options.
+    Excludes the current week only if today's Thursday has *passed* market hours.
+    Returns date as 'YYYY-MM-DD' string; falls back to today if nothing found.
+    """
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+
+    expiries = set()
+    for row in nfo_instruments or []:
+        # Look at CE rows to avoid duplicates (CE/PE share expiry)
+        if row.get("instrument_type") == "CE" and row.get("expiry"):
+            expiries.add(str(row["expiry"])[:10])
+
+    if not expiries:
+        return now.isoformat()
+
+    sorted_expiries = sorted(expiries)
+    for exp_str in sorted_expiries:
+        try:
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if exp_date >= now:
+            return exp_str
+
+    # If all are in the past (unexpected), return the last known
+    return sorted_expiries[-1]
+
+
+def _get_spot_ltp(kite: Optional[KiteConnect]) -> Optional[float]:
+    """
+    Fetch the current spot LTP via Kite. Safe if kite is None.
+    """
+    if not kite or kite is object:
+        return None
+    symbol = getattr(getattr(settings, "instruments", object()), "spot_symbol", "NSE:NIFTY 50")
+    try:
+        data = _rate_call(kite.ltp, "kite-ltp-spot", [symbol])
+        if symbol in data:
+            return float(data[symbol]["last_price"])
+        # fallback: first value
+        for _, v in data.items():
+            return float(v["last_price"])
+        return None
+    except Exception as e:
+        logger.warning("Failed to fetch spot LTP for %s: %s", symbol, e)
+        return None
+
+
+def get_instrument_tokens(kite_instance: Optional[KiteConnect] = None) -> Optional[Dict[str, Any]]:
+    """
+    Resolve spot token, ATM and target option strikes and tokens for the configured trade symbol.
+
+    Returns:
+        {
+            "spot_token": int,
+            "spot_price": float,
+            "atm_strike": int,
+            "target_strike": int,
+            "expiry": "YYYY-MM-DD",
+            "tokens": {"ce": Optional[int], "pe": Optional[int]},
+        }
+    """
+    try:
+        # --- read config with safe fallbacks ---
+        inst = getattr(settings, "instruments", object())
+        trade_symbol = str(getattr(inst, "trade_symbol", "NIFTY"))
+        spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY index token default
+        step = 50  # NIFTY option strike step
+
+        # Prefer new name; fallback to older ones
+        strike_range = getattr(inst, "strike_range", None)
+        if strike_range is None:
+            strike_range = getattr(inst, "strike_selection_range", None)
+        if strike_range is None:
+            # legacy env or typo resilience
+            strike_range = getattr(settings, "OPTION_RANGE", 3)
+        try:
+            strike_range = int(strike_range)
+        except Exception:
+            strike_range = 3
+
+        # --- resolve spot price ---
+        spot_price = _get_spot_ltp(kite_instance)
+        if spot_price is None or spot_price <= 0:
+            logger.warning("Spot LTP unavailable; cannot resolve ATM/target strikes.")
+            return {
+                "spot_token": spot_token,
+                "spot_price": None,
+                "atm_strike": None,
+                "target_strike": None,
+                "expiry": None,
+                "tokens": {"ce": None, "pe": None},
+            }
+
+        # ATM rounding to nearest 50
+        atm = int(round(spot_price / step) * step)
+        target = int(atm + strike_range * step)
+
+        # --- fetch instruments and resolve tokens ---
+        nfo = _fetch_cached_instruments(kite_instance) or []
+        if not nfo:
+            logger.warning("NFO instruments unavailable; returning strike math without tokens.")
+            return {
+                "spot_token": spot_token,
+                "spot_price": float(spot_price),
+                "atm_strike": atm,
+                "target_strike": target,
+                "expiry": None,
+                "tokens": {"ce": None, "pe": None},
+            }
+
+        expiry = _resolve_nfo_weekly_expiry(nfo)
 
         ce_token = None
         pe_token = None
-        base_name = getattr(settings.instruments, "trade_symbol", "NIFTY")
-
-        for row in nfo or []:
+        for row in nfo:
             if row.get("segment") != "NFO-OPT":
                 continue
-            if row.get("name") != base_name:
+            if row.get("name") != trade_symbol:
                 continue
-            if str(row.get("expiry")).startswith(expiry):
-                try:
-                    strike = int(row.get("strike"))
-                except Exception:
-                    continue
-                if strike == target:
-                    if row.get("instrument_type") == "CE":
-                        ce_token = row.get("instrument_token")
-                    elif row.get("instrument_type") == "PE":
-                        pe_token = row.get("instrument_token")
+            if not str(row.get("expiry", "")).startswith(expiry):
+                continue
+            try:
+                strike = int(row.get("strike"))
+            except Exception:
+                continue
+            if strike == target:
+                if row.get("instrument_type") == "CE":
+                    ce_token = row.get("instrument_token")
+                elif row.get("instrument_type") == "PE":
+                    pe_token = row.get("instrument_token")
 
         return {
-            "spot_price": float(spot),
+            "spot_token": int(spot_token),
+            "spot_price": float(spot_price),
             "atm_strike": int(atm),
             "target_strike": int(target),
             "expiry": expiry,
@@ -250,5 +238,5 @@ def health_check() -> Dict[str, Any]:
     return {
         "ok": True,
         "ist_open": is_market_open(),
-        "trade_symbol": getattr(settings.instruments, "trade_symbol", "NIFTY"),
+        "trade_symbol": getattr(getattr(settings, "instruments", object()), "trade_symbol", "NIFTY"),
     }
