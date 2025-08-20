@@ -30,10 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _bollinger_bands_from_close(close: pd.Series, window: int, std: float) -> Tuple[pd.Series, pd.Series]:
-    """
-    Compute Bollinger Bands (upper, lower) from the close series.
-    Uses population std (ddof=0) to be stable on short windows.
-    """
+    """Compute Bollinger Bands (upper, lower) from the close series using population std (ddof=0)."""
     ma = close.rolling(window=window, min_periods=window).mean()
     sd = close.rolling(window=window, min_periods=window).std(ddof=0)
     upper = ma + std * sd
@@ -48,18 +45,17 @@ class EnhancedScalpingStrategy:
         self,
         base_stop_loss_points: float = getattr(settings, "BASE_STOP_LOSS_POINTS", 20.0),
         base_target_points: float = getattr(settings, "BASE_TARGET_POINTS", 40.0),
-        # Align defaults with .env/settings to avoid runner/strategy mismatch:
         confidence_threshold: float = getattr(settings, "CONFIDENCE_THRESHOLD", 6.0),
         min_score_threshold: int = int(getattr(settings, "MIN_SIGNAL_SCORE", 5)),
-        # Faster MACD for 1-min scalping:
+        # Indicator params
         ema_fast_period: int = 9,
         ema_slow_period: int = 21,
         rsi_period: int = 14,
         rsi_overbought: int = 60,
         rsi_oversold: int = 40,
-        macd_fast_period: int = 8,      # was 12
-        macd_slow_period: int = 17,     # was 26
-        macd_signal_period: int = 9,    # keep 9
+        macd_fast_period: int = 8,
+        macd_slow_period: int = 17,
+        macd_signal_period: int = 9,
         atr_period: int = getattr(settings, "ATR_PERIOD", 14),
         supertrend_atr_multiplier: float = 2.0,
         bb_window: int = 20,
@@ -67,7 +63,7 @@ class EnhancedScalpingStrategy:
         adx_period: int = 14,
         adx_trend_strength: int = 25,
         vwap_period: int = 20,
-        # --- options params (used in generate_options_signal) ---
+        # Options params
         option_sl_percent: float = getattr(settings, "OPTION_SL_PERCENT", 0.05),
         option_tp_percent: float = getattr(settings, "OPTION_TP_PERCENT", 0.15),
     ) -> None:
@@ -95,8 +91,7 @@ class EnhancedScalpingStrategy:
         self.option_sl_percent = option_sl_percent
         self.option_tp_percent = option_tp_percent
 
-        # We score 6 key “axes”: EMA, RSI, MACD hist sign, MACD zerocross, Supertrend dir, VWAP.
-        # (BB and regime nudge modify score but aren’t counted toward max_possible_score here)
+        # We score 6 key axes: EMA, RSI, MACD hist sign, MACD zero-cross, Supertrend dir, VWAP.
         self.max_possible_score = 6
         self.last_signal_hash: Optional[str] = None
 
@@ -281,7 +276,12 @@ class EnhancedScalpingStrategy:
 
     # --------------------------- public API: spot/fut --------------------------- #
 
-    def generate_signal(self, df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+    def generate_signal(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+        spot_df: Optional[pd.DataFrame] = None,  # accepted for runner compatibility
+    ) -> Optional[Dict[str, Any]]:
         """Generate a signal for spot/futures (also used on options DF by the runner)."""
         if df is None or df.empty:
             logger.debug("Strategy received empty DataFrame")
