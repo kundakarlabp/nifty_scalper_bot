@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from src.config import settings
+from src.config import Config
 from src.utils.indicators import (
     calculate_ema,
     calculate_rsi,
@@ -29,7 +29,9 @@ from src.utils.atr_helper import compute_atr_df, latest_atr_value
 logger = logging.getLogger(__name__)
 
 
-def _bollinger_bands_from_close(close: pd.Series, window: int, std: float) -> Tuple[pd.Series, pd.Series]:
+def _bollinger_bands_from_close(
+    close: pd.Series, window: int, std: float
+) -> Tuple[pd.Series, pd.Series]:
     """
     Compute Bollinger Bands (upper, lower) from the close series.
     Uses population std (ddof=0) to be stable on short windows.
@@ -46,11 +48,11 @@ class EnhancedScalpingStrategy:
 
     def __init__(
         self,
-        base_stop_loss_points: float = getattr(settings, "BASE_STOP_LOSS_POINTS", 20.0),
-        base_target_points: float = getattr(settings, "BASE_TARGET_POINTS", 40.0),
-        # Align defaults with .env/settings to avoid runner/strategy mismatch:
-        confidence_threshold: float = getattr(settings, "CONFIDENCE_THRESHOLD", 6.0),
-        min_score_threshold: int = int(getattr(settings, "MIN_SIGNAL_SCORE", 5)),
+        base_stop_loss_points: float = getattr(Config, "BASE_STOP_LOSS_POINTS", 20.0),
+        base_target_points: float = getattr(Config, "BASE_TARGET_POINTS", 40.0),
+        # Align defaults with .env/Config to avoid runner/strategy mismatch:
+        confidence_threshold: float = getattr(Config, "CONFIDENCE_THRESHOLD", 6.0),
+        min_score_threshold: int = int(getattr(Config, "MIN_SIGNAL_SCORE", 5)),
         # Faster MACD for 1-min scalping:
         ema_fast_period: int = 9,
         ema_slow_period: int = 21,
@@ -60,7 +62,7 @@ class EnhancedScalpingStrategy:
         macd_fast_period: int = 8,      # was 12
         macd_slow_period: int = 17,     # was 26
         macd_signal_period: int = 9,    # keep 9
-        atr_period: int = getattr(settings, "ATR_PERIOD", 14),
+        atr_period: int = getattr(Config, "ATR_PERIOD", 14),
         supertrend_atr_multiplier: float = 2.0,
         bb_window: int = 20,
         bb_std_dev: float = 2.0,
@@ -68,8 +70,8 @@ class EnhancedScalpingStrategy:
         adx_trend_strength: int = 25,
         vwap_period: int = 20,
         # --- options params (used in generate_options_signal) ---
-        option_sl_percent: float = getattr(settings, "OPTION_SL_PERCENT", 0.05),
-        option_tp_percent: float = getattr(settings, "OPTION_TP_PERCENT", 0.15),
+        option_sl_percent: float = getattr(Config, "OPTION_SL_PERCENT", 0.05),
+        option_tp_percent: float = getattr(Config, "OPTION_TP_PERCENT", 0.15),
     ) -> None:
         self.base_stop_loss_points = base_stop_loss_points
         self.base_target_points = base_target_points
@@ -116,7 +118,9 @@ class EnhancedScalpingStrategy:
         ) + 10
 
         if len(df) < min_len:
-            logger.debug(f"Insufficient data for indicators. Need {min_len}, got {len(df)}")
+            logger.debug(
+                f"Insufficient data for indicators. Need {min_len}, got {len(df)}"
+            )
             return indicators
 
         # EMA
@@ -146,7 +150,9 @@ class EnhancedScalpingStrategy:
         indicators["supertrend_lower"] = st_l
 
         # Bollinger (upper/lower)
-        bb_u, bb_l = _bollinger_bands_from_close(df["close"], self.bb_window, self.bb_std_dev)
+        bb_u, bb_l = _bollinger_bands_from_close(
+            df["close"], self.bb_window, self.bb_std_dev
+        )
         indicators["bb_upper"] = bb_u
         indicators["bb_lower"] = bb_l
 
@@ -281,7 +287,9 @@ class EnhancedScalpingStrategy:
 
     # --------------------------- public API: spot/fut --------------------------- #
 
-    def generate_signal(self, df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+    def generate_signal(
+        self, df: pd.DataFrame, current_price: float
+    ) -> Optional[Dict[str, Any]]:
         """Generate a signal for spot/futures (also used on options DF by the runner)."""
         if df is None or df.empty:
             logger.debug("Strategy received empty DataFrame")
@@ -289,7 +297,9 @@ class EnhancedScalpingStrategy:
 
         required_cols = {"open", "high", "low", "close"}  # volume optional
         if not required_cols.issubset(df.columns):
-            logger.error(f"DataFrame missing required columns: {required_cols - set(df.columns)}")
+            logger.error(
+                f"DataFrame missing required columns: {required_cols - set(df.columns)}"
+            )
             return None
 
         min_required = max(
@@ -301,7 +311,9 @@ class EnhancedScalpingStrategy:
             self.vwap_period,
         ) + 5
         if len(df) < min_required:
-            logger.debug(f"Insufficient data for signal generation. Need {min_required}, got {len(df)}")
+            logger.debug(
+                f"Insufficient data for signal generation. Need {min_required}, got {len(df)}"
+            )
             return None
 
         try:
@@ -318,7 +330,9 @@ class EnhancedScalpingStrategy:
                 direction = "SELL"
 
             if not direction:
-                logger.debug(f"Score {score} below threshold {self.min_score_threshold}. No trade.")
+                logger.debug(
+                    f"Score {score} below threshold {self.min_score_threshold}. No trade."
+                )
                 return None
 
             # De-duplicate signals
@@ -344,20 +358,24 @@ class EnhancedScalpingStrategy:
                 sl_points = self.base_stop_loss_points
                 tp_points = self.base_target_points
             else:
-                sl_mult = float(getattr(settings, "ATR_SL_MULTIPLIER", 1.5))
-                tp_mult = float(getattr(settings, "ATR_TP_MULTIPLIER", 3.0))
+                sl_mult = float(getattr(Config, "ATR_SL_MULTIPLIER", 1.5))
+                tp_mult = float(getattr(Config, "ATR_TP_MULTIPLIER", 3.0))
                 sl_points = atr_value * sl_mult
                 tp_points = atr_value * tp_mult
 
             # Confidence adjustments
-            sl_adj = float(getattr(settings, "SL_CONFIDENCE_ADJ", 0.2))
-            tp_adj = float(getattr(settings, "TP_CONFIDENCE_ADJ", 0.3))
+            sl_adj = float(getattr(Config, "SL_CONFIDENCE_ADJ", 0.2))
+            tp_adj = float(getattr(Config, "TP_CONFIDENCE_ADJ", 0.3))
             sl_points *= (1 + (10 - confidence) * sl_adj / 10.0)
             tp_points *= (1 + (confidence - 5) * tp_adj / 10.0)
 
             entry_price = float(current_price)
-            stop_loss = entry_price - sl_points if direction == "BUY" else entry_price + sl_points
-            target = entry_price + tp_points if direction == "BUY" else entry_price - tp_points
+            stop_loss = (
+                entry_price - sl_points if direction == "BUY" else entry_price + sl_points
+            )
+            target = (
+                entry_price + tp_points if direction == "BUY" else entry_price - tp_points
+            )
 
             stop_loss = max(0.0, float(stop_loss))
             target = max(0.0, float(target))
@@ -413,7 +431,7 @@ class EnhancedScalpingStrategy:
             else:
                 volume_condition = True
 
-            breakout_pct = float(getattr(settings, "OPTION_BREAKOUT_PCT", 0.01))
+            breakout_pct = float(getattr(Config, "OPTION_BREAKOUT_PCT", 0.01))
             breakout_condition = curr_close > last_close * (1.0 + breakout_pct)
 
             spot_trend_bullish = False
@@ -421,7 +439,7 @@ class EnhancedScalpingStrategy:
             spot_return = 0.0
             if spot_ohlc is not None and not spot_ohlc.empty and len(spot_ohlc) >= 5:
                 spot_return = (spot_ohlc["close"].iloc[-1] / spot_ohlc["close"].iloc[-5]) - 1.0
-                th = float(getattr(settings, "OPTION_SPOT_TREND_PCT", 0.005))
+                th = float(getattr(Config, "OPTION_SPOT_TREND_PCT", 0.005))
                 if spot_return > th:
                     spot_trend_bullish = True
                 elif spot_return < -th:
@@ -438,8 +456,8 @@ class EnhancedScalpingStrategy:
             if not signal:
                 return None
 
-            sl_pct = float(getattr(settings, "OPTION_SL_PERCENT", self.option_sl_percent))
-            tp_pct = float(getattr(settings, "OPTION_TP_PERCENT", self.option_tp_percent))
+            sl_pct = float(getattr(Config, "OPTION_SL_PERCENT", self.option_sl_percent))
+            tp_pct = float(getattr(Config, "OPTION_TP_PERCENT", self.option_tp_percent))
 
             entry = float(current_option_price)
             sl = round(entry * (1 - sl_pct), 2)
@@ -460,7 +478,9 @@ class EnhancedScalpingStrategy:
             confidence = min(10.0, base_conf + vol_bonus + spot_bonus)
 
             # Option ATR as volatility proxy (if available)
-            opt_atr = latest_atr_value(options_ohlc, period=getattr(settings, "ATR_PERIOD", 14), method="rma")
+            opt_atr = latest_atr_value(
+                options_ohlc, period=getattr(Config, "ATR_PERIOD", 14), method="rma"
+            )
             mv = float(opt_atr) if opt_atr is not None else 0.0
 
             signal.update(
