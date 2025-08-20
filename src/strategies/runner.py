@@ -16,7 +16,7 @@ import pandas as pd
 from ta.trend import ADXIndicator
 
 from src.config import settings
-from src.risk.position_sizing import PositionSizer  # type: ignore[import]
+from src.risk.position_sizing import PositionSizing
 from src.risk.session import Trade
 from src.signals.signal import Signal
 from src.signals.regime_detector import detect_market_regime
@@ -43,7 +43,7 @@ class StrategyRunner:
         strategy: "EnhancedScalpingStrategy",
         order_executor: "OrderExecutor",
         trading_session: "TradingSession",
-        position_sizer: PositionSizer,
+        position_sizer: PositionSizing,
         telegram_controller: Optional["TelegramController"],
     ):
         self.data_source = data_source
