@@ -2,8 +2,9 @@
 StrategyRunner orchestrates:
 - Time-gate via is_market_open()
 - Resolve strikes/tokens (only if Kite is available)
+- Pull OHLC via DataSource.fetch_ohlc(token, from_dt, to_dt, interval)
 - Ensure ADX/DI columns on SPOT DF
-- Generate a signal using EnhancedScalpingStrategy(df, current_price)  # 2-arg signature
+- Generate a signal using EnhancedScalpingStrategy(df, current_price)
 - Compute position size (lots) using PositionSizing and equity estimate
 
 Shadow-mode safe: if Kite or data source is missing, run_once() returns None without raising.
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -33,6 +35,11 @@ try:
     from ta.trend import ADXIndicator  # type: ignore
 except Exception:  # pragma: no cover
     ADXIndicator = None  # type: ignore
+
+
+def _now_ist_naive() -> datetime:
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.replace(tzinfo=None)
 
 
 def _ensure_adx_di(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
@@ -62,32 +69,35 @@ def _ensure_adx_di(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
         return df
 
 
-def _fetch_df(
+def _fetch_via_datasource(
     source: Any,
-    kind: str,
-    *,
-    symbol_or_token: Any,
+    instrument_token: int,
     lookback_minutes: int,
     timeframe: str,
 ) -> Optional[pd.DataFrame]:
     """
-    Duck-typed data fetcher:
-      - tries source.get_spot_ohlc / get_option_ohlc
-      - falls back to source.fetch_ohlc(symbol_or_token, ...)
+    Use DataSource.fetch_ohlc(token, from_dt, to_dt, interval).
+    Returns a DataFrame or None on failure.
     """
-    if source is None:
+    if source is None or not hasattr(source, "fetch_ohlc"):
         return None
     try:
-        if kind == "spot":
-            if hasattr(source, "get_spot_ohlc"):
-                return source.get_spot_ohlc(symbol_or_token, lookback_minutes, timeframe)
-        else:
-            if hasattr(source, "get_option_ohlc"):
-                return source.get_option_ohlc(symbol_or_token, lookback_minutes, timeframe)
-        if hasattr(source, "fetch_ohlc"):
-            return source.fetch_ohlc(symbol_or_token, lookback_minutes, timeframe)
+        end = _now_ist_naive()
+        start = end - timedelta(minutes=max(1, int(lookback_minutes)))
+        df = source.fetch_ohlc(
+            instrument_token=int(instrument_token),
+            from_date=start,
+            to_date=end,
+            interval=str(timeframe),
+        )
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            # Ensure expected columns exist
+            for col in ("open", "high", "low", "close"):
+                if col not in df.columns:
+                    return None
+            return df
     except Exception as e:
-        log.warning("Data source fetch error (%s): %s", kind, e)
+        log.warning("Data source fetch error (token=%s): %s", instrument_token, e)
     return None
 
 
@@ -133,31 +143,27 @@ class StrategyRunner:
             self._throttled_token_warn("Could not resolve CE/PE tokens.")
             return None
 
+        # Data source required for OHLC
+        if self.data_source is None:
+            self._throttled_token_warn("No data source available; cannot fetch OHLC.")
+            return None
+
+        lookback = int(getattr(settings, "DATA_LOOKBACK_MINUTES", getattr(settings.data, "lookback_minutes", 60)))
+        timeframe = str(getattr(settings, "HISTORICAL_TIMEFRAME", getattr(settings.data, "timeframe", "minute")))
+
         # ---- SPOT DF (context) ----
-        spot_symbol = getattr(settings, "SPOT_SYMBOL", getattr(settings.instruments, "spot_symbol", "NSE:NIFTY 50"))
-        spot_df = _fetch_df(
-            self.data_source,
-            "spot",
-            symbol_or_token=spot_symbol,
-            lookback_minutes=int(getattr(settings, "DATA_LOOKBACK_MINUTES", getattr(settings.data, "lookback_minutes", 60))),
-            timeframe=str(getattr(settings, "HISTORICAL_TIMEFRAME", getattr(settings.data, "timeframe", "minute"))),
-        )
+        spot_token = int(getattr(settings.instruments, "spot_token", getattr(settings, "INSTRUMENT_TOKEN", 256265)))
+        spot_df = _fetch_via_datasource(self.data_source, spot_token, lookback, timeframe)
         if spot_df is not None and not spot_df.empty:
             spot_df = _ensure_adx_di(spot_df, window=int(getattr(settings, "ATR_PERIOD", getattr(settings.strategy, "atr_period", 14))))
 
-        # ---- OPTION DF (default CE) ----
+        # ---- OPTION DF (use CE first) ----
         ce_token = token_info["tokens"].get("ce")
         if ce_token is None:
             self._throttled_token_warn("CE token missing; skipping.")
             return None
 
-        opt_df = _fetch_df(
-            self.data_source,
-            "option",
-            symbol_or_token=ce_token,
-            lookback_minutes=int(getattr(settings, "DATA_LOOKBACK_MINUTES", getattr(settings.data, "lookback_minutes", 60))),
-            timeframe=str(getattr(settings, "HISTORICAL_TIMEFRAME", getattr(settings.data, "timeframe", "minute"))),
-        )
+        opt_df = _fetch_via_datasource(self.data_source, int(ce_token), lookback, timeframe)
         if opt_df is None or opt_df.empty:
             log.debug("Option DF empty; skipping.")
             return None
