@@ -7,7 +7,7 @@ Exports a single source of truth: `settings` (AppSettings instance).
 Back-compat features:
 - Read-only properties that mirror common nested values (e.g., settings.DEFAULT_EQUITY)
 - A legacy `.api` proxy so old code like `settings.api.zerodha_api_key` keeps working
-- No duplicate fields; no recursive default_factory; single env-loading surface
+- No duplicate fields; single env-loading surface
 """
 
 from __future__ import annotations
@@ -21,9 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _find_env_file() -> Optional[Path]:
-    """
-    Find a .env by walking up from CWD up to 6 levels; return None if not found.
-    """
+    """Walk up from CWD up to 6 levels to find a .env; return None if not found."""
     path = Path.cwd()
     for _ in range(6):
         candidate = path / ".env"
@@ -52,7 +50,7 @@ class RiskConfig(BaseModel):
 class ZerodhaConfig(BaseModel):
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
-    access_token: Optional[str] = None  # aka KITE_ACCESS_TOKEN
+    access_token: Optional[str] = None  # KITE_ACCESS_TOKEN
     public_token: Optional[str] = None
     enctoken: Optional[str] = None
 
@@ -69,18 +67,32 @@ class ServerConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    # Core gates
     min_bars_for_signal: int = 30
     min_signal_score: int = 5
     confidence_threshold: float = 6.0
+
+    # Indicators used by strategy
+    ema_fast: int = 9
+    ema_slow: int = 21
+    rsi_period: int = 14
+    adx_period: int = 14
+    adx_trend_strength: int = 20
+
+    # ATR + SL/TP logic
     atr_period: int = 14
     base_stop_loss_points: float = 20.0
     base_target_points: float = 40.0
     atr_sl_multiplier: float = 1.5
     atr_tp_multiplier: float = 3.0
-    sl_confidence_adj: float = 0.2
-    tp_confidence_adj: float = 0.3
-    strike_selection_range: int = 3
-    di_diff_threshold: float = 10.0  # used by regime detector
+    sl_confidence_adj: float = 0.2  # used by atr_helper: sl_conf_adj
+    tp_confidence_adj: float = 0.3  # used by atr_helper: tp_conf_adj
+
+    # Regime detector
+    di_diff_threshold: float = 10.0
+
+    # Strike selection
+    strike_selection_range: int = 3  # also supported as instruments.strike_range
 
 
 class InstrumentsConfig(BaseModel):
@@ -90,12 +102,33 @@ class InstrumentsConfig(BaseModel):
     nifty_lot_size: int = 75
     min_lots: int = 1
     max_lots: int = 10
-    strike_range: int = 0  # ATM-only default
+    strike_range: int = 0  # ATM-only default (runner/selector can also read strategy.strike_selection_range)
 
 
 class ExecutorConfig(BaseModel):
+    # Placement preferences
     preferred_exit_mode: Literal["REGULAR", "OCO", "AUTO"] = "REGULAR"
+    order_variety: Literal["regular", "amo"] = "regular"
+    order_product: Literal["NRML", "MIS"] = "MIS"
+    entry_order_type: Literal["LIMIT", "MARKET"] = "LIMIT"
+
+    # Exchange / symbol meta
+    exchange: Literal["NFO", "NSE"] = "NFO"
+    tick_size: float = 0.05
+    exchange_freeze_qty: int = 1800  # typical freeze qty for NIFTY options (update if needed)
+
+    # Risk mgmt / fees
     fee_per_lot: float = 20.0
+
+    # Partial profit-taking
+    partial_tp_enable: bool = True
+    tp1_qty_ratio: float = 0.5  # 50% at TP1, remainder at TP2
+    breakeven_ticks: int = 2    # hop SL to breakeven +/- ticks after TP1
+
+    # Stop types
+    use_slm_exit: bool = True  # use SL-M for exits; else LIMIT with protective offset
+
+    # Trailing logic
     enable_trailing: bool = True
     trailing_atr_multiplier: float = 1.5
 
@@ -109,7 +142,7 @@ class AppSettings(BaseSettings):
     Env mapping strategy:
     - Nested fields via ENV_NESTED_DELIMITER="__"
       e.g., RISK__DEFAULT_EQUITY, TELEGRAM__ENABLED
-    - Flat legacy names supported via validation_alias on selected top-level shims.
+    - Flat legacy names supported via top-level aliases on toggles.
     - A .env file is auto-discovered by _find_env_file().
     """
     model_config = SettingsConfigDict(
@@ -133,7 +166,7 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsConfig = InstrumentsConfig()
     executor: ExecutorConfig = ExecutorConfig()
 
-    # ---- Read-only mirrors for common fields (no duplicates; no recursion) ----
+    # ---- Read-only mirrors for common fields (no duplicates) ----
     @property
     def DEFAULT_EQUITY(self) -> float:
         return float(self.risk.default_equity)
@@ -152,7 +185,6 @@ class AppSettings(BaseSettings):
 
     @property
     def PREFERRED_EXIT_MODE(self) -> str:
-        # mirror executor preference (for legacy reads)
         return str(self.executor.preferred_exit_mode)
 
     # ---- Legacy `.api` proxy for old code paths ----
