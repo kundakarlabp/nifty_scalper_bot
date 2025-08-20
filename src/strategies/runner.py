@@ -1,17 +1,18 @@
 """
 StrategyRunner orchestrates:
 - Time-gate via is_market_open()
-- Resolve strikes/tokens
+- Resolve strikes/tokens (only if Kite is available)
 - Ensure ADX/DI columns on SPOT DF
 - Generate a signal using EnhancedScalpingStrategy(df, current_price)  # 2-arg signature
 - Compute position size (lots) using PositionSizing and equity estimate
 
-Note: This runner is intentionally conservative and duck-typed for the data source.
+Shadow-mode safe: if Kite or data source is missing, run_once() returns None without raising.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -74,6 +75,8 @@ def _fetch_df(
       - tries source.get_spot_ohlc / get_option_ohlc
       - falls back to source.fetch_ohlc(symbol_or_token, ...)
     """
+    if source is None:
+        return None
     try:
         if kind == "spot":
             if hasattr(source, "get_spot_ohlc"):
@@ -90,62 +93,75 @@ def _fetch_df(
 
 class StrategyRunner:
     """
-    Minimal orchestrator; you can call .run_once(...) from your loop.
+    Minimal orchestrator; call .run_once(...) from your loop.
     """
 
     def __init__(self, *, data_source: Any, kite: Any, strategy: Optional[EnhancedScalpingStrategy] = None) -> None:
         self.data_source = data_source
         self.kite = kite
         self.strategy = strategy or EnhancedScalpingStrategy()
+        self._last_token_warn_ts: float = 0.0  # throttle noisy warnings
+
+    def _throttled_token_warn(self, msg: str, period_sec: int = 60) -> None:
+        now = time.time()
+        if now - self._last_token_warn_ts >= period_sec:
+            log.warning(msg)
+            self._last_token_warn_ts = now
+        else:
+            log.debug(msg)
 
     def run_once(self) -> Optional[Dict[str, Any]]:
         """
         Execute a single decision cycle:
           - skip if market closed (unless ALLOW_OFFHOURS_TESTING)
-          - produce signal dict with side/confidence/sl/tp/score
-          - attach lots, equity, and token info
+          - if Kite is unavailable (shadow mode), return None gracefully
+          - else produce signal dict with side/confidence/sl/tp/score, plus size and tokens
         """
-        if not is_market_open() and not getattr(settings.toggles, "allow_offhours_testing", getattr(settings, "ALLOW_OFFHOURS_TESTING", False)):
-            log.info("Market closed (IST gate).")
+        if not is_market_open() and not getattr(settings, "allow_offhours_testing", False):
+            log.debug("Market closed (IST gate).")
+            return None
+
+        # Shadow-mode guard: cannot resolve tokens without Kite
+        if self.kite is None:
+            log.debug("Runner: kite instance missing; skipping trading cycle (shadow mode).")
             return None
 
         # Resolve instruments
         nfo, _ = fetch_cached_instruments(self.kite)
         token_info = get_instrument_tokens(self.kite, nfo)
         if not token_info or not token_info.get("tokens"):
-            log.warning("Could not resolve CE/PE tokens.")
+            self._throttled_token_warn("Could not resolve CE/PE tokens.")
             return None
 
-        # ---- SPOT DF (for ADX/DI context if you need it later) ----
-        spot_symbol = getattr(settings.instruments, "spot_symbol", getattr(settings, "SPOT_SYMBOL", "NSE:NIFTY 50"))
+        # ---- SPOT DF (context) ----
+        spot_symbol = getattr(settings, "SPOT_SYMBOL", getattr(settings.instruments, "spot_symbol", "NSE:NIFTY 50"))
         spot_df = _fetch_df(
             self.data_source,
             "spot",
             symbol_or_token=spot_symbol,
-            lookback_minutes=int(getattr(settings.data, "lookback_minutes", getattr(settings, "DATA_LOOKBACK_MINUTES", 60))),
-            timeframe=str(getattr(settings.data, "timeframe", getattr(settings, "HISTORICAL_TIMEFRAME", "minute"))),
+            lookback_minutes=int(getattr(settings, "DATA_LOOKBACK_MINUTES", getattr(settings.data, "lookback_minutes", 60))),
+            timeframe=str(getattr(settings, "HISTORICAL_TIMEFRAME", getattr(settings.data, "timeframe", "minute"))),
         )
         if spot_df is not None and not spot_df.empty:
-            spot_df = _ensure_adx_di(spot_df, window=int(getattr(settings.strategy, "atr_period", getattr(settings, "ATR_PERIOD", 14))))
+            spot_df = _ensure_adx_di(spot_df, window=int(getattr(settings, "ATR_PERIOD", getattr(settings.strategy, "atr_period", 14))))
 
-        # ---- OPTION DF (we’ll default to CE; you can choose based on bias externally) ----
+        # ---- OPTION DF (default CE) ----
         ce_token = token_info["tokens"].get("ce")
         if ce_token is None:
-            log.warning("CE token missing; cannot build option DF.")
+            self._throttled_token_warn("CE token missing; skipping.")
             return None
 
         opt_df = _fetch_df(
             self.data_source,
             "option",
             symbol_or_token=ce_token,
-            lookback_minutes=int(getattr(settings.data, "lookback_minutes", 60)),
-            timeframe=str(getattr(settings.data, "timeframe", "minute")),
+            lookback_minutes=int(getattr(settings, "DATA_LOOKBACK_MINUTES", getattr(settings.data, "lookback_minutes", 60))),
+            timeframe=str(getattr(settings, "HISTORICAL_TIMEFRAME", getattr(settings.data, "timeframe", "minute"))),
         )
         if opt_df is None or opt_df.empty:
-            log.warning("Option DF empty.")
+            log.debug("Option DF empty; skipping.")
             return None
 
-        # LTP/current price for the option
         current_price = float(opt_df["close"].iloc[-1])
 
         # Strategy call (STRICT signature: df, current_price)
