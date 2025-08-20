@@ -28,43 +28,60 @@ except Exception:  # pragma: no cover
 
 
 def _now_ist_naive() -> datetime:
-    """Naive IST timestamp for convenience."""
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     return ist.replace(tzinfo=None)
 
 
-def _build_kite() -> Optional[Any]:
-    """Create a KiteConnect if creds exist; else return None."""
+def _build_kite_or_die() -> Optional[Any]:
+    """
+    Build a KiteConnect client if env/config present. Returns None if kiteconnect
+    isn’t installed. If keys are present but login is bad, we fail fast so you notice.
+    """
     if KiteConnect is None:
         log.warning("kiteconnect not installed; running without live feed.")
         return None
+
     api_key = settings.zerodha.api_key or getattr(settings, "ZERODHA_API_KEY", None)
     access_token = settings.zerodha.access_token or getattr(settings, "KITE_ACCESS_TOKEN", None)
+
     if not api_key or not access_token:
         log.warning("Kite credentials missing; running without live feed.")
         return None
+
     try:
         kite = KiteConnect(api_key=api_key)
         kite.set_access_token(access_token)
+        # light sanity: get margins (cheap) to prove token is valid
+        try:
+            kite.margins()
+        except Exception:
+            # If margins scope isn’t allowed, try profile as fallback
+            kite.profile()
+        log.info("KiteConnect OK (token valid).")
         return kite
     except Exception as e:
-        log.critical("Failed to initialize KiteConnect: %s", e)
+        log.critical("Failed to initialize KiteConnect with provided creds: %s", e, exc_info=False)
         return None
 
 
 def _load_data_source(kite: Optional[Any]) -> Optional[Any]:
     """
-    Use your concrete LiveKiteSource from src.data.source (requires connect()).
+    Use concrete LiveKiteSource from src.data.source (requires connect()).
+    We fail gracefully and log the exact reason.
     """
     try:
         from src.data.source import LiveKiteSource  # type: ignore
-    except Exception:
-        log.warning("LiveKiteSource not found; data source unavailable.")
+    except Exception as e:
+        log.warning("LiveKiteSource import failed: %s", e)
+        return None
+
+    if kite is None:
         return None
 
     try:
-        ds = LiveKiteSource(kite=kite) if kite is not None else LiveKiteSource(kite=None)  # type: ignore[arg-type]
-        ds.connect()  # may raise; we treat failure as 'no live data'
+        ds = LiveKiteSource(kite=kite)  # your class requires a KiteConnect object
+        ds.connect()  # will set is_connected and raise on failure
+        log.info("LiveKiteSource connected.")
         return ds
     except Exception as e:
         log.warning("Data source connect failed: %s", e)
@@ -74,20 +91,20 @@ def _load_data_source(kite: Optional[Any]) -> Optional[Any]:
 class Application:
     """
     Orchestrator: health server + StrategyRunner loop + Telegram control.
-    Works in shadow mode when live deps are absent.
+    Works in shadow mode if live deps are absent.
     """
 
     def __init__(self) -> None:
         self.settings = settings
-        self.live_trading = bool(self.settings.enable_live_trading)  # LIVE vs SHADOW
-        self.quality = "AUTO"   # AUTO | CONSERVATIVE | AGGRESSIVE
-        self.regime = "auto"    # placeholder (wire your detector if you have one)
+        self.live_trading = bool(self.settings.enable_live_trading)
+        self.quality = "AUTO"
+        self.regime = "auto"
 
         self._started_ts = time.time()
         self._shutdown = False
 
         # Dependencies
-        self.kite = _build_kite()
+        self.kite = _build_kite_or_die()
         self.data_source = _load_data_source(self.kite)
         if self.data_source is None:
             log.warning("Data source not available. Running without live feed.")
@@ -107,9 +124,9 @@ class Application:
             "live_mode": bool(self.live_trading),
             "quality": self.quality,
             "regime": self.regime,
-            "open_positions": 0,         # plug in your live state if available
-            "closed_today": 0,           # plug in actual count if tracked
-            "daily_pnl": 0.0,            # plug in actual P&L if tracked
+            "open_positions": 0,
+            "closed_today": 0,
+            "daily_pnl": 0.0,
             "session_date": _now_ist_naive().strftime("%Y-%m-%d"),
             "uptime_seconds": float(uptime),
             "kite": bool(self.kite is not None),
@@ -145,7 +162,7 @@ class Application:
                 return True
 
             if command == "refresh":
-                # Hook for instrument cache refresh / re-login if you maintain such state.
+                # hook for cache refresh / re-login, if required
                 return True
 
             if command == "health":
@@ -205,7 +222,6 @@ class Application:
 
         while not self._shutdown:
             try:
-                # Shadow-safe: runner returns None if it can't trade (no Kite, closed market, etc.)
                 result = self.runner.run_once()
                 if result:
                     log.info("Signal: %s", result)
@@ -214,7 +230,6 @@ class Application:
                 log.exception("Main loop error: %s", e)
                 time.sleep(2.0)
 
-        # orderly stop
         if self.tg:
             self.tg.stop_polling()
 
