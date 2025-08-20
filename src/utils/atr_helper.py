@@ -1,18 +1,17 @@
-# src/utils/atr_helper.py
 from __future__ import annotations
 
 from typing import Optional
+
 import pandas as pd
 
 
 def _true_range(df: pd.DataFrame) -> pd.Series:
     """
-    True Range (TR) per bar:
-      max(high - low, abs(high - prev_close), abs(low - prev_close))
+    True Range (TR) per bar: max(high - low, abs(high - prev_close), abs(low - prev_close))
     """
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
     prev_close = close.shift(1)
 
     tr = pd.concat(
@@ -23,14 +22,13 @@ def _true_range(df: pd.DataFrame) -> pd.Series:
         ],
         axis=1,
     ).max(axis=1)
-
     tr.name = "tr"
     return tr
 
 
-def compute_atr_df(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.Series:
+def compute_atr(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.Series:
     """
-    Compute ATR series aligned to df.index.
+    Compute ATR. Requires columns: high, low, close.
 
     method:
       - "sma": simple moving average of TR
@@ -45,26 +43,32 @@ def compute_atr_df(df: pd.DataFrame, period: int = 14, method: str = "rma") -> p
 
     m = method.lower()
     if m == "sma":
-        atr = tr.rolling(window=period, min_periods=period).mean()
+        atr = tr.rolling(window=period, min_periods=1).mean()
     elif m == "ema":
         atr = tr.ewm(span=period, adjust=False).mean()
-    else:  # "rma" (Wilder)
-        atr = tr.ewm(alpha=1.0 / float(period), adjust=False).mean()
+    else:  # Wilder's (RMA): alpha=1/period
+        alpha = 1 / float(period)
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
 
     atr.name = "atr"
     return atr
 
 
-def latest_atr_value(
-    df: pd.DataFrame, period: int = 14, method: str = "rma"
-) -> Optional[float]:
-    s = compute_atr_df(df, period=period, method=method)
-    if s.empty:
-        return None
-    v = s.iloc[-1]
-    if pd.isna(v):
-        return None
-    try:
-        return float(v)
-    except Exception:
-        return None
+def atr_sl_tp_points(
+    *,
+    base_sl_points: float,
+    base_tp_points: float,
+    atr_value: Optional[float],
+    sl_mult: float,
+    tp_mult: float,
+    confidence: float,
+    sl_conf_adj: float = 0.0,
+    tp_conf_adj: float = 0.0,
+) -> tuple[float, float]:
+    """
+    Combine base SL/TP with ATR-based dynamic scaling and confidence nudges.
+    """
+    atr_part = float(atr_value or 0.0)
+    sl = max(0.01, base_sl_points + atr_part * sl_mult - confidence * sl_conf_adj)
+    tp = max(0.01, base_tp_points + atr_part * tp_mult + confidence * tp_conf_adj)
+    return sl, tp
