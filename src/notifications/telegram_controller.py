@@ -10,10 +10,9 @@ import requests
 from requests.adapters import HTTPAdapter
 
 try:
-    # available via requests' dependency
     from urllib3.util.retry import Retry  # type: ignore
 except Exception:  # pragma: no cover
-    Retry = None  # graceful degrade
+    Retry = None
 
 from src.config import settings
 
@@ -22,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _TGConfig:
-    """Internal Telegram config wrapper built from settings.telegram."""
     enabled: bool
     bot_token: Optional[str]
     chat_id: Optional[int]
@@ -32,7 +30,6 @@ def _build_cfg() -> _TGConfig:
     tg = getattr(settings, "telegram", None)
     enabled = bool(getattr(tg, "enabled", True))
     bot_token = getattr(tg, "bot_token", None)
-    # Optional chat_id (can be learned on first inbound message)
     chat_id = getattr(tg, "chat_id", getattr(settings, "TELEGRAM_CHAT_ID", None)) if tg is not None else None
     try:
         chat_id = int(chat_id) if chat_id is not None else None
@@ -45,14 +42,10 @@ class TelegramController:
     """
     Telegram bot interface for receiving commands and sending alerts.
 
-    Required callbacks (injected by the app):
+    Callbacks:
       - status_callback() -> dict
       - control_callback(command: str, arg: str) -> bool
       - summary_callback() -> str
-
-    Commands:
-      /start, /stop, /mode live|shadow, /quality auto|conservative|aggressive,
-      /status, /summary, /refresh, /health, /emergency, /ping, /help
     """
 
     def __init__(
@@ -67,17 +60,14 @@ class TelegramController:
         self.enabled = bool(self.cfg.enabled and self.cfg.bot_token)
         self.base_url = f"https://api.telegram.org/bot{self.cfg.bot_token}" if self.cfg.bot_token else None
 
-        # Callbacks from trader
         self.status_callback = status_callback
         self.control_callback = control_callback
         self.summary_callback = summary_callback
 
-        # Polling state
         self._poll_lock = threading.Lock()
         self._polling = False
         self._thread: Optional[threading.Thread] = None
 
-        # Single session with retries
         self.session = requests.Session()
         if Retry is not None:
             retry = Retry(
@@ -98,30 +88,19 @@ class TelegramController:
         else:
             logger.info("TelegramController initialized.")
 
-    # ---------- low-level HTTP helpers ----------
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        json: Optional[Dict[str, Any]] = None,
-        timeout: int = 35,
-    ) -> Optional[requests.Response]:
+    # ---------- HTTP helpers ----------
+    def _request(self, method: str, path: str, *, params=None, json=None, timeout: int = 35):
         if not self.enabled or not self.base_url:
             return None
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
             resp = self.session.request(method=method, url=url, params=params, json=json, timeout=timeout)
             if resp.status_code == 429:
-                # Handle rate limiting explicitly
                 try:
                     retry_after = int(resp.json().get("parameters", {}).get("retry_after", 1))
                 except Exception:
                     retry_after = 1
-                retry_after = max(1, retry_after)
-                logger.warning("Telegram 429 rate limited; sleeping %ss then retrying once.", retry_after)
-                time.sleep(retry_after)
+                time.sleep(max(1, retry_after))
                 return self.session.request(method=method, url=url, params=params, json=json, timeout=timeout)
             return resp
         except requests.exceptions.RequestException as exc:
@@ -129,34 +108,24 @@ class TelegramController:
             return None
 
     def _delete_webhook(self) -> None:
-        """Ensure long-polling is allowed by disabling any active webhook."""
         if not self.enabled:
             return
         try:
-            resp = self._request("POST", "deleteWebhook", json={"drop_pending_updates": True}, timeout=15)
-            if resp is None:
-                return
-            if resp.status_code != 200:
-                logger.warning("deleteWebhook returned %s: %s", resp.status_code, resp.text)
-        except Exception as e:
-            logger.debug("deleteWebhook failed: %s", e)
+            self._request("POST", "deleteWebhook", json={"drop_pending_updates": True}, timeout=15)
+        except Exception:
+            pass
 
-    # ---------- low-level send ----------
+    # ---------- send ----------
     def _send_message(self, text: str, parse_mode: Optional[str] = None, retries: int = 2, backoff_sec: float = 1.0) -> bool:
         if not self.enabled:
             return False
-
-        payload: Dict[str, Any] = {
-            "chat_id": self.cfg.chat_id,
-            "text": text,
-            "disable_notification": False,
-        }
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-
         if self.cfg.chat_id is None:
             logger.error("Telegram chat_id is not configured. Cannot send message.")
             return False
+
+        payload: Dict[str, Any] = {"chat_id": self.cfg.chat_id, "text": text, "disable_notification": False}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
         attempt = 0
         while attempt <= retries:
@@ -168,35 +137,22 @@ class TelegramController:
                 continue
             if resp.status_code == 200:
                 return True
-            try:
-                body = resp.json()
-            except Exception:
-                body = {"text": resp.text}
-            logger.warning("sendMessage failed (%s): %s", resp.status_code, body)
             if attempt <= retries and resp.status_code >= 500:
                 time.sleep(backoff_sec)
-            else:
-                break
         return False
 
-    # ---------- public send helpers ----------
+    # ---------- public helpers ----------
     def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
         return self._send_message(text, parse_mode=parse_mode)
 
     def send_startup_alert(self) -> None:
-        text = "🟢 Nifty Scalper Bot started.\nType /help for commands. Awaiting instructions…"
-        self._send_message(text)
+        self._send_message("🟢 Nifty Scalper Bot started.\nType /help for commands. Awaiting instructions…")
 
     def send_realtime_session_alert(self, action: str) -> None:
-        if action.upper() == "START":
-            text = "✅ Real-time trading session STARTED."
-        elif action.upper() == "STOP":
-            text = "🛑 Real-time trading session STOPPED."
-        else:
-            text = f"ℹ️ Session {action}."
+        text = "✅ Real-time trading session STARTED." if action.upper() == "START" else \
+               "🛑 Real-time trading session STOPPED." if action.upper() == "STOP" else f"ℹ️ Session {action}."
         self._send_message(text)
 
-    # Compatibility alias
     def send_alert(self, action: str) -> None:
         self.send_realtime_session_alert(action)
 
@@ -207,7 +163,6 @@ class TelegramController:
         target = signal.get("target", signal.get("tp_points", "N/A"))
         conf = float(signal.get("confidence", 0.0) or 0.0)
         qty = position.get("quantity", position.get("lots", "N/A"))
-
         text = (
             f"🔥 <b>NEW SIGNAL #{token}</b>\n"
             f"🎯 Direction: <b>{direction}</b>\n"
@@ -219,7 +174,7 @@ class TelegramController:
         )
         self._send_message(text, parse_mode="HTML")
 
-    # ---------- status/summary formatting ----------
+    # ---------- status ----------
     @staticmethod
     def _fmt_uptime(sec: float) -> str:
         sec = int(max(0, sec))
@@ -232,9 +187,6 @@ class TelegramController:
         return f"{s}s"
 
     def _send_status(self, status: Dict[str, Any]) -> None:
-        # Expected keys (all optional; sensible defaults):
-        # is_trading, live_mode, quality, regime, open_positions, closed_today, daily_pnl,
-        # session_date, uptime_seconds
         is_trading = bool(status.get("is_trading", False))
         live_mode = bool(status.get("live_mode", False))
         quality = (status.get("quality") or "AUTO").upper()
@@ -264,11 +216,10 @@ class TelegramController:
     def _send_summary(self, summary: str) -> None:
         self._send_message(summary, parse_mode="HTML")
 
-    # ---------- command router ----------
+    # ---------- command routing ----------
     def _handle_command(self, command: str, arg: str = "", chat_id_hint: Optional[int] = None) -> None:
         logger.info("📩 Telegram command: '%s %s'", command, arg)
 
-        # Learn chat_id if unset (first inbound message)
         if self.cfg.chat_id is None and chat_id_hint is not None:
             try:
                 self.cfg.chat_id = int(chat_id_hint)
@@ -336,8 +287,7 @@ class TelegramController:
             logger.info("Telegram disabled; polling thread exiting.")
             return
 
-        # Prevent 409 by ensuring webhook is off
-        self._delete_webhook()
+        self._delete_webhook()  # avoid 409 conflicts
 
         url_path = "getUpdates"
         offset: Optional[int] = None
@@ -368,7 +318,6 @@ class TelegramController:
                         self._handle_command(cmd, arg, chat_id_hint=chat_id)
 
                 elif resp.status_code == 409:
-                    # Another webhook/poller might be active — try to disable webhook once and continue.
                     logger.error("409 Conflict: webhook active; disabling and retrying.")
                     self._delete_webhook()
                     time.sleep(2)
@@ -389,9 +338,8 @@ class TelegramController:
 
         logger.info("🛑 Telegram polling stopped.")
 
-    # ---------- lifecycle (idempotent) ----------
+    # ---------- lifecycle ----------
     def start_polling(self) -> None:
-        """Start long-polling for Telegram messages in a background thread."""
         if not self.enabled:
             logger.warning("Telegram disabled; not starting polling.")
             return
@@ -404,7 +352,6 @@ class TelegramController:
             self._thread.start()
 
     def stop_polling(self) -> None:
-        """Stop the polling loop gracefully."""
         with self._poll_lock:
             if not self._polling:
                 return
