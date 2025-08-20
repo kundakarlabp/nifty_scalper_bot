@@ -5,23 +5,17 @@ lot-aware partial profit-taking, breakeven hop after TP1, trailing-SL support,
 hard-stop failsafe, and exchange freeze-quantity chunking.
 
 Public API:
-- place_entry_order(...)
-- setup_gtt_orders(...)
-- update_trailing_stop(order_id, current_price, atr, atr_multiplier)
-- exit_order(order_id, exit_reason="manual")
-- get_active_orders()
-- get_positions()
-- cancel_all_orders()
-- get_last_price(symbol)
-- get_tick_size() -> float
-- sync_and_enforce_oco() -> list[(order_id, fill_price)]
-
-Notes:
-- If PARTIAL_TP_ENABLE=true, exits are managed with REGULAR orders (GTT OCO cannot split partials cleanly).
-- After TP1 fill we:
-    * shrink SL to remaining quantity
-    * optionally hop SL to breakeven ± ticks (tighten-only)
-- If USE_SLM_EXIT=true, SL uses market trigger (SL-M/SLM). Otherwise SL (limit) with a protective offset.
+- place_entry_order(token, symbol, side, quantity, price) -> record_id | None
+- setup_gtt_orders(record_id, sl_price, tp_price) -> None  (REGULAR fallback when partial TP enabled)
+- update_trailing_stop(record_id, current_price, atr, atr_multiplier) -> bool
+- exit_order(record_id, exit_reason="manual") -> bool
+- get_active_orders() -> list[_OrderRecord]
+- get_positions() -> dict
+- get_positions_kite() -> dict
+- cancel_all_orders() -> None
+- get_last_price(symbol) -> Optional[float]
+- get_tick_size(token=None) -> float
+- sync_and_enforce_oco() -> list[tuple[str, float]]   # (record_id, fill_price)
 """
 
 from __future__ import annotations
@@ -31,11 +25,17 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, List, Tuple
 
-from src.config import ExecutorConfig
+from src.config import settings
 from src.utils.retry import retry
+
+try:
+    # optional import for typing and side values
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:  # pragma: no cover
+    KiteConnect = object  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -43,780 +43,741 @@ logger = logging.getLogger(__name__)
 # ---------------------------- rounding helpers -------------------------- #
 
 def _round_to_tick(x: float, tick: float) -> float:
-    if tick <= 0:
+    """Round price to nearest tick size."""
+    try:
+        if tick <= 0:
+            return float(x)
+        return round(float(x) / tick) * tick
+    except Exception:
         return float(x)
-    return round(float(x) / tick) * tick
 
 
-def _round_down_to_tick(x: float, tick: float) -> float:
-    if tick <= 0:
-        return float(x)
-    return math.floor(float(x) / tick) * tick
+def _round_to_qty(x: int, step: int) -> int:
+    """Round quantity DOWN to nearest multiple of step."""
+    try:
+        x = int(x)
+        step = max(1, int(step))
+        return (x // step) * step
+    except Exception:
+        return int(x)
 
 
-def _round_up_to_tick(x: float, tick: float) -> float:
-    if tick <= 0:
-        return float(x)
-    return math.ceil(float(x) / tick) * tick
-
-
-# ---------------------------- lot helpers ------------------------------- #
-
-def _lots_from_qty(qty: int, lot_size: int) -> int:
-    if lot_size <= 0:
-        return qty
-    return max(0, int(qty // lot_size))
-
-
-def _qty_from_lots(lots: int, lot_size: int) -> int:
-    return max(0, int(lots * max(1, lot_size)))
-
-
-# ---------------------------- model ------------------------------------- #
+# ---------------------------- data model -------------------------------- #
 
 @dataclass
-class OrderRecord:
-    """Internal representation of one managed trade (entry with exits)."""
-    order_id: str
+class _OrderRecord:
+    """Internal state for a managed order set (entry + exits)."""
+    instrument_token: int
     symbol: str
-    exchange: str
-    transaction_type: str  # BUY/SELL (entry side)
-    quantity: int          # contracts (NOT lots)
+    side: str  # "BUY" | "SELL"
+    quantity: int  # total units (multiple of lot_size)
     entry_price: float
-    stop_loss: float
-    target: float
+    order_variety: str
+    order_product: str
+    exchange: str
+    tick_size: float
+    lot_size: int
+    freeze_qty: int
+    record_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
-    # exit linkage (broker order IDs or GTT)
-    use_gtt: bool = False
-    gtt_id: Optional[int] = None
+    # entry orders can be chunked; store all child order_ids
+    entry_order_ids: List[str] = field(default_factory=list)
+    is_open: bool = True
+    entry_filled_qty: int = 0
+    avg_entry_price: float = 0.0
+
+    # Exit orders (REGULAR)
     sl_order_id: Optional[str] = None
     tp_order_id: Optional[str] = None
-    exit_side: Optional[str] = None  # SELL if entry BUY, else BUY
-
-    is_open: bool = True
-    last_trail_ts: float = 0.0
-    trailing_step_atr_multiplier: float = 1.5  # can be overridden via Config
-
-    # --- Partial profits (REGULAR only) ---
+    # Partial profit targets (REGULAR)
     partial_enabled: bool = False
-    tp1_price: Optional[float] = None
     tp1_order_id: Optional[str] = None
-    tp1_qty: int = 0
-    tp1_filled: bool = False
-
-    tp2_price: Optional[float] = None
     tp2_order_id: Optional[str] = None
+    tp1_qty: int = 0
     tp2_qty: int = 0
-    tp2_filled: bool = False
+    breakeven_done: bool = False
 
-    # track SL qty (so we can recreate/resize it after TP1)
-    sl_qty: int = 0
+    # GTT (placed as separate singles)
+    gtt_sl_id: Optional[int] = None
+    gtt_tp_id: Optional[int] = None
 
-    # --- Hard stop bookkeeping (hook for future use) ---
-    breach_ts: Optional[float] = None
-
-    # close info
-    exit_price: Optional[float] = None
-    exit_reason: Optional[str] = None
+    # Remember desired exit prices (for (re)arm logic)
+    desired_sl: Optional[float] = None
+    desired_tp: Optional[float] = None
 
 
 # ---------------------------- executor ---------------------------------- #
 
 class OrderExecutor:
     """
-    Thin wrapper around order placement and exit management.
-    If `kite` is None, it runs in simulation mode.
+    Manages live order execution with state-tracking and OCO/GTT logic.
+
+    Uses settings.executor for defaults; safe when unset.
     """
 
-    def __init__(self, config: ExecutorConfig, kite: Optional[Any] = None):
-        if not isinstance(config, ExecutorConfig):
-            raise TypeError("A valid ExecutorConfig instance is required.")
-        self.config = config
+    def __init__(self, config: Optional[object] = None, kite: Any = None, data_source: Any = None) -> None:
+        self.config = config or getattr(settings, "executor", object())
         self.kite = kite
-        self._lock = threading.RLock()
-        self.orders: Dict[str, OrderRecord] = {}
+        self.data_source = data_source
 
-    # ------------------------------- helpers -------------------------------- #
+        # lock + in-memory state
+        self._lock = threading.Lock()
+        self._active: Dict[str, _OrderRecord] = {}
+        self._positions: Dict[str, Any] = {}
+        self._tick_cache: Dict[int, float] = {}
 
-    def get_tick_size(self) -> float:
-        return float(self.config.tick_size)
+        # derived config with safe defaults
+        self.exchange: str = str(getattr(self.config, "exchange", "NFO"))
+        self.order_variety: str = str(getattr(self.config, "order_variety", "regular"))
+        self.order_product: str = str(getattr(self.config, "order_product", "NRML"))
+        self.entry_order_type: str = str(getattr(self.config, "entry_order_type", "LIMIT"))  # LIMIT / MARKET
+        self.use_slm_exit: bool = bool(getattr(self.config, "use_slm_exit", True))
+        self.preferred_exit_mode: str = str(getattr(self.config, "preferred_exit_mode", "REGULAR")).upper()
+        self.enable_trailing: bool = bool(getattr(self.config, "enable_trailing", True))
+        self.trailing_atr_multiplier: float = float(getattr(self.config, "trailing_atr_multiplier", 1.5))
+        self.partial_tp_enable: bool = bool(getattr(self.config, "partial_tp_enable", False))
+        self.tp1_qty_ratio: float = float(getattr(self.config, "tp1_qty_ratio", 0.5))  # 50% at TP1
+        self.breakeven_ticks: int = int(getattr(self.config, "breakeven_ticks", 2))   # hop to BE±ticks after TP1
+        self.default_tick_size: float = float(getattr(self.config, "tick_size", 0.05))
+        self.freeze_qty_default: int = int(getattr(self.config, "exchange_freeze_qty", 1800))
+        self.lot_size: int = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
 
-    @property
-    def default_product(self) -> str:
-        return self.config.default_product
+    # --------------- market utils ---------------- #
 
-    @property
-    def default_order_type(self) -> str:
-        return self.config.default_order_type
+    def get_tick_size(self, token: Optional[int] = None) -> float:
+        """Fetch instrument tick size, cached per token."""
+        if token is None:
+            return self.default_tick_size
+        if token in self._tick_cache:
+            return self._tick_cache[token]
 
-    @property
-    def default_validity(self) -> str:
-        return self.config.default_validity
-
-    @property
-    def use_slm_exit(self) -> bool:
-        return self.config.use_slm_exit
-
-    @property
-    def breakeven_after_tp1(self) -> bool:
-        return bool(self.config.breakeven_after_tp1_enable)
-
-    @property
-    def sl_limit_offset_ticks(self) -> int:
-        return int(self.config.sl_limit_offset_ticks)
-
-    def _generate_order_id(self) -> str:
-        return str(uuid.uuid4())
-
-    def _safe_float(self, v: Any, default: float = 0.0) -> float:
+        tick = self.default_tick_size
         try:
-            f = float(v)
-            return f if f == f else default  # filter NaN
-        except Exception:
-            return default
+            if not self.kite:
+                raise RuntimeError("kite not available")
+            # Try NFO first; fallback to NSE
+            for seg in ("NFO", "NSE"):
+                instruments = self.kite.instruments(seg)
+                for inst in instruments:
+                    if int(inst.get("instrument_token", -1)) == int(token):
+                        tick = float(inst.get("tick_size", tick))
+                        freeze = int(inst.get("freeze_quantity", self.freeze_qty_default)) if "freeze_quantity" in inst else self.freeze_qty_default
+                        self._tick_cache[token] = tick
+                        # keep a freeze cache by token
+                        return tick
+        except Exception as e:
+            logger.warning("Tick size fetch failed for token %s, defaulting to %.2f: %s", token, tick, e)
 
-    def _place_in_chunks(
-        self, *, tradingsymbol: str, exchange: str, side: str,
-        quantity: int, product: str, order_type: str, validity: str,
-        price: Optional[float] = None, trigger_price: Optional[float] = None,
-        variety: Optional[str] = None
-    ) -> Optional[str]:
-        """Respect exchange freeze quantity by splitting into chunks; return first order_id anchor."""
-        remain = int(quantity)
-        if remain <= 0:
-            return None
-        anchor_id = None
-        freeze_qty = int(self.config.nfo_freeze_qty or 0)
-        while remain > 0:
-            q = min(remain, freeze_qty if freeze_qty > 0 else remain)
-            oid = self._kite_place_order(
-                tradingsymbol=tradingsymbol,
-                exchange=exchange,
-                transaction_type=side,
-                quantity=q,
-                product=product,
-                order_type=order_type,
-                validity=validity,
-                price=price,
-                trigger_price=trigger_price,
-                variety=variety,
-            )
-            if not oid:
+        self._tick_cache[token] = tick
+        return tick
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        """Fetch LTP from attached data source."""
+        try:
+            if not self.data_source:
                 return None
-            anchor_id = anchor_id or oid
-            remain -= q
-        return anchor_id
-
-    # ------------------------------- live API -------------------------------- #
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _kite_place_order(
-        self,
-        *,
-        tradingsymbol: str,
-        exchange: str,
-        transaction_type: str,
-        quantity: int,
-        product: str,
-        order_type: str,
-        validity: str,
-        price: Optional[float] = None,
-        trigger_price: Optional[float] = None,
-        variety: Optional[str] = None,
-    ) -> Optional[str]:
-        """Place order via Kite; return order_id or None."""
-        if not self.kite:
-            oid = self._generate_order_id()
-            logger.info(
-                "🧪 SIM order: %s %s x%d %s price=%s trig=%s",
-                transaction_type, tradingsymbol, quantity, order_type, price, trigger_price
-            )
-            return oid
-        try:
-            params = dict(
-                tradingsymbol=tradingsymbol,
-                exchange=exchange,
-                transaction_type=transaction_type,
-                quantity=int(quantity),
-                product=product,
-                order_type=order_type,
-                validity=validity,
-                variety=variety or getattr(self.kite, "VARIETY_REGULAR", "regular"),
-            )
-            if price is not None:
-                params["price"] = float(price)
-            if trigger_price is not None:
-                params["trigger_price"] = float(trigger_price)
-
-            order_id = self.kite.place_order(**params)
-            if isinstance(order_id, dict):
-                order_id = order_id.get("order_id") or order_id.get("data", {}).get("order_id")
-            order_id = str(order_id)
-            logger.info(
-                "✅ Kite order placed: id=%s %s %s x%d (%s)",
-                order_id, transaction_type, tradingsymbol, quantity, order_type
-            )
-            return order_id
-        except Exception as exc:
-            logger.error("💥 place_order failed: %s", exc, exc_info=True)
-            return None
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _kite_place_gtt_oco(
-        self,
-        *,
-        tradingsymbol: str,
-        exchange: str,
-        last_price: float,
-        exit_side: str,
-        quantity: int,
-        sl_price: float,
-        tp_price: float,
-    ) -> Optional[int]:
-        """Place GTT OCO; return trigger_id or None."""
-        if not self.kite:
-            logger.info(
-                "🧪 SIM GTT OCO created for %s (sl=%.2f, tp=%.2f)",
-                tradingsymbol, sl_price, tp_price
-            )
-            return None
-        try:
-            legs: List[Dict[str, Any]] = [
-                {
-                    "transaction_type": exit_side,
-                    "quantity": int(quantity),
-                    "product": self.config.default_product,
-                    "order_type": "LIMIT",  # GTT legs are limit
-                    "price": float(sl_price),
-                },
-                {
-                    "transaction_type": exit_side,
-                    "quantity": int(quantity),
-                    "product": self.config.default_product,
-                    "order_type": "LIMIT",
-                    "price": float(tp_price),
-                },
-            ]
-            trigger_vals = [float(sl_price), float(tp_price)]
-            trigger_type = getattr(self.kite, "GTT_TYPE_OCO", "two-leg")
-
-            try:
-                resp = self.kite.place_gtt(
-                    trigger_type=trigger_type,
-                    tradingsymbol=tradingsymbol,
-                    exchange=exchange,
-                    trigger_values=trigger_vals,
-                    last_price=float(last_price),
-                    orders=legs,
-                )
-            except TypeError:
-                # some SDK variants don't require last_price
-                resp = self.kite.place_gtt(
-                    trigger_type=trigger_type,
-                    tradingsymbol=tradingsymbol,
-                    exchange=exchange,
-                    trigger_values=trigger_vals,
-                    orders=legs,
-                )
-
-            trig_id = None
-            if isinstance(resp, dict):
-                trig_id = resp.get("trigger_id") or resp.get("data", {}).get("trigger_id")
-            if trig_id:
-                logger.info("✅ GTT OCO created: trigger_id=%s for %s", trig_id, tradingsymbol)
-                return int(trig_id)
-            logger.info("ℹ️ GTT OCO placed but no trigger_id returned; broker may accept silently.")
-            return None
-        except Exception as exc:
-            logger.info("ℹ️ GTT OCO rejected/unavailable, falling back to REGULAR: %s", exc)
-            return None
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _kite_modify_sl(self, order_id: str, new_stop: float) -> bool:
-        if not self.kite:
-            logger.info("🧪 SIM modify SL(%s) → %.2f", order_id, new_stop)
-            return True
-        try:
-            ordertype = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M") if self.config.use_slm_exit \
-                        else getattr(self.kite, "ORDER_TYPE_SL", "SL")
-            self.kite.modify_order(
-                variety=getattr(self.kite, "VARIETY_REGULAR", "regular"),
-                order_id=order_id,
-                order_type=ordertype,
-                price=(None if ordertype in ("SLM", "SL-M") else float(new_stop)),
-                trigger_price=float(new_stop),
-                validity=self.config.default_validity,
-            )
-            logger.info("✏️  Modified SL %s → trig %.2f (%s)", order_id, new_stop, ordertype)
-            return True
-        except Exception as exc:
-            logger.error("💥 modify_order (SL) failed: %s", exc, exc_info=True)
-            return False
-
-    @retry(tries=3, delay=1, backoff=2)
-    def _kite_cancel(self, order_id: str) -> bool:
-        if not self.kite:
-            logger.info("🧪 SIM cancel %s", order_id)
-            return True
-        try:
-            self.kite.cancel_order(
-                variety=getattr(self.kite, "VARIETY_REGULAR", "regular"),
-                order_id=order_id,
-            )
-            logger.info("🧹 Cancelled order: %s", order_id)
-            return True
-        except Exception as exc:
-            logger.error("💥 cancel_order failed: %s", exc, exc_info=True)
-            return False
-
-    def _order_status_map(self) -> Dict[str, Dict[str, Any]]:
-        """Return {order_id: order_dict} for quick lookups."""
-        if not self.kite:
-            return {}
-        try:
-            mp: Dict[str, Dict[str, Any]] = {}
-            for o in self.kite.orders() or []:
-                oid = str(o.get("order_id") or o.get("id") or "")
-                if oid:
-                    mp[oid] = o
-            return mp
+            return self.data_source.get_last_price(symbol)
         except Exception:
+            return None
+
+    def get_active_orders(self) -> List[Any]:
+        with self._lock:
+            return list(self._active.values())
+
+    def get_positions(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._positions)
+
+    def get_positions_kite(self) -> Dict[str, Any]:
+        try:
+            if not self.kite:
+                return {}
+            pos = self.kite.positions().get("day", [])
+            return {p["tradingsymbol"]: p for p in pos}
+        except Exception as e:
+            logger.error("Failed to fetch live positions from Kite: %s", e)
             return {}
 
-    # ------------------------------- public API ------------------------------ #
+    # ---------------- kite wrappers (retry) ---------------- #
+
+    @retry(exceptions=(Exception,))
+    def _kite_place_order(self, **kwargs) -> str:
+        """Wrapper for kite.place_order with retry & logging."""
+        return self.kite.place_order(**kwargs)
+
+    @retry(exceptions=(Exception,))
+    def _kite_modify_order(self, **kwargs) -> str:
+        """Wrapper for kite.modify_order with retry & logging."""
+        return self.kite.modify_order(**kwargs)
+
+    @retry(exceptions=(Exception,))
+    def _kite_cancel(self, **kwargs) -> bool:
+        """Wrapper for kite.cancel_order with retry & logging."""
+        try:
+            self.kite.cancel_order(**kwargs)
+            return True
+        except Exception as e:
+            logger.warning("Failed to cancel order (%s): %s", kwargs, e)
+            return False
+
+    # ---------------- entry placement (with chunking) ---------------- #
+
+    def _chunk_quantity(self, units: int, step: int, freeze: int) -> List[int]:
+        """Split a quantity (units) into chunks obeying lot step and freeze limit."""
+        units = _round_to_qty(units, step)
+        if units <= 0:
+            return []
+        freeze_adj = _round_to_qty(min(freeze, units), step)
+        if freeze_adj <= 0:
+            freeze_adj = step
+        chunks = []
+        remaining = units
+        while remaining > 0:
+            take = min(remaining, freeze_adj)
+            take = _round_to_qty(take, step)
+            if take <= 0:
+                break
+            chunks.append(take)
+            remaining -= take
+        return chunks
 
     def place_entry_order(
         self,
+        token: int,
         symbol: str,
-        exchange: str,
-        transaction_type: str,
-        quantity: int,
+        side: str,
+        quantity: int,   # UNITS (must be multiple of lot_size)
+        price: float,
     ) -> Optional[str]:
         """
-        Place the initial entry order. Returns order_id or None.
-        Quantity must be contracts.
+        Place entry orders (chunked by freeze-limit).
+        Returns record_id or None.
         """
-        if quantity <= 0:
-            logger.warning("Attempted to place order with non-positive quantity: %s", quantity)
+        if not self.kite:
+            logger.error("Kite not available; cannot place live orders.")
             return None
 
-        # Lot size integrity guard
-        lot_size = int(self.config.nifty_lot_size or 0)
-        if lot_size > 0 and quantity % lot_size != 0:
-            adj_qty = (quantity // lot_size) * lot_size
-            logger.warning(
-                "Quantity %d not a multiple of lot size %d; adjusting down to %d.",
-                quantity, lot_size, adj_qty
-            )
-            quantity = adj_qty
-            if quantity <= 0:
-                return None
+        if quantity <= 0:
+            logger.warning("Attempted to place order with quantity <= 0. Skipping.")
+            return None
 
-        oid = self._place_in_chunks(
-            tradingsymbol=symbol,
-            exchange=exchange,
-            side=transaction_type.upper(),
-            quantity=int(quantity),
-            product=self.config.default_product,
-            order_type=self.config.default_order_type,
-            validity=self.config.default_validity,
+        tick = self.get_tick_size(token)
+        step = self.lot_size
+        freeze = int(getattr(self.config, "exchange_freeze_qty", self.freeze_qty_default))
+
+        with self._lock:
+            # Prevent duplicate open record for same symbol
+            for rec in self._active.values():
+                if rec.symbol == symbol and rec.is_open:
+                    logger.warning("Open order/position already exists for %s; skipping new entry.", symbol)
+                    return None
+
+        chunks = self._chunk_quantity(quantity, step, freeze)
+        if not chunks:
+            logger.warning("Quantity %d could not be chunked; check lot_size/freeze limits.", quantity)
+            return None
+
+        entry_ids: List[str] = []
+        for q in chunks:
+            try:
+                params = {
+                    "variety": self.order_variety,
+                    "exchange": self.exchange,
+                    "tradingsymbol": symbol,
+                    "transaction_type": side,
+                    "quantity": q,
+                    "product": self.order_product,
+                    "order_type": self.entry_order_type,
+                }
+                if self.entry_order_type.upper() == "LIMIT":
+                    params["price"] = _round_to_tick(price, tick)
+                oid = self._kite_place_order(**params)
+                entry_ids.append(oid)
+                logger.info("🟢 Entry chunk placed %s: %s %d@%.2f -> %s", symbol, side, q, price, oid)
+            except Exception as e:
+                logger.error("Failed to place entry chunk %s %d: %s", symbol, q, e)
+
+        if not entry_ids:
+            return None
+
+        rec = _OrderRecord(
+            instrument_token=token,
+            symbol=symbol,
+            side=side,
+            quantity=sum(chunks),
+            entry_price=price,
+            order_variety=self.order_variety,
+            order_product=self.order_product,
+            exchange=self.exchange,
+            tick_size=tick,
+            lot_size=step,
+            freeze_qty=freeze,
+            entry_order_ids=entry_ids,
         )
-        return oid
+        with self._lock:
+            self._active[rec.record_id] = rec
+        return rec.record_id
 
-    def setup_gtt_orders(
-        self,
-        entry_order_id: str,
-        entry_price: float,
-        stop_loss_price: float,
-        target_price: float,
-        symbol: str,
-        exchange: str,
-        quantity: int,
-        transaction_type: str,
-    ) -> bool:
-        """
-        Create exits. If partial profits are enabled -> REGULAR with two TPs;
-        else try GTT OCO, fallback to REGULAR.
-        Always records an internal OrderRecord.
-        """
+    # ---------------- exits (REGULAR & GTT) ---------------- #
+
+    def _place_sl_regular(self, rec: _OrderRecord, sl_price: float, qty: int) -> Optional[str]:
+        """Place/replace a regular SL(-M) order for given qty."""
+        order_type = "SL-M" if self.use_slm_exit else "SL"
+        params = {
+            "variety": rec.order_variety,
+            "exchange": rec.exchange,
+            "tradingsymbol": rec.symbol,
+            "transaction_type": "SELL" if rec.side == "BUY" else "BUY",
+            "quantity": qty,
+            "product": rec.order_product,
+            "order_type": order_type,
+            "trigger_price": _round_to_tick(sl_price, rec.tick_size),
+        }
+        if order_type == "SL":  # protective offset for limit SL
+            params["price"] = _round_to_tick(sl_price, rec.tick_size)
         try:
-            entry_price = self._safe_float(entry_price)
-            sl = self._safe_float(stop_loss_price)
-            tp = self._safe_float(target_price)
+            oid = self._kite_place_order(**params)
+            return oid
+        except Exception as e:
+            logger.error("SL order placement failed for %s: %s", rec.symbol, e)
+            return None
 
-            if entry_price <= 0 or sl <= 0 or tp <= 0:
-                logger.warning("⚠️ Invalid SL/TP/entry for exits setup.")
+    def _place_tp_regular(self, rec: _OrderRecord, tp_price: float, qty: int) -> Optional[str]:
+        """Place/replace a regular TP limit order for given qty."""
+        params = {
+            "variety": rec.order_variety,
+            "exchange": rec.exchange,
+            "tradingsymbol": rec.symbol,
+            "transaction_type": "SELL" if rec.side == "BUY" else "BUY",
+            "quantity": qty,
+            "product": rec.order_product,
+            "order_type": "LIMIT",
+            "price": _round_to_tick(tp_price, rec.tick_size),
+        }
+        try:
+            oid = self._kite_place_order(**params)
+            return oid
+        except Exception as e:
+            logger.error("TP order placement failed for %s: %s", rec.symbol, e)
+            return None
+
+    def setup_gtt_orders(self, record_id: str, sl_price: float, tp_price: float) -> None:
+        """
+        Arms exits for the record. Behavior:
+          - If partial TP is enabled => use REGULAR orders (two TPs if configured).
+          - Else:
+              * If preferred_exit_mode is GTT/AUTO => attempt two single GTTs (SL & TP),
+                else REGULAR SL/TP.
+        """
+        with self._lock:
+            rec = self._active.get(record_id)
+        if not rec or not rec.is_open:
+            logger.warning("Record %s not found or not open; cannot arm exits.", record_id)
+            return
+
+        rec.desired_sl = sl_price
+        rec.desired_tp = tp_price
+
+        # Partial TP => REGULAR orders always
+        if self.partial_tp_enable:
+            with self._lock:
+                rec.partial_enabled = True
+
+            # qty split: tp1_ratio for TP1, remaining for TP2
+            tp1_qty = _round_to_qty(int(rec.quantity * self.tp1_qty_ratio), rec.lot_size)
+            tp1_qty = max(rec.lot_size, tp1_qty) if tp1_qty > 0 else rec.lot_size
+            tp2_qty = _round_to_qty(rec.quantity - tp1_qty, rec.lot_size)
+
+            # Place SL for full qty first
+            sl_id = self._place_sl_regular(rec, sl_price, rec.quantity)
+            # Place TP1 at provided target
+            tp1_id = self._place_tp_regular(rec, tp_price, tp1_qty)
+
+            # Optional TP2 further out (2x distance)
+            dist = abs(tp_price - rec.entry_price)
+            tp2_price = rec.entry_price + (dist * 2.0) * (1 if rec.side == "BUY" else -1)
+            tp2_id = None
+            if tp2_qty > 0:
+                tp2_id = self._place_tp_regular(rec, tp2_price, tp2_qty)
+
+            with self._lock:
+                rec.sl_order_id = sl_id
+                rec.tp1_order_id = tp1_id
+                rec.tp2_order_id = tp2_id
+                rec.tp1_qty = tp1_qty
+                rec.tp2_qty = tp2_qty
+            logger.info("Exits armed (REGULAR partial): SL=%s, TP1=%s, TP2=%s", sl_id, tp1_id, tp2_id)
+            return
+
+        # Non-partial: try GTT if preferred, otherwise REGULAR
+        if self.preferred_exit_mode in ("GTT", "AUTO"):
+            try:
+                # Two single GTTs (SL & TP). If this fails, fallback to regular.
+                # NOTE: Kite's GTT signature may vary; this is wrapped in try.
+                sl_gtt = self.kite.place_gtt(
+                    trigger_type="single",
+                    tradingsymbol=rec.symbol,
+                    exchange=rec.exchange,
+                    trigger_values=[_round_to_tick(sl_price, rec.tick_size)],
+                    last_price=self.get_last_price(rec.symbol) or rec.entry_price,
+                    orders=[{
+                        "transaction_type": "SELL" if rec.side == "BUY" else "BUY",
+                        "quantity": rec.quantity,
+                        "order_type": "SL-M" if self.use_slm_exit else "SL",
+                        "product": rec.order_product,
+                        "price": _round_to_tick(sl_price, rec.tick_size),
+                    }],
+                )
+                tp_gtt = self.kite.place_gtt(
+                    trigger_type="single",
+                    tradingsymbol=rec.symbol,
+                    exchange=rec.exchange,
+                    trigger_values=[_round_to_tick(tp_price, rec.tick_size)],
+                    last_price=self.get_last_price(rec.symbol) or rec.entry_price,
+                    orders=[{
+                        "transaction_type": "SELL" if rec.side == "BUY" else "BUY",
+                        "quantity": rec.quantity,
+                        "order_type": "LIMIT",
+                        "product": rec.order_product,
+                        "price": _round_to_tick(tp_price, rec.tick_size),
+                    }],
+                )
+                with self._lock:
+                    rec.gtt_sl_id = int(sl_gtt)
+                    rec.gtt_tp_id = int(tp_gtt)
+                logger.info("Exits armed (GTT): SL GTT=%s, TP GTT=%s", sl_gtt, tp_gtt)
+                return
+            except Exception as e:
+                logger.warning("GTT arming failed (%s); falling back to REGULAR exits.", e)
+
+        # Fallback REGULAR exits
+        sl_id = self._place_sl_regular(rec, sl_price, rec.quantity)
+        tp_id = self._place_tp_regular(rec, tp_price, rec.quantity)
+        with self._lock:
+            rec.sl_order_id = sl_id
+            rec.tp_order_id = tp_id
+        logger.info("Exits armed (REGULAR): SL=%s, TP=%s", sl_id, tp_id)
+
+    # ---------------- trailing stop ---------------- #
+
+    def update_trailing_stop(self, record_id: str, current_price: float, atr: float, atr_multiplier: Optional[float] = None) -> bool:
+        """
+        Tighten SL according to ATR trail (never loosen).
+        For REGULAR SL: modify order; for GTT SL: cancel & recreate.
+        """
+        with self._lock:
+            rec = self._active.get(record_id)
+        if not rec or not rec.is_open or not self.enable_trailing:
+            return False
+        if atr is None or atr <= 0:
+            return False
+
+        mult = float(atr_multiplier if atr_multiplier is not None else self.trailing_atr_multiplier)
+        if mult <= 0:
+            return False
+
+        # Compute proposed new SL
+        if rec.side == "BUY":
+            proposed = current_price - atr * mult
+            new_sl = max(float(rec.desired_sl or proposed), proposed)
+            # never below original desired SL; allow only tighten (increase)
+            if rec.desired_sl is not None:
+                new_sl = max(rec.desired_sl, new_sl)
+        else:
+            proposed = current_price + atr * mult
+            new_sl = min(float(rec.desired_sl or proposed), proposed)
+            if rec.desired_sl is not None:
+                new_sl = min(rec.desired_sl, new_sl)
+
+        new_sl = _round_to_tick(new_sl, rec.tick_size)
+
+        # If SL is unchanged or worse, skip
+        old_sl = rec.desired_sl or new_sl
+        if rec.side == "BUY" and new_sl <= old_sl:
+            return False
+        if rec.side == "SELL" and new_sl >= old_sl:
+            return False
+
+        # Apply
+        try:
+            if rec.sl_order_id:  # REGULAR SL
+                params = {
+                    "variety": rec.order_variety,
+                    "order_id": rec.sl_order_id,
+                    "quantity": rec.tp1_qty + rec.tp2_qty if rec.partial_enabled else rec.quantity,
+                    "trigger_price": new_sl,
+                }
+                if not self.use_slm_exit:
+                    params["price"] = new_sl
+                    params["order_type"] = "SL"
+                self._kite_modify_order(**params)
+            elif rec.gtt_sl_id:  # GTT SL: cancel & recreate
+                try:
+                    self.kite.cancel_gtt(rec.gtt_sl_id)
+                except Exception:
+                    pass
+                sl_gtt = self.kite.place_gtt(
+                    trigger_type="single",
+                    tradingsymbol=rec.symbol,
+                    exchange=rec.exchange,
+                    trigger_values=[new_sl],
+                    last_price=self.get_last_price(rec.symbol) or rec.entry_price,
+                    orders=[{
+                        "transaction_type": "SELL" if rec.side == "BUY" else "BUY",
+                        "quantity": rec.quantity,
+                        "order_type": "SL-M" if self.use_slm_exit else "SL",
+                        "product": rec.order_product,
+                        "price": new_sl,
+                    }],
+                )
+                with self._lock:
+                    rec.gtt_sl_id = int(sl_gtt)
+            else:
                 return False
 
-            exit_side = "SELL" if transaction_type.upper() == "BUY" else "BUY"
-
-            # Decide partials
-            want_partial = bool(self.config.partial_tp_enable) and quantity >= int(self.config.nifty_lot_size or 2)
-            use_gtt = False
-            gtt_id = None
-            sl_id = None
-            tp_id = None
-
-            tp1 = None
-            tp2 = None
-            tp1_qty = 0
-            tp2_qty = 0
-            tp1_id = None
-            tp2_id = None
-
-            if want_partial:
-                # R-multiples for TP calculation
-                r = abs(entry_price - sl)
-                if transaction_type.upper() == "BUY":
-                    tp1 = entry_price + r * 1.0
-                    tp2 = entry_price + r * max(1.0, float(self.config.partial_tp2_r_mult))
-                else:
-                    tp1 = entry_price - r * 1.0
-                    tp2 = entry_price - r * max(1.0, float(self.config.partial_tp2_r_mult))
-
-                # Quantities by lots
-                lot_size = int(self.config.nifty_lot_size or 0)
-                total_lots = _lots_from_qty(quantity, lot_size)
-                tp1_lots = max(1, int(round(total_lots * float(self.config.partial_tp_ratio))))
-                tp2_lots = max(0, int(total_lots - tp1_lots))
-                if tp2_lots == 0 and tp1_lots > 1:
-                    tp1_lots -= 1
-                    tp2_lots = 1
-
-                tp1_qty = _qty_from_lots(tp1_lots, lot_size)
-                tp2_qty = _qty_from_lots(tp2_lots, lot_size)
-
-            mode = self.config.preferred_exit_mode
-            try_gtt = (mode in ("AUTO", "GTT")) and not want_partial
-
-            tick = self.get_tick_size()
-
-            if try_gtt:
-                gtt_id = self._kite_place_gtt_oco(
-                    tradingsymbol=symbol,
-                    exchange=exchange,
-                    last_price=entry_price,
-                    exit_side=exit_side,
-                    quantity=int(quantity),
-                    sl_price=_round_to_tick(sl, tick),
-                    tp_price=_round_to_tick(tp, tick),
-                )
-                use_gtt = gtt_id is not None
-                if not use_gtt:
-                    logger.info("ℹ️ Falling back to REGULAR exits (GTT not available / rejected).")
-
-            if not use_gtt:
-                # REGULAR exits
-                sl_trig = _round_to_tick(sl, tick)
-
-                if self.use_slm_exit:
-                    sl_ordertype = "SL-M"
-                    sl_price = None
-                else:
-                    sl_ordertype = "SL"
-                    off = self.sl_limit_offset_ticks
-                    if exit_side == "SELL":
-                        sl_price = _round_down_to_tick(sl_trig - off * tick, tick)
-                    else:
-                        sl_price = _round_up_to_tick(sl_trig + off * tick, tick)
-
-                sl_id = self._place_in_chunks(
-                    tradingsymbol=symbol,
-                    exchange=exchange,
-                    side=exit_side,
-                    quantity=int(quantity),
-                    product=self.default_product,
-                    order_type=sl_ordertype,
-                    validity=self.default_validity,
-                    price=(None if self.use_slm_exit else float(sl_price)),
-                    trigger_price=float(sl_trig),
-                )
-
-                if want_partial:
-                    tp1_rounded = _round_to_tick(float(tp1), tick)
-                    tp2_rounded = _round_to_tick(float(tp2), tick)
-                    tp1_id = self._place_in_chunks(
-                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
-                        quantity=int(tp1_qty), product=self.default_product,
-                        order_type="LIMIT", validity=self.default_validity, price=float(tp1_rounded),
-                    )
-                    tp2_id = self._place_in_chunks(
-                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
-                        quantity=int(tp2_qty), product=self.default_product,
-                        order_type="LIMIT", validity=self.default_validity, price=float(tp2_rounded),
-                    )
-                else:
-                    tp_rounded = _round_to_tick(tp, tick)
-                    tp_id = self._place_in_chunks(
-                        tradingsymbol=symbol, exchange=exchange, side=exit_side,
-                        quantity=int(quantity), product=self.default_product,
-                        order_type="LIMIT", validity=self.default_validity, price=float(tp_rounded),
-                    )
-
             with self._lock:
-                rec = OrderRecord(
-                    order_id=entry_order_id, symbol=symbol, exchange=exchange,
-                    transaction_type=transaction_type.upper(), quantity=int(quantity),
-                    entry_price=entry_price, stop_loss=sl, target=tp,
-                    use_gtt=use_gtt, gtt_id=gtt_id, sl_order_id=sl_id,
-                    tp_order_id=tp_id, exit_side=exit_side,
-                    partial_enabled=bool(want_partial),
-                    tp1_price=(float(tp1) if want_partial else None),
-                    tp1_order_id=(tp1_id if want_partial else None),
-                    tp1_qty=(int(tp1_qty) if want_partial else 0),
-                    tp2_price=(float(tp2) if want_partial else None),
-                    tp2_order_id=(tp2_id if want_partial else None),
-                    tp2_qty=(int(tp2_qty) if want_partial else 0),
-                    sl_qty=int(quantity),
-                )
-                self.orders[entry_order_id] = rec
-
-            logger.info(
-                "🔧 Exits set for %s | mode=%s sl_id=%s tp_id=%s gtt_id=%s partial=%s",
-                entry_order_id, ("GTT" if use_gtt else "REGULAR"), sl_id, tp_id, gtt_id, want_partial
-            )
+                rec.desired_sl = new_sl
+            logger.info("Trailing SL updated for %s -> %.2f", rec.symbol, new_sl)
             return True
-
-        except Exception as exc:
-            logger.error("💥 setup_gtt_orders failed for %s: %s", entry_order_id, exc, exc_info=True)
-            # Attempt to cancel the entry order if exits failed
-            self.cancel_order(entry_order_id)
+        except Exception as e:
+            logger.error("Failed to update trailing SL for %s: %s", rec.symbol, e)
             return False
 
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancels a single order by its ID."""
-        return self._kite_cancel(order_id)
+    # ---------------- exits / cancel / hard stop ---------------- #
 
-    # ------------------------------- trailing & exit -------------------------- #
-
-    def _breakeven_price(self, rec: OrderRecord) -> float:
-        off = float(self.config.breakeven_offset_ticks) * self.get_tick_size()
-        if rec.transaction_type.upper() == "BUY":
-            return rec.entry_price + off
-        return rec.entry_price - off
-
-    def update_trailing_stop(self, order_id: str, current_price: float, atr: float, atr_multiplier: float) -> None:
-        """
-        Trailing SL:
-        - New SL = price ± (ATR * multiplier), rounded to tick; tighten only.
-        - Updates internal record.
-        - If using REGULAR exits, modifies the live SL order (price & trigger).
-        - If using GTT, log only (cancel & recreate not done automatically here).
-        """
+    def exit_order(self, record_id: str, exit_reason: str = "manual") -> bool:
+        """Hard exit via MARKET and cancel all linked exits."""
         with self._lock:
-            rec = self.orders.get(order_id)
-
+            rec = self._active.get(record_id)
         if not rec or not rec.is_open:
-            return
-
-        now = time.time()
-        if now - rec.last_trail_ts < float(self.config.trail_cooldown_sec):
-            return
-
-        if atr is None or atr <= 0 or current_price <= 0:
-            return
-
-        tick = self.get_tick_size()
-
-        if rec.transaction_type.upper() == "BUY":
-            raw = current_price - atr_multiplier * atr
-            new_sl = _round_up_to_tick(raw, tick)
-            better = new_sl > rec.stop_loss
-        else:
-            raw = current_price + atr_multiplier * atr
-            new_sl = _round_down_to_tick(raw, tick)
-            better = new_sl < rec.stop_loss
-
-        if not better:
-            return
-
-        rec.stop_loss = float(new_sl)
-        rec.last_trail_ts = now
-
-        if rec.use_gtt:
-            logger.info("🧭 GTT trailing noted for %s → %.2f (no auto-modify).", order_id, new_sl)
-            return
-
-        if rec.sl_order_id:
-            self._kite_modify_sl(rec.sl_order_id, float(new_sl))
-
-    def exit_order(self, order_id: str, exit_reason: str = "manual") -> bool:
-        """Market out whatever remains; cancel peer orders."""
-        with self._lock:
-            rec = self.orders.get(order_id)
-        if not rec or not rec.is_open:
+            logger.warning("Record %s not found or already closed.", record_id)
             return False
 
         try:
-            qty = int(rec.sl_qty if rec.partial_enabled else rec.quantity)
-            if qty <= 0:
-                qty = int(rec.quantity)
+            # Cancel GTTs
+            if rec.gtt_sl_id:
+                try: self.kite.cancel_gtt(rec.gtt_sl_id)
+                except Exception: pass
+            if rec.gtt_tp_id:
+                try: self.kite.cancel_gtt(rec.gtt_tp_id)
+                except Exception: pass
 
-            side = rec.exit_side or ("SELL" if rec.transaction_type.upper() == "BUY" else "BUY")
-            oid = self._place_in_chunks(
-                tradingsymbol=rec.symbol,
+            # Cancel regular exits
+            if rec.sl_order_id:
+                self._kite_cancel(variety=rec.order_variety, order_id=rec.sl_order_id)
+            if rec.tp_order_id:
+                self._kite_cancel(variety=rec.order_variety, order_id=rec.tp_order_id)
+            if rec.tp1_order_id:
+                self._kite_cancel(variety=rec.order_variety, order_id=rec.tp1_order_id)
+            if rec.tp2_order_id:
+                self._kite_cancel(variety=rec.order_variety, order_id=rec.tp2_order_id)
+
+            # Market close for remaining qty (use side inverse)
+            remaining_qty = max(0, rec.quantity - rec.entry_filled_qty) or rec.quantity
+            self._kite_place_order(
+                variety=rec.order_variety,
                 exchange=rec.exchange,
-                side=side,
-                quantity=qty,
-                product=self.default_product,
+                tradingsymbol=rec.symbol,
+                transaction_type="SELL" if rec.side == "BUY" else "BUY",
+                quantity=remaining_qty,
+                product=rec.order_product,
                 order_type="MARKET",
-                validity=self.default_validity,
             )
-            # best-effort cancel peers
-            for x in (rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id):
-                if x:
-                    self._kite_cancel(x)
-
             with self._lock:
                 rec.is_open = False
-                rec.exit_reason = exit_reason
-                rec.exit_price = None  # not guaranteed from here
-
-            logger.info("🏁 Forced exit %s (%s) x%d for %s (oid=%s)", side, exit_reason, qty, rec.symbol, oid)
+            logger.info("🟥 Exited %s due to: %s", rec.symbol, exit_reason)
             return True
-        except Exception as exc:
-            logger.error("💥 exit_order failed: %s", exc, exc_info=True)
+        except Exception as e:
+            logger.error("Failed to exit %s: %s", rec.symbol, e)
             return False
-
-    # ------------------------------- queries & maintenance -------------------- #
-
-    def get_active_orders(self):
-        with self._lock:
-            return {k: v for k, v in self.orders.items() if v.is_open}
-
-    def get_positions(self):
-        if not self.kite:
-            return []
-        try:
-            pos = self.kite.positions() or {}
-            return pos
-        except Exception:
-            return []
 
     def cancel_all_orders(self) -> None:
         with self._lock:
-            ids = list(self.orders.keys())
-        for oid in ids:
+            records = list(self._active.values())
+        for rec in records:
             try:
-                rec = self.orders.get(oid)
-                if not rec:
-                    continue
-                for x in (rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id):
-                    if x:
-                        self._kite_cancel(x)
-                if rec.gtt_id and self.kite:
-                    try:
-                        self.kite.delete_gtt(rec.gtt_id)
-                    except Exception:
-                        pass
-                rec.is_open = False
-            except Exception:
-                pass
-        logger.info("🧹 cancel_all_orders completed.")
+                if rec.sl_order_id:
+                    self._kite_cancel(variety=rec.order_variety, order_id=rec.sl_order_id)
+                if rec.tp_order_id:
+                    self._kite_cancel(variety=rec.order_variety, order_id=rec.tp_order_id)
+                if rec.tp1_order_id:
+                    self._kite_cancel(variety=rec.order_variety, order_id=rec.tp1_order_id)
+                if rec.tp2_order_id:
+                    self._kite_cancel(variety=rec.order_variety, order_id=rec.tp2_order_id)
+                if rec.gtt_sl_id:
+                    try: self.kite.cancel_gtt(rec.gtt_sl_id)
+                    except Exception: pass
+                if rec.gtt_tp_id:
+                    try: self.kite.cancel_gtt(rec.gtt_tp_id)
+                    except Exception: pass
+                # Cancel entries
+                for oid in rec.entry_order_ids:
+                    self._kite_cancel(variety=rec.order_variety, order_id=oid)
+                with self._lock:
+                    rec.is_open = False
+            except Exception as e:
+                logger.warning("Failed to cancel some orders for %s: %s", rec.symbol, e)
+        logger.info("All open orders cancelled.")
 
-    def get_last_price(self, symbol: str) -> Optional[float]:
-        if not self.kite:
-            return None
+    # ---------------- sync + OCO enforcement ---------------- #
+
+    def _refresh_entry_fills(self, rec: _OrderRecord, live_orders_by_id: Dict[str, Any]) -> None:
+        """Update filled qty/avg price for entry orders."""
+        total_filled = 0
+        sum_price_qty = 0.0
+        for oid in rec.entry_order_ids:
+            o = live_orders_by_id.get(oid)
+            if not o:
+                continue
+            filled = int(o.get("filled_quantity", 0))
+            price = float(o.get("average_price", 0.0) or 0.0)
+            total_filled += filled
+            sum_price_qty += price * filled
+        if total_filled > 0:
+            rec.entry_filled_qty = total_filled
+            rec.avg_entry_price = sum_price_qty / max(1, total_filled)
+
+    def _reduce_sl_after_tp1(self, rec: _OrderRecord) -> None:
+        """After TP1 fill: reduce SL qty to remaining & hop to breakeven ± ticks."""
+        if not rec.partial_enabled or not rec.tp1_order_id or not rec.sl_order_id:
+            return
+        remaining = max(0, rec.quantity - rec.tp1_qty)
+        if remaining <= 0:
+            return
+        # Modify SL qty
         try:
-            q = self.kite.ltp([symbol]) or {}
-            lp = q.get(symbol, {}).get("last_price")
-            return float(lp) if lp is not None else None
-        except Exception:
-            return None
+            self._kite_modify_order(
+                variety=rec.order_variety,
+                order_id=rec.sl_order_id,
+                quantity=_round_to_qty(remaining, rec.lot_size),
+            )
+        except Exception as e:
+            logger.warning("Failed to reduce SL qty after TP1 for %s: %s", rec.symbol, e)
+
+        # Breakeven hop (tighten-only)
+        be = rec.avg_entry_price if rec.avg_entry_price > 0 else rec.entry_price
+        hop = rec.breakeven_done
+        be_ticks = self.breakeven_ticks * rec.tick_size
+        if rec.side == "BUY":
+            new_sl = max(rec.desired_sl or be, be + be_ticks)
+            if rec.desired_sl is None or new_sl > rec.desired_sl:
+                try:
+                    self._kite_modify_order(
+                        variety=rec.order_variety,
+                        order_id=rec.sl_order_id,
+                        trigger_price=_round_to_tick(new_sl, rec.tick_size),
+                        price=_round_to_tick(new_sl, rec.tick_size) if not self.use_slm_exit else None,
+                    )
+                    rec.desired_sl = new_sl
+                    rec.breakeven_done = True
+                except Exception:
+                    pass
+        else:
+            new_sl = min(rec.desired_sl or be, be - be_ticks)
+            if rec.desired_sl is None or new_sl < rec.desired_sl:
+                try:
+                    self._kite_modify_order(
+                        variety=rec.order_variety,
+                        order_id=rec.sl_order_id,
+                        trigger_price=_round_to_tick(new_sl, rec.tick_size),
+                        price=_round_to_tick(new_sl, rec.tick_size) if not self.use_slm_exit else None,
+                    )
+                    rec.desired_sl = new_sl
+                    rec.breakeven_done = True
+                except Exception:
+                    pass
 
     def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
         """
-        Best-effort check to see if any exits imply the pair should be closed or resized.
-        - Detect TP1 fill -> shrink SL to remaining qty and hop to breakeven (optional).
-        - Detect final TP/SL fill -> mark closed and cancel siblings.
-        Return list of (entry_order_id, exit_fill_price).
+        Poll broker, synchronize records, and enforce OCO (cancel opposite exit on fill).
+        Return fills as (record_id, fill_price).
         """
-        fills: List[Tuple[str, float]] = []
         if not self.kite:
-            return fills
+            return []
 
-        status = self._order_status_map()
+        try:
+            live = self.kite.orders()
+            live_by_id = {str(o.get("order_id")): o for o in live}
+        except Exception as e:
+            logger.error("Failed to fetch live orders: %s", e)
+            return []
+
+        # GTT status (best-effort)
+        try:
+            gtts = self.kite.gtts()
+            gtt_by_id = {int(g.get("id", g.get("gtt_id"))): g for g in gtts}
+        except Exception:
+            gtt_by_id = {}
+
+        fills: List[Tuple[str, float]] = []
 
         with self._lock:
-            records = list(self.orders.values())
+            recs = list(self._active.values())
 
-        for rec in records:
+        for rec in recs:
             if not rec.is_open:
                 continue
 
-            # --- TP1 filled handling (partial mode) ---
-            if rec.partial_enabled and rec.tp1_order_id and not rec.tp1_filled:
-                s = status.get(rec.tp1_order_id, {})
-                if str(s.get("status", "")).upper() == "COMPLETE":
-                    rec.tp1_filled = True
-                    remain_qty = max(0, int(rec.quantity - rec.tp1_qty))
-                    rec.sl_qty = remain_qty
+            # update entry fill status
+            self._refresh_entry_fills(rec, live_by_id)
 
-                    # Cancel old SL and recreate for remaining qty
-                    if rec.sl_order_id:
-                        self._kite_cancel(rec.sl_order_id)
-                        rec.sl_order_id = None
+            # If entry completely filled and no exits armed (REGULAR), arm them if we have desired SL/TP
+            if rec.entry_filled_qty >= rec.quantity and not any([rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.gtt_sl_id, rec.gtt_tp_id]) and rec.desired_sl and rec.desired_tp:
+                logger.info("Entry filled for %s; auto-arming exits.", rec.symbol)
+                self.setup_gtt_orders(rec.record_id, rec.desired_sl, rec.desired_tp)
 
-                    new_sl = rec.stop_loss
-                    if self.breakeven_after_tp1 and remain_qty > 0:
-                        new_sl = self._breakeven_price(rec)
+            # Check REGULAR exits for fills
+            def _is_complete(oid: Optional[str]) -> bool:
+                if not oid:
+                    return False
+                s = live_by_id.get(oid, {})
+                return str(s.get("status", "")).upper() == "COMPLETE"
 
-                    tick = self.get_tick_size()
-                    trig = _round_to_tick(new_sl, tick)
-                    if self.use_slm_exit:
-                        ordtype = "SL-M"
-                        px = None
-                    else:
-                        ordtype = "SL"
-                        off = max(0, int(self.sl_limit_offset_ticks))
-                        if rec.exit_side == "SELL":
-                            px = _round_down_to_tick(trig - off * tick, tick)
-                        else:
-                            px = _round_up_to_tick(trig + off * tick, tick)
+            sl_hit = _is_complete(rec.sl_order_id)
+            tp_hit = _is_complete(rec.tp_order_id) or _is_complete(rec.tp1_order_id) or _is_complete(rec.tp2_order_id)
 
-                    if remain_qty > 0:
-                        rec.sl_order_id = self._place_in_chunks(
-                            tradingsymbol=rec.symbol,
-                            exchange=rec.exchange,
-                            side=rec.exit_side or ("SELL" if rec.transaction_type.upper() == "BUY" else "BUY"),
-                            quantity=int(remain_qty),
-                            product=self.default_product,
-                            order_type=ordtype,
-                            validity=self.default_validity,
-                            price=(None if self.use_slm_exit else float(px)),
-                            trigger_price=float(trig),
-                        )
-                    logger.info(
-                        "♻️  TP1 filled for %s. SL resized to %d and moved to %.2f",
-                        rec.order_id, remain_qty, trig
-                    )
+            # Handle TP1 fill (partial)
+            if rec.partial_enabled and rec.tp1_order_id and _is_complete(rec.tp1_order_id):
+                logger.info("TP1 filled for %s; reducing SL & breakeven hop.", rec.symbol)
+                self._reduce_sl_after_tp1(rec)
 
-            # --- Close detection: TP2 complete, (single) TP complete, or SL complete ---
-            closed = False
-            exit_px: Optional[float] = None
-            # prefer SL/TP2 completion as closure signal
-            candidate_ids = [rec.tp2_order_id, rec.tp_order_id, rec.sl_order_id]
-            # if no partial, tp1_order_id may be the actual TP
-            if not rec.partial_enabled and rec.tp1_order_id:
-                candidate_ids.insert(0, rec.tp1_order_id)
+            # OCO: if one exit filled, cancel the other(s) and close record
+            if sl_hit or tp_hit:
+                # capture price
+                fill_price = 0.0
+                for oid in [rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id]:
+                    if oid and _is_complete(oid):
+                        fill_price = float(live_by_id[oid].get("average_price", 0.0) or 0.0)
+                        break
 
-            for oid in filter(None, candidate_ids):
-                s = status.get(oid, {})
-                if str(s.get("status", "")).upper() == "COMPLETE":
-                    closed = True
-                    px = s.get("average_price") or s.get("price")
-                    if px:
-                        exit_px = float(px)
-                    break
+                # cancel the rest
+                for oid in [rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id]:
+                    if oid and not _is_complete(oid):
+                        try:
+                            self._kite_cancel(variety=rec.order_variety, order_id=oid)
+                        except Exception:
+                            pass
 
-            if closed:
                 with self._lock:
                     rec.is_open = False
-                # best-effort cancel peers
-                for x in (rec.sl_order_id, rec.tp_order_id, rec.tp1_order_id, rec.tp2_order_id):
-                    if x:
-                        self._kite_cancel(x)
-                if exit_px is not None:
-                    fills.append((rec.order_id, exit_px))
+                fills.append((rec.record_id, fill_price))
+                logger.info("OCO closed %s @ %.2f (sl_hit=%s, tp_hit=%s)", rec.symbol, fill_price, sl_hit, tp_hit)
+                continue
+
+            # GTT paths (best-effort): if either GTT fired, mark closed
+            if rec.gtt_sl_id and isinstance(gtt_by_id.get(rec.gtt_sl_id), dict):
+                gs = gtt_by_id[rec.gtt_sl_id]
+                if str(gs.get("status", "")).lower() in ("triggered", "cancelled", "deleted", "rejected"):
+                    with self._lock:
+                        rec.is_open = False
+                    fills.append((rec.record_id, 0.0))
+                    continue
+            if rec.gtt_tp_id and isinstance(gtt_by_id.get(rec.gtt_tp_id), dict):
+                gs = gtt_by_id[rec.gtt_tp_id]
+                if str(gs.get("status", "")).lower() in ("triggered", "cancelled", "deleted", "rejected"):
+                    with self._lock:
+                        rec.is_open = False
+                    fills.append((rec.record_id, 0.0))
+                    continue
 
         return fills
