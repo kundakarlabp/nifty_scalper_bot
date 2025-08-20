@@ -1,7 +1,9 @@
+# src/main.py
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -27,22 +29,57 @@ except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
 
+# ------------ time helpers ------------
 def _now_ist_naive() -> datetime:
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     return ist.replace(tzinfo=None)
 
 
-def _build_kite_or_die() -> Optional[Any]:
-    """
-    Build a KiteConnect client if env/config present. Returns None if kiteconnect
-    isn’t installed. If keys are present but login is bad, we fail fast so you notice.
-    """
+# ------------ env helpers ------------
+def _first_nonempty(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.getenv(n)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _get_nested(obj: Any, *path: str) -> Optional[Any]:
+    cur = obj
+    for p in path:
+        cur = getattr(cur, p, None)
+        if cur is None:
+            return None
+    return cur
+
+
+# ------------ kite + data source wiring ------------
+def _build_kite_or_none() -> Optional[Any]:
+    """Create KiteConnect if creds exist. Return None if any piece is missing/bad."""
     if KiteConnect is None:
         log.warning("kiteconnect not installed; running without live feed.")
         return None
 
-    api_key = settings.zerodha.api_key or getattr(settings, "ZERODHA_API_KEY", None)
-    access_token = settings.zerodha.access_token or getattr(settings, "KITE_ACCESS_TOKEN", None)
+    # ENV-FIRST (supports both KITE_* and ZERODHA_*), then legacy nested settings
+    api_key = _first_nonempty("ZERODHA_API_KEY", "KITE_API_KEY") \
+              or _get_nested(settings, "api", "zerodha_api_key") \
+              or _get_nested(settings, "zerodha", "api_key")
+
+    access_token = _first_nonempty("ZERODHA_ACCESS_TOKEN", "KITE_ACCESS_TOKEN", "ACCESS_TOKEN") \
+                   or _get_nested(settings, "api", "zerodha_access_token") \
+                   or _get_nested(settings, "zerodha", "access_token")
+
+    # NOTE: secret is NOT needed at runtime if you already have an access token
+    # kept for completeness in case you want to validate scope later
+    api_secret = _first_nonempty("ZERODHA_API_SECRET", "KITE_API_SECRET") \
+                 or _get_nested(settings, "api", "zerodha_api_secret") \
+                 or _get_nested(settings, "zerodha", "api_secret")
+
+    # non-secret diagnostic (Y/N) so you can see what the app detected
+    log.info(
+        "Kite env present: api_key=%s access_token=%s (secret=%s)",
+        "Y" if api_key else "N", "Y" if access_token else "N", "Y" if api_secret else "N",
+    )
 
     if not api_key or not access_token:
         log.warning("Kite credentials missing; running without live feed.")
@@ -51,11 +88,10 @@ def _build_kite_or_die() -> Optional[Any]:
     try:
         kite = KiteConnect(api_key=api_key)
         kite.set_access_token(access_token)
-        # light sanity: get margins (cheap) to prove token is valid
+        # cheap sanity check (profile/margins)
         try:
             kite.margins()
         except Exception:
-            # If margins scope isn’t allowed, try profile as fallback
             kite.profile()
         log.info("KiteConnect OK (token valid).")
         return kite
@@ -65,22 +101,18 @@ def _build_kite_or_die() -> Optional[Any]:
 
 
 def _load_data_source(kite: Optional[Any]) -> Optional[Any]:
-    """
-    Use concrete LiveKiteSource from src.data.source (requires connect()).
-    We fail gracefully and log the exact reason.
-    """
+    """Use LiveKiteSource if Kite is available; connect() to verify."""
+    if kite is None:
+        return None
     try:
         from src.data.source import LiveKiteSource  # type: ignore
     except Exception as e:
         log.warning("LiveKiteSource import failed: %s", e)
         return None
 
-    if kite is None:
-        return None
-
     try:
-        ds = LiveKiteSource(kite=kite)  # your class requires a KiteConnect object
-        ds.connect()  # will set is_connected and raise on failure
+        ds = LiveKiteSource(kite=kite)
+        ds.connect()  # verifies session
         log.info("LiveKiteSource connected.")
         return ds
     except Exception as e:
@@ -88,6 +120,7 @@ def _load_data_source(kite: Optional[Any]) -> Optional[Any]:
         return None
 
 
+# ------------ application ------------
 class Application:
     """
     Orchestrator: health server + StrategyRunner loop + Telegram control.
@@ -96,7 +129,14 @@ class Application:
 
     def __init__(self) -> None:
         self.settings = settings
-        self.live_trading = bool(self.settings.enable_live_trading)
+
+        # LIVE flag: env overrides settings to avoid surprises on Railway
+        env_live = os.getenv("ENABLE_LIVE_TRADING")
+        if env_live is not None:
+            self.live_trading = env_live.strip().lower() not in ("0", "false", "no")
+        else:
+            self.live_trading = bool(getattr(self.settings, "enable_live_trading", False))
+
         self.quality = "AUTO"
         self.regime = "auto"
 
@@ -104,7 +144,7 @@ class Application:
         self._shutdown = False
 
         # Dependencies
-        self.kite = _build_kite_or_die()
+        self.kite = _build_kite_or_none()
         self.data_source = _load_data_source(self.kite)
         if self.data_source is None:
             log.warning("Data source not available. Running without live feed.")
@@ -131,7 +171,7 @@ class Application:
             "uptime_seconds": float(uptime),
             "kite": bool(self.kite is not None),
             "data_source": bool(self.data_source is not None),
-            "preferred_exit_mode": self.settings.preferred_exit_mode,
+            "preferred_exit_mode": getattr(self.settings, "preferred_exit_mode", "AUTO"),
         }
 
     # ---- Telegram control handler ----
@@ -185,8 +225,8 @@ class Application:
     def start_health(self) -> None:
         def _run():
             health_server.run(callback=self._health_payload,
-                              host=self.settings.server.host,
-                              port=self.settings.server.port)
+                              host=getattr(self.settings.server, "host", "0.0.0.0"),
+                              port=getattr(self.settings.server, "port", 8000))
         self._health_thread = threading.Thread(target=_run, name="health", daemon=True)
         self._health_thread.start()
 
@@ -234,6 +274,7 @@ class Application:
             self.tg.stop_polling()
 
 
+# ------------ cli ------------
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="nifty_scalper_bot")
     sub = p.add_subparsers(dest="cmd", required=False)
