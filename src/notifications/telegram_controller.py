@@ -1,57 +1,81 @@
-# src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
+
 try:
     # available via requests' dependency
     from urllib3.util.retry import Retry  # type: ignore
 except Exception:  # pragma: no cover
     Retry = None  # graceful degrade
 
-from src.config import TelegramConfig
+from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _TGConfig:
+    """Internal Telegram config wrapper built from settings.telegram."""
+    enabled: bool
+    bot_token: Optional[str]
+    chat_id: Optional[int]
+
+
+def _build_cfg() -> _TGConfig:
+    tg = getattr(settings, "telegram", None)
+    enabled = bool(getattr(tg, "enabled", True))
+    bot_token = getattr(tg, "bot_token", None)
+    # Optional chat_id (can be learned on first inbound message)
+    chat_id = getattr(tg, "chat_id", getattr(settings, "TELEGRAM_CHAT_ID", None)) if tg is not None else None
+    try:
+        chat_id = int(chat_id) if chat_id is not None else None
+    except Exception:
+        chat_id = None
+    return _TGConfig(enabled=enabled, bot_token=bot_token, chat_id=chat_id)
 
 
 class TelegramController:
     """
     Telegram bot interface for receiving commands and sending alerts.
 
-    Public callbacks (injected):
+    Required callbacks (injected by the app):
       - status_callback() -> dict
       - control_callback(command: str, arg: str) -> bool
       - summary_callback() -> str
 
     Commands:
-      /start, /stop, /mode live|shadow, /status, /summary,
-      /refresh, /health, /emergency, /help
+      /start, /stop, /mode live|shadow, /quality auto|conservative|aggressive,
+      /status, /summary, /refresh, /health, /emergency, /ping, /help
     """
 
     def __init__(
         self,
-        config: TelegramConfig,
         status_callback: Callable[[], Dict[str, Any]],
         control_callback: Callable[[str, str], bool],
         summary_callback: Callable[[], str],
+        *,
+        cfg: Optional[_TGConfig] = None,
     ) -> None:
-        if not isinstance(config, TelegramConfig):
-            raise TypeError("A valid TelegramConfig instance is required.")
-
-        self.config = config
-        self.base_url = f"https://api.telegram.org/bot{self.config.bot_token}"
-        self.polling = False
-        self.polling_thread: Optional[threading.Thread] = None
+        self.cfg = cfg or _build_cfg()
+        self.enabled = bool(self.cfg.enabled and self.cfg.bot_token)
+        self.base_url = f"https://api.telegram.org/bot{self.cfg.bot_token}" if self.cfg.bot_token else None
 
         # Callbacks from trader
         self.status_callback = status_callback
         self.control_callback = control_callback
         self.summary_callback = summary_callback
+
+        # Polling state
+        self._poll_lock = threading.Lock()
+        self._polling = False
+        self._thread: Optional[threading.Thread] = None
 
         # Single session with retries
         self.session = requests.Session()
@@ -69,7 +93,10 @@ class TelegramController:
             self.session.mount("https://", adapter)
             self.session.mount("http://", adapter)
 
-        logger.info("TelegramController initialized.")
+        if not self.enabled:
+            logger.warning("TelegramController disabled (no token or not enabled).")
+        else:
+            logger.info("TelegramController initialized.")
 
     # ---------- low-level HTTP helpers ----------
     def _request(
@@ -81,17 +108,19 @@ class TelegramController:
         json: Optional[Dict[str, Any]] = None,
         timeout: int = 35,
     ) -> Optional[requests.Response]:
+        if not self.enabled or not self.base_url:
+            return None
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
             resp = self.session.request(method=method, url=url, params=params, json=json, timeout=timeout)
-            # Handle rate limiting explicitly
             if resp.status_code == 429:
+                # Handle rate limiting explicitly
                 try:
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 1)
+                    retry_after = int(resp.json().get("parameters", {}).get("retry_after", 1))
                 except Exception:
                     retry_after = 1
-                retry_after = max(1, int(retry_after))
-                logger.warning("Telegram 429 rate limit; sleeping %ss then retrying once.", retry_after)
+                retry_after = max(1, retry_after)
+                logger.warning("Telegram 429 rate limited; sleeping %ss then retrying once.", retry_after)
                 time.sleep(retry_after)
                 return self.session.request(method=method, url=url, params=params, json=json, timeout=timeout)
             return resp
@@ -99,18 +128,33 @@ class TelegramController:
             logger.warning("Telegram HTTP error: %s %s (%s)", method, path, exc)
             return None
 
+    def _delete_webhook(self) -> None:
+        """Ensure long-polling is allowed by disabling any active webhook."""
+        if not self.enabled:
+            return
+        try:
+            resp = self._request("POST", "deleteWebhook", json={"drop_pending_updates": True}, timeout=15)
+            if resp is None:
+                return
+            if resp.status_code != 200:
+                logger.warning("deleteWebhook returned %s: %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.debug("deleteWebhook failed: %s", e)
+
     # ---------- low-level send ----------
     def _send_message(self, text: str, parse_mode: Optional[str] = None, retries: int = 2, backoff_sec: float = 1.0) -> bool:
+        if not self.enabled:
+            return False
+
         payload: Dict[str, Any] = {
-            "chat_id": self.config.chat_id,
+            "chat_id": self.cfg.chat_id,
             "text": text,
             "disable_notification": False,
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
 
-        # Make sure we have a chat_id
-        if not str(self.config.chat_id).strip():
+        if self.cfg.chat_id is None:
             logger.error("Telegram chat_id is not configured. Cannot send message.")
             return False
 
@@ -119,29 +163,20 @@ class TelegramController:
             attempt += 1
             resp = self._request("POST", "sendMessage", json=payload, timeout=15)
             if resp is None:
-                # network issue; backoff
                 if attempt <= retries:
                     time.sleep(backoff_sec)
                 continue
-
             if resp.status_code == 200:
-                logger.debug("Telegram message sent successfully.")
                 return True
-
-            # Log and retry on server errors
             try:
                 body = resp.json()
             except Exception:
                 body = {"text": resp.text}
             logger.warning("sendMessage failed (%s): %s", resp.status_code, body)
-
             if attempt <= retries and resp.status_code >= 500:
                 time.sleep(backoff_sec)
-
             else:
                 break
-
-        logger.error("Failed to send Telegram message after %d attempts.", retries + 1)
         return False
 
     # ---------- public send helpers ----------
@@ -166,12 +201,12 @@ class TelegramController:
         self.send_realtime_session_alert(action)
 
     def send_signal_alert(self, token: int, signal: Dict[str, Any], position: Dict[str, Any]) -> None:
-        direction = signal.get("signal") or signal.get("direction", "ENTRY")
-        entry = signal.get("entry_price", "N/A")
-        sl = signal.get("stop_loss", "N/A")
-        target = signal.get("target", "N/A")
+        direction = signal.get("side") or signal.get("signal") or signal.get("direction", "ENTRY")
+        entry = signal.get("entry_price", signal.get("price", "N/A"))
+        sl = signal.get("stop_loss", signal.get("sl_points", "N/A"))
+        target = signal.get("target", signal.get("tp_points", "N/A"))
         conf = float(signal.get("confidence", 0.0) or 0.0)
-        qty = position.get("quantity", "N/A")
+        qty = position.get("quantity", position.get("lots", "N/A"))
 
         text = (
             f"🔥 <b>NEW SIGNAL #{token}</b>\n"
@@ -180,43 +215,49 @@ class TelegramController:
             f"📉 Stop Loss: <code>{sl}</code>\n"
             f"🎯 Target: <code>{target}</code>\n"
             f"📊 Confidence: <code>{conf:.2f}</code>\n"
-            f"🧮 Quantity: <code>{qty}</code>"
+            f"🧮 Quantity/Lots: <code>{qty}</code>"
         )
         self._send_message(text, parse_mode="HTML")
 
     # ---------- status/summary formatting ----------
-    def _send_status(self, status: Any) -> None:
-        if isinstance(status, str):
-            self._send_message(f"📊 Status:\n{status}")
-            return
+    @staticmethod
+    def _fmt_uptime(sec: float) -> str:
+        sec = int(max(0, sec))
+        m, s = divmod(sec, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h {m}m"
+        if m:
+            return f"{m}m"
+        return f"{s}s"
 
+    def _send_status(self, status: Dict[str, Any]) -> None:
+        # Expected keys (all optional; sensible defaults):
+        # is_trading, live_mode, quality, regime, open_positions, closed_today, daily_pnl,
+        # session_date, uptime_seconds
         is_trading = bool(status.get("is_trading", False))
         live_mode = bool(status.get("live_mode", False))
-
-        open_positions = status.get("open_positions")
-        if open_positions is None:
-            open_positions = status.get("open_orders", 0)
-
-        trades_today = status.get("closed_today")
-        if trades_today is None:
-            trades_today = status.get("trades_today", 0)
-
+        quality = (status.get("quality") or "AUTO").upper()
+        regime = (status.get("regime") or "auto")
+        open_positions = status.get("open_positions", 0)
+        closed_today = status.get("closed_today", status.get("trades_today", 0))
         daily_pnl = float(status.get("daily_pnl", 0.0) or 0.0)
+        session_date = status.get("session_date") or status.get("session")
+        uptime_sec = float(status.get("uptime_seconds", 0.0) or 0.0)
 
         lines = [
             "📊 <b>Bot Status</b>",
             f"🔁 <b>Trading:</b> {'🟢 Running' if is_trading else '🔴 Stopped'}",
-            f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ Shadow'}",
+            f"🌐 <b>Mode:</b> {'🟢 LIVE' if live_mode else '🛡️ SHADOW'}",
+            f"✨ <b>Quality:</b> {quality}",
+            f"🧭 <b>Regime:</b> {regime}",
             f"📦 <b>Open Positions:</b> {open_positions}",
-            f"📈 <b>Closed Today:</b> {trades_today}",
+            f"📈 <b>Closed Today:</b> {closed_today}",
             f"💰 <b>Daily P&L:</b> {daily_pnl:.2f}",
         ]
-        acct = status.get("account_size")
-        sess = status.get("session_date")
-        if acct is not None:
-            lines.append(f"🏦 <b>Acct Size:</b> ₹{acct}")
-        if sess is not None:
-            lines.append(f"📅 <b>Session:</b> {sess}")
+        if session_date:
+            lines.append(f"📅 <b>Session:</b> {session_date}")
+        lines.append(f"⏱️ <b>Uptime:</b> {self._fmt_uptime(uptime_sec)}")
 
         self._send_message("\n".join(lines), parse_mode="HTML")
 
@@ -225,12 +266,15 @@ class TelegramController:
 
     # ---------- command router ----------
     def _handle_command(self, command: str, arg: str = "", chat_id_hint: Optional[int] = None) -> None:
-        logger.info("📩 Received command: '%s %s'", command, arg)
+        logger.info("📩 Telegram command: '%s %s'", command, arg)
 
         # Learn chat_id if unset (first inbound message)
-        if (not str(self.config.chat_id).strip()) and chat_id_hint is not None:
-            self.config.chat_id = chat_id_hint  # type: ignore[attr-defined]
-            logger.info("📌 Learned TELEGRAM_CHAT_ID=%s from inbound message.", chat_id_hint)
+        if self.cfg.chat_id is None and chat_id_hint is not None:
+            try:
+                self.cfg.chat_id = int(chat_id_hint)
+                logger.info("📌 Learned TELEGRAM_CHAT_ID=%s from inbound message.", chat_id_hint)
+            except Exception:
+                pass
 
         if command == "help":
             self._send_message(
@@ -238,32 +282,42 @@ class TelegramController:
                 "/start – start trading\n"
                 "/stop – stop trading\n"
                 "/mode live|shadow – switch mode\n"
+                "/quality auto|conservative|aggressive – risk/latency profile\n"
                 "/status – bot status\n"
                 "/summary – daily summary\n"
                 "/refresh – refresh instruments cache\n"
                 "/health – system health\n"
-                "/emergency – stop & cancel orders",
+                "/emergency – stop & cancel orders\n"
+                "/ping – latency check",
                 parse_mode="HTML",
             )
             return
 
+        if command == "ping":
+            self._send_message("pong");  return
+
         if command == "status":
-            self._send_status(self.status_callback())
-            return
+            self._send_status(self.status_callback());  return
 
         if command == "summary":
-            self._send_summary(self.summary_callback())
-            return
+            self._send_summary(self.summary_callback());  return
 
         if command == "mode":
             v = (arg or "").strip().lower()
             if v not in ("live", "shadow"):
-                self._send_message("Usage: /mode <live|shadow>")
-                return
+                self._send_message("Usage: /mode <live|shadow>");  return
             ok = self.control_callback("mode", v)
-            self._send_message("✅ Mode set to LIVE." if ok and v == "live" else
-                               "✅ Mode set to SHADOW." if ok else
-                               "⚠️ Failed to set mode.")
+            self._send_message("✅ Mode set to LIVE." if ok and v == "live"
+                               else "✅ Mode set to SHADOW." if ok
+                               else "⚠️ Failed to set mode.")
+            return
+
+        if command == "quality":
+            v = (arg or "").strip().lower()
+            if v not in ("auto", "conservative", "aggressive"):
+                self._send_message("Usage: /quality <auto|conservative|aggressive>");  return
+            ok = self.control_callback("quality", v)
+            self._send_message(f"✅ Quality set to {v.upper()}." if ok else "⚠️ Failed to set quality.")
             return
 
         if command in ("start", "stop", "refresh", "health", "emergency"):
@@ -273,23 +327,29 @@ class TelegramController:
 
         self._send_message(
             "❌ Unknown command.\n"
-            "Try: /start, /stop, /mode live, /mode shadow, /status, /summary, /refresh, /health, /emergency, /help"
+            "Try: /start, /stop, /mode live, /mode shadow, /quality auto, /status, /summary, /refresh, /health, /emergency, /help, /ping"
         )
 
     # ---------- polling loop ----------
     def _poll_updates(self) -> None:
+        if not self.enabled:
+            logger.info("Telegram disabled; polling thread exiting.")
+            return
+
+        # Prevent 409 by ensuring webhook is off
+        self._delete_webhook()
+
         url_path = "getUpdates"
         offset: Optional[int] = None
         timeout = 30
 
         logger.info("📡 Telegram polling started. Awaiting commands...")
-        while self.polling:
+        while self._polling:
             try:
                 params = {"timeout": timeout, "offset": offset, "allowed_updates": ["message", "edited_message"]}
                 resp = self._request("GET", url_path, params=params, timeout=timeout + 5)
                 if resp is None:
-                    time.sleep(1)
-                    continue
+                    time.sleep(1);  continue
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -300,23 +360,25 @@ class TelegramController:
                         text = (message.get("text") or "").strip()
                         if not text.startswith("/"):
                             continue
-                        cmd_parts = text[1:].split(maxsplit=1)
-                        command = cmd_parts[0].lower()
-                        arg = cmd_parts[1] if len(cmd_parts) > 1 else ""
+                        parts = text[1:].split(maxsplit=1)
+                        cmd = parts[0].lower()
+                        arg = parts[1] if len(parts) > 1 else ""
                         chat = message.get("chat") or {}
                         chat_id = chat.get("id")
-                        self._handle_command(command, arg, chat_id_hint=chat_id)
+                        self._handle_command(cmd, arg, chat_id_hint=chat_id)
 
                 elif resp.status_code == 409:
-                    logger.error("409 Conflict: another webhook/poller is active. Stopping polling.")
-                    self.polling = False
+                    # Another webhook/poller might be active — try to disable webhook once and continue.
+                    logger.error("409 Conflict: webhook active; disabling and retrying.")
+                    self._delete_webhook()
+                    time.sleep(2)
 
                 else:
                     try:
                         body = resp.json()
                     except Exception:
                         body = {"text": resp.text}
-                    logger.error("Telegram getUpdates failed (%s): %s", resp.status_code, body)
+                    logger.error("getUpdates failed (%s): %s", resp.status_code, body)
                     time.sleep(2)
 
             except requests.exceptions.ReadTimeout:
@@ -327,25 +389,28 @@ class TelegramController:
 
         logger.info("🛑 Telegram polling stopped.")
 
-    # ---------- lifecycle ----------
+    # ---------- lifecycle (idempotent) ----------
     def start_polling(self) -> None:
         """Start long-polling for Telegram messages in a background thread."""
-        if self.polling:
-            logger.warning("Polling already active.")
+        if not self.enabled:
+            logger.warning("Telegram disabled; not starting polling.")
             return
-
-        self.polling = True
-        self.polling_thread = threading.Thread(
-            target=self._poll_updates,
-            name="TelegramPolling",
-            daemon=True,
-        )
-        self.polling_thread.start()
+        with self._poll_lock:
+            if self._polling:
+                logger.info("Telegram polling already running; ignoring duplicate start.")
+                return
+            self._polling = True
+            self._thread = threading.Thread(target=self._poll_updates, name="TelegramPolling", daemon=True)
+            self._thread.start()
 
     def stop_polling(self) -> None:
         """Stop the polling loop gracefully."""
-        logger.info("🛑 Stopping Telegram polling...")
-        self.polling = False
-        if self.polling_thread and self.polling_thread.is_alive():
-            self.polling_thread.join(timeout=5)
-        self.polling_thread = None
+        with self._poll_lock:
+            if not self._polling:
+                return
+            logger.info("🛑 Stopping Telegram polling...")
+            self._polling = False
+            th = self._thread
+            self._thread = None
+        if th and th.is_alive():
+            th.join(timeout=5)
