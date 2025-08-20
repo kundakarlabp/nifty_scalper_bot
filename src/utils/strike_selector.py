@@ -4,6 +4,7 @@ Strike resolution helpers and market-time gates.
 Clean signatures (no exchange-calendars, no spot_symbol arg).
 - get_instrument_tokens(kite_instance, ...) reads symbols from `settings`
 - is_market_open() -> bool, pure IST gate 09:15–15:30 Mon–Fri
+- All functions are safe when `kite_instance` is None (shadow mode).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from src.config import settings
 
@@ -45,7 +46,7 @@ def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
 
 def _rate_call(fn, call_key: str, *args, **kwargs):
     """
-    Execute a Kite API call with very conservative rate limiting + 1 retry on rate error.
+    Execute a Kite API call with conservative rate limiting + 1 retry on rate error.
     """
     if _rate_limited(call_key):
         time.sleep(0.3)
@@ -88,13 +89,22 @@ def is_trading_hours() -> bool:
 
 # ---------- Instruments cache ----------
 
-def fetch_cached_instruments(kite_instance: KiteConnect) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def fetch_cached_instruments(kite_instance: Optional[KiteConnect]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Return (NFO_list, NSE_list) instrument dumps, cached by the caller if needed.
+    Return (NFO_list, NSE_list) instrument dumps.
+
+    Shadow-mode safe: if `kite_instance` is None or lacks .instruments, returns ([], []).
     """
-    nfo = _rate_call(kite_instance.instruments, "instruments_NFO", "NFO")
-    nse = _rate_call(kite_instance.instruments, "instruments_NSE", "NSE")
-    return nfo or [], nse or []
+    try:
+        if kite_instance is None or not hasattr(kite_instance, "instruments"):
+            logger.debug("fetch_cached_instruments: kite_instance missing; returning empty lists (shadow mode).")
+            return [], []
+        nfo = _rate_call(kite_instance.instruments, "instruments_NFO", "NFO")
+        nse = _rate_call(kite_instance.instruments, "instruments_NSE", "NSE")
+        return nfo or [], nse or []
+    except Exception as e:
+        logger.warning("fetch_cached_instruments failed: %s", e)
+        return [], []
 
 
 # ---------- Spot helpers ----------
@@ -107,15 +117,16 @@ def _get_spot_ltp_symbol() -> str:
     return sym or "NSE:NIFTY 50"
 
 
-def _spot_ltp(kite_instance: KiteConnect) -> float:
+def _spot_ltp(kite_instance: Optional[KiteConnect]) -> float:
     """
-    Fetch NIFTY 50 spot LTP; return fallback 25000.0 on failure.
+    Fetch NIFTY 50 spot LTP; return fallback 25000.0 on failure or when kite is None.
     """
+    if kite_instance is None or not hasattr(kite_instance, "ltp"):
+        return 25000.0
     try:
         symbol = _get_spot_ltp_symbol()
         out = _rate_call(kite_instance.ltp, "ltp_spot", [symbol])
         if isinstance(out, dict) and out:
-            # Zerodha returns { "NSE:NIFTY 50": {"last_price": ...}, ...}
             payload = next(iter(out.values()))
             return float(payload.get("last_price") or payload.get("last_price", 0.0))
     except Exception as e:
@@ -152,17 +163,15 @@ def _resolve_nfo_weekly_expiry(cached_nfo: List[Dict[str, Any]]) -> str:
     Parse earliest future expiry from instrument dump. Fallback to next Thursday calc.
     """
     try:
-        from datetime import date
         expiries = sorted(
             {
-                r["expiry"] if isinstance(r.get("expiry"), str) else r.get("expiry").strftime("%Y-%m-%d")
+                (r.get("expiry").strftime("%Y-%m-%d") if hasattr(r.get("expiry"), "strftime") else str(r.get("expiry")))
                 for r in cached_nfo
                 if (r.get("name") == "NIFTY" and r.get("segment") == "NFO-OPT")
             }
         )
-        for e in expiries:
-            # choose the closest >= today
-            return e
+        if expiries:
+            return expiries[0]
     except Exception:
         pass
     return _calculate_next_thursday()
@@ -171,7 +180,7 @@ def _resolve_nfo_weekly_expiry(cached_nfo: List[Dict[str, Any]]) -> str:
 # ---------- Public API ----------
 
 def get_instrument_tokens(
-    kite_instance: KiteConnect,
+    kite_instance: Optional[KiteConnect],
     cached_nfo_instruments: Optional[List[Dict[str, Any]]] = None,
     *,
     offset: int = 0,
@@ -182,15 +191,13 @@ def get_instrument_tokens(
 
     Reads base symbol/exchange from `settings`—no spot_symbol arg required.
 
-    Returns dict:
-      {
-        "spot_price": float,
-        "atm_strike": int,
-        "target_strike": int,
-        "expiry": "YYYY-MM-DD",
-        "tokens": {"ce": int|None, "pe": int|None},
-      }
+    Returns dict or None (when kite is not available in shadow mode).
     """
+    # Shadow mode: cannot resolve tokens without Kite
+    if kite_instance is None:
+        logger.debug("get_instrument_tokens: kite_instance missing; returning None (shadow mode).")
+        return None
+
     try:
         nfo = cached_nfo_instruments
         if nfo is None:
@@ -198,23 +205,22 @@ def get_instrument_tokens(
 
         spot = _spot_ltp(kite_instance)
         atm = get_atm_strike(spot, step=50)
-        rng = int(strike_range if strike_range is not None else getattr(settings.instruments, "strike_selection_range", 3))
+        _ = int(strike_range if strike_range is not None else getattr(settings.instruments, "strike_selection_range", 3))
         step = 50
 
         target = atm + offset * step
-        expiry = _resolve_nfo_weekly_expiry(nfo)
+        expiry = _resolve_nfo_weekly_expiry(nfo or [])
 
         ce_token = None
         pe_token = None
         base_name = getattr(settings.instruments, "trade_symbol", "NIFTY")
 
-        for row in nfo:
+        for row in nfo or []:
             if row.get("segment") != "NFO-OPT":
                 continue
             if row.get("name") != base_name:
                 continue
             if str(row.get("expiry")).startswith(expiry):
-                # Zerodha format example: NIFTY25AUG25000CE
                 try:
                     strike = int(row.get("strike"))
                 except Exception:
