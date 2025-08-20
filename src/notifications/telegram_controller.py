@@ -1,3 +1,4 @@
+# src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import logging
@@ -30,6 +31,7 @@ def _build_cfg() -> _TGConfig:
     tg = getattr(settings, "telegram", None)
     enabled = bool(getattr(tg, "enabled", True))
     bot_token = getattr(tg, "bot_token", None)
+    # Can be learned on first inbound message if not set
     chat_id = getattr(tg, "chat_id", getattr(settings, "TELEGRAM_CHAT_ID", None)) if tg is not None else None
     try:
         chat_id = int(chat_id) if chat_id is not None else None
@@ -44,6 +46,7 @@ class TelegramController:
     - Ensures webhook is disabled before polling (prevents 409 conflicts)
     - Singleton polling guard within a process (no double polling)
     - Throttled 'no chat_id' logs
+    - Status format matches requested style
     """
 
     # ---- process-wide singleton guard (no double polling) ----
@@ -132,8 +135,8 @@ class TelegramController:
         for attempt in range(5):
             if self._delete_webhook():
                 return
-            sleep = 1 + attempt  # small backoff
-            logger.info("Waiting for webhook to clear (%ss)...", sleep)
+            sleep = 1 + attempt  # tiny backoff
+            logger.info("Waiting for Telegram webhook to clear (%ss)...", sleep)
             time.sleep(sleep)
 
     # ---------- send ----------
@@ -242,6 +245,7 @@ class TelegramController:
     def _handle_command(self, command: str, arg: str = "", chat_id_hint: Optional[int] = None) -> None:
         logger.info("📩 Telegram command: '%s %s'", command, arg)
 
+        # Learn chat_id on first inbound message
         if self.cfg.chat_id is None and chat_id_hint is not None:
             try:
                 self.cfg.chat_id = int(chat_id_hint)
@@ -290,7 +294,7 @@ class TelegramController:
             if v not in ("auto", "conservative", "aggressive"):
                 self._send_message("Usage: /quality <auto|conservative|aggressive>");  return
             ok = self.control_callback("quality", v)
-            self._send_message(f"✅ Quality set to {v.UPPER()}." if ok else "⚠️ Failed to set quality.")
+            self._send_message(f"✅ Quality set to {v.upper()}." if ok else "⚠️ Failed to set quality.")
             return
 
         if command in ("start", "stop", "refresh", "health", "emergency"):
