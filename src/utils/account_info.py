@@ -2,9 +2,9 @@
 """
 Account info helpers (graceful fallbacks).
 
-- get_equity_estimate(kite) -> float
-    Returns a conservative equity estimate using Zerodha margins when available,
-    else falls back to settings.risk.default_equity.
+get_equity_estimate(kite) -> float
+  Returns a conservative equity estimate using Zerodha margins when available,
+  else falls back to settings.risk.default_equity.
 
 Notes:
 - Narrow exception handling; no blanket 'except Exception'.
@@ -44,21 +44,18 @@ def get_equity_estimate(kite: Optional["KiteConnect"]) -> float:
 
     try:
         m = kite.margins()  # may raise on network/token issues
-        # Typical structure: {'equity': {'available': {...}, 'net': ..., ...}, ...}
+        # Typical shape: {'equity': {'available': {...}, 'net': ...}, ...}
         eq = m.get("equity") or {}
-        # Use 'available' cash first, then 'net'
         avail = eq.get("available") or {}
-        # Zerodha uses keys like 'cash', 'adhoc_margin', etc.
         cash = avail.get("cash")
         if cash is not None:
             return float(cash)
         net = eq.get("net")
         if net is not None:
             return float(net)
-        # As a last resort, try top-level 'available' if present
         if isinstance(m.get("available"), (int, float, str)):
             return float(m["available"])
-        logger.warning("account_info: margins() returned unexpected shape; using default equity.")
+        logger.warning("account_info: margins() unexpected shape; using default equity.")
         return default_equity
     except (NetworkException, TokenException) as e:
         logger.warning("account_info: margins() failed (%s); using default equity.", e)
