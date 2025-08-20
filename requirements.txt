@@ -1,17 +1,41 @@
+# Core trading stack
 kiteconnect==4.1.0
-python-telegram-bot==20.6
+websocket-client==1.8.0
+requests==2.32.3
+schedule==1.2.1
+python-dotenv==1.0.1
+
+# Data & indicators
 pandas==2.2.2
 numpy==1.26.4
 ta>=0.11.0
-requests==2.32.3
-scikit-learn==1.5.0
-python-dotenv==1.0.1
-schedule==1.2.1
-flask==3.0.3
 yfinance==0.2.40
-websocket-client==1.8.0
-uvicorn==0.29.0
+
+# ML
+scikit-learn==1.5.0
+scipy==1.13.1
+
+# API / server
 fastapi==0.111.0
+uvicorn==0.29.0
+flask==3.0.3
+
+# Telegram
+python-telegram-bot==20.6
+
+# Viz (matplotlib is used; seaborn added for quantstats compat)
 matplotlib==3.9.0
+seaborn==0.13.2
+
+# Config / validation
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Testing
 pytest==7.4.4
 pytest-mock==3.11.1
+freezegun
+
+# Analytics / calendars (left unpinned to avoid unnecessary breakage)
+quantstats
+exchange-calendars

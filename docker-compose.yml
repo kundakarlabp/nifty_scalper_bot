@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  scalper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nifty-scalper:latest
+    container_name: nifty-scalper
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Ensure IST inside container (also set in Dockerfile)
+      - TZ=Asia/Kolkata
+      # Optional: override mode at runtime
+      # - ENABLE_LIVE_TRADING=true
+      # - ENABLE_TELEGRAM=true
+    volumes:
+      # Persist logs locally (optional)
+      - ./logs:/app/logs
+    command: ["python", "-m", "src.main", "start"]
+    # If you expose a health endpoint (Flask/FastAPI), map it:
+    # ports:
+    #   - "8000:8000"
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import socket; import sys; sys.exit(0)"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 20s
+
+  # Optional one-off backtest job (run with: `docker compose run --rm backtest`)
+  backtest:
+    image: nifty-scalper:latest
+    profiles: ["test"]
+    env_file:
+      - .env
+    working_dir: /app
+    command: ["python", "tests/true_backtest_dynamic.py"]
+    depends_on:
+      - scalper

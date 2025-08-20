@@ -1,44 +1,63 @@
-# Use official Python slim image
-FROM python:3.10-slim
+# syntax=docker/dockerfile:1
 
-# --- Security: non-root user ---
-ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
+############################
+# Stage 1: Builder
+############################
+FROM python:3.11-slim AS builder
 
-# Workdir
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Logs unbuffered
-ENV PYTHONUNBUFFERED=1
-
-# ✅ Make both /app and /app/src importable everywhere
-ENV PYTHONPATH="/app:/app/src"
-
-# System deps
+# System build deps (removed later)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libffi-dev libssl-dev curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+      build-essential gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-# Python deps
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
+# Copy requirements and build wheels
 COPY requirements.txt .
-RUN python -m pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
-# App source
+
+############################
+# Stage 2: Final runtime
+############################
+FROM python:3.11-slim
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Kolkata
+
+WORKDIR /app
+
+# Runtime libs only (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone
+
+# Install wheels built in builder
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+
+# Copy application code
 COPY . .
 
-# Ensure .sh is executable before switching user
-RUN if [ -f manage_bot.sh ]; then chmod +x manage_bot.sh; fi
+# Create non-root user
+RUN groupadd -r app && useradd -r -g app app \
+    && chown -R app:app /app
+USER app
 
-# Use non-root
-USER appuser
+# Optional healthcheck if you expose Flask/FastAPI health endpoint
+# HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
+#   CMD curl -f http://localhost:8000/health || exit 1
 
-# ✅ Run module with explicit 'start' arg so the process keeps running
-CMD ["python3","-m","src.main","start"]
+# Default command: run the bot
+CMD ["python", "-m", "src.main", "start"]

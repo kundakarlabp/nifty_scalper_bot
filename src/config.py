@@ -1,218 +1,159 @@
 # src/config.py
 """
-Centralised configuration loader for the scalper bot.
-Reads environment variables at import time and exposes them via the Config class
-(and a convenience alias: `settings`).
+Centralized, validated configuration for the Nifty Scalper Bot using Pydantic.
 """
 
 from __future__ import annotations
-
-import os
 from pathlib import Path
+from typing import Literal, Optional
+
+from pydantic import (
+    Field,
+    field_validator,
+    PositiveFloat,
+    PositiveInt,
+    NonNegativeFloat,
+)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _load_env() -> None:
-    """
-    Load .env from (in order):
-      1) src/.env
-      2) repo root .env
-      3) /app/.env   (common in containers like Railway/Render)
-    Uses python-dotenv if installed; otherwise no-op.
-    """
-    try:
-        from dotenv import load_dotenv  # type: ignore
-    except Exception:
-        # dotenv not installed; silently skip
-        return
-
-    candidates = [
-        Path(__file__).parent / ".env",           # src/.env
-        Path(__file__).parent.parent / ".env",    # repo root .env
-        Path("/app/.env"),                        # container path
-    ]
-    for p in candidates:
-        if p.exists():
-            try:
-                load_dotenv(dotenv_path=p)
-                # Mark where we loaded from; useful for debug prints
-                os.environ.setdefault("_ENV_LOADED_FROM", str(p))
-                break
-            except Exception:
-                # Fallback to next candidate
-                continue
+# ---------- shared .env discovery ----------
+def _find_env_file() -> Optional[Path]:
+    """Find the nearest .env by searching upward from CWD."""
+    cwd = Path.cwd()
+    for parent in [cwd, *cwd.parents]:
+        env_file = parent / ".env"
+        if env_file.exists():
+            return env_file
+    return None
 
 
-def _as_bool(val: str | None, default: bool = False) -> bool:
-    if val is None:
-        return default
-    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+# ---------- Component configs (now BaseSettings so they read env on their own) ----------
+class ExecutorConfig(BaseSettings):
+    """Configuration for the OrderExecutor."""
+    default_product: Literal["MIS", "NRML"] = Field("MIS", alias="DEFAULT_PRODUCT")
+    default_order_type: Literal["MARKET", "LIMIT"] = Field("MARKET", alias="DEFAULT_ORDER_TYPE")
+    default_validity: Literal["DAY", "IOC"] = Field("DAY", alias="DEFAULT_VALIDITY")
+    preferred_exit_mode: Literal["AUTO", "GTT", "REGULAR"] = Field("AUTO", alias="PREFERRED_EXIT_MODE")
+    use_slm_exit: bool = Field(True, alias="USE_SLM_EXIT")
+    sl_limit_offset_ticks: PositiveInt = Field(2, alias="SL_LIMIT_OFFSET_TICKS")
+    trail_cooldown_sec: NonNegativeFloat = Field(12.0, alias="TRAIL_COOLDOWN_SEC")
+    partial_tp_enable: bool = Field(True, alias="PARTIAL_TP_ENABLE")
+    partial_tp_ratio: float = Field(0.5, gt=0, lt=1, alias="PARTIAL_TP_RATIO")
+    partial_tp2_r_mult: PositiveFloat = Field(2.0, alias="PARTIAL_TP2_R_MULT")
+    breakeven_after_tp1_enable: bool = Field(True, alias="BREAKEVEN_AFTER_TP1_ENABLE")
+    breakeven_offset_ticks: NonNegativeFloat = Field(1.0, alias="BREAKEVEN_OFFSET_TICKS")
+    nfo_freeze_qty: PositiveInt = Field(1800, alias="NFO_FREEZE_QTY")
+    nifty_lot_size: PositiveInt = Field(50, alias="NIFTY_LOT_SIZE")
+    tick_size: PositiveFloat = Field(0.05, alias="TICK_SIZE")
+
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
-# Load environment before reading keys
-_load_env()
+class APIConfig(BaseSettings):
+    """Credentials for brokers and services."""
+    zerodha_api_key: str = Field("DUMMY_KEY", alias="ZERODHA_API_KEY")
+    zerodha_api_secret: str = Field("DUMMY_SECRET", alias="ZERODHA_API_SECRET")
+    zerodha_access_token: str = Field("DUMMY_TOKEN", alias="ZERODHA_ACCESS_TOKEN")
+
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
-class Config:
-    """Static configuration values pulled from environment variables."""
+class TelegramConfig(BaseSettings):
+    """Configuration for Telegram notifications."""
+    bot_token: str = Field("DUMMY_BOT_TOKEN", alias="TELEGRAM_BOT_TOKEN")
+    chat_id: str = Field("12345", alias="TELEGRAM_CHAT_ID")
 
-    # ─────────── Zerodha ─────────── #
-    ZERODHA_API_KEY: str = os.getenv("ZERODHA_API_KEY", "")
-    ZERODHA_API_SECRET: str = os.getenv("ZERODHA_API_SECRET", "")
-
-    # Access token var name unified across project:
-    KITE_ACCESS_TOKEN: str = os.getenv("KITE_ACCESS_TOKEN", "")
-    # Back-compat (if someone sets ZERODHA_ACCESS_TOKEN)
-    if not KITE_ACCESS_TOKEN and os.getenv("ZERODHA_ACCESS_TOKEN"):
-        KITE_ACCESS_TOKEN = os.getenv("ZERODHA_ACCESS_TOKEN", "")
-
-    # ─────────── Telegram ─────────── #
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    try:
-        TELEGRAM_CHAT_ID: int = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
-    except Exception:
-        TELEGRAM_CHAT_ID = 0
-
-    # ─────────── Risk & Money Mgmt ─────────── #
-    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.01"))
-    MAX_DRAWDOWN: float = float(os.getenv("MAX_DRAWDOWN", "0.05"))
-    CONSECUTIVE_LOSS_LIMIT: int = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
-
-    # Daily circuit breaker (amount OR pct). If both provided, stricter is used.
-    DAILY_MAX_LOSS_PCT: float = float(os.getenv("DAILY_MAX_LOSS_PCT", "0.05"))  # 5% of equity
-    DAILY_MAX_LOSS_AMOUNT: float = float(os.getenv("DAILY_MAX_LOSS_AMOUNT", "0"))  # 0=disabled
-    HALT_ON_DRAWDOWN: bool = _as_bool(os.getenv("HALT_ON_DRAWDOWN", "true"))
-
-    # ─────────── Strategy Tuning ─────────── #
-    BASE_STOP_LOSS_POINTS: float = float(os.getenv("BASE_STOP_LOSS_POINTS", "20.0"))
-    BASE_TARGET_POINTS: float = float(os.getenv("BASE_TARGET_POINTS", "40.0"))
-    CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "8.0"))
-    MIN_SIGNAL_SCORE: int = int(float(os.getenv("MIN_SIGNAL_SCORE", "7")))  # ensure int
-
-    TIME_FILTER_START: str = os.getenv("TIME_FILTER_START", "09:15")
-    TIME_FILTER_END: str = os.getenv("TIME_FILTER_END", "15:15")
-    SKIP_FIRST_MIN: int = int(os.getenv("SKIP_FIRST_MIN", "10"))  # warmup ignore
-
-    # ATR-based adaptive SL/TP
-    ATR_SL_MULTIPLIER: float = float(os.getenv("ATR_SL_MULTIPLIER", "1.5"))
-    ATR_TP_MULTIPLIER: float = float(os.getenv("ATR_TP_MULTIPLIER", "3.0"))
-    ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
-    ATR_LOOKBACK_MIN: int = int(os.getenv("ATR_LOOKBACK_MIN", "30"))
-
-    # Confidence-based adjustments
-    SL_CONFIDENCE_ADJ: float = float(os.getenv("SL_CONFIDENCE_ADJ", "0.2"))
-    TP_CONFIDENCE_ADJ: float = float(os.getenv("TP_CONFIDENCE_ADJ", "0.3"))
-
-    # ─────────── Instrument / Trading ─────────── #
-    NIFTY_LOT_SIZE: int = int(os.getenv("NIFTY_LOT_SIZE", "75"))
-    MIN_LOTS: int = int(os.getenv("MIN_LOTS", "1"))
-    MAX_LOTS: int = int(os.getenv("MAX_LOTS", "5"))
-
-    TRADE_SYMBOL: str = os.getenv("TRADE_SYMBOL", "NIFTY")
-    TRADE_EXCHANGE: str = os.getenv("TRADE_EXCHANGE", "NFO")
-    INSTRUMENT_TOKEN: int = int(os.getenv("INSTRUMENT_TOKEN", "256265"))
-
-    # Options specifics
-    SPOT_SYMBOL: str = os.getenv("SPOT_SYMBOL", "NSE:NIFTY 50")
-    OPTION_TYPE: str = os.getenv("OPTION_TYPE", "BOTH")  # CE, PE, BOTH
-    STRIKE_SELECTION_TYPE: str = os.getenv("STRIKE_SELECTION_TYPE", "ATM")
-    STRIKE_RANGE: int = int(os.getenv("STRIKE_RANGE", "3"))
-    DATA_LOOKBACK_MINUTES: int = int(os.getenv("DATA_LOOKBACK_MINUTES", "35"))
-
-    OPTION_SL_PERCENT: float = float(os.getenv("OPTION_SL_PERCENT", "0.05"))
-    OPTION_TP_PERCENT: float = float(os.getenv("OPTION_TP_PERCENT", "0.15"))
-    OPTION_BREAKOUT_PCT: float = float(os.getenv("OPTION_BREAKOUT_PCT", "0.01"))
-    OPTION_SPOT_TREND_PCT: float = float(os.getenv("OPTION_SPOT_TREND_PCT", "0.005"))
-
-    # Quotes / microstructure
-    SPREAD_GUARD_MAX_PCT: float = float(os.getenv("SPREAD_GUARD_MAX_PCT", "0.7"))  # max spread % of mid
-    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
-
-    # Slippage & fees
-    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "5"))  # 5 bps = 0.05%
-    FEES_PCT_PER_SIDE: float = float(os.getenv("FEES_PCT_PER_SIDE", "0.03"))  # 0.03% per side (example)
-
-    # Scheduling / rate limit
-    JITTER_SECONDS_MAX: float = float(os.getenv("JITTER_SECONDS_MAX", "2.0"))
-    BALANCE_LOG_INTERVAL_MIN: int = int(os.getenv("BALANCE_LOG_INTERVAL_MIN", "30"))
-
-    # Order-exit preferences
-    DEFAULT_PRODUCT: str = os.getenv("DEFAULT_PRODUCT", "MIS")
-    DEFAULT_ORDER_TYPE: str = os.getenv("DEFAULT_ORDER_TYPE", "MARKET")
-    DEFAULT_VALIDITY: str = os.getenv("DEFAULT_VALIDITY", "DAY")
-    PREFERRED_EXIT_MODE: str = os.getenv("PREFERRED_EXIT_MODE", "AUTO")  # AUTO | GTT | REGULAR
-    TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.05"))
-    TRAIL_COOLDOWN_SEC: float = float(os.getenv("TRAIL_COOLDOWN_SEC", "12.0"))
-
-    # ─────────── Partial TP + Breakeven hop + Hard Stop ─────────── #
-    PARTIAL_TP_ENABLE: bool = _as_bool(os.getenv("PARTIAL_TP_ENABLE", "true"))
-    PARTIAL_TP_RATIO: float = float(os.getenv("PARTIAL_TP_RATIO", "0.5"))  # fraction at TP1 (0–1)
-    PARTIAL_TP_USE_MIDPOINT: bool = _as_bool(os.getenv("PARTIAL_TP_USE_MIDPOINT", "true"))
-    PARTIAL_TP2_R_MULT: float = float(os.getenv("PARTIAL_TP2_R_MULT", "2.0"))  # only if not using midpoint
-
-    BREAKEVEN_AFTER_TP1_ENABLE: bool = _as_bool(os.getenv("BREAKEVEN_AFTER_TP1_ENABLE", "true"))
-    BREAKEVEN_OFFSET_TICKS: int = int(os.getenv("BREAKEVEN_OFFSET_TICKS", "1"))
-
-    HARD_STOP_ENABLE: bool = _as_bool(os.getenv("HARD_STOP_ENABLE", "true"))
-    HARD_STOP_GRACE_SEC: float = float(os.getenv("HARD_STOP_GRACE_SEC", "3.0"))
-    HARD_STOP_SLIPPAGE_BPS: float = float(os.getenv("HARD_STOP_SLIPPAGE_BPS", "5"))
-
-    # Feature toggles
-    ENABLE_LIVE_TRADING: bool = _as_bool(os.getenv("ENABLE_LIVE_TRADING", "false"))
-    ENABLE_TELEGRAM: bool = _as_bool(os.getenv("ENABLE_TELEGRAM", "true"))
-    ALLOW_OFFHOURS_TESTING: bool = _as_bool(os.getenv("ALLOW_OFFHOURS_TESTING", "false"))
-
-    # Logging / persistence
-    LOG_FILE: str = os.getenv("LOG_FILE", "logs/trades.csv")
-
-    # Historical data timeframe
-    HISTORICAL_TIMEFRAME: str = os.getenv("HISTORICAL_TIMEFRAME", "minute")
-
-    # Session management
-    SESSION_AUTO_EXIT_TIME: str = os.getenv("SESSION_AUTO_EXIT_TIME", "15:20")  # HH:MM IST
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
-# Compatibility alias so modules can `from src.config import settings`
-settings = Config
+class RiskConfig(BaseSettings):
+    """Parameters controlling risk management and position sizing."""
+    max_daily_drawdown_pct: float = Field(0.03, alias="MAX_DAILY_DRAWDOWN_PCT", gt=0, lt=0.5)
+    max_trades_per_day: PositiveInt = Field(15, alias="MAX_TRADES_PER_DAY")
+    consecutive_loss_limit: PositiveInt = Field(3, alias="CONSECUTIVE_LOSS_LIMIT")
+    risk_per_trade_pct: float = Field(0.01, alias="RISK_PER_TRADE_PCT", gt=0, lt=0.2)
+    min_lots: PositiveInt = Field(1, alias="MIN_LOTS")
+    max_lots: PositiveInt = Field(10, alias="MAX_LOTS")
+
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
-def _validate_for_live() -> None:
-    """Raise a clear error if live trading is enabled but credentials are missing."""
-    if not settings.ENABLE_LIVE_TRADING:  # type: ignore[attr-defined]
-        return
-    missing = []
-    if not settings.ZERODHA_API_KEY:  # type: ignore[attr-defined]
-        missing.append("ZERODHA_API_KEY")
-    if not settings.ZERODHA_API_SECRET:  # type: ignore[attr-defined]
-        missing.append("ZERODHA_API_SECRET")
-    if not settings.KITE_ACCESS_TOKEN:  # type: ignore[attr-defined]
-        missing.append("KITE_ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN)")
-    if settings.ENABLE_TELEGRAM and not settings.TELEGRAM_BOT_TOKEN:  # type: ignore[attr-defined]
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if missing:
-        raise SystemExit(
-            "Live trading is enabled but required environment variables are missing: "
-            + ", ".join(missing)
-        )
+class StrategyConfig(BaseSettings):
+    """Parameters for tuning the trading strategy logic."""
+    min_signal_score: float = Field(5.0, alias="MIN_SIGNAL_SCORE")
+    confidence_threshold: float = Field(6.0, alias="CONFIDENCE_THRESHOLD", ge=0, le=10)
+    time_filter_start: str = Field("09:20", alias="TIME_FILTER_START")
+    time_filter_end: str = Field("15:15", alias="TIME_FILTER_END")
+    atr_period: PositiveInt = Field(14, alias="ATR_PERIOD")
+    atr_sl_multiplier: PositiveFloat = Field(1.5, alias="ATR_SL_MULTIPLIER")
+    atr_tp_multiplier: PositiveFloat = Field(3.0, alias="ATR_TP_MULTIPLIER")
+    spot_symbol: str = Field("NSE:NIFTY 50", alias="SPOT_SYMBOL")
+    strike_selection_range: PositiveInt = Field(3, alias="STRIKE_SELECTION_RANGE")
+    # per your update request:
+    min_bars_for_signal: PositiveInt = Field(10, alias="MIN_BARS_FOR_SIGNAL")
+
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+
+# ---------- App (top-level) ----------
+class AppSettings(BaseSettings):
+    """Main application settings, composing all other configuration models."""
+    model_config = SettingsConfigDict(
+        env_file=_find_env_file(),
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
+
+    enable_live_trading: bool = Field(False, alias="ENABLE_LIVE_TRADING")
+    enable_telegram: bool = Field(True, alias="ENABLE_TELEGRAM")
+    allow_offhours_testing: bool = Field(False, alias="ALLOW_OFFHOURS_TESTING")
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+
+    api: APIConfig = Field(default_factory=APIConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        if v.upper() not in valid_levels:
+            raise ValueError(f"log_level must be one of {valid_levels}")
+        return v.upper()
+
+
+# Safe singleton init
+try:
+    settings = AppSettings()
+except Exception as e:
+    print(f"FATAL: Could not load application settings. Error: {e}")
+    raise
 
 
 if __name__ == "__main__":
-    # Safe preview of loaded configuration
-    from pprint import pprint
-
-    preview = {
-        k: v for k, v in Config.__dict__.items()
-        if not k.startswith("__") and not callable(v)
-    }
-    # Redact secrets
-    if preview.get("ZERODHA_API_SECRET"):
-        preview["ZERODHA_API_SECRET"] = "***"
-    if preview.get("KITE_ACCESS_TOKEN"):
-        preview["KITE_ACCESS_TOKEN"] = "***"
-    if preview.get("TELEGRAM_BOT_TOKEN"):
-        preview["TELEGRAM_BOT_TOKEN"] = "***"
-
-    loaded_from = os.environ.get("_ENV_LOADED_FROM", "auto")
-    print(f"Environment loaded from: {loaded_from}")
-    print("Final Config:")
-    pprint(preview)
-    _validate_for_live()
+    print("--- Application Settings ---")
+    print(settings.model_dump_json(indent=2))

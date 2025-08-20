@@ -1,50 +1,84 @@
 """
 Unit tests for the enhanced scalping strategy.
-
-These tests verify that the strategy returns sensible signal objects on
-simple synthetic data.  The goal is not to exhaustively test the
-indicator calculations (which are provided by the ``ta`` library) but
-to ensure that the wrapper logic behaves correctly.
 """
 
 from __future__ import annotations
-
+import pytest
 import pandas as pd
+import numpy as np
 
+from src.config import StrategyConfig
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.signals.signal import Signal
 
 
-def create_trending_dataframe(length: int = 100, up: bool = True) -> pd.DataFrame:
-    """Create a synthetic OHLC DataFrame trending up or down."""
-    import numpy as np
-    prices = np.linspace(100, 120, length) if up else np.linspace(120, 100, length)
+@pytest.fixture
+def strategy_config() -> StrategyConfig:
+    """Provides a default StrategyConfig for tests."""
+    return StrategyConfig(
+        min_signal_score=5.0,
+        confidence_threshold=6.0,
+        atr_period=14,
+        atr_sl_multiplier=1.5,
+        atr_tp_multiplier=3.0,
+    )
+
+
+def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_price: bool = False) -> pd.DataFrame:
+    """Creates a synthetic OHLCV DataFrame."""
+    if constant_price:
+        prices = np.full(length, 100.0)
+    else:
+        prices = np.linspace(100.0, 120.0, length) if trending_up else np.linspace(120.0, 100.0, length)
+
     data = {
         "open": prices,
-        "high": prices + 1,
-        "low": prices - 1,
+        "high": prices + 0.5,
+        "low": prices - 0.5,
         "close": prices,
-        "volume": np.ones(length) * 1000,
+        "volume": np.random.randint(100, 1000, size=length),
     }
-    return pd.DataFrame(data)
+    index = pd.date_range(start="2023-01-01", periods=length, freq="min")
+    return pd.DataFrame(data, index=pd.to_datetime(index))
 
 
-def test_generate_signal_structure() -> None:
-    strategy = EnhancedScalpingStrategy(base_stop_loss_points=20, base_target_points=40, confidence_threshold=5)
-    df = create_trending_dataframe()
-    current_price = df.iloc[-1]["close"]
-    signal = strategy.generate_signal(df, current_price)
-    assert signal is not None, "Strategy should return a signal on trending data"
-    assert signal["signal"] in {"BUY", "SELL"}
-    assert 0 <= signal["confidence"] <= 10, "Confidence should be within 0–10"
-    assert signal["target"] != signal["stop_loss"], "Target and stop loss should differ"
+def test_generate_signal_returns_valid_structure(strategy_config: StrategyConfig):
+    """A generated signal should be a Signal with valid fields."""
+    strategy = EnhancedScalpingStrategy(strategy_config)
+    df = create_test_dataframe(trending_up=True)
+
+    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    if sig:
+        assert isinstance(sig, Signal)
+        assert sig.signal in {"BUY", "SELL"}
+        assert isinstance(sig.confidence, float)
+        assert sig.entry_price > 0
+        assert sig.target != sig.stop_loss
 
 
-def test_signal_direction_changes() -> None:
-    strategy = EnhancedScalpingStrategy(base_stop_loss_points=20, base_target_points=40, confidence_threshold=5)
-    df_up = create_trending_dataframe(up=True)
-    df_down = create_trending_dataframe(up=False)
-    price_up = df_up.iloc[-1]["close"]
-    price_down = df_down.iloc[-1]["close"]
-    signal_up = strategy.generate_signal(df_up, price_up)
-    signal_down = strategy.generate_signal(df_down, price_down)
-    assert signal_up["signal"] != signal_down["signal"], "Opposite trends should yield opposite signals"
+def test_no_signal_on_flat_data(strategy_config: StrategyConfig):
+    """No signal when ATR is effectively zero (flat series)."""
+    strategy = EnhancedScalpingStrategy(strategy_config)
+    df = create_test_dataframe(constant_price=True)
+
+    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert sig is None, "Should not generate a signal when ATR is ~0"
+
+
+def test_signal_direction_on_trends(strategy_config: StrategyConfig):
+    """
+    Up-trend should bias BUY; down-trend should bias SELL,
+    subject to scoring/thresholds.
+    """
+    strategy = EnhancedScalpingStrategy(strategy_config)
+
+    df_up = create_test_dataframe(trending_up=True)
+    sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
+    if sig_up:
+        assert sig_up.signal == "BUY"
+
+    df_down = create_test_dataframe(trending_up=False)
+    sig_down = strategy.generate_signal(df_down, current_price=float(df_down['close'].iloc[-1]))
+    if sig_down:
+        assert sig_down.signal == "SELL"

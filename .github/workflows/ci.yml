@@ -1,32 +1,11 @@
-name: Python CI
-on:
-  push:
-  pull_request:
-
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
 jobs:
-  build:
+  build-test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11"]
-    env:
-      ENV_FILE: tests/.env.test
-      TZ: Asia/Kolkata
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff==0.6.2 mypy==1.10.0 pytest==8.2.0 freezegun exchange-calendars pytz
-      - name: Lint (non-fatal while stabilizing)
-        run: ruff check --output-format=github src || true
-      - name: Type check (non-fatal while stabilizing)
-        run: mypy src || true
-      - name: Tests (with IST + test env)
-        run: pytest -q
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: chmod +x run_checks.sh && ./run_checks.sh
