@@ -1,360 +1,283 @@
 # src/strategies/runner.py
-"""
-The StrategyRunner is the central orchestrator of the trading bot.
-It coordinates the data source, strategy, execution, and session management
-to run the main trading loop.
-"""
-
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Dict, Optional
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 import pandas as pd
-from ta.trend import ADXIndicator
 
 from src.config import settings
 from src.risk.position_sizing import PositionSizing
-from src.risk.session import Trade
-from src.signals.signal import Signal
-from src.signals.regime_detector import detect_market_regime
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.utils.account_info import get_equity_estimate
 from src.utils.strike_selector import (
     get_instrument_tokens,
     is_market_open,
-    fetch_cached_instruments,
 )
+from src.data.source import DataSource, LiveKiteSource
 
-if TYPE_CHECKING:
-    from src.data.source import DataSource
-    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-    from src.execution.order_executor import OrderExecutor
-    from src.risk.session import TradingSession
-    from src.notifications.telegram_controller import TelegramController
+# Optional broker SDK (keep imports safe and allow for "shadow mode")
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+    from kiteconnect.exceptions import (
+        NetworkException,
+        TokenException,
+        InputException,
+    )  # type: ignore
+except Exception:  # pragma: no cover
+    KiteConnect = None  # type: ignore
+    NetworkException = TokenException = InputException = Exception  # fallbacks
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
+# -------------------- Internal Helper Functions --------------------
+def _now_ist_naive() -> datetime:
+    """Returns the current naive datetime in IST."""
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.replace(tzinfo=None)
+
+
+def _ensure_adx_di(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    """
+    Computes ADX and DI+, DI- indicators on the provided DataFrame.
+
+    Uses `ta` if available; otherwise falls back to a lightweight manual calc.
+    """
+    if df is None or df.empty or not {"high", "low", "close"}.issubset(df.columns):
+        log.warning("ADX/DI: Missing 'high', 'low', or 'close' columns.")
+        return df
+
+    # Try ta.trend.ADXIndicator if available
+    try:
+        from ta.trend import ADXIndicator  # type: ignore
+        adxi = ADXIndicator(df["high"], df["low"], df["close"], window=window)
+        df[f"adx_{window}"] = adxi.adx()
+        df[f"di_plus_{window}"] = adxi.adx_pos()
+        df[f"di_minus_{window}"] = adxi.adx_neg()
+        return df
+    except Exception:
+        # Fallback manual estimate
+        pass
+
+    # Manual approximation if ta is not installed
+    up_move = df["high"].diff()
+    down_move = -df["low"].diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    tr = (df["high"] - df["low"]).abs()
+    atr = tr.ewm(alpha=1 / window, adjust=False).mean().replace(0, 1e-9)
+
+    plus_di = (plus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr) * 100.0
+    minus_di = (minus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr) * 100.0
+    dx = (plus_di.subtract(minus_di).abs() / (plus_di.add(minus_di).abs() + 1e-9)) * 100.0
+    adx = dx.ewm(alpha=1 / window, adjust=False).mean()
+
+    df[f"adx_{window}"] = adx
+    df[f"di_plus_{window}"] = plus_di
+    df[f"di_minus_{window}"] = minus_di
+    return df
+
+
+def _fetch_and_prepare_df(
+    data_source: Optional[DataSource],
+    token: Optional[int],
+    lookback: timedelta,
+    timeframe: str,
+) -> pd.DataFrame:
+    """
+    Helper to fetch OHLC data and ensure it's in the correct format.
+    """
+    if data_source is None or token is None:
+        return pd.DataFrame()
+
+    end_date = _now_ist_naive()
+    start_date = end_date - lookback
+    df = data_source.fetch_ohlc(token, start_date, end_date, timeframe)
+
+    if df.empty:
+        log.warning("Data fetch for token %s returned empty DataFrame.", token)
+        return pd.DataFrame()
+
+    # Ensure required columns are present for the strategy
+    required_cols = {"open", "high", "low", "close"}
+    if not required_cols.issubset(df.columns):
+        log.error("Fetched data for token %s is missing required columns: %s", token, required_cols)
+        return pd.DataFrame()
+
+    return df
+
+
+# -------------------- Main Runner Class --------------------
 class StrategyRunner:
+    """
+    Orchestrates the bot's core trading loop:
+      1) Market hours check
+      2) Resolve strike/instrument tokens
+      3) Fetch spot + option OHLC
+      4) Compute ADX/DI on spot
+      5) Strategy.generate_signal(...)
+      6) Position sizing
+      7) Return actionable signal dict
+    """
+
     def __init__(
         self,
-        data_source: "DataSource",
-        strategy: "EnhancedScalpingStrategy",
-        order_executor: "OrderExecutor",
-        trading_session: "TradingSession",
-        position_sizer: PositionSizing,
-        telegram_controller: Optional["TelegramController"],
-    ):
-        self.data_source = data_source
-        self.strategy = strategy
-        self.executor = order_executor
-        self.session = trading_session
-        self.sizer = position_sizer
-        self.telegram = telegram_controller
+        strategy: Optional[EnhancedScalpingStrategy] = None,
+        data_source: Optional[DataSource] = None,
+        spot_source: Optional[DataSource] = None,
+        kite: Optional["KiteConnect"] = None,
+    ) -> None:
+        """
+        Initializes the runner with optional strategy and data sources.
+        If not provided, builds sensible defaults (shadow-mode safe).
+        """
+        self.strategy = strategy or EnhancedScalpingStrategy()
+        self._kite = kite or self._build_kite()
+        self.data_source = data_source or self._build_live_source(self._kite)
+        self.spot_source = spot_source or self.data_source
+        self._last_token_warn_ts = 0.0
 
-        self._running = False
-        self._last_run_time = 0.0
+    # ---- wiring helpers ----
+    def _build_kite(self) -> Optional["KiteConnect"]:
+        if KiteConnect is None:
+            log.warning("KiteConnect not installed; StrategyRunner in shadow mode (no broker).")
+            return None
 
-        # Poll every 15s by default (configurable if needed)
-        self.poll_interval_sec = 15
+        api_key = getattr(getattr(settings, "zerodha", object()), "api_key", None)
+        access_token = getattr(getattr(settings, "zerodha", object()), "access_token", None)
+        if not api_key:
+            log.warning("ZERODHA_API_KEY missing; StrategyRunner will run without broker connectivity.")
+            return None
 
-        # Instrument cache (NSE/NFO) refreshed periodically
-        self.instrument_cache: Dict[str, object] = {}
-        self.cache_ttl_sec = 300
-
-        # De-dup signals per symbol
-        self._last_signal_hash_by_symbol: Dict[str, str] = {}
-
-    # ----------------------- lifecycle -----------------------
-
-    def start(self):
-        self._running = True
-        logger.info("StrategyRunner started.")
-        while self._running:
-            now = time.time()
-            if (now - self._last_run_time) < self.poll_interval_sec:
-                time.sleep(0.5)
-                continue
-            self._last_run_time = now
+        kc = KiteConnect(api_key=api_key)
+        if access_token:
             try:
-                self.tick()
+                kc.set_access_token(access_token)
+                log.info("Kite session OK via ACCESS_TOKEN")
             except Exception as e:
-                logger.error("Runner tick error: %s", e, exc_info=True)
-                time.sleep(1)
+                log.warning("Unable to set Kite access token: %s", e)
+        return kc
 
-    def stop(self):
-        self._running = False
-        logger.info("StrategyRunner stopped.")
-
-    # ----------------------- internals -----------------------
-
-    def _refresh_instrument_cache(self):
-        ts = self.instrument_cache.get("timestamp", 0)
-        if not self.instrument_cache or (time.time() - float(ts)) > self.cache_ttl_sec:
-            logger.info("Refreshing instrument cache...")
-            kite = getattr(self.executor, "kite", None)
-            if kite:
-                cache = fetch_cached_instruments(kite)
-                if isinstance(cache, dict):
-                    cache["timestamp"] = time.time()
-                    self.instrument_cache = cache
-
-    def _ensure_adx_di(self, df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-        """
-        Ensure ADX, DI+ and DI- columns exist on df. Returns a new df with columns:
-        ['open','high','low','close','volume','adx','di_plus','di_minus'].
-        """
-        if df is None or df.empty:
-            return df
-
-        # Normalize column names to lowercase
-        out = df.copy()
-        out.columns = [str(c).lower() for c in out.columns]
-
-        if {"adx", "di_plus", "di_minus"}.issubset(out.columns):
-            return out
-
+    def _build_live_source(self, kite: Optional["KiteConnect"]) -> Optional[DataSource]:
+        if kite is None:
+            return None
         try:
-            hi = out["high"].astype(float)
-            lo = out["low"].astype(float)
-            cl = out["close"].astype(float)
-            adx_ind = ADXIndicator(high=hi, low=lo, close=cl, window=window, fillna=False)
-            out["adx"] = adx_ind.adx()
-            out["di_plus"] = adx_ind.adx_pos()
-            out["di_minus"] = adx_ind.adx_neg()
-            return out
-        except KeyError:
-            # Missing required OHLC columns
-            return df
+            ds = LiveKiteSource(kite)
+            ds.connect()
+            log.info("LiveKiteSource connected.")
+            return ds
         except Exception as e:
-            logger.debug("Failed to compute ADX/DI: %s", e)
-            return df
+            log.warning("LiveKiteSource unavailable: %s", e)
+            return None
 
-    def _finalize_fills_if_any(self):
+    # ---- misc helpers ----
+    def _throttled_token_warn(self, message: str) -> None:
+        """Rate-limit token warnings to avoid log spam."""
+        now = time.time()
+        if now - self._last_token_warn_ts > 60:
+            log.warning(message)
+            self._last_token_warn_ts = now
+
+    def to_status_dict(self) -> Dict[str, Any]:
+        """Minimal status snapshot for health/Telegram."""
+        return {
+            "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
+            "broker": "Kite" if self._kite else "none",
+            "data_source": type(self.data_source).__name__ if self.data_source else None,
+        }
+
+    # ---- main step ----
+    def run_once(self, stop_event: threading.Event) -> Optional[Dict[str, Any]]:
         """
-        Ask executor to sync OCO state and finalize session trades for any fills detected.
+        Perform a single cycle of the trading loop.
+        Returns a structured signal dict or None.
         """
-        try:
-            fills = self.executor.sync_and_enforce_oco()
-        except Exception as e:
-            logger.debug("sync_and_enforce_oco failed: %s", e)
-            return
-
-        if not fills:
-            return
-
-        for order_id, exit_px in fills:
-            try:
-                closed = self.session.finalize_trade(order_id, float(exit_px))
-                if closed and self.telegram:
-                    self.telegram.send_message(
-                        f"🏁 Closed {closed.symbol} ({closed.direction}) @ {exit_px:.2f} | "
-                        f"PnL: {closed.net_pnl:.2f}"
-                    )
-            except Exception:
-                logger.exception("Failed to finalize trade %s", order_id)
-
-    # ----------------------- main tick -----------------------
-
-    def tick(self):
-        # 1) Market hours & risk gates
-        # NOTE: is_market_open() now takes NO arguments (fixed API)
+        # 1) market hours gate
         if not is_market_open():
-            logger.debug("Market is closed. Skipping tick.")
-            return
+            log.info("Market is closed. Skipping run.")
+            return None
 
-        reason = self.session.check_risk_limits()
-        if reason is not None:
-            logger.warning("Trading halted due to risk limit breach: %s", reason)
-            self.stop()
-            return
+        if stop_event.is_set():
+            return None
 
-        # 2) Instruments (with periodic cache refresh)
-        self._refresh_instrument_cache()
-        kite = getattr(self.executor, "kite", None)
-        if not kite:
-            logger.debug("No broker client attached; skipping tick.")
-            return
+        try:
+            # 2) resolve tokens (pass broker if selector uses it)
+            token_info = get_instrument_tokens(kite_instance=self._kite)
+            if not token_info:
+                self._throttled_token_warn("Could not resolve strike tokens.")
+                return None
 
-        instruments = get_instrument_tokens(
-            symbol="NIFTY",
-            kite_instance=kite,
-            cached_nfo_instruments=self.instrument_cache.get("NFO", []),
-            cached_nse_instruments=self.instrument_cache.get("NSE", []),
-            strike_range=int(getattr(settings.strategy, "strike_selection_range", 3)),
-        )
-        if not instruments:
-            logger.debug("No instruments found for the current spot price.")
-            return
+            spot_token = token_info.get("spot_token")
+            ce_token = token_info.get("tokens", {}).get("ce")
+            if not spot_token or not ce_token:
+                self._throttled_token_warn("Spot or CE token missing. Skipping.")
+                return None
 
-        logger.debug("Instrument selection: %s", instruments)
+            # 3) lookback + timeframe
+            lookback_minutes = int(getattr(getattr(settings, "data", object()), "lookback_minutes", 60))
+            lookback = timedelta(minutes=lookback_minutes)
+            timeframe = str(getattr(getattr(settings, "data", object()), "timeframe", "minute"))
 
-        # 3) Trailing SL updates for open trades
-        for trade in list(self.session.active_trades.values()):
-            try:
-                ltp = self.data_source.get_spot_price(f"NFO:{trade.symbol}")
-                if ltp:
-                    self.executor.update_trailing_stop(
-                        order_id=trade.order_id,
-                        current_price=float(ltp),
-                        atr=float(trade.atr_at_entry or 0.0),
-                        atr_multiplier=float(settings.strategy.atr_sl_multiplier),
-                    )
-            except Exception as e:
-                logger.debug("Trailing update failed for %s: %s", trade.order_id, e)
+            # 4) fetch OHLC
+            spot_df = _fetch_and_prepare_df(self.spot_source, spot_token, lookback, timeframe)
+            if spot_df.empty:
+                return None
 
-        # 4) Build spot dataframe with indicators (lookback = configured minutes)
-        lookback_min = int(getattr(settings.executor, "data_lookback_minutes", 15))
-        now = datetime.now()
-        frm = now - timedelta(minutes=lookback_min)
+            opt_df = _fetch_and_prepare_df(self.data_source, ce_token, lookback, timeframe)
+            if opt_df.empty:
+                return None
 
-        spot_token = instruments.get("spot_token")
-        spot_df = None
-        if spot_token:
-            spot_df = self.data_source.fetch_ohlc(spot_token, frm, now, "minute")
-            if spot_df is not None and not spot_df.empty:
-                spot_df = self._ensure_adx_di(spot_df, window=int(settings.strategy.atr_period))
-        if spot_df is None or spot_df.empty:
-            logger.debug("Spot OHLC data is missing; skipping signal generation this tick.")
-            self._finalize_fills_if_any()
-            return
+            # 5) indicators on spot
+            adx_window = int(getattr(getattr(settings, "strategy", object()), "atr_period", 14))
+            spot_df = _ensure_adx_di(spot_df, window=adx_window)
 
-        # 5) Try both CE and PE legs around ATM
-        min_bars = int(settings.strategy.min_bars_for_signal)
-        adx_trend_threshold = int(getattr(self.strategy, "adx_trend_strength", 20))
+            current_price = float(opt_df["close"].iloc[-1])
 
-        for option_type in ("ce", "pe"):
-            option_token = instruments.get(f"{option_type}_token")
-            option_symbol = instruments.get(f"{option_type}_symbol")
-            if not option_token or not option_symbol:
-                continue
-
-            # Fetch option OHLC (slightly longer buffer than lookback for signals)
-            opt_df = self.data_source.fetch_ohlc(option_token, frm - timedelta(minutes=lookback_min), now, "minute")
-            if opt_df is None or len(opt_df) < min_bars:
-                logger.debug(
-                    "Insufficient data for %s. Have %d bars, need %d.",
-                    option_symbol, (0 if opt_df is None else len(opt_df)), min_bars
-                )
-                continue
-
-            # Latest trade price for the option
-            ltp = self.data_source.get_spot_price(f"NFO:{option_symbol}")
-            if ltp is None:
-                continue
-            ltp = float(ltp)
-
-            # Ask strategy for a signal (NO spot_df kwarg — strategy API doesn’t take it)
-            signal: Optional[Signal] = None
-            try:
-                signal = self.strategy.generate_signal(df=opt_df, current_price=ltp)
-            except Exception as e:
-                logger.error("Strategy error for %s: %s", option_symbol, e, exc_info=True)
-                continue
-
+            # 6) strategy
+            signal = self.strategy.generate_signal(opt_df, current_price, spot_df)
             if not signal:
-                continue
+                log.info("No signal generated by strategy.")
+                return None
 
-            # Ensure hashed identity for dedupe
-            if not getattr(signal, "hash", None):
-                try:
-                    signal.compute_hash()
-                except Exception:
-                    pass
+            # 7) position sizing (use broker-based equity when possible)
+            equity = float(get_equity_estimate(self._kite))
+            if equity <= 0:
+                log.warning("Equity estimate is zero or negative. Skipping trade.")
+                return None
 
-            # Regime-aware filter (based on spot)
-            try:
-                regime = detect_market_regime(
-                    spot_df,
-                    adx=spot_df.get("adx", pd.Series(dtype=float)),
-                    di_plus=spot_df.get("di_plus", pd.Series(dtype=float)),
-                    di_minus=spot_df.get("di_minus", pd.Series(dtype=float)),
-                    adx_trend_strength=adx_trend_threshold,
-                )
-            except Exception:
-                regime = "unknown"
+            sl_points = float(signal.get("sl_points", 0.0))
+            if sl_points <= 0:
+                log.warning("Calculated stop loss points are zero or negative. Skipping.")
+                return None
 
-            if regime == "range" and int(signal.score) < (int(settings.strategy.min_signal_score) + 1):
-                logger.debug("Skipping %s in range regime due to low score.", option_symbol)
-                continue
+            lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
+            if lots <= 0:
+                log.info("Calculated lots is zero. Skipping trade.")
+                return None
 
-            # Per-symbol dedupe
-            last_h = self._last_signal_hash_by_symbol.get(option_symbol)
-            if signal.hash and last_h and signal.hash == last_h:
-                logger.debug("Duplicate signal %s for %s. Skipping.", signal.hash, option_symbol)
-                continue
-            if signal.hash:
-                self._last_signal_hash_by_symbol[option_symbol] = signal.hash
+            # 8) enrich and return
+            enriched_signal: Dict[str, Any] = {
+                **signal,
+                "equity": equity,
+                "lots": lots,
+                "instrument": {
+                    "atm_strike": token_info.get("atm_strike"),
+                    "target_strike": token_info.get("target_strike"),
+                    "expiry": token_info.get("expiry"),
+                    "token_ce": ce_token,
+                },
+            }
+            log.info("Signal generated: %s", enriched_signal)
+            return enriched_signal
 
-            logger.info("Signal for %s: %s", option_symbol, signal.to_dict() if hasattr(signal, "to_dict") else signal)
+        except (NetworkException, TokenException, InputException) as e:
+            log.error("Transient broker error: %s", e)
+        except Exception as e:
+            log.exception("Unexpected error in run_once: %s", e)
 
-            # Position sizing (contracts, multiple of lot size)
-            quantity = self.sizer.calculate_quantity(
-                session=self.session,
-                entry_price=float(signal.entry_price),
-                stop_loss_price=float(signal.stop_loss),
-                lot_size=int(settings.executor.nifty_lot_size),
-            )
-            if quantity <= 0:
-                logger.debug("Sizer returned 0 for %s; skipping.", option_symbol)
-                continue
-
-            # Place entry order
-            order_id = self.executor.place_entry_order(
-                symbol=str(option_symbol),
-                exchange="NFO",
-                transaction_type=str(signal.signal),
-                quantity=int(quantity),
-            )
-            if not order_id:
-                logger.warning("Failed to place entry order for %s.", option_symbol)
-                continue
-
-            # Register trade in session
-            trade = Trade(
-                symbol=str(option_symbol),
-                direction=str(signal.signal),
-                entry_price=float(signal.entry_price),
-                quantity=int(quantity),
-                order_id=str(order_id),
-                atr=float(getattr(signal, "market_volatility", 0.0) or 0.0),
-            )
-            self.session.add_trade(trade)
-
-            # Setup exits (GTT or regular)
-            ok = self.executor.setup_gtt_orders(
-                entry_order_id=str(order_id),
-                entry_price=float(signal.entry_price),
-                stop_loss_price=float(signal.stop_loss),
-                target_price=float(signal.target),
-                symbol=str(option_symbol),
-                exchange="NFO",
-                quantity=int(quantity),
-                transaction_type=str(signal.signal),
-            )
-            if not ok:
-                logger.warning("Failed to create exits for %s (oid=%s).", option_symbol, order_id)
-
-            # Telegram alert (structured)
-            if self.telegram:
-                try:
-                    self.telegram.send_signal_alert(
-                        token=int(option_token),
-                        signal=(signal.to_dict() if hasattr(signal, "to_dict") else {
-                            "signal": signal.signal,
-                            "entry_price": signal.entry_price,
-                            "stop_loss": signal.stop_loss,
-                            "target": signal.target,
-                            "confidence": signal.confidence,
-                        }),
-                        position={"quantity": int(quantity)},
-                    )
-                except Exception:
-                    # fallback to simple text on any failure
-                    self.telegram.send_message(
-                        f"Trade executed: {option_symbol} {signal.signal} x{quantity} @ {signal.entry_price}"
-                    )
-
-        # 6) After placing / managing orders, sync for any fills and finalize
-        self._finalize_fills_if_any()
+        return None
