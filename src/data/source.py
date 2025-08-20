@@ -26,9 +26,14 @@ import pandas as pd
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
-    from kiteconnect.exceptions import NetworkException, TokenException, InputException  # type: ignore
+    from kiteconnect.exceptions import (  # type: ignore
+        NetworkException,
+        TokenException,
+        InputException,
+    )
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
+    # fallbacks (used by retry decorator)
     NetworkException = TokenException = InputException = Exception  # type: ignore
 
 # Centralized settings (optional import guard)
