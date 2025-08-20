@@ -1,19 +1,13 @@
-# src/config.py
 """
 Centralized, validated configuration for the Nifty Scalper Bot using Pydantic.
 """
 
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import (
-    Field,
-    field_validator,
-    PositiveFloat,
-    PositiveInt,
-    NonNegativeFloat,
-)
+from pydantic import Field, PositiveFloat, PositiveInt, NonNegativeFloat, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,7 +22,7 @@ def _find_env_file() -> Optional[Path]:
     return None
 
 
-# ---------- Component configs (now BaseSettings so they read env on their own) ----------
+# ---------- Component configs ----------
 class ExecutorConfig(BaseSettings):
     """Configuration for the OrderExecutor."""
     default_product: Literal["MIS", "NRML"] = Field("MIS", alias="DEFAULT_PRODUCT")
@@ -106,7 +100,7 @@ class StrategyConfig(BaseSettings):
     atr_tp_multiplier: PositiveFloat = Field(3.0, alias="ATR_TP_MULTIPLIER")
     spot_symbol: str = Field("NSE:NIFTY 50", alias="SPOT_SYMBOL")
     strike_selection_range: PositiveInt = Field(3, alias="STRIKE_SELECTION_RANGE")
-    # per your update request:
+    # min bars guard used by some strategies
     min_bars_for_signal: PositiveInt = Field(10, alias="MIN_BARS_FOR_SIGNAL")
 
     model_config = SettingsConfigDict(
@@ -130,6 +124,7 @@ class AppSettings(BaseSettings):
     enable_telegram: bool = Field(True, alias="ENABLE_TELEGRAM")
     allow_offhours_testing: bool = Field(False, alias="ALLOW_OFFHOURS_TESTING")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    tz: str = Field("Asia/Kolkata", alias="TZ")
 
     api: APIConfig = Field(default_factory=APIConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -149,11 +144,11 @@ class AppSettings(BaseSettings):
 # Safe singleton init
 try:
     settings = AppSettings()
-except Exception as e:
+except Exception as e:  # pragma: no cover
     print(f"FATAL: Could not load application settings. Error: {e}")
     raise
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     print("--- Application Settings ---")
     print(settings.model_dump_json(indent=2))
