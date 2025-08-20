@@ -4,7 +4,7 @@ Centralized, validated configuration using Pydantic v2 / pydantic-settings v2.
 Key points:
 - Export a SINGLE source of truth: `settings` (AppSettings instance).
 - No `Config` singleton anywhere in the codebase.
-- Sensible defaults that match your NIFTY scalper workflow.
+- Backward-compatible flat aliases so older code keeps working (e.g., settings.enable_live_trading).
 """
 
 from __future__ import annotations
@@ -17,6 +17,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _find_env_file() -> Optional[Path]:
+    """
+    Find a .env by walking up from CWD up to 6 levels; return None if not found.
+    """
     path = Path.cwd()
     for _ in range(6):
         candidate = path / ".env"
@@ -25,6 +28,8 @@ def _find_env_file() -> Optional[Path]:
         path = path.parent
     return None
 
+
+# ---------------- Component settings ----------------
 
 class DataSettings(BaseSettings):
     warmup_bars: PositiveInt = Field(30, alias="WARMUP_BARS")
@@ -41,7 +46,7 @@ class InstrumentSettings(BaseSettings):
     nifty_lot_size: PositiveInt = Field(50, alias="NIFTY_LOT_SIZE")
     min_lots: PositiveInt = Field(1, alias="MIN_LOTS")
     max_lots: PositiveInt = Field(10, alias="MAX_LOTS")
-    # ✅ allow 0 (ATM-only); previously PositiveInt caused crash with default 0
+    # allow 0 (ATM-only)
     strike_range: NonNegativeInt = Field(0, alias="STRIKE_RANGE")
     strike_selection_range: PositiveInt = Field(3, alias="STRIKE_SELECTION_RANGE")
     model_config = SettingsConfigDict(env_file=_find_env_file(), extra="ignore")
@@ -57,13 +62,15 @@ class StrategySettings(BaseSettings):
     atr_tp_multiplier: PositiveFloat = Field(3.0, alias="ATR_TP_MULTIPLIER")
     sl_confidence_adj: NonNegativeFloat = Field(0.2, alias="SL_CONFIDENCE_ADJ")
     tp_confidence_adj: NonNegativeFloat = Field(0.3, alias="TP_CONFIDENCE_ADJ")
-    time_filter_start: str = Field("09:15", alias="TIME_FILTER_START")
-    time_filter_end: str = Field("15:30", alias="TIME_FILTER_END")
+
+    time_filter_start: str = Field("09:15", alias="TIME_FILTER_START")  # IST
+    time_filter_end: str = Field("15:30", alias="TIME_FILTER_END")      # IST
+
     model_config = SettingsConfigDict(env_file=_find_env_file(), extra="ignore")
 
 
 class RiskSettings(BaseSettings):
-    risk_per_trade: PositiveFloat = Field(0.01, alias="RISK_PER_TRADE")
+    risk_per_trade: PositiveFloat = Field(0.01, alias="RISK_PER_TRADE")  # fraction of equity
     daily_loss_limit_r: PositiveFloat = Field(3.0, alias="DAILY_LOSS_LIMIT_R")
     max_trades_per_day: PositiveInt = Field(10, alias="MAX_TRADES_PER_DAY")
     default_equity: PositiveFloat = Field(30000.0, alias="DEFAULT_EQUITY")
@@ -96,7 +103,16 @@ class AppToggles(BaseSettings):
     model_config = SettingsConfigDict(env_file=_find_env_file(), extra="ignore")
 
 
+# ---------------- Top-level composed settings ----------------
+
 class AppSettings(BaseSettings):
+    """
+    Access structured config:
+      - settings.strategy.atr_period
+      - settings.instruments.trade_symbol
+      - settings.toggles.enable_live_trading
+    Backward-compatible flat mirrors are provided for commonly used fields.
+    """
     data: DataSettings = DataSettings()
     instruments: InstrumentSettings = InstrumentSettings()
     strategy: StrategySettings = StrategySettings()
@@ -106,6 +122,7 @@ class AppSettings(BaseSettings):
     server: ServerSettings = ServerSettings()
     toggles: AppToggles = AppToggles()
 
+    # ---- Flat mirrors for strategy numbers (legacy access patterns) ----
     BASE_STOP_LOSS_POINTS: float = Field(default_factory=lambda: StrategySettings().base_stop_loss_points)
     BASE_TARGET_POINTS: float = Field(default_factory=lambda: StrategySettings().base_target_points)
     CONFIDENCE_THRESHOLD: float = Field(default_factory=lambda: StrategySettings().confidence_threshold)
@@ -114,6 +131,7 @@ class AppSettings(BaseSettings):
     ATR_SL_MULTIPLIER: float = Field(default_factory=lambda: StrategySettings().atr_sl_multiplier)
     ATR_TP_MULTIPLIER: float = Field(default_factory=lambda: StrategySettings().atr_tp_multiplier)
 
+    # ---- Flat mirrors for instrument values (legacy access patterns) ----
     SPOT_SYMBOL: str = Field(default_factory=lambda: InstrumentSettings().spot_symbol)
     TRADE_SYMBOL: str = Field(default_factory=lambda: InstrumentSettings().trade_symbol)
     TRADE_EXCHANGE: str = Field(default_factory=lambda: InstrumentSettings().trade_exchange)
@@ -123,12 +141,27 @@ class AppSettings(BaseSettings):
     MAX_LOTS: int = Field(default_factory=lambda: InstrumentSettings().max_lots)
     STRIKE_RANGE: int = Field(default_factory=lambda: InstrumentSettings().strike_range)
 
+    # ---- Flat mirrors for time/health ----
     TIME_FILTER_START: str = Field(default_factory=lambda: StrategySettings().time_filter_start)
     TIME_FILTER_END: str = Field(default_factory=lambda: StrategySettings().time_filter_end)
-
     HEALTH_PORT: int = Field(default_factory=lambda: ServerSettings().port)
+
+    # ---- NEW: Flat aliases for toggles (both UPPERCASE *and* lowercase) ----
+    # Uppercase env-style
+    ENABLE_LIVE_TRADING: bool = Field(default_factory=lambda: AppToggles().enable_live_trading)
+    ALLOW_OFFHOURS_TESTING: bool = Field(default_factory=lambda: AppToggles().allow_offhours_testing)
+    PREFERRED_EXIT_MODE: Literal["AUTO", "GTT", "REGULAR"] = Field(
+        default_factory=lambda: AppToggles().preferred_exit_mode
+    )
+    # Lowercase attributes for legacy code like `settings.enable_live_trading`
+    enable_live_trading: bool = Field(default_factory=lambda: AppToggles().enable_live_trading)
+    allow_offhours_testing: bool = Field(default_factory=lambda: AppToggles().allow_offhours_testing)
+    preferred_exit_mode: Literal["AUTO", "GTT", "REGULAR"] = Field(
+        default_factory=lambda: AppToggles().preferred_exit_mode
+    )
 
     model_config = SettingsConfigDict(env_file=_find_env_file(), extra="ignore")
 
 
+# Export single source of truth
 settings = AppSettings()
