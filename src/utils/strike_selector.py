@@ -54,12 +54,10 @@ def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
 def is_market_open() -> bool:
     """
     Checks if the market is currently open in IST (Indian Standard Time).
-
     Trading hours are from 09:15 to 15:30, Monday to Friday.
     """
     now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    weekday = now.weekday()  # Monday is 0, Sunday is 6
-    if weekday > 4:  # Saturday or Sunday
+    if now.weekday() > 4:  # Saturday or Sunday
         return False
     start_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
     end_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -71,13 +69,14 @@ def _fetch_cached_instruments(kite: Optional[KiteConnect] = None) -> Optional[Li
     Fetch the full list of NFO instruments (options).
     Uses a simple rate-limiting wrapper. Safe when kite is None.
     """
-    if not kite or kite is object:
+    if not kite:
         logger.warning("Kite instance missing; cannot fetch instruments.")
         return None
 
     try:
         call_key = "kite-instruments-nfo"
-        instruments = _rate_call(kite.instruments, call_key, segment="NFO")
+        # Correct signature for Kite: instruments(exchange)
+        instruments = _rate_call(kite.instruments, call_key, "NFO")
         return instruments
     except Exception as e:
         logger.exception("Failed to fetch instruments from Kite: %s", e)
@@ -87,7 +86,6 @@ def _fetch_cached_instruments(kite: Optional[KiteConnect] = None) -> Optional[Li
 def _resolve_nfo_weekly_expiry(nfo_instruments: List[Dict[str, Any]]) -> str:
     """
     Finds the nearest weekly expiry date for Nifty options.
-    Excludes the current week only if today's Thursday has *passed* market hours.
     Returns date as 'YYYY-MM-DD' string; falls back to today if nothing found.
     """
     now = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
@@ -110,7 +108,7 @@ def _resolve_nfo_weekly_expiry(nfo_instruments: List[Dict[str, Any]]) -> str:
         if exp_date >= now:
             return exp_str
 
-    # If all are in the past (unexpected), return the last known
+    # If all are in the past (unexpected), return the latest known
     return sorted_expiries[-1]
 
 
@@ -118,7 +116,7 @@ def _get_spot_ltp(kite: Optional[KiteConnect]) -> Optional[float]:
     """
     Fetch the current spot LTP via Kite. Safe if kite is None.
     """
-    if not kite or kite is object:
+    if not kite:
         return None
     symbol = getattr(getattr(settings, "instruments", object()), "spot_symbol", "NSE:NIFTY 50")
     try:
@@ -141,10 +139,10 @@ def get_instrument_tokens(kite_instance: Optional[KiteConnect] = None) -> Option
     Returns:
         {
             "spot_token": int,
-            "spot_price": float,
-            "atm_strike": int,
-            "target_strike": int,
-            "expiry": "YYYY-MM-DD",
+            "spot_price": float | None,
+            "atm_strike": int | None,
+            "target_strike": int | None,
+            "expiry": str | None,  # 'YYYY-MM-DD'
             "tokens": {"ce": Optional[int], "pe": Optional[int]},
         }
     """
@@ -155,12 +153,11 @@ def get_instrument_tokens(kite_instance: Optional[KiteConnect] = None) -> Option
         spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY index token default
         step = 50  # NIFTY option strike step
 
-        # Prefer new name; fallback to older ones
+        # Prefer new field names; fallback to legacy
         strike_range = getattr(inst, "strike_range", None)
         if strike_range is None:
             strike_range = getattr(inst, "strike_selection_range", None)
         if strike_range is None:
-            # legacy env or typo resilience
             strike_range = getattr(settings, "OPTION_RANGE", 3)
         try:
             strike_range = int(strike_range)
