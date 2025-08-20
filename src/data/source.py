@@ -1,4 +1,3 @@
-# src/data/source.py
 """
 Defines the market data source abstraction and concrete implementations.
 
@@ -6,7 +5,8 @@ Defines the market data source abstraction and concrete implementations.
 - LiveKiteSource: Zerodha Kite-backed source for spot LTP and OHLC history.
 
 Notes:
-- Uses application LOG_LEVEL from settings.
+- Logging uses a safe default (INFO). If settings exposes a log level, it is
+  picked up *without* assuming the attribute exists.
 - Ensures returned OHLC DataFrames are indexed by naive datetimes (no tz),
   sorted ascending, with columns: open, high, low, close, volume (floats).
 """
@@ -19,14 +19,39 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 import pandas as pd
-from kiteconnect import KiteConnect
 
-from src.config import settings
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:  # pragma: no cover
+    KiteConnect = None  # type: ignore
 
+# Import settings late and guard attribute access
+try:
+    from src.config import settings  # type: ignore
+except Exception:  # pragma: no cover
+    settings = None  # type: ignore[var-annotated]
+
+# ---------------------------------------------------------------------
+# Logging: pick a sane default; only use settings.* if present
+# ---------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 if not logger.handlers:
+    level = logging.INFO
+    try:
+        # Accept log_level or LOG_LEVEL (string or int)
+        lvl = None
+        if settings is not None:
+            lvl = getattr(settings, "log_level", None) or getattr(settings, "LOG_LEVEL", None)
+        if isinstance(lvl, str):
+            level = getattr(logging, lvl.upper(), logging.INFO)
+        elif isinstance(lvl, int):
+            level = lvl
+    except Exception:
+        # keep default INFO
+        pass
+
     logging.basicConfig(
-        level=getattr(logging, str(settings.log_level).upper(), logging.INFO),
+        level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
@@ -79,21 +104,13 @@ class LiveKiteSource(DataSource):
     """
 
     _VALID_INTERVALS: set[str] = {
-        "minute",
-        "3minute",
-        "5minute",
-        "10minute",
-        "15minute",
-        "30minute",
-        "60minute",
-        "day",
-        "week",
-        "month",
+        "minute", "3minute", "5minute", "10minute", "15minute",
+        "30minute", "60minute", "day", "week", "month",
     }
 
-    def __init__(self, kite: KiteConnect):
-        if not isinstance(kite, KiteConnect):
-            raise TypeError("A valid KiteConnect instance is required.")
+    def __init__(self, kite: Optional[KiteConnect]) -> None:
+        if KiteConnect is not None and kite is not None and not isinstance(kite, KiteConnect):  # type: ignore[arg-type]
+            raise TypeError("LiveKiteSource requires a KiteConnect instance (or None if kiteconnect not installed).")
         self.kite = kite
         self.is_connected = False
 
@@ -103,13 +120,22 @@ class LiveKiteSource(DataSource):
         Confirms the connection by fetching the user profile.
         The actual WebSocket connection (for ticks) is handled elsewhere.
         """
+        if self.kite is None:
+            self.is_connected = False
+            logger.warning("LiveKiteSource.connect(): no Kite client; offline mode.")
+            return
+
         try:
-            self.kite.profile()
+            # Lightweight auth check
+            try:
+                self.kite.margins()  # cheaper than profile in some cases
+            except Exception:
+                self.kite.profile()
             self.is_connected = True
-            logger.info("Successfully connected to Kite API.")
+            logger.info("LiveKiteSource: connected to Kite API.")
         except Exception as e:
             self.is_connected = False
-            logger.error("Failed to connect to Kite API: %s", e, exc_info=True)
+            logger.error("LiveKiteSource: failed to connect to Kite API: %s", e, exc_info=True)
             raise ConnectionError("Could not connect to Kite API.") from e
 
     # ------------------------ LTP / Spot ------------------------
@@ -119,8 +145,8 @@ class LiveKiteSource(DataSource):
 
         Returns `None` if not connected or unable to fetch.
         """
-        if not self.is_connected:
-            logger.warning("Not connected to Kite. Cannot fetch spot price.")
+        if not self.is_connected or self.kite is None:
+            logger.warning("LiveKiteSource: not connected; cannot fetch spot price.")
             return None
 
         try:
@@ -128,12 +154,12 @@ class LiveKiteSource(DataSource):
             response = self.kite.ltp([symbol])
             data = response.get(symbol)
             if not data:
-                logger.warning("No LTP entry for %s. Raw response: %s", symbol, response)
+                logger.warning("LiveKiteSource: no LTP entry for %s. Raw response: %s", symbol, response)
                 return None
             last_price = data.get("last_price")
             return float(last_price) if last_price is not None else None
         except Exception as e:
-            logger.error("Error fetching spot price for %s: %s", symbol, e, exc_info=True)
+            logger.error("LiveKiteSource: error fetching spot price for %s: %s", symbol, e, exc_info=True)
             return None
 
     # ------------------------ OHLC History ------------------------
@@ -151,25 +177,25 @@ class LiveKiteSource(DataSource):
           ['open','high','low','close','volume'] — float dtype
         On error, returns an empty DataFrame.
         """
-        if not self.is_connected:
-            logger.warning("Not connected to Kite. Cannot fetch OHLC data.")
+        if not self.is_connected or self.kite is None:
+            logger.warning("LiveKiteSource: not connected; cannot fetch OHLC data.")
             return pd.DataFrame()
 
         interval = str(interval).lower()
         if interval not in self._VALID_INTERVALS:
-            logger.warning("Unsupported interval '%s'. Using 'minute' as fallback.", interval)
+            logger.warning("LiveKiteSource: unsupported interval '%s'. Using 'minute' as fallback.", interval)
             interval = "minute"
 
         # Guard dates
         if not isinstance(from_date, datetime) or not isinstance(to_date, datetime):
-            logger.error("from_date and to_date must be datetime objects.")
+            logger.error("LiveKiteSource: from_date and to_date must be datetime objects.")
             return pd.DataFrame()
         if from_date >= to_date:
-            logger.warning("from_date >= to_date; returning empty frame.")
+            logger.warning("LiveKiteSource: from_date >= to_date; returning empty frame.")
             return pd.DataFrame()
 
         try:
-            # Zerodha SDK expects positional args in some versions; the keyword form is supported in recent ones.
+            # Zerodha SDK returns list[dict]: date, open, high, low, close, volume, etc.
             records: Iterable[dict] = self.kite.historical_data(
                 instrument_token=instrument_token,
                 from_date=from_date,
@@ -179,29 +205,28 @@ class LiveKiteSource(DataSource):
                 oi=False,
             )
 
-            # records is a list[dict] with keys like: date, open, high, low, close, volume
             if not records:
                 return pd.DataFrame()
 
             df = pd.DataFrame(records)
 
             # Standardize datetime index
-            if "date" in df.columns:
-                df.rename(columns={"date": "datetime"}, inplace=True)
-            if "datetime" not in df.columns:
-                logger.error("Historical response missing 'date'/'datetime' field.")
+            col_dt = "date" if "date" in df.columns else "datetime" if "datetime" in df.columns else None
+            if col_dt is None:
+                logger.error("LiveKiteSource: historical response missing 'date'/'datetime' field.")
                 return pd.DataFrame()
 
-            # Ensure naive datetimes and sorted order
+            df.rename(columns={col_dt: "datetime"}, inplace=True)
+
             if pd.api.types.is_datetime64_any_dtype(df["datetime"]):
-                # Some Kite SDKs return tz-aware; normalize to naive
+                # Normalize to naive timestamps
                 try:
                     df["datetime"] = df["datetime"].dt.tz_localize(None)
                 except Exception:
-                    # If already naive, ignore
                     pass
             else:
                 df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+
             df = df.dropna(subset=["datetime"]).copy()
             df.set_index("datetime", inplace=True)
             df.sort_index(inplace=True)
@@ -210,16 +235,14 @@ class LiveKiteSource(DataSource):
             required_cols = ["open", "high", "low", "close", "volume"]
             for col in required_cols:
                 if col not in df.columns:
-                    logger.warning("Missing column '%s' in historical data; filling with NaN.", col)
                     df[col] = float("nan")
 
             df = df[required_cols].astype(float)
-
             return df
 
         except Exception as e:
             logger.error(
-                "Error fetching historical data for token %s: %s",
+                "LiveKiteSource: error fetching historical data for token %s: %s",
                 instrument_token, e, exc_info=True
             )
             return pd.DataFrame()
