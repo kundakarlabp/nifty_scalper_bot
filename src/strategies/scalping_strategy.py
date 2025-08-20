@@ -25,19 +25,6 @@ class EnhancedScalpingStrategy:
       - df:   OHLCV DataFrame for the option contract
       - current_price: current option price (float)
       - spot_df: OHLCV DataFrame for the spot index (with ADX/DI columns if available)
-
-    Output format (dict) example:
-      {
-        "side": "BUY" | "SELL",
-        "confidence": float,
-        "sl_points": float,
-        "tp_points": float,
-        "score": int,
-        "entry_price": float,
-        "stop_loss": float,
-        "target": float,
-        "reasons": list[str],
-      }
     """
 
     def __init__(
@@ -49,9 +36,6 @@ class EnhancedScalpingStrategy:
         adx_period: int = 14,
         adx_trend_strength: int = 20,
     ) -> None:
-        """
-        Initializes the strategy with parameters from settings.
-        """
         strat = getattr(settings, "strategy", object())
         self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
         self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
@@ -64,12 +48,10 @@ class EnhancedScalpingStrategy:
 
     @staticmethod
     def _ema(s: pd.Series, period: int) -> pd.Series:
-        """Calculates the Exponential Moving Average (EMA)."""
         return s.ewm(span=max(1, int(period)), adjust=False).mean()
 
     @staticmethod
     def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
-        """Calculates the Relative Strength Index (RSI)."""
         delta = close.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
@@ -83,12 +65,11 @@ class EnhancedScalpingStrategy:
     def _extract_adx_columns(spot_df: pd.DataFrame) -> tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
         """
         Find ADX/DI columns regardless of suffix (runner uses adx_{n}, di_plus_{n}, di_minus_{n}).
-        Returns (adx, di_plus, di_minus) series or (None, None, None) if missing.
+        Returns (adx, di_plus, di_minus) or (None, None, None) if missing.
         """
         if spot_df is None or spot_df.empty:
             return None, None, None
 
-        # Prefer the highest 'n' available to use the latest calc
         adx_cols = sorted([c for c in spot_df.columns if c.startswith("adx_")])
         dip_cols = sorted([c for c in spot_df.columns if c.startswith("di_plus_")])
         dim_cols = sorted([c for c in spot_df.columns if c.startswith("di_minus_")])
@@ -104,9 +85,6 @@ class EnhancedScalpingStrategy:
         current_price: float,
         spot_df: pd.DataFrame,
     ) -> SignalOutput:
-        """
-        Generates a trading signal based on multiple confirmation indicators.
-        """
         if df is None or df.empty or len(df) < self.ema_slow:
             logger.debug("DataFrame too short to generate signal.")
             return None
@@ -169,17 +147,17 @@ class EnhancedScalpingStrategy:
                     reasons.append("Current spot price is below VWAP.")
 
         # --- Scoring gate ---
-        min_score = int(getattr(getattr(settings, "strategy", object()), "min_signal_score", 5))
+        strat_cfg = getattr(settings, "strategy", object())
+        min_score = int(getattr(strat_cfg, "min_signal_score", 5))
         if score < min_score:
             logger.debug("Signal score (%s) below minimum threshold (%s).", score, min_score)
             return None
 
         # Map score to confidence (simple, monotone mapping)
-        # 0-2 -> 0, 3-4 -> 2.5, 5-6 -> 5, 7-8 -> 7.5, 9+ -> 10
         confidence_map = {0: 0.0, 1: 0.0, 2: 0.0, 3: 2.5, 4: 2.5, 5: 5.0, 6: 5.0, 7: 7.5, 8: 7.5, 9: 10.0}
         confidence = float(confidence_map.get(score, 10.0 if score >= 9 else 0.0))
 
-        min_conf = float(getattr(getattr(settings, "strategy", object()), "confidence_threshold", 6.0))
+        min_conf = float(getattr(strat_cfg, "confidence_threshold", 6.0))
         if confidence < min_conf:
             logger.debug("Confidence (%.2f) below threshold (%.2f).", confidence, min_conf)
             return None
@@ -194,12 +172,13 @@ class EnhancedScalpingStrategy:
             logger.debug("ATR value is invalid (%.4f); cannot set SL/TP.", atr_val)
             return None
 
-        strat = getattr(settings, "strategy", object())
-        sl_mult = float(getattr(strat, "atr_sl_multiplier", getattr(settings, "ATR_SL_MULTIPLIER", 1.5)))
-        tp_mult = float(getattr(strat, "atr_tp_multiplier", getattr(settings, "ATR_TP_MULTIPLIER", 3.0)))
-        sl_adj = float(getattr(strat, "sl_confidence_adj", getattr(settings, "SL_CONFIDENCE_ADJ", 0.2)))
-        tp_adj = float(getattr(strat, "tp_confidence_adj", getattr(settings, "TP_CONFIDENCE_ADJ", 0.3)))
+        sl_mult = float(getattr(strat_cfg, "atr_sl_multiplier", getattr(settings, "ATR_SL_MULTIPLIER", 1.5)))
+        tp_mult = float(getattr(strat_cfg, "atr_tp_multiplier", getattr(settings, "ATR_TP_MULTIPLIER", 3.0)))
+        # read config fields that might be named ...confidence... in your config
+        sl_adj_cfg = float(getattr(strat_cfg, "sl_confidence_adj", getattr(settings, "SL_CONFIDENCE_ADJ", 0.2)))
+        tp_adj_cfg = float(getattr(strat_cfg, "tp_confidence_adj", getattr(settings, "TP_CONFIDENCE_ADJ", 0.3)))
 
+        # NOTE: atr_sl_tp_points expects sl_conf_adj / tp_conf_adj
         sl_points, tp_points = atr_sl_tp_points(
             base_sl_points=atr_val * sl_mult,
             base_tp_points=atr_val * tp_mult,
@@ -207,8 +186,8 @@ class EnhancedScalpingStrategy:
             sl_mult=sl_mult,
             tp_mult=tp_mult,
             confidence=confidence,
-            sl_confidence_adj=sl_adj,
-            tp_confidence_adj=tp_adj,
+            sl_conf_adj=sl_adj_cfg,
+            tp_conf_adj=tp_adj_cfg,
         )
 
         side: Side = "BUY" if ema_bias_up else "SELL"
