@@ -1,10 +1,11 @@
 """
 Centralized, validated configuration using Pydantic v2 / pydantic-settings v2.
 
-Key points:
-- Export a SINGLE source of truth: `settings` (AppSettings instance).
-- No `Config` singleton anywhere in the codebase.
-- Backward-compatible flat aliases so older code keeps working (e.g., settings.enable_live_trading).
+Exports a single source of truth: `settings` (AppSettings instance).
+
+Backwards-compat features included:
+- Flat mirrors for common fields (e.g., settings.enable_live_trading)
+- Legacy `.api` proxy so old code like `settings.api.zerodha_api_key` keeps working
 """
 
 from __future__ import annotations
@@ -146,7 +147,7 @@ class AppSettings(BaseSettings):
     TIME_FILTER_END: str = Field(default_factory=lambda: StrategySettings().time_filter_end)
     HEALTH_PORT: int = Field(default_factory=lambda: ServerSettings().port)
 
-    # ---- NEW: Flat aliases for toggles (both UPPERCASE *and* lowercase) ----
+    # ---- Flat aliases for toggles (both UPPERCASE *and* lowercase) ----
     # Uppercase env-style
     ENABLE_LIVE_TRADING: bool = Field(default_factory=lambda: AppToggles().enable_live_trading)
     ALLOW_OFFHOURS_TESTING: bool = Field(default_factory=lambda: AppToggles().allow_offhours_testing)
@@ -159,6 +160,15 @@ class AppSettings(BaseSettings):
     preferred_exit_mode: Literal["AUTO", "GTT", "REGULAR"] = Field(
         default_factory=lambda: AppToggles().preferred_exit_mode
     )
+
+    # ---- Legacy `.api` proxy for old code paths ----
+    @property
+    def api(self):  # type: ignore[override]
+        class _ApiProxy:
+            zerodha_api_key = self.zerodha.api_key
+            zerodha_api_secret = self.zerodha.api_secret
+            zerodha_access_token = self.zerodha.access_token
+        return _ApiProxy
 
     model_config = SettingsConfigDict(env_file=_find_env_file(), extra="ignore")
 
