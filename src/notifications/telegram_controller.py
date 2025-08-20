@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -27,26 +28,47 @@ class _TGConfig:
     chat_id: Optional[int]
 
 
-def _build_cfg() -> _TGConfig:
-    tg = getattr(settings, "telegram", None)
-    enabled = bool(getattr(tg, "enabled", True))
-    bot_token = getattr(tg, "bot_token", None)
-    # Can be learned on first inbound message if not set
-    chat_id = getattr(tg, "chat_id", getattr(settings, "TELEGRAM_CHAT_ID", None)) if tg is not None else None
+def _parse_int(v: Any) -> Optional[int]:
     try:
-        chat_id = int(chat_id) if chat_id is not None else None
+        if v is None:
+            return None
+        s = str(v).strip()
+        return int(s) if s else None
     except Exception:
-        chat_id = None
+        return None
+
+
+def _build_cfg() -> _TGConfig:
+    """
+    Build config with explicit .env precedence.
+    Order of precedence for chat_id:
+      1) TELEGRAM_CHAT_ID env
+      2) settings.telegram.chat_id
+      3) settings.TELEGRAM_CHAT_ID
+    """
+    tg = getattr(settings, "telegram", None)
+    enabled_env = os.getenv("ENABLE_TELEGRAM")
+    enabled = bool(enabled_env.lower() != "false") if enabled_env is not None else bool(getattr(tg, "enabled", True))
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or (getattr(tg, "bot_token", None) if tg is not None else None)
+
+    chat_id = (
+        os.getenv("TELEGRAM_CHAT_ID")
+        or (getattr(tg, "chat_id", None) if tg is not None else None)
+        or getattr(settings, "TELEGRAM_CHAT_ID", None)
+    )
+    chat_id = _parse_int(chat_id)
+
     return _TGConfig(enabled=enabled, bot_token=bot_token, chat_id=chat_id)
 
 
 class TelegramController:
     """
-    Telegram bot interface (long polling).
-    - Ensures webhook is disabled before polling (prevents 409 conflicts)
-    - Singleton polling guard within a process (no double polling)
-    - Throttled 'no chat_id' logs
-    - Status format matches requested style
+    Long-polling Telegram controller.
+    - Reads TELEGRAM_CHAT_ID directly from env (no learning needed).
+    - Proactively deletes any webhook *before* starting (prevents 409).
+    - Process-wide singleton guard blocks duplicate polling.
+    - Quiet logs if chat_id missing (only once).
     """
 
     # ---- process-wide singleton guard (no double polling) ----
@@ -114,30 +136,24 @@ class TelegramController:
             return None
 
     # ---------- webhook controls ----------
-    def _delete_webhook(self) -> bool:
-        """Disable webhook; return True if disabled or not set."""
+    def _delete_webhook(self) -> None:
+        """Disable webhook and do a best-effort verification."""
         if not self.enabled:
-            return True
+            return
         try:
             self._request("POST", "deleteWebhook", json={"drop_pending_updates": True}, timeout=15)
-            # verify
+            # verify quietly; no need to spam if API is flaky
             info = self._request("GET", "getWebhookInfo", timeout=10)
-            if info is None or info.status_code != 200:
-                return True  # best effort
-            data = info.json() if info.headers.get("content-type", "").startswith("application/json") else {}
-            url = (data.get("result") or {}).get("url", "") if data.get("ok") else ""
-            return not url
+            if info and info.status_code == 200:
+                data = info.json() if info.headers.get("content-type", "").startswith("application/json") else {}
+                url = (data.get("result") or {}).get("url", "") if data.get("ok") else ""
+                if url:
+                    logger.info("Telegram webhook still present; retrying clear.")
+                    # small extra attempt
+                    self._request("POST", "deleteWebhook", json={"drop_pending_updates": True}, timeout=15)
         except Exception:
-            return True  # don't block polling on verification
-
-    def _ensure_polling_ready(self) -> None:
-        """Loop until webhook is cleared to avoid 409 conflicts."""
-        for attempt in range(5):
-            if self._delete_webhook():
-                return
-            sleep = 1 + attempt  # tiny backoff
-            logger.info("Waiting for Telegram webhook to clear (%ss)...", sleep)
-            time.sleep(sleep)
+            # never block on webhook clear
+            pass
 
     # ---------- send ----------
     def _send_message(self, text: str, parse_mode: Optional[str] = None, retries: int = 2, backoff_sec: float = 1.0) -> bool:
@@ -145,7 +161,7 @@ class TelegramController:
             return False
         if self.cfg.chat_id is None:
             if not self._chat_missing_warned:
-                logger.error("Telegram chat_id is not configured. Cannot send message.")
+                logger.error("Telegram chat_id is not configured (TELEGRAM_CHAT_ID). Cannot send message.")
                 self._chat_missing_warned = True
             return False
 
@@ -245,13 +261,11 @@ class TelegramController:
     def _handle_command(self, command: str, arg: str = "", chat_id_hint: Optional[int] = None) -> None:
         logger.info("📩 Telegram command: '%s %s'", command, arg)
 
-        # Learn chat_id on first inbound message
+        # Learn chat_id if env not set
         if self.cfg.chat_id is None and chat_id_hint is not None:
-            try:
-                self.cfg.chat_id = int(chat_id_hint)
+            self.cfg.chat_id = _parse_int(chat_id_hint)
+            if self.cfg.chat_id is not None:
                 logger.info("📌 Learned TELEGRAM_CHAT_ID=%s from inbound message.", chat_id_hint)
-            except Exception:
-                pass
 
         if command == "help":
             self._send_message(
@@ -313,8 +327,6 @@ class TelegramController:
             logger.info("Telegram disabled; polling thread exiting.")
             return
 
-        self._ensure_polling_ready()  # avoid 409 conflicts
-
         url_path = "getUpdates"
         offset: Optional[int] = None
         timeout = 30
@@ -344,11 +356,12 @@ class TelegramController:
                         self._handle_command(cmd, arg, chat_id_hint=chat_id)
 
                 elif resp.status_code == 409:
-                    logger.error("409 Conflict: webhook active; disabling and retrying.")
-                    self._ensure_polling_ready()
-                    time.sleep(2)
+                    # Quietly clear webhook and continue without spamming logs
+                    self._delete_webhook()
+                    time.sleep(1)
 
                 else:
+                    # Log once per non-OK class
                     try:
                         body = resp.json()
                     except Exception:
@@ -369,6 +382,10 @@ class TelegramController:
         if not self.enabled:
             logger.warning("Telegram disabled; not starting polling.")
             return
+
+        # Proactively delete webhook BEFORE marking active → prevents first 409 entirely.
+        self._delete_webhook()
+
         with TelegramController._global_lock:
             if TelegramController._global_polling_active:
                 logger.info("Telegram polling already active in this process; ignoring duplicate start.")
