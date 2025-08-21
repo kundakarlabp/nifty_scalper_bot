@@ -3,28 +3,11 @@ from __future__ import annotations
 """
 Telegram controller with on-demand diagnostics.
 
-Commands:
-  /status [verbose]           – bot status
-  /summary                    – last signal (if runner exposes it via status)
-  /active [page]              – active orders
-  /positions                  – broker day positions
-  /cancel_all                 – cancel all (with confirm)
-  /pause [minutes]            – pause entries (minutes optional)
-  /resume                     – resume entries
-  /risk <pct>                 – set risk per trade (e.g., /risk 0.5)
-  /trail on|off               – toggle trailing exits
-  /trailmult <x>              – set trailing ATR multiplier
-  /partial on|off             – toggle partial TP
-  /tp1 <pct>                  – TP1 qty percent (e.g., 40)
-  /breakeven <ticks>          – BE ticks after TP1
-  /mode live|dry              – live trading toggle
-  /config [get <k>|set <k> <v>] – whitelist runtime keys
-  /logs [N]                   – last N log lines (default 150)
-  /health                     – system health snapshot (JSON)
-  /tick                       – run one strategy cycle now (returns brief result)
-  /ping                       – pong + uptime
-  /id                         – show chat id
-  /help                       – this help
+New commands:
+  /diag                      – full end-to-end diagnostic (flow)
+  /flow                      – compact traffic-light summary of /diag
+  /events [N]               – last N internal events (ENTRY_PLACED, FILLS, WARN, ERROR, etc.)
+Existing commands kept (status, config, pause/resume, mode, logs, health, tick, etc.)
 """
 
 import hashlib
@@ -57,14 +40,16 @@ class TelegramController:
         logs_provider: Optional[Callable[[int], str]] = None,
         health_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         tick_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        # runtime config hooks (optional; if absent, /config mutates settings via whitelist)
-        set_risk_pct: Optional[Callable[[float], None]] = None,           # 0.5 -> 0.5%
+        diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        events_provider: Optional[Callable[[int], List[Dict[str, Any]]]] = None,
+        # runtime config hooks (optional)
+        set_risk_pct: Optional[Callable[[float], None]] = None,
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
         toggle_partial: Optional[Callable[[bool], None]] = None,
-        set_tp1_ratio: Optional[Callable[[float], None]] = None,          # 40 -> 40%
+        set_tp1_ratio: Optional[Callable[[float], None]] = None,
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
-        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE
+        set_live_mode: Optional[Callable[[bool], None]] = None,
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
@@ -87,6 +72,8 @@ class TelegramController:
         self._logs_provider = logs_provider
         self._health_provider = health_provider
         self._tick_provider = tick_provider
+        self._diag_provider = diag_provider
+        self._events_provider = events_provider
 
         self._set_risk_pct = set_risk_pct
         self._toggle_trailing = toggle_trailing
@@ -107,12 +94,12 @@ class TelegramController:
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
         # send rate & backoff
-        self._send_min_interval = 0.8  # seconds
-        self._last_sends: List[tuple[float, str]] = []  # (timestamp, md5(text))
+        self._send_min_interval = 0.8
+        self._last_sends: List[tuple[float, str]] = []
         self._backoff = 1.0
         self._backoff_max = 20.0
 
-        # /config whitelist mapping (getter, setter, caster)
+        # config whitelist
         self._cfg_map = {
             "risk.pct": (
                 lambda: getattr(settings.risk, "risk_per_trade", 0.01) * 100.0,
@@ -152,11 +139,9 @@ class TelegramController:
         }
 
     # -------------------- outbound --------------------
-
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
-        # de-dupe same msg within 10s and enforce min interval
         self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
         if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
             return False
@@ -183,9 +168,12 @@ class TelegramController:
                 self._backoff = delay
 
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
-        payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
         try:
-            requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            requests.post(
+                f"{self._base}/sendMessage",
+                json={"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}},
+                timeout=self._timeout,
+            )
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
@@ -205,8 +193,7 @@ class TelegramController:
             f"📦 Active: {s.get('active_orders', 0)}"
         )
 
-    # -------------------- inbound (poll) --------------------
-
+    # -------------------- polling --------------------
     def start_polling(self) -> None:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
@@ -245,8 +232,7 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
-    # -------------------- command handling --------------------
-
+    # -------------------- commands --------------------
     def _handle_update(self, upd: Dict[str, Any]) -> None:
         # inline callback
         if "callback_query" in upd:
@@ -285,6 +271,7 @@ class TelegramController:
         cmd = parts[0].lower()
         args = parts[1:]
 
+        # help
         if cmd in ("/start", "/help"):
             return self._send(
                 "🤖 Nifty Scalper Bot\n"
@@ -306,9 +293,13 @@ class TelegramController:
                 "/logs [N] – last N log lines\n"
                 "/health – system health snapshot\n"
                 "/tick – run one strategy cycle now\n"
+                "/diag – end-to-end diagnostic\n"
+                "/flow – compact traffic-light diagnostic\n"
+                "/events [N] – recent internal events\n"
                 "/ping – ping"
             )
 
+        # core status
         if cmd == "/status":
             try:
                 s = self._status_provider() if self._status_provider else {}
@@ -333,6 +324,7 @@ class TelegramController:
                 return self._send("No recent signal.")
             return self._send("```json\n" + json.dumps(last, indent=2) + "\n```", parse_mode="Markdown")
 
+        # actives & positions
         if cmd == "/active":
             if not self._actives_provider:
                 return self._send("No active-orders provider wired.")
@@ -368,27 +360,26 @@ class TelegramController:
                 lines.append(f"• {sym}: qty={qty} avg={avg}")
             return self._send("\n".join(lines))
 
+        # control
         if cmd == "/cancel_all":
             return self._send_inline(
                 "Confirm cancel all?",
                 [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
                   {"text": "❌ Abort", "callback_data": "abort"}]],
             )
-
         if cmd == "/pause":
             if self._runner_pause:
                 self._runner_pause()
-            # optional minutes arg is accepted, but we don't schedule resume here
             return self._send("⏸️ Entries paused.")
-
         if cmd == "/resume":
             if self._runner_resume:
                 self._runner_resume()
             return self._send("▶️ Entries resumed.")
 
+        # runtime config
         if cmd == "/risk":
             if not args:
-                return self._send("Usage: /risk 0.5  (for 0.5%)")
+                return self._send("Usage: /risk 0.5")
             try:
                 pct = float(args[0])
                 if self._set_risk_pct:
@@ -434,7 +425,7 @@ class TelegramController:
 
         if cmd == "/tp1":
             if not args:
-                return self._send("Usage: /tp1 40  (for 40% of qty)")
+                return self._send("Usage: /tp1 40")
             try:
                 pct = float(args[0])
                 if self._set_tp1_ratio:
@@ -493,6 +484,7 @@ class TelegramController:
                 return self._send("Unknown key.")
             return self._send("Usage: /config [get <key>|set <key> <value>]")
 
+        # diagnostics
         if cmd == "/logs":
             n = 150
             if args:
@@ -503,10 +495,8 @@ class TelegramController:
             if not self._logs_provider:
                 return self._send("Logs provider not wired.")
             tail = self._logs_provider(n)
-            # Telegram messages have size limits; chunk if needed
             if len(tail) <= 3500:
                 return self._send("```log\n" + tail + "\n```", parse_mode="Markdown")
-            # chunk in ~3000 char messages
             i = 0
             while i < len(tail):
                 self._send("```log\n" + tail[i:i+3000] + "\n```", parse_mode="Markdown", disable_notification=True)
@@ -527,6 +517,35 @@ class TelegramController:
                 return self._send("Tick provider not wired.")
             res = self._tick_provider()
             return self._send("```json\n" + json.dumps(res, indent=2) + "\n```", parse_mode="Markdown")
+
+        if cmd == "/diag":
+            if not self._diag_provider:
+                return self._send("Diagnostic provider not wired.")
+            d = self._diag_provider()
+            return self._send("```json\n" + json.dumps(d, indent=2) + "\n```", parse_mode="Markdown")
+
+        if cmd == "/flow":
+            if not self._diag_provider:
+                return self._send("Diagnostic provider not wired.")
+            d = self._diag_provider()
+            bits = []
+            for c in d.get("checks", []):
+                emoji = "🟢" if c.get("ok") else "🔴"
+                bits.append(f"{emoji} {c.get('name')}")
+            header = "✅ Flow OK" if d.get("ok") else "❗ Flow has issues"
+            return self._send(header + "\n" + " · ".join(bits))
+
+        if cmd == "/events":
+            n = 30
+            if args:
+                try:
+                    n = int(args[0])
+                except Exception:
+                    pass
+            if not self._events_provider:
+                return self._send("Events provider not wired.")
+            ev = self._events_provider(n) or []
+            return self._send("```json\n" + json.dumps(ev, indent=2) + "\n```", parse_mode="Markdown")
 
         if cmd == "/ping":
             try:
