@@ -1,3 +1,4 @@
+# src/main.py
 from __future__ import annotations
 
 import argparse
@@ -13,7 +14,6 @@ from typing import Any, Optional
 from src.config import settings
 from src.server import health as health_server
 from src.strategies.runner import StrategyRunner
-from src.notifications.telegram_controller import TelegramController
 
 # Optional broker SDK (keep imports safe)
 try:
@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
     NetworkException = TokenException = InputException = Exception  # fallbacks
 
-# Optional DataSource (runner can build it)
+# Optional DataSource (not required if StrategyRunner manages its own source)
 try:
     from src.data.source import LiveKiteSource, DataSource  # type: ignore
 except Exception:  # pragma: no cover
@@ -52,13 +52,25 @@ def _now_ist_naive() -> datetime:
     return ist.replace(tzinfo=None)
 
 
+# ------------ nested attr helper ------------
+def _get_nested(obj: Any, *path: str) -> Optional[Any]:
+    """Safely get a nested attribute from an object."""
+    cur = obj
+    for p in path:
+        cur = getattr(cur, p, None)
+        if cur is None:
+            return None
+    return cur
+
+
 class Application:
     """Main application class for the Nifty Scalper Bot."""
 
     def __init__(self) -> None:
         self.live_trading = bool(settings.enable_live_trading)
-        self.runner = StrategyRunner(event_sink=self._on_runner_event)
-        self.tg: Optional[TelegramController] = None
+        # runner will be (re)constructed below so we can inject the event sink
+        self.runner: Optional[StrategyRunner] = None
+        self.tg = None  # TelegramController instance (optional)
 
         # for uptime in /ping
         self._start_ts = time.time()
@@ -73,76 +85,19 @@ class Application:
         log.info("Received signal %s, starting graceful shutdown…", signum)
         self._stop_event.set()
 
-    # ---- event sink (from StrategyRunner)
-    def _on_runner_event(self, evt: dict) -> None:
-        """Receive ENTRY_PLACED / FILLS from runner and forward to Telegram."""
-        if not self.tg or not isinstance(evt, dict):
-            return
-        t = str(evt.get("type", "")).upper()
-        if t == "ENTRY_PLACED":
-            try:
-                self.tg.notify_entry(
-                    symbol=str(evt.get("symbol", "?")),
-                    side=str(evt.get("side", "?")),
-                    qty=int(evt.get("qty", 0)),
-                    price=float(evt.get("price", 0.0)),
-                    record_id=str(evt.get("record_id", "")),
-                )
-            except Exception:
-                pass
-        elif t == "FILLS":
-            fills = evt.get("fills") or []
-            try:
-                self.tg.notify_fills(fills)
-            except Exception:
-                pass
-
     # ---- status payload for health/Telegram
     def _status_payload(self) -> dict:
-        active_cnt = 0
-        try:
-            active_cnt = len(self.runner.executor.get_active_orders()) if self.runner.executor else 0
-        except Exception:
-            pass
         return {
             "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
             "live_trading": bool(getattr(settings, "enable_live_trading", False)),
-            "broker": "Kite" if getattr(self.runner, "_kite", None) else "none",
-            "active_orders": active_cnt,
+            "broker": "Kite" if self.runner and self.runner._kite else "none",
+            "active_orders": (len(self.runner.executor.get_active_orders()) if self.runner and self.runner.executor else 0),
         }
-
-    # ---- provider wrappers for Telegram
-    def _positions_provider(self) -> dict:
-        try:
-            return self.runner.executor.get_positions_kite() if self.runner.executor else {}
-        except Exception:
-            return {}
-
-    def _actives_provider(self):
-        try:
-            return self.runner.executor.get_active_orders() if self.runner.executor else []
-        except Exception:
-            return []
-
-    # ---- control hooks
-    def _pause(self) -> None:
-        self.runner.pause()
-
-    def _resume(self) -> None:
-        self.runner.resume()
-
-    def _cancel_all(self) -> None:
-        if self.runner.executor:
-            self.runner.executor.cancel_all_orders()
-
-    def _enable_live(self, v: bool) -> None:
-        setattr(settings, "enable_live_trading", bool(v))
-        self.live_trading = bool(v)
 
     def run(self) -> None:
         """Main entry point for the application."""
         _setup_logging()
-        log.info("Starting Nifty Scalper Bot | live_trading=%s", self.live_trading)
+        log.info("Starting Nifty Scalper Bot | live_trading=%s", bool(getattr(settings, "enable_live_trading", False)))
 
         # Health server (guarded inside health module)
         health_thread = threading.Thread(
@@ -156,36 +111,61 @@ class Application:
         )
         health_thread.start()
 
-        # Telegram controller (enabled + creds required)
-        try:
-            # accept both TELEGRAM__ENABLED and legacy ENABLE_TELEGRAM
-            tg_enabled_env = os.getenv("ENABLE_TELEGRAM", "").lower() in ("1", "true", "yes")
-            tg_enabled_cfg = bool(getattr(getattr(settings, "telegram", object()), "enabled", True))
-            tg_enabled = tg_enabled_cfg or tg_enabled_env
+        # --- Build runner with an event sink that forwards to Telegram (if available) ---
+        def _runner_event_sink(evt: dict) -> None:
+            try:
+                if not self.tg:  # Telegram may not be started (no creds)
+                    return
+                t = str(evt.get("type"))
+                if t == "ENTRY_PLACED":
+                    self.tg.notify_entry(
+                        symbol=evt.get("symbol", "?"),
+                        side=evt.get("side", "?"),
+                        qty=int(evt.get("qty", 0)),
+                        price=float(evt.get("price", 0.0)),
+                        record_id=str(evt.get("record_id", "")),
+                    )
+                elif t == "FILLS":
+                    fills = evt.get("fills") or []
+                    self.tg.notify_fills(fills)
+            except Exception:
+                log.exception("Failed to forward runner event to Telegram.")
 
-            bot_token = getattr(getattr(settings, "telegram", object()), "bot_token", None)
-            chat_id = getattr(getattr(settings, "telegram", object()), "chat_id", None)
+        self.runner = StrategyRunner(event_sink=_runner_event_sink)
+
+        # --- Telegram controller (with flat env fallbacks) ---
+        try:
+            from src.notifications.telegram_controller import TelegramController
+
+            tg_enabled = (
+                bool(_get_nested(settings, "telegram", "enabled")) or
+                os.getenv("ENABLE_TELEGRAM", "true").lower() in ("1", "true", "yes")
+            )
+            bot_token = _get_nested(settings, "telegram", "bot_token") or os.getenv("TELEGRAM_BOT_TOKEN")
+            chat_id_raw = _get_nested(settings, "telegram", "chat_id") or os.getenv("TELEGRAM_CHAT_ID")
+            chat_id = int(chat_id_raw) if chat_id_raw else None
 
             if tg_enabled and bot_token and chat_id:
+                # patch settings at runtime so TelegramController's own settings read succeeds
+                try:
+                    settings.telegram.bot_token = bot_token  # type: ignore[attr-defined]
+                    settings.telegram.chat_id = chat_id      # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
                 self.tg = TelegramController(
-                    status_provider=self._status_payload,
-                    positions_provider=self._positions_provider,
-                    actives_provider=self._actives_provider,
-                    runner_pause=self._pause,
-                    runner_resume=self._resume,
-                    cancel_all=self._cancel_all,
-                    set_risk_pct=lambda pct: setattr(settings.risk, "risk_per_trade", float(pct) / 100.0),
-                    toggle_trailing=lambda v: setattr(settings.executor, "enable_trailing", bool(v)),
-                    set_trailing_mult=lambda x: setattr(settings.executor, "trailing_atr_multiplier", float(x)),
-                    toggle_partial=lambda v: setattr(settings.executor, "partial_tp_enable", bool(v)),
-                    set_tp1_ratio=lambda pct: setattr(settings.executor, "tp1_qty_ratio", float(pct) / 100.0),
-                    set_breakeven_ticks=lambda n: setattr(settings.executor, "breakeven_ticks", int(n)),
-                    set_live_mode=self._enable_live,
+                    status_provider=self.runner.to_status_dict,
+                    positions_provider=(self.runner.executor.get_positions_kite if self.runner and self.runner.executor else None),
+                    actives_provider=(self.runner.executor.get_active_orders if self.runner and self.runner.executor else None),
+                    runner_pause=self.runner.pause,
+                    runner_resume=self.runner.resume,
+                    cancel_all=(self.runner.executor.cancel_all_orders if self.runner and self.runner.executor else None),
                 )
                 self.tg.start_polling()
                 self.tg.send_startup_alert()
             else:
                 log.info("Telegram not started (disabled or credentials missing).")
+
         except Exception as e:
             log.warning("Telegram controller not started: %s", e)
             self.tg = None
