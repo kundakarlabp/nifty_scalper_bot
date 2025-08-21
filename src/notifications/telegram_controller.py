@@ -1,8 +1,8 @@
 from __future__ import annotations
+
 """
 Lightweight Telegram controller for the Nifty Scalper Bot.
 
-Key points:
 - Single long-poll thread (no webhook, no double polling)
 - Allowlist (chat IDs) and simple operator role
 - Rate-limited, de-duplicated sends with exponential backoff
@@ -10,11 +10,12 @@ Key points:
 - Rich command set (+ safe /config get|set on whitelisted keys)
 - Event helpers: notify_entry(), notify_fills(), notify_text()
 
-Env/config:
+Requires:
 - settings.telegram.bot_token (str)
 - settings.telegram.chat_id (int)
-- settings.telegram.extra_admin_ids (optional list[int])
+- settings.telegram.enabled = True
 """
+
 import hashlib
 import json
 import logging
@@ -41,14 +42,14 @@ class TelegramController:
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
         cancel_all: Optional[Callable[[], None]] = None,
-        # runtime config hooks (optional; if absent, /config mutates settings via whitelist)
+        # runtime config hooks
         set_risk_pct: Optional[Callable[[float], None]] = None,           # 0.5 -> 0.5%
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
         toggle_partial: Optional[Callable[[bool], None]] = None,
         set_tp1_ratio: Optional[Callable[[float], None]] = None,          # 40 -> 40%
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
-        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE
+        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE mode
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
@@ -85,9 +86,6 @@ class TelegramController:
         # security: allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
-
-        # requests session (re-use TCP)
-        self._session = requests.Session()
 
         # send rate & backoff
         self._send_min_interval = 0.9  # seconds
@@ -128,7 +126,7 @@ class TelegramController:
                 int,
             ),
             "mode.live": (
-                lambda: getattr(settings, "enable_live_trading", False),
+                lambda: getattr(self._status_provider(), "get", lambda *_: None)("live_trading"),  # live flag from runtime status
                 (self._set_live_mode or (lambda v: setattr(settings, "enable_live_trading", bool(v)))),
                 lambda s: str(s).lower() in ("on", "true", "1", "yes", "live"),
             ),
@@ -157,7 +155,7 @@ class TelegramController:
                 payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
                 self._backoff = 1.0
                 return
             except Exception:
@@ -172,7 +170,7 @@ class TelegramController:
             "reply_markup": {"inline_keyboard": buttons},
         }
         try:
-            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
@@ -231,7 +229,7 @@ class TelegramController:
                 params = {"timeout": 25}
                 if self._last_update_id is not None:
                     params["offset"] = self._last_update_id + 1
-                r = self._session.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                r = requests.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
                 data = r.json()
                 if not data.get("ok"):
                     time.sleep(1.0)
@@ -253,7 +251,7 @@ class TelegramController:
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq.get("message", {}).get("chat", {}).get("id")
-            if not self._authorized(int(chat_id)):
+            if chat_id is None or not self._authorized(int(chat_id)):
                 return
             data = cq.get("data", "")
             try:
@@ -262,7 +260,7 @@ class TelegramController:
                     self._send("🧹 Cancelled all open orders.")
             finally:
                 try:
-                    self._session.post(
+                    requests.post(
                         f"{self._base}/answerCallbackQuery",
                         json={"callback_query_id": cq.get("id")},
                         timeout=self._timeout,
@@ -278,8 +276,8 @@ class TelegramController:
         text = (msg.get("text") or "").strip()
         if not text:
             return
-        if not self._authorized(int(chat_id)):
-            # silently ignore unknown chats
+        if chat_id is None or not self._authorized(int(chat_id)):
+            self._send("Unauthorized.")
             return
 
         parts = text.split()
@@ -312,8 +310,7 @@ class TelegramController:
                 s = {}
             verbose = (args and args[0].lower().startswith("v"))
             if verbose:
-                pretty = json.dumps(s, indent=2)
-                return self._send(f"📊 Status (verbose)\n<pre>{pretty}</pre>", parse_mode="HTML")
+                return self._send("📊 Status (verbose)\n```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
             return self._send(
                 f"📊 {s.get('time_ist')}\n"
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
@@ -454,7 +451,10 @@ class TelegramController:
                 return self._send("Usage: /mode live|dry")
             val = (state == "live")
             if self._set_live_mode:
-                self._set_live_mode(val)
+                try:
+                    self._set_live_mode(val)
+                except Exception as e:
+                    return self._send(f"Failed to set mode: {e}")
             else:
                 setattr(settings, "enable_live_trading", val)
             return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
