@@ -1,26 +1,25 @@
 # src/config.py
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
-from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, NonNegativeFloat, NonNegativeInt, model_validator
+from pydantic import BaseModel, Field, NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt
+from pydantic.functional_validators import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _find_env_file() -> Optional[Path]:
-    path = Path.cwd()
+    p = Path.cwd()
     for _ in range(6):
-        cand = path / ".env"
-        if cand.exists():
-            return cand
-        path = path.parent
+        f = p / ".env"
+        if f.exists():
+            return f
+        p = p.parent
     return None
 
 
-# ---------- component models ----------
 class DataSettings(BaseModel):
     warmup_bars: PositiveInt = Field(30, alias="WARMUP_BARS")
     lookback_minutes: PositiveInt = Field(60, alias="DATA_LOOKBACK_MINUTES")
@@ -28,92 +27,122 @@ class DataSettings(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    default_equity: PositiveFloat = 30000.0
+    # accept RISK_PER_TRADE_PCT (e.g. 0.5 => 0.5%)
+    default_equity: PositiveFloat = Field(30000.0, alias="DEFAULT_EQUITY")
     risk_per_trade: NonNegativeFloat = 0.01
-    max_trades_per_day: PositiveInt = 1
-    consecutive_loss_limit: NonNegativeInt = 3
-    max_daily_drawdown_pct: NonNegativeFloat = 0.05
+
+    @field_validator("risk_per_trade", mode="before")
+    @classmethod
+    def _from_pct(cls, v, values):
+        # Prefer flat env RISK_PER_TRADE_PCT when present
+        import os
+        pct = os.environ.get("RISK_PER_TRADE_PCT")
+        if pct is not None:
+            try:
+                return float(pct) / 100.0
+            except Exception:
+                pass
+        return v
+
+    max_trades_per_day: PositiveInt = Field(1, alias="MAX_TRADES_PER_DAY")
+    consecutive_loss_limit: NonNegativeInt = Field(3, alias="CONSECUTIVE_LOSS_LIMIT")
+    max_daily_drawdown_pct: NonNegativeFloat = Field(0.05, alias="MAX_DAILY_DRAWDOWN_PCT")
 
 
 class ZerodhaConfig(BaseModel):
-    api_key: Optional[str] = None
-    api_secret: Optional[str] = None
-    access_token: Optional[str] = None
-    public_token: Optional[str] = None
-    enctoken: Optional[str] = None
+    api_key: Optional[str] = Field(default=None, alias="ZERODHA_API_KEY")
+    api_secret: Optional[str] = Field(default=None, alias="ZERODHA_API_SECRET")
+    access_token: Optional[str] = Field(default=None, alias="ZERODHA_ACCESS_TOKEN")
+    public_token: Optional[str] = Field(default=None, alias="ZERODHA_PUBLIC_TOKEN")
+    enctoken: Optional[str] = Field(default=None, alias="ZERODHA_ENCTOKEN")
 
 
 class TelegramConfig(BaseModel):
-    enabled: bool = True
-    bot_token: Optional[str] = None
-    chat_id: Optional[int] = None
+    enabled: bool = Field(True, alias="ENABLE_TELEGRAM")
+    bot_token: Optional[str] = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    chat_id: Optional[int] = Field(default=None, alias="TELEGRAM_CHAT_ID")
+    extra_admin_ids: Optional[str] = Field(default=None, alias="TELEGRAM_EXTRA_ADMINS")  # "111,222"
+
+    @field_validator("extra_admin_ids", mode="after")
+    def _split_admins(cls, v):
+        if not v:
+            return []
+        if isinstance(v, list):
+            return v
+        return [int(x.strip()) for x in str(v).split(",") if x.strip()]
 
 
 class ServerConfig(BaseModel):
-    host: str = "0.0.0.0"
-    port: int = 8000
+    host: str = Field("0.0.0.0", alias="HEALTH_HOST")
+    port: int = Field(8000, alias="HEALTH_PORT")
 
 
 class StrategyConfig(BaseModel):
-    # gates
-    min_bars_for_signal: int = 10
-    min_signal_score: int = 2
-    confidence_threshold: float = 4.0
-    # indicators
-    ema_fast: int = 9
-    ema_slow: int = 21
-    rsi_period: int = 14
-    adx_period: int = 14
-    adx_trend_strength: int = 20
-    # ATR/SL/TP
-    atr_period: int = 14
-    base_stop_loss_points: float = 20.0
-    base_target_points: float = 40.0
-    atr_sl_multiplier: float = 1.5
-    atr_tp_multiplier: float = 3.0
-    sl_confidence_adj: float = 0.2
-    tp_confidence_adj: float = 0.3
-    # regime
-    di_diff_threshold: float = 10.0
-    # strike
-    strike_selection_range: int = 3
+    min_bars_for_signal: int = Field(30, alias="MIN_BARS_FOR_SIGNAL")
+    min_signal_score: int = Field(5, alias="MIN_SIGNAL_SCORE")
+    confidence_threshold: float = Field(6.0, alias="CONFIDENCE_THRESHOLD")
+    atr_period: int = Field(14, alias="ATR_PERIOD")
+    base_stop_loss_points: float = Field(20.0, alias="BASE_STOP_LOSS_POINTS")
+    base_target_points: float = Field(40.0, alias="BASE_TARGET_POINTS")
+    atr_sl_multiplier: float = Field(1.5, alias="ATR_SL_MULTIPLIER")
+    atr_tp_multiplier: float = Field(3.0, alias="ATR_TP_MULTIPLIER")
+    sl_confidence_adj: float = Field(0.2, alias="SL_CONFIDENCE_ADJ")
+    tp_confidence_adj: float = Field(0.3, alias="TP_CONFIDENCE_ADJ")
+    strike_selection_range: int = Field(3, alias="STRIKE_SELECTION_RANGE")
+    di_diff_threshold: float = Field(10.0, alias="DI_DIFF_THRESHOLD")
 
 
 class InstrumentsConfig(BaseModel):
-    spot_symbol: str = "NSE:NIFTY 50"
-    trade_symbol: str = "NIFTY"
-    instrument_token: int = 256265
-    nifty_lot_size: int = 75
-    min_lots: int = 1
-    max_lots: int = 10
-    strike_range: int = 0  # ATM only by default
+    spot_symbol: str = Field("NSE:NIFTY 50", alias="SPOT_SYMBOL")
+    trade_symbol: str = Field("NIFTY", alias="TRADE_SYMBOL")
+    instrument_token: int = Field(256265, alias="INSTRUMENT_TOKEN")
+    nifty_lot_size: int = Field(75, alias="NIFTY_LOT_SIZE")
+    min_lots: int = Field(1, alias="MIN_LOTS")
+    max_lots: int = Field(10, alias="MAX_LOTS")
+    strike_range: int = Field(0, alias="STRIKE_RANGE")  # ATM by default
+
+    @field_validator("strike_range", mode="before")
+    @classmethod
+    def _prefer_selection_range(cls, v):
+        import os
+        sel = os.environ.get("STRIKE_SELECTION_RANGE")
+        if sel is not None:
+            try:
+                return int(sel)
+            except Exception:
+                pass
+        return v
 
 
 class ExecutorConfig(BaseModel):
-    preferred_exit_mode: Literal["REGULAR", "OCO", "AUTO"] = "REGULAR"
-    order_variety: Literal["regular", "amo"] = "regular"
-    order_product: Literal["NRML", "MIS"] = "MIS"
-    entry_order_type: Literal["LIMIT", "MARKET"] = "LIMIT"
-    exchange: Literal["NFO", "NSE"] = "NFO"
-    tick_size: float = 0.05
-    exchange_freeze_qty: int = 1800
-    fee_per_lot: float = 20.0
-    partial_tp_enable: bool = True
-    tp1_qty_ratio: float = 0.5
-    breakeven_ticks: int = 2
-    use_slm_exit: bool = True
-    enable_trailing: bool = True
-    trailing_atr_multiplier: float = 1.5
+    # New fields with common aliases to your env
+    exchange: str = Field("NFO", alias="TRADE_EXCHANGE")
+    order_product: str = Field("NRML", alias="ORDER_PRODUCT")
+    order_variety: str = Field("regular", alias="ORDER_VARIETY")
+    entry_order_type: str = Field("LIMIT", alias="ENTRY_ORDER_TYPE")
+    tick_size: float = Field(0.05, alias="TICK_SIZE")
+    exchange_freeze_qty: int = Field(900, alias="NFO_FREEZE_QTY")
+
+    partial_tp_enable: bool = Field(False, alias="PARTIAL_TP_ENABLE")
+    tp1_qty_ratio: float = Field(0.5, alias="TP1_QTY_RATIO")  # 0..1
+    breakeven_ticks: int = Field(2, alias="BREAKEVEN_TICKS")
+
+    enable_trailing: bool = Field(True, alias="ENABLE_TRAILING")
+    trailing_atr_multiplier: float = Field(1.5, alias="TRAILING_ATR_MULTIPLIER")
+    use_slm_exit: bool = Field(True, alias="USE_SLM_EXIT")
+
+    preferred_exit_mode: Literal["REGULAR", "OCO", "AUTO"] = Field("REGULAR", alias="PREFERRED_EXIT_MODE")
+    fee_per_lot: float = Field(20.0, alias="FEE_PER_LOT")
 
 
-# ---------- master settings ----------
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_find_env_file(),
-        extra="ignore",
         env_nested_delimiter="__",
+        extra="ignore",
     )
 
+    # top-level flags
     enable_live_trading: bool = Field(False, alias="ENABLE_LIVE_TRADING")
     allow_offhours_testing: bool = Field(False, alias="ALLOW_OFFHOURS_TESTING")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
@@ -127,169 +156,7 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsConfig = InstrumentsConfig()
     executor: ExecutorConfig = ExecutorConfig()
 
-    # Overlay flat env names from .env/Railway
-    @model_validator(mode="after")
-    def _apply_flat_env_overrides(self) -> "AppSettings":
-        # --- Zerodha (accept both ZERODHA_* and KITE_ACCESS_TOKEN) ---
-        self.zerodha.api_key = os.getenv("ZERODHA_API_KEY", self.zerodha.api_key)
-        self.zerodha.api_secret = os.getenv("ZERODHA_API_SECRET", self.zerodha.api_secret)
-        self.zerodha.access_token = (
-            os.getenv("ZERODHA_ACCESS_TOKEN", self.zerodha.access_token)
-            or os.getenv("KITE_ACCESS_TOKEN", self.zerodha.access_token)
-        )
-        self.zerodha.public_token = os.getenv("KITE_PUBLIC_TOKEN", self.zerodha.public_token)
-        self.zerodha.enctoken = os.getenv("ENCTOKEN", self.zerodha.enctoken)
-
-        # --- Telegram ---
-        self.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", self.telegram.bot_token)
-        _chat = os.getenv("TELEGRAM_CHAT_ID")
-        if _chat:
-            try:
-                self.telegram.chat_id = int(_chat)
-            except Exception:
-                pass
-        _tg_enabled = os.getenv("ENABLE_TELEGRAM")
-        if _tg_enabled is not None:
-            self.telegram.enabled = str(_tg_enabled).strip().lower() in {"1", "true", "yes", "on"}
-
-        # --- Data / scheduling ---
-        self.data.lookback_minutes = int(os.getenv("DATA_LOOKBACK_MINUTES", self.data.lookback_minutes))
-        # MIN_BARS_FOR_SIGNAL maps to strategy.min_bars_for_signal (keep data.warmup_bars separate)
-        _mbfs = os.getenv("MIN_BARS_FOR_SIGNAL")
-        if _mbfs:
-            try:
-                self.strategy.min_bars_for_signal = int(_mbfs)
-            except Exception:
-                pass
-
-        # --- Instruments (flat) ---
-        self.instruments.spot_symbol = os.getenv("SPOT_SYMBOL", self.instruments.spot_symbol)
-        self.instruments.trade_symbol = os.getenv("TRADE_SYMBOL", self.instruments.trade_symbol)
-        _it = os.getenv("INSTRUMENT_TOKEN")
-        if _it:
-            try:
-                self.instruments.instrument_token = int(_it)
-            except Exception:
-                pass
-        _lot = os.getenv("NIFTY_LOT_SIZE")
-        if _lot:
-            try:
-                self.instruments.nifty_lot_size = int(_lot)
-            except Exception:
-                pass
-        _min_lots = os.getenv("MIN_LOTS")
-        if _min_lots:
-            try:
-                self.instruments.min_lots = int(_min_lots)
-            except Exception:
-                pass
-        _max_lots = os.getenv("MAX_LOTS")
-        if _max_lots:
-            try:
-                self.instruments.max_lots = int(_max_lots)
-            except Exception:
-                pass
-        # strike range can arrive either here or as STRIKE_SELECTION_RANGE (strategy)
-        _sr = os.getenv("STRIKE_RANGE") or os.getenv("STRIKE_SELECTION_RANGE")
-        if _sr:
-            try:
-                # reflect to both to keep older helpers happy
-                v = int(_sr)
-                self.instruments.strike_range = v
-                self.strategy.strike_selection_range = v
-            except Exception:
-                pass
-
-        # --- Strategy (flat) ---
-        _mss = os.getenv("MIN_SIGNAL_SCORE")
-        if _mss:
-            try:
-                self.strategy.min_signal_score = int(_mss)
-            except Exception:
-                pass
-        _conf = os.getenv("CONFIDENCE_THRESHOLD")
-        if _conf:
-            try:
-                self.strategy.confidence_threshold = float(_conf)
-            except Exception:
-                pass
-        _atrp = os.getenv("ATR_PERIOD")
-        if _atrp:
-            try:
-                self.strategy.atr_period = int(_atrp)
-            except Exception:
-                pass
-        _slm = os.getenv("ATR_SL_MULTIPLIER")
-        if _slm:
-            try:
-                self.strategy.atr_sl_multiplier = float(_slm)
-            except Exception:
-                pass
-        _tpm = os.getenv("ATR_TP_MULTIPLIER")
-        if _tpm:
-            try:
-                self.strategy.atr_tp_multiplier = float(_tpm)
-            except Exception:
-                pass
-        _slc = os.getenv("SL_CONFIDENCE_ADJ")
-        if _slc:
-            try:
-                self.strategy.sl_confidence_adj = float(_slc)
-            except Exception:
-                pass
-        _tpc = os.getenv("TP_CONFIDENCE_ADJ")
-        if _tpc:
-            try:
-                self.strategy.tp_confidence_adj = float(_tpc)
-            except Exception:
-                pass
-
-        # --- Risk (flat uses *_PCT for percentage) ---
-        _rpt = os.getenv("RISK_PER_TRADE_PCT")
-        if _rpt:
-            try:
-                self.risk.risk_per_trade = float(_rpt)
-            except Exception:
-                pass
-        _mtd = os.getenv("MAX_TRADES_PER_DAY")
-        if _mtd:
-            try:
-                self.risk.max_trades_per_day = int(_mtd)
-            except Exception:
-                pass
-        _cl = os.getenv("CONSECUTIVE_LOSS_LIMIT")
-        if _cl:
-            try:
-                self.risk.consecutive_loss_limit = int(_cl)
-            except Exception:
-                pass
-        _dd = os.getenv("MAX_DAILY_DRAWDOWN_PCT")
-        if _dd:
-            try:
-                self.risk.max_daily_drawdown_pct = float(_dd)
-            except Exception:
-                pass
-
-        # --- Execution / exchange ---
-        _ex = os.getenv("TRADE_EXCHANGE")
-        if _ex:
-            self.executor.exchange = _ex.upper()
-        _tick = os.getenv("TICK_SIZE")
-        if _tick:
-            try:
-                self.executor.tick_size = float(_tick)
-            except Exception:
-                pass
-        _fz = os.getenv("NFO_FREEZE_QTY")
-        if _fz:
-            try:
-                self.executor.exchange_freeze_qty = int(_fz)
-            except Exception:
-                pass
-
-        return self
-
-    # mirrors
+    # mirrors for legacy reads
     @property
     def DEFAULT_EQUITY(self) -> float: return float(self.risk.default_equity)
     @property
@@ -301,7 +168,7 @@ class AppSettings(BaseSettings):
     @property
     def PREFERRED_EXIT_MODE(self) -> str: return str(self.executor.preferred_exit_mode)
 
-    # legacy `.api`
+    # Legacy .api proxy
     @property
     def api(self) -> SimpleNamespace:  # type: ignore[override]
         return SimpleNamespace(
