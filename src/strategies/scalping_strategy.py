@@ -1,4 +1,3 @@
-# src/strategies/scalping_strategy.py
 from __future__ import annotations
 
 import logging
@@ -19,12 +18,12 @@ SignalOutput = Optional[Dict[str, Any]]
 
 class EnhancedScalpingStrategy:
     """
-    An enhanced scalping strategy that combines EMA, RSI, ADX, and VWAP.
+    Trend-vs-Range aware scalping strategy that combines EMA, RSI, ADX/DI, and VWAP.
 
-    Signature constraints for `generate_signal()`:
-      - df:   OHLCV DataFrame for the option contract
+    generate_signal(df, current_price, spot_df)
+      - df:   option OHLCV
       - current_price: current option price (float)
-      - spot_df: OHLCV DataFrame for the spot index (with ADX/DI columns if available)
+      - spot_df: spot OHLCV (with ADX/DI columns if available)
     """
 
     def __init__(
@@ -40,10 +39,8 @@ class EnhancedScalpingStrategy:
         self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
         self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
         self.rsi_period = int(getattr(strat, "rsi_period", rsi_period))
-        # Keep an internal adx_period knob but prefer runner-provided columns
         self.adx_period = int(getattr(strat, "adx_period", adx_period))
         self.adx_trend_strength = int(getattr(strat, "adx_trend_strength", adx_trend_strength))
-        # ATR config is centralized
         self.atr_period = int(getattr(strat, "atr_period", 14))
 
     @staticmethod
@@ -63,17 +60,11 @@ class EnhancedScalpingStrategy:
 
     @staticmethod
     def _extract_adx_columns(spot_df: pd.DataFrame) -> tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
-        """
-        Find ADX/DI columns regardless of suffix (runner uses adx_{n}, di_plus_{n}, di_minus_{n}).
-        Returns (adx, di_plus, di_minus) or (None, None, None) if missing.
-        """
         if spot_df is None or spot_df.empty:
             return None, None, None
-
         adx_cols = sorted([c for c in spot_df.columns if c.startswith("adx_")])
         dip_cols = sorted([c for c in spot_df.columns if c.startswith("di_plus_")])
         dim_cols = sorted([c for c in spot_df.columns if c.startswith("di_minus_")])
-
         adx = spot_df[adx_cols[-1]] if adx_cols else spot_df.get("adx")
         di_plus = spot_df[dip_cols[-1]] if dip_cols else spot_df.get("di_plus")
         di_minus = spot_df[dim_cols[-1]] if dim_cols else spot_df.get("di_minus")
@@ -86,36 +77,37 @@ class EnhancedScalpingStrategy:
         spot_df: pd.DataFrame,
     ) -> SignalOutput:
         if df is None or df.empty or len(df) < self.ema_slow:
-            logger.debug("DataFrame too short to generate signal.")
             return None
 
         reasons: list[str] = []
         score = 0
 
-        # --- 1. EMA Crossover Bias on OPTION price ---
+        # 1) EMA bias on OPTION
         ema_fast = self._ema(df["close"], self.ema_fast)
         ema_slow = self._ema(df["close"], self.ema_slow)
         ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
         ema_cross_up = bool((ema_fast.iloc[-2] <= ema_slow.iloc[-2]) and ema_bias_up)
+        ema_cross_dn = bool((ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up)
 
         if ema_cross_up:
             score += 2
-            reasons.append(f"EMA fast ({self.ema_fast}) crossed above slow ({self.ema_slow}).")
-        elif (ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up:
+            reasons.append(f"EMA fast({self.ema_fast}) crossed above slow({self.ema_slow}).")
+        elif ema_cross_dn:
             score += 2
-            reasons.append(f"EMA fast ({self.ema_fast}) crossed below slow ({self.ema_slow}).")
+            reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
 
-        # --- 2. RSI Momentum Confirmation on OPTION price ---
+        # 2) RSI on OPTION
         rsi_val = float(self._rsi(df["close"], self.rsi_period).iloc[-1])
         if ema_bias_up and rsi_val > 50:
             score += 1
-            reasons.append(f"RSI ({self.rsi_period}) > 50, confirming upward momentum.")
+            reasons.append(f"RSI({self.rsi_period})>50 (up momentum).")
         elif not ema_bias_up and rsi_val < 50:
             score += 1
-            reasons.append(f"RSI ({self.rsi_period}) < 50, confirming downward momentum.")
+            reasons.append(f"RSI({self.rsi_period})<50 (down momentum).")
 
-        # --- 3. ADX Trend Strength & Direction on SPOT ---
-        if spot_df is not None and len(spot_df) >= max(10, self.atr_period):
+        # 3) Market regime from SPOT
+        regime = "unknown"
+        if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
             adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
             regime = detect_market_regime(
                 df=spot_df,
@@ -126,59 +118,77 @@ class EnhancedScalpingStrategy:
             )
             if regime == "trend_up" and ema_bias_up:
                 score += 2
-                reasons.append("Spot ADX confirms an upward trend.")
+                reasons.append("Spot ADX trend ↑.")
             elif regime == "trend_down" and not ema_bias_up:
                 score += 2
-                reasons.append("Spot ADX confirms a downward trend.")
+                reasons.append("Spot ADX trend ↓.")
             elif regime == "range":
-                reasons.append("Spot ADX indicates a ranging market.")
+                reasons.append("Spot indicates range.")
 
-        # --- 4. VWAP Confirmation on SPOT ---
+        # 4) VWAP on SPOT
+        vwap_ok = True
         if spot_df is not None and len(spot_df) > 0:
             vwap_series = calculate_vwap(spot_df)
             if vwap_series is not None and len(vwap_series) > 0:
                 vwap_val = float(vwap_series.iloc[-1])
-                current_spot_price = float(spot_df["close"].iloc[-1])
-                if ema_bias_up and current_spot_price > vwap_val:
-                    score += 1
-                    reasons.append("Current spot price is above VWAP.")
-                elif not ema_bias_up and current_spot_price < vwap_val:
-                    score += 1
-                    reasons.append("Current spot price is below VWAP.")
+                current_spot = float(spot_df["close"].iloc[-1])
 
-        # --- Scoring gate ---
-        strat_cfg = getattr(settings, "strategy", object())
-        min_score = int(getattr(strat_cfg, "min_signal_score", 5))
-        if score < min_score:
-            logger.debug("Signal score (%s) below minimum threshold (%s).", score, min_score)
+                # VWAP filter adapts to regime:
+                if regime.startswith("trend"):
+                    if ema_bias_up and current_spot > vwap_val:
+                        score += 1
+                        reasons.append("Spot above VWAP in trend.")
+                    elif (not ema_bias_up) and current_spot < vwap_val:
+                        score += 1
+                        reasons.append("Spot below VWAP in trend.")
+                    else:
+                        vwap_ok = False
+                elif regime == "range":
+                    # near VWAP (±0.2%) is fine in range
+                    if abs(current_spot - vwap_val) / max(1e-9, vwap_val) <= 0.002:
+                        score += 1
+                        reasons.append("Spot near VWAP (range).")
+                    else:
+                        vwap_ok = False
+
+        # Gate by score and confidence
+        min_score = int(getattr(getattr(settings, "strategy", object()), "min_signal_score", 5))
+        if score < min_score or not vwap_ok:
             return None
 
-        # Map score to confidence (simple, monotone mapping)
-        confidence_map = {0: 0.0, 1: 0.0, 2: 0.0, 3: 2.5, 4: 2.5, 5: 5.0, 6: 5.0, 7: 7.5, 8: 7.5, 9: 10.0}
-        confidence = float(confidence_map.get(score, 10.0 if score >= 9 else 0.0))
+        # Confidence mapping (slightly regime-aware)
+        # 0-2->0, 3-4->2.5, 5-6->5, 7-8->7.5, 9+->10 ; boost trend by +0.5
+        base_map = {0: 0.0, 1: 0.0, 2: 0.0, 3: 2.5, 4: 2.5, 5: 5.0, 6: 5.0, 7: 7.5, 8: 7.5, 9: 10.0}
+        confidence = float(base_map.get(score, 10.0 if score >= 9 else 0.0))
+        if regime.startswith("trend"):
+            confidence += 0.5
+        confidence = min(confidence, 10.0)
 
-        min_conf = float(getattr(strat_cfg, "confidence_threshold", 6.0))
+        min_conf = float(getattr(getattr(settings, "strategy", object()), "confidence_threshold", 6.0))
         if confidence < min_conf:
-            logger.debug("Confidence (%.2f) below threshold (%.2f).", confidence, min_conf)
             return None
 
-        # --- ATR-based SL/TP Calculation on OPTION price ---
+        # ATR-based SL/TP on OPTION
         atr_series = compute_atr(df, period=self.atr_period)
         if atr_series is None or len(atr_series) == 0:
-            logger.debug("ATR series missing; cannot compute SL/TP.")
             return None
         atr_val = float(atr_series.iloc[-1] or 0.0)
         if atr_val <= 0:
-            logger.debug("ATR value is invalid (%.4f); cannot set SL/TP.", atr_val)
             return None
 
-        sl_mult = float(getattr(strat_cfg, "atr_sl_multiplier", getattr(settings, "ATR_SL_MULTIPLIER", 1.5)))
-        tp_mult = float(getattr(strat_cfg, "atr_tp_multiplier", getattr(settings, "ATR_TP_MULTIPLIER", 3.0)))
-        # read config fields that might be named ...confidence... in your config
-        sl_adj_cfg = float(getattr(strat_cfg, "sl_confidence_adj", getattr(settings, "SL_CONFIDENCE_ADJ", 0.2)))
-        tp_adj_cfg = float(getattr(strat_cfg, "tp_confidence_adj", getattr(settings, "TP_CONFIDENCE_ADJ", 0.3)))
+        strat = getattr(settings, "strategy", object())
+        sl_mult = float(getattr(strat, "atr_sl_multiplier", getattr(settings, "ATR_SL_MULTIPLIER", 1.5)))
+        tp_mult = float(getattr(strat, "atr_tp_multiplier", getattr(settings, "ATR_TP_MULTIPLIER", 3.0)))
+        sl_adj = float(getattr(strat, "sl_confidence_adj", getattr(settings, "SL_CONFIDENCE_ADJ", 0.2)))
+        tp_adj = float(getattr(strat, "tp_confidence_adj", getattr(settings, "TP_CONFIDENCE_ADJ", 0.3)))
 
-        # NOTE: atr_sl_tp_points expects sl_conf_adj / tp_conf_adj
+        # Regime adaptation: trend = wider TP, range = tighter TP, tighter SL
+        if regime.startswith("trend"):
+            tp_mult *= 1.1
+        elif regime == "range":
+            tp_mult *= 0.8
+            sl_mult *= 0.9
+
         sl_points, tp_points = atr_sl_tp_points(
             base_sl_points=atr_val * sl_mult,
             base_tp_points=atr_val * tp_mult,
@@ -186,14 +196,13 @@ class EnhancedScalpingStrategy:
             sl_mult=sl_mult,
             tp_mult=tp_mult,
             confidence=confidence,
-            sl_conf_adj=sl_adj_cfg,
-            tp_conf_adj=tp_adj_cfg,
+            sl_confidence_adj=sl_adj,
+            tp_confidence_adj=tp_adj,
         )
 
         side: Side = "BUY" if ema_bias_up else "SELL"
         entry_price = float(current_price)
 
-        # Final SL/TP prices
         if side == "BUY":
             stop_loss = entry_price - sl_points
             target = entry_price + tp_points
@@ -210,8 +219,7 @@ class EnhancedScalpingStrategy:
             "entry_price": entry_price,
             "stop_loss": float(stop_loss),
             "target": float(target),
-            "reasons": reasons,
+            "reasons": reasons + [f"regime={regime}"],
         }
-
         logger.info("Generated signal: %s", signal)
         return signal
