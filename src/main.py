@@ -1,4 +1,3 @@
-# src/main.py
 from __future__ import annotations
 
 import argparse
@@ -73,7 +72,7 @@ class Application:
             )
         elif t == "FILLS":
             self.tg.notify_fills(evt.get("fills") or [])
-        # We intentionally DO NOT spam on SIGNAL; use /summary to fetch last signal.
+        # We intentionally do not spam on SIGNAL; use /summary.
 
     # ---- Telegram providers
     def _status_payload(self) -> dict:
@@ -94,7 +93,6 @@ class Application:
         sig = s.get("last_signal")
         if not sig:
             return "No recent signal."
-        # compact view
         return (
             "📈 Last signal\n"
             f"{sig.get('t')}\n"
@@ -139,17 +137,31 @@ class Application:
             log.warning("Telegram controller not started: %s", e)
             self.tg = None
 
-        # Main loop
+        # Main loop with heartbeat
         cadence = 0.5
+        last_heartbeat = 0.0
         while not self._stop_event.is_set():
             try:
-                # detect live flag change to surface in logs once
                 live_now = bool(getattr(settings, "enable_live_trading", False))
                 if live_now != self._last_live_flag:
                     self._last_live_flag = live_now
                     log.info("Live mode set to %s.", "True" if live_now else "False")
 
                 self.runner.run_once(stop_event=self._stop_event)
+
+                # heartbeat every 60s so Railway logs show activity
+                now = time.time()
+                if now - last_heartbeat >= 60:
+                    st = self._status_payload()
+                    log.info(
+                        "⏱ heartbeat | live=%s paused=%s active=%s src=%s",
+                        "1" if st.get("live_trading") else "0",
+                        st.get("paused"),
+                        st.get("active_orders"),
+                        st.get("data_source"),
+                    )
+                    last_heartbeat = now
+
             except (NetworkException, TokenException, InputException) as e:
                 log.error("Transient broker error: %s", e)
             except Exception as e:
@@ -168,7 +180,6 @@ class Application:
     # Telegram hook
     def _set_live_mode(self, val: bool) -> None:
         setattr(settings, "enable_live_trading", bool(val))
-        # runner reads it every tick; we also log immediately for visibility
         log.info("Live mode set to %s.", "True" if val else "False")
 
 
