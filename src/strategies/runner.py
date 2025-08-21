@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional, List
 
@@ -104,15 +105,7 @@ def _fetch_and_prepare_df(
 
 class StrategyRunner:
     """
-    Orchestrates:
-      1) market-hours gating
-      2) strike tokens from spot LTP
-      3) OHLC fetch (spot + option)
-      4) indicators on spot (ADX/DI)
-      5) strategy signal (df, spot_df, current_price)
-      6) position sizing
-      7) (optional) live execution via OrderExecutor
-      8) emits events for Telegram (ENTRY_PLACED, FILLS)
+    Core orchestrator. (Logs throttled for 'No signal' to avoid spam.)
     """
 
     def __init__(
@@ -130,6 +123,11 @@ class StrategyRunner:
         self._live = bool(getattr(settings, "enable_live_trading", False))
         self._paused = False
         self._event_sink = event_sink
+
+        # throttle settings (seconds)
+        # Logs "No signal" at most once every 300s (5 min). Change if you want.
+        self._no_signal_interval_sec = 300.0
+        self._no_signal_next_ts = 0.0
 
         self.executor = None
         if OrderExecutor is not None and getattr(settings, "executor", None) is not None:
@@ -291,12 +289,23 @@ class StrategyRunner:
         # strategy
         signal = self.strategy.generate_signal(df=opt_df, current_price=current_price, spot_df=spot_df)
         if not signal:
-            log.info("No signal (thresholds not met).")
+            # ---- THROTTLED INFO LOG ----
+            now = time.time()
+            if now >= self._no_signal_next_ts:
+                log.info("No signal (thresholds not met).")
+                self._no_signal_next_ts = now + self._no_signal_interval_sec
+            else:
+                log.debug("No signal (suppressed; next info at %.0fs).", self._no_signal_next_ts - now)
             return None
 
-        log.info("Signal: side=%s score=%s conf=%.2f sl=%.2f tp=%.2f",
-                 signal.get("side"), signal.get("score"), signal.get("confidence"),
-                 signal.get("sl_points"), signal.get("tp_points"))
+        log.info(
+            "Signal: side=%s score=%s conf=%.2f sl=%.2f tp=%.2f",
+            signal.get("side"),
+            signal.get("score"),
+            signal.get("confidence"),
+            signal.get("sl_points"),
+            signal.get("tp_points"),
+        )
 
         # sizing
         try:
@@ -305,11 +314,11 @@ class StrategyRunner:
             equity = float(get_equity_estimate())
         sl_points = float(signal.get("sl_points", 0.0) or 0.0)
         if equity <= 0 or sl_points <= 0:
-            log.info("Skip: invalid equity or sl_points.")
+            log.debug("Skip: invalid equity or sl_points.")
             return None
         lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
         if lots <= 0:
-            log.info("Skip: sizing -> 0 lots (risk too small?).")
+            log.debug("Skip: sizing -> 0 lots (risk too small?).")
             return None
         lot_size = int(getattr(inst, "nifty_lot_size", 75))
         quantity_units = lots * lot_size
