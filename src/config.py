@@ -56,7 +56,7 @@ class ServerConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     # gates
-    min_bars_for_signal: int = 30
+    min_bars_for_signal: int = 10
     min_signal_score: int = 2
     confidence_threshold: float = 4.0
     # indicators
