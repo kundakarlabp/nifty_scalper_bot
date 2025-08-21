@@ -258,7 +258,7 @@ class StrategyRunner:
                 return None
 
             # resolve CE token from selector
-            token_info = get_instrument_tokens(kite=self._kite, spot_price=spot_ltp)
+            token_info = get_instrument_tokens(spot_price=spot_ltp)
             if not token_info:
                 return None
             ce_token = token_info.get("tokens", {}).get("ce")
