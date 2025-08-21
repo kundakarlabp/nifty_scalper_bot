@@ -1,58 +1,36 @@
 from __future__ import annotations
 
+from typing import Literal, Optional, Tuple
+
 import pandas as pd
 
-
-def _compute_adx(df: pd.DataFrame, period: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    Minimal ADX/DI implementation (Wilder).
-    Assumes df has 'high','low','close'.
-    """
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    close = df["close"].astype(float)
-
-    up = high.diff()
-    dn = -low.diff()
-    plus_dm = up.where((up > dn) & (up > 0), 0.0)
-    minus_dm = dn.where((dn > up) & (dn > 0), 0.0)
-    tr = (high.combine(low, max) - low.combine(low, min)).abs()
-    atr = tr.ewm(alpha=1 / period, adjust=False).mean().replace(0, 1e-9)
-
-    plus_di = (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
-    minus_di = (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
-    dx = (plus_di.subtract(minus_di).abs() / (plus_di.add(minus_di).abs() + 1e-9)) * 100.0
-    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-    return adx, plus_di, minus_di
+Regime = Literal["trend_up", "trend_down", "range"]
 
 
 def detect_market_regime(
-    *,
     df: pd.DataFrame,
-    adx: pd.Series | None = None,
-    di_plus: pd.Series | None = None,
-    di_minus: pd.Series | None = None,
-    adx_trend_strength: int = 20,
-) -> str:
+    *,
+    adx: Optional[pd.Series] = None,
+    di_plus: Optional[pd.Series] = None,
+    di_minus: Optional[pd.Series] = None,
+    adx_trend_strength: float = 20.0,
+    di_diff_threshold: float = 10.0,
+) -> Tuple[Regime, float]:
     """
-    Returns: "trend_up" | "trend_down" | "range"
+    Return (regime, strength) where strength is ~0..100.
+    Heuristics: ADX high + DI spread => trend; else range.
     """
     if df is None or df.empty:
-        return "range"
+        return "range", 0.0
 
-    if adx is None or di_plus is None or di_minus is None:
-        adx, di_plus, di_minus = _compute_adx(df, period=14)
+    adx_val = float(adx.iloc[-1]) if adx is not None and len(adx) else 0.0
+    dip = float(di_plus.iloc[-1]) if di_plus is not None and len(di_plus) else 0.0
+    dim = float(di_minus.iloc[-1]) if di_minus is not None and len(di_minus) else 0.0
+    di_spread = abs(dip - dim)
 
-    try:
-        adx_val = float(adx.iloc[-1])
-        dplus = float(di_plus.iloc[-1])
-        dminus = float(di_minus.iloc[-1])
-    except Exception:
-        return "range"
-
-    if adx_val < float(adx_trend_strength):
-        return "range"
-    # trend: use DI dominance
-    if dplus > dminus:
-        return "trend_up"
-    return "trend_down"
+    if adx_val >= adx_trend_strength and di_spread >= di_diff_threshold:
+        if dip > dim:
+            return "trend_up", min(100.0, adx_val + di_spread)
+        else:
+            return "trend_down", min(100.0, adx_val + di_spread)
+    return "range", max(0.0, adx_val - adx_trend_strength)
