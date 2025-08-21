@@ -1,4 +1,3 @@
-# src/strategies/runner.py
 from __future__ import annotations
 
 import logging
@@ -65,7 +64,7 @@ def _ensure_adx_di(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
             return df
         except Exception:
             pass
-    # fallback
+    # fallback calc
     up = df["high"].diff()
     dn = -df["low"].diff()
     plus_dm = up.where((up > dn) & (up > 0), 0.0)
@@ -100,18 +99,6 @@ def _fetch_and_prepare_df(
 
 
 class StrategyRunner:
-    """
-    Orchestrates:
-      1) market-hours gating
-      2) strike tokens from spot LTP
-      3) OHLC fetch (spot + option)
-      4) indicators on spot (ADX/DI)
-      5) strategy signal (df, spot_df, current_price)
-      6) position sizing
-      7) optional live execution via OrderExecutor
-      8) emits events for Telegram (SIGNAL, ENTRY_PLACED, FILLS)
-    """
-
     def __init__(
         self,
         strategy: Optional[EnhancedScalpingStrategy] = None,
@@ -214,9 +201,9 @@ class StrategyRunner:
         if stop_event.is_set():
             return None
 
-        # Always service open trades (trailing/OCO), even off-hours
         service_only = not is_market_open()
-
+        if service_only:
+            log.debug("Gate: market closed, service open trades only.")
         try:
             inst = getattr(settings, "instruments", object())
             timeframe = str(getattr(getattr(settings, "data", object()), "timeframe", "minute"))
@@ -224,8 +211,10 @@ class StrategyRunner:
             lookback = timedelta(minutes=lookback_minutes)
 
             # fetch spot history
-            spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY spot default
+            spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY token
             spot_df = _fetch_and_prepare_df(self.spot_source, spot_token, lookback, timeframe)
+            if spot_df.empty:
+                log.debug("Data: empty spot_df (source=%s token=%s)", type(self.spot_source).__name__, spot_token)
 
             # spot LTP to pick strikes
             spot_symbol = str(getattr(inst, "spot_symbol", "NSE:NIFTY 50"))
@@ -235,12 +224,15 @@ class StrategyRunner:
                     spot_ltp = self.spot_source.get_last_price(spot_symbol)  # type: ignore[attr-defined]
             except Exception:
                 spot_ltp = None
+            if spot_ltp is None:
+                log.debug("Data: spot LTP unavailable for %s", spot_symbol)
 
             # service open trades regardless
             self._service_open_trades(spot_df if not spot_df.empty else None)
 
-            live_now = bool(getattr(settings, "enable_live_trading", False))
             if service_only or self._paused:
+                if self._paused:
+                    log.debug("Gate: runner paused.")
                 return None
 
             if not spot_df.empty:
@@ -248,26 +240,29 @@ class StrategyRunner:
                 spot_df = _ensure_adx_di(spot_df, window=adx_window)
 
             if spot_ltp is None or spot_ltp <= 0:
+                log.debug("Gate: invalid spot_ltp=%s", spot_ltp)
                 return None
 
-            # resolve option token
             token_info = get_instrument_tokens(kite_instance=self._kite)
             if not token_info:
+                log.debug("Resolver: token_info is None")
                 return None
             ce_token = token_info.get("tokens", {}).get("ce")
             if not ce_token:
+                log.debug("Resolver: CE token missing")
                 return None
 
-            # option OHLC
             opt_df = _fetch_and_prepare_df(self.data_source, ce_token, lookback, timeframe)
             if opt_df.empty:
+                log.debug("Data: empty opt_df (token=%s)", ce_token)
                 return None
 
             current_price = float(opt_df["close"].iloc[-1])
 
-            # Strategy expects (df, current_price, spot_df)
+            # Strategy signature (df, current_price, spot_df)
             signal = self.strategy.generate_signal(opt_df, current_price, spot_df)
             if not signal:
+                log.debug("Signal: none")
                 return None
 
             self.last_signal = {
@@ -276,16 +271,18 @@ class StrategyRunner:
             }
             self._emit("SIGNAL", signal=self.last_signal)
 
-            # --- sizing ---
+            # sizing
             try:
                 equity = float(get_equity_estimate(self._kite))
             except TypeError:
                 equity = float(get_equity_estimate())
             sl_points = float(signal.get("sl_points", 0.0) or 0.0)
             if equity <= 0 or sl_points <= 0:
+                log.debug("Gate: equity/SL invalid (equity=%s sl_points=%s)", equity, sl_points)
                 return None
             lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
             if lots <= 0:
+                log.debug("Gate: computed lots <= 0")
                 return None
             lot_size = int(getattr(inst, "nifty_lot_size", 75))
             quantity_units = lots * lot_size
@@ -306,7 +303,7 @@ class StrategyRunner:
                 },
             }
 
-            # --- live execution ---
+            live_now = bool(getattr(settings, "enable_live_trading", False))
             if live_now and self._kite and self.executor and option_symbol:
                 side = str(signal.get("side", "BUY")).upper()
                 entry_price = float(signal.get("entry_price", current_price))
@@ -327,17 +324,18 @@ class StrategyRunner:
                             self.executor.setup_gtt_orders(rec_id, sl_price=sl_price, tp_price=tp_price)
                         except Exception:
                             pass
-                    self._emit(
-                        "ENTRY_PLACED",
-                        symbol=option_symbol,
-                        side=side,
-                        qty=quantity_units,
-                        price=entry_price,
-                        record_id=rec_id,
-                    )
+                    self._emit("ENTRY_PLACED", symbol=option_symbol, side=side, qty=quantity_units, price=entry_price, record_id=rec_id)
 
-                # Service after entry
                 self._service_open_trades(opt_df)
+            else:
+                if not live_now:
+                    log.debug("Gate: live_mode=False (dry run).")
+                elif not self._kite:
+                    log.debug("Gate: no Kite client.")
+                elif not self.executor:
+                    log.debug("Gate: no OrderExecutor.")
+                elif not option_symbol:
+                    log.debug("Gate: option symbol unresolved.")
 
             return enriched
 
@@ -364,7 +362,7 @@ class StrategyRunner:
 
             if atr_val and atr_val > 0:
                 try:
-                    cur = float(opt_or_spot_df["close"].iloc[-1])  # proxy
+                    cur = float(opt_or_spot_df["close"].iloc[-1])
                 except Exception:
                     cur = None
                 if cur is not None:
