@@ -1,8 +1,8 @@
-# src/main.py
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -12,9 +12,8 @@ from typing import Any, Optional
 
 from src.config import settings
 from src.server import health as health_server
-from src.notifications.telegram_controller import TelegramController
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.strategies.runner import StrategyRunner
+from src.notifications.telegram_controller import TelegramController
 
 # Optional broker SDK (keep imports safe)
 try:
@@ -24,7 +23,7 @@ except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
     NetworkException = TokenException = InputException = Exception  # fallbacks
 
-# Optional DataSource
+# Optional DataSource (runner can build it)
 try:
     from src.data.source import LiveKiteSource, DataSource  # type: ignore
 except Exception:  # pragma: no cover
@@ -35,8 +34,9 @@ except Exception:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 
-# ------------ logging ------------
+# ------------ Logging helper ------------
 def _setup_logging() -> None:
+    """Configure centralized logging."""
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -47,58 +47,9 @@ def _setup_logging() -> None:
 
 # ------------ time helper ------------
 def _now_ist_naive() -> datetime:
+    """Return current naive datetime in IST."""
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     return ist.replace(tzinfo=None)
-
-
-# ------------ kite session wiring ------------
-def _build_kite() -> Optional[KiteConnect]:
-    if KiteConnect is None:
-        log.info("kiteconnect not installed; running in shadow mode.")
-        return None
-
-    ak = settings.zerodha.api_key
-    sk = settings.zerodha.api_secret
-    at = settings.zerodha.access_token
-    enctoken = settings.zerodha.enctoken
-
-    if enctoken:
-        # ENCTOKEN bootstrap (no api_key/secret needed)
-        k = KiteConnect(api_key="enc")  # dummy; library requires a string
-        try:
-            k.set_session_expiry_hook(lambda *a, **kw: None)  # avoid crashes on expiry hook
-        except Exception:
-            pass
-        k.set_headers({"Authorization": f"enctoken {enctoken}"})
-        log.info("Kite session initialized via ENCTOKEN.")
-        return k
-
-    if not ak or not at:
-        log.info("Kite credentials missing (API key/access token). Shadow mode.")
-        return None
-
-    k = KiteConnect(api_key=ak)
-    try:
-        k.set_access_token(at)
-        log.info("Kite session initialized via API key + access token.")
-    except Exception as e:
-        log.warning("Failed to set access token: %s", e)
-        return None
-    return k
-
-
-def _build_sources(kite: Optional[KiteConnect]) -> tuple[Optional[DataSource], Optional[DataSource]]:
-    """Return (option_source, spot_source). For now both are LiveKiteSource if kite is present."""
-    if kite and LiveKiteSource:
-        try:
-            opt_src = LiveKiteSource(kite)
-            opt_src.connect()
-            spot_src = LiveKiteSource(kite)  # separate instance (simple)
-            spot_src.connect()
-            return opt_src, spot_src
-        except Exception as e:
-            log.warning("LiveKiteSource init/connect failed: %s", e)
-    return None, None
 
 
 class Application:
@@ -106,77 +57,130 @@ class Application:
 
     def __init__(self) -> None:
         self.live_trading = bool(settings.enable_live_trading)
-        self._stop_event = threading.Event()
+        self.runner = StrategyRunner(event_sink=self._on_runner_event)
+        self.tg: Optional[TelegramController] = None
+
+        # for uptime in /ping
         self._start_ts = time.time()
 
-        # OS signals
+        # graceful shutdown
+        self._stop_event = threading.Event()
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
 
-        # Build broker + data sources
-        self.kite = _build_kite()
-        opt_src, spot_src = _build_sources(self.kite)
-
-        # Strategy + Runner wiring (runner expects explicit components)
-        self.strategy = EnhancedScalpingStrategy()
-        self.runner = StrategyRunner(
-            strategy=self.strategy,
-            data_source=opt_src,     # may be None in shadow mode; runner should handle
-            spot_source=spot_src,    # may be None in shadow mode; runner should handle
-        )
-
-        self.tg: Optional[TelegramController] = None
-
     # ---- signals / shutdown
     def _handle_signal(self, signum: int, frame: Any) -> None:
-        log.info("Received signal %s; initiating graceful shutdown…", signum)
+        log.info("Received signal %s, starting graceful shutdown…", signum)
         self._stop_event.set()
 
-    # ---- telegram command handler
-    def _handle_telegram_cmd(self, cmd: str) -> str:
-        c = (cmd or "").strip().lower()
-        if c == "ping":
-            return f"Pong at {_now_ist_naive().strftime('%H:%M:%S')} (uptime: {int(time.time()-self._start_ts)}s)"
-        if c == "status":
-            return str(self._status_payload())
-        if c == "stop":
-            self._stop_event.set()
-            return "Stopping…"
-        return f"Unknown command: '{cmd}'"
+    # ---- event sink (from StrategyRunner)
+    def _on_runner_event(self, evt: dict) -> None:
+        """Receive ENTRY_PLACED / FILLS from runner and forward to Telegram."""
+        if not self.tg or not isinstance(evt, dict):
+            return
+        t = str(evt.get("type", "")).upper()
+        if t == "ENTRY_PLACED":
+            try:
+                self.tg.notify_entry(
+                    symbol=str(evt.get("symbol", "?")),
+                    side=str(evt.get("side", "?")),
+                    qty=int(evt.get("qty", 0)),
+                    price=float(evt.get("price", 0.0)),
+                    record_id=str(evt.get("record_id", "")),
+                )
+            except Exception:
+                pass
+        elif t == "FILLS":
+            fills = evt.get("fills") or []
+            try:
+                self.tg.notify_fills(fills)
+            except Exception:
+                pass
 
     # ---- status payload for health/Telegram
     def _status_payload(self) -> dict:
-        d = {
-            "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
-            "live_trading": self.live_trading,
-            "runner": "StrategyRunner",
-        }
+        active_cnt = 0
         try:
-            # If your runner exposes a health_check() dict, prefer that
-            if hasattr(self.runner, "health_check"):
-                d.update(self.runner.health_check())  # type: ignore[attr-defined]
+            active_cnt = len(self.runner.executor.get_active_orders()) if self.runner.executor else 0
         except Exception:
             pass
-        return d
+        return {
+            "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
+            "live_trading": bool(getattr(settings, "enable_live_trading", False)),
+            "broker": "Kite" if getattr(self.runner, "_kite", None) else "none",
+            "active_orders": active_cnt,
+        }
+
+    # ---- provider wrappers for Telegram
+    def _positions_provider(self) -> dict:
+        try:
+            return self.runner.executor.get_positions_kite() if self.runner.executor else {}
+        except Exception:
+            return {}
+
+    def _actives_provider(self):
+        try:
+            return self.runner.executor.get_active_orders() if self.runner.executor else []
+        except Exception:
+            return []
+
+    # ---- control hooks
+    def _pause(self) -> None:
+        self.runner.pause()
+
+    def _resume(self) -> None:
+        self.runner.resume()
+
+    def _cancel_all(self) -> None:
+        if self.runner.executor:
+            self.runner.executor.cancel_all_orders()
+
+    def _enable_live(self, v: bool) -> None:
+        setattr(settings, "enable_live_trading", bool(v))
+        self.live_trading = bool(v)
 
     def run(self) -> None:
+        """Main entry point for the application."""
         _setup_logging()
         log.info("Starting Nifty Scalper Bot | live_trading=%s", self.live_trading)
 
-        # Health server
-        threading.Thread(
+        # Health server (guarded inside health module)
+        health_thread = threading.Thread(
             target=health_server.run,
-            kwargs={"callback": self._status_payload, "host": settings.server.host, "port": settings.server.port},
+            kwargs={
+                "callback": self._status_payload,
+                "host": settings.server.host,
+                "port": settings.server.port,
+            },
             daemon=True,
-        ).start()
+        )
+        health_thread.start()
 
-        # Telegram controller (guarded by settings.telegram)
+        # Telegram controller (enabled + creds required)
         try:
-            if settings.telegram.enabled and settings.telegram.bot_token and settings.telegram.chat_id:
+            # accept both TELEGRAM__ENABLED and legacy ENABLE_TELEGRAM
+            tg_enabled_env = os.getenv("ENABLE_TELEGRAM", "").lower() in ("1", "true", "yes")
+            tg_enabled_cfg = bool(getattr(getattr(settings, "telegram", object()), "enabled", True))
+            tg_enabled = tg_enabled_cfg or tg_enabled_env
+
+            bot_token = getattr(getattr(settings, "telegram", object()), "bot_token", None)
+            chat_id = getattr(getattr(settings, "telegram", object()), "chat_id", None)
+
+            if tg_enabled and bot_token and chat_id:
                 self.tg = TelegramController(
-                    status_callback=self._status_payload,
-                    control_callback=self._handle_telegram_cmd,
-                    summary_callback=lambda: "No summary yet.",
+                    status_provider=self._status_payload,
+                    positions_provider=self._positions_provider,
+                    actives_provider=self._actives_provider,
+                    runner_pause=self._pause,
+                    runner_resume=self._resume,
+                    cancel_all=self._cancel_all,
+                    set_risk_pct=lambda pct: setattr(settings.risk, "risk_per_trade", float(pct) / 100.0),
+                    toggle_trailing=lambda v: setattr(settings.executor, "enable_trailing", bool(v)),
+                    set_trailing_mult=lambda x: setattr(settings.executor, "trailing_atr_multiplier", float(x)),
+                    toggle_partial=lambda v: setattr(settings.executor, "partial_tp_enable", bool(v)),
+                    set_tp1_ratio=lambda pct: setattr(settings.executor, "tp1_qty_ratio", float(pct) / 100.0),
+                    set_breakeven_ticks=lambda n: setattr(settings.executor, "breakeven_ticks", int(n)),
+                    set_live_mode=self._enable_live,
                 )
                 self.tg.start_polling()
                 self.tg.send_startup_alert()
@@ -186,14 +190,13 @@ class Application:
             log.warning("Telegram controller not started: %s", e)
             self.tg = None
 
-        # Main trading loop (cooperative sleep + stop_event)
-        cadence = 0.5
+        # Main trading loop (StrategyRunner handles cadence internally if needed)
+        cadence = 0.5  # responsive sleep
         while not self._stop_event.is_set():
             try:
                 result = self.runner.run_once(stop_event=self._stop_event)
                 if result:
                     log.info("Signal: %s", result)
-                    # If you later wire OrderExecutor + Telegram fills, emit here
             except (NetworkException, TokenException, InputException) as e:
                 log.error("Transient broker error: %s", e)
             except Exception as e:
