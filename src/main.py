@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
 import time
-from typing import Any, Optional
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from typing import Any, Deque, Optional
 
 from src.config import settings
 from src.server import health as health_server
 from src.strategies.runner import StrategyRunner
 from src.notifications.telegram_controller import TelegramController
-from src.utils.logging_tools import log_buffer_handler, get_recent_logs
 
-# Optional broker SDK (safe import)
+# Optional broker SDK (keep imports safe)
 try:
     from kiteconnect import KiteConnect  # type: ignore
     from kiteconnect.exceptions import NetworkException, TokenException, InputException  # type: ignore
@@ -26,93 +28,171 @@ except Exception:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 
+# ------------ time helper ------------
+def _now_ist_naive() -> datetime:
+    """Return current naive datetime in IST."""
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.replace(tzinfo=None)
+
+
+# ------------ ring buffer log handler ------------
+class RingBufferHandler(logging.Handler):
+    """
+    In-memory ring buffer of recent log lines for /logs.
+    Cheap and thread-safe enough for our needs.
+    """
+    def __init__(self, capacity: int = 4000) -> None:
+        super().__init__()
+        self._buf: Deque[str] = deque(maxlen=max(100, capacity))
+        self._lock = threading.Lock()
+        fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        self._formatter = logging.Formatter(fmt)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = self._formatter.format(record)
+            with self._lock:
+                self._buf.append(line)
+        except Exception:
+            pass
+
+    def tail(self, n: int = 200) -> str:
+        n = max(1, min(n, self._buf.maxlen or 2000))
+        with self._lock:
+            return "\n".join(list(self._buf)[-n:])
+
+
+_RING_HANDLER: Optional[RingBufferHandler] = None
+
+
+def get_recent_logs(n: int = 200) -> str:
+    if __RING_HANDLER:
+        return __RING_HANDLER.tail(n)
+    return "no log buffer"
+
+
+# ------------ Logging helper ------------
 def _setup_logging() -> None:
+    """Configure centralized logging."""
+    global __RING_HANDLER
     root = logging.getLogger()
     root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     # Console
-    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
-        sh = logging.StreamHandler(sys.stdout)
-        sh.setFormatter(fmt)
-        root.addHandler(sh)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(root.level)
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root.addHandler(ch)
 
-    # In-memory buffer (for /logs)
-    if not any(h is log_buffer_handler for h in root.handlers):
-        root.addHandler(log_buffer_handler)
+    # Ring buffer for /logs
+    __RING_HANDLER = RingBufferHandler(capacity=6000)
+    __RING_HANDLER.setLevel(logging.DEBUG)  # capture everything for tailing
+    root.addHandler(__RING_HANDLER)
+
+    # Quiet noisy libs
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("werkzeug").setLevel(logging.INFO)
 
 
+# ------------ Application ------------
 class Application:
+    """Main application class for the Nifty Scalper Bot."""
+
     def __init__(self) -> None:
-        self.runner = StrategyRunner(event_sink=self._event_sink)
+        self.live_trading = bool(settings.enable_live_trading)
+        self.runner = StrategyRunner()
         self.tg: Optional[TelegramController] = None
         self._start_ts = time.time()
         self._stop_event = threading.Event()
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
-        self._last_live_flag = bool(getattr(settings, "enable_live_trading", False))
 
-    # ---- graceful shutdown
-    def _handle_signal(self, signum: int, frame: Any) -> None:  # noqa: ARG002
+    # ---- signals / shutdown
+    def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("Received signal %s, starting graceful shutdown…", signum)
         self._stop_event.set()
 
-    # ---- Telegram event sink from runner
-    def _event_sink(self, evt: dict) -> None:
-        if not self.tg:
-            return
-        t = evt.get("type")
-        if t == "ENTRY_PLACED":
-            self.tg.notify_entry(
-                symbol=evt.get("symbol", "?"),
-                side=evt.get("side", "?"),
-                qty=int(evt.get("qty", 0)),
-                price=float(evt.get("price", 0.0)),
-                record_id=str(evt.get("record_id", "")),
-            )
-        elif t == "FILLS":
-            self.tg.notify_fills(evt.get("fills") or [])
-        # We intentionally do not spam on SIGNAL; use /summary.
-
-    # ---- Telegram providers
+    # ---- status payload / health
     def _status_payload(self) -> dict:
-        return self.runner.to_status_dict()
+        r = {}
+        try:
+            r = self.runner.to_status_dict()
+        except Exception:
+            r = {}
+        return {
+            "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
+            "live_trading": bool(getattr(self.runner, "_live", False)),
+            "paused": bool(getattr(self.runner, "_paused", False)),
+            "active_orders": (len(self.runner.executor.get_active_orders()) if self.runner.executor else 0),
+            "broker": "Kite" if getattr(self.runner, "_kite", None) else "none",
+            "data_source": r.get("data_source"),
+        }
 
-    def _positions_provider(self) -> dict:
+    # ---- telegram command handler (fallback)
+    def _handle_telegram_cmd(self, cmd: str) -> str:
+        c = (cmd or "").strip().lower()
+        if c == "ping":
+            uptime = int(time.time() - self._start_ts)
+            return f"Pong at {_now_ist_naive().strftime('%H:%M:%S')} (uptime {uptime}s)"
+        if c == "status":
+            return str(self._status_payload())
+        if c == "stop":
+            self._stop_event.set()
+            return "Stopping…"
+        return f"Unknown command: '{cmd}'"
+
+    # ---- providers for TelegramController ----
+    def _provider_positions(self) -> dict:
         if self.runner.executor:
             return self.runner.executor.get_positions_kite()
         return {}
 
-    def _actives_provider(self):
+    def _provider_actives(self):
         if self.runner.executor:
             return self.runner.executor.get_active_orders()
         return []
 
-    def _summary_provider(self) -> str:
-        s = self.runner.to_status_dict()
-        sig = s.get("last_signal")
-        if not sig:
-            return "No recent signal."
-        return (
-            "📈 Last signal\n"
-            f"{sig.get('t')}\n"
-            f"{sig.get('side')} | conf={sig.get('confidence')} | score={sig.get('score')}\n"
-            f"entry={sig.get('entry_price')}  sl={sig.get('stop_loss')}  tp={sig.get('target')}"
-        )
+    def _provider_logs(self, n: int) -> str:
+        return get_recent_logs(n)
 
-    # ---- main
+    def _provider_health(self) -> dict:
+        # combine health + runner status
+        s = self._status_payload()
+        s["uptime_sec"] = int(time.time() - self._start_ts)
+        s["status"] = "ok"
+        return s
+
+    def _tick_once(self) -> dict:
+        """Run one strategy cycle (on-demand). Returns a small summary."""
+        try:
+            res = self.runner.run_once(stop_event=self._stop_event)
+            if res:
+                return {"ran": True, "signal": True, "side": res.get("side"), "lots": res.get("lots"), "qty": res.get("quantity_units")}
+            return {"ran": True, "signal": False}
+        except Exception as e:
+            log.exception("tick error: %s", e)
+            return {"ran": False, "error": str(e)}
+
+    # ---- run ----
     def run(self) -> None:
+        """Main entry point for the application."""
         _setup_logging()
-        log.info("Starting Nifty Scalper Bot | live_trading=%s", bool(getattr(settings, "enable_live_trading", False)))
+        log.info("Starting Nifty Scalper Bot | live_trading=%s", self.live_trading)
 
         # Health server
-        threading.Thread(
+        health_thread = threading.Thread(
             target=health_server.run,
-            kwargs={"callback": self._status_payload, "host": settings.server.host, "port": settings.server.port},
+            kwargs={
+                "callback": self._provider_health,
+                "host": settings.server.host,
+                "port": settings.server.port,
+            },
             daemon=True,
-        ).start()
+        )
+        health_thread.start()
 
-        # Telegram
+        # Telegram controller
         try:
             tg_enabled = bool(getattr(settings.telegram, "enabled", True))
             bot_token = getattr(settings.telegram, "bot_token", None)
@@ -120,14 +200,18 @@ class Application:
             if tg_enabled and bot_token and chat_id:
                 self.tg = TelegramController(
                     status_provider=self._status_payload,
-                    positions_provider=self._positions_provider,
-                    actives_provider=self._actives_provider,
-                    logs_provider=lambda n=60: get_recent_logs(n=n),
-                    summary_provider=self._summary_provider,
+                    positions_provider=self._provider_positions,
+                    actives_provider=self._provider_actives,
+                    # control hooks
                     runner_pause=self.runner.pause,
                     runner_resume=self.runner.resume,
                     cancel_all=(self.runner.executor.cancel_all_orders if self.runner.executor else None),
-                    set_live_mode=self._set_live_mode,
+                    # diagnostics
+                    logs_provider=self._provider_logs,
+                    health_provider=self._provider_health,
+                    tick_provider=self._tick_once,
+                    # live mode toggle
+                    set_live_mode=lambda v: setattr(self.runner, "_live", bool(v)),
                 )
                 self.tg.start_polling()
                 self.tg.send_startup_alert()
@@ -137,31 +221,12 @@ class Application:
             log.warning("Telegram controller not started: %s", e)
             self.tg = None
 
-        # Main loop with heartbeat
-        cadence = 0.5
-        last_heartbeat = 0.0
+        # Main loop
+        cadence = 0.75  # responsive sleep, no noisy heartbeats
         while not self._stop_event.is_set():
             try:
-                live_now = bool(getattr(settings, "enable_live_trading", False))
-                if live_now != self._last_live_flag:
-                    self._last_live_flag = live_now
-                    log.info("Live mode set to %s.", "True" if live_now else "False")
-
+                # Only place orders during trading hours; the runner contains all gating.
                 self.runner.run_once(stop_event=self._stop_event)
-
-                # heartbeat every 60s so Railway logs show activity
-                now = time.time()
-                if now - last_heartbeat >= 60:
-                    st = self._status_payload()
-                    log.info(
-                        "⏱ heartbeat | live=%s paused=%s active=%s src=%s",
-                        "1" if st.get("live_trading") else "0",
-                        st.get("paused"),
-                        st.get("active_orders"),
-                        st.get("data_source"),
-                    )
-                    last_heartbeat = now
-
             except (NetworkException, TokenException, InputException) as e:
                 log.error("Transient broker error: %s", e)
             except Exception as e:
@@ -170,6 +235,7 @@ class Application:
             if self._stop_event.wait(timeout=cadence):
                 break
 
+        # Teardown
         if self.tg:
             try:
                 self.tg.stop_polling()
@@ -177,28 +243,20 @@ class Application:
                 pass
         log.info("Bot stopped.")
 
-    # Telegram hook
-    def _set_live_mode(self, val: bool) -> None:
-        setattr(settings, "enable_live_trading", bool(val))
-        log.info("Live mode set to %s.", "True" if val else "False")
 
-
-# ---- CLI ----
+# ------------ cli ------------
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="nifty_scalper_bot")
     sub = p.add_subparsers(dest="cmd", required=False)
     sub.add_parser("start", help="Start trading loop (default)")
-    sub.add_parser("backtest", help="Run backtest from CSV file")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
-    cmd = args.cmd or "start"
-    if cmd == "start":
-        Application().run()
-    elif cmd == "backtest":
-        log.info("Backtest command not yet implemented.")
+    if (args.cmd or "start") == "start":
+        app = Application()
+        app.run()
     return 0
 
 
