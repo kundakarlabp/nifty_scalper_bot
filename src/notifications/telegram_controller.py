@@ -3,6 +3,7 @@ from __future__ import annotations
 """
 Lightweight Telegram controller for the Nifty Scalper Bot.
 
+Key points:
 - Single long-poll thread (no webhook, no double polling)
 - Allowlist (chat IDs) and simple operator role
 - Rate-limited, de-duplicated sends with exponential backoff
@@ -10,10 +11,10 @@ Lightweight Telegram controller for the Nifty Scalper Bot.
 - Rich command set (+ safe /config get|set on whitelisted keys)
 - Event helpers: notify_entry(), notify_fills(), notify_text()
 
-Requires:
+Env/config:
 - settings.telegram.bot_token (str)
 - settings.telegram.chat_id (int)
-- settings.telegram.enabled = True
+- settings.telegram.extra_admin_ids (optional list[int])
 """
 
 import hashlib
@@ -42,14 +43,14 @@ class TelegramController:
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
         cancel_all: Optional[Callable[[], None]] = None,
-        # runtime config hooks
+        # runtime config hooks (optional; if absent, /config mutates settings via whitelist)
         set_risk_pct: Optional[Callable[[float], None]] = None,           # 0.5 -> 0.5%
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
         toggle_partial: Optional[Callable[[bool], None]] = None,
         set_tp1_ratio: Optional[Callable[[float], None]] = None,          # 40 -> 40%
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
-        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE mode
+        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
@@ -126,7 +127,7 @@ class TelegramController:
                 int,
             ),
             "mode.live": (
-                lambda: getattr(self._status_provider(), "get", lambda *_: None)("live_trading"),  # live flag from runtime status
+                lambda: getattr(settings, "enable_live_trading", False),
                 (self._set_live_mode or (lambda v: setattr(settings, "enable_live_trading", bool(v)))),
                 lambda s: str(s).lower() in ("on", "true", "1", "yes", "live"),
             ),
@@ -210,7 +211,7 @@ class TelegramController:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
             return
-        self._stop.clear()
+        self._stop.clear
         self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
         self._poll_thread.start()
         self._started = True
@@ -251,7 +252,7 @@ class TelegramController:
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq.get("message", {}).get("chat", {}).get("id")
-            if chat_id is None or not self._authorized(int(chat_id)):
+            if not self._authorized(int(chat_id)):
                 return
             data = cq.get("data", "")
             try:
@@ -276,7 +277,7 @@ class TelegramController:
         text = (msg.get("text") or "").strip()
         if not text:
             return
-        if chat_id is None or not self._authorized(int(chat_id)):
+        if not self._authorized(int(chat_id)):
             self._send("Unauthorized.")
             return
 
@@ -332,6 +333,7 @@ class TelegramController:
             i0, i1 = (page - 1) * page_size, min(n, page * page_size)
             lines = [f"📦 Active Orders (p{page}/{pages})"]
             for rec in acts[i0:i1]:
+                # rec assumed to be a dataclass-like object with attributes
                 sym = getattr(rec, "symbol", "?")
                 side = getattr(rec, "side", "?")
                 qty = getattr(rec, "quantity", "?")
@@ -451,10 +453,7 @@ class TelegramController:
                 return self._send("Usage: /mode live|dry")
             val = (state == "live")
             if self._set_live_mode:
-                try:
-                    self._set_live_mode(val)
-                except Exception as e:
-                    return self._send(f"Failed to set mode: {e}")
+                self._set_live_mode(val)
             else:
                 setattr(settings, "enable_live_trading", val)
             return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
