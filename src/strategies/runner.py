@@ -234,15 +234,6 @@ class StrategyRunner:
             spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY spot default
             spot_df = _fetch_and_prepare_df(self.spot_source, spot_token, lookback, timeframe)
 
-            # spot LTP to pick strikes
-            spot_symbol = str(getattr(inst, "spot_symbol", "NSE:NIFTY 50"))
-            spot_ltp = None
-            try:
-                if hasattr(self.spot_source, "get_last_price"):
-                    spot_ltp = self.spot_source.get_last_price(spot_symbol)  # type: ignore[attr-defined]
-            except Exception:
-                spot_ltp = None
-
             # service open trades regardless
             self._service_open_trades(spot_df if not spot_df.empty else None)
 
@@ -254,11 +245,9 @@ class StrategyRunner:
                 adx_window = int(getattr(getattr(settings, "strategy", object()), "adx_period", 14))
                 spot_df = _ensure_adx_di(spot_df, window=adx_window)
 
-            if spot_ltp is None or spot_ltp <= 0:
-                return None
-
-            # resolve CE token from selector
-            token_info = get_instrument_tokens(spot_price=spot_ltp)
+            # resolve CE token via strike selector
+            # IMPORTANT: our selector expects ONLY `kite_instance=...`
+            token_info = get_instrument_tokens(kite_instance=self._kite)
             if not token_info:
                 return None
             ce_token = token_info.get("tokens", {}).get("ce")
@@ -272,12 +261,12 @@ class StrategyRunner:
 
             current_price = float(opt_df["close"].iloc[-1])
 
-            # --- Strategy: NOTE signature (df, spot_df, current_price) ---
-            signal = self.strategy.generate_signal(opt_df, spot_df, current_price)
+            # Strategy expects (df, current_price, spot_df)
+            signal = self.strategy.generate_signal(opt_df, current_price, spot_df)
             if not signal:
                 return None
 
-            # --- Sizing ---
+            # Sizing
             try:
                 equity = float(get_equity_estimate(self._kite))  # prefer broker margins when available
             except TypeError:
@@ -307,7 +296,7 @@ class StrategyRunner:
                 },
             }
 
-            # --- Live execution (if available) ---
+            # Live execution (if available)
             if self._live and self._kite and self.executor and option_symbol:
                 side = str(signal.get("side", "BUY")).upper()
                 entry_price = float(signal.get("entry_price", current_price))
