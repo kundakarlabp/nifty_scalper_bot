@@ -26,7 +26,9 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
+
 def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
+    """Lightweight retry wrapper with exponential backoff for transient Kite errors."""
     delay = base_delay
     for i in range(tries):
         try:
@@ -34,10 +36,16 @@ def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
         except (NetworkException, TokenException, InputException) as e:
             if i == tries - 1:
                 raise
-            log.warning("Transient broker error in %s (try %d/%d): %s",
-                        getattr(fn, "__name__", "call"), i + 1, tries, e)
+            log.warning(
+                "Transient broker error in %s (try %d/%d): %s",
+                getattr(fn, "__name__", "call"),
+                i + 1,
+                tries,
+                e,
+            )
             time.sleep(delay)
             delay *= 2.0
+
 
 def _round_to_tick(x: float, tick: float) -> float:
     try:
@@ -47,6 +55,7 @@ def _round_to_tick(x: float, tick: float) -> float:
     except Exception:
         return float(x)
 
+
 def _round_to_step(qty: int, step: int) -> int:
     try:
         if step <= 0:
@@ -54,6 +63,7 @@ def _round_to_step(qty: int, step: int) -> int:
         return int(math.floor(qty / step) * step)
     except Exception:
         return int(qty)
+
 
 def _chunks(total: int, chunk: int) -> List[int]:
     if chunk <= 0:
@@ -64,6 +74,7 @@ def _chunks(total: int, chunk: int) -> List[int]:
         out.append(take)
         left -= take
     return out
+
 
 @dataclass
 class _OrderRecord:
@@ -94,7 +105,7 @@ class _OrderRecord:
     variety: str = "regular"
     entry_order_type: str = "LIMIT"
     freeze_qty: int = 900
-    use_slm_exit: bool = True
+    use_slm_exit: bool = True  # kept for compatibility; GTT leg uses MARKET
 
     # partial/tp/breakeven/trailing controls
     partial_enabled: bool = False
@@ -117,16 +128,21 @@ class _OrderRecord:
     def side_sign(self) -> int:
         return 1 if self.side.upper() == "BUY" else -1
 
+
 class OrderExecutor:
     """
-    Entry -> regular; Exits -> single SL GTT + two regular LIMIT targets (TP1/TP2).
+    Entry -> REGULAR
+    Exits -> TP1/TP2 REGULAR LIMITs + one SL GTT (MARKET) for remaining qty.
+    Our code enforces OCO: when one exit fills, we cancel the others.
     """
+
     def __init__(self, config: Any, kite: Optional[KiteConnect], data_source: Optional[DataSource]) -> None:
         self.kite = kite
         self.data_source = data_source
         self._lock = threading.Lock()
         self._active: Dict[str, _OrderRecord] = {}
 
+        # executor config sourced from settings.executor safely
         self.exchange = getattr(config, "exchange", "NFO")
         self.product = getattr(config, "order_product", "NRML")
         self.variety = getattr(config, "order_variety", "regular")
@@ -192,11 +208,13 @@ class OrderExecutor:
                 params["price"] = _round_to_tick(float(price), self.tick_size)
 
             try:
-                oid = _retry_call(self.kite.place_order, **params)
+                oid = _retry_call(self.kite.place_order, tries=2, **params)  # <-- tries handled by wrapper
                 child_ids.append(oid)
                 record_id = record_id or oid
-                log.info("Entry child placed: %s %s qty=%d price=%s -> %s",
-                         symbol, side, q, params.get("price"), oid)
+                log.info(
+                    "Entry child placed: %s %s qty=%d price=%s -> %s",
+                    symbol, side, q, params.get("price"), oid
+                )
             except Exception as e:
                 log.error("place_order failed chunk %d: %s", q, e)
 
@@ -217,7 +235,7 @@ class OrderExecutor:
             self._active[rec.record_id] = rec
         return rec.record_id
 
-    # --------- exits setup (SL GTT + two LIMIT TPs) ---------
+    # --------- exits setup (TP1/TP2 + SL GTT) ---------
     def setup_gtt_orders(self, record_id: str, sl_price: float, tp_price: float) -> None:
         rec = None
         with self._lock:
@@ -229,7 +247,6 @@ class OrderExecutor:
         if qty <= 0:
             return
 
-        # Targets (TP1 + TP2 regular LIMIT orders)
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
         tp_price = _round_to_tick(float(tp_price), rec.tick_size)
         sl_price = _round_to_tick(float(sl_price), rec.tick_size)
@@ -238,11 +255,12 @@ class OrderExecutor:
         for old_tid in (rec.tp1_order_id, rec.tp2_order_id):
             if old_tid:
                 try:
-                    _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=old_tid, tries=2)
+                    _retry_call(self.kite.cancel_order, tries=2, variety=rec.variety, order_id=old_tid)
                 except Exception:
                     pass
         rec.tp1_order_id = rec.tp2_order_id = None
 
+        # Partial qty split
         if rec.partial_enabled:
             q_tp1 = _round_to_step(int(round(qty * max(0.0, min(1.0, rec.tp1_ratio)))), self.lot_size)
             q_tp1 = min(max(q_tp1, self.lot_size), qty)  # at least one lot, not above total
@@ -254,10 +272,10 @@ class OrderExecutor:
         if q_tp1 > 0:
             try:
                 rec.tp1_order_id = _retry_call(
-                    self.kite.place_order,
+                    self.kite.place_order, tries=2,
                     variety=rec.variety, exchange=rec.exchange, tradingsymbol=rec.symbol,
                     transaction_type=exit_side, quantity=int(q_tp1), product=rec.product,
-                    order_type="LIMIT", price=tp_price, tries=2
+                    order_type="LIMIT", price=tp_price
                 )
                 log.info("TP1 placed %s qty=%d @ %.2f -> %s", rec.symbol, q_tp1, tp_price, rec.tp1_order_id)
             except Exception as e:
@@ -267,10 +285,10 @@ class OrderExecutor:
         if q_tp2 > 0:
             try:
                 rec.tp2_order_id = _retry_call(
-                    self.kite.place_order,
+                    self.kite.place_order, tries=2,
                     variety=rec.variety, exchange=rec.exchange, tradingsymbol=rec.symbol,
                     transaction_type=exit_side, quantity=int(q_tp2), product=rec.product,
-                    order_type="LIMIT", price=tp_price, tries=2
+                    order_type="LIMIT", price=tp_price
                 )
                 log.info("TP2 placed %s qty=%d @ %.2f -> %s", rec.symbol, q_tp2, tp_price, rec.tp2_order_id)
             except Exception as e:
@@ -278,7 +296,7 @@ class OrderExecutor:
 
         rec.tp_price = tp_price
 
-        # SL as single GTT for total remaining qty
+        # --- SL as single GTT MARKET for total remaining qty ---
         self._refresh_sl_gtt(rec, sl_price=sl_price, qty=qty)
 
     def _refresh_sl_gtt(self, rec: _OrderRecord, *, sl_price: float, qty: int) -> None:
@@ -287,37 +305,51 @@ class OrderExecutor:
         # cancel previous SL GTT
         if rec.sl_gtt_id is not None:
             try:
-                _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
+                _retry_call(self.kite.cancel_gtt, tries=2, gtt_id=rec.sl_gtt_id)
             except Exception:
                 pass
             rec.sl_gtt_id = None
 
+        # Zerodha GTT API needs: trigger_values=[...], last_price (current LTP), and order payloads (LIMIT/MARKET).
+        # We emulate SL-M by using order_type="MARKET" with a single trigger.
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
+
+        # try to get a reasonable last_price (required by GTT)
+        last_price = None
+        try:
+            if self.data_source and hasattr(self.data_source, "get_last_price"):
+                last_price = self.data_source.get_last_price(rec.symbol)  # type: ignore[attr-defined]
+        except Exception:
+            last_price = None
+        if last_price is None:
+            # fallback if LTP not available
+            last_price = float(sl_price)
+
         sl_leg = {
             "exchange": rec.exchange,
             "tradingsymbol": rec.symbol,
             "transaction_type": exit_side,
             "quantity": int(qty),
-            "order_type": "SL-M" if rec.use_slm_exit else "SL",
             "product": rec.product,
-            "price": None if rec.use_slm_exit else sl_price,
-            "trigger_price": sl_price,
+            "order_type": "MARKET",   # GTT supports MARKET/LIMIT; we use MARKET for stop
+            "price": 0.0,             # ignored for MARKET
         }
 
         try:
             gid = _retry_call(
                 self.kite.place_gtt,
+                tries=2,
                 trigger_type="single",
                 tradingsymbol=rec.symbol,
                 exchange=rec.exchange,
-                trigger_price=sl_price,
-                last_price=None,
+                trigger_values=[sl_price],   # <-- FIX: correct param name & type
+                last_price=float(last_price),
                 orders=[sl_leg],
-                tries=2,
             )
-            rec.sl_gtt_id = int(gid)
+            # Kite returns dict or id; normalize to int if possible
+            rec.sl_gtt_id = int(gid if isinstance(gid, int) else gid.get("id") or gid.get("gtt_id"))
             rec.sl_price = sl_price
-            log.info("SL GTT set for %s qty=%d @ %.2f -> %s", rec.symbol, qty, sl_price, gid)
+            log.info("SL GTT set for %s qty=%d @ %.2f -> %s", rec.symbol, qty, sl_price, rec.sl_gtt_id)
         except Exception as e:
             log.error("SL GTT placement failed: %s", e)
 
@@ -335,13 +367,19 @@ class OrderExecutor:
         if rec.side == "BUY":
             proposed = _round_to_tick(current_price - m * atr, rec.tick_size)
             if rec.tp1_done and rec.breakeven_ticks > 0:
-                proposed = max(proposed, _round_to_tick(rec.entry_price + rec.breakeven_ticks * rec.tick_size, rec.tick_size))
+                proposed = max(
+                    proposed,
+                    _round_to_tick(rec.entry_price + rec.breakeven_ticks * rec.tick_size, rec.tick_size),
+                )
             if rec.sl_price is not None and proposed <= rec.sl_price:
                 return
         else:
             proposed = _round_to_tick(current_price + m * atr, rec.tick_size)
             if rec.tp1_done and rec.breakeven_ticks > 0:
-                proposed = min(proposed, _round_to_tick(rec.entry_price - rec.breakeven_ticks * rec.tick_size, rec.tick_size))
+                proposed = min(
+                    proposed,
+                    _round_to_tick(rec.entry_price - rec.breakeven_ticks * rec.tick_size, rec.tick_size),
+                )
             if rec.sl_price is not None and proposed >= rec.sl_price:
                 return
 
@@ -361,14 +399,14 @@ class OrderExecutor:
         # Cancel SL GTT and TPs
         if rec.sl_gtt_id is not None:
             try:
-                _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
+                _retry_call(self.kite.cancel_gtt, tries=2, gtt_id=rec.sl_gtt_id)
             except Exception:
                 pass
             rec.sl_gtt_id = None
         for tid in (rec.tp1_order_id, rec.tp2_order_id):
             if tid:
                 try:
-                    _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=tid, tries=2)
+                    _retry_call(self.kite.cancel_order, tries=2, variety=rec.variety, order_id=tid)
                 except Exception:
                     pass
 
@@ -380,9 +418,10 @@ class OrderExecutor:
         try:
             oid = _retry_call(
                 self.kite.place_order,
+                tries=2,
                 variety=rec.variety, exchange=rec.exchange, tradingsymbol=rec.symbol,
                 transaction_type=("SELL" if rec.side == "BUY" else "BUY"),
-                quantity=int(qty), product=rec.product, order_type="MARKET", tries=2
+                quantity=int(qty), product=rec.product, order_type="MARKET"
             )
             log.info("Exit %s qty=%d -> %s (%s)", rec.symbol, qty, oid, exit_reason)
             rec.is_open = False
@@ -402,18 +441,18 @@ class OrderExecutor:
             # cancel all children and exits
             for oid in rec.child_order_ids:
                 try:
-                    _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=oid, tries=2)
+                    _retry_call(self.kite.cancel_order, tries=2, variety=rec.variety, order_id=oid)
                 except Exception:
                     pass
             for tid in (rec.tp1_order_id, rec.tp2_order_id):
                 if tid:
                     try:
-                        _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=tid, tries=2)
+                        _retry_call(self.kite.cancel_order, tries=2, variety=rec.variety, order_id=tid)
                     except Exception:
                         pass
             if rec.sl_gtt_id is not None:
                 try:
-                    _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
+                    _retry_call(self.kite.cancel_gtt, tries=2, gtt_id=rec.sl_gtt_id)
                 except Exception:
                     pass
             rec.is_open = False
@@ -462,45 +501,61 @@ class OrderExecutor:
             if total_filled > rec.filled_qty:
                 rec.filled_qty = total_filled
 
-            # TP1/TP2 status
-            tp_filled_now = False
-            for tid in ("tp1_order_id", "tp2_order_id"):
-                oid = getattr(rec, tid)
-                if not oid:
-                    continue
-                o = omap.get(oid, {})
-                if (o.get("status") or "").upper() == "COMPLETE":
-                    tp_filled_now = True
-                    # If TP1 just filled and partial enabled, breakeven hop + shrink SL qty
-                    if tid == "tp1_order_id" and rec.partial_enabled and not rec.tp1_done:
-                        rec.tp1_done = True
-                        # Recreate SL for remaining qty and hop to breakeven
-                        rem = rec.remaining_qty or rec.quantity
-                        if rem > 0:
-                            be = _round_to_tick(
-                                rec.entry_price + rec.side_sign() * rec.breakeven_ticks * rec.tick_size,
-                                rec.tick_size
-                            )
-                            self._refresh_sl_gtt(rec, sl_price=be, qty=rem)
+            # TP1/TP2 status (OCO enforcement on success)
+            tp1_complete = False
+            tp2_complete = False
 
-            # SL triggered? (GTT status may show triggered->child orders created; we rely on gtts status)
-            if rec.sl_gtt_id is not None:
-                g = gmap.get(rec.sl_gtt_id, {})
-                g_state = (g.get("status") or g.get("state") or "").lower()
-                if g_state in ("triggered", "cancelled", "deleted", "expired"):
-                    # consider position closed; avg px unknown from here, set 0
-                    rec.is_open = False
-                    fills.append((rec.record_id, float(rec.sl_price or 0.0)))
-                    continue
+            if rec.tp1_order_id:
+                o1 = omap.get(rec.tp1_order_id, {})
+                tp1_complete = (o1.get("status", "") or "").upper() == "COMPLETE"
+            else:
+                tp1_complete = True  # no TP1 means treat as done for closure logic
 
-            # If both TPs filled or remaining qty is 0, close
-            if (rec.tp1_order_id and (omap.get(rec.tp1_order_id, {}).get("status","").upper()=="COMPLETE") or not rec.tp1_order_id) \
-               and (rec.tp2_order_id and (omap.get(rec.tp2_order_id, {}).get("status","").upper()=="COMPLETE")):
+            if rec.tp2_order_id:
+                o2 = omap.get(rec.tp2_order_id, {})
+                tp2_complete = (o2.get("status", "") or "").upper() == "COMPLETE"
+
+            # If TP1 just filled: hop SL to BE and shrink SL qty to remaining
+            if rec.partial_enabled and not rec.tp1_done and rec.tp1_order_id and tp1_complete:
+                rec.tp1_done = True
+                rem = rec.remaining_qty or rec.quantity
+                if rem > 0:
+                    be = _round_to_tick(
+                        rec.entry_price + rec.side_sign() * rec.breakeven_ticks * rec.tick_size,
+                        rec.tick_size
+                    )
+                    self._refresh_sl_gtt(rec, sl_price=be, qty=rem)
+                # cancel TP1 idempotently (already complete; no-op if cancel fails)
+
+            # If TP2 filled OR both TPs complete => position closed, cancel SL GTT
+            if tp2_complete and tp1_complete:
+                if rec.sl_gtt_id is not None:
+                    try:
+                        _retry_call(self.kite.cancel_gtt, tries=2, gtt_id=rec.sl_gtt_id)
+                    except Exception:
+                        pass
+                    rec.sl_gtt_id = None
                 rec.is_open = False
                 fills.append((rec.record_id, float(rec.tp_price or 0.0)))
                 continue
 
-        # purge
+            # SL triggered? (GTT state)
+            if rec.sl_gtt_id is not None:
+                g = gmap.get(rec.sl_gtt_id, {})
+                g_state = (g.get("status") or g.get("state") or "").lower()
+                if g_state in ("triggered", "cancelled", "deleted", "expired"):
+                    # Cancel any pending TP legs to enforce OCO
+                    for tid in (rec.tp1_order_id, rec.tp2_order_id):
+                        if tid:
+                            try:
+                                _retry_call(self.kite.cancel_order, tries=2, variety=rec.variety, order_id=tid)
+                            except Exception:
+                                pass
+                    rec.is_open = False
+                    fills.append((rec.record_id, float(rec.sl_price or 0.0)))
+                    continue
+
+        # purge closed
         if fills:
             with self._lock:
                 self._active = {k: v for k, v in self._active.items() if v.is_open}
