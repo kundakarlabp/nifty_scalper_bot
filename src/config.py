@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, Optional, List
@@ -8,62 +9,78 @@ from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, NonNegativeFl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# ---------- helpers ----------
+
 def _find_env_file() -> Optional[Path]:
-    """Look up to 6 parents for a .env file."""
     p = Path.cwd()
     for _ in range(6):
-        cand = p / ".env"
-        if cand.exists():
-            return cand
+        f = p / ".env"
+        if f.exists():
+            return f
         p = p.parent
     return None
 
 
-# ---------------- Component models ----------------
+def _env_first(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.getenv(n)
+        if v is not None:
+            v = v.strip()
+            if v:
+                return v
+    return None
+
+
+def _as_bool(v: Optional[str], default: bool = False) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _csv_ints(v: Optional[str]) -> List[int]:
+    if not v:
+        return []
+    out: List[int] = []
+    for part in v.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except Exception:
+            pass
+    return out
+
+
+# ---------- component models (NO aliases; use nested env like TELEGRAM__ENABLED) ----------
 
 class DataSettings(BaseModel):
-    warmup_bars: PositiveInt = Field(30, alias="WARMUP_BARS")
-    lookback_minutes: PositiveInt = Field(60, alias="DATA_LOOKBACK_MINUTES")
-    timeframe: Literal["minute", "5minute"] = Field("minute", alias="HISTORICAL_TIMEFRAME")
+    warmup_bars: PositiveInt = 30
+    lookback_minutes: PositiveInt = 60
+    timeframe: Literal["minute", "5minute"] = "minute"
 
 
 class RiskConfig(BaseModel):
     default_equity: PositiveFloat = 30000.0
-    # will be overridden by RISK_PER_TRADE_PCT (see post-init)
-    risk_per_trade: NonNegativeFloat = Field(0.01, alias="RISK_PER_TRADE")
+    risk_per_trade: NonNegativeFloat = 0.01
     max_trades_per_day: PositiveInt = 5
     consecutive_loss_limit: NonNegativeInt = 3
     max_daily_drawdown_pct: NonNegativeFloat = 0.05
 
 
 class ZerodhaConfig(BaseModel):
-    api_key: Optional[str] = Field(default=None, alias="ZERODHA_API_KEY")
-    api_secret: Optional[str] = Field(default=None, alias="ZERODHA_API_SECRET")
-    access_token: Optional[str] = Field(default=None, alias="ZERODHA_ACCESS_TOKEN")
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    access_token: Optional[str] = None
     public_token: Optional[str] = None
     enctoken: Optional[str] = None
 
 
 class TelegramConfig(BaseModel):
-    # Support both ENABLE_TELEGRAM and TELEGRAM_ENABLED
-    enabled: bool = Field(default=True, alias="ENABLE_TELEGRAM")
-    bot_token: Optional[str] = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
-    chat_id: Optional[int] = Field(default=None, alias="TELEGRAM_CHAT_ID")
-    # Accept CSV string from env: "111,222,333"
+    enabled: bool = True
+    bot_token: Optional[str] = None
+    chat_id: Optional[int] = None
     extra_admin_ids: List[int] = Field(default_factory=list)
-
-    @staticmethod
-    def _parse_csv_ids(raw: Optional[str]) -> List[int]:
-        if not raw:
-            return []
-        parts = [p.strip() for p in str(raw).split(",") if p.strip()]
-        out: List[int] = []
-        for p in parts:
-            try:
-                out.append(int(p))
-            except Exception:
-                continue
-        return out
 
 
 class ServerConfig(BaseModel):
@@ -72,11 +89,10 @@ class ServerConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    # entry gates
-    min_bars_for_signal: int = Field(10, alias="MIN_BARS_FOR_SIGNAL")
-    min_signal_score: int = Field(2, alias="MIN_SIGNAL_SCORE")
-    confidence_threshold: float = Field(4.0, alias="CONFIDENCE_THRESHOLD")
-
+    # gates
+    min_bars_for_signal: int = 10
+    min_signal_score: int = 2
+    confidence_threshold: float = 4.0
     # indicators
     ema_fast: int = 9
     ema_slow: int = 21
@@ -84,14 +100,12 @@ class StrategyConfig(BaseModel):
     adx_period: int = 14
     adx_trend_strength: int = 20
     di_diff_threshold: float = 10.0
-
     # ATR/SL/TP
-    atr_period: int = Field(14, alias="ATR_PERIOD")
-    atr_sl_multiplier: float = Field(1.5, alias="ATR_SL_MULTIPLIER")
-    atr_tp_multiplier: float = Field(3.0, alias="ATR_TP_MULTIPLIER")
-    sl_confidence_adj: float = Field(0.2, alias="SL_CONFIDENCE_ADJ")
-    tp_confidence_adj: float = Field(0.3, alias="TP_CONFIDENCE_ADJ")
-
+    atr_period: int = 14
+    atr_sl_multiplier: float = 1.5
+    atr_tp_multiplier: float = 3.0
+    sl_confidence_adj: float = 0.12
+    tp_confidence_adj: float = 0.35
     # regime tweaks
     trend_tp_boost: float = 0.6
     trend_sl_relax: float = 0.2
@@ -100,24 +114,23 @@ class StrategyConfig(BaseModel):
 
 
 class InstrumentsConfig(BaseModel):
-    spot_symbol: str = Field("NSE:NIFTY 50", alias="SPOT_SYMBOL")
-    trade_symbol: str = Field("NIFTY", alias="TRADE_SYMBOL")
-    exchange: str = Field("NFO", alias="TRADE_EXCHANGE")
-    instrument_token: int = Field(256265, alias="INSTRUMENT_TOKEN")
-    nifty_lot_size: int = Field(75, alias="NIFTY_LOT_SIZE")
-    min_lots: int = Field(1, alias="MIN_LOTS")
-    max_lots: int = Field(10, alias="MAX_LOTS")
-    strike_range: int = Field(3, alias="STRIKE_SELECTION_RANGE")
+    spot_symbol: str = "NSE:NIFTY 50"
+    trade_symbol: str = "NIFTY"
+    exchange: str = "NFO"
+    instrument_token: int = 256265
+    nifty_lot_size: int = 75
+    min_lots: int = 1
+    max_lots: int = 10
+    strike_range: int = 3
 
 
 class ExecutorConfig(BaseModel):
-    exchange: str = Field("NFO", alias="TRADE_EXCHANGE")
+    exchange: str = "NFO"
     order_product: str = "NRML"
     order_variety: str = "regular"
     entry_order_type: str = "LIMIT"
-    tick_size: float = Field(0.05, alias="TICK_SIZE")
-    exchange_freeze_qty: int = Field(900, alias="NFO_FREEZE_QTY")
-
+    tick_size: float = 0.05
+    exchange_freeze_qty: int = 900
     preferred_exit_mode: Literal["REGULAR", "OCO", "AUTO"] = "REGULAR"
     use_slm_exit: bool = True
     partial_tp_enable: bool = False
@@ -125,24 +138,25 @@ class ExecutorConfig(BaseModel):
     breakeven_ticks: int = 2
     enable_trailing: bool = True
     trailing_atr_multiplier: float = 1.5
-
     fee_per_lot: float = 20.0
 
 
-# ---------------- App settings ----------------
+# ---------- master settings ----------
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_find_env_file(),
-        extra="ignore",
         env_nested_delimiter="__",
+        extra="ignore",
         case_sensitive=False,
     )
 
-    enable_live_trading: bool = Field(False, alias="ENABLE_LIVE_TRADING")
-    allow_offhours_testing: bool = Field(False, alias="ALLOW_OFFHOURS_TESTING")
-    log_level: str = Field("INFO", alias="LOG_LEVEL")
+    # top-level
+    enable_live_trading: bool = False
+    allow_offhours_testing: bool = False
+    log_level: str = "INFO"
 
+    # components
     data: DataSettings = DataSettings()
     risk: RiskConfig = RiskConfig()
     zerodha: ZerodhaConfig = ZerodhaConfig()
@@ -152,26 +166,64 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsConfig = InstrumentsConfig()
     executor: ExecutorConfig = ExecutorConfig()
 
-    # Compatibility shims for alternate env names
-    TELEGRAM_ENABLED: Optional[bool] = None
-    TELEGRAM_EXTRA_ADMINS: Optional[str] = None  # CSV
-    RISK_PER_TRADE_PCT: Optional[float] = None
+    # flat-env fallbacks (Railway/legacy)
+    RISK_PER_TRADE_PCT: Optional[str] = None
+    TELEGRAM_ENABLED: Optional[str] = None
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
+    TELEGRAM_EXTRA_ADMINS: Optional[str] = None
+
+    TG_BOT_TOKEN: Optional[str] = None
+    TG_CHAT_ID: Optional[str] = None
+    BOT_TOKEN: Optional[str] = None
+    CHAT_ID: Optional[str] = None
+
+    ZERODHA_API_KEY: Optional[str] = None
+    ZERODHA_API_SECRET: Optional[str] = None
+    ZERODHA_ACCESS_TOKEN: Optional[str] = None
+    ZERODHA_KEY: Optional[str] = None
+    ZERODHA_SECRET: Optional[str] = None
+    ZERODHA_TOKEN: Optional[str] = None
 
     def model_post_init(self, __ctx) -> None:  # type: ignore[override]
-        # Allow TELEGRAM_ENABLED as well
+        # --- Telegram from flat env (if nested vars weren’t used)
         if self.TELEGRAM_ENABLED is not None:
-            self.telegram.enabled = bool(self.TELEGRAM_ENABLED)
-        # Accept CSV for extra admins
-        if self.TELEGRAM_EXTRA_ADMINS:
-            self.telegram.extra_admin_ids = TelegramConfig._parse_csv_ids(self.TELEGRAM_EXTRA_ADMINS)
-        # Percent convenience
-        if self.RISK_PER_TRADE_PCT is not None:
+            self.telegram.enabled = _as_bool(self.TELEGRAM_ENABLED, True)
+
+        self.telegram.bot_token = self.telegram.bot_token or _env_first(
+            "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "BOT_TOKEN"
+        )
+        if self.telegram.chat_id is None:
+            chat = _env_first("TELEGRAM_CHAT_ID", "TG_CHAT_ID", "CHAT_ID")
             try:
-                self.risk.risk_per_trade = float(self.RISK_PER_TRADE_PCT) / 100.0
+                self.telegram.chat_id = int(chat) if chat else None
+            except Exception:
+                self.telegram.chat_id = None
+
+        extra = self.TELEGRAM_EXTRA_ADMINS or os.getenv("TELEGRAM_EXTRA_ADMINS")
+        if extra:
+            self.telegram.extra_admin_ids = _csv_ints(extra)
+
+        # --- Zerodha fallbacks
+        self.zerodha.api_key = self.zerodha.api_key or _env_first(
+            "ZERODHA_API_KEY", "ZERODHA_KEY", "KITE_API_KEY"
+        )
+        self.zerodha.api_secret = self.zerodha.api_secret or _env_first(
+            "ZERODHA_API_SECRET", "ZERODHA_SECRET", "KITE_API_SECRET"
+        )
+        self.zerodha.access_token = self.zerodha.access_token or _env_first(
+            "ZERODHA_ACCESS_TOKEN", "ZERODHA_TOKEN", "KITE_ACCESS_TOKEN"
+        )
+
+        # --- Risk % convenience
+        pct = self.RISK_PER_TRADE_PCT or os.getenv("RISK_PER_TRADE_PCT")
+        if pct:
+            try:
+                self.risk.risk_per_trade = float(pct) / 100.0
             except Exception:
                 pass
 
-    # Convenience mirrors
+    # mirrors / helpers
     @property
     def DEFAULT_EQUITY(self) -> float:
         return float(self.risk.default_equity)
@@ -193,6 +245,26 @@ class AppSettings(BaseSettings):
     @property
     def telegram_ready(self) -> bool:
         return bool(self.telegram.enabled and self.telegram.bot_token and self.telegram.chat_id)
+
+    def debug_summary(self) -> dict:
+        def mask(v: Optional[str]) -> str:
+            if not v:
+                return "absent"
+            return f"present({len(v)} chars)"
+        return {
+            "telegram": {
+                "enabled": bool(self.telegram.enabled),
+                "bot_token": mask(self.telegram.bot_token),
+                "chat_id": "present" if self.telegram.chat_id else "absent",
+                "extra_admin_ids": self.telegram.extra_admin_ids,
+            },
+            "zerodha": {
+                "api_key": mask(self.zerodha.api_key),
+                "access_token": mask(self.zerodha.access_token),
+            },
+            "log_level": self.log_level,
+            "env_file": str(_find_env_file() or "none"),
+        }
 
 
 settings = AppSettings()
