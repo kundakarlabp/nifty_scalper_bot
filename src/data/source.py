@@ -1,4 +1,3 @@
-# src/data/source.py
 """
 Defines the market data source abstraction and concrete implementations.
 
@@ -26,14 +25,9 @@ import pandas as pd
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
-    from kiteconnect.exceptions import (  # type: ignore
-        NetworkException,
-        TokenException,
-        InputException,
-    )
+    from kiteconnect.exceptions import NetworkException, TokenException, InputException  # type: ignore
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
-    # fallbacks (used by retry decorator)
     NetworkException = TokenException = InputException = Exception  # type: ignore
 
 # Centralized settings (optional import guard)
@@ -43,9 +37,6 @@ except Exception:  # pragma: no cover
     settings = None  # type: ignore[var-annotated]
 
 
-# ---------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     level = logging.INFO
@@ -95,10 +86,7 @@ def _retry(
 # Abstract Base Class
 # ---------------------------------------------------------------------
 class DataSource(ABC):
-    """
-    Abstract interface for all data sources (live or backtest).
-    Decouples the runner from the data provider.
-    """
+    """Abstract interface for all data sources (live or backtest)."""
 
     @abstractmethod
     def connect(self) -> None:
@@ -121,9 +109,7 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_last_price(self, symbol: str) -> Optional[float]:
-        """
-        Fetch the last traded price (LTP) for a given instrument symbol (e.g., 'NSE:NIFTY 50').
-        """
+        """Fetch the last traded price (LTP) for a given instrument symbol."""
         ...
 
 
@@ -163,8 +149,7 @@ class LiveKiteSource(DataSource):
         try:
             df["datetime"] = df["datetime"].dt.tz_localize(None)
         except Exception:
-            # already naive
-            pass
+            pass  # already naive
 
         df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
 
@@ -182,7 +167,6 @@ class LiveKiteSource(DataSource):
         try:
             self._kite.margins()
         except Exception:
-            # Some setups restrict margins; fall back to profile
             self._kite.profile()
 
     # --- LTP ---
@@ -194,7 +178,6 @@ class LiveKiteSource(DataSource):
         """
         try:
             data = self._kite.ltp([symbol])
-            # Kite returns dict keyed by instrument; get the first (or the given symbol)
             if symbol in data:
                 return float(data[symbol]["last_price"])
             # fallback: pick any value
@@ -214,9 +197,7 @@ class LiveKiteSource(DataSource):
         to_date: datetime,
         interval: str,
     ) -> pd.DataFrame:
-        """
-        Fetch historical OHLC from Kite and normalize.
-        """
+        """Fetch historical OHLC from Kite and normalize."""
         try:
             # Validate interval against typical Kite values we use
             if interval not in {"minute", "5minute"}:
@@ -235,6 +216,6 @@ class LiveKiteSource(DataSource):
                 "Historical fetch failed for token %s: %s",
                 instrument_token,
                 e,
-                exc_info=True,
+                exc_info=False,
             )
             return pd.DataFrame()
