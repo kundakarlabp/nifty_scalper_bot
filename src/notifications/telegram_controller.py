@@ -1,6 +1,4 @@
-# src/notifications/telegram_controller.py
 from __future__ import annotations
-
 """
 Lightweight Telegram controller for the Nifty Scalper Bot.
 
@@ -17,7 +15,6 @@ Env/config:
 - settings.telegram.chat_id (int)
 - settings.telegram.extra_admin_ids (optional list[int])
 """
-
 import hashlib
 import json
 import logging
@@ -89,6 +86,9 @@ class TelegramController:
         extra = getattr(tg, "extra_admin_ids", []) or []
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
+        # requests session (re-use TCP)
+        self._session = requests.Session()
+
         # send rate & backoff
         self._send_min_interval = 0.9  # seconds
         self._last_sends: List[tuple[float, str]] = []  # (timestamp, md5(text))
@@ -157,7 +157,7 @@ class TelegramController:
                 payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
                 self._backoff = 1.0
                 return
             except Exception:
@@ -172,7 +172,7 @@ class TelegramController:
             "reply_markup": {"inline_keyboard": buttons},
         }
         try:
-            requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
@@ -231,7 +231,7 @@ class TelegramController:
                 params = {"timeout": 25}
                 if self._last_update_id is not None:
                     params["offset"] = self._last_update_id + 1
-                r = requests.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                r = self._session.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
                 data = r.json()
                 if not data.get("ok"):
                     time.sleep(1.0)
@@ -262,7 +262,7 @@ class TelegramController:
                     self._send("🧹 Cancelled all open orders.")
             finally:
                 try:
-                    requests.post(
+                    self._session.post(
                         f"{self._base}/answerCallbackQuery",
                         json={"callback_query_id": cq.get("id")},
                         timeout=self._timeout,
@@ -279,7 +279,7 @@ class TelegramController:
         if not text:
             return
         if not self._authorized(int(chat_id)):
-            self._send("Unauthorized.")
+            # silently ignore unknown chats
             return
 
         parts = text.split()
@@ -312,7 +312,8 @@ class TelegramController:
                 s = {}
             verbose = (args and args[0].lower().startswith("v"))
             if verbose:
-                return self._send("📊 Status (verbose)\n```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+                pretty = json.dumps(s, indent=2)
+                return self._send(f"📊 Status (verbose)\n<pre>{pretty}</pre>", parse_mode="HTML")
             return self._send(
                 f"📊 {s.get('time_ist')}\n"
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
@@ -334,7 +335,6 @@ class TelegramController:
             i0, i1 = (page - 1) * page_size, min(n, page * page_size)
             lines = [f"📦 Active Orders (p{page}/{pages})"]
             for rec in acts[i0:i1]:
-                # rec assumed to be a dataclass-like object with attributes
                 sym = getattr(rec, "symbol", "?")
                 side = getattr(rec, "side", "?")
                 qty = getattr(rec, "quantity", "?")
