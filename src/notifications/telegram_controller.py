@@ -1,16 +1,30 @@
-# src/notifications/telegram_controller.py
 from __future__ import annotations
 
 """
-Telegram controller
+Telegram controller with on-demand diagnostics.
 
-New commands:
-- /ping
-- /health
-- /summary
-- /logs [N]                -> last N log lines (default 60)
-- /strat get|set <k> [v]   -> runtime strategy params (ema_fast, ema_slow, rsi_period, min_signal_score, confidence_threshold, adx_period, adx_trend_strength)
-(plus the existing /status, /active, /positions, /cancel_all, /pause, /resume, /risk, /trail, /trailmult, /partial, /tp1, /breakeven, /mode, /config)
+Commands:
+  /status [verbose]           – bot status
+  /summary                    – last signal (if runner exposes it via status)
+  /active [page]              – active orders
+  /positions                  – broker day positions
+  /cancel_all                 – cancel all (with confirm)
+  /pause [minutes]            – pause entries (minutes optional)
+  /resume                     – resume entries
+  /risk <pct>                 – set risk per trade (e.g., /risk 0.5)
+  /trail on|off               – toggle trailing exits
+  /trailmult <x>              – set trailing ATR multiplier
+  /partial on|off             – toggle partial TP
+  /tp1 <pct>                  – TP1 qty percent (e.g., 40)
+  /breakeven <ticks>          – BE ticks after TP1
+  /mode live|dry              – live trading toggle
+  /config [get <k>|set <k> <v>] – whitelist runtime keys
+  /logs [N]                   – last N log lines (default 150)
+  /health                     – system health snapshot (JSON)
+  /tick                       – run one strategy cycle now (returns brief result)
+  /ping                       – pong + uptime
+  /id                         – show chat id
+  /help                       – this help
 """
 
 import hashlib
@@ -31,23 +45,26 @@ class TelegramController:
     def __init__(
         self,
         *,
+        # read-only providers
         status_provider: Callable[[], Dict[str, Any]],
         positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         actives_provider: Optional[Callable[[], List[Any]]] = None,
-        logs_provider: Optional[Callable[[int], str]] = None,
-        summary_provider: Optional[Callable[[], str]] = None,
         # control hooks
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
         cancel_all: Optional[Callable[[], None]] = None,
-        # runtime config hooks (optional; if absent, mutate settings)
-        set_risk_pct: Optional[Callable[[float], None]] = None,
+        # diagnostics
+        logs_provider: Optional[Callable[[int], str]] = None,
+        health_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        tick_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        # runtime config hooks (optional; if absent, /config mutates settings via whitelist)
+        set_risk_pct: Optional[Callable[[float], None]] = None,           # 0.5 -> 0.5%
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
         toggle_partial: Optional[Callable[[bool], None]] = None,
-        set_tp1_ratio: Optional[Callable[[float], None]] = None,    # value in %
+        set_tp1_ratio: Optional[Callable[[float], None]] = None,          # 40 -> 40%
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
-        set_live_mode: Optional[Callable[[bool], None]] = None,
+        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
@@ -59,15 +76,17 @@ class TelegramController:
         self._base = f"https://api.telegram.org/bot{self._token}"
         self._timeout = http_timeout
 
-        # providers / hooks
+        # hooks
         self._status_provider = status_provider
         self._positions_provider = positions_provider
         self._actives_provider = actives_provider
-        self._logs_provider = logs_provider
-        self._summary_provider = summary_provider
         self._runner_pause = runner_pause
         self._runner_resume = runner_resume
         self._cancel_all = cancel_all
+
+        self._logs_provider = logs_provider
+        self._health_provider = health_provider
+        self._tick_provider = tick_provider
 
         self._set_risk_pct = set_risk_pct
         self._toggle_trailing = toggle_trailing
@@ -83,17 +102,17 @@ class TelegramController:
         self._started = False
         self._last_update_id: Optional[int] = None
 
-        # allowlist
+        # security: allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
-        # rate / dedupe
-        self._send_min_interval = 0.8
-        self._last_sends: List[tuple[float, str]] = []  # (ts, md5)
+        # send rate & backoff
+        self._send_min_interval = 0.8  # seconds
+        self._last_sends: List[tuple[float, str]] = []  # (timestamp, md5(text))
         self._backoff = 1.0
         self._backoff_max = 20.0
 
-        # /config whitelist (getter, setter, caster)
+        # /config whitelist mapping (getter, setter, caster)
         self._cfg_map = {
             "risk.pct": (
                 lambda: getattr(settings.risk, "risk_per_trade", 0.01) * 100.0,
@@ -132,21 +151,12 @@ class TelegramController:
             ),
         }
 
-        # /strat keys (read/write to settings.strategy at runtime)
-        self._strat_keys = {
-            "ema_fast": int,
-            "ema_slow": int,
-            "rsi_period": int,
-            "min_signal_score": int,
-            "confidence_threshold": float,
-            "adx_period": int,
-            "adx_trend_strength": int,
-        }
+    # -------------------- outbound --------------------
 
-    # ---------- outbound ----------
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
+        # de-dupe same msg within 10s and enforce min interval
         self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
         if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
             return False
@@ -155,8 +165,8 @@ class TelegramController:
         self._last_sends.append((now, h))
         return True
 
-    def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False, dedupe: bool = True) -> None:
-        if dedupe and not self._rate_ok(text):
+    def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
+        if not self._rate_ok(text):
             return
         delay = self._backoff
         while True:
@@ -195,18 +205,8 @@ class TelegramController:
             f"📦 Active: {s.get('active_orders', 0)}"
         )
 
-    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
-        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`", parse_mode="Markdown")
+    # -------------------- inbound (poll) --------------------
 
-    def notify_fills(self, fills: List[tuple[str, float]]) -> None:
-        if not fills:
-            return
-        lines = ["✅ Fills"]
-        for rid, px in fills:
-            lines.append(f"• {rid} @ {px:.2f}")
-        self._send("\n".join(lines))
-
-    # ---------- inbound (poll) ----------
     def start_polling(self) -> None:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
@@ -245,29 +245,7 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
-    # ---------- commands ----------
-    def _help_text(self) -> str:
-        return (
-            "🤖 Nifty Scalper Bot\n"
-            "/status [verbose] – bot status\n"
-            "/summary – last signal quick view\n"
-            "/active [page] – active orders\n"
-            "/positions – broker day positions\n"
-            "/logs [N] – last N log lines\n"
-            "/ping – quick heartbeat\n"
-            "/health – short health\n"
-            "/cancel_all – cancel all (confirm)\n"
-            "/pause – pause entries | /resume – resume\n"
-            "/risk <pct> – e.g. /risk 0.5\n"
-            "/trail on|off – toggle trailing\n"
-            "/trailmult <x> – set ATR trail multiplier\n"
-            "/partial on|off – toggle partial TP\n"
-            "/tp1 <pct> – TP1 percent of qty\n"
-            "/breakeven <ticks> – BE ticks after TP1\n"
-            "/mode live|dry – trading mode\n"
-            "/config [get <k>|set <k> <v>] – exec/risk keys\n"
-            "/strat [get|set <key> <value>] – strategy params"
-        )
+    # -------------------- command handling --------------------
 
     def _handle_update(self, upd: Dict[str, Any]) -> None:
         # inline callback
@@ -283,7 +261,11 @@ class TelegramController:
                     self._send("🧹 Cancelled all open orders.")
             finally:
                 try:
-                    requests.post(f"{self._base}/answerCallbackQuery", json={"callback_query_id": cq.get("id")}, timeout=self._timeout)
+                    requests.post(
+                        f"{self._base}/answerCallbackQuery",
+                        json={"callback_query_id": cq.get("id")},
+                        timeout=self._timeout,
+                    )
                 except Exception:
                     pass
             return
@@ -304,53 +286,28 @@ class TelegramController:
         args = parts[1:]
 
         if cmd in ("/start", "/help"):
-            return self._send(self._help_text())
-
-        if cmd == "/ping":
-            return self._send("pong")
-
-        if cmd == "/health":
-            s = {}
-            try:
-                s = self._status_provider() if self._status_provider else {}
-            except Exception:
-                pass
-            return self._send(f"Health: {'LIVE' if s.get('live_trading') else 'DRY'} | active={s.get('active_orders', 0)}")
-
-        if cmd == "/summary":
-            if self._summary_provider:
-                try:
-                    return self._send(self._summary_provider(), dedupe=False)
-                except Exception:
-                    pass
-            # fallback: quick compose from status
-            s = {}
-            try:
-                s = self._status_provider() if self._status_provider else {}
-            except Exception:
-                pass
-            sig = s.get("last_signal")
-            if not sig:
-                return self._send("No recent signal.")
-            return self._send("📈 Last signal\n```json\n" + json.dumps(sig, indent=2) + "\n```", parse_mode="Markdown", dedupe=False)
-
-        if cmd == "/logs":
-            n = 60
-            try:
-                if args:
-                    n = max(1, min(400, int(args[0])))
-            except Exception:
-                pass
-            if self._logs_provider:
-                try:
-                    text = self._logs_provider(n)
-                    if not text:
-                        text = "(no logs)"
-                    # avoid dedupe for log pages
-                    return self._send(f"🧾 Logs (last {n})\n```\n{text}\n```", parse_mode="Markdown", dedupe=False)
-                except Exception as e:
-                    return self._send(f"Failed to read logs: {e}")
-            return self._send("Log provider not wired.")
+            return self._send(
+                "🤖 Nifty Scalper Bot\n"
+                "/status [verbose] – bot status\n"
+                "/summary – recent signal summary\n"
+                "/active [page] – active orders\n"
+                "/positions – broker day positions\n"
+                "/cancel_all – cancel all (with confirm)\n"
+                "/pause [minutes] – pause entries\n"
+                "/resume – resume entries\n"
+                "/risk <pct> – risk per trade (e.g., /risk 0.5)\n"
+                "/trail on|off – toggle trailing\n"
+                "/trailmult <x> – trailing ATR multiplier\n"
+                "/partial on|off – partial TP\n"
+                "/tp1 <pct> – TP1 percent of qty\n"
+                "/breakeven <ticks> – BE ticks after TP1\n"
+                "/mode live|dry – live trading toggle\n"
+                "/config [get <k>|set <k> <v>] – runtime config\n"
+                "/logs [N] – last N log lines\n"
+                "/health – system health snapshot\n"
+                "/tick – run one strategy cycle now\n"
+                "/ping – ping"
+            )
 
         if cmd == "/status":
             try:
@@ -359,12 +316,22 @@ class TelegramController:
                 s = {}
             verbose = (args and args[0].lower().startswith("v"))
             if verbose:
-                return self._send("📊 Status (verbose)\n```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown", dedupe=False)
+                return self._send("```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
             return self._send(
                 f"📊 {s.get('time_ist')}\n"
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
                 f"📦 Active: {s.get('active_orders', 0)}"
             )
+
+        if cmd == "/summary":
+            try:
+                s = self._status_provider() if self._status_provider else {}
+            except Exception:
+                s = {}
+            last = s.get("last_signal")
+            if not last:
+                return self._send("No recent signal.")
+            return self._send("```json\n" + json.dumps(last, indent=2) + "\n```", parse_mode="Markdown")
 
         if cmd == "/active":
             if not self._actives_provider:
@@ -404,20 +371,20 @@ class TelegramController:
         if cmd == "/cancel_all":
             return self._send_inline(
                 "Confirm cancel all?",
-                [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"}, {"text": "❌ Abort", "callback_data": "abort"}]],
+                [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
+                  {"text": "❌ Abort", "callback_data": "abort"}]],
             )
 
         if cmd == "/pause":
             if self._runner_pause:
                 self._runner_pause()
-                return self._send("⏸️ Entries paused.")
-            return self._send("Pause not wired.")
+            # optional minutes arg is accepted, but we don't schedule resume here
+            return self._send("⏸️ Entries paused.")
 
         if cmd == "/resume":
             if self._runner_resume:
                 self._runner_resume()
-                return self._send("▶️ Entries resumed.")
-            return self._send("Resume not wired.")
+            return self._send("▶️ Entries resumed.")
 
         if cmd == "/risk":
             if not args:
@@ -526,29 +493,53 @@ class TelegramController:
                 return self._send("Unknown key.")
             return self._send("Usage: /config [get <key>|set <key> <value>]")
 
-        if cmd == "/strat":
-            if not args or args[0] not in ("get", "set"):
-                keys = ", ".join(sorted(self._strat_keys.keys()))
-                return self._send(f"Usage: /strat get|set <key> [value]\nKeys: {keys}")
-
-            if args[0] == "get" and len(args) == 2:
-                k = args[1]
-                if k not in self._strat_keys:
-                    return self._send("Unknown strategy key.")
-                return self._send(f"{k} = {getattr(settings.strategy, k)}")
-
-            if args[0] == "set" and len(args) == 3:
-                k, v = args[1], args[2]
-                if k not in self._strat_keys:
-                    return self._send("Unknown strategy key.")
-                cast = self._strat_keys[k]
+        if cmd == "/logs":
+            n = 150
+            if args:
                 try:
-                    setattr(settings.strategy, k, cast(v))
-                    return self._send(f"Updated {k} → {getattr(settings.strategy, k)}")
-                except Exception as e:
-                    return self._send(f"Failed to set {k}: {e}")
+                    n = int(args[0])
+                except Exception:
+                    pass
+            if not self._logs_provider:
+                return self._send("Logs provider not wired.")
+            tail = self._logs_provider(n)
+            # Telegram messages have size limits; chunk if needed
+            if len(tail) <= 3500:
+                return self._send("```log\n" + tail + "\n```", parse_mode="Markdown")
+            # chunk in ~3000 char messages
+            i = 0
+            while i < len(tail):
+                self._send("```log\n" + tail[i:i+3000] + "\n```", parse_mode="Markdown", disable_notification=True)
+                i += 3000
+            return
 
-            return self._send("Usage: /strat get|set <key> [value]")
+        if cmd == "/health":
+            if not self._health_provider:
+                return self._send("Health provider not wired.")
+            try:
+                h = self._health_provider()
+            except Exception as e:
+                return self._send(f"Health error: {e}")
+            return self._send("```json\n" + json.dumps(h, indent=2) + "\n```", parse_mode="Markdown")
+
+        if cmd == "/tick":
+            if not self._tick_provider:
+                return self._send("Tick provider not wired.")
+            res = self._tick_provider()
+            return self._send("```json\n" + json.dumps(res, indent=2) + "\n```", parse_mode="Markdown")
+
+        if cmd == "/ping":
+            try:
+                s = self._status_provider() if self._status_provider else {}
+            except Exception:
+                s = {}
+            return self._send(
+                f"Pong {s.get('time_ist')} • "
+                f"{'LIVE' if s.get('live_trading') else 'DRY'} • active={s.get('active_orders', 0)}"
+            )
+
+        if cmd == "/id":
+            return self._send(f"Chat ID: {self._chat_id}")
 
         # fallback
         return self._send(f"Unknown command: {cmd}")
