@@ -110,7 +110,6 @@ def _fetch_ohlc(
 
 
 def _ensure_min_bars(df: pd.DataFrame, want_bars: int) -> bool:
-    """Return True if df has at least want_bars rows."""
     try:
         return len(df) >= int(want_bars)
     except Exception:
@@ -228,10 +227,87 @@ class StrategyRunner:
     def resume(self) -> None:
         self._paused = False
 
+    # ---- diagnostics (used by /diag) ----
+    def diagnose(self) -> Dict[str, Any]:
+        checks: list[dict] = []
+        ok_all = True
+
+        # market hours
+        mkt = is_market_open()
+        checks.append({"name": "market_open", "ok": bool(mkt)})
+        ok_all &= mkt
+
+        # spot LTP
+        spot_symbol = getattr(getattr(settings, "instruments", object()), "spot_symbol", "NSE:NIFTY 50")
+        try:
+            spot_ltp = self.spot_source.get_last_price(spot_symbol) if self.spot_source else None  # type: ignore[attr-defined]
+        except Exception:
+            spot_ltp = None
+        checks.append({"name": "spot_ltp", "ok": bool(spot_ltp and spot_ltp > 0), "value": spot_ltp})
+
+        # tokens
+        tokens = get_instrument_tokens(kite_instance=self._kite) or {}
+        checks.append({"name": "strike_selection", "ok": bool(tokens), "result": tokens})
+
+        # OHLC fetch quick sanity
+        inst = getattr(settings, "instruments", object())
+        timeframe = getattr(getattr(settings, "data", object()), "timeframe", "minute")
+        lookback = timedelta(minutes=max(15, getattr(getattr(settings, "data", object()), "lookback_minutes", 60)))
+        spot_token = int(getattr(inst, "instrument_token", 256265))
+        sdf = _fetch_ohlc(self.spot_source, spot_token, lookback, timeframe)
+        checks.append({"name": "spot_ohlc", "ok": not sdf.empty, "rows": len(sdf)})
+
+        ce_token = tokens.get("tokens", {}).get("ce")
+        odf = _fetch_ohlc(self.data_source, ce_token, lookback, timeframe) if ce_token else pd.DataFrame()
+        checks.append({"name": "option_ohlc", "ok": not odf.empty, "rows": len(odf)})
+
+        if not sdf.empty:
+            adx_window = int(getattr(getattr(settings, "strategy", object()), "adx_period", 14))
+            sdf2 = _ensure_adx_di(sdf.copy(), adx_window)
+            checks.append({"name": "indicators", "ok": f"adx_{adx_window}" in sdf2.columns})
+        else:
+            checks.append({"name": "indicators", "ok": False, "error": "spot OHLC empty"})
+
+        # quick signal try (order of args matters)
+        if not odf.empty and not sdf.empty:
+            try:
+                current_price = float(odf["close"].iloc[-1])
+                sig = self.strategy.generate_signal(odf, current_price, sdf)
+                ok_sig = bool(sig)
+                checks.append({"name": "signal", "ok": ok_sig, "value": sig})
+                if ok_sig:
+                    sl_points = float(sig.get("sl_points", 0.0) or 0.0)
+                    equity = float(get_equity_estimate(self._kite)) if self._kite else float(get_equity_estimate())
+                    lots = PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points)
+                    checks.append({"name": "sizing", "ok": lots > 0, "lots": lots, "equity": equity})
+                else:
+                    checks.append({"name": "sizing", "ok": False, "error": "no signal"})
+            except Exception as e:
+                checks.append({"name": "signal", "ok": False, "error": str(e)})
+                checks.append({"name": "sizing", "ok": False, "error": "no signal"})
+        else:
+            checks.append({"name": "signal", "ok": False, "error": "option or spot OHLC empty"})
+            checks.append({"name": "sizing", "ok": False, "error": "no signal"})
+
+        # execution
+        checks.append({
+            "name": "execution_ready",
+            "ok": bool(self._live and self._kite and self.executor),
+            "live": bool(self._live),
+            "broker": bool(self._kite),
+            "executor": bool(self.executor),
+        })
+
+        active_cnt = len(self.executor.get_active_orders()) if self.executor else 0
+        checks.append({"name": "open_orders", "ok": True, "count": active_cnt})
+
+        ok_all = all(c.get("ok") for c in checks if "ok" in c)
+        return {"ok": ok_all, "checks": checks, "tokens": tokens}
+
     # ---- main tick ----
-    def run_once(self, stop_event: threading.Event) -> Optional[Dict[str, Any]]:
+    def run_once(self, stop_event: threading.Event, *, force_entry: bool = False) -> Optional[Dict[str, Any]]:
         # Always service open trades (trailing/OCO), even off-hours
-        service_only = not is_market_open()
+        service_only = False if force_entry else (not is_market_open())
         if stop_event.is_set():
             return None
 
