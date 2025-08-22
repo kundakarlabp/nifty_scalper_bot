@@ -1,212 +1,112 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
 import time
-from collections import deque
-from typing import Any, Deque, List, Optional
 
 from flask import Flask, jsonify
 
 from src.config import settings
-from src.strategies.runner import StrategyRunner
 from src.notifications.telegram_controller import TelegramController
+from src.strategies.runner import StrategyRunner
 
-# ---------- logging with in-memory ring for /logs ----------
-
-class RingHandler(logging.Handler):
-    def __init__(self, capacity: int = 1000) -> None:
-        super().__init__()
-        self.buf: Deque[str] = deque(maxlen=capacity)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            self.buf.append(msg)
-        except Exception:
-            pass
-
-    def tail(self, n: int) -> List[str]:
-        n = max(1, min(n, len(self.buf)))
-        return list(self.buf)[-n:]
-
-
-ring = RingHandler(capacity=3000)
-_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-ring.setFormatter(_formatter)
-root = logging.getLogger()
-root.setLevel(getattr(logging, (settings.log_level or "INFO").upper(), logging.INFO))
-root.addHandler(ring)
-
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 log = logging.getLogger(__name__)
-
-# ---------- app / health ----------
 
 app = Flask("src.server.health")
 
-@app.get("/")
-def root_health():
-    return jsonify({"ok": True, "time": time.time()})
+runner = StrategyRunner()
 
-# ---------- runner & telegram wiring ----------
 
-stop_event = threading.Event()
-runner = StrategyRunner(event_sink=lambda evt: log.info("event: %s", json.dumps(evt)))
+# ---------------- HTTP health ----------------
 
-def _hb_line(prefix: str = "heartbeat") -> str:
-    src = type(runner.data_source).__name__ if runner.data_source else "None"
-    st = runner.to_status_dict()
-    return f"⏱ {prefix} | live={int(st['live_trading'])} paused={st['paused']} active={st['active_orders']} src={src}"
+@app.get("/health")
+def health():
+    s = runner.status()
+    return jsonify({"ok": True, **s})
 
-def status_provider() -> dict:
-    return runner.to_status_dict()
 
-def summary_provider(n: int) -> list[dict]:
-    return runner.last_signals(n)
-
-def diag_provider() -> dict:
-    try:
-        return runner.diagnose()
-    except Exception as e:
-        log.exception("diag failed: %s", e)
-        return {"ok": False, "error": str(e)}
-
-def logs_provider(n: int) -> list[str]:
-    return ring.tail(n)
-
-def positions_provider() -> dict:
-    if not getattr(runner, "executor", None):
-        return {}
-    try:
-        return runner.executor.get_positions_kite()  # type: ignore[union-attr]
-    except Exception:
-        return {}
-
-def actives_provider():
-    if not getattr(runner, "executor", None):
-        return []
-    try:
-        return runner.executor.get_active_orders()  # type: ignore[union-attr]
-    except Exception:
-        return []
-
-def pause_runner(minutes: Optional[int] = None):
-    runner.pause(minutes)
-
-def resume_runner():
-    runner.resume()
-
-def cancel_all():
-    if getattr(runner, "executor", None):
-        runner.executor.cancel_all_orders()  # type: ignore[union-attr]
-
-def flatten_all():
-    if getattr(runner, "executor", None):
-        # cancel exits then market out of any remaining qty
+def _heartbeat_loop():
+    while True:
         try:
-            for rec in runner.executor.get_active_orders():  # type: ignore[union-attr]
-                runner.executor.exit_order(rec.order_id, exit_reason="flatten")  # type: ignore[union-attr]
-        except Exception:
-            pass
-
-def tick_once():
-    return runner.run_once(stop_event)
-
-def set_risk_pct(pct: float):
-    settings.risk.risk_per_trade = float(pct) / 100.0
-
-def toggle_trailing(v: bool):
-    settings.executor.enable_trailing = bool(v)
-
-def set_trailing_mult(v: float):
-    settings.executor.trailing_atr_multiplier = float(v)
-
-def toggle_partial(v: bool):
-    settings.executor.partial_tp_enable = bool(v)
-
-def set_tp1_ratio(pct: float):
-    settings.executor.tp1_qty_ratio = float(pct) / 100.0
-
-def set_breakeven_ticks(ticks: int):
-    settings.executor.breakeven_ticks = int(ticks)
-
-def set_live_mode(v: bool):
-    settings.enable_live_trading = bool(v)
-    runner.set_live(bool(v))
-    log.info("Live mode set to %s.", "True" if v else "False")
-
-def set_quality_mode(mode: str):
-    runner.set_quality_mode(mode)
-
-def set_regime_mode(mode: str):
-    runner.set_regime_mode(mode)
-
-# ---------- telegram ----------
-
-tg: Optional[TelegramController] = None
-if settings.telegram_ready:
-    try:
-        tg = TelegramController(
-            status_provider=status_provider,
-            summary_provider=summary_provider,
-            diag_provider=diag_provider,
-            logs_provider=logs_provider,
-            positions_provider=positions_provider,
-            actives_provider=actives_provider,
-            runner_pause=pause_runner,
-            runner_resume=resume_runner,
-            cancel_all=cancel_all,
-            flatten_all=flatten_all,
-            tick_once=tick_once,
-            set_risk_pct=set_risk_pct,
-            toggle_trailing=toggle_trailing,
-            set_trailing_mult=set_trailing_mult,
-            toggle_partial=toggle_partial,
-            set_tp1_ratio=set_tp1_ratio,
-            set_breakeven_ticks=set_breakeven_ticks,
-            set_live_mode=set_live_mode,
-            set_quality_mode=set_quality_mode,
-            set_regime_mode=set_regime_mode,
-        )
-        tg.start_polling()
-        log.info("Telegram polling started.")
-        # greet
-        tg._send("🤖 Nifty Scalper online.\n" + json.dumps(settings.debug_summary(), indent=2), parse_mode=None)
-        tg.send_menu()
-    except Exception as e:
-        log.error("Telegram not started: %s", e)
-else:
-    log.info("Telegram disabled or credentials missing.")
-
-# ---------- worker loop with gentle heartbeat ----------
-
-def worker_loop():
-    last_hb = 0.0
-    while not stop_event.is_set():
-        try:
-            # run trading tick
-            tick_once()
-            # heartbeat every 5 minutes
-            now = time.time()
-            if now - last_hb >= 300:
-                log.info(_hb_line())
-                last_hb = now
+            s = runner.status()
+            log.info("⏱ heartbeat | live=%d paused=%s active=%d",
+                     1 if s.get("live_trading") else 0,
+                     s.get("paused"),
+                     s.get("active_orders", 0))
         except Exception as e:
-            log.exception("worker loop error: %s", e)
-        time.sleep(5)  # 5s cadence — signals are minute-based anyway
+            log.warning("heartbeat error: %s", e)
+        time.sleep(600)  # every 10 min
 
-th = threading.Thread(target=worker_loop, name="runner-loop", daemon=True)
-th.start()
+
+def _runner_loop():
+    while True:
+        try:
+            runner.run_once()
+        except Exception as e:
+            log.exception("runner top-level error: %s", e)
+        # default cadence (adjust in data source if you want faster)
+        time.sleep(60)
+
+
+def _logs_provider(n: int) -> str:
+    # very simple tail of container logs if available
+    # On Railway, you usually can't read system logs from file.
+    # You can log-buffer in memory; here we just return a stub.
+    return "use platform logs; in-app buffer not configured"
+
+
+def _wire_telegram() -> TelegramController | None:
+    tg = getattr(settings, "telegram", None)
+    token = getattr(tg, "bot_token", None)
+    chat_id = getattr(tg, "chat_id", None)
+
+    if not token or not chat_id or not getattr(tg, "enabled", True):
+        log.info("Telegram not started (missing bot token, missing chat id, or disabled).")
+        return None
+
+    ctrl = TelegramController(
+        status_provider=runner.status,
+        diag_provider=runner.diag,
+        logs_provider=_logs_provider,
+        positions_provider=runner.executor.positions_summary,
+        actives_provider=runner.executor.active_orders,
+        tick_once=runner.run_once,
+        runner_pause=runner.pause,
+        runner_resume=runner.resume,
+        cancel_all=runner.executor.cancel_all,
+        set_risk_pct=lambda pct: setattr(settings.risk, "risk_per_trade", float(pct) / 100.0),
+        toggle_trailing=lambda b: setattr(settings.executor, "enable_trailing", bool(b)),
+        set_trailing_mult=lambda v: setattr(settings.executor, "trailing_atr_multiplier", float(v)),
+        toggle_partial=lambda b: setattr(settings.executor, "partial_tp_enable", bool(b)),
+        set_tp1_ratio=lambda pct: setattr(settings.executor, "tp1_qty_ratio", float(pct) / 100.0),
+        set_breakeven_ticks=lambda t: setattr(settings.executor, "breakeven_ticks", int(t)),
+        set_live_mode=lambda b: setattr(settings, "enable_live_trading", bool(b)),
+        set_quality_mode=runner.set_quality_mode,
+        set_regime_mode=runner.set_regime_mode,
+    )
+    ctrl.start_polling()
+    ctrl.send_startup_alert()
+    log.info("Telegram polling thread started.")
+    return ctrl
+
+
+def main():
+    log.info("Starting Nifty Scalper Bot | live_trading=%s", settings.enable_live_trading)
+
+    # start background loops
+    threading.Thread(target=_heartbeat_loop, name="heartbeat", daemon=True).start()
+    threading.Thread(target=_runner_loop, name="runner", daemon=True).start()
+
+    _wire_telegram()
+
+    # start health server
+    app.run(host=settings.server.host, port=settings.server.port, debug=False)
+
 
 if __name__ == "__main__":
-    # Gunicorn/uvicorn not strictly required; built-in is OK for Railway health.
-    host = getattr(settings.server, "host", "0.0.0.0")
-    port = int(getattr(settings.server, "port", 8000))
-    log.info("Starting Nifty Scalper Bot | live_trading=%s", settings.enable_live_trading)
-    try:
-        from waitress import serve  # if present, use a less noisy server
-        serve(app, host=host, port=port)
-    except Exception:
-        app.run(host=host, port=port, debug=False)
+    main()
