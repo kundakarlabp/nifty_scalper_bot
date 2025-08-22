@@ -2,20 +2,22 @@
 from __future__ import annotations
 
 """
-Minimal Telegram controller compatible with existing main.py wiring.
+Telegram controller (long-poll) with rich commands and safe runtime toggles.
 
-- Matches constructor used by main.py:
-    TelegramController(
-        status_callback=...,     # () -> dict
-        control_callback=...,    # (text:str) -> str
-        summary_callback=...,    # () -> str
-    )
-- Single long-poll thread (no webhook)
-- Basic commands delegated to control_callback
+Features
+- Single long-poll thread (no webhook, no double polling)
+- Allowlist by chat_id (+ extra admins)
+- Rate-limited, de-duplicated sends with exponential backoff
+- Inline confirmation for destructive commands (/cancel_all)
+- On-demand diagnostics (/diag) and logs (/logs)
+- Runtime config toggles (/risk, /trail, /trailmult, /partial, /tp1, /breakeven, /mode, /config)
 - Event helpers: notify_entry(), notify_fills(), notify_text()
+
+Constructor wires everything via callables so this file stays framework-agnostic.
 """
 
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -32,9 +34,27 @@ class TelegramController:
     def __init__(
         self,
         *,
+        # read providers
         status_callback: Callable[[], Dict[str, Any]],
-        control_callback: Callable[[str], str],
         summary_callback: Optional[Callable[[], str]] = None,
+        actives_provider: Optional[Callable[[], List[Any]]] = None,
+        positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        logs_provider: Optional[Callable[[int], List[Dict[str, Any]]]] = None,
+        diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        # control hooks
+        control_callback: Optional[Callable[[str], str]] = None,  # simple text commands (ping/status/pause/resume/live/dry/stop)
+        runner_pause: Optional[Callable[[], None]] = None,
+        runner_resume: Optional[Callable[[], None]] = None,
+        cancel_all: Optional[Callable[[], None]] = None,
+        tick_callback: Optional[Callable[[], None]] = None,
+        # runtime config hooks (optional; fall back to writing settings directly)
+        set_risk_pct: Optional[Callable[[float], None]] = None,           # 0.5 -> 0.5%
+        toggle_trailing: Optional[Callable[[bool], None]] = None,
+        set_trailing_mult: Optional[Callable[[float], None]] = None,
+        toggle_partial: Optional[Callable[[bool], None]] = None,
+        set_tp1_ratio: Optional[Callable[[float], None]] = None,          # 40 -> 40%
+        set_breakeven_ticks: Optional[Callable[[int], None]] = None,
+        set_live_mode: Optional[Callable[[bool], None]] = None,           # True => LIVE
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
@@ -46,25 +66,84 @@ class TelegramController:
         self._base = f"https://api.telegram.org/bot{self._token}"
         self._timeout = http_timeout
 
-        # hooks
+        # providers / hooks
         self._status = status_callback
+        self._summary = summary_callback
+        self._actives = actives_provider
+        self._positions = positions_provider
+        self._logs = logs_provider
+        self._diag = diag_provider
         self._control = control_callback
-        self._summary = summary_callback or (lambda: "No summary.")
+        self._runner_pause = runner_pause
+        self._runner_resume = runner_resume
+        self._cancel_all = cancel_all
+        self._tick = tick_callback
 
-        # poll state
+        self._set_risk_pct = set_risk_pct
+        self._toggle_trailing = toggle_trailing
+        self._set_trailing_mult = set_trailing_mult
+        self._toggle_partial = toggle_partial
+        self._set_tp1_ratio = set_tp1_ratio
+        self._set_breakeven_ticks = set_breakeven_ticks
+        self._set_live_mode = set_live_mode
+
+        # polling state
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._started = False
         self._last_update_id: Optional[int] = None
 
-        # simple rate-limit + dedupe
-        self._send_min_interval = 0.9
-        self._last_sends: List[tuple[float, str]] = []
+        # security: allowlist
+        extra = getattr(tg, "extra_admin_ids", []) or []
+        self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
-        # allowlist (just the configured chat)
-        self._allowlist = {int(self._chat_id)}
+        # send rate & backoff
+        self._send_min_interval = 0.9  # seconds
+        self._last_sends: List[tuple[float, str]] = []  # (timestamp, md5(text))
+        self._backoff = 1.0
+        self._backoff_max = 20.0
 
-    # ----------- outbound -----------
+        # /config whitelist mapping (getter, setter, caster)
+        self._cfg_map = {
+            "risk.pct": (
+                lambda: round(getattr(settings.risk, "risk_per_trade", 0.01) * 100.0, 4),
+                (self._set_risk_pct or (lambda v: setattr(settings.risk, "risk_per_trade", float(v) / 100.0))),
+                float,
+            ),
+            "exec.trailing": (
+                lambda: getattr(settings.executor, "enable_trailing", True),
+                (self._toggle_trailing or (lambda v: setattr(settings.executor, "enable_trailing", bool(v)))),
+                lambda s: str(s).lower() in ("on", "true", "1", "yes"),
+            ),
+            "exec.trail_mult": (
+                lambda: getattr(settings.executor, "trailing_atr_multiplier", 1.5),
+                (self._set_trailing_mult or (lambda v: setattr(settings.executor, "trailing_atr_multiplier", float(v)))),
+                float,
+            ),
+            "exec.partial": (
+                lambda: getattr(settings.executor, "partial_tp_enable", False),
+                (self._toggle_partial or (lambda v: setattr(settings.executor, "partial_tp_enable", bool(v)))),
+                lambda s: str(s).lower() in ("on", "true", "1", "yes"),
+            ),
+            "exec.tp1_ratio": (
+                lambda: round(getattr(settings.executor, "tp1_qty_ratio", 0.5) * 100.0, 2),
+                (self._set_tp1_ratio or (lambda v: setattr(settings.executor, "tp1_qty_ratio", float(v) / 100.0))),
+                float,
+            ),
+            "exec.be_ticks": (
+                lambda: getattr(settings.executor, "breakeven_ticks", 2),
+                (self._set_breakeven_ticks or (lambda v: setattr(settings.executor, "breakeven_ticks", int(v)))),
+                int,
+            ),
+            "mode.live": (
+                lambda: getattr(settings, "enable_live_trading", False),
+                (self._set_live_mode or (lambda v: setattr(settings, "enable_live_trading", bool(v)))),
+                lambda s: str(s).lower() in ("on", "true", "1", "yes", "live"),
+            ),
+        }
+
+    # -------------------- outbound helpers --------------------
+
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -77,27 +156,47 @@ class TelegramController:
         self._last_sends.append((now, h))
         return True
 
-    def _send(self, text: str, parse_mode: Optional[str] = None) -> None:
+    def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
+        if not text:
+            return
         if not self._rate_ok(text):
             return
-        payload = {"chat_id": self._chat_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+        delay = self._backoff
+        while True:
+            try:
+                payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                self._backoff = 1.0
+                return
+            except Exception:
+                time.sleep(delay)
+                delay = min(self._backoff_max, delay * 2)
+                self._backoff = delay
+
+    def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
         try:
             requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
         except Exception as e:
-            log.debug("telegram send failed: %s", e)
+            log.debug("Inline send failed: %s", e)
 
     def notify_text(self, text: str) -> None:
         self._send(text)
 
     def send_startup_alert(self) -> None:
+        s = {}
         try:
             s = self._status() if self._status else {}
         except Exception:
-            s = {}
+            pass
         self._send(
-            "🚀 Bot started\n"
+            "🚀 Nifty Scalper Bot started\n"
             f"🔁 Trading: {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'}\n"
             f"🧠 Broker: {s.get('broker')}\n"
             f"📦 Active: {s.get('active_orders', 0)}"
@@ -117,7 +216,8 @@ class TelegramController:
             lines.append(f"• {rid} @ {px:.2f}")
         self._send("\n".join(lines))
 
-    # ----------- inbound -----------
+    # -------------------- polling --------------------
+
     def start_polling(self) -> None:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
@@ -156,7 +256,55 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
+    # -------------------- command handling --------------------
+
+    def _help_text(self) -> str:
+        return (
+            "🤖 Nifty Scalper Bot\n"
+            "/help – this help\n"
+            "/ping – quick heartbeat\n"
+            "/status [verbose] – status snapshot\n"
+            "/diag – end-to-end diagnostics (signal path)\n"
+            "/logs [n] – last n logs (default 30)\n"
+            "/active [page] – active orders\n"
+            "/positions – broker day positions\n"
+            "/cancel_all – cancel all (with confirm)\n"
+            "/pause – pause entries\n"
+            "/resume – resume entries\n"
+            "/tick – force one strategy tick\n"
+            "/risk <pct> – set risk per trade (e.g., /risk 0.5)\n"
+            "/trail on|off – toggle trailing\n"
+            "/trailmult <x> – set trailing ATR multiplier\n"
+            "/partial on|off – toggle partial TP\n"
+            "/tp1 <pct> – TP1 percent of qty (e.g., 40)\n"
+            "/breakeven <ticks> – BE ticks after TP1\n"
+            "/mode live|dry – live trading toggle\n"
+            "/config [get <k>|set <k> <v>] – whitelist keys"
+        )
+
     def _handle_update(self, upd: Dict[str, Any]) -> None:
+        # inline callback
+        if "callback_query" in upd:
+            cq = upd["callback_query"]
+            chat_id = cq.get("message", {}).get("chat", {}).get("id")
+            if not self._authorized(int(chat_id)):
+                return
+            data = cq.get("data", "")
+            try:
+                if data == "confirm_cancel_all" and self._cancel_all:
+                    self._cancel_all()
+                    self._send("🧹 Cancelled all open orders.")
+            finally:
+                try:
+                    requests.post(
+                        f"{self._base}/answerCallbackQuery",
+                        json={"callback_query_id": cq.get("id")},
+                        timeout=self._timeout,
+                    )
+                except Exception:
+                    pass
+            return
+
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
             return
@@ -168,11 +316,247 @@ class TelegramController:
             self._send("Unauthorized.")
             return
 
-        # Strip leading slash and route to control_callback
-        cmd = text.lstrip("/")
-        try:
-            reply = self._control(cmd) if self._control else "No controller wired."
-        except Exception as e:
-            reply = f"Error: {e}"
-        if reply:
-            self._send(str(reply))
+        parts = text.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        # shortcuts for control_callback (legacy simple commands)
+        if cmd in ("/ping", "/status", "/pause", "/resume", "/live", "/dry", "/stop"):
+            if self._control:
+                out = self._control(cmd[1:])  # pass without leading slash
+                return self._send(out)
+
+        if cmd in ("/start", "/help"):
+            return self._send(self._help_text())
+
+        if cmd == "/status":
+            try:
+                s = self._status() if self._status else {}
+            except Exception:
+                s = {}
+            verbose = (args and args[0].lower().startswith("v"))
+            if verbose:
+                return self._send("📊 Status (verbose)\n```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+            return self._send(
+                f"📊 {s.get('time_ist')}\n"
+                f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
+                f"📦 Active: {s.get('active_orders', 0)}"
+            )
+
+        if cmd == "/diag":
+            if not self._diag:
+                return self._send("No diagnostics wired.")
+            try:
+                d = self._diag() or {}
+            except Exception as e:
+                return self._send(f"Diag error: {e}")
+            try:
+                ok = d.get("ok", False)
+                checks = d.get("checks", [])
+                pills = []
+                for c in checks:
+                    pills.append(("🟢" if c.get("ok") else "🔴") + " " + c.get("name", "?"))
+                header = "✔️ Flow is healthy" if ok else "❗ Flow has issues"
+                return self._send(header + "\n" + " · ".join(pills))
+            except Exception:
+                # fallback raw json
+                return self._send("```json\n" + json.dumps(d, indent=2) + "\n```", parse_mode="Markdown")
+
+        if cmd == "/logs":
+            n = 30
+            if args:
+                try:
+                    n = max(1, min(300, int(args[0])))
+                except Exception:
+                    pass
+            if not self._logs:
+                return self._send("Log provider not wired.")
+            recs = self._logs(n) or []
+            if not recs:
+                return self._send("No logs.")
+            lines = ["🧾 Last logs"]
+            for r in recs:
+                lines.append(f"{r.get('ts','')} [{r.get('lvl','')}] {r.get('name','')}: {r.get('msg','')}")
+            # split if too long
+            text = "\n".join(lines)
+            chunks = [text[i:i+3800] for i in range(0, len(text), 3800)]
+            for c in chunks:
+                self._send(c, disable_notification=True)
+            return
+
+        if cmd == "/active":
+            if not self._actives:
+                return self._send("No active-orders provider wired.")
+            try:
+                page = int(args[0]) if args else 1
+            except Exception:
+                page = 1
+            acts = self._actives() or []
+            n = len(acts)
+            page_size = 6
+            pages = max(1, (n + page_size - 1) // page_size)
+            page = max(1, min(page, pages))
+            i0, i1 = (page - 1) * page_size, min(n, page * page_size)
+            lines = [f"📦 Active Orders (p{page}/{pages})"]
+            for rec in acts[i0:i1]:
+                sym = getattr(rec, "symbol", "?")
+                side = getattr(rec, "side", "?")
+                qty = getattr(rec, "quantity", "?")
+                rid = getattr(rec, "order_id", getattr(rec, "record_id", "?"))
+                lines.append(f"• {sym} {side} qty={qty} id={rid}")
+            return self._send("\n".join(lines))
+
+        if cmd == "/positions":
+            if not self._positions:
+                return self._send("No positions provider wired.")
+            pos = self._positions() or {}
+            if not pos:
+                return self._send("No positions (day).")
+            lines = ["📒 Positions (day)"]
+            for sym, p in pos.items():
+                qty = p.get("quantity") if isinstance(p, dict) else getattr(p, "quantity", "?")
+                avg = p.get("average_price") if isinstance(p, dict) else getattr(p, "average_price", "?")
+                pnl = p.get("pnl") if isinstance(p, dict) else getattr(p, "pnl", None)
+                if pnl is not None:
+                    lines.append(f"• {sym}: qty={qty} avg={avg} pnl={pnl}")
+                else:
+                    lines.append(f"• {sym}: qty={qty} avg={avg}")
+            return self._send("\n".join(lines))
+
+        if cmd == "/cancel_all":
+            return self._send_inline(
+                "Confirm cancel all?",
+                [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
+                  {"text": "❌ Abort", "callback_data": "abort"}]],
+            )
+
+        if cmd == "/pause":
+            if self._runner_pause:
+                self._runner_pause()
+                return self._send("⏸️ Entries paused.")
+            return self._send("Pause not wired.")
+
+        if cmd == "/resume":
+            if self._runner_resume:
+                self._runner_resume()
+                return self._send("▶️ Entries resumed.")
+            return self._send("Resume not wired.")
+
+        if cmd == "/tick":
+            if not self._tick:
+                return self._send("Tick not wired.")
+            try:
+                self._tick()
+                return self._send("🔄 One tick executed.")
+            except Exception as e:
+                return self._send(f"Tick error: {e}")
+
+        if cmd == "/risk":
+            if not args:
+                return self._send("Usage: /risk 0.5  (for 0.5%)")
+            try:
+                pct = float(args[0])
+                if self._set_risk_pct:
+                    self._set_risk_pct(pct)
+                else:
+                    setattr(settings.risk, "risk_per_trade", pct / 100.0)
+                return self._send(f"Risk per trade set to {pct:.4f}%.")
+            except Exception:
+                return self._send("Invalid number. Example: /risk 0.5")
+
+        if cmd == "/trail":
+            if not args:
+                return self._send("Usage: /trail on|off")
+            val = str(args[0]).lower() in ("on", "true", "1", "yes")
+            if self._toggle_trailing:
+                self._toggle_trailing(val)
+            else:
+                setattr(settings.executor, "enable_trailing", val)
+            return self._send(f"Trailing {'enabled' if val else 'disabled'}.")
+
+        if cmd == "/trailmult":
+            if not args:
+                return self._send("Usage: /trailmult 1.8")
+            try:
+                v = float(args[0])
+                if self._set_trailing_mult:
+                    self._set_trailing_mult(v)
+                else:
+                    setattr(settings.executor, "trailing_atr_multiplier", v)
+                return self._send(f"Trailing ATR multiplier set to {v:.2f}.")
+            except Exception:
+                return self._send("Invalid number. Example: /trailmult 1.8")
+
+        if cmd == "/partial":
+            if not args:
+                return self._send("Usage: /partial on|off")
+            val = str(args[0]).lower() in ("on", "true", "1", "yes")
+            if self._toggle_partial:
+                self._toggle_partial(val)
+            else:
+                setattr(settings.executor, "partial_tp_enable", val)
+            return self._send(f"Partial TP {'enabled' if val else 'disabled'}.")
+
+        if cmd == "/tp1":
+            if not args:
+                return self._send("Usage: /tp1 40  (for 40% of qty)")
+            try:
+                pct = float(args[0])
+                if self._set_tp1_ratio:
+                    self._set_tp1_ratio(pct)
+                else:
+                    setattr(settings.executor, "tp1_qty_ratio", pct / 100.0)
+                return self._send(f"TP1 set to {pct:.1f}%% of qty.")
+            except Exception:
+                return self._send("Invalid number. Example: /tp1 40")
+
+        if cmd == "/breakeven":
+            if not args:
+                return self._send("Usage: /breakeven 2")
+            try:
+                ticks = int(args[0])
+                if self._set_breakeven_ticks:
+                    self._set_breakeven_ticks(ticks)
+                else:
+                    setattr(settings.executor, "breakeven_ticks", ticks)
+                return self._send(f"Breakeven hop set to {ticks} ticks.")
+            except Exception:
+                return self._send("Invalid number. Example: /breakeven 2")
+
+        if cmd == "/mode":
+            if not args:
+                return self._send("Usage: /mode live|dry")
+            state = str(args[0]).lower()
+            if state not in ("live", "dry"):
+                return self._send("Usage: /mode live|dry")
+            val = (state == "live")
+            if self._set_live_mode:
+                self._set_live_mode(val)
+            else:
+                setattr(settings, "enable_live_trading", val)
+            return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
+
+        if cmd == "/config":
+            if not args:
+                keys = "\n".join([f"- {k} = {g()}" for k, (g, _, _) in self._cfg_map.items()])
+                return self._send("⚙️ Config (runtime)\n" + keys)
+            if args[0] == "get" and len(args) == 2:
+                k = args[1]
+                if k in self._cfg_map:
+                    g, _, _ = self._cfg_map[k]
+                    return self._send(f"{k} = {g()}")
+                return self._send("Unknown key.")
+            if args[0] == "set" and len(args) == 3:
+                k, val = args[1], args[2]
+                if k in self._cfg_map:
+                    g, s, cast = self._cfg_map[k]
+                    try:
+                        s(cast(val))
+                        return self._send(f"Updated {k} → {g()}")
+                    except Exception as e:
+                        return self._send(f"Failed to set {k}: {e}")
+                return self._send("Unknown key.")
+            return self._send("Usage: /config [get <key>|set <key> <value>]")
+
+        # fallback
+        return self._send(f"Unknown command: {cmd}")
