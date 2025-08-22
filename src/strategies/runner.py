@@ -1,460 +1,379 @@
+# src/strategies/runner.py
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, time as dtime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Optional
+
+import pandas as pd
 
 from src.config import settings
+from src.risk.position_sizing import PositionSizing
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.utils.account_info import get_equity_estimate
+from src.utils.atr_helper import compute_atr
 
-# Optional/soft imports – keep the runner tolerant
+# Optional utils (tokens / market open)
 try:
-    from src.data.source import LiveKiteSource  # expected production source
+    # NOTE: latest strike_selector signature: get_instrument_tokens(kite_instance=None)
+    from src.utils.strike_selector import get_instrument_tokens, is_market_open  # type: ignore
 except Exception:  # pragma: no cover
-    LiveKiteSource = None  # type: ignore
+    def is_market_open() -> bool:  # fallback gate: always open
+        return True
+    def get_instrument_tokens(*args, **kwargs) -> Optional[Dict[str, Any]]:
+        return None
 
+# Optional broker SDK and executor
 try:
-    from src.utils.strike_selector import get_instrument_tokens
+    from kiteconnect import KiteConnect  # type: ignore
+    from kiteconnect.exceptions import NetworkException, TokenException, InputException  # type: ignore
 except Exception:  # pragma: no cover
-    get_instrument_tokens = None  # type: ignore
+    KiteConnect = None  # type: ignore
+    NetworkException = TokenException = InputException = Exception
 
 try:
-    from src.signals.regime_detector import detect_market_regime  # optional
-except Exception:  # pragma: no cover
-    detect_market_regime = None  # type: ignore
-
-try:
-    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-except Exception:  # pragma: no cover
-    EnhancedScalpingStrategy = None  # type: ignore
-
-try:
-    from src.risk.position_sizing import PositionSizer, SizingInputs, DailyRiskState
-except Exception:  # pragma: no cover
-    PositionSizer = None  # type: ignore
-    SizingInputs = None  # type: ignore
-    DailyRiskState = None  # type: ignore
-
-try:
-    from src.execution.order_executor import OrderExecutor
+    from src.execution.order_executor import OrderExecutor  # type: ignore
 except Exception:  # pragma: no cover
     OrderExecutor = None  # type: ignore
 
+try:
+    from ta.trend import ADXIndicator  # type: ignore
+    _TA_OK = True
+except Exception:  # pragma: no cover
+    ADXIndicator = None  # type: ignore
+    _TA_OK = False
+
+# Data source
+try:
+    from src.data.source import DataSource, LiveKiteSource  # type: ignore
+except Exception:  # pragma: no cover
+    DataSource = object  # type: ignore
+    LiveKiteSource = None  # type: ignore
 
 log = logging.getLogger(__name__)
 
 
-def _now_ist() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+# ---------------- Helpers ----------------
+def _now_ist_naive() -> datetime:
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.replace(tzinfo=None)
 
 
-def _within_trading_window(dt_ist: datetime) -> bool:
-    if settings.allow_offhours_testing:
-        return True
-    start = getattr(settings, "TIME_FILTER_START", None)
-    end = getattr(settings, "TIME_FILTER_END", None)
-    if not start or not end:
-        return True
-    try:
-        hh, mm = [int(x) for x in str(start).split(":")]
-        start_t = dtime(hh, mm)
-        hh, mm = [int(x) for x in str(end).split(":")]
-        end_t = dtime(hh, mm)
-        cur_t = dt_ist.time()
-        return start_t <= cur_t <= end_t
-    except Exception:
-        return True
+def _ensure_adx_di(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    if df is None or df.empty or not {"high", "low", "close"}.issubset(df.columns):
+        return df
+    if _TA_OK:
+        try:
+            adxi = ADXIndicator(df["high"], df["low"], df["close"], window=window)
+            df[f"adx_{window}"] = adxi.adx()
+            df[f"di_plus_{window}"] = adxi.adx_pos()
+            df[f"di_minus_{window}"] = adxi.adx_neg()
+            return df
+        except Exception:
+            pass
+    # fallback manual
+    up = df["high"].diff()
+    dn = -df["low"].diff()
+    plus_dm = up.where((up > dn) & (up > 0), 0.0)
+    minus_dm = dn.where((dn > up) & (dn > 0), 0.0)
+    tr = (df["high"] - df["low"]).abs()
+    atr = tr.ewm(alpha=1 / window, adjust=False).mean().replace(0, 1e-9)
+    plus_di = (plus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr) * 100.0
+    minus_di = (minus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr) * 100.0
+    dx = (plus_di.subtract(minus_di).abs() / (plus_di.add(minus_di).abs() + 1e-9)) * 100.0
+    adx = dx.ewm(alpha=1 / window, adjust=False).mean()
+    df[f"adx_{window}"] = adx
+    df[f"di_plus_{window}"] = plus_di
+    df[f"di_minus_{window}"] = minus_di
+    return df
 
 
-@dataclass
-class SignalDecision:
-    ok: bool
-    side: Optional[str] = None
-    score: float = 0.0
-    confidence: float = 0.0
-    entry: Optional[float] = None
-    stop: Optional[float] = None
-    target: Optional[float] = None
-    reasons: Optional[List[str]] = None
+def _fetch_and_prepare_df(
+    data_source: Optional[DataSource],
+    token: Optional[int],
+    lookback: timedelta,
+    timeframe: str,
+) -> pd.DataFrame:
+    if data_source is None or token is None:
+        return pd.DataFrame()
+    end_date = _now_ist_naive()
+    start_date = end_date - lookback
+    df = data_source.fetch_ohlc(token, start_date, end_date, timeframe)
+    if df.empty:
+        return pd.DataFrame()
+    req = {"open", "high", "low", "close"}
+    return df if req.issubset(df.columns) else pd.DataFrame()
 
 
+# ---------------- Runner ----------------
 class StrategyRunner:
     """
-    Orchestrates market data → signals → sizing → (optional) execution.
-    Produces rich diagnostics for Telegram (/diag, /flow).
+    Minimal, corrected runner:
+      1) market-hours gating
+      2) strike tokens from selector (no spot needed)
+      3) OHLC fetch (spot + option)
+      4) indicators on spot (ADX/DI)
+      5) strategy.generate_signal(df, spot_df, current_price)  ✅ correct order
+      6) position sizing
+      7) optional live execution via OrderExecutor
+      8) emits events for Telegram (ENTRY_PLACED, FILLS)
     """
 
     def __init__(
         self,
-        *,
-        live: bool = False,
-        notifier: Optional[Any] = None,
+        strategy: Optional[EnhancedScalpingStrategy] = None,
+        data_source: Optional[DataSource] = None,
+        spot_source: Optional[DataSource] = None,
+        kite: Optional["KiteConnect"] = None,
+        event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
-        self.live = bool(live)
-        self.notifier = notifier
+        self.strategy = strategy or EnhancedScalpingStrategy()
+        self._kite = kite or self._build_kite()
+        self.data_source = data_source or self._build_live_source(self._kite)
+        self.spot_source = spot_source or self.data_source
+        self._live = bool(getattr(settings, "enable_live_trading", False))
+        self._paused = False
+        self._event_sink = event_sink
 
-        self.source = LiveKiteSource() if LiveKiteSource else None
-        self.strategy = EnhancedScalpingStrategy() if EnhancedScalpingStrategy else None
-        self.sizer = PositionSizer() if PositionSizer else None
-        self.executor = OrderExecutor(live=live) if OrderExecutor else None
+        # optional executor
+        self.executor = None
+        if OrderExecutor is not None and getattr(settings, "executor", None) is not None and self._kite:
+            try:
+                self.executor = OrderExecutor(
+                    config=settings.executor,
+                    kite=self._kite,
+                    data_source=self.data_source,
+                )
+            except Exception as e:
+                log.warning("OrderExecutor not initialized: %s", e)
 
-        self.paused: bool = False
-        self.last_diag: Dict[str, Any] = {}
-        self.last_signal: Optional[SignalDecision] = None
-        self.last_place_error: Optional[str] = None
-        self.trades_placed_today: int = 0
-        self.loss_streak: int = 0
-        self.realized_pnl: float = 0.0
-        self.peak_equity: Optional[float] = None
+        self._symbol_cache: dict[int, str] = {}
 
-    # ---------- telegram providers ----------
+    # ---- infra ----
+    def _emit(self, evt_type: str, **payload: Any) -> None:
+        if self._event_sink:
+            try:
+                self._event_sink({"type": evt_type, **payload})
+            except Exception:
+                pass
 
-    def status_provider(self) -> Dict[str, Any]:
-        dt = _now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    def _build_kite(self) -> Optional["KiteConnect"]:
+        if KiteConnect is None:
+            log.info("KiteConnect not installed; shadow mode.")
+            return None
+        zk = getattr(settings, "zerodha", object())
+        api_key = getattr(zk, "api_key", None)
+        access_token = getattr(zk, "access_token", None)
+        if not api_key:
+            return None
+        kc = KiteConnect(api_key=api_key)
+        if access_token:
+            try:
+                kc.set_access_token(access_token)
+            except Exception:
+                pass
+        return kc
+
+    def _build_live_source(self, kite: Optional["KiteConnect"]) -> Optional[DataSource]:
+        if kite is None or LiveKiteSource is None:
+            return None
+        try:
+            ds = LiveKiteSource(kite)
+            ds.connect()
+            return ds
+        except Exception:
+            return None
+
+    def _token_to_symbol(self, token: int) -> Optional[str]:
+        if token in self._symbol_cache or not self._kite:
+            return self._symbol_cache.get(token)
+        try:
+            for seg in ("NFO", "NSE"):
+                for row in self._kite.instruments(seg):
+                    if int(row.get("instrument_token", -1)) == int(token):
+                        sym = str(row.get("tradingsymbol"))
+                        self._symbol_cache[token] = sym
+                        return sym
+        except Exception:
+            pass
+        return None
+
+    # ---- public ----
+    def to_status_dict(self) -> Dict[str, Any]:
+        active = self.executor.get_active_orders() if self.executor else []
         return {
-            "time_ist": dt,
-            "live_trading": self.live,
-            "paused": self.paused,
-            "active_orders": self._active_order_count(),
-            "broker": "Kite" if self.source else "None",
-            "quality": getattr(self.strategy, "quality_mode", "auto"),
-            "regime_mode": getattr(self.strategy, "regime_mode", "auto"),
+            "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
+            "broker": "Kite" if self._kite else "none",
+            "data_source": type(self.data_source).__name__ if self.data_source else None,
+            "live_trading": self._live,
+            "paused": self._paused,
+            "active_orders": len(active),
         }
 
-    def positions_provider(self) -> Dict[str, Any]:
-        try:
-            if self.executor and hasattr(self.executor, "get_day_positions"):
-                return self.executor.get_day_positions() or {}
-        except Exception as e:
-            log.warning("positions_provider error: %s", e)
-        return {}
-
-    def actives_provider(self) -> List[Any]:
-        try:
-            if self.executor and hasattr(self.executor, "list_active_orders"):
-                return self.executor.list_active_orders() or []
-        except Exception as e:
-            log.warning("actives_provider error: %s", e)
-        return []
-
-    # ---------- internal utils ----------
-
-    def _active_order_count(self) -> int:
-        acts = self.actives_provider()
-        try:
-            return len(acts)
-        except Exception:
-            return 0
-
-    def _daily_state(self) -> Optional[DailyRiskState]:
-        if DailyRiskState is None:
-            return None
-        return DailyRiskState(
-            trades_placed=self.trades_placed_today,
-            realized_pnl=self.realized_pnl,
-            peak_equity=self.peak_equity,
-            loss_streak=self.loss_streak,
-        )
-
-    # ---------- external toggles from Telegram ----------
-
-    def pause(self, minutes: Optional[int] = None) -> None:
-        self.paused = True
-        if self.notifier:
-            self.notifier.notify_text("⏸️ Entries paused.")
-        if minutes:
-            import threading
-            def _timer():
-                time.sleep(max(1, int(minutes * 60)))
-                self.resume()
-            threading.Thread(target=_timer, daemon=True).start()
+    def pause(self) -> None:
+        self._paused = True
 
     def resume(self) -> None:
-        self.paused = False
-        if self.notifier:
-            self.notifier.notify_text("▶️ Entries resumed.")
+        self._paused = False
 
-    def diagnostics(self) -> Dict[str, Any]:
-        return self.last_diag or {"ok": False, "error": "no run yet"}
+    # ---- main tick ----
+    def run_once(self, stop_event: threading.Event) -> Optional[Dict[str, Any]]:
+        # Always service open trades (trailing/OCO), even off-hours
+        service_only = not is_market_open()
+        if stop_event.is_set():
+            return None
 
-    # ---------- core loop step ----------
-
-    def run_once(self) -> None:
-        diag: Dict[str, Any] = {"ok": True, "checks": []}
-        t0 = _now_ist()
-
-        if self.source is None:
-            diag["ok"] = False
-            diag["error"] = "market data source unavailable"
-            self.last_diag = diag
-            return
-        if self.strategy is None:
-            diag["ok"] = False
-            diag["error"] = "strategy unavailable"
-            self.last_diag = diag
-            return
-
-        is_open = _within_trading_window(t0)
-        diag["checks"].append({"name": "market_open", "ok": bool(is_open)})
-        if not is_open:
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-
-        # Spot LTP
-        spot_token = settings.instruments.instrument_token
-        spot_price = None
         try:
-            if hasattr(self.source, "get_spot_ltp"):
-                spot_price = float(self.source.get_spot_ltp(spot_token))
-        except Exception as e:
-            logging.warning("spot LTP error: %s", e)
-        diag["checks"].append({"name": "spot_ltp", "ok": spot_price is not None, "value": spot_price})
-        if spot_price is None:
-            diag["ok"] = False
-            self.last_diag = diag
-            return
+            inst = getattr(settings, "instruments", object())
+            timeframe = str(getattr(getattr(settings, "data", object()), "timeframe", "minute"))
+            lookback_minutes = int(getattr(getattr(settings, "data", object()), "lookback_minutes", 60))
+            lookback = timedelta(minutes=lookback_minutes)
 
-        # Strike selection – POSitional arg only
-        tokens = None
-        try:
-            if get_instrument_tokens:
-                tokens = get_instrument_tokens(spot_price)
-        except TypeError as e:
+            # fetch spot history (for ADX/VWAP etc.)
+            spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY spot default
+            spot_df = _fetch_and_prepare_df(self.spot_source, spot_token, lookback, timeframe)
+
+            # service open trades regardless of market hours
+            self._service_open_trades(spot_df if not spot_df.empty else None)
+
+            # no entries when market closed or paused
+            if service_only or self._paused:
+                return None
+
+            if not spot_df.empty:
+                adx_window = int(getattr(getattr(settings, "strategy", object()), "adx_period", 14))
+                spot_df = _ensure_adx_di(spot_df, window=adx_window)
+
+            # resolve CE token from selector (uses broker to infer spot/expiry)
+            token_info = get_instrument_tokens(kite_instance=self._kite)
+            if not token_info:
+                return None
+            ce_token = token_info.get("tokens", {}).get("ce")
+            if not ce_token:
+                return None
+
+            # option OHLC
+            opt_df = _fetch_and_prepare_df(self.data_source, ce_token, lookback, timeframe)
+            if opt_df.empty:
+                return None
+
+            current_price = float(opt_df["close"].iloc[-1])
+
+            # ✅ Correct call order for strategy: (df, spot_df, current_price)
+            signal = self.strategy.generate_signal(opt_df, spot_df, current_price)
+            if not signal:
+                return None
+
+            # --- Sizing ---
             try:
-                tokens = get_instrument_tokens()  # type: ignore
-            except Exception:
-                tokens = None
-            logging.warning("strike selector signature mismatch: %s", e)
-        except Exception as e:
-            logging.warning("strike selection error: %s", e)
-            tokens = None
+                equity = float(get_equity_estimate(self._kite))  # prefer broker margins when available
+            except TypeError:
+                equity = float(get_equity_estimate())  # fallback to default-equity variant
+            sl_points = float(signal.get("sl_points", 0.0) or 0.0)
+            if equity <= 0 or sl_points <= 0:
+                return None
+            lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
+            if lots <= 0:
+                return None
+            lot_size = int(getattr(inst, "nifty_lot_size", 75))
+            quantity_units = lots * lot_size
 
-        diag_tokens = None
-        if tokens and isinstance(tokens, dict):
-            diag_tokens = {
-                "spot_token": spot_token,
-                "spot_price": spot_price,
-                "atm_strike": tokens.get("atm_strike"),
-                "target_strike": tokens.get("target_strike", tokens.get("atm_strike")),
-                "expiry": tokens.get("expiry"),
-                "tokens": tokens.get("tokens") or tokens.get("token_map") or {},
+            option_symbol = self._token_to_symbol(int(ce_token)) if self._kite else None
+
+            enriched = {
+                **signal,
+                "equity": equity,
+                "lots": lots,
+                "quantity_units": quantity_units,
+                "instrument": {
+                    "symbol_ce": option_symbol,
+                    "token_ce": ce_token,
+                    "atm_strike": token_info.get("atm_strike"),
+                    "target_strike": token_info.get("target_strike"),
+                    "expiry": token_info.get("expiry"),
+                },
             }
-        diag["checks"].append({"name": "strike_selection", "ok": tokens is not None, "result": diag_tokens})
-        if tokens is None:
-            diag["ok"] = False
-            self.last_diag = diag
-            return
 
-        # OHLC
-        spot_ohlc = None
-        opt_ohlc = None
-        try:
-            if hasattr(self.source, "get_ohlc"):
-                spot_ohlc = self.source.get_ohlc(spot_token, minutes=settings.data.lookback_minutes)
-        except Exception as e:
-            logging.warning("spot OHLC error: %s", e)
+            # --- Live execution (if available) ---
+            if self._live and self._kite and self.executor and option_symbol:
+                side = str(signal.get("side", "BUY")).upper()
+                entry_price = float(signal.get("entry_price", current_price))
+                sl_price = float(signal.get("stop_loss", 0.0) or 0.0)
+                tp_price = float(signal.get("target", 0.0) or 0.0)
 
-        ce_token = (tokens.get("tokens") or {}).get("ce")
-        pe_token = (tokens.get("tokens") or {}).get("pe")
-        chosen_token = ce_token if ce_token else pe_token
-
-        try:
-            if hasattr(self.source, "get_ohlc") and chosen_token:
-                opt_ohlc = self.source.get_ohlc(chosen_token, minutes=settings.data.lookback_minutes)
-        except Exception as e:
-            logging.warning("option OHLC error: %s", e)
-
-        diag["checks"].append({"name": "spot_ohlc", "ok": bool(getattr(spot_ohlc, "__len__", lambda: 0)() > 0),
-                               "rows": (len(spot_ohlc) if spot_ohlc is not None else 0)})
-        diag["checks"].append({"name": "option_ohlc", "ok": bool(getattr(opt_ohlc, "__len__", lambda: 0)() > 0),
-                               "rows": (len(opt_ohlc) if opt_ohlc is not None else 0)})
-        if not spot_ohlc or not getattr(spot_ohlc, "__len__", lambda: 0)():
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-        if not opt_ohlc or not getattr(opt_ohlc, "__len__", lambda: 0)():
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-
-        # Indicators / regime
-        try:
-            regime = detect_market_regime(spot_ohlc) if detect_market_regime else {"regime": "auto"}
-            diag["checks"].append({"name": "indicators", "ok": True, "regime": regime})
-        except Exception as e:
-            logging.warning("indicator/regime error: %s", e)
-            diag["checks"].append({"name": "indicators", "ok": False, "error": str(e)})
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-
-        # Signal
-        signal = None
-        try:
-            if hasattr(self.strategy, "generate_signal"):
-                signal = self.strategy.generate_signal(spot_ohlc, opt_ohlc, spot_price=spot_price, regime=regime)
-        except Exception as e:
-            logging.warning("signal error: %s", e)
-
-        sig_ok = bool(signal and getattr(signal, "ok", False))
-        if not sig_ok and isinstance(signal, dict):
-            sig_ok = bool(signal.get("ok"))
-
-        if sig_ok:
-            sd = SignalDecision(
-                ok=True,
-                side=getattr(signal, "side", None) or (signal.get("side") if isinstance(signal, dict) else None),
-                score=float(getattr(signal, "score", 0.0) or (signal.get("score", 0.0) if isinstance(signal, dict) else 0.0)),
-                confidence=float(getattr(signal, "confidence", 0.0) or (signal.get("confidence", 0.0) if isinstance(signal, dict) else 0.0)),
-                entry=getattr(signal, "entry_price", None) or (signal.get("entry_price") if isinstance(signal, dict) else None),
-                stop=getattr(signal, "stop_loss", None) or (signal.get("stop_loss") if isinstance(signal, dict) else None),
-                target=getattr(signal, "target", None) or (signal.get("target") if isinstance(signal, dict) else None),
-                reasons=getattr(signal, "reasons", None) or (signal.get("reasons") if isinstance(signal, dict) else None),
-            )
-            self.last_signal = sd
-            diag["checks"].append({"name": "signal", "ok": True, "side": sd.side, "score": sd.score,
-                                   "conf": sd.confidence, "entry": sd.entry, "sl": sd.stop, "tp": sd.target})
-        else:
-            self.last_signal = None
-            diag["checks"].append({"name": "signal", "ok": False, "error": "no signal or thresholds not met"})
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-
-        # Sizing
-        sizing_ok = False
-        sizing_note: Optional[str] = None
-        qty = lots = per_order_qty = num_orders = 0
-        stop_points = 0.0
-
-        try:
-            if self.sizer and SizingInputs and self.last_signal and self.last_signal.entry and self.last_signal.stop:
-                equity = getattr(settings.risk, "default_equity", 30000.0)
-                if hasattr(self.source, "get_equity"):
-                    try:
-                        equity = float(self.source.get_equity() or equity)
-                    except Exception:
-                        pass
-
-                inputs = SizingInputs(
-                    equity=equity,
-                    risk_per_trade=settings.risk.risk_per_trade,
-                    entry_price=float(self.last_signal.entry),
-                    stop_price=float(self.last_signal.stop),
-                    lot_size=settings.instruments.nifty_lot_size,
-                    tick_size=settings.executor.tick_size,
-                    freeze_qty=settings.executor.exchange_freeze_qty,
-                    min_lots=settings.instruments.min_lots,
-                    max_lots=settings.instruments.max_lots,
-                    max_trades_per_day=settings.risk.max_trades_per_day,
-                    max_daily_drawdown_pct=settings.risk.max_daily_drawdown_pct,
-                    max_consecutive_losses=settings.risk.consecutive_loss_limit,
+                rec_id = self.executor.place_entry_order(
+                    token=int(ce_token),
+                    symbol=option_symbol,
+                    side=side,
+                    quantity=quantity_units,
+                    price=entry_price,
                 )
-                decision = self.sizer.size(inputs, daily=self._daily_state())
-                sizing_ok = bool(decision.ok)
-                if decision.ok:
-                    qty = decision.qty
-                    lots = decision.lots
-                    per_order_qty = decision.per_order_qty
-                    num_orders = decision.num_orders
-                    stop_points = decision.stop_points
-                    sizing_note = "; ".join(decision.reasons)
-                else:
-                    sizing_note = "; ".join(decision.reasons)
+                if rec_id:
+                    enriched["order_record_id"] = rec_id
+                    # Arm exits if available
+                    if sl_price > 0 and tp_price > 0:
+                        try:
+                            self.executor.setup_gtt_orders(rec_id, sl_price=sl_price, tp_price=tp_price)
+                        except Exception:
+                            pass
+                    # Notify via event
+                    self._emit(
+                        "ENTRY_PLACED",
+                        symbol=option_symbol,
+                        side=side,
+                        qty=quantity_units,
+                        price=entry_price,
+                        record_id=rec_id,
+                    )
+
+                # Service open trades on the fresh opt_df
+                self._service_open_trades(opt_df)
+
+            return enriched
+
+        except (NetworkException, TokenException, InputException) as e:
+            log.error("Transient broker error: %s", e)
         except Exception as e:
-            sizing_note = f"exception: {e}"
-            logging.warning("sizing error: %s", e)
+            log.exception("Unexpected error in run_once: %s", e)
 
-        diag["checks"].append({
-            "name": "sizing",
-            "ok": sizing_ok,
-            "qty": qty,
-            "lots": lots,
-            "per_order_qty": per_order_qty,
-            "num_orders": num_orders,
-            "stop_points": stop_points,
-            "note": sizing_note,
-        })
-        if not sizing_ok:
-            diag["ok"] = False
-            self.last_diag = diag
+        return None
+
+    def _service_open_trades(self, opt_or_spot_df: Optional[pd.DataFrame]) -> None:
+        """Trailing / OCO sync; emits FILLS events if any."""
+        if not self.executor:
             return
-
-        # Execution ready
-        exec_ready = bool(self.executor is not None)
-        diag["checks"].append({"name": "execution_ready", "ok": exec_ready,
-                               "live": self.live, "broker": bool(self.source), "executor": bool(self.executor)})
-        if not exec_ready:
-            diag["ok"] = False
-            self.last_diag = diag
-            return
-
-        # Place entry
-        if self.live and not self.paused:
-            try:
-                place_ok = False
-                place_msg = None
-
-                if hasattr(self.executor, "place_entry"):
-                    place_ok, place_msg = self.executor.place_entry(
-                        side=self.last_signal.side,
-                        qty=qty,
-                        price=self.last_signal.entry,
-                        token=chosen_token,
-                        per_order_qty=per_order_qty,
-                    )
-                elif hasattr(self.executor, "enter"):
-                    place_ok, place_msg = self.executor.enter(
-                        side=self.last_signal.side,
-                        qty=qty,
-                        price=self.last_signal.entry,
-                        token=chosen_token,
-                        per_order_qty=per_order_qty,
-                    )
-                else:
-                    place_msg = "executor has no place_entry/enter"
-                    place_ok = False
-
-                diag["checks"].append({"name": "place_entry", "ok": bool(place_ok), "msg": place_msg})
-                if not place_ok:
-                    self.last_place_error = str(place_msg)
-                    diag["ok"] = False
-                else:
-                    self.trades_placed_today += 1
-                    if self.notifier:
-                        self.notifier.notify_entry(
-                            symbol=str(chosen_token),
-                            side=str(self.last_signal.side),
-                            qty=int(qty),
-                            price=float(self.last_signal.entry or 0.0),
-                            record_id=str(place_msg or ""),
-                        )
-            except Exception as e:
-                logging.exception("entry placement failed: %s", e)
-                self.last_place_error = str(e)
-                diag["checks"].append({"name": "place_entry", "ok": False, "error": str(e)})
-                diag["ok"] = False
-        else:
-            diag["checks"].append({"name": "place_entry", "ok": False,
-                                   "msg": "skipped (not live or paused)"})
-
-        # Open orders snapshot
         try:
-            cnt = self._active_order_count()
-            diag["checks"].append({"name": "open_orders", "ok": True, "count": cnt})
+            active = self.executor.get_active_orders()
+            if not active:
+                return
+
+            atr_val = None
+            if opt_or_spot_df is not None and not opt_or_spot_df.empty:
+                atr_period = int(getattr(getattr(settings, "strategy", object()), "atr_period", 14))
+                atr_series = compute_atr(opt_or_spot_df, period=atr_period)
+                if atr_series is not None and len(atr_series):
+                    atr_val = float(atr_series.iloc[-1])
+
+            if atr_val and atr_val > 0:
+                # apply trailing to each open order if current price is available
+                try:
+                    cur = float(opt_or_spot_df["close"].iloc[-1])  # last bar close as proxy
+                except Exception:
+                    cur = None
+                if cur is not None:
+                    for rec in active:
+                        if getattr(rec, "is_open", False):
+                            try:
+                                self.executor.update_trailing_stop(
+                                    rec.order_id, current_price=cur, atr=atr_val, atr_multiplier=None
+                                )
+                            except Exception:
+                                pass
+
+            fills = self.executor.sync_and_enforce_oco()
+            if fills:
+                self._emit("FILLS", fills=fills)
         except Exception:
-            diag["checks"].append({"name": "open_orders", "ok": False})
-
-        diag["tokens"] = diag_tokens
-        self.last_diag = diag
-
-    def loop_forever(self, interval_sec: int = 30) -> None:
-        while True:
-            try:
-                if not self.paused:
-                    self.run_once()
-            except Exception as e:
-                logging.exception("Unexpected error in run loop: %s", e)
-            time.sleep(max(5, int(interval_sec)))
+            pass
