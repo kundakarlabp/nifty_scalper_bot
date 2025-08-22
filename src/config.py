@@ -78,7 +78,7 @@ class StrategyConfig(BaseModel):
     # gates
     min_bars_for_signal: int = 10
     min_signal_score: int = 2
-    confidence_threshold: float = 4.0
+    confidence_threshold: float = 2.0
     # indicators
     ema_fast: int = 9
     ema_slow: int = 21
