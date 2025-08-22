@@ -16,18 +16,18 @@ from src.server import health as health_server
 from src.strategies.runner import StrategyRunner
 from src.notifications.telegram_controller import TelegramController
 
-# Optional broker SDK (kept safe)
+# Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
     from kiteconnect.exceptions import NetworkException, TokenException, InputException  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:  # fallback if kiteconnect not installed
     KiteConnect = None  # type: ignore
-    NetworkException = TokenException = InputException = Exception  # fallbacks
+    NetworkException = TokenException = InputException = Exception
 
 
 # ---------------- Logging ----------------
 class RingBufferLogHandler(logging.Handler):
-    """Lightweight in-memory log buffer for /logs on demand."""
+    """In-memory log buffer for /logs."""
     def __init__(self, capacity: int = 1000) -> None:
         super().__init__()
         self.capacity = int(capacity)
@@ -36,13 +36,11 @@ class RingBufferLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            line = self._fmt.format(record)
-            self.buf.append(line)
+            self.buf.append(self._fmt.format(record))
         except Exception:
             pass
 
     def tail(self, n: int) -> List[str]:
-        n = max(1, min(int(n), self.capacity))
         return list(self.buf)[-n:]
 
 
@@ -72,27 +70,18 @@ class Application:
         self._log_handler = _setup_logging()
         self.log = logging.getLogger(__name__)
 
-        # live toggle mirrors settings
         self.live_trading = bool(settings.enable_live_trading)
-
-        # graceful shutdown
         self._stop_event = threading.Event()
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
 
-        # start time
         self._start_ts = time.time()
-
-        # runner with event sink -> telegram notifications
         self._last_signal: Optional[Dict[str, Any]] = None
         self.runner = StrategyRunner(event_sink=self._on_event)
-
-        # telegram (wired after runner so hooks can be passed)
         self.tg: Optional[TelegramController] = None
 
-    # ---------- status / payload ----------
+    # ---------- status payload ----------
     def _status_payload(self) -> Dict[str, Any]:
-        r = {}
         try:
             r = self.runner.to_status_dict()
         except Exception:
@@ -109,13 +98,12 @@ class Application:
 
     # ---------- health server ----------
     def _start_health(self) -> None:
+        # Defaults if not in .env
+        host = "0.0.0.0"
+        port = 8000
         t = threading.Thread(
             target=health_server.run,
-            kwargs={
-                "callback": self._status_payload,
-                "host": settings.server.host,
-                "port": settings.server.port,
-            },
+            kwargs={"callback": self._status_payload, "host": host, "port": port},
             daemon=True,
             name="health-http",
         )
@@ -123,153 +111,28 @@ class Application:
 
     # ---------- telegram wiring ----------
     def _wire_telegram(self) -> None:
-        tg_enabled = bool(getattr(settings.telegram, "enabled", True))
-        if not tg_enabled or not settings.telegram.bot_token or not settings.telegram.chat_id:
+        tg_enabled = True
+        if not getattr(settings, "telegram_bot_token", None) or not getattr(settings, "telegram_chat_id", None):
             self.log.info("Telegram not started (disabled or credentials missing).")
             return
 
-        # Providers
-        def positions_provider() -> Dict[str, Any]:
-            ex = getattr(self.runner, "executor", None)
-            return ex.get_positions_kite() if ex else {}
-
-        def actives_provider() -> List[Any]:
-            ex = getattr(self.runner, "executor", None)
-            return ex.get_active_orders() if ex else []
-
-        def diag_provider() -> Dict[str, Any]:
-            try:
-                return self.runner.diagnose()
-            except Exception:
-                return {"ok": False, "error": "diagnose() not available"}
-
-        def logs_provider(n: int) -> List[str]:
-            return self._log_handler.tail(n)
-
-        def last_signal_provider() -> Optional[Dict[str, Any]]:
-            return self._last_signal
-
-        # Controls / mutators
-        def runner_pause() -> None:
-            try:
-                self.runner.pause()
-            except Exception:
-                pass
-
-        def runner_resume() -> None:
-            try:
-                self.runner.resume()
-            except Exception:
-                pass
-
-        def runner_tick() -> Optional[Dict[str, Any]]:
-            # one synchronous tick using a temporary event
-            stop_evt = threading.Event()
-            try:
-                res = self.runner.run_once(stop_evt)
-                if res:
-                    self._last_signal = res
-                return res
-            except Exception as e:
-                self.log.exception("Manual tick error: %s", e)
-                return None
-
-        def cancel_all() -> None:
-            ex = getattr(self.runner, "executor", None)
-            if ex:
-                try:
-                    ex.cancel_all_orders()
-                except Exception:
-                    pass
-
-        # Execution mutators
-        def set_risk_pct(pct: float) -> None:
-            settings.risk.risk_per_trade = float(pct) / 100.0
-
-        def toggle_trailing(v: bool) -> None:
-            settings.executor.enable_trailing = bool(v)
-
-        def set_trailing_mult(x: float) -> None:
-            settings.executor.trailing_atr_multiplier = float(x)
-
-        def toggle_partial(v: bool) -> None:
-            settings.executor.partial_tp_enable = bool(v)
-
-        def set_tp1_ratio(pct: float) -> None:
-            settings.executor.tp1_qty_ratio = float(pct) / 100.0
-
-        def set_breakeven_ticks(ticks: int) -> None:
-            settings.executor.breakeven_ticks = int(ticks)
-
-        def set_live_mode(v: bool) -> None:
-            # update all three: app flag, settings, runner
-            self.live_trading = bool(v)
-            settings.enable_live_trading = bool(v)
-            try:
-                # keep runner in sync with /mode changes
-                self.runner._live = bool(v)  # minimal, avoids full re-init
-            except Exception:
-                pass
-            self.log.info("Live mode set to %s.", "True" if v else "False")
-
-        # Strategy mutators
-        def set_min_score(n: int) -> None:
-            settings.strategy.min_signal_score = int(n)
-
-        def set_conf_threshold(x: float) -> None:
-            settings.strategy.confidence_threshold = float(x)
-
-        def set_atr_period(n: int) -> None:
-            settings.strategy.atr_period = int(n)
-
-        def set_sl_mult(x: float) -> None:
-            settings.strategy.atr_sl_multiplier = float(x)
-
-        def set_tp_mult(x: float) -> None:
-            settings.strategy.atr_tp_multiplier = float(x)
-
-        def set_trend_boosts(tp_boost: float, sl_relax: float) -> None:
-            settings.strategy.trend_tp_boost = float(tp_boost)
-            settings.strategy.trend_sl_relax = float(sl_relax)
-
-        def set_range_tighten(tp_t: float, sl_t: float) -> None:
-            settings.strategy.range_tp_tighten = float(tp_t)
-            settings.strategy.range_sl_tighten = float(sl_t)
-
-        # Instantiate controller
         self.tg = TelegramController(
             status_provider=self._status_payload,
-            positions_provider=positions_provider,
-            actives_provider=actives_provider,
-            diag_provider=diag_provider,
-            logs_provider=logs_provider,
-            last_signal_provider=last_signal_provider,
-            runner_pause=runner_pause,
-            runner_resume=runner_resume,
-            runner_tick=runner_tick,
-            cancel_all=cancel_all,
-            set_risk_pct=set_risk_pct,
-            toggle_trailing=toggle_trailing,
-            set_trailing_mult=set_trailing_mult,
-            toggle_partial=toggle_partial,
-            set_tp1_ratio=set_tp1_ratio,
-            set_breakeven_ticks=set_breakeven_ticks,
-            set_live_mode=set_live_mode,
-            set_min_score=set_min_score,
-            set_conf_threshold=set_conf_threshold,
-            set_atr_period=set_atr_period,
-            set_sl_mult=set_sl_mult,
-            set_tp_mult=set_tp_mult,
-            set_trend_boosts=set_trend_boosts,
-            set_range_tighten=set_range_tighten,
+            positions_provider=lambda: getattr(self.runner.executor, "get_positions_kite", lambda: {})(),
+            actives_provider=lambda: getattr(self.runner.executor, "get_active_orders", lambda: [])(),
+            diag_provider=lambda: self.runner.diagnose(),
+            logs_provider=self._log_handler.tail,
+            last_signal_provider=lambda: self._last_signal,
         )
         self.tg.start_polling()
         self.tg.send_startup_alert()
 
-    # ---------- runner event sink -> telegram ----------
+    # ---------- runner events ----------
     def _on_event(self, evt: Dict[str, Any]) -> None:
+        if not evt:
+            return
         try:
-            et = (evt or {}).get("type")
+            et = evt.get("type")
             if et == "ENTRY_PLACED" and self.tg:
                 self.tg.notify_entry(
                     symbol=str(evt.get("symbol")),
@@ -278,18 +141,16 @@ class Application:
                     price=float(evt.get("price", 0.0)),
                     record_id=str(evt.get("record_id")),
                 )
-            elif et in ("FILL", "FILLS") and self.tg:  # accept both singular/plural
+            elif et in ("FILL", "FILLS") and self.tg:
                 fills = evt.get("fills") or []
                 if fills:
                     self.tg.notify_fills(fills)
 
-            # cache last signal-ish payloads
             if et in ("ENTRY_PLACED", "SIGNAL", "FILL", "FILLS"):
                 self._last_signal = evt
         except Exception:
             pass
 
-    # ---------- signals/shutdown ----------
     def _on_signal(self, signum: int, frame: Any) -> None:
         self.log.info("Signal %s received, shutting down…", signum)
         self._stop_event.set()
@@ -301,7 +162,7 @@ class Application:
         self._wire_telegram()
 
         cadence = 0.5
-        hb_every = 300.0  # heartbeat log every ~5 minutes
+        hb_every = 300.0
         last_hb = 0.0
 
         while not self._stop_event.is_set():
