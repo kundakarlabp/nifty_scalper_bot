@@ -1,65 +1,32 @@
-"""
-src/signals/regime_detector.py
-
-Market regime detection (trend vs range) using ADX and DI values.
-"""
-
 from __future__ import annotations
 
-import logging
-from typing import Optional
-
-import pandas as pd
-
-logger = logging.getLogger(__name__)
+from typing import Dict, Sequence
 
 
-def detect_market_regime(
-    df: pd.DataFrame,
-    adx: Optional[pd.Series] = None,
-    di_plus: Optional[pd.Series] = None,
-    di_minus: Optional[pd.Series] = None,
-    adx_trend_strength: int = 20,
-) -> str:
+def _slope(vals: Sequence[float]) -> float:
+    if not vals or len(vals) < 2:
+        return 0.0
+    return float(vals[-1] - vals[0]) / max(1, len(vals) - 1)
+
+
+def detect_market_regime(spot_ohlc) -> Dict[str, object]:
     """
-    Detects market regime from spot OHLC with ADX/DI columns.
-
-    Args:
-        df: spot OHLC dataframe
-        adx: ADX series (if None, will try to pull from df)
-        di_plus: +DI series (if None, will try to pull from df)
-        di_minus: -DI series (if None, will try to pull from df)
-        adx_trend_strength: threshold for "trend" classification
-
-    Returns:
-        str: one of "trend_up", "trend_down", "range", or "unknown"
+    Very lightweight regime detector:
+    - Uses simple price slope (close values) and rolling range to classify.
+    - Returns dict: {"regime": "trend"|"range", "strength": float}
     """
-    if df is None or df.empty:
-        return "unknown"
-
     try:
-        adx_series = adx if adx is not None else df[[c for c in df.columns if c.startswith("adx_")]].iloc[:, -1]
-        di_plus_series = di_plus if di_plus is not None else df[[c for c in df.columns if c.startswith("di_plus_")]].iloc[:, -1]
-        di_minus_series = di_minus if di_minus is not None else df[[c for c in df.columns if c.startswith("di_minus_")]].iloc[:, -1]
+        closes = [float(x["close"]) for x in spot_ohlc][-50:]
     except Exception:
-        return "unknown"
+        closes = []
+    if len(closes) < 10:
+        return {"regime": "auto", "strength": 0.0}
 
-    try:
-        adx_val = float(adx_series.iloc[-1])
-        di_p = float(di_plus_series.iloc[-1])
-        di_m = float(di_minus_series.iloc[-1])
-    except Exception:
-        return "unknown"
+    sl = _slope(closes)
+    rng = max(closes) - min(closes)
+    strength = abs(sl) / (rng / max(1, len(closes))) if rng > 0 else 0.0
 
-    if adx_val >= adx_trend_strength:
-        if di_p > di_m:
-            return "trend_up"
-        elif di_m > di_p:
-            return "trend_down"
-    return "range"
-
-
-# Alias for backwards compatibility
-def determine_regime(df: pd.DataFrame, **kwargs) -> str:
-    """Legacy alias for detect_market_regime."""
-    return detect_market_regime(df, **kwargs)
+    if strength > 0.35:
+        return {"regime": "trend", "strength": round(strength, 3)}
+    else:
+        return {"regime": "range", "strength": round(strength, 3)}
