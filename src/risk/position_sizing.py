@@ -40,54 +40,48 @@ class PositionSizing:
             Lots (integer). 0 if invalid inputs.
         """
         try:
-            _lot = int(
-                lot_size or getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 50)
-            )
-            _risk = float(
-                risk_per_trade
-                if risk_per_trade is not None
-                else getattr(getattr(settings, "risk", object()), "risk_per_trade", 0.01)
-            )
-            min_lots = int(getattr(getattr(settings, "instruments", object()), "min_lots", 1))
-            max_lots = int(getattr(getattr(settings, "instruments", object()), "max_lots", 100))
+            inst = getattr(settings, "instruments", object())
+            risk = getattr(settings, "risk", object())
+
+            _lot = int(lot_size or getattr(inst, "nifty_lot_size", 50))
+            _risk = float(risk_per_trade if risk_per_trade is not None else getattr(risk, "risk_per_trade", 0.01))
+            min_lots = int(getattr(inst, "min_lots", 1))
+            max_lots = int(getattr(inst, "max_lots", 100))
         except Exception as e:
             log.error("PositionSizing: settings load failed: %s", e)
             return 0
 
-        if equity <= 0 or sl_points <= 0 or _lot <= 0 or _risk <= 0:
-            log.warning("PositionSizing: invalid inputs (equity, sl_points, lot, risk must be > 0).")
+        # Validate inputs (and reject NaN/inf)
+        if (
+            equity is None or sl_points is None
+            or not all(map(math.isfinite, [float(equity), float(sl_points), float(_lot), float(_risk)]))
+            or equity <= 0 or sl_points <= 0 or _lot <= 0 or _risk <= 0
+        ):
+            log.warning("PositionSizing: invalid inputs (equity, sl_points, lot, risk must be finite and > 0).")
             return 0
 
         try:
-            rupees_at_risk = equity * _risk
-            rupees_per_lot = sl_points * _lot  # points * qty
+            rupees_at_risk = float(equity) * float(_risk)
+            rupees_per_lot = float(sl_points) * int(_lot)  # points * qty
             raw_lots = rupees_at_risk / max(rupees_per_lot, 1e-9)
             lots = int(math.floor(raw_lots))
         except Exception as e:
             log.exception("PositionSizing: math failed: %s", e)
             return 0
 
-        # Clamp
+        # Respect min_lots only if it's affordable; otherwise skip the trade
         if lots < min_lots:
-            if raw_lots >= 1.0:  # afford at least 1 lot
+            if raw_lots >= float(min_lots):
                 lots = min_lots
             else:
-                log.debug("PositionSizing: %.2f raw lots < 1.0 → skipping", raw_lots)
+                log.debug("PositionSizing: raw_lots=%.3f < min_lots=%d → 0 lots (skip)", raw_lots, min_lots)
                 return 0
 
         clamped = min(lots, max_lots)
 
         log.debug(
-            "Sizing: equity=₹%.2f risk=%.2f%% sl_pts=%.2f lot=%d "
-            "→ raw=%.2f lots, final=%d (min=%d, max=%d)",
-            equity,
-            _risk * 100.0,
-            sl_points,
-            _lot,
-            raw_lots,
-            clamped,
-            min_lots,
-            max_lots,
+            "Sizing: equity=₹%.2f risk=%.2f%% sl_pts=%.2f lot=%d → raw=%.2f lots, final=%d (min=%d, max=%d)",
+            equity, _risk * 100.0, sl_points, _lot, raw_lots, clamped, min_lots, max_lots,
         )
         return clamped
 
@@ -98,12 +92,17 @@ class PositionSizing:
         """
         Shortcut using defaults from settings.
         """
-        eq = float(equity or getattr(settings.risk, "default_equity", 0.0))
+        risk_cfg = getattr(settings, "risk", object())
+        inst_cfg = getattr(settings, "instruments", object())
+
+        eq_default = float(getattr(risk_cfg, "default_equity", 0.0))
+        eq = float(equity if equity is not None else eq_default)
+
         return PositionSizing.lots_from_equity(
             equity=eq,
-            sl_points=sl_points,
-            lot_size=getattr(settings.instruments, "nifty_lot_size", 50),
-            risk_per_trade=getattr(settings.risk, "risk_per_trade", 0.01),
+            sl_points=float(sl_points),
+            lot_size=int(getattr(inst_cfg, "nifty_lot_size", 50)),
+            risk_per_trade=float(getattr(risk_cfg, "risk_per_trade", 0.01)),
         )
 
     @staticmethod
@@ -111,7 +110,13 @@ class PositionSizing:
         """
         Returns (lots, rupees_at_risk) for diagnostics (/diag).
         """
-        eq = float(equity or getattr(settings.risk, "default_equity", 0.0))
+        risk_cfg = getattr(settings, "risk", object())
+        inst_cfg = getattr(settings, "instruments", object())
+
+        eq_default = float(getattr(risk_cfg, "default_equity", 0.0))
+        eq = float(equity if equity is not None else eq_default)
+
         lots = PositionSizing.from_settings(sl_points, equity=eq)
-        rupees_at_risk = lots * sl_points * getattr(settings.instruments, "nifty_lot_size", 50)
+        lot_size = int(getattr(inst_cfg, "nifty_lot_size", 50))
+        rupees_at_risk = float(lots) * float(sl_points) * lot_size
         return lots, rupees_at_risk
