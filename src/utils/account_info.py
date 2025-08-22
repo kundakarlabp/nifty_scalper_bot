@@ -1,16 +1,4 @@
 # src/utils/account_info.py
-"""
-Account info helpers (graceful fallbacks).
-
-get_equity_estimate(kite) -> float
-  Returns a conservative equity estimate using Zerodha margins when available,
-  else falls back to settings.risk.default_equity.
-
-Notes:
-- Narrow exception handling; no blanket 'except Exception'.
-- Does not crash if kite is None or creds are missing.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -18,48 +6,34 @@ from typing import Optional
 
 from src.config import settings
 
-try:
-    from kiteconnect import KiteConnect  # type: ignore
-    from kiteconnect.exceptions import NetworkException, TokenException  # type: ignore
-except Exception:  # pragma: no cover
-    KiteConnect = None  # type: ignore
-    class NetworkException(Exception): ...  # type: ignore
-    class TokenException(Exception): ...    # type: ignore
-
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-def get_equity_estimate(kite: Optional["KiteConnect"]) -> float:
+def get_equity_estimate(kite_instance: Optional[object] = None) -> float:
     """
-    Best-effort equity figure to drive sizing logic.
-    Priority:
-      1) Zerodha 'margins()' API (equity.cash / available)
-      2) settings.risk.default_equity
+    Try to read available cash from Kite funds; fall back to .env default.
+    Never returns NaN/negative; returns 0.0 only if everything fails.
     """
-    default_equity = float(getattr(settings.risk, "default_equity", 30000.0))
+    # 1) Broker funds
+    if kite_instance is not None:
+        try:
+            funds = kite_instance.margins("equity")  # type: ignore[attr-defined]
+            # Zerodha response often has: net, available: { cash, adhoc_margin, ... }
+            if isinstance(funds, dict):
+                # Prefer immediately usable cash; else net
+                avail = funds.get("available") or {}
+                cash = float(avail.get("cash", 0.0) or 0.0)
+                if cash > 0:
+                    return cash
+                net = float(funds.get("net", 0.0) or 0.0)
+                if net > 0:
+                    return net
+        except Exception as e:
+            log.debug("get_equity_estimate: funds fetch failed: %s", e)
 
-    if kite is None:
-        logger.info("account_info: no Kite client; using default equity %.2f", default_equity)
-        return default_equity
-
+    # 2) Fallback to configured default
     try:
-        m = kite.margins()  # may raise on network/token issues
-        # Typical shape: {'equity': {'available': {...}, 'net': ...}, ...}
-        eq = m.get("equity") or {}
-        avail = eq.get("available") or {}
-        cash = avail.get("cash")
-        if cash is not None:
-            return float(cash)
-        net = eq.get("net")
-        if net is not None:
-            return float(net)
-        if isinstance(m.get("available"), (int, float, str)):
-            return float(m["available"])
-        logger.warning("account_info: margins() unexpected shape; using default equity.")
-        return default_equity
-    except (NetworkException, TokenException) as e:
-        logger.warning("account_info: margins() failed (%s); using default equity.", e)
-        return default_equity
-    except (TypeError, ValueError) as e:
-        logger.warning("account_info: parsing margins() failed (%s); using default equity.", e)
-        return default_equity
+        eq = float(getattr(settings.risk, "default_equity", 0.0) or 0.0)
+        return max(0.0, eq)
+    except Exception:
+        return 0.0
