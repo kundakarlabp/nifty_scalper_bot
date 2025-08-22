@@ -45,25 +45,17 @@ except Exception:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 
-# ----------------------- helpers -----------------------
-
 def _now_ist() -> datetime:
-    # Railway containers default to UTC; IST = UTC+5:30
     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
 
 def _within_trading_window(dt_ist: datetime) -> bool:
-    """Gate by configured TIME_FILTER_START/END if present in .env; otherwise allow.
-    If ALLOW_OFFHOURS_TESTING is True, always allow.
-    """
     if settings.allow_offhours_testing:
         return True
-
     start = getattr(settings, "TIME_FILTER_START", None)
     end = getattr(settings, "TIME_FILTER_END", None)
     if not start or not end:
         return True
-
     try:
         hh, mm = [int(x) for x in str(start).split(":")]
         start_t = dtime(hh, mm)
@@ -72,16 +64,13 @@ def _within_trading_window(dt_ist: datetime) -> bool:
         cur_t = dt_ist.time()
         return start_t <= cur_t <= end_t
     except Exception:
-        # If parsing fails, fail open so the bot still runs
         return True
 
-
-# ----------------------- data containers -----------------------
 
 @dataclass
 class SignalDecision:
     ok: bool
-    side: Optional[str] = None  # "BUY" / "SELL"
+    side: Optional[str] = None
     score: float = 0.0
     confidence: float = 0.0
     entry: Optional[float] = None
@@ -89,8 +78,6 @@ class SignalDecision:
     target: Optional[float] = None
     reasons: Optional[List[str]] = None
 
-
-# ----------------------- main runner -----------------------
 
 class StrategyRunner:
     """
@@ -102,18 +89,16 @@ class StrategyRunner:
         self,
         *,
         live: bool = False,
-        notifier: Optional[Any] = None,   # TelegramController (notify_text/notify_entry/notify_fills)
+        notifier: Optional[Any] = None,
     ) -> None:
         self.live = bool(live)
         self.notifier = notifier
 
-        # Sources & components (feature-detected to avoid hard crashes)
         self.source = LiveKiteSource() if LiveKiteSource else None
         self.strategy = EnhancedScalpingStrategy() if EnhancedScalpingStrategy else None
         self.sizer = PositionSizer() if PositionSizer else None
         self.executor = OrderExecutor(live=live) if OrderExecutor else None
 
-        # State
         self.paused: bool = False
         self.last_diag: Dict[str, Any] = {}
         self.last_signal: Optional[SignalDecision] = None
@@ -126,7 +111,6 @@ class StrategyRunner:
     # ---------- telegram providers ----------
 
     def status_provider(self) -> Dict[str, Any]:
-        """Small summary used by /status."""
         dt = _now_ist().strftime("%Y-%m-%d %H:%M:%S")
         return {
             "time_ist": dt,
@@ -180,11 +164,10 @@ class StrategyRunner:
         if self.notifier:
             self.notifier.notify_text("⏸️ Entries paused.")
         if minutes:
-            # simple timed unpause
+            import threading
             def _timer():
                 time.sleep(max(1, int(minutes * 60)))
                 self.resume()
-            import threading
             threading.Thread(target=_timer, daemon=True).start()
 
     def resume(self) -> None:
@@ -192,23 +175,15 @@ class StrategyRunner:
         if self.notifier:
             self.notifier.notify_text("▶️ Entries resumed.")
 
-    # ---------- diagnostics (used by /diag and /flow) ----------
-
     def diagnostics(self) -> Dict[str, Any]:
-        """Return last diagnostic snapshot (built on every run_once)."""
         return self.last_diag or {"ok": False, "error": "no run yet"}
 
     # ---------- core loop step ----------
 
     def run_once(self) -> None:
-        """
-        One full evaluation step; safe to call every X seconds by a scheduler in main.py.
-        Updates self.last_diag with a granular flow report that Telegram can render.
-        """
         diag: Dict[str, Any] = {"ok": True, "checks": []}
         t0 = _now_ist()
 
-        # 0) basic availability
         if self.source is None:
             diag["ok"] = False
             diag["error"] = "market data source unavailable"
@@ -220,7 +195,6 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 1: market hours
         is_open = _within_trading_window(t0)
         diag["checks"].append({"name": "market_open", "ok": bool(is_open)})
         if not is_open:
@@ -228,35 +202,33 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 2: spot LTP
+        # Spot LTP
         spot_token = settings.instruments.instrument_token
         spot_price = None
         try:
             if hasattr(self.source, "get_spot_ltp"):
                 spot_price = float(self.source.get_spot_ltp(spot_token))
         except Exception as e:
-            log.warning("spot LTP error: %s", e)
+            logging.warning("spot LTP error: %s", e)
         diag["checks"].append({"name": "spot_ltp", "ok": spot_price is not None, "value": spot_price})
         if spot_price is None:
             diag["ok"] = False
             self.last_diag = diag
             return
 
-        # Gate 3: strike selection (POSitional arg only; never keyword)
+        # Strike selection – POSitional arg only
         tokens = None
         try:
             if get_instrument_tokens:
-                # Some historical versions accepted only (spot_price); pass positional to be safe
                 tokens = get_instrument_tokens(spot_price)
         except TypeError as e:
-            # As a fallback, try zero-arg or (int) variants safely
             try:
                 tokens = get_instrument_tokens()  # type: ignore
             except Exception:
                 tokens = None
-            log.warning("strike selector signature mismatch: %s", e)
+            logging.warning("strike selector signature mismatch: %s", e)
         except Exception as e:
-            log.warning("strike selection error: %s", e)
+            logging.warning("strike selection error: %s", e)
             tokens = None
 
         diag_tokens = None
@@ -275,14 +247,14 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 4: OHLC (spot + chosen option). Source interface can vary; feature detect.
+        # OHLC
         spot_ohlc = None
         opt_ohlc = None
         try:
             if hasattr(self.source, "get_ohlc"):
                 spot_ohlc = self.source.get_ohlc(spot_token, minutes=settings.data.lookback_minutes)
         except Exception as e:
-            log.warning("spot OHLC error: %s", e)
+            logging.warning("spot OHLC error: %s", e)
 
         ce_token = (tokens.get("tokens") or {}).get("ce")
         pe_token = (tokens.get("tokens") or {}).get("pe")
@@ -292,7 +264,7 @@ class StrategyRunner:
             if hasattr(self.source, "get_ohlc") and chosen_token:
                 opt_ohlc = self.source.get_ohlc(chosen_token, minutes=settings.data.lookback_minutes)
         except Exception as e:
-            log.warning("option OHLC error: %s", e)
+            logging.warning("option OHLC error: %s", e)
 
         diag["checks"].append({"name": "spot_ohlc", "ok": bool(getattr(spot_ohlc, "__len__", lambda: 0)() > 0),
                                "rows": (len(spot_ohlc) if spot_ohlc is not None else 0)})
@@ -307,28 +279,24 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 5: indicators & regime (optional)
-        regime = None
+        # Indicators / regime
         try:
-            if detect_market_regime:
-                regime = detect_market_regime(spot_ohlc)
-            else:
-                regime = {"regime": "auto"}  # minimal
+            regime = detect_market_regime(spot_ohlc) if detect_market_regime else {"regime": "auto"}
             diag["checks"].append({"name": "indicators", "ok": True, "regime": regime})
         except Exception as e:
-            log.warning("indicator/regime error: %s", e)
+            logging.warning("indicator/regime error: %s", e)
             diag["checks"].append({"name": "indicators", "ok": False, "error": str(e)})
             diag["ok"] = False
             self.last_diag = diag
             return
 
-        # Gate 6: signal
+        # Signal
         signal = None
         try:
             if hasattr(self.strategy, "generate_signal"):
                 signal = self.strategy.generate_signal(spot_ohlc, opt_ohlc, spot_price=spot_price, regime=regime)
         except Exception as e:
-            log.warning("signal error: %s", e)
+            logging.warning("signal error: %s", e)
 
         sig_ok = bool(signal and getattr(signal, "ok", False))
         if not sig_ok and isinstance(signal, dict):
@@ -355,18 +323,14 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 7: sizing
+        # Sizing
         sizing_ok = False
         sizing_note: Optional[str] = None
-        qty = 0
-        lots = 0
-        per_order_qty = 0
-        num_orders = 0
+        qty = lots = per_order_qty = num_orders = 0
         stop_points = 0.0
 
         try:
             if self.sizer and SizingInputs and self.last_signal and self.last_signal.entry and self.last_signal.stop:
-                # We need account equity. If your account info helper exists, fetch it; else fall back.
                 equity = getattr(settings.risk, "default_equity", 30000.0)
                 if hasattr(self.source, "get_equity"):
                     try:
@@ -401,7 +365,7 @@ class StrategyRunner:
                     sizing_note = "; ".join(decision.reasons)
         except Exception as e:
             sizing_note = f"exception: {e}"
-            log.warning("sizing error: %s", e)
+            logging.warning("sizing error: %s", e)
 
         diag["checks"].append({
             "name": "sizing",
@@ -418,7 +382,7 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 8: execution-ready (components present)
+        # Execution ready
         exec_ready = bool(self.executor is not None)
         diag["checks"].append({"name": "execution_ready", "ok": exec_ready,
                                "live": self.live, "broker": bool(self.source), "executor": bool(self.executor)})
@@ -427,13 +391,12 @@ class StrategyRunner:
             self.last_diag = diag
             return
 
-        # Gate 9: place entry (only when live, not paused)
+        # Place entry
         if self.live and not self.paused:
             try:
                 place_ok = False
                 place_msg = None
 
-                # Your executor interface may differ – feature detect common shapes safely
                 if hasattr(self.executor, "place_entry"):
                     place_ok, place_msg = self.executor.place_entry(
                         side=self.last_signal.side,
@@ -469,7 +432,7 @@ class StrategyRunner:
                             record_id=str(place_msg or ""),
                         )
             except Exception as e:
-                log.exception("entry placement failed: %s", e)
+                logging.exception("entry placement failed: %s", e)
                 self.last_place_error = str(e)
                 diag["checks"].append({"name": "place_entry", "ok": False, "error": str(e)})
                 diag["ok"] = False
@@ -477,28 +440,21 @@ class StrategyRunner:
             diag["checks"].append({"name": "place_entry", "ok": False,
                                    "msg": "skipped (not live or paused)"})
 
-        # Open orders snapshot (if supported)
+        # Open orders snapshot
         try:
             cnt = self._active_order_count()
             diag["checks"].append({"name": "open_orders", "ok": True, "count": cnt})
         except Exception:
             diag["checks"].append({"name": "open_orders", "ok": False})
 
-        # Save tokens at top-level for Telegram debugs
         diag["tokens"] = diag_tokens
         self.last_diag = diag
 
-    # ---------- scheduler API (used by main) ----------
-
     def loop_forever(self, interval_sec: int = 30) -> None:
-        """
-        Simple scheduler; call from main when you don’t use APScheduler/Cron.
-        """
         while True:
             try:
                 if not self.paused:
                     self.run_once()
             except Exception as e:
-                log.exception("Unexpected error in run loop: %s", e)
-            # Keep a gentle pace; signals don’t need < 5s cadence
+                logging.exception("Unexpected error in run loop: %s", e)
             time.sleep(max(5, int(interval_sec)))
