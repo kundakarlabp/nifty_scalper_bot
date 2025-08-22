@@ -1,123 +1,92 @@
 # src/config.py
-"""
-Simple config loader: all settings pulled from .env
-No pydantic, no BaseModel, no callbacks.
-"""
+from __future__ import annotations
 
-import os
-from types import SimpleNamespace
-from dotenv import load_dotenv
+import logging
+from functools import lru_cache
+from pydantic import BaseSettings, Field
 
-# Load .env file
-load_dotenv()
+log = logging.getLogger(__name__)
 
 
-def get_str(key: str, default: str = "") -> str:
-    return os.getenv(key, default)
+# --- Server ---
+class ServerSettings(BaseSettings):
+    host: str = Field("0.0.0.0", env="SERVER__HOST")
+    port: int = Field(8000, env="SERVER__PORT")
 
 
-def get_int(key: str, default: int = 0) -> int:
-    try:
-        return int(os.getenv(key, default))
-    except Exception:
-        return default
+# --- Instruments ---
+class InstrumentsSettings(BaseSettings):
+    spot_symbol: str = Field(..., env="INSTRUMENTS__SPOT_SYMBOL")
+    trade_symbol: str = Field(..., env="INSTRUMENTS__TRADE_SYMBOL")
+    trade_exchange: str = Field(..., env="INSTRUMENTS__TRADE_EXCHANGE")
+    instrument_token: int = Field(..., env="INSTRUMENTS__INSTRUMENT_TOKEN")
+    nifty_lot_size: int = Field(50, env="INSTRUMENTS__NIFTY_LOT_SIZE")
+    strike_range: int = Field(3, env="INSTRUMENTS__STRIKE_RANGE")
+    min_lots: int = Field(1, env="INSTRUMENTS__MIN_LOTS")
+    max_lots: int = Field(100, env="INSTRUMENTS__MAX_LOTS")
 
 
-def get_float(key: str, default: float = 0.0) -> float:
-    try:
-        return float(os.getenv(key, default))
-    except Exception:
-        return default
+# --- Strategy ---
+class StrategySettings(BaseSettings):
+    min_signal_score: int = Field(2, env="STRATEGY__MIN_SIGNAL_SCORE")
+    confidence_threshold: float = Field(2.0, env="STRATEGY__CONFIDENCE_THRESHOLD")
+    atr_period: int = Field(14, env="STRATEGY__ATR_PERIOD")
+    atr_sl_multiplier: float = Field(1.5, env="STRATEGY__ATR_SL_MULTIPLIER")
+    atr_tp_multiplier: float = Field(3.0, env="STRATEGY__ATR_TP_MULTIPLIER")
+    sl_confidence_adj: float = Field(0.12, env="STRATEGY__SL_CONFIDENCE_ADJ")
+    tp_confidence_adj: float = Field(0.35, env="STRATEGY__TP_CONFIDENCE_ADJ")
+    min_bars_for_signal: int = Field(10, env="STRATEGY__MIN_BARS_FOR_SIGNAL")
 
 
-def get_bool(key: str, default: bool = False) -> bool:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.lower() in ("1", "true", "yes", "on")
+# --- Risk ---
+class RiskSettings(BaseSettings):
+    default_equity: float = Field(30000, env="RISK__DEFAULT_EQUITY")
+    risk_per_trade: float = Field(0.02, env="RISK__RISK_PER_TRADE")
+    max_trades_per_day: int = Field(30, env="RISK__MAX_TRADES_PER_DAY")
+    consecutive_loss_limit: int = Field(3, env="RISK__CONSECUTIVE_LOSS_LIMIT")
+    max_daily_drawdown_pct: float = Field(0.05, env="RISK__MAX_DAILY_DRAWDOWN_PCT")
 
 
-class AppSettings:
-    def __init__(self):
-        # --- Modes / Logging ---
-        self.enable_live_trading = get_bool("ENABLE_LIVE_TRADING", False)
-        self.allow_offhours_testing = get_bool("ALLOW_OFFHOURS_TESTING", False)
-        self.log_level = get_str("LOG_LEVEL", "INFO")
-
-        # --- Scheduling / Hours ---
-        self.time_filter_start = get_str("TIME_FILTER_START", "09:20")
-        self.time_filter_end = get_str("TIME_FILTER_END", "15:20")
-        self.lookback_minutes = get_int("DATA__LOOKBACK_MINUTES", 15)
-
-        # --- Instruments ---
-        self.instruments = SimpleNamespace(
-            spot_symbol=get_str("INSTRUMENTS__SPOT_SYMBOL", "NSE:NIFTY 50"),
-            trade_symbol=get_str("INSTRUMENTS__TRADE_SYMBOL", "NIFTY"),
-            trade_exchange=get_str("INSTRUMENTS__TRADE_EXCHANGE", "NFO"),
-            instrument_token=get_int("INSTRUMENTS__INSTRUMENT_TOKEN", 256265),
-            nifty_lot_size=get_int("INSTRUMENTS__NIFTY_LOT_SIZE", 50),
-            strike_range=get_int("INSTRUMENTS__STRIKE_RANGE", 3),
-            min_lots=get_int("INSTRUMENTS__MIN_LOTS", 1),
-            max_lots=get_int("INSTRUMENTS__MAX_LOTS", 15),
-        )
-
-        # --- Strategy ---
-        self.strategy = SimpleNamespace(
-            min_signal_score=get_float("STRATEGY__MIN_SIGNAL_SCORE", 2.0),
-            confidence_threshold=get_float("STRATEGY__CONFIDENCE_THRESHOLD", 2.0),
-            atr_period=get_int("STRATEGY__ATR_PERIOD", 14),
-            atr_sl_multiplier=get_float("STRATEGY__ATR_SL_MULTIPLIER", 1.5),
-            atr_tp_multiplier=get_float("STRATEGY__ATR_TP_MULTIPLIER", 3.0),
-            sl_confidence_adj=get_float("STRATEGY__SL_CONFIDENCE_ADJ", 0.12),
-            tp_confidence_adj=get_float("STRATEGY__TP_CONFIDENCE_ADJ", 0.35),
-            min_bars_for_signal=get_int("STRATEGY__MIN_BARS_FOR_SIGNAL", 10),
-        )
-
-        # --- Risk ---
-        self.risk = SimpleNamespace(
-            default_equity=get_float("RISK__DEFAULT_EQUITY", 30000.0),
-            risk_per_trade=get_float("RISK__RISK_PER_TRADE", 0.02),
-            max_trades_per_day=get_int("RISK__MAX_TRADES_PER_DAY", 20),
-            consecutive_loss_limit=get_int("RISK__CONSECUTIVE_LOSS_LIMIT", 3),
-            max_daily_drawdown_pct=get_float("RISK__MAX_DAILY_DRAWDOWN_PCT", 0.05),
-        )
-
-        # --- Executor ---
-        self.executor = SimpleNamespace(
-            exchange=get_str("EXECUTOR__EXCHANGE", "NFO"),
-            order_product=get_str("EXECUTOR__ORDER_PRODUCT", "NRML"),
-            order_variety=get_str("EXECUTOR__ORDER_VARIETY", "regular"),
-            entry_order_type=get_str("EXECUTOR__ENTRY_ORDER_TYPE", "LIMIT"),
-            tick_size=get_float("EXECUTOR__TICK_SIZE", 0.05),
-            exchange_freeze_qty=get_int("EXECUTOR__EXCHANGE_FREEZE_QTY", 1800),
-            preferred_exit_mode=get_str("EXECUTOR__PREFERRED_EXIT_MODE", "REGULAR"),
-            use_slm_exit=get_bool("EXECUTOR__USE_SLM_EXIT", True),
-            partial_tp_enable=get_bool("EXECUTOR__PARTIAL_TP_ENABLE", True),
-            tp1_qty_ratio=get_float("EXECUTOR__TP1_QTY_RATIO", 0.5),
-            breakeven_ticks=get_int("EXECUTOR__BREAKEVEN_TICKS", 2),
-            enable_trailing=get_bool("EXECUTOR__ENABLE_TRAILING", True),
-            trailing_atr_multiplier=get_float("EXECUTOR__TRAILING_ATR_MULTIPLIER", 1.5),
-            fee_per_lot=get_float("EXECUTOR__FEE_PER_LOT", 20.0),
-        )
-
-        # --- API Keys ---
-        self.telegram = SimpleNamespace(
-            bot_token=get_str("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=get_str("TELEGRAM_CHAT_ID", ""),
-        )
-        self.zerodha = SimpleNamespace(
-            api_key=get_str("ZERODHA_API_KEY", ""),
-            api_secret=get_str("ZERODHA_API_SECRET", ""),
-            access_token=get_str("ZERODHA_ACCESS_TOKEN", ""),
-        )
-
-    def summary(self) -> str:
-        return (
-            f"Trading={'LIVE' if self.enable_live_trading else 'DRY'} | "
-            f"Risk={self.risk.risk_per_trade*100:.1f}% per trade | "
-            f"Equity=₹{self.risk.default_equity:.0f} | "
-            f"Lots={self.instruments.min_lots}-{self.instruments.max_lots}"
-        )
+# --- Execution ---
+class ExecutorSettings(BaseSettings):
+    exchange: str = Field("NFO", env="EXECUTOR__EXCHANGE")
+    order_product: str = Field("NRML", env="EXECUTOR__ORDER_PRODUCT")
+    order_variety: str = Field("regular", env="EXECUTOR__ORDER_VARIETY")
+    entry_order_type: str = Field("LIMIT", env="EXECUTOR__ENTRY_ORDER_TYPE")
+    tick_size: float = Field(0.05, env="EXECUTOR__TICK_SIZE")
+    exchange_freeze_qty: int = Field(1800, env="EXECUTOR__EXCHANGE_FREEZE_QTY")
+    preferred_exit_mode: str = Field("REGULAR", env="EXECUTOR__PREFERRED_EXIT_MODE")
+    use_slm_exit: bool = Field(True, env="EXECUTOR__USE_SLM_EXIT")
+    partial_tp_enable: bool = Field(True, env="EXECUTOR__PARTIAL_TP_ENABLE")
+    tp1_qty_ratio: float = Field(0.5, env="EXECUTOR__TP1_QTY_RATIO")
+    breakeven_ticks: int = Field(2, env="EXECUTOR__BREAKEVEN_TICKS")
+    enable_trailing: bool = Field(True, env="EXECUTOR__ENABLE_TRAILING")
+    trailing_atr_multiplier: float = Field(1.5, env="EXECUTOR__TRAILING_ATR_MULTIPLIER")
+    fee_per_lot: float = Field(20.0, env="EXECUTOR__FEE_PER_LOT")
 
 
-settings = AppSettings()
+# --- AppSettings ---
+class AppSettings(BaseSettings):
+    enable_live_trading: bool = Field(False, env="ENABLE_LIVE_TRADING")
+    allow_offhours_testing: bool = Field(False, env="ALLOW_OFFHOURS_TESTING")
+    log_level: str = Field("INFO", env="LOG_LEVEL")
+
+    time_filter_start: str = Field("09:20", env="TIME_FILTER_START")
+    time_filter_end: str = Field("15:20", env="TIME_FILTER_END")
+    data_lookback_minutes: int = Field(15, env="DATA__LOOKBACK_MINUTES")
+
+    instruments: InstrumentsSettings = InstrumentsSettings()
+    strategy: StrategySettings = StrategySettings()
+    risk: RiskSettings = RiskSettings()
+    executor: ExecutorSettings = ExecutorSettings()
+    server: ServerSettings = ServerSettings()  # ✅ added back for main.py health server
+
+
+@lru_cache()
+def get_settings() -> AppSettings:
+    settings = AppSettings()
+    log.info("Settings loaded successfully.")
+    return settings
+
+
+settings = get_settings()
