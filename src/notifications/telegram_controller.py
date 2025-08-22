@@ -645,3 +645,28 @@ class TelegramController:
 
         # fallback
         return self._send(f"Unknown command: {cmd}")
+
+
+# --- add near the top of TelegramController.__init__ signature ---
+        runner_tick_mock: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+
+# --- store it in __init__ ---
+        self._runner_tick_mock = runner_tick_mock
+
+# --- in _handle_update(), add a handler (below /tick and above /logs is fine) ---
+        # ---- TICK (MOCK) ----
+        if cmd == "/tickmock":
+            if not self._runner_tick_mock:
+                return self._send("Mock tick not wired.")
+            try:
+                res = self._runner_tick_mock()
+                if res and res.get("signal_ok"):
+                    msg = "✅ Mock tick: signal ✓, sizing ✓\n"
+                    msg += f"{res.get('side')} lots={res.get('lots')} sl={res.get('sl_points'):.2f} tp={res.get('tp_points'):.2f}"
+                elif res and res.get("signal_ok"):
+                    msg = "ℹ️ Mock tick: signal ✓, sizing 0 (not affordable)."
+                else:
+                    msg = "Mock tick: no signal."
+                return self._send(msg)
+            except Exception as e:
+                return self._send(f"Mock tick error: {e}")
