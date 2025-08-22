@@ -1,3 +1,4 @@
+# src/main.py
 from __future__ import annotations
 
 import argparse
@@ -26,9 +27,7 @@ except Exception:  # pragma: no cover
 
 # ---------------- Logging ----------------
 class RingBufferLogHandler(logging.Handler):
-    """
-    Lightweight in-memory log buffer for /logs on demand (no spam).
-    """
+    """Lightweight in-memory log buffer for /logs on demand."""
     def __init__(self, capacity: int = 1000) -> None:
         super().__init__()
         self.capacity = int(capacity)
@@ -54,7 +53,6 @@ def _setup_logging() -> RingBufferLogHandler:
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         root.addHandler(ch)
-    # quiet noisy libs
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
@@ -140,12 +138,10 @@ class Application:
             return ex.get_active_orders() if ex else []
 
         def diag_provider() -> Dict[str, Any]:
-            diag = {}
             try:
-                diag = self.runner.diagnose()  # type: ignore[attr-defined]
+                return self.runner.diagnose()
             except Exception:
-                diag = {"ok": False, "error": "diagnose() not available"}
-            return diag
+                return {"ok": False, "error": "diagnose() not available"}
 
         def logs_provider(n: int) -> List[str]:
             return self._log_handler.tail(n)
@@ -206,8 +202,14 @@ class Application:
             settings.executor.breakeven_ticks = int(ticks)
 
         def set_live_mode(v: bool) -> None:
+            # update all three: app flag, settings, runner
             self.live_trading = bool(v)
             settings.enable_live_trading = bool(v)
+            try:
+                # keep runner in sync with /mode changes
+                self.runner._live = bool(v)  # minimal, avoids full re-init
+            except Exception:
+                pass
             self.log.info("Live mode set to %s.", "True" if v else "False")
 
         # Strategy mutators
@@ -276,12 +278,13 @@ class Application:
                     price=float(evt.get("price", 0.0)),
                     record_id=str(evt.get("record_id")),
                 )
-            elif et == "FILLS" and self.tg:
+            elif et in ("FILL", "FILLS") and self.tg:  # accept both singular/plural
                 fills = evt.get("fills") or []
                 if fills:
                     self.tg.notify_fills(fills)
-            # cache the last signal-ish payload if present
-            if et in ("ENTRY_PLACED", "SIGNAL"):
+
+            # cache last signal-ish payloads
+            if et in ("ENTRY_PLACED", "SIGNAL", "FILL", "FILLS"):
                 self._last_signal = evt
         except Exception:
             pass
@@ -297,9 +300,8 @@ class Application:
         self._start_health()
         self._wire_telegram()
 
-        # main cadence is lightweight; the runner fetch cadence is internalized
         cadence = 0.5
-        hb_every = 300.0  # heartbeat log every ~5 minutes max
+        hb_every = 300.0  # heartbeat log every ~5 minutes
         last_hb = 0.0
 
         while not self._stop_event.is_set():
@@ -312,7 +314,6 @@ class Application:
             except Exception as e:
                 logging.getLogger(__name__).exception("Main loop error: %s", e)
 
-            # lightweight heartbeat to console (users can /logs on demand)
             now = time.time()
             if now - last_hb > hb_every:
                 s = self._status_payload()
@@ -326,7 +327,6 @@ class Application:
             if self._stop_event.wait(timeout=cadence):
                 break
 
-        # teardown
         if self.tg:
             try:
                 self.tg.stop_polling()
