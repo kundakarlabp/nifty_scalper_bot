@@ -1,26 +1,14 @@
+# src/notifications/telegram_controller.py
 from __future__ import annotations
-"""
-Telegram controller — robust, single long-poll, on-demand ops.
-
-Highlights
-- Single long-poll thread (no webhook, no double polling)
-- Allowlist via chat IDs
-- /status, /active, /positions, /cancel_all (with confirm)
-- /pause, /resume, /mode live|dry
-- /tick (timeout-guarded), /tickdry (one-shot DRY tick with restore)
-- /logs [n], /diag, /last, /help
-- Runtime tuning: /risk, /trail, /trailmult, /partial, /tp1, /breakeven
-- Strategy tuning: /minscore, /conf, /atrp, /slmult, /tpmult, /trend, /range
-- De-dup + rate limit + exponential backoff on sends
-"""
 
 import hashlib
 import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
+import inspect
 import requests
 
 from src.config import settings
@@ -42,7 +30,7 @@ class TelegramController:
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
-        runner_tick: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+        runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
         cancel_all: Optional[Callable[[], None]] = None,
         # execution mutators
         set_risk_pct: Optional[Callable[[float], None]] = None,
@@ -60,10 +48,7 @@ class TelegramController:
         set_tp_mult: Optional[Callable[[float], None]] = None,
         set_trend_boosts: Optional[Callable[[float, float], None]] = None,   # (tp_boost, sl_relax)
         set_range_tighten: Optional[Callable[[float, float], None]] = None,  # (tp_tighten, sl_tighten)
-        # networking
         http_timeout: float = 20.0,
-        # control defaults
-        tick_timeout_sec: float = 8.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
         self._token: Optional[str] = getattr(tg, "bot_token", None)
@@ -72,8 +57,7 @@ class TelegramController:
             raise RuntimeError("TelegramController: bot_token or chat_id missing in settings.telegram")
 
         self._base = f"https://api.telegram.org/bot{self._token}"
-        self._timeout = float(http_timeout)
-        self._tick_timeout = float(tick_timeout_sec)
+        self._timeout = http_timeout
 
         # hooks
         self._status_provider = status_provider
@@ -114,22 +98,19 @@ class TelegramController:
         extra = getattr(tg, "extra_admin_ids", []) or []
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
-        # outbound send control
+        # rate / backoff
         self._send_min_interval = 0.9
-        self._last_sends: List[Tuple[float, str]] = []
+        self._last_sends: List[tuple[float, str]] = []
         self._backoff = 1.0
         self._backoff_max = 20.0
 
-    # ---------------- outbound helpers ----------------
+    # ------------- outbound -------------
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
-        # keep only recent history (10s window)
         self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
-        # min spacing
-        if self._last_sends and (now - self._last_sends[-1][0]) < self._send_min_interval:
+        if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
             return False
-        # avoid duplicate payloads
         if any(hh == h for _, hh in self._last_sends):
             return False
         self._last_sends.append((now, h))
@@ -147,8 +128,7 @@ class TelegramController:
                 requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
                 self._backoff = 1.0
                 return
-            except Exception as e:
-                log.debug("send error: %s", e)
+            except Exception:
                 time.sleep(delay)
                 delay = min(self._backoff_max, delay * 2)
                 self._backoff = delay
@@ -159,24 +139,6 @@ class TelegramController:
             requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
         except Exception as e:
             log.debug("Inline send failed: %s", e)
-
-    # ---------------- lifecycle ----------------
-    def start_polling(self) -> None:
-        if self._started:
-            log.info("Telegram polling already running; skip start.")
-            return
-        self._stop.clear()
-        self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
-        self._poll_thread.start()
-        self._started = True
-
-    def stop_polling(self) -> None:
-        if not self._started:
-            return
-        self._stop.set()
-        if self._poll_thread:
-            self._poll_thread.join(timeout=5)
-        self._started = False
 
     def send_startup_alert(self) -> None:
         s = {}
@@ -192,10 +154,7 @@ class TelegramController:
         )
 
     def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
-        self._send(
-            f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`",
-            parse_mode="Markdown",
-        )
+        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`", parse_mode="Markdown")
 
     def notify_fills(self, fills: List[tuple[str, float]]) -> None:
         if not fills:
@@ -205,7 +164,24 @@ class TelegramController:
             lines.append(f"• {rid} @ {px:.2f}")
         self._send("\n".join(lines))
 
-    # ---------------- polling loop ----------------
+    # ------------- polling -------------
+    def start_polling(self) -> None:
+        if self._started:
+            log.info("Telegram polling already running; skipping start.")
+            return
+        self._stop.clear()
+        self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
+        self._poll_thread.start()
+        self._started = True
+
+    def stop_polling(self) -> None:
+        if not self._started:
+            return
+        self._stop.set()
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
+        self._started = False
+
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -227,33 +203,62 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
-    # ---------------- util: call with timeout ----------------
-    def _call_with_timeout(self, fn: Callable[[], Any], timeout_s: float) -> Tuple[bool, Any]:
-        """
-        Run `fn` in a thread and wait up to `timeout_s`.
-        Returns (completed, result_or_exception).
-        """
-        done = threading.Event()
-        box: Dict[str, Any] = {}
+    # ------------- helpers -------------
+    def _do_tick(self, *, dry: bool) -> str:
+        """Run one tick. If runner provider doesn't accept 'dry', emulate by flipping live + offhours flags."""
+        if not self._runner_tick:
+            return "Tick not wired."
+        # detect if provider accepts 'dry'
+        accepts_dry = False
+        try:
+            sig = inspect.signature(self._runner_tick)  # type: ignore[arg-type]
+            accepts_dry = "dry" in sig.parameters
+        except Exception:
+            accepts_dry = False
 
-        def _runner() -> None:
+        # snapshot flags
+        live_before = None
+        allow_off_before = None
+        try:
+            live_before = bool(getattr(settings, "enable_live_trading", False))
+            allow_off_before = bool(getattr(settings, "allow_offhours_testing", False))
+        except Exception:
+            pass
+
+        try:
+            if dry:
+                # ensure off-hours flow proceeds
+                try:
+                    setattr(settings, "allow_offhours_testing", True)
+                except Exception:
+                    pass
+                # force dry for this tick if we can, else emulate by flipping live flag off temporarily
+                if accepts_dry:
+                    res = self._runner_tick(dry=True)  # type: ignore[misc]
+                else:
+                    if self._set_live_mode and live_before is not None:
+                        self._set_live_mode(False)
+                    res = self._runner_tick()
+            else:
+                res = self._runner_tick()
+        except Exception as e:
+            return f"Tick error: {e}"
+        finally:
+            # restore flags
             try:
-                box["result"] = fn()
-            except Exception as e:  # store exception for reporting
-                box["error"] = e
-            finally:
-                done.set()
+                if live_before is not None and self._set_live_mode:
+                    self._set_live_mode(live_before)
+            except Exception:
+                pass
+            try:
+                if allow_off_before is not None:
+                    setattr(settings, "allow_offhours_testing", allow_off_before)
+            except Exception:
+                pass
 
-        t = threading.Thread(target=_runner, daemon=True)
-        t.start()
-        finished = done.wait(timeout_s)
-        if not finished:
-            return False, TimeoutError(f"operation exceeded {timeout_s:.1f}s")
-        if "error" in box:
-            return True, box["error"]
-        return True, box.get("result")
+        return "✅ Tick executed." if res else "Dry tick executed (no action)." if dry else "Tick executed (no action)."
 
-    # ---------------- command handling ----------------
+    # ------------- command handling -------------
     def _handle_update(self, upd: Dict[str, Any]) -> None:
         # inline callbacks
         if "callback_query" in upd:
@@ -268,11 +273,9 @@ class TelegramController:
                     self._send("🧹 Cancelled all open orders.")
             finally:
                 try:
-                    requests.post(
-                        f"{self._base}/answerCallbackQuery",
-                        json={"callback_query_id": cq.get("id")},
-                        timeout=self._timeout,
-                    )
+                    requests.post(f"{self._base}/answerCallbackQuery",
+                                  json={"callback_query_id": cq.get("id")},
+                                  timeout=self._timeout)
                 except Exception:
                     pass
             return
@@ -292,28 +295,28 @@ class TelegramController:
         cmd = parts[0].lower()
         args = parts[1:]
 
-        # ---- HELP / PING ----
+        # ---- HELP ----
         if cmd in ("/start", "/help"):
             return self._send(
                 "🤖 Nifty Scalper Bot — commands\n"
                 "*Core*\n"
-                "/status [verbose] • /active • /positions • /cancel_all\n"
-                "/pause | /resume | /mode live|dry\n"
-                "/tick — force one tick (timeout)\n"
-                "/tickdry — one tick in DRY (restores mode)\n"
-                "/logs [n] • /diag • /last • /ping\n"
+                "/status [verbose] — basic or JSON status\n"
+                "/active [page] — list active orders\n"
+                "/positions — broker day positions\n"
+                "/cancel_all — cancel all (with confirm)\n"
+                "/pause | /resume — control entries\n"
+                "/mode live|dry — toggle live trading\n"
+                "/tick — one tick | /tickdry — one dry tick (after-hours ok)\n"
+                "/logs [n] — recent log lines\n"
+                "/diag — health/flow summary  •  /check — deep check\n"
                 "*Execution Tuning*\n"
                 "/risk <pct> • /trail on|off • /trailmult <x>\n"
                 "/partial on|off • /tp1 <pct> • /breakeven <ticks>\n"
                 "*Strategy Tuning*\n"
                 "/minscore <n> • /conf <x> • /atrp <n>\n"
-                "/slmult <x> • /tpmult <x> • /trend <tp> <sl>\n"
-                "/range <tp> <sl>\n",
+                "/slmult <x> • /tpmult <x> • /trend a b • /range a b\n",
                 parse_mode="Markdown",
             )
-
-        if cmd == "/ping":
-            return self._send("pong")
 
         # ---- STATUS ----
         if cmd == "/status":
@@ -402,42 +405,11 @@ class TelegramController:
                 setattr(settings, "enable_live_trading", val)
             return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
 
-        # ---- TICK (with timeout) ----
-        if cmd == "/tick":
-            if not self._runner_tick:
-                return self._send("Tick not wired.")
-            ok, res = self._call_with_timeout(self._runner_tick, self._tick_timeout)
-            if not ok:
-                return self._send(f"Tick timed out ({self._tick_timeout:.0f}s).")
-            if isinstance(res, Exception):
-                return self._send(f"Tick error: {res}")
-            return self._send("✅ Tick executed." if res else "Tick executed (no action).")
-
-        # ---- TICKDRY (force DRY for one tick, then restore) ----
-        if cmd == "/tickdry":
-            if not self._runner_tick:
-                return self._send("Tick not wired.")
-            prev_live = bool(getattr(settings, "enable_live_trading", False))
-            try:
-                if self._set_live_mode:
-                    self._set_live_mode(False)
-                else:
-                    setattr(settings, "enable_live_trading", False)
-                ok, res = self._call_with_timeout(self._runner_tick, self._tick_timeout)
-                if not ok:
-                    return self._send(f"Tick (dry) timed out ({self._tick_timeout:.0f}s).")
-                if isinstance(res, Exception):
-                    return self._send(f"Tick (dry) error: {res}")
-                return self._send("✅ Dry tick executed." if res else "Dry tick executed (no action).")
-            finally:
-                # restore previous live state
-                try:
-                    if self._set_live_mode:
-                        self._set_live_mode(prev_live)
-                    else:
-                        setattr(settings, "enable_live_trading", prev_live)
-                except Exception:
-                    pass
+        # ---- TICKS ----
+        if cmd in ("/tick", "/tickdry"):
+            dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
+            out = self._do_tick(dry=dry)
+            return self._send(out)
 
         # ---- LOGS ----
         if cmd == "/logs":
@@ -445,8 +417,7 @@ class TelegramController:
                 return self._send("Logs provider not wired.")
             try:
                 n = int(args[0]) if args else 30
-                n = max(5, min(200, n))
-                lines = self._logs_provider(n) or []
+                lines = self._logs_provider(max(5, min(200, n))) or []
                 if not lines:
                     return self._send("No logs available.")
                 block = "\n".join(lines[-n:])
@@ -456,21 +427,44 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Logs error: {e}")
 
-        # ---- DIAG ----
+        # ---- DIAG (compact) ----
         if cmd == "/diag":
             if not self._diag_provider:
                 return self._send("Diag provider not wired.")
             try:
                 d = self._diag_provider() or {}
                 ok = d.get("ok", False)
+                checks = d.get("checks", [])
                 summary = []
-                for c in d.get("checks", []):
+                for c in checks:
                     mark = "🟢" if c.get("ok") else "🔴"
                     summary.append(f"{mark} {c.get('name')}")
                 head = "✅ Flow looks good" if ok else "❗ Flow has issues"
                 return self._send(f"{head}\n" + " · ".join(summary))
             except Exception as e:
                 return self._send(f"Diag error: {e}")
+
+        # ---- CHECK (deep) ----
+        if cmd == "/check":
+            if not self._diag_provider:
+                return self._send("Diag provider not wired.")
+            try:
+                d = self._diag_provider() or {}
+                lines = ["🔍 Full system check"]
+                for c in d.get("checks", []):
+                    mark = "🟢" if c.get("ok") else "🔴"
+                    extra = c.get("hint") or c.get("detail") or ""
+                    if extra:
+                        lines.append(f"{mark} {c.get('name')} — {extra}")
+                    else:
+                        lines.append(f"{mark} {c.get('name')}")
+                if d.get("last_signal"):
+                    lines.append("📈 last_signal: present")
+                else:
+                    lines.append("📈 last_signal: none")
+                return self._send("\n".join(lines))
+            except Exception as e:
+                return self._send(f"Check error: {e}")
 
         # ---- EXECUTION TUNING ----
         if cmd == "/risk":
@@ -639,13 +633,13 @@ class TelegramController:
             except Exception:
                 return self._send("Invalid numbers.")
 
-        # ---- LAST SIGNAL ----
+        # ---- LAST SIGNAL (optional) ----
         if cmd == "/last":
             if not self._last_signal_provider:
                 return self._send("Last-signal provider not wired.")
             try:
-                s = self._last_signal_provider() or {}
-                return self._send("```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+                s = self._last_signal_provider()
+                return self._send("```json\n" + json.dumps(s or {}, indent=2) + "\n```", parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Last-signal error: {e}")
 
