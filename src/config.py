@@ -1,241 +1,123 @@
 # src/config.py
-from __future__ import annotations
+"""
+Simple config loader: all settings pulled from .env
+No pydantic, no BaseModel, no callbacks.
+"""
 
 import os
-from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional
+from dotenv import load_dotenv
 
-from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-# ---------- helpers ----------
-
-def _find_env_file() -> Optional[Path]:
-    p = Path.cwd()
-    for _ in range(6):
-        f = p / ".env"
-        if f.exists():
-            return f
-        p = p.parent
-    return None
-
-def _csv_ints(v: Optional[str]) -> List[int]:
-    if not v:
-        return []
-    out: List[int] = []
-    for part in v.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.append(int(part))
-        except Exception:
-            pass
-    return out
+# Load .env file
+load_dotenv()
 
 
-# ---------- component models ----------
-
-class DataSettings(BaseModel):
-    warmup_bars: int = 30
-    lookback_minutes: int = 60
-    timeframe: str = "minute"  # minute | 5minute
-
-class RiskConfig(BaseModel):
-    # If Kite funds cannot be read, we fallback to default_equity.
-    default_equity: float = 30000.0
-    risk_per_trade: float = 0.01       # 1% = 0.01
-    max_trades_per_day: int = 5
-    consecutive_loss_limit: int = 3
-    max_daily_drawdown_pct: float = 0.05
-
-class ZerodhaConfig(BaseModel):
-    api_key: Optional[str] = None
-    api_secret: Optional[str] = None
-    access_token: Optional[str] = None
-    public_token: Optional[str] = None
-    enctoken: Optional[str] = None
-
-class TelegramConfig(BaseModel):
-    enabled: bool = True
-    bot_token: Optional[str] = None
-    chat_id: Optional[int] = None
-    extra_admin_ids: List[int] = Field(default_factory=list)
-
-class ServerConfig(BaseModel):
-    host: str = "0.0.0.0"
-    port: int = 8000
-
-class StrategyConfig(BaseModel):
-    # gates
-    min_bars_for_signal: int = 10
-    min_signal_score: int = 2
-    confidence_threshold: float = 2.5
-    auto_relax_enabled: bool = True
-    min_signal_score_relaxed: int = 2
-    confidence_threshold_relaxed: float = 2
-
-    # indicators
-    ema_fast: int = 9
-    ema_slow: int = 21
-    rsi_period: int = 14
-    adx_period: int = 14
-    adx_trend_strength: int = 20
-
-    # ATR/SL/TP
-    atr_period: int = 14
-    atr_sl_multiplier: float = 1.5
-    atr_tp_multiplier: float = 3.0
-    sl_confidence_adj: float = 0.12
-    tp_confidence_adj: float = 0.35
-
-    # regime tweaks
-    trend_tp_boost: float = 0.6
-    trend_sl_relax: float = 0.2
-    range_tp_tighten: float = -0.4
-    range_sl_tighten: float = -0.2
-
-class InstrumentsConfig(BaseModel):
-    spot_symbol: str = "NSE:NIFTY 50"
-    trade_symbol: str = "NIFTY"
-    exchange: str = "NFO"
-    instrument_token: int = 256265
-    nifty_lot_size: int = 75
-    min_lots: int = 1
-    max_lots: int = 15
-    strike_range: int = 3
-
-class ExecutorConfig(BaseModel):
-    exchange: str = "NFO"
-    order_product: str = "NRML"
-    order_variety: str = "regular"
-    entry_order_type: str = "LIMIT"
-    tick_size: float = 0.05
-    exchange_freeze_qty: int = 1800
-    preferred_exit_mode: str = "REGULAR"
-    use_slm_exit: bool = True
-    partial_tp_enable: bool = False
-    tp1_qty_ratio: float = 0.5
-    breakeven_ticks: int = 2
-    enable_trailing: bool = True
-    trailing_atr_multiplier: float = 1.5
-    fee_per_lot: float = 20.0
+def get_str(key: str, default: str = "") -> str:
+    return os.getenv(key, default)
 
 
-# ---------- master settings ----------
+def get_int(key: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(key, default))
+    except Exception:
+        return default
 
-class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=_find_env_file(),
-        env_nested_delimiter="__",   # RISK__RISK_PER_TRADE=0.02 etc.
-        extra="ignore",
-        case_sensitive=False,
-    )
 
-    # top-level
-    enable_live_trading: bool = False
-    allow_offhours_testing: bool = False
-    log_level: str = "INFO"
+def get_float(key: str, default: float = 0.0) -> float:
+    try:
+        return float(os.getenv(key, default))
+    except Exception:
+        return default
 
-    # components
-    data: DataSettings = DataSettings()
-    risk: RiskConfig = RiskConfig()
-    zerodha: ZerodhaConfig = ZerodhaConfig()
-    telegram: TelegramConfig = TelegramConfig()
-    server: ServerConfig = ServerConfig()
-    strategy: StrategyConfig = StrategyConfig()
-    instruments: InstrumentsConfig = InstrumentsConfig()
-    executor: ExecutorConfig = ExecutorConfig()
 
-    # flat env fallbacks (Railway & legacy)
-    TELEGRAM_ENABLED: Optional[str] = None
-    TELEGRAM_BOT_TOKEN: Optional[str] = None
-    TELEGRAM_CHAT_ID: Optional[str] = None
-    TELEGRAM_EXTRA_ADMINS: Optional[str] = None
+def get_bool(key: str, default: bool = False) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.lower() in ("1", "true", "yes", "on")
 
-    ZERODHA_API_KEY: Optional[str] = None
-    ZERODHA_API_SECRET: Optional[str] = None
-    ZERODHA_ACCESS_TOKEN: Optional[str] = None
 
-    ENABLE_LIVE_TRADING: Optional[str] = None
-    LOG_LEVEL: Optional[str] = None
+class AppSettings:
+    def __init__(self):
+        # --- Modes / Logging ---
+        self.enable_live_trading = get_bool("ENABLE_LIVE_TRADING", False)
+        self.allow_offhours_testing = get_bool("ALLOW_OFFHOURS_TESTING", False)
+        self.log_level = get_str("LOG_LEVEL", "INFO")
 
-    RISK_PER_TRADE: Optional[str] = None       # decimal (0.02)
-    RISK_PER_TRADE_PCT: Optional[str] = None   # percent (2)
+        # --- Scheduling / Hours ---
+        self.time_filter_start = get_str("TIME_FILTER_START", "09:20")
+        self.time_filter_end = get_str("TIME_FILTER_END", "15:20")
+        self.lookback_minutes = get_int("DATA__LOOKBACK_MINUTES", 15)
 
-    def model_post_init(self, _) -> None:  # type: ignore[override]
-        # ----- Telegram fallbacks -----
-        if self.TELEGRAM_ENABLED is not None:
-            self.telegram.enabled = str(self.TELEGRAM_ENABLED).strip().lower() in {"1", "true", "yes", "on"}
-        if not self.telegram.bot_token:
-            self.telegram.bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or self.TELEGRAM_BOT_TOKEN
-        if self.telegram.chat_id is None:
-            val = os.getenv("TELEGRAM_CHAT_ID") or self.TELEGRAM_CHAT_ID
-            try:
-                self.telegram.chat_id = int(val) if val else None
-            except Exception:
-                self.telegram.chat_id = None
-        extra = os.getenv("TELEGRAM_EXTRA_ADMINS") or self.TELEGRAM_EXTRA_ADMINS
-        if extra:
-            self.telegram.extra_admin_ids = _csv_ints(extra)
-
-        # ----- Zerodha fallbacks -----
-        self.zerodha.api_key = self.zerodha.api_key or self.ZERODHA_API_KEY
-        self.zerodha.api_secret = self.zerodha.api_secret or self.ZERODHA_API_SECRET
-        self.zerodha.access_token = self.zerodha.access_token or self.ZERODHA_ACCESS_TOKEN
-
-        # ----- Top-level toggles -----
-        if self.ENABLE_LIVE_TRADING is not None:
-            self.enable_live_trading = str(self.ENABLE_LIVE_TRADING).strip().lower() in {"1", "true", "yes", "on"}
-        if self.LOG_LEVEL:
-            self.log_level = str(self.LOG_LEVEL).upper()
-
-        # ----- Risk % (accept decimal or percent) -----
-        if self.RISK_PER_TRADE:
-            try:
-                self.risk.risk_per_trade = float(self.RISK_PER_TRADE)
-            except Exception:
-                pass
-        if self.RISK_PER_TRADE_PCT:
-            try:
-                self.risk.risk_per_trade = float(self.RISK_PER_TRADE_PCT) / 100.0
-            except Exception:
-                pass
-
-    # mirrors / helpers
-    @property
-    def api(self) -> SimpleNamespace:
-        return SimpleNamespace(
-            zerodha_api_key=self.zerodha.api_key,
-            zerodha_api_secret=self.zerodha.api_secret,
-            zerodha_access_token=self.zerodha.access_token,
-            telegram_bot_token=self.telegram.bot_token,
-            telegram_chat_id=self.telegram.chat_id,
+        # --- Instruments ---
+        self.instruments = SimpleNamespace(
+            spot_symbol=get_str("INSTRUMENTS__SPOT_SYMBOL", "NSE:NIFTY 50"),
+            trade_symbol=get_str("INSTRUMENTS__TRADE_SYMBOL", "NIFTY"),
+            trade_exchange=get_str("INSTRUMENTS__TRADE_EXCHANGE", "NFO"),
+            instrument_token=get_int("INSTRUMENTS__INSTRUMENT_TOKEN", 256265),
+            nifty_lot_size=get_int("INSTRUMENTS__NIFTY_LOT_SIZE", 50),
+            strike_range=get_int("INSTRUMENTS__STRIKE_RANGE", 3),
+            min_lots=get_int("INSTRUMENTS__MIN_LOTS", 1),
+            max_lots=get_int("INSTRUMENTS__MAX_LOTS", 15),
         )
 
-    @property
-    def telegram_ready(self) -> bool:
-        return bool(self.telegram.enabled and self.telegram.bot_token and self.telegram.chat_id)
+        # --- Strategy ---
+        self.strategy = SimpleNamespace(
+            min_signal_score=get_float("STRATEGY__MIN_SIGNAL_SCORE", 2.0),
+            confidence_threshold=get_float("STRATEGY__CONFIDENCE_THRESHOLD", 2.0),
+            atr_period=get_int("STRATEGY__ATR_PERIOD", 14),
+            atr_sl_multiplier=get_float("STRATEGY__ATR_SL_MULTIPLIER", 1.5),
+            atr_tp_multiplier=get_float("STRATEGY__ATR_TP_MULTIPLIER", 3.0),
+            sl_confidence_adj=get_float("STRATEGY__SL_CONFIDENCE_ADJ", 0.12),
+            tp_confidence_adj=get_float("STRATEGY__TP_CONFIDENCE_ADJ", 0.35),
+            min_bars_for_signal=get_int("STRATEGY__MIN_BARS_FOR_SIGNAL", 10),
+        )
 
-    def debug_summary(self) -> dict:
-        def mask(v: Optional[str]) -> str:
-            return "absent" if not v else f"present({len(v)} chars)"
-        return {
-            "telegram": {
-                "enabled": bool(self.telegram.enabled),
-                "bot_token": mask(self.telegram.bot_token),
-                "chat_id": "present" if self.telegram.chat_id else "absent",
-                "extra_admin_ids": self.telegram.extra_admin_ids,
-            },
-            "zerodha": {
-                "api_key": mask(self.zerodha.api_key),
-                "access_token": mask(self.zerodha.access_token),
-            },
-            "log_level": self.log_level,
-            "env_file": str(_find_env_file() or "none"),
-        }
+        # --- Risk ---
+        self.risk = SimpleNamespace(
+            default_equity=get_float("RISK__DEFAULT_EQUITY", 30000.0),
+            risk_per_trade=get_float("RISK__RISK_PER_TRADE", 0.02),
+            max_trades_per_day=get_int("RISK__MAX_TRADES_PER_DAY", 20),
+            consecutive_loss_limit=get_int("RISK__CONSECUTIVE_LOSS_LIMIT", 3),
+            max_daily_drawdown_pct=get_float("RISK__MAX_DAILY_DRAWDOWN_PCT", 0.05),
+        )
+
+        # --- Executor ---
+        self.executor = SimpleNamespace(
+            exchange=get_str("EXECUTOR__EXCHANGE", "NFO"),
+            order_product=get_str("EXECUTOR__ORDER_PRODUCT", "NRML"),
+            order_variety=get_str("EXECUTOR__ORDER_VARIETY", "regular"),
+            entry_order_type=get_str("EXECUTOR__ENTRY_ORDER_TYPE", "LIMIT"),
+            tick_size=get_float("EXECUTOR__TICK_SIZE", 0.05),
+            exchange_freeze_qty=get_int("EXECUTOR__EXCHANGE_FREEZE_QTY", 1800),
+            preferred_exit_mode=get_str("EXECUTOR__PREFERRED_EXIT_MODE", "REGULAR"),
+            use_slm_exit=get_bool("EXECUTOR__USE_SLM_EXIT", True),
+            partial_tp_enable=get_bool("EXECUTOR__PARTIAL_TP_ENABLE", True),
+            tp1_qty_ratio=get_float("EXECUTOR__TP1_QTY_RATIO", 0.5),
+            breakeven_ticks=get_int("EXECUTOR__BREAKEVEN_TICKS", 2),
+            enable_trailing=get_bool("EXECUTOR__ENABLE_TRAILING", True),
+            trailing_atr_multiplier=get_float("EXECUTOR__TRAILING_ATR_MULTIPLIER", 1.5),
+            fee_per_lot=get_float("EXECUTOR__FEE_PER_LOT", 20.0),
+        )
+
+        # --- API Keys ---
+        self.telegram = SimpleNamespace(
+            bot_token=get_str("TELEGRAM_BOT_TOKEN", ""),
+            chat_id=get_str("TELEGRAM_CHAT_ID", ""),
+        )
+        self.zerodha = SimpleNamespace(
+            api_key=get_str("ZERODHA_API_KEY", ""),
+            api_secret=get_str("ZERODHA_API_SECRET", ""),
+            access_token=get_str("ZERODHA_ACCESS_TOKEN", ""),
+        )
+
+    def summary(self) -> str:
+        return (
+            f"Trading={'LIVE' if self.enable_live_trading else 'DRY'} | "
+            f"Risk={self.risk.risk_per_trade*100:.1f}% per trade | "
+            f"Equity=₹{self.risk.default_equity:.0f} | "
+            f"Lots={self.instruments.min_lots}-{self.instruments.max_lots}"
+        )
 
 
 settings = AppSettings()
