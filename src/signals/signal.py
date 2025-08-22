@@ -1,4 +1,3 @@
-# src/signals/signal.py
 from __future__ import annotations
 
 import hashlib
@@ -42,7 +41,7 @@ class Signal:
         s = str(self.signal).upper()
         if s not in ("BUY", "SELL"):
             raise ValueError(f"signal must be 'BUY' or 'SELL', got {self.signal!r}")
-        object.__setattr__(self, "signal", s)  # keep slots happy
+        object.__setattr__(self, "signal", s)
 
         # Coerce numerics
         try:
@@ -59,7 +58,7 @@ class Signal:
         if ep == sl:
             raise ValueError("stop_loss cannot equal entry_price")
 
-        # Directional sanity (warn, don't raise): BUY expects tp>ep; SELL expects tp<ep
+        # Directional sanity check
         if s == "BUY" and tp <= ep:
             logger.warning("BUY signal has non-positive reward: target %.2f <= entry %.2f", tp, ep)
         if s == "SELL" and tp >= ep:
@@ -76,7 +75,7 @@ class Signal:
         # Score as int
         object.__setattr__(self, "score", int(self.score))
 
-        # Reasons -> list[str]
+        # Clean reasons
         if self.reasons is None:
             object.__setattr__(self, "reasons", [])
         else:
@@ -111,6 +110,7 @@ class Signal:
     def to_dict(self) -> Dict[str, Any]:
         """Dict payload compatible with Telegram / executors."""
         return {
+            "side": self.signal,  # alias for compatibility
             "signal": self.signal,
             "score": int(self.score),
             "confidence": float(self.confidence),
@@ -160,10 +160,10 @@ class Signal:
         sl = _rt(self.stop_loss)
         tp = _rt(self.target)
 
-        # Avoid zero stop distance due to rounding; widen 1 tick if needed
+        # Avoid zero stop distance due to rounding
         if ep == sl:
             if self.is_buy:
-                sl = max(t, sl - t)  # ensure positive price
+                sl = max(t, sl - t) if sl > t else sl + t
             else:
                 sl = sl + t
 
@@ -172,10 +172,10 @@ class Signal:
         object.__setattr__(self, "target", tp)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> Signal:
+    def from_dict(cls, d: Dict[str, Any]) -> "Signal":
         """Lenient constructor from a dict."""
         return cls(
-            signal=str(d.get("signal", "BUY")).upper(),
+            signal=str(d.get("signal", d.get("side", "BUY"))).upper(),
             score=int(d.get("score", 0)),
             confidence=float(d.get("confidence", 0.0)),
             entry_price=float(d.get("entry_price")),
