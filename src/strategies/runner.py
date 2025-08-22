@@ -146,7 +146,6 @@ class StrategyRunner:
                 log.warning("OrderExecutor not initialized: %s", e)
 
         self._symbol_cache: dict[int, str] = {}
-        self._last_signal: Optional[Dict[str, Any]] = None  # <-- cache for /diag
 
     # ---- infra ----
     def _emit(self, evt_type: str, **payload: Any) -> None:
@@ -228,11 +227,14 @@ class StrategyRunner:
         ok_all &= bool(mkt_open)
 
         inst = getattr(settings, "instruments", object())
+        risk_cfg = getattr(settings, "risk", object())
         timeframe = str(getattr(getattr(settings, "data", object()), "timeframe", "minute"))
         lookback_minutes = int(getattr(getattr(settings, "data", object()), "lookback_minutes", 60))
         lookback = timedelta(minutes=lookback_minutes)
         spot_token = int(getattr(inst, "instrument_token", 256265))
         spot_symbol = str(getattr(inst, "spot_symbol", "NSE:NIFTY 50"))
+        lot_size = int(getattr(inst, "nifty_lot_size", 75))
+        risk_per_trade = float(getattr(risk_cfg, "risk_per_trade", 0.01))
 
         # spot ltp
         spot_ltp = None
@@ -282,34 +284,33 @@ class StrategyRunner:
         except Exception as e:
             checks.append({"name": "indicators", "ok": False, "error": str(e)})
 
-        # -------- signal: prefer fresh; fallback to cached --------
-        chosen_sig: Optional[Dict[str, Any]] = None
+        # signal (simulate, no side effects)
+        signal_ok = False
+        sig = None
         try:
-            fresh_sig: Optional[Dict[str, Any]] = None
             if not opt_df.empty and not spot_df.empty:
                 cur_px = float(opt_df["close"].iloc[-1])
-                fresh_sig = self.strategy.generate_signal(opt_df, cur_px, spot_df)
-
-            if fresh_sig:
-                self._last_signal = fresh_sig
-                chosen_sig = fresh_sig
-                checks.append({"name": "signal", "ok": True, "value": fresh_sig})
-            elif self._last_signal:
-                chosen_sig = self._last_signal
-                checks.append({"name": "signal", "ok": True, "value": self._last_signal, "source": "cached"})
+                sig = self.strategy.generate_signal(opt_df, cur_px, spot_df)
+                signal_ok = bool(sig)
+                checks.append({"name": "signal", "ok": signal_ok, "value": sig if sig else None})
             else:
-                # no fresh and no cache
-                err = "missing OHLC" if (opt_df.empty or spot_df.empty) else "no signal"
-                checks.append({"name": "signal", "ok": False, "error": err})
+                checks.append({"name": "signal", "ok": False, "error": "missing OHLC"})
         except Exception as e:
             checks.append({"name": "signal", "ok": False, "error": str(e)})
 
-        # sizing (based on chosen signal if any)
+        # sizing (use same lot_size/risk_per_trade as execution)
         try:
-            if chosen_sig:
+            if signal_ok and sig:
                 equity = float(get_equity_estimate(self._kite))
-                sl_points = float(chosen_sig.get("sl_points", 0.0))
-                lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
+                sl_points = float(sig.get("sl_points", 0.0))
+                lots = int(
+                    PositionSizing.lots_from_equity(
+                        equity=equity,
+                        sl_points=sl_points,
+                        lot_size=lot_size,
+                        risk_per_trade=risk_per_trade,
+                    )
+                )
                 checks.append({"name": "sizing", "ok": lots > 0, "equity": equity, "lots": lots})
             else:
                 checks.append({"name": "sizing", "ok": False, "error": "no signal"})
@@ -345,9 +346,13 @@ class StrategyRunner:
 
         try:
             inst = getattr(settings, "instruments", object())
+            risk_cfg = getattr(settings, "risk", object())
             timeframe = str(getattr(getattr(settings, "data", object()), "timeframe", "minute"))
             lookback_minutes = int(getattr(getattr(settings, "data", object()), "lookback_minutes", 60))
             lookback = timedelta(minutes=lookback_minutes)
+
+            lot_size = int(getattr(inst, "nifty_lot_size", 75))
+            risk_per_trade = float(getattr(risk_cfg, "risk_per_trade", 0.01))
 
             # spot history (for indicators/regime + trailing ATR fallback)
             spot_token = int(getattr(inst, "instrument_token", 256265))
@@ -383,10 +388,7 @@ class StrategyRunner:
             if not signal:
                 return None
 
-            # cache latest signal for /diag
-            self._last_signal = dict(signal)
-
-            # --- Sizing ---
+            # --- Sizing (use same lot_size/risk_per_trade as above) ---
             try:
                 equity = float(get_equity_estimate(self._kite))
             except TypeError:
@@ -396,10 +398,16 @@ class StrategyRunner:
             if equity <= 0 or sl_points <= 0:
                 return None
 
-            lots = int(PositionSizing.lots_from_equity(equity=equity, sl_points=sl_points))
+            lots = int(
+                PositionSizing.lots_from_equity(
+                    equity=equity,
+                    sl_points=sl_points,
+                    lot_size=lot_size,
+                    risk_per_trade=risk_per_trade,
+                )
+            )
             if lots <= 0:
                 return None
-            lot_size = int(getattr(inst, "nifty_lot_size", 75))
             quantity_units = lots * lot_size
 
             option_symbol = self._token_to_symbol(int(ce_token)) if self._kite else None
