@@ -1,7 +1,7 @@
-# src/strategies/scalping_strategy.py
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Optional, Literal, Tuple
 
 import pandas as pd
@@ -12,6 +12,20 @@ from src.utils.indicators import calculate_vwap
 from src.signals.regime_detector import detect_market_regime
 
 logger = logging.getLogger(__name__)
+
+# --- 60s log throttle (to avoid spam in deploy logs) ---
+_LOG_EVERY = 60.0
+_last_log_ts = {
+    "drop_strict": 0.0,
+    "drop_relaxed": 0.0,
+    "auto_relax": 0.0,
+    "generated": 0.0,
+}
+def _log_throttled(key: str, level: int, msg: str, *args) -> None:
+    now = time.time()
+    if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
+        _last_log_ts[key] = now
+        logger.log(level, msg, *args)
 
 Side = Literal["BUY", "SELL"]
 SignalOutput = Optional[Dict[str, Any]]
@@ -54,15 +68,16 @@ class EnhancedScalpingStrategy:
         # Bars threshold for validity
         self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
 
-        # ---- Thresholds (CONFIGURABLE) ----
-        # Strict pass
+        # Thresholds
         self.min_score_strict = int(getattr(strat, "min_signal_score", 4))
         self.min_conf_strict = float(getattr(strat, "confidence_threshold", 0.50))
 
-        # Optional relaxed pass (if strict fails)
+        # Optional relaxed gate
         self.auto_relax_enabled = bool(getattr(strat, "auto_relax_enabled", True))
         self.min_score_relaxed = int(getattr(strat, "min_signal_score_relaxed", max(2, self.min_score_strict - 1)))
-        self.min_conf_relaxed = float(getattr(strat, "confidence_threshold_relaxed", max(0.0, self.min_conf_strict - 0.20)))
+        self.min_conf_relaxed = float(
+            getattr(strat, "confidence_threshold_relaxed", max(0.0, self.min_conf_strict - 0.20))
+        )
 
         # ATR & confidence shaping
         self.base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.5))
@@ -101,10 +116,6 @@ class EnhancedScalpingStrategy:
 
     # ---------- thresholds ----------
     def _score_confidence(self, score: int) -> float:
-        """
-        Map score -> confidence (coarse). Customize freely; thresholds decide acceptance.
-        """
-        # keep monotonic and simple
         if score >= 8:
             return 8.0
         if score >= 6:
@@ -130,7 +141,7 @@ class EnhancedScalpingStrategy:
             logger.debug("DataFrame too short to generate signal.")
             return None
 
-        # --- 1) OPTION trend/momentum ---
+        # --- OPTION trend/momentum ---
         ema_fast = self._ema(df["close"], self.ema_fast)
         ema_slow = self._ema(df["close"], self.ema_slow)
         ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
@@ -155,7 +166,7 @@ class EnhancedScalpingStrategy:
             score += 1
             reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
 
-        # --- 2) SPOT regime / VWAP filters ---
+        # --- SPOT regime / VWAP filters ---
         regime = None
         if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
             adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
@@ -187,29 +198,34 @@ class EnhancedScalpingStrategy:
                     score += 1
                     reasons.append("Spot < VWAP (risk-off).")
 
-        # --- 3) Score -> confidence; apply thresholds (strict, then relaxed) ---
+        # --- Score -> confidence; apply thresholds (strict, then relaxed) ---
         confidence = self._score_confidence(score)
 
         if not self._passes(score, confidence, strict=True):
-            logger.info(
+            _log_throttled(
+                "drop_strict",
+                logging.INFO,
                 "Signal drop (strict): confidence(%.2f) < threshold(%.2f) | score=%d",
                 confidence, self.min_conf_strict, score,
             )
             if not self.auto_relax_enabled:
                 return None
-            # relaxed pass
             if not self._passes(score, confidence, strict=False):
-                logger.info(
+                _log_throttled(
+                    "drop_relaxed",
+                    logging.INFO,
                     "Signal drop (relaxed): confidence(%.2f) < threshold(%.2f) | score=%d",
                     confidence, self.min_conf_relaxed, score,
                 )
                 return None
-            logger.info(
+            _log_throttled(
+                "auto_relax",
+                logging.INFO,
                 "Auto-relax applied: min_score->%d, confidence_threshold->%.2f",
                 self.min_score_relaxed, self.min_conf_relaxed,
             )
 
-        # --- 4) ATR-based SL/TP on OPTION ---
+        # --- ATR-based SL/TP on OPTION ---
         atr_series = compute_atr(df, period=self.atr_period)
         atr_val = latest_atr_value(atr_series, default=0.0)
         if atr_val <= 0:
@@ -246,7 +262,7 @@ class EnhancedScalpingStrategy:
 
         side: Side = "BUY" if ema_bias_up else "SELL"
         entry_price = float(current_price)
-        eps = 1e-4  # guard against zero/negative prices
+        eps = 1e-4
         if side == "BUY":
             stop_loss = max(eps, entry_price - sl_points)
             target = entry_price + tp_points
@@ -270,7 +286,9 @@ class EnhancedScalpingStrategy:
             "atr": float(atr_val),
         }
 
-        logger.info(
+        _log_throttled(
+            "generated",
+            logging.INFO,
             "Generated signal (%s): %s",
             "relaxed" if self._passes(score, confidence, strict=False) and not self._passes(score, confidence, strict=True) else "strict",
             {
