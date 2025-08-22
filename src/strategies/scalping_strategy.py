@@ -1,171 +1,258 @@
-# src/signals/regime_detector.py
+# src/strategies/scalping_strategy.py
 from __future__ import annotations
 
-"""
-Market regime detection utilities.
+import logging
+from typing import Any, Dict, Optional, Literal
 
-- Works whether ADX/DI are precomputed on `spot_df` (e.g., columns adx_14, di_plus_14, di_minus_14),
-  or provided as Series, or missing (falls back to an internal calculation).
-- Output is one of: "trend_up" | "trend_down" | "range".
-- Includes a verbose variant for diagnostics (/diag, /health).
-
-Expected usage (matches scalping_strategy.py):
-  regime = detect_market_regime(
-      df=spot_df,
-      adx=spot_df.get("adx") or spot_df.get("adx_14"),
-      di_plus=spot_df.get("di_plus") or spot_df.get("di_plus_14"),
-      di_minus=spot_df.get("di_minus") or spot_df.get("di_minus_14"),
-      adx_trend_strength=settings.strategy.adx_trend_strength,
-      di_diff_threshold=settings.strategy.di_diff_threshold,
-  )
-"""
-
-from typing import Optional, Literal, Dict, Any, Tuple
 import pandas as pd
 
-try:
-    from ta.trend import ADXIndicator  # type: ignore
-    _TA_OK = True
-except Exception:  # pragma: no cover
-    ADXIndicator = None  # type: ignore
-    _TA_OK = False
+from src.config import settings
+from src.utils.atr_helper import compute_atr, atr_sl_tp_points
+from src.utils.indicators import calculate_vwap
+from src.signals.regime_detector import detect_market_regime
 
-Regime = Literal["trend_up", "trend_down", "range"]
+logger = logging.getLogger(__name__)
 
-
-# ---------- internal helpers ----------
-
-def _compute_adx_di_manual(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Manual Wilder-style ADX / +DI / -DI (no external TA dependency)."""
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-
-    tr = (high - low).abs()
-    atr = tr.ewm(alpha=1 / period, adjust=False).mean().replace(0.0, 1e-9)
-
-    di_plus = (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
-    di_minus = (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
-    dx = (di_plus.subtract(di_minus).abs() / (di_plus.add(di_minus).abs() + 1e-9)) * 100.0
-    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-
-    adx.name, di_plus.name, di_minus.name = "adx", "di_plus", "di_minus"
-    return adx, di_plus, di_minus
+Side = Literal["BUY", "SELL"]
+SignalOutput = Optional[Dict[str, Any]]
 
 
-def _ensure_adx_di(
-    df: pd.DataFrame,
-    adx: Optional[pd.Series],
-    di_plus: Optional[pd.Series],
-    di_minus: Optional[pd.Series],
-    period: int,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Return valid (adx, di+, di-) series; compute them if not supplied."""
-    if adx is not None and di_plus is not None and di_minus is not None:
-        return adx.astype(float), di_plus.astype(float), di_minus.astype(float)
-
-    # Try TA library
-    if _TA_OK:
-        try:
-            ind = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=period)
-            a = ind.adx().astype(float)
-            dpos = ind.adx_pos().astype(float)
-            dneg = ind.adx_neg().astype(float)
-            a.name, dpos.name, dneg.name = "adx", "di_plus", "di_minus"
-            return a, dpos, dneg
-        except Exception:
-            pass
-
-    # Manual fallback
-    return _compute_adx_di_manual(df, period=period)
-
-
-# ---------- public API ----------
-
-def detect_market_regime(
-    *,
-    df: pd.DataFrame,
-    adx: Optional[pd.Series] = None,
-    di_plus: Optional[pd.Series] = None,
-    di_minus: Optional[pd.Series] = None,
-    adx_trend_strength: float = 20.0,
-    di_diff_threshold: float = 8.0,
-    period: int = 14,
-) -> Regime:
+class EnhancedScalpingStrategy:
     """
-    Decide whether the market is "trend_up", "trend_down", or "range".
+    EMA + RSI + VWAP for direction/momentum with ADX regime (trend/range) on the SPOT index.
 
-    Heuristics:
-      1) If ADX < adx_trend_strength => "range"
-      2) Else, if DI+ - DI- >= di_diff_threshold => "trend_up"
-         If DI- - DI+ >= di_diff_threshold => "trend_down"
-      3) Else tie-break using fast vs very-fast EMA slope on close.
+    Signature for generate_signal():
+      - df:           OPTION OHLCV DataFrame
+      - current_price:float (current option last/close)
+      - spot_df:      SPOT OHLCV DataFrame (with or without precomputed ADX/DI)
+
+    Output:
+      {
+        "side": "BUY" | "SELL",
+        "confidence": float,
+        "sl_points": float,
+        "tp_points": float,
+        "score": int,
+        "entry_price": float,
+        "stop_loss": float,
+        "target": float,
+        "reasons": list[str],
+      }
     """
-    if df is None or df.empty or not {"high", "low", "close"}.issubset(df.columns):
-        return "range"
 
-    a, dpos, dneg = _ensure_adx_di(df, adx, di_plus, di_minus, period=period)
-    if len(a) == 0:
-        return "range"
+    def __init__(
+        self,
+        *,
+        ema_fast: int = 9,
+        ema_slow: int = 21,
+        rsi_period: int = 14,
+        adx_period: int = 14,
+        adx_trend_strength: int = 20,
+    ) -> None:
+        strat = getattr(settings, "strategy", object())
+        self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
+        self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
+        self.rsi_period = int(getattr(strat, "rsi_period", rsi_period))
+        # Keep local knob; spot_df may already have adx columns produced in runner
+        self.adx_period = int(getattr(strat, "adx_period", adx_period))
+        self.adx_trend_strength = int(getattr(strat, "adx_trend_strength", adx_trend_strength))
 
-    a_last = float(a.iloc[-1])
-    if a_last < float(adx_trend_strength):
-        return "range"
+        # ATR + regime knobs
+        self.atr_period = int(getattr(strat, "atr_period", 14))
+        self.trend_tp_boost = float(getattr(strat, "trend_tp_boost", 0.6))
+        self.trend_sl_relax = float(getattr(strat, "trend_sl_relax", 0.2))
+        self.range_tp_tighten = float(getattr(strat, "range_tp_tighten", -0.4))
+        self.range_sl_tighten = float(getattr(strat, "range_sl_tighten", -0.2))
 
-    dpos_last = float(dpos.iloc[-1]) if len(dpos) else 0.0
-    dneg_last = float(dneg.iloc[-1]) if len(dneg) else 0.0
-    diff = dpos_last - dneg_last
+        # decision thresholds
+        self.min_score = int(getattr(strat, "min_signal_score", 5))
+        self.min_conf = float(getattr(strat, "confidence_threshold", 6.0))
 
-    if diff >= di_diff_threshold:
-        return "trend_up"
-    if diff <= -di_diff_threshold:
-        return "trend_down"
+    # ---------- simple indicators ----------
+    @staticmethod
+    def _ema(s: pd.Series, period: int) -> pd.Series:
+        return s.ewm(span=max(1, int(period)), adjust=False).mean()
 
-    # Tie-break with EMA slope (on close)
-    close = df["close"].astype(float)
-    ema_fast = close.ewm(span=max(4, period // 2), adjust=False).mean()
-    ema_ultra = close.ewm(span=max(2, period // 3), adjust=False).mean()
-    slope = float(ema_ultra.iloc[-1] - ema_fast.iloc[-1])
-    if slope > 0:
-        return "trend_up"
-    if slope < 0:
-        return "trend_down"
-    return "range"
+    @staticmethod
+    def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+        rs = (avg_gain / (avg_loss.replace(0.0, 1e-9))).fillna(0.0)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return rsi
 
+    @staticmethod
+    def _extract_adx_columns(spot_df: pd.DataFrame) -> tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
+        """
+        Find ADX/DI columns regardless of suffix (runner typically populates adx_{n}, di_plus_{n}, di_minus_{n}).
+        """
+        if spot_df is None or spot_df.empty:
+            return None, None, None
 
-def detect_market_regime_verbose(
-    *,
-    df: pd.DataFrame,
-    adx: Optional[pd.Series] = None,
-    di_plus: Optional[pd.Series] = None,
-    di_minus: Optional[pd.Series] = None,
-    adx_trend_strength: float = 20.0,
-    di_diff_threshold: float = 8.0,
-    period: int = 14,
-) -> Dict[str, Any]:
-    """Diagnostic variant with numeric context for /diag or debugging."""
-    if df is None or df.empty:
-        return {"regime": "range", "reason": "empty_df"}
+        adx_cols = sorted([c for c in spot_df.columns if c.startswith("adx_")])
+        dip_cols = sorted([c for c in spot_df.columns if c.startswith("di_plus_")])
+        dim_cols = sorted([c for c in spot_df.columns if c.startswith("di_minus_")])
 
-    a, dpos, dneg = _ensure_adx_di(df, adx, di_plus, di_minus, period=period)
-    regime = detect_market_regime(
-        df=df,
-        adx=a,
-        di_plus=dpos,
-        di_minus=dneg,
-        adx_trend_strength=adx_trend_strength,
-        di_diff_threshold=di_diff_threshold,
-        period=period,
-    )
-    return {
-        "regime": regime,
-        "adx_last": float(a.iloc[-1]) if len(a) else None,
-        "di_plus_last": float(dpos.iloc[-1]) if len(dpos) else None,
-        "di_minus_last": float(dneg.iloc[-1]) if len(dneg) else None,
-        "adx_trend_strength": float(adx_trend_strength),
-        "di_diff_threshold": float(di_diff_threshold),
-    }
+        adx = spot_df[adx_cols[-1]] if adx_cols else spot_df.get("adx")
+        di_plus = spot_df[dip_cols[-1]] if dip_cols else spot_df.get("di_plus")
+        di_minus = spot_df[dim_cols[-1]] if dim_cols else spot_df.get("di_minus")
+        return adx, di_plus, di_minus
+
+    # ---------- main ----------
+    def generate_signal(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+        spot_df: pd.DataFrame,
+    ) -> SignalOutput:
+        if df is None or df.empty or len(df) < max(self.ema_slow, 10):
+            logger.debug("DataFrame too short to generate signal.")
+            return None
+
+        reasons: list[str] = []
+        score = 0
+
+        # 1) EMA crossover / bias on OPTION price
+        ema_fast = self._ema(df["close"], self.ema_fast)
+        ema_slow = self._ema(df["close"], self.ema_slow)
+        ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
+        ema_cross_up = bool((ema_fast.iloc[-2] <= ema_slow.iloc[-2]) and ema_bias_up)
+
+        if ema_cross_up:
+            score += 2
+            reasons.append(f"EMA fast({self.ema_fast}) crossed above slow({self.ema_slow}).")
+        elif (ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up:
+            score += 2
+            reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
+
+        # 2) RSI momentum on OPTION price
+        rsi_val = float(self._rsi(df["close"], self.rsi_period).iloc[-1])
+        if ema_bias_up and rsi_val > 50:
+            score += 1
+            reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
+        elif not ema_bias_up and rsi_val < 50:
+            score += 1
+            reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
+
+        # 3) ADX regime on SPOT (trend_up / trend_down / range)
+        regime = None
+        if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
+            adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
+            regime = detect_market_regime(
+                df=spot_df,
+                adx=adx_series,
+                di_plus=di_plus_series,
+                di_minus=di_minus_series,
+                adx_trend_strength=self.adx_trend_strength,
+            )
+            if regime == "trend_up" and ema_bias_up:
+                score += 2
+                reasons.append("Spot ADX: trend up.")
+            elif regime == "trend_down" and not ema_bias_up:
+                score += 2
+                reasons.append("Spot ADX: trend down.")
+            elif regime == "range":
+                reasons.append("Spot ADX: range.")
+
+        # 4) VWAP on SPOT (context)
+        if spot_df is not None and not spot_df.empty:
+            vwap_series = calculate_vwap(spot_df)
+            if vwap_series is not None and len(vwap_series) > 0:
+                vwap_val = float(vwap_series.iloc[-1])
+                current_spot_price = float(spot_df["close"].iloc[-1])
+                if ema_bias_up and current_spot_price > vwap_val:
+                    score += 1
+                    reasons.append("Spot above VWAP.")
+                elif not ema_bias_up and current_spot_price < vwap_val:
+                    score += 1
+                    reasons.append("Spot below VWAP.")
+
+        # --- Score gate ---
+        if score < self.min_score:
+            logger.debug("Score %s < min_score %s", score, self.min_score)
+            return None
+
+        # Score → confidence (piecewise)
+        # 0-2 -> 0, 3-4 -> 2.5, 5-6 -> 5, 7-8 -> 7.5, 9+ -> 10
+        confidence_map = {0: 0.0, 1: 0.0, 2: 0.0, 3: 2.5, 4: 2.5, 5: 5.0, 6: 5.0, 7: 7.5, 8: 7.5, 9: 10.0}
+        confidence = float(confidence_map.get(score, 10.0 if score >= 9 else 0.0))
+
+        if confidence < self.min_conf:
+            logger.debug("Confidence %.2f < min_conf %.2f", confidence, self.min_conf)
+            return None
+
+        # --- ATR-based SL/TP on OPTION price ---
+        atr_series = compute_atr(df, period=self.atr_period)
+        if atr_series is None or len(atr_series) == 0:
+            logger.debug("ATR series missing; cannot compute SL/TP.")
+            return None
+        atr_val = float(atr_series.iloc[-1] or 0.0)
+        if atr_val <= 0:
+            logger.debug("ATR invalid: %.4f", atr_val)
+            return None
+
+        strat = getattr(settings, "strategy", object())
+        base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.5))
+        base_tp_mult = float(getattr(strat, "atr_tp_multiplier", 3.0))
+        sl_adj = float(getattr(strat, "sl_confidence_adj", 0.2))
+        tp_adj = float(getattr(strat, "tp_confidence_adj", 0.3))
+
+        # Start from ATR-based baseline
+        base_sl_pts = atr_val * base_sl_mult
+        base_tp_pts = atr_val * base_tp_mult
+
+        # Regime-aware tweaks (positive adds, negative tightens)
+        reg_note = None
+        if regime == "trend_up" or regime == "trend_down":
+            base_tp_pts += max(0.0, self.trend_tp_boost) * atr_val
+            base_sl_pts += max(0.0, self.trend_sl_relax) * atr_val
+            reg_note = "Regime boost: trend (wider TP, slightly looser SL)."
+        elif regime == "range":
+            base_tp_pts += self.range_tp_tighten * atr_val  # typically negative
+            base_sl_pts += self.range_sl_tighten * atr_val  # typically negative
+            base_tp_pts = max(0.01, base_tp_pts)
+            base_sl_pts = max(0.01, base_sl_pts)
+            reg_note = "Regime tighten: range (tighter TP/SL)."
+        if reg_note:
+            reasons.append(reg_note)
+
+        # Combine with confidence nudges
+        sl_points, tp_points = atr_sl_tp_points(
+            base_sl_points=base_sl_pts,
+            base_tp_points=base_tp_pts,
+            atr_value=atr_val,
+            sl_mult=base_sl_mult,
+            tp_mult=base_tp_mult,
+            confidence=confidence,
+            sl_confidence_adj=sl_adj,
+            tp_confidence_adj=tp_adj,
+        )
+
+        side: Side = "BUY" if ema_bias_up else "SELL"
+        entry_price = float(current_price)
+
+        # Final absolute SL/TP prices
+        if side == "BUY":
+            stop_loss = entry_price - sl_points
+            target = entry_price + tp_points
+        else:
+            stop_loss = entry_price + sl_points
+            target = entry_price - tp_points
+
+        signal: Dict[str, Any] = {
+            "side": side,
+            "confidence": float(confidence),
+            "sl_points": float(sl_points),
+            "tp_points": float(tp_points),
+            "score": int(score),
+            "entry_price": entry_price,
+            "stop_loss": float(stop_loss),
+            "target": float(target),
+            "reasons": reasons,
+        }
+
+        logger.info("Generated signal: %s", signal)
+        return signal
