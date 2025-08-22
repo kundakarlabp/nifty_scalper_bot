@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 
@@ -70,10 +69,7 @@ def compute_atr(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.S
 
 
 def compute_atr_df(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.DataFrame:
-    """
-    Return a copy of `df` with an 'atr' column appended.
-    Safe on empty/invalid input.
-    """
+    """Return a copy of `df` with an 'atr' column appended. Safe on empty/invalid input."""
     out = df.copy()
     out.loc[:, "atr"] = compute_atr(out, period=period, method=method)
     return out
@@ -86,7 +82,6 @@ def latest_atr_value(atr_series: Optional[pd.Series], default: float = 0.0) -> f
     """
     if atr_series is None or len(atr_series) == 0:
         return float(default)
-    # last valid (non-NaN) observation if present
     last_valid = atr_series.dropna()
     if len(last_valid) == 0:
         return float(default)
@@ -129,8 +124,13 @@ def atr_sl_tp_points(
 
     # Confidence nudges (0..10 → 0..1)
     conf = max(0.0, min(10.0, float(confidence)))
-    sl_nudge = (conf / 10.0) * float(sl_conf_adj)   # tighten SL
-    tp_nudge = (conf / 10.0) * float(tp_conf_adj)   # widen TP
+
+    # Bound the effect so auto-adjust can’t go wild (±20% by default)
+    sl_conf_adj = max(-0.2, min(0.2, float(sl_conf_adj)))
+    tp_conf_adj = max(-0.2, min(0.2, float(tp_conf_adj)))
+
+    sl_nudge = (conf / 10.0) * sl_conf_adj    # tighten SL
+    tp_nudge = (conf / 10.0) * tp_conf_adj    # widen TP
 
     sl_pts = max(0.01, sl_base * (1.0 - sl_nudge))
     tp_pts = max(0.01, tp_base * (1.0 + tp_nudge))
