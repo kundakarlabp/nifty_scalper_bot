@@ -1,16 +1,12 @@
 from __future__ import annotations
-
 import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, Optional, List
-
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, NonNegativeFloat, NonNegativeInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # ---------- helpers ----------
-
 def _find_env_file() -> Optional[Path]:
     p = Path.cwd()
     for _ in range(6):
@@ -20,12 +16,19 @@ def _find_env_file() -> Optional[Path]:
         p = p.parent
     return None
 
+def _env_first(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.getenv(n)
+        if v is not None:
+            v = v.strip()
+            if v:
+                return v
+    return None
 
 def _as_bool(v: Optional[str], default: bool = False) -> bool:
     if v is None:
         return default
     return str(v).strip().lower() in {"1", "true", "yes", "on", "y"}
-
 
 def _csv_ints(v: Optional[str]) -> List[int]:
     if not v:
@@ -41,22 +44,18 @@ def _csv_ints(v: Optional[str]) -> List[int]:
             pass
     return out
 
-
 # ---------- component models ----------
-
 class DataSettings(BaseModel):
     warmup_bars: PositiveInt = 30
     lookback_minutes: PositiveInt = 60
     timeframe: Literal["minute", "5minute"] = "minute"
 
-
 class RiskConfig(BaseModel):
     default_equity: PositiveFloat = 30000.0
-    risk_per_trade: NonNegativeFloat = 0.01   # fraction (0.01 = 1%)
+    risk_per_trade: NonNegativeFloat = 0.01
     max_trades_per_day: PositiveInt = 5
     consecutive_loss_limit: NonNegativeInt = 3
     max_daily_drawdown_pct: NonNegativeFloat = 0.05
-
 
 class ZerodhaConfig(BaseModel):
     api_key: Optional[str] = None
@@ -65,18 +64,15 @@ class ZerodhaConfig(BaseModel):
     public_token: Optional[str] = None
     enctoken: Optional[str] = None
 
-
 class TelegramConfig(BaseModel):
     enabled: bool = True
     bot_token: Optional[str] = None
     chat_id: Optional[int] = None
     extra_admin_ids: List[int] = Field(default_factory=list)
 
-
 class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
-
 
 class StrategyConfig(BaseModel):
     # gates
@@ -102,17 +98,15 @@ class StrategyConfig(BaseModel):
     range_tp_tighten: float = -0.4
     range_sl_tighten: float = -0.2
 
-
 class InstrumentsConfig(BaseModel):
     spot_symbol: str = "NSE:NIFTY 50"
     trade_symbol: str = "NIFTY"
-    trade_exchange: str = "NFO"  # corrected: matches INSTRUMENTS__TRADE_EXCHANGE
+    exchange: str = "NFO"
     instrument_token: int = 256265
     nifty_lot_size: int = 75
     min_lots: int = 1
     max_lots: int = 10
     strike_range: int = 3
-
 
 class ExecutorConfig(BaseModel):
     exchange: str = "NFO"
@@ -130,9 +124,7 @@ class ExecutorConfig(BaseModel):
     trailing_atr_multiplier: float = 1.5
     fee_per_lot: float = 20.0
 
-
 # ---------- master settings ----------
-
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_find_env_file(),
@@ -156,7 +148,51 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsConfig = InstrumentsConfig()
     executor: ExecutorConfig = ExecutorConfig()
 
-    # mirrors / helpers
+    # legacy envs
+    RISK_PER_TRADE_PCT: Optional[str] = None
+    TELEGRAM_ENABLED: Optional[str] = None
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
+    TELEGRAM_EXTRA_ADMINS: Optional[str] = None
+    TG_BOT_TOKEN: Optional[str] = None
+    TG_CHAT_ID: Optional[str] = None
+    BOT_TOKEN: Optional[str] = None
+    CHAT_ID: Optional[str] = None
+    ZERODHA_API_KEY: Optional[str] = None
+    ZERODHA_API_SECRET: Optional[str] = None
+    ZERODHA_ACCESS_TOKEN: Optional[str] = None
+    ZERODHA_KEY: Optional[str] = None
+    ZERODHA_SECRET: Optional[str] = None
+    ZERODHA_TOKEN: Optional[str] = None
+
+    def model_post_init(self, __ctx) -> None:  # type: ignore[override]
+        # Telegram
+        if self.TELEGRAM_ENABLED is not None:
+            self.telegram.enabled = _as_bool(self.TELEGRAM_ENABLED, True)
+        self.telegram.bot_token = self.telegram.bot_token or _env_first("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "BOT_TOKEN")
+        if self.telegram.chat_id is None:
+            chat = _env_first("TELEGRAM_CHAT_ID", "TG_CHAT_ID", "CHAT_ID")
+            try:
+                self.telegram.chat_id = int(chat) if chat else None
+            except Exception:
+                self.telegram.chat_id = None
+        extra = self.TELEGRAM_EXTRA_ADMINS or os.getenv("TELEGRAM_EXTRA_ADMINS")
+        if extra:
+            self.telegram.extra_admin_ids = _csv_ints(extra)
+
+        # Zerodha
+        self.zerodha.api_key = self.zerodha.api_key or _env_first("ZERODHA_API_KEY", "ZERODHA_KEY", "KITE_API_KEY")
+        self.zerodha.api_secret = self.zerodha.api_secret or _env_first("ZERODHA_API_SECRET", "ZERODHA_SECRET", "KITE_API_SECRET")
+        self.zerodha.access_token = self.zerodha.access_token or _env_first("ZERODHA_ACCESS_TOKEN", "ZERODHA_TOKEN", "KITE_ACCESS_TOKEN")
+
+        # Risk %
+        pct = self.RISK_PER_TRADE_PCT or os.getenv("RISK_PER_TRADE_PCT")
+        if pct:
+            try:
+                self.risk.risk_per_trade = float(pct) / 100.0
+            except Exception:
+                pass
+
     @property
     def DEFAULT_EQUITY(self) -> float:
         return float(self.risk.default_equity)
@@ -198,6 +234,5 @@ class AppSettings(BaseSettings):
             "log_level": self.log_level,
             "env_file": str(_find_env_file() or "none"),
         }
-
 
 settings = AppSettings()
