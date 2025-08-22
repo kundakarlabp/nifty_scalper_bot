@@ -7,8 +7,9 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from src.config import settings
 from src.server import health as health_server
@@ -34,11 +35,45 @@ except Exception:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 
+# --------- In-memory log buffer for /logs ---------
+class _RingLogHandler(logging.Handler):
+    def __init__(self, capacity: int = 400):
+        super().__init__()
+        self.capacity = capacity
+        self.buf: Deque[Dict[str, Any]] = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.buf.append({
+                "ts": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
+                "lvl": record.levelname,
+                "name": record.name,
+                "msg": record.getMessage(),
+            })
+        except Exception:
+            pass
+
+    def last(self, n: int) -> List[Dict[str, Any]]:
+        if n <= 0:
+            return []
+        n = min(n, self.capacity)
+        return list(self.buf)[-n:]
+
+
+_ring_handler = _RingLogHandler(capacity=600)
+
+
 def _setup_logging() -> None:
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=getattr(logging, settings.log_level.upper(), logging.INFO),
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+    root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+    # attach ring buffer once
+    if _ring_handler not in root.handlers:
+        root.addHandler(_ring_handler)
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
@@ -82,7 +117,7 @@ class Application:
             if fills:
                 self.tg.notify_fills(fills)
 
-    # ----- telegram -----
+    # ----- telegram control shims (legacy/simple) -----
     def _control_cmd(self, cmd: str) -> str:
         c = (cmd or "").strip().lower()
         if c == "ping":
@@ -108,13 +143,67 @@ class Application:
             return "Stopping…"
         return f"Unknown: {cmd}"
 
+    # ----- telegram providers -----
+    def _actives_provider(self) -> List[Any]:
+        try:
+            return self.runner.executor.get_active_orders() if self.runner.executor else []
+        except Exception:
+            return []
+
+    def _positions_provider(self) -> Dict[str, Any]:
+        try:
+            return self.runner.executor.get_positions_kite() if self.runner.executor else {}
+        except Exception:
+            return {}
+
+    def _logs_provider(self, n: int) -> List[Dict[str, Any]]:
+        try:
+            return _ring_handler.last(n)
+        except Exception:
+            return []
+
+    def _diag_provider(self) -> Dict[str, Any]:
+        # Prefer runner.diagnose if present
+        diag_fn = getattr(self.runner, "diagnose", None)
+        if callable(diag_fn):
+            try:
+                return diag_fn()
+            except Exception as e:
+                return {"ok": False, "error": f"runner.diagnose failed: {e}"}
+        # Fallback minimal
+        try:
+            ok = bool(self.runner.data_source) and bool(self.runner.executor)
+            return {
+                "ok": ok,
+                "checks": [
+                    {"name": "broker", "ok": bool(getattr(self.runner, "_kite", None))},
+                    {"name": "data_source", "ok": bool(self.runner.data_source)},
+                    {"name": "executor", "ok": bool(self.runner.executor)},
+                ],
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _tick_once(self) -> None:
+        # Force one run_once; still respects market-hours gates inside
+        try:
+            self.runner.run_once(stop_event=self._stop_event)
+        except Exception as e:
+            log.error("Manual tick failed: %s", e)
+
+    # ----- status payload -----
     def _status_payload(self) -> dict:
+        active = 0
+        try:
+            active = len(self.runner.executor.get_active_orders()) if self.runner.executor else 0
+        except Exception:
+            pass
         return {
             "time_ist": _now_ist_naive().isoformat(sep=" ", timespec="seconds"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if getattr(self.runner, "_kite", None) else "none",
             "data_source": type(self.runner.data_source).__name__ if self.runner.data_source else None,
-            "active_orders": len(self.runner.executor.get_active_orders()) if self.runner.executor else 0,
+            "active_orders": active,
             "paused": getattr(self.runner, "_paused", False),
         }
 
@@ -135,8 +224,24 @@ class Application:
             if tg_enabled and settings.telegram.bot_token and settings.telegram.chat_id:
                 self.tg = TelegramController(
                     status_callback=self._status_payload,
-                    control_callback=self._control_cmd,
                     summary_callback=lambda: "No summary yet.",
+                    control_callback=self._control_cmd,
+                    actives_provider=self._actives_provider,
+                    positions_provider=self._positions_provider,
+                    logs_provider=self._logs_provider,
+                    diag_provider=self._diag_provider,
+                    runner_pause=self.runner.pause,
+                    runner_resume=self.runner.resume,
+                    cancel_all=(self.runner.executor.cancel_all_orders if self.runner.executor else None),
+                    tick_callback=self._tick_once,
+                    # runtime toggles (optional shims; defaults handled in controller)
+                    set_risk_pct=lambda pct: setattr(settings.risk, "risk_per_trade", float(pct) / 100.0),
+                    toggle_trailing=lambda v: setattr(settings.executor, "enable_trailing", bool(v)),
+                    set_trailing_mult=lambda v: setattr(settings.executor, "trailing_atr_multiplier", float(v)),
+                    toggle_partial=lambda v: setattr(settings.executor, "partial_tp_enable", bool(v)),
+                    set_tp1_ratio=lambda pct: setattr(settings.executor, "tp1_qty_ratio", float(pct) / 100.0),
+                    set_breakeven_ticks=lambda t: setattr(settings.executor, "breakeven_ticks", int(t)),
+                    set_live_mode=lambda v: setattr(settings, "enable_live_trading", bool(v)),
                 )
                 self.tg.start_polling()
                 self.tg.send_startup_alert()
