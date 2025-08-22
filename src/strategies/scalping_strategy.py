@@ -1,115 +1,171 @@
+# src/signals/regime_detector.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Sequence
+"""
+Market regime detection utilities.
 
-import numpy as np
+- Works whether ADX/DI are precomputed on `spot_df` (e.g., columns adx_14, di_plus_14, di_minus_14),
+  or provided as Series, or missing (falls back to an internal calculation).
+- Output is one of: "trend_up" | "trend_down" | "range".
+- Includes a verbose variant for diagnostics (/diag, /health).
+
+Expected usage (matches scalping_strategy.py):
+  regime = detect_market_regime(
+      df=spot_df,
+      adx=spot_df.get("adx") or spot_df.get("adx_14"),
+      di_plus=spot_df.get("di_plus") or spot_df.get("di_plus_14"),
+      di_minus=spot_df.get("di_minus") or spot_df.get("di_minus_14"),
+      adx_trend_strength=settings.strategy.adx_trend_strength,
+      di_diff_threshold=settings.strategy.di_diff_threshold,
+  )
+"""
+
+from typing import Optional, Literal, Dict, Any, Tuple
 import pandas as pd
 
-from src.config import settings
+try:
+    from ta.trend import ADXIndicator  # type: ignore
+    _TA_OK = True
+except Exception:  # pragma: no cover
+    ADXIndicator = None  # type: ignore
+    _TA_OK = False
+
+Regime = Literal["trend_up", "trend_down", "range"]
 
 
-@dataclass
-class Signal:
-    side: str                 # "BUY" or "SELL"
-    confidence: float
-    score: int
-    entry_price: float
-    sl_points: float
-    tp_points: float
-    reasons: Sequence[str]
+# ---------- internal helpers ----------
+
+def _compute_adx_di_manual(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Manual Wilder-style ADX / +DI / -DI (no external TA dependency)."""
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    tr = (high - low).abs()
+    atr = tr.ewm(alpha=1 / period, adjust=False).mean().replace(0.0, 1e-9)
+
+    di_plus = (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
+    di_minus = (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr) * 100.0
+    dx = (di_plus.subtract(di_minus).abs() / (di_plus.add(di_minus).abs() + 1e-9)) * 100.0
+    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+
+    adx.name, di_plus.name, di_minus.name = "adx", "di_plus", "di_minus"
+    return adx, di_plus, di_minus
 
 
-def _ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False).mean()
+def _ensure_adx_di(
+    df: pd.DataFrame,
+    adx: Optional[pd.Series],
+    di_plus: Optional[pd.Series],
+    di_minus: Optional[pd.Series],
+    period: int,
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """Return valid (adx, di+, di-) series; compute them if not supplied."""
+    if adx is not None and di_plus is not None and di_minus is not None:
+        return adx.astype(float), di_plus.astype(float), di_minus.astype(float)
+
+    # Try TA library
+    if _TA_OK:
+        try:
+            ind = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=period)
+            a = ind.adx().astype(float)
+            dpos = ind.adx_pos().astype(float)
+            dneg = ind.adx_neg().astype(float)
+            a.name, dpos.name, dneg.name = "adx", "di_plus", "di_minus"
+            return a, dpos, dneg
+        except Exception:
+            pass
+
+    # Manual fallback
+    return _compute_adx_di_manual(df, period=period)
 
 
-def make_signal(spot_df: pd.DataFrame, opt_df: pd.DataFrame, *, regime: str = "auto") -> Optional[Signal]:
+# ---------- public API ----------
+
+def detect_market_regime(
+    *,
+    df: pd.DataFrame,
+    adx: Optional[pd.Series] = None,
+    di_plus: Optional[pd.Series] = None,
+    di_minus: Optional[pd.Series] = None,
+    adx_trend_strength: float = 20.0,
+    di_diff_threshold: float = 8.0,
+    period: int = 14,
+) -> Regime:
     """
-    Simple but consistent rule-set:
-    - EMA(9) vs EMA(21)
-    - RSI(14) > 50 for BUY, < 50 for SELL
-    - ATR-based SL/TP with regime adjustments and confidence tilt
+    Decide whether the market is "trend_up", "trend_down", or "range".
+
+    Heuristics:
+      1) If ADX < adx_trend_strength => "range"
+      2) Else, if DI+ - DI- >= di_diff_threshold => "trend_up"
+         If DI- - DI+ >= di_diff_threshold => "trend_down"
+      3) Else tie-break using fast vs very-fast EMA slope on close.
     """
-    if len(spot_df) < settings.strategy.min_bars_for_signal:
-        return None
+    if df is None or df.empty or not {"high", "low", "close"}.issubset(df.columns):
+        return "range"
 
-    close = spot_df["close"].astype(float)
-    ema_fast = _ema(close, settings.strategy.ema_fast)
-    ema_slow = _ema(close, settings.strategy.ema_slow)
+    a, dpos, dneg = _ensure_adx_di(df, adx, di_plus, di_minus, period=period)
+    if len(a) == 0:
+        return "range"
 
-    rsi = _rsi(close, settings.strategy.rsi_period)
-    atr = _atr(spot_df, settings.strategy.atr_period)
+    a_last = float(a.iloc[-1])
+    if a_last < float(adx_trend_strength):
+        return "range"
 
-    reasons = []
+    dpos_last = float(dpos.iloc[-1]) if len(dpos) else 0.0
+    dneg_last = float(dneg.iloc[-1]) if len(dneg) else 0.0
+    diff = dpos_last - dneg_last
 
-    side = None
-    score = 0
-    if ema_fast.iloc[-1] > ema_slow.iloc[-1]:
-        score += 1
-        if rsi.iloc[-1] > 50:
-            side = "BUY"
-            score += 1
-            reasons += ["EMA fast above slow", "RSI>50"]
-    elif ema_fast.iloc[-1] < ema_slow.iloc[-1]:
-        score += 1
-        if rsi.iloc[-1] < 50:
-            side = "SELL"
-            score += 1
-            reasons += ["EMA fast below slow", "RSI<50"]
+    if diff >= di_diff_threshold:
+        return "trend_up"
+    if diff <= -di_diff_threshold:
+        return "trend_down"
 
-    if side is None or score < settings.strategy.min_signal_score:
-        return None
+    # Tie-break with EMA slope (on close)
+    close = df["close"].astype(float)
+    ema_fast = close.ewm(span=max(4, period // 2), adjust=False).mean()
+    ema_ultra = close.ewm(span=max(2, period // 3), adjust=False).mean()
+    slope = float(ema_ultra.iloc[-1] - ema_fast.iloc[-1])
+    if slope > 0:
+        return "trend_up"
+    if slope < 0:
+        return "trend_down"
+    return "range"
 
-    # Base SL/TP
-    sl_mult = settings.strategy.atr_sl_multiplier
-    tp_mult = settings.strategy.atr_tp_multiplier
 
-    # Confidence tilt via RSI distance from 50
-    conf = min(5.0, abs(float(rsi.iloc[-1]) - 50.0) / 5.0)  # 0..5
-    sl_mult += settings.strategy.sl_confidence_adj * (conf / 5.0)
-    tp_mult += settings.strategy.tp_confidence_adj * (conf / 5.0)
+def detect_market_regime_verbose(
+    *,
+    df: pd.DataFrame,
+    adx: Optional[pd.Series] = None,
+    di_plus: Optional[pd.Series] = None,
+    di_minus: Optional[pd.Series] = None,
+    adx_trend_strength: float = 20.0,
+    di_diff_threshold: float = 8.0,
+    period: int = 14,
+) -> Dict[str, Any]:
+    """Diagnostic variant with numeric context for /diag or debugging."""
+    if df is None or df.empty:
+        return {"regime": "range", "reason": "empty_df"}
 
-    # Regime tilt
-    if regime == "trend":
-        tp_mult += settings.strategy.trend_tp_boost
-        sl_mult += settings.strategy.trend_sl_relax
-        reasons.append("Regime: trend")
-    elif regime == "range":
-        tp_mult += settings.strategy.range_tp_tighten
-        sl_mult += settings.strategy.range_sl_tighten
-        reasons.append("Regime: range")
-
-    sl_points = max(atr.iloc[-1] * sl_mult, 5.0)
-    tp_points = max(atr.iloc[-1] * tp_mult, sl_points * 1.2)
-
-    entry_price = float(opt_df["close"].astype(float).iloc[-1])
-
-    return Signal(
-        side=side,
-        confidence=conf,
-        score=score,
-        entry_price=entry_price,
-        sl_points=float(sl_points),
-        tp_points=float(tp_points),
-        reasons=reasons,
+    a, dpos, dneg = _ensure_adx_di(df, adx, di_plus, di_minus, period=period)
+    regime = detect_market_regime(
+        df=df,
+        adx=a,
+        di_plus=dpos,
+        di_minus=dneg,
+        adx_trend_strength=adx_trend_strength,
+        di_diff_threshold=di_diff_threshold,
+        period=period,
     )
-
-
-def _rsi(series: pd.Series, period: int) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ma_up = up.rolling(window=period, min_periods=period).mean()
-    ma_down = down.rolling(window=period, min_periods=period).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-
-def _atr(df: pd.DataFrame, n: int) -> pd.Series:
-    h, l, c = df["high"], df["low"], df["close"]
-    tr = pd.concat(
-        [h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()],
-        axis=1
-    ).max(axis=1)
-    return tr.rolling(n, min_periods=n).mean()
+    return {
+        "regime": regime,
+        "adx_last": float(a.iloc[-1]) if len(a) else None,
+        "di_plus_last": float(dpos.iloc[-1]) if len(dpos) else None,
+        "di_minus_last": float(dneg.iloc[-1]) if len(dneg) else None,
+        "adx_trend_strength": float(adx_trend_strength),
+        "di_diff_threshold": float(di_diff_threshold),
+    }
