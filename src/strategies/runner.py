@@ -146,7 +146,7 @@ class StrategyRunner:
                 log.warning("OrderExecutor not initialized: %s", e)
 
         self._symbol_cache: dict[int, str] = {}
-        self._last_signal: Optional[Dict[str, Any]] = None  # <<< cache last valid/enriched signal
+        self._last_signal: Optional[Dict[str, Any]] = None  # <-- cache for /diag
 
     # ---- infra ----
     def _emit(self, evt_type: str, **payload: Any) -> None:
@@ -282,33 +282,29 @@ class StrategyRunner:
         except Exception as e:
             checks.append({"name": "indicators", "ok": False, "error": str(e)})
 
-        # signal: prefer fresh; fallback to cached last signal
+        # -------- signal: prefer fresh; fallback to cached --------
         chosen_sig: Optional[Dict[str, Any]] = None
         try:
+            fresh_sig: Optional[Dict[str, Any]] = None
             if not opt_df.empty and not spot_df.empty:
                 cur_px = float(opt_df["close"].iloc[-1])
-                fresh = self.strategy.generate_signal(opt_df, cur_px, spot_df)
-                if fresh:
-                    self._last_signal = fresh  # cache fresh
-                    chosen_sig = fresh
-                    checks.append({"name": "signal", "ok": True, "value": fresh})
-                else:
-                    # fallback to cache
-                    if self._last_signal:
-                        chosen_sig = self._last_signal
-                        checks.append({"name": "signal", "ok": True, "value": self._last_signal, "source": "cached"})
-                    else:
-                        checks.append({"name": "signal", "ok": False})
+                fresh_sig = self.strategy.generate_signal(opt_df, cur_px, spot_df)
+
+            if fresh_sig:
+                self._last_signal = fresh_sig
+                chosen_sig = fresh_sig
+                checks.append({"name": "signal", "ok": True, "value": fresh_sig})
+            elif self._last_signal:
+                chosen_sig = self._last_signal
+                checks.append({"name": "signal", "ok": True, "value": self._last_signal, "source": "cached"})
             else:
-                if self._last_signal:
-                    chosen_sig = self._last_signal
-                    checks.append({"name": "signal", "ok": True, "value": self._last_signal, "source": "cached"})
-                else:
-                    checks.append({"name": "signal", "ok": False, "error": "missing OHLC"})
+                # no fresh and no cache
+                err = "missing OHLC" if (opt_df.empty or spot_df.empty) else "no signal"
+                checks.append({"name": "signal", "ok": False, "error": err})
         except Exception as e:
             checks.append({"name": "signal", "ok": False, "error": str(e)})
 
-        # sizing based on chosen signal (fresh or cached)
+        # sizing (based on chosen signal if any)
         try:
             if chosen_sig:
                 equity = float(get_equity_estimate(self._kite))
@@ -387,6 +383,9 @@ class StrategyRunner:
             if not signal:
                 return None
 
+            # cache latest signal for /diag
+            self._last_signal = dict(signal)
+
             # --- Sizing ---
             try:
                 equity = float(get_equity_estimate(self._kite))
@@ -418,9 +417,6 @@ class StrategyRunner:
                     "expiry": token_info.get("expiry"),
                 },
             }
-
-            # cache enriched signal for /diag and /last_signal
-            self._last_signal = enriched
 
             # --- Live execution ---
             if self._live and self._kite and self.executor and option_symbol:
