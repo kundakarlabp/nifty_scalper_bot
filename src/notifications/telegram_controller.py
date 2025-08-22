@@ -1,276 +1,178 @@
+# src/notifications/telegram_controller.py
 from __future__ import annotations
 
-import json
+"""
+Minimal Telegram controller compatible with existing main.py wiring.
+
+- Matches constructor used by main.py:
+    TelegramController(
+        status_callback=...,     # () -> dict
+        control_callback=...,    # (text:str) -> str
+        summary_callback=...,    # () -> str
+    )
+- Single long-poll thread (no webhook)
+- Basic commands delegated to control_callback
+- Event helpers: notify_entry(), notify_fills(), notify_text()
+"""
+
+import hashlib
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+import requests
 
 from src.config import settings
-
-# We use python-telegram-bot v13 style imports (common in many Railway images)
-try:
-    from telegram import Update, ParseMode
-    from telegram.ext import Updater, CommandHandler, CallbackContext, Filters
-except Exception as e:  # pragma: no cover
-    raise RuntimeError(f"python-telegram-bot not installed or incompatible: {e}")
 
 log = logging.getLogger(__name__)
 
 
-def _fmt_bool(b: bool) -> str:
-    return "🟢" if b else "🔴"
-
-
-def _is_admin(update: Update) -> bool:
-    chat_id = update.effective_chat.id if update and update.effective_chat else None
-    wanted = {settings.telegram.chat_id}
-    extra = set(settings.telegram.extra_admin_ids or [])
-    return (chat_id in wanted) or (chat_id in extra)
-
-
 class TelegramController:
-    """
-    Thin wrapper around python-telegram-bot. Starts polling in a daemon thread.
-    Exposes commands to control runner and query diagnostics.
-    """
-
     def __init__(
         self,
         *,
-        token: str,
-        chat_id: int,
-        runner,
-        log_provider: Optional[Callable[[int], str]] = None,
+        status_callback: Callable[[], Dict[str, Any]],
+        control_callback: Callable[[str], str],
+        summary_callback: Optional[Callable[[], str]] = None,
+        http_timeout: float = 20.0,
     ) -> None:
-        self.token = token
-        self.chat_id = int(chat_id)
-        self.runner = runner
-        self.log_provider = log_provider or (lambda n: "log tail unavailable")
+        tg = getattr(settings, "telegram", object())
+        self._token: Optional[str] = getattr(tg, "bot_token", None)
+        self._chat_id: Optional[int] = getattr(tg, "chat_id", None)
+        if not self._token or not self._chat_id:
+            raise RuntimeError("TelegramController: bot_token or chat_id missing in settings.telegram")
 
-        self.updater: Optional[Updater] = None
-        self._thread: Optional[threading.Thread] = None
+        self._base = f"https://api.telegram.org/bot{self._token}"
+        self._timeout = http_timeout
 
-    # ---------- public notify helpers (used by runner/executor) ----------
+        # hooks
+        self._status = status_callback
+        self._control = control_callback
+        self._summary = summary_callback or (lambda: "No summary.")
+
+        # poll state
+        self._poll_thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._started = False
+        self._last_update_id: Optional[int] = None
+
+        # simple rate-limit + dedupe
+        self._send_min_interval = 0.9
+        self._last_sends: List[tuple[float, str]] = []
+
+        # allowlist (just the configured chat)
+        self._allowlist = {int(self._chat_id)}
+
+    # ----------- outbound -----------
+    def _rate_ok(self, text: str) -> bool:
+        now = time.time()
+        h = hashlib.md5(text.encode("utf-8")).hexdigest()
+        # de-dupe same msg within 10s and enforce min interval
+        self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
+        if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
+            return False
+        if any(hh == h for _, hh in self._last_sends):
+            return False
+        self._last_sends.append((now, h))
+        return True
+
+    def _send(self, text: str, parse_mode: Optional[str] = None) -> None:
+        if not self._rate_ok(text):
+            return
+        payload = {"chat_id": self._chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        try:
+            requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+        except Exception as e:
+            log.debug("telegram send failed: %s", e)
 
     def notify_text(self, text: str) -> None:
+        self._send(text)
+
+    def send_startup_alert(self) -> None:
         try:
-            if self.updater:
-                self.updater.bot.send_message(chat_id=self.chat_id, text=text)
-        except Exception as e:
-            log.warning("notify_text failed: %s", e)
-
-    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str = "") -> None:
-        msg = f"🟦 ENTRY {side} {symbol}\nQty: {qty} @ {price:.2f}\nRef: {record_id}"
-        self.notify_text(msg)
-
-    def notify_fills(self, text: str) -> None:
-        self.notify_text(text)
-
-    # ---------- lifecycle ----------
-
-    def start(self) -> None:
-        if self.updater:  # already started
-            return
-        self.updater = Updater(self.token, use_context=True)
-
-        dp = self.updater.dispatcher
-
-        dp.add_handler(CommandHandler("help", self._cmd_help))
-        dp.add_handler(CommandHandler("id", self._cmd_id))
-        dp.add_handler(CommandHandler("status", self._cmd_status))
-        dp.add_handler(CommandHandler("flow", self._cmd_flow))
-        dp.add_handler(CommandHandler("diag", self._cmd_diag))
-        dp.add_handler(CommandHandler("mode", self._cmd_mode, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("pause", self._cmd_pause, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("resume", self._cmd_resume, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("risk", self._cmd_risk, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("quality", self._cmd_quality, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("regime", self._cmd_regime, Filters.user(user_id=[self.chat_id])))
-        dp.add_handler(CommandHandler("positions", self._cmd_positions))
-        dp.add_handler(CommandHandler("active", self._cmd_active))
-        dp.add_handler(CommandHandler("logs", self._cmd_logs))
-        dp.add_handler(CommandHandler("ping", self._cmd_ping))
-        dp.add_handler(CommandHandler("emergency", self._cmd_emergency, Filters.user(user_id=[self.chat_id])))
-
-        # Unknown commands go to /help
-        dp.add_handler(CommandHandler(None, self._cmd_help))
-
-        # Run on a daemon thread
-        self._thread = threading.Thread(target=self.updater.start_polling, daemon=True)
-        self._thread.start()
-        log.info("Telegram polling started.")
-
-    # ---------- command handlers ----------
-
-    def _cmd_help(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
-            return
-        text = (
-            "🤖 *Nifty Scalper Bot*\n\n"
-            "/status – bot status\n"
-            "/flow – green/red flow summary\n"
-            "/diag – full JSON diagnostics\n"
-            "/mode live|shadow – toggle live trading\n"
-            "/pause [minutes] – pause entries\n"
-            "/resume – resume entries\n"
-            "/risk <pct> – set risk per trade (e.g. /risk 0.5)\n"
-            "/quality auto|on|off – indicator quality gates\n"
-            "/regime auto|trend|range – regime override\n"
-            "/positions – broker day positions\n"
-            "/active – active orders\n"
-            "/logs [n] – tail n log lines\n"
-            "/emergency – flatten & cancel all\n"
-            "/id – show chat id\n"
-            "/ping – heartbeat\n"
-        )
-        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-    def _cmd_id(self, update: Update, context: CallbackContext) -> None:
-        update.message.reply_text(f"Chat ID: `{update.effective_chat.id}`", parse_mode=ParseMode.MARKDOWN)
-
-    def _cmd_ping(self, update: Update, context: CallbackContext) -> None:
-        sp = self.runner.status_provider() if hasattr(self.runner, "status_provider") else {}
-        ok = _fmt_bool(True)
-        update.message.reply_text(f"{ok} heartbeat | live={int(sp.get('live_trading', False))} "
-                                  f"paused={sp.get('paused', False)} active={sp.get('active_orders', 0)}")
-
-    def _cmd_status(self, update: Update, context: CallbackContext) -> None:
-        sp = self.runner.status_provider()
-        msg = (
-            f"📊 {sp.get('time_ist')}\n"
-            f"{'🟢' if sp.get('live_trading') else '🟡'} {'LIVE' if sp.get('live_trading') else 'DRY'} | Kite\n"
-            f"📦 Active: {sp.get('active_orders', 0)} | ⏸ {sp.get('paused')}\n"
-            f"🗜 Quality: {sp.get('quality')} | Regime: {sp.get('regime_mode')}"
-        )
-        update.message.reply_text(msg)
-
-    def _cmd_flow(self, update: Update, context: CallbackContext) -> None:
-        d = self.runner.diagnostics()
-        checks = d.get("checks", [])
-        parts = []
-        ok_all = True
-        for c in checks:
-            ok = bool(c.get("ok"))
-            ok_all = ok_all and ok
-            parts.append(f"{_fmt_bool(ok)} {c.get('name')}")
-        head = "✅ Flow OK" if ok_all else "❗ Flow has issues"
-        update.message.reply_text(f"{head}\n" + " · ".join(parts))
-
-    def _cmd_diag(self, update: Update, context: CallbackContext) -> None:
-        d = self.runner.diagnostics()
-        pretty = json.dumps(d, indent=2, default=str)
-        update.message.reply_text(f"```\n{pretty}\n```", parse_mode=ParseMode.MARKDOWN)
-
-    def _cmd_mode(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
-            return
-        args = (context.args or [])
-        if not args:
-            update.message.reply_text("Usage: /mode live|shadow")
-            return
-        val = args[0].lower()
-        if val == "live":
-            self.runner.live = True
-            update.message.reply_text("Mode set to LIVE.")
-        elif val in ("dry", "shadow"):
-            self.runner.live = False
-            update.message.reply_text("Mode set to SHADOW.")
-        else:
-            update.message.reply_text("Usage: /mode live|shadow")
-
-    def _cmd_pause(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
-            return
-        minutes = None
-        if context.args:
-            try:
-                minutes = float(context.args[0])
-            except Exception:
-                minutes = None
-        self.runner.pause(minutes=minutes)
-        if minutes:
-            update.message.reply_text(f"Entries paused for {minutes} min.")
-        else:
-            update.message.reply_text("Entries paused.")
-
-    def _cmd_resume(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
-            return
-        self.runner.resume()
-        update.message.reply_text("Entries resumed.")
-
-    def _cmd_risk(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
-            return
-        if not context.args:
-            update.message.reply_text(f"Current risk %: {settings.risk.risk_per_trade * 100:.2f}")
-            return
-        try:
-            pct = float(context.args[0])
-            settings.risk.risk_per_trade = pct / 100.0
-            update.message.reply_text(f"Risk per trade set to {pct:.2f}%")
+            s = self._status() if self._status else {}
         except Exception:
-            update.message.reply_text("Usage: /risk <percent> (e.g., /risk 0.5)")
+            s = {}
+        self._send(
+            "🚀 Bot started\n"
+            f"🔁 Trading: {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'}\n"
+            f"🧠 Broker: {s.get('broker')}\n"
+            f"📦 Active: {s.get('active_orders', 0)}"
+        )
 
-    def _cmd_quality(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
+    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
+        self._send(
+            f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`",
+            parse_mode="Markdown",
+        )
+
+    def notify_fills(self, fills: List[tuple[str, float]]) -> None:
+        if not fills:
             return
-        mode = (context.args[0].lower() if context.args else "auto")
-        if hasattr(self.runner.strategy, "set_quality_mode"):
-            self.runner.strategy.set_quality_mode(mode)
-            update.message.reply_text(f"Quality mode set to {mode}.")
-        else:
-            update.message.reply_text("Strategy does not support quality mode.")
+        lines = ["✅ Fills"]
+        for rid, px in fills:
+            lines.append(f"• {rid} @ {px:.2f}")
+        self._send("\n".join(lines))
 
-    def _cmd_regime(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
+    # ----------- inbound -----------
+    def start_polling(self) -> None:
+        if self._started:
+            log.info("Telegram polling already running; skipping start.")
             return
-        mode = (context.args[0].lower() if context.args else "auto")
-        if hasattr(self.runner.strategy, "set_regime_mode"):
-            self.runner.strategy.set_regime_mode(mode)
-            update.message.reply_text(f"Regime mode set to {mode}.")
-        else:
-            update.message.reply_text("Strategy does not support regime mode.")
+        self._stop.clear()
+        self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
+        self._poll_thread.start()
+        self._started = True
 
-    def _cmd_positions(self, update: Update, context: CallbackContext) -> None:
-        pos = self.runner.positions_provider()
-        pretty = json.dumps(pos, indent=2, default=str)
-        update.message.reply_text(f"```\n{pretty}\n```", parse_mode=ParseMode.MARKDOWN)
+    def stop_polling(self) -> None:
+        if not self._started:
+            return
+        self._stop.set()
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
+        self._started = False
 
-    def _cmd_active(self, update: Update, context: CallbackContext) -> None:
-        acts = self.runner.actives_provider()
-        pretty = json.dumps(acts, indent=2, default=str)
-        update.message.reply_text(f"```\n{pretty}\n```", parse_mode=ParseMode.MARKDOWN)
-
-    def _cmd_logs(self, update: Update, context: CallbackContext) -> None:
-        n = 200
-        if context.args:
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
             try:
-                n = int(context.args[0])
-            except Exception:
-                pass
-        text = self.log_provider(n)
-        if not text:
-            text = "<no logs>"
-        # Telegram message size limit: split if needed
-        chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
-        for ch in chunks:
-            update.message.reply_text(f"```\n{ch}\n```", parse_mode=ParseMode.MARKDOWN)
+                params = {"timeout": 25}
+                if self._last_update_id is not None:
+                    params["offset"] = self._last_update_id + 1
+                r = requests.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                data = r.json()
+                if not data.get("ok"):
+                    time.sleep(1.0)
+                    continue
+                for upd in data.get("result", []):
+                    self._last_update_id = int(upd.get("update_id", 0))
+                    self._handle_update(upd)
+            except Exception as e:
+                log.debug("Telegram poll error: %s", e)
+                time.sleep(1.0)
 
-    def _cmd_emergency(self, update: Update, context: CallbackContext) -> None:
-        if not _is_admin(update):
+    def _authorized(self, chat_id: int) -> bool:
+        return int(chat_id) in self._allowlist
+
+    def _handle_update(self, upd: Dict[str, Any]) -> None:
+        msg = upd.get("message") or upd.get("edited_message")
+        if not msg:
             return
-        ex = getattr(self.runner, "executor", None)
-        if not ex:
-            update.message.reply_text("No executor.")
+        chat_id = msg.get("chat", {}).get("id")
+        text = (msg.get("text") or "").strip()
+        if not text:
             return
+        if not self._authorized(int(chat_id)):
+            self._send("Unauthorized.")
+            return
+
+        # Strip leading slash and route to control_callback
+        cmd = text.lstrip("/")
         try:
-            if hasattr(ex, "flatten_and_cancel_all"):
-                ok, msg = ex.flatten_and_cancel_all()
-            elif hasattr(ex, "cancel_all"):
-                ok, msg = ex.cancel_all()
-            else:
-                ok, msg = False, "executor has no emergency method"
+            reply = self._control(cmd) if self._control else "No controller wired."
         except Exception as e:
-            ok, msg = False, str(e)
-        update.message.reply_text(f"{'✅' if ok else '❌'} {msg}")
+            reply = f"Error: {e}"
+        if reply:
+            self._send(str(reply))
