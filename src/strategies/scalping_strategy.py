@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional, Literal, Tuple
 
 import pandas as pd
 
 from src.config import settings
-from src.utils.atr_helper import compute_atr, atr_sl_tp_points
+from src.utils.atr_helper import compute_atr, atr_sl_tp_points, latest_atr_value
 from src.utils.indicators import calculate_vwap
 from src.signals.regime_detector import detect_market_regime
 
@@ -35,6 +35,10 @@ class EnhancedScalpingStrategy:
         "stop_loss": float,
         "target": float,
         "reasons": list[str],
+        "regime": "trend_up" | "trend_down" | "range" | "unknown",
+        "emas": {"fast": float, "slow": float},
+        "rsi": float,
+        "atr": float,
       }
     """
 
@@ -62,6 +66,9 @@ class EnhancedScalpingStrategy:
         self.range_tp_tighten = float(getattr(strat, "range_tp_tighten", -0.4))
         self.range_sl_tighten = float(getattr(strat, "range_sl_tighten", -0.2))
 
+        # bars threshold for validity
+        self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
+
     # ------------- tech utils -------------
     @staticmethod
     def _ema(s: pd.Series, period: int) -> pd.Series:
@@ -79,7 +86,7 @@ class EnhancedScalpingStrategy:
         return rsi
 
     @staticmethod
-    def _extract_adx_columns(spot_df: pd.DataFrame) -> tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
+    def _extract_adx_columns(spot_df: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
         """
         Return (adx, di_plus, di_minus) from spot_df; tolerant to suffix (_{n}) naming.
         """
@@ -103,7 +110,7 @@ class EnhancedScalpingStrategy:
         """
         Generate signal with regime & confidence aware SL/TP shaping.
         """
-        if df is None or df.empty or len(df) < max(self.ema_slow, 10):
+        if df is None or df.empty or len(df) < self.min_bars_for_signal:
             logger.debug("DataFrame too short to generate signal.")
             return None
 
@@ -183,12 +190,9 @@ class EnhancedScalpingStrategy:
 
         # 6) ATR SL/TP base (OPTION)
         atr_series = compute_atr(df, period=self.atr_period)
-        if atr_series is None or len(atr_series) == 0:
-            logger.debug("ATR missing — no SL/TP.")
-            return None
-        atr_val = float(atr_series.iloc[-1] or 0.0)
+        atr_val = latest_atr_value(atr_series, default=0.0)
         if atr_val <= 0:
-            logger.debug("ATR invalid — no SL/TP.")
+            logger.debug("ATR invalid/missing — no SL/TP.")
             return None
 
         strat = getattr(settings, "strategy", object())
@@ -209,7 +213,7 @@ class EnhancedScalpingStrategy:
             sl_mult += self.range_sl_tighten
             reasons.append(f"Regime tighten: range (tp{self.range_tp_tighten:+}, sl{self.range_sl_tighten:+}).")
 
-        # ensure not crazy
+        # ensure bounds
         sl_mult = max(0.2, sl_mult)
         tp_mult = max(0.4, tp_mult)
 
@@ -230,12 +234,13 @@ class EnhancedScalpingStrategy:
         side: Side = "BUY" if ema_bias_up else "SELL"
         entry_price = float(current_price)
 
-        # Final SL/TP prices
+        # Final SL/TP prices (with safety clamp on SL)
+        eps = 1e-4  # ultra-small floor to avoid zero/negative SL
         if side == "BUY":
-            stop_loss = entry_price - sl_points
+            stop_loss = max(eps, entry_price - sl_points)
             target = entry_price + tp_points
         else:
-            stop_loss = entry_price + sl_points
+            stop_loss = max(eps, entry_price + sl_points)
             target = entry_price - tp_points
 
         signal: Dict[str, Any] = {
