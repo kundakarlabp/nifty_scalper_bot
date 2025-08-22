@@ -24,23 +24,6 @@ class EnhancedScalpingStrategy:
       - ADX/DI & VWAP on SPOT
       - ATR-based SL/TP with regime & confidence shaping
       - Signature: generate_signal(df, current_price, spot_df)
-
-    Output:
-      {
-        "side": "BUY" | "SELL",
-        "confidence": float,
-        "sl_points": float,
-        "tp_points": float,
-        "score": int,
-        "entry_price": float,
-        "stop_loss": float,
-        "target": float,
-        "reasons": list[str],
-        "regime": "trend_up" | "trend_down" | "range" | "unknown",
-        "emas": {"fast": float, "slow": float},
-        "rsi": float,
-        "atr": float,
-      }
     """
 
     def __init__(
@@ -53,6 +36,8 @@ class EnhancedScalpingStrategy:
         adx_trend_strength: int = 20,
     ) -> None:
         strat = getattr(settings, "strategy", object())
+
+        # Core lookbacks
         self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
         self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
         self.rsi_period = int(getattr(strat, "rsi_period", rsi_period))
@@ -60,19 +45,32 @@ class EnhancedScalpingStrategy:
         self.adx_trend_strength = int(getattr(strat, "adx_trend_strength", adx_trend_strength))
         self.atr_period = int(getattr(strat, "atr_period", 14))
 
-        # regime shaping (floats; may be +/-)
+        # Regime shaping (add to multipliers; can be negative)
         self.trend_tp_boost = float(getattr(strat, "trend_tp_boost", 0.6))
         self.trend_sl_relax = float(getattr(strat, "trend_sl_relax", 0.2))
         self.range_tp_tighten = float(getattr(strat, "range_tp_tighten", -0.4))
         self.range_sl_tighten = float(getattr(strat, "range_sl_tighten", -0.2))
 
-        # bars threshold for validity
+        # Bars threshold for validity
         self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
 
-        # auto-relax once if strict filters block signals (useful for testing)
-        self.auto_relax = bool(getattr(strat, "auto_relax_filters", True))
+        # ---- Thresholds (CONFIGURABLE) ----
+        # Strict pass
+        self.min_score_strict = int(getattr(strat, "min_signal_score", 4))
+        self.min_conf_strict = float(getattr(strat, "confidence_threshold", 0.50))
 
-    # ------------- tech utils -------------
+        # Optional relaxed pass (if strict fails)
+        self.auto_relax_enabled = bool(getattr(strat, "auto_relax_enabled", True))
+        self.min_score_relaxed = int(getattr(strat, "min_signal_score_relaxed", max(2, self.min_score_strict - 1)))
+        self.min_conf_relaxed = float(getattr(strat, "confidence_threshold_relaxed", max(0.0, self.min_conf_strict - 0.20)))
+
+        # ATR & confidence shaping
+        self.base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.5))
+        self.base_tp_mult = float(getattr(strat, "atr_tp_multiplier", 3.0))
+        self.sl_conf_adj = float(getattr(strat, "sl_confidence_adj", 0.2))
+        self.tp_conf_adj = float(getattr(strat, "tp_confidence_adj", 0.3))
+
+    # ---------- tech utils ----------
     @staticmethod
     def _ema(s: pd.Series, period: int) -> pd.Series:
         return s.ewm(span=max(1, int(period)), adjust=False).mean()
@@ -101,12 +99,38 @@ class EnhancedScalpingStrategy:
         di_minus = spot_df[dim_cols[-1]] if dim_cols else spot_df.get("di_minus")
         return adx, di_plus, di_minus
 
-    # ------------- core helpers -------------
-    def _score_and_reasons(self, df: pd.DataFrame, spot_df: pd.DataFrame) -> Tuple[int, bool, float, Optional[str], list[str]]:
-        """Return (score, ema_bias_up, rsi_val, regime, reasons)."""
-        reasons: list[str] = []
+    # ---------- thresholds ----------
+    def _score_confidence(self, score: int) -> float:
+        """
+        Map score -> confidence (coarse). Customize freely; thresholds decide acceptance.
+        """
+        # keep monotonic and simple
+        if score >= 8:
+            return 8.0
+        if score >= 6:
+            return 6.0
+        if score >= 4:
+            return 2.5
+        return 0.0
 
-        # EMA bias & cross (OPTION)
+    def _passes(self, score: int, conf: float, *, strict: bool) -> bool:
+        if strict:
+            return (score >= self.min_score_strict) and (conf >= self.min_conf_strict)
+        return (score >= self.min_score_relaxed) and (conf >= self.min_conf_relaxed)
+
+    # ---------- main ----------
+    def generate_signal(
+        self,
+        df: pd.DataFrame,
+        current_price: float,
+        spot_df: pd.DataFrame,
+    ) -> SignalOutput:
+
+        if df is None or df.empty or len(df) < self.min_bars_for_signal:
+            logger.debug("DataFrame too short to generate signal.")
+            return None
+
+        # --- 1) OPTION trend/momentum ---
         ema_fast = self._ema(df["close"], self.ema_fast)
         ema_slow = self._ema(df["close"], self.ema_slow)
         ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
@@ -114,19 +138,24 @@ class EnhancedScalpingStrategy:
         ema_cross_down = bool((ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up)
 
         score = 0
-        if ema_cross_up:
-            score += 2; reasons.append(f"EMA fast({self.ema_fast}) crossed above slow({self.ema_slow}).")
-        elif ema_cross_down:
-            score += 2; reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
+        reasons: list[str] = []
 
-        # RSI (OPTION)
+        if ema_cross_up:
+            score += 2
+            reasons.append(f"EMA fast({self.ema_fast}) crossed above slow({self.ema_slow}).")
+        elif ema_cross_down:
+            score += 2
+            reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
+
         rsi_val = float(self._rsi(df["close"], self.rsi_period).iloc[-1])
         if ema_bias_up and rsi_val > 50:
-            score += 1; reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
+            score += 1
+            reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
         elif not ema_bias_up and rsi_val < 50:
-            score += 1; reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
+            score += 1
+            reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
 
-        # Regime (SPOT ADX/DI)
+        # --- 2) SPOT regime / VWAP filters ---
         regime = None
         if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
             adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
@@ -138,121 +167,57 @@ class EnhancedScalpingStrategy:
                 adx_trend_strength=self.adx_trend_strength,
             )
             if regime == "trend_up" and ema_bias_up:
-                score += 2; reasons.append("Spot ADX trend_up (aligned).")
+                score += 2
+                reasons.append("Spot ADX trend_up (aligned).")
             elif regime == "trend_down" and not ema_bias_up:
-                score += 2; reasons.append("Spot ADX trend_down (aligned).")
+                score += 2
+                reasons.append("Spot ADX trend_down (aligned).")
             elif regime == "range":
                 reasons.append("Spot ADX range.")
 
-        # VWAP (SPOT)
         if spot_df is not None and len(spot_df) > 0:
             vwap_series = calculate_vwap(spot_df)
             if vwap_series is not None and len(vwap_series) > 0:
                 vwap_val = float(vwap_series.iloc[-1])
-                spot_px = float(spot_df["close"].iloc[-1])
-                if ema_bias_up and spot_px > vwap_val:
-                    score += 1; reasons.append("Spot > VWAP (risk-on).")
-                elif not ema_bias_up and spot_px < vwap_val:
-                    score += 1; reasons.append("Spot < VWAP (risk-off).")
+                current_spot_price = float(spot_df["close"].iloc[-1])
+                if ema_bias_up and current_spot_price > vwap_val:
+                    score += 1
+                    reasons.append("Spot > VWAP (risk-on).")
+                elif not ema_bias_up and current_spot_price < vwap_val:
+                    score += 1
+                    reasons.append("Spot < VWAP (risk-off).")
 
-        logger.debug("Score=%s | EMA_bias_up=%s | RSI=%.2f | Regime=%s", score, ema_bias_up, rsi_val, regime or "unknown")
-        return score, ema_bias_up, rsi_val, regime, reasons
+        # --- 3) Score -> confidence; apply thresholds (strict, then relaxed) ---
+        confidence = self._score_confidence(score)
 
-    def _confidence_from_score(self, score: int) -> float:
-        # coarse map (kept stable)
-        cmap = {0: 0.0, 1: 0.0, 2: 0.0, 3: 2.5, 4: 2.5, 5: 5.0, 6: 5.0, 7: 7.5, 8: 7.5, 9: 10.0}
-        return float(cmap.get(score, 10.0 if score >= 9 else 0.0))
-
-    # ------------- main -------------
-    def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_price: float,
-        spot_df: pd.DataFrame,
-    ) -> SignalOutput:
-        """
-        Generate signal with regime & confidence aware SL/TP shaping.
-        Includes verbose diagnostics and an optional one-time 'auto-relax'
-        retry with softer thresholds if strict filters block signals.
-        """
-        if df is None or df.empty or len(df) < self.min_bars_for_signal:
-            logger.info("Signal drop: not enough bars (have=%d need>=%d).",
-                        0 if df is None else len(df), self.min_bars_for_signal)
-            return None
-
-        # ---- first pass (strict) ----
-        sig = self._try_build_signal(df, current_price, spot_df,
-                                     reason_prefix="strict")
-        if sig is not None:
-            return sig
-
-        # ---- auto-relax once ----
-        if self.auto_relax:
-            relaxed = {
-                "min_score": max(1, int(getattr(getattr(settings, "strategy", object()), "min_signal_score", 5)) - 2),
-                "min_conf": float(getattr(getattr(settings, "strategy", object()), "confidence_threshold", 6.0)) - 3.5,
-                "atr_period": max(5, self.atr_period // 2),
-            }
-            logger.info("Auto-relax applied: min_score->%d, confidence_threshold->%.2f, atr_period->%d",
-                        relaxed["min_score"], relaxed["min_conf"], relaxed["atr_period"])
-            return self._try_build_signal(
-                df, current_price, spot_df,
-                reason_prefix="relaxed",
-                override_min_score=relaxed["min_score"],
-                override_min_conf=relaxed["min_conf"],
-                override_atr_period=relaxed["atr_period"],
+        if not self._passes(score, confidence, strict=True):
+            logger.info(
+                "Signal drop (strict): confidence(%.2f) < threshold(%.2f) | score=%d",
+                confidence, self.min_conf_strict, score,
+            )
+            if not self.auto_relax_enabled:
+                return None
+            # relaxed pass
+            if not self._passes(score, confidence, strict=False):
+                logger.info(
+                    "Signal drop (relaxed): confidence(%.2f) < threshold(%.2f) | score=%d",
+                    confidence, self.min_conf_relaxed, score,
+                )
+                return None
+            logger.info(
+                "Auto-relax applied: min_score->%d, confidence_threshold->%.2f",
+                self.min_score_relaxed, self.min_conf_relaxed,
             )
 
-        return None
-
-    # -------- internal builder --------
-    def _try_build_signal(
-        self,
-        df: pd.DataFrame,
-        current_price: float,
-        spot_df: pd.DataFrame,
-        *,
-        reason_prefix: str,
-        override_min_score: Optional[int] = None,
-        override_min_conf: Optional[float] = None,
-        override_atr_period: Optional[int] = None,
-    ) -> SignalOutput:
-
-        # 1) score elements
-        score, ema_bias_up, rsi_val, regime, reasons = self._score_and_reasons(df, spot_df)
-
-        # 2) gates: score + confidence
-        strat = getattr(settings, "strategy", object())
-        min_score = int(getattr(strat, "min_signal_score", 5)) if override_min_score is None else int(override_min_score)
-        conf_threshold = float(getattr(strat, "confidence_threshold", 6.0)) if override_min_conf is None else float(override_min_conf)
-
-        if score < min_score:
-            logger.info("Signal drop (%s): score(%d) < min_score(%d) | reasons=%s",
-                        reason_prefix, score, min_score, reasons)
-            return None
-
-        confidence = self._confidence_from_score(score)
-        if confidence < conf_threshold:
-            logger.info("Signal drop (%s): confidence(%.2f) < threshold(%.2f) | score=%d",
-                        reason_prefix, confidence, conf_threshold, score)
-            return None
-
-        # 3) ATR & SL/TP shaping
-        atr_period = int(self.atr_period if override_atr_period is None else override_atr_period)
-        atr_series = compute_atr(df, period=atr_period)
+        # --- 4) ATR-based SL/TP on OPTION ---
+        atr_series = compute_atr(df, period=self.atr_period)
         atr_val = latest_atr_value(atr_series, default=0.0)
         if atr_val <= 0:
-            logger.info("Signal drop (%s): ATR invalid/missing (period=%d).", reason_prefix, atr_period)
+            logger.debug("ATR invalid/missing — no SL/TP.")
             return None
 
-        base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.5))
-        base_tp_mult = float(getattr(strat, "atr_tp_multiplier", 3.0))
-        sl_adj = float(getattr(strat, "sl_confidence_adj", 0.2))
-        tp_adj = float(getattr(strat, "tp_confidence_adj", 0.3))
-
-        # regime shaping (additive)
-        sl_mult = base_sl_mult
-        tp_mult = base_tp_mult
+        sl_mult = self.base_sl_mult
+        tp_mult = self.base_tp_mult
         if regime in ("trend_up", "trend_down"):
             tp_mult += self.trend_tp_boost
             sl_mult += self.trend_sl_relax
@@ -262,7 +227,6 @@ class EnhancedScalpingStrategy:
             sl_mult += self.range_sl_tighten
             reasons.append(f"Regime tighten: range (tp{self.range_tp_tighten:+}, sl{self.range_sl_tighten:+}).")
 
-        # bounds
         sl_mult = max(0.2, sl_mult)
         tp_mult = max(0.4, tp_mult)
 
@@ -276,15 +240,13 @@ class EnhancedScalpingStrategy:
             sl_mult=sl_mult,
             tp_mult=tp_mult,
             confidence=confidence,
-            sl_conf_adj=sl_adj,
-            tp_conf_adj=tp_adj,
+            sl_conf_adj=self.sl_conf_adj,
+            tp_conf_adj=self.tp_conf_adj,
         )
 
         side: Side = "BUY" if ema_bias_up else "SELL"
         entry_price = float(current_price)
-
-        # Final SL/TP prices (safety clamp on SL)
-        eps = 1e-4
+        eps = 1e-4  # guard against zero/negative prices
         if side == "BUY":
             stop_loss = max(eps, entry_price - sl_points)
             target = entry_price + tp_points
@@ -303,13 +265,18 @@ class EnhancedScalpingStrategy:
             "target": float(target),
             "reasons": reasons,
             "regime": regime or "unknown",
-            "emas": {
-                "fast": float(self._ema(df["close"], self.ema_fast).iloc[-1]),
-                "slow": float(self._ema(df["close"], self.ema_slow).iloc[-1]),
-            },
+            "emas": {"fast": float(ema_fast.iloc[-1]), "slow": float(ema_slow.iloc[-1])},
             "rsi": float(rsi_val),
             "atr": float(atr_val),
         }
 
-        logger.info("Generated signal (%s): %s", reason_prefix, signal)
+        logger.info(
+            "Generated signal (%s): %s",
+            "relaxed" if self._passes(score, confidence, strict=False) and not self._passes(score, confidence, strict=True) else "strict",
+            {
+                k: (round(v, 4) if isinstance(v, float) else v)
+                for k, v in signal.items()
+                if k not in ("reasons", "emas")
+            },
+        )
         return signal
