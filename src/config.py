@@ -21,16 +21,6 @@ def _find_env_file() -> Optional[Path]:
     return None
 
 
-def _env_first(*names: str) -> Optional[str]:
-    for n in names:
-        v = os.getenv(n)
-        if v is not None:
-            v = v.strip()
-            if v:
-                return v
-    return None
-
-
 def _as_bool(v: Optional[str], default: bool = False) -> bool:
     if v is None:
         return default
@@ -52,7 +42,7 @@ def _csv_ints(v: Optional[str]) -> List[int]:
     return out
 
 
-# ---------- component models (NO aliases; use nested env like TELEGRAM__ENABLED) ----------
+# ---------- component models ----------
 
 class DataSettings(BaseModel):
     warmup_bars: PositiveInt = 30
@@ -62,7 +52,7 @@ class DataSettings(BaseModel):
 
 class RiskConfig(BaseModel):
     default_equity: PositiveFloat = 30000.0
-    risk_per_trade: NonNegativeFloat = 0.01
+    risk_per_trade: NonNegativeFloat = 0.01   # fraction (0.01 = 1%)
     max_trades_per_day: PositiveInt = 5
     consecutive_loss_limit: NonNegativeInt = 3
     max_daily_drawdown_pct: NonNegativeFloat = 0.05
@@ -116,7 +106,7 @@ class StrategyConfig(BaseModel):
 class InstrumentsConfig(BaseModel):
     spot_symbol: str = "NSE:NIFTY 50"
     trade_symbol: str = "NIFTY"
-    exchange: str = "NFO"
+    trade_exchange: str = "NFO"  # corrected: matches INSTRUMENTS__TRADE_EXCHANGE
     instrument_token: int = 256265
     nifty_lot_size: int = 75
     min_lots: int = 1
@@ -165,63 +155,6 @@ class AppSettings(BaseSettings):
     strategy: StrategyConfig = StrategyConfig()
     instruments: InstrumentsConfig = InstrumentsConfig()
     executor: ExecutorConfig = ExecutorConfig()
-
-    # flat-env fallbacks (Railway/legacy)
-    RISK_PER_TRADE_PCT: Optional[str] = None
-    TELEGRAM_ENABLED: Optional[str] = None
-    TELEGRAM_BOT_TOKEN: Optional[str] = None
-    TELEGRAM_CHAT_ID: Optional[str] = None
-    TELEGRAM_EXTRA_ADMINS: Optional[str] = None
-
-    TG_BOT_TOKEN: Optional[str] = None
-    TG_CHAT_ID: Optional[str] = None
-    BOT_TOKEN: Optional[str] = None
-    CHAT_ID: Optional[str] = None
-
-    ZERODHA_API_KEY: Optional[str] = None
-    ZERODHA_API_SECRET: Optional[str] = None
-    ZERODHA_ACCESS_TOKEN: Optional[str] = None
-    ZERODHA_KEY: Optional[str] = None
-    ZERODHA_SECRET: Optional[str] = None
-    ZERODHA_TOKEN: Optional[str] = None
-
-    def model_post_init(self, __ctx) -> None:  # type: ignore[override]
-        # --- Telegram from flat env (if nested vars weren’t used)
-        if self.TELEGRAM_ENABLED is not None:
-            self.telegram.enabled = _as_bool(self.TELEGRAM_ENABLED, True)
-
-        self.telegram.bot_token = self.telegram.bot_token or _env_first(
-            "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "BOT_TOKEN"
-        )
-        if self.telegram.chat_id is None:
-            chat = _env_first("TELEGRAM_CHAT_ID", "TG_CHAT_ID", "CHAT_ID")
-            try:
-                self.telegram.chat_id = int(chat) if chat else None
-            except Exception:
-                self.telegram.chat_id = None
-
-        extra = self.TELEGRAM_EXTRA_ADMINS or os.getenv("TELEGRAM_EXTRA_ADMINS")
-        if extra:
-            self.telegram.extra_admin_ids = _csv_ints(extra)
-
-        # --- Zerodha fallbacks
-        self.zerodha.api_key = self.zerodha.api_key or _env_first(
-            "ZERODHA_API_KEY", "ZERODHA_KEY", "KITE_API_KEY"
-        )
-        self.zerodha.api_secret = self.zerodha.api_secret or _env_first(
-            "ZERODHA_API_SECRET", "ZERODHA_SECRET", "KITE_API_SECRET"
-        )
-        self.zerodha.access_token = self.zerodha.access_token or _env_first(
-            "ZERODHA_ACCESS_TOKEN", "ZERODHA_TOKEN", "KITE_ACCESS_TOKEN"
-        )
-
-        # --- Risk % convenience
-        pct = self.RISK_PER_TRADE_PCT or os.getenv("RISK_PER_TRADE_PCT")
-        if pct:
-            try:
-                self.risk.risk_per_trade = float(pct) / 100.0
-            except Exception:
-                pass
 
     # mirrors / helpers
     @property
