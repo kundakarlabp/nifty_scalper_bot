@@ -1,132 +1,74 @@
-# src/config.py
-from __future__ import annotations
-import os
-from types import SimpleNamespace
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
-def _as_bool(v: str | None, default: bool = False) -> bool:
-    if v is None: return default
-    return str(v).strip().lower() in {"1","true","yes","on","y"}
 
-def _env_first(*names: str) -> str | None:
-    for n in names:
-        v = os.getenv(n)
-        if v and v.strip():
-            return v.strip()
-    return None
+class AppSettings(BaseSettings):
+    # --- Modes / Logging ---
+    enable_live_trading: bool = Field(default=False, env="ENABLE_LIVE_TRADING")
+    allow_offhours_testing: bool = Field(default=False, env="ALLOW_OFFHOURS_TESTING")
+    log_level: str = Field(default="INFO", env="LOG_LEVEL")
 
-def _csv_ints(v: str | None) -> list[int]:
-    if not v: return []
-    out: list[int] = []
-    for p in v.split(","):
-        p = p.strip()
-        if not p: continue
-        try: out.append(int(p))
-        except: pass
-    return out
+    # --- Scheduling / Hours ---
+    time_filter_start: str = Field(default="09:20", env="TIME_FILTER_START")
+    time_filter_end: str = Field(default="15:20", env="TIME_FILTER_END")
+    data_lookback_minutes: int = Field(default=15, env="DATA__LOOKBACK_MINUTES")
 
-class EnvSettings:
-    def __init__(self) -> None:
-        # top-level
-        self.enable_live_trading = _as_bool(os.getenv("ENABLE_LIVE_TRADING"), False)
-        self.allow_offhours_testing = _as_bool(os.getenv("ALLOW_OFFHOURS_TESTING"), False)
-        self.log_level = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    # --- Instruments ---
+    instruments_spot_symbol: str = Field(default="NSE:NIFTY 50", env="INSTRUMENTS__SPOT_SYMBOL")
+    instruments_trade_symbol: str = Field(default="NIFTY", env="INSTRUMENTS__TRADE_SYMBOL")
+    instruments_trade_exchange: str = Field(default="NFO", env="INSTRUMENTS__TRADE_EXCHANGE")
+    instruments_instrument_token: int = Field(default=256265, env="INSTRUMENTS__INSTRUMENT_TOKEN")
+    instruments_nifty_lot_size: int = Field(default=75, env="INSTRUMENTS__NIFTY_LOT_SIZE")
+    instruments_strike_range: int = Field(default=3, env="INSTRUMENTS__STRIKE_RANGE")
+    instruments_min_lots: int = Field(default=1, env="INSTRUMENTS__MIN_LOTS")
+    instruments_max_lots: int = Field(default=15, env="INSTRUMENTS__MAX_LOTS")
 
-        # server (health endpoint)
-        self.server = SimpleNamespace(
-            host=os.getenv("SERVER__HOST") or "0.0.0.0",
-            port=int(os.getenv("SERVER__PORT") or 8000),
-        )
+    # --- Strategy Core ---
+    strategy_min_signal_score: int = Field(default=2, env="STRATEGY__MIN_SIGNAL_SCORE")
+    strategy_confidence_threshold: float = Field(default=2.0, env="STRATEGY__CONFIDENCE_THRESHOLD")
+    strategy_atr_period: int = Field(default=14, env="STRATEGY__ATR_PERIOD")
+    strategy_atr_sl_multiplier: float = Field(default=1.5, env="STRATEGY__ATR_SL_MULTIPLIER")
+    strategy_atr_tp_multiplier: float = Field(default=3.0, env="STRATEGY__ATR_TP_MULTIPLIER")
+    strategy_sl_confidence_adj: float = Field(default=0.12, env="STRATEGY__SL_CONFIDENCE_ADJ")
+    strategy_tp_confidence_adj: float = Field(default=0.35, env="STRATEGY__TP_CONFIDENCE_ADJ")
+    strategy_min_bars_for_signal: int = Field(default=10, env="STRATEGY__MIN_BARS_FOR_SIGNAL")
 
-        # data
-        self.data = SimpleNamespace(
-            lookback_minutes=int(os.getenv("DATA__LOOKBACK_MINUTES") or 60),
-            timeframe=os.getenv("DATA__TIMEFRAME") or "minute",
-        )
+    # --- Risk / Limits ---
+    risk_default_equity: float = Field(default=30000, env="RISK__DEFAULT_EQUITY")
+    risk_per_trade: float = Field(default=0.025, env="RISK__RISK_PER_TRADE")
+    risk_max_trades_per_day: int = Field(default=30, env="RISK__MAX_TRADES_PER_DAY")
+    risk_consecutive_loss_limit: int = Field(default=3, env="RISK__CONSECUTIVE_LOSS_LIMIT")
+    risk_max_daily_drawdown_pct: float = Field(default=0.05, env="RISK__MAX_DAILY_DRAWDOWN_PCT")
 
-        # instruments
-        self.instruments = SimpleNamespace(
-            spot_symbol=os.getenv("INSTRUMENTS__SPOT_SYMBOL") or "NSE:NIFTY 50",
-            trade_symbol=os.getenv("INSTRUMENTS__TRADE_SYMBOL") or "NIFTY",
-            exchange=os.getenv("INSTRUMENTS__TRADE_EXCHANGE") or "NFO",
-            instrument_token=int(os.getenv("INSTRUMENTS__INSTRUMENT_TOKEN") or 256265),
-            nifty_lot_size=int(os.getenv("INSTRUMENTS__NIFTY_LOT_SIZE") or 75),
-            min_lots=int(os.getenv("INSTRUMENTS__MIN_LOTS") or 1),
-            max_lots=int(os.getenv("INSTRUMENTS__MAX_LOTS") or 10),
-            strike_range=int(os.getenv("INSTRUMENTS__STRIKE_RANGE") or 3),
-        )
+    # --- Execution ---
+    executor_exchange: str = Field(default="NFO", env="EXECUTOR__EXCHANGE")
+    executor_order_product: str = Field(default="NRML", env="EXECUTOR__ORDER_PRODUCT")
+    executor_order_variety: str = Field(default="regular", env="EXECUTOR__ORDER_VARIETY")
+    executor_entry_order_type: str = Field(default="LIMIT", env="EXECUTOR__ENTRY_ORDER_TYPE")
+    executor_tick_size: float = Field(default=0.05, env="EXECUTOR__TICK_SIZE")
+    executor_exchange_freeze_qty: int = Field(default=1800, env="EXECUTOR__EXCHANGE_FREEZE_QTY")
+    executor_preferred_exit_mode: str = Field(default="REGULAR", env="EXECUTOR__PREFERRED_EXIT_MODE")
+    executor_use_slm_exit: bool = Field(default=True, env="EXECUTOR__USE_SLM_EXIT")
+    executor_partial_tp_enable: bool = Field(default=True, env="EXECUTOR__PARTIAL_TP_ENABLE")
+    executor_tp1_qty_ratio: float = Field(default=0.5, env="EXECUTOR__TP1_QTY_RATIO")
+    executor_breakeven_ticks: int = Field(default=2, env="EXECUTOR__BREAKEVEN_TICKS")
+    executor_enable_trailing: bool = Field(default=True, env="EXECUTOR__ENABLE_TRAILING")
+    executor_trailing_atr_multiplier: float = Field(default=1.5, env="EXECUTOR__TRAILING_ATR_MULTIPLIER")
+    executor_fee_per_lot: float = Field(default=20.0, env="EXECUTOR__FEE_PER_LOT")
 
-        # strategy
-        self.strategy = SimpleNamespace(
-            min_bars_for_signal=int(os.getenv("STRATEGY__MIN_BARS_FOR_SIGNAL") or 10),
-            min_signal_score=int(os.getenv("STRATEGY__MIN_SIGNAL_SCORE") or 2),
-            confidence_threshold=float(os.getenv("STRATEGY__CONFIDENCE_THRESHOLD") or 4.0),
-            ema_fast=int(os.getenv("STRATEGY__EMA_FAST") or 9),
-            ema_slow=int(os.getenv("STRATEGY__EMA_SLOW") or 21),
-            rsi_period=int(os.getenv("STRATEGY__RSI_PERIOD") or 14),
-            adx_period=int(os.getenv("STRATEGY__ADX_PERIOD") or 14),
-            adx_trend_strength=int(os.getenv("STRATEGY__ADX_TREND_STRENGTH") or 20),
-            di_diff_threshold=float(os.getenv("STRATEGY__DI_DIFF_THRESHOLD") or 10.0),
-            atr_period=int(os.getenv("STRATEGY__ATR_PERIOD") or 14),
-            atr_sl_multiplier=float(os.getenv("STRATEGY__ATR_SL_MULTIPLIER") or 1.5),
-            atr_tp_multiplier=float(os.getenv("STRATEGY__ATR_TP_MULTIPLIER") or 3.0),
-            sl_confidence_adj=float(os.getenv("STRATEGY__SL_CONFIDENCE_ADJ") or 0.12),
-            tp_confidence_adj=float(os.getenv("STRATEGY__TP_CONFIDENCE_ADJ") or 0.35),
-            trend_tp_boost=float(os.getenv("STRATEGY__TREND_TP_BOOST") or 0.6),
-            trend_sl_relax=float(os.getenv("STRATEGY__TREND_SL_RELAX") or 0.2),
-            range_tp_tighten=float(os.getenv("STRATEGY__RANGE_TP_TIGHTEN") or -0.4),
-            range_sl_tighten=float(os.getenv("STRATEGY__RANGE_SL_TIGHTEN") or -0.2),
-            auto_relax_enabled=_as_bool(os.getenv("STRATEGY__AUTO_RELAX_ENABLED"), True),
-            min_signal_score_relaxed=int(os.getenv("STRATEGY__MIN_SIGNAL_SCORE_RELAXED") or 1),
-            confidence_threshold_relaxed=float(os.getenv("STRATEGY__CONFIDENCE_THRESHOLD_RELAXED") or 3.8),
-        )
+    # --- Telegram ---
+    telegram_enabled: bool = Field(default=False, env="TELEGRAM_ENABLED")
+    telegram_bot_token: str = Field(default="", env="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", env="TELEGRAM_CHAT_ID")
 
-        # risk
-        self.risk = SimpleNamespace(
-            default_equity=float(os.getenv("RISK__DEFAULT_EQUITY") or 30000),
-            risk_per_trade=float(os.getenv("RISK__RISK_PER_TRADE") or 0.01),
-            max_trades_per_day=int(os.getenv("RISK__MAX_TRADES_PER_DAY") or 5),
-            consecutive_loss_limit=int(os.getenv("RISK__CONSECUTIVE_LOSS_LIMIT") or 3),
-            max_daily_drawdown_pct=float(os.getenv("RISK__MAX_DAILY_DRAWDOWN_PCT") or 0.05),
-        )
+    # --- Zerodha / Broker Keys ---
+    zerodha_api_key: str = Field(default="", env="ZERODHA_API_KEY")
+    zerodha_api_secret: str = Field(default="", env="ZERODHA_API_SECRET")
+    zerodha_access_token: str = Field(default="", env="ZERODHA_ACCESS_TOKEN")
 
-        # executor
-        self.executor = SimpleNamespace(
-            exchange=os.getenv("EXECUTOR__EXCHANGE") or "NFO",
-            order_product=os.getenv("EXECUTOR__ORDER_PRODUCT") or "NRML",
-            order_variety=os.getenv("EXECUTOR__ORDER_VARIETY") or "regular",
-            entry_order_type=os.getenv("EXECUTOR__ENTRY_ORDER_TYPE") or "LIMIT",
-            tick_size=float(os.getenv("EXECUTOR__TICK_SIZE") or 0.05),
-            exchange_freeze_qty=int(os.getenv("EXECUTOR__EXCHANGE_FREEZE_QTY") or 900),
-            preferred_exit_mode=os.getenv("EXECUTOR__PREFERRED_EXIT_MODE") or "REGULAR",
-            use_slm_exit=_as_bool(os.getenv("EXECUTOR__USE_SLM_EXIT"), True),
-            partial_tp_enable=_as_bool(os.getenv("EXECUTOR__PARTIAL_TP_ENABLE"), False),
-            tp1_qty_ratio=float(os.getenv("EXECUTOR__TP1_QTY_RATIO") or 0.5),
-            breakeven_ticks=int(os.getenv("EXECUTOR__BREAKEVEN_TICKS") or 2),
-            enable_trailing=_as_bool(os.getenv("EXECUTOR__ENABLE_TRAILING"), True),
-            trailing_atr_multiplier=float(os.getenv("EXECUTOR__TRAILING_ATR_MULTIPLIER") or 1.5),
-            fee_per_lot=float(os.getenv("EXECUTOR__FEE_PER_LOT") or 20.0),
-        )
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
-        # zerodha
-        self.zerodha = SimpleNamespace(
-            api_key=_env_first("ZERODHA_API_KEY", "ZERODHA_KEY", "KITE_API_KEY"),
-            api_secret=_env_first("ZERODHA_API_SECRET", "ZERODHA_SECRET", "KITE_API_SECRET"),
-            access_token=_env_first("ZERODHA_ACCESS_TOKEN", "ZERODHA_TOKEN", "KITE_ACCESS_TOKEN"),
-        )
 
-        # telegram (accept nested or flat names)
-        bot_token = _env_first("TELEGRAM__BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "BOT_TOKEN")
-        chat_id_raw = _env_first("TELEGRAM__CHAT_ID", "TELEGRAM_CHAT_ID", "TG_CHAT_ID", "CHAT_ID")
-        try:
-            chat_id = int(chat_id_raw) if chat_id_raw else None
-        except Exception:
-            chat_id = None
-
-        self.telegram = SimpleNamespace(
-            enabled=_as_bool(_env_first("TELEGRAM__ENABLED", "TELEGRAM_ENABLED"), True),
-            bot_token=bot_token,
-            chat_id=chat_id,
-            extra_admin_ids=_csv_ints(_env_first("TELEGRAM__EXTRA_ADMIN_IDS", "TELEGRAM_EXTRA_ADMINS")),
-        )
-
-settings = EnvSettings()
+settings = AppSettings()
