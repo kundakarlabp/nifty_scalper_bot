@@ -1,205 +1,206 @@
-# src/risk/position_sizing.py
+# Path: src/strategies/scalping_strategy.py
 from __future__ import annotations
-"""
-PositionSizing — production-grade, broker-agnostic sizing for LONG NIFTY OPTIONS
-
-What this module does
-- Computes order quantity (in units) for long options based on risk per trade and stop distance.
-- Uses caller-supplied equity (so you can pass LIVE equity from the runner), with a safe fallback.
-- Enforces min/max lots and an exposure cap (% of equity) using rough notional.
-- Exposes a diagnostic helper to print all intermediate numbers for quick Telegram/CLI checks.
-
-Key design choices
-- No broker imports. The runner (or caller) supplies `equity` and `lot_size`.
-- Stateless, pure functions + a thin class for ergonomics.
-- Works with any option instrument where quantity must be a multiple of lot_size.
-
-Typical usage (from runner)
-----------------------------------------------------------------
-from src.risk.position_sizing import PositionSizer
-
-sizer = PositionSizer(
-    risk_per_trade=settings.risk_risk_per_trade,
-    min_lots=settings.instruments_min_lots,
-    max_lots=settings.instruments_max_lots,
-    max_position_size_pct=settings.risk_max_position_size_pct,
-)
-
-equity = active_equity_snapshot  # live or fallback
-qty, lots, diag = sizer.size_from_signal(
-    entry_price=signal.entry_price,
-    stop_loss=signal.stop_loss,
-    lot_size=settings.instruments_nifty_lot_size,
-    equity=equity,
-)
-
-if qty > 0:
-    # pass `qty` into the executor
-----------------------------------------------------------------
-"""
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple, List
+import numpy as np
+import pandas as pd
+
+from src.config import settings
 
 
-@dataclass(frozen=True)
-class SizingInputs:
-    entry_price: float         # option entry price (₹)
-    stop_loss: float           # option stop loss price (₹)
-    lot_size: int              # instrument lot size (e.g., 75 for NIFTY options)
-    equity: float              # account equity to base risk on (live or fallback)
+@dataclass
+class TradingSignal:
+    action: str               # "BUY" or "SELL"
+    option_type: str          # "CE" or "PE"
+    strike: float
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    score: float
+    confidence: float         # 0..100
+    rr: float
+    regime: str               # "TREND" | "RANGE"
+    reasons: List[str]
 
 
-@dataclass(frozen=True)
-class SizingParams:
-    risk_per_trade: float = 0.01           # fraction of equity (e.g., 0.01 = 1%)
-    min_lots: int = 1                      # floor on lots
-    max_lots: int = 10                     # ceiling on lots
-    max_position_size_pct: float = 0.10    # cap notional ≈ entry * lot_size * lots vs equity
+class EnhancedScalpingStrategy:
+    def __init__(self) -> None:
+        self.min_bars = int(settings.strategy_min_bars_for_signal)
+        self.ema_fast = int(settings.strategy_ema_fast)
+        self.ema_slow = int(settings.strategy_ema_slow)
+        self.rsi_period = int(settings.strategy_rsi_period)
+        self.bb_period = int(settings.strategy_bb_period)
+        self.bb_std = float(settings.strategy_bb_std)
+        self.atr_period = int(settings.strategy_atr_period)
+        self.min_score = float(settings.strategy_min_signal_score)
+        self.conf_thresh = float(settings.strategy_confidence_threshold)
+        self.sl_mult = float(settings.strategy_atr_sl_multiplier)
+        self.tp_mult = float(settings.strategy_atr_tp_multiplier)
 
+        # last debug snapshot for /check
+        self._last_debug: Dict = {"note": "no_evaluation_yet"}
 
-class PositionSizer:
-    """
-    Thin convenience wrapper. Uses pure static methods under the hood.
-    """
-    def __init__(
-        self,
-        risk_per_trade: float,
-        min_lots: int,
-        max_lots: int,
-        max_position_size_pct: float,
-    ) -> None:
-        if risk_per_trade <= 0 or risk_per_trade > 0.10:
-            raise ValueError("risk_per_trade must be within (0, 0.10].")
-        if min_lots <= 0 or max_lots <= 0 or max_lots < min_lots:
-            raise ValueError("min_lots and max_lots must be positive and max_lots >= min_lots.")
-        if max_position_size_pct < 0 or max_position_size_pct > 1:
-            raise ValueError("max_position_size_pct must be within [0, 1].")
+    def get_debug(self) -> Dict:
+        return dict(self._last_debug)
 
-        self.params = SizingParams(
-            risk_per_trade=risk_per_trade,
-            min_lots=min_lots,
-            max_lots=max_lots,
-            max_position_size_pct=max_position_size_pct,
-        )
-
-    # ------------- Public API -------------
-
-    def size_from_signal(
-        self,
-        *,
-        entry_price: float,
-        stop_loss: float,
-        lot_size: int,
-        equity: float,
-    ) -> Tuple[int, int, Dict]:
-        """
-        Returns:
-            quantity (int): units to send to broker (multiple of lot_size)
-            lots (int): computed lots (pre-multiplied)
-            diagnostic (dict): intermediate numbers for logging/Telegram
-        """
-        si = SizingInputs(
-            entry_price=float(entry_price),
-            stop_loss=float(stop_loss),
-            lot_size=int(lot_size),
-            equity=float(equity),
-        )
-        qty, lots, diag = self._compute_quantity(si, self.params)
-        return qty, lots, diag
-
-    # ------------- Core logic -------------
-
-    @staticmethod
-    def _compute_quantity(
-        si: SizingInputs,
-        sp: SizingParams,
-    ) -> Tuple[int, int, Dict]:
-        """
-        Long options sizing:
-            risk_rupees = equity * risk_per_trade
-            sl_points = |entry - stop|
-            rupee_risk_per_lot = sl_points * lot_size
-            lots = floor(risk_rupees / rupee_risk_per_lot), clipped to [min_lots, max_lots]
-            exposure cap: notional ≈ entry * lot_size * lots <= equity * max_position_size_pct
-        """
-        # Sanity checks
-        if si.entry_price <= 0 or si.stop_loss <= 0 or si.lot_size <= 0 or si.equity <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, sl_points=0.0, rupee_risk_per_lot=0.0,
-                                             risk_rupees=0.0, lots_raw=0, lots_capped=0,
-                                             exposure_notional=0.0, max_notional=0.0)
-
-        sl_points = abs(si.entry_price - si.stop_loss)
-        if sl_points <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, sl_points=0.0, rupee_risk_per_lot=0.0,
-                                             risk_rupees=0.0, lots_raw=0, lots_capped=0,
-                                             exposure_notional=0.0, max_notional=0.0)
-
-        risk_rupees = si.equity * sp.risk_per_trade
-        rupee_risk_per_lot = sl_points * si.lot_size
-
-        if rupee_risk_per_lot <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, sl_points=sl_points, rupee_risk_per_lot=0.0,
-                                             risk_rupees=risk_rupees, lots_raw=0, lots_capped=0,
-                                             exposure_notional=0.0, max_notional=0.0)
-
-        lots_raw = int(risk_rupees // rupee_risk_per_lot)
-        lots = max(lots_raw, sp.min_lots)
-        lots = min(lots, sp.max_lots)
-
-        # Exposure cap (approximate)
-        exposure_notional = si.entry_price * si.lot_size * lots
-        max_notional = si.equity * sp.max_position_size_pct if sp.max_position_size_pct > 0 else float("inf")
-        if exposure_notional > max_notional:
-            # Recalculate lots under the cap:
-            #   lots_cap ≈ floor(max_notional / (entry * lot_size))
-            # Ensure non-negative and respect min lots if possible
-            denom = si.entry_price * si.lot_size
-            lots_cap = int(max_notional // denom) if denom > 0 else 0
-            lots = max(min(lots_cap, lots), 0)
-
-        quantity = lots * si.lot_size
-        diag = PositionSizer._diag(
-            si, sp,
-            sl_points=sl_points,
-            rupee_risk_per_lot=rupee_risk_per_lot,
-            risk_rupees=risk_rupees,
-            lots_raw=lots_raw,
-            lots_capped=lots,
-            exposure_notional=exposure_notional,
-            max_notional=max_notional if max_notional != float("inf") else 0.0,
-        )
-        return quantity, lots, diag
-
-    # ------------- Diagnostics -------------
-
-    @staticmethod
-    def _diag(
-        si: SizingInputs,
-        sp: SizingParams,
-        *,
-        sl_points: float,
-        rupee_risk_per_lot: float,
-        risk_rupees: float,
-        lots_raw: int,
-        lots_capped: int,
-        exposure_notional: float,
-        max_notional: float,
-    ) -> Dict:
-        return {
-            "entry_price": round(si.entry_price, 4),
-            "stop_loss": round(si.stop_loss, 4),
-            "equity": round(si.equity, 2),
-            "lot_size": si.lot_size,
-            "risk_per_trade": sp.risk_per_trade,
-            "min_lots": sp.min_lots,
-            "max_lots": sp.max_lots,
-            "max_position_size_pct": sp.max_position_size_pct,
-            "sl_points": round(sl_points, 4),
-            "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
-            "risk_rupees": round(risk_rupees, 2),
-            "lots_raw": lots_raw,
-            "lots_final": lots_capped,
-            "exposure_notional_est": round(exposure_notional, 2),
-            "max_notional_cap": round(max_notional, 2),
+    def generate_signal(self, df: pd.DataFrame, current_tick: Optional[Dict] = None) -> Optional[TradingSignal]:
+        dbg = {
+            "ok": False,
+            "reason_block": None,
+            "bars": int(len(df) if isinstance(df, pd.DataFrame) else 0),
+            "features": {},
+            "scores": {},
+            "selected_side": None,
+            "score": None,
+            "confidence": None,
+            "rr": None,
+            "regime": None,
+            "reasons": [],
+            "gates": {"min_bars": False, "nan_free": False, "score_gate": False, "confidence_gate": False, "rr_gate": False},
         }
+        try:
+            if df is None or not isinstance(df, pd.DataFrame) or len(df) < self.min_bars:
+                dbg["reason_block"] = "min_bars"
+                self._last_debug = dbg
+                return None
+            dbg["gates"]["min_bars"] = True
+
+            df = df.copy().dropna(subset=["open", "high", "low", "close"]).sort_index()
+
+            self._ema(df, self.ema_fast, "ema_fast")
+            self._ema(df, self.ema_slow, "ema_slow")
+            self._rsi(df, self.rsi_period, "rsi")
+            self._bb(df, self.bb_period, self.bb_std, "bb_mid", "bb_up", "bb_dn")
+            self._atr(df, self.atr_period, "atr")
+            self._vwap(df, "vwap")
+
+            last = df.iloc[-1]
+            if any(pd.isna([last.close, last.ema_fast, last.ema_slow, last.rsi, last.atr, last.vwap])):
+                dbg["reason_block"] = "nan_features"
+                self._last_debug = dbg
+                return None
+            dbg["gates"]["nan_free"] = True
+
+            dbg["features"] = {
+                "close": float(last.close), "ema_fast": float(last.ema_fast), "ema_slow": float(last.ema_slow),
+                "rsi": float(last.rsi), "atr": float(last.atr), "vwap": float(last.vwap), "bb_mid": float(last.bb_mid),
+            }
+
+            regime = self._regime(df); dbg["regime"] = regime
+
+            slong, rlong = self._score_long(df)
+            sshort, rshort = self._score_short(df)
+            dbg["scores"] = {"long": slong, "short": sshort}
+
+            if slong >= sshort:
+                action, opt, score, reasons = "BUY", "CE", slong, rlong
+                sl = last.close - self.sl_mult * last.atr
+                tp = last.close + self.tp_mult * last.atr
+                dbg["selected_side"] = "long"
+            else:
+                action, opt, score, reasons = "SELL", "PE", sshort, rshort
+                sl = last.close + self.sl_mult * last.atr
+                tp = last.close - self.tp_mult * last.atr
+                dbg["selected_side"] = "short"
+
+            sl_dist = abs(last.close - sl); tp_dist = abs(tp - last.close)
+            if sl_dist <= 0 or tp_dist <= 0:
+                dbg["reason_block"] = "rr_degenerate"; self._last_debug = dbg; return None
+            rr = round(tp_dist / sl_dist, 2); dbg["rr"] = rr; dbg["gates"]["rr_gate"] = True
+
+            confidence = max(0.0, min(100.0, score * 20.0))
+            dbg["score"] = float(round(score, 2)); dbg["confidence"] = float(round(confidence, 1)); dbg["reasons"] = reasons[:6]
+
+            if score < self.min_score:
+                dbg["reason_block"] = "score_gate"; self._last_debug = dbg; return None
+            dbg["gates"]["score_gate"] = True
+
+            if confidence < self.conf_thresh:
+                dbg["reason_block"] = "confidence_gate"; self._last_debug = dbg; return None
+            dbg["gates"]["confidence_gate"] = True
+
+            strike = self._round(last.close, 50)
+            entry = float(last.close)
+
+            sig = TradingSignal(
+                action=action, option_type=opt, strike=float(strike),
+                entry_price=float(entry), stop_loss=float(sl), take_profit=float(tp),
+                score=float(round(score, 2)), confidence=float(round(confidence, 1)), rr=float(rr),
+                regime=regime, reasons=reasons[:6],
+            )
+            dbg["ok"] = True; dbg["reason_block"] = None; self._last_debug = dbg
+            return sig
+
+        except Exception as e:
+            dbg["reason_block"] = f"exception:{e.__class__.__name__}"
+            self._last_debug = dbg
+            return None
+
+    @staticmethod
+    def _ema(df: pd.DataFrame, n: int, c: str) -> None:
+        df[c] = df["close"].ewm(span=n, adjust=False).mean()
+
+    @staticmethod
+    def _rsi(df: pd.DataFrame, n: int, c: str) -> None:
+        delta = df["close"].diff()
+        up = delta.clip(lower=0).rolling(n).mean()
+        down = (-delta.clip(upper=0)).rolling(n).mean()
+        rs = up / (down.replace(0, np.nan))
+        df[c] = 100 - (100 / (1 + rs))
+        df[c] = df[c].fillna(50.0)
+
+    @staticmethod
+    def _bb(df: pd.DataFrame, n: int, std: float, mid: str, up: str, dn: str) -> None:
+        ma = df["close"].rolling(n).mean()
+        sd = df["close"].rolling(n).std(ddof=0)
+        df[mid] = ma; df[up] = ma + std * sd; df[dn] = ma - std * sd
+
+    @staticmethod
+    def _atr(df: pd.DataFrame, n: int, c: str) -> None:
+        hl = df["high"] - df["low"]
+        hc = (df["high"] - df["close"].shift(1)).abs()
+        lc = (df["low"] - df["close"].shift(1)).abs()
+        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+        df[c] = tr.rolling(n).mean().fillna(method="bfill")
+
+    @staticmethod
+    def _vwap(df: pd.DataFrame, c: str) -> None:
+        tp = (df["high"] + df["low"] + df["close"]) / 3.0
+        vol = df["volume"].replace(0, np.nan).fillna(method="ffill")
+        df[c] = (tp * vol).cumsum() / vol.cumsum()
+
+    def _regime(self, df: pd.DataFrame) -> str:
+        slow = df["ema_slow"]; fast = df["ema_fast"]
+        if len(df) < max(self.ema_slow, self.ema_fast) + 2:
+            return "RANGE"
+        slope = (slow.iloc[-1] - slow.iloc[-3])
+        spread = abs(fast.iloc[-1] - slow.iloc[-1])
+        atr = df["atr"].iloc[-1]
+        return "TREND" if (slope * 10 > 0.1 * atr and spread > 0.1 * atr) else "RANGE"
+
+    def _score_long(self, df: pd.DataFrame) -> Tuple[float, List[str]]:
+        last = df.iloc[-1]; score = 0.0; reasons: List[str] = []
+        if last.ema_fast > last.ema_slow: score += 1.0; reasons.append("EMA fast>slow")
+        if last.close > last.vwap: score += 0.5; reasons.append("Close>VWAP")
+        if last.close > last.bb_mid: score += 0.5; reasons.append("Close>BB mid")
+        if last.rsi >= 55: score += 0.75; reasons.append("RSI>=55")
+        if last.rsi >= 60: score += 0.25; reasons.append("RSI>=60")
+        if last.atr > 0 and (last.atr / max(1e-6, last.close)) > 0.002: score += 0.25; reasons.append("ATR ok")
+        if self._regime(df) == "TREND" and last.ema_fast > last.ema_slow: score += 0.5; reasons.append("Trend-aligned")
+        return round(score, 2), reasons
+
+    def _score_short(self, df: pd.DataFrame) -> Tuple[float, List[str]]:
+        last = df.iloc[-1]; score = 0.0; reasons: List[str] = []
+        if last.ema_fast < last.ema_slow: score += 1.0; reasons.append("EMA fast<slow")
+        if last.close < last.vwap: score += 0.5; reasons.append("Close<VWAP")
+        if last.close < last.bb_mid: score += 0.5; reasons.append("Close<BB mid")
+        if last.rsi <= 45: score += 0.75; reasons.append("RSI<=45")
+        if last.rsi <= 40: score += 0.25; reasons.append("RSI<=40")
+        if last.atr > 0 and (last.atr / max(1e-6, last.close)) > 0.002: score += 0.25; reasons.append("ATR ok")
+        if self._regime(df) == "TREND" and last.ema_fast < last.ema_slow: score += 0.5; reasons.append("Trend-aligned")
+        return round(score, 2), reasons
+
+    @staticmethod
+    def _round(x: float, step: int) -> float:
+        return float(int(round(x / step) * step)) if step > 0 else float(x)
