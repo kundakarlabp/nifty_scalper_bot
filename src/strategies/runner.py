@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
-from types import SimpleNamespace
 
 import pandas as pd
 
@@ -48,8 +47,8 @@ class StrategyRunner:
         # Telegram is mandatory in this app
         if telegram_controller is None:
             raise RuntimeError("TelegramController must be provided to StrategyRunner.")
+        # support both attributes so main.py can use either one
         self.telegram = telegram_controller
-        # compat alias so main.py can set either .telegram or .telegram_controller
         self.telegram_controller = telegram_controller
 
         # Core components
@@ -117,28 +116,26 @@ class StrategyRunner:
             if not signal:
                 flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
                 self._last_flow_debug = flow; return
-            # compat: accept both dict and dataclass-like objects
-            sig = SimpleNamespace(**signal) if isinstance(signal, dict) else signal
             flow["signal_ok"] = True
 
             # ---- RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
-            rr_val = float(getattr(sig, "rr", 0.0) or 0.0)
+            rr_val = float(getattr(signal, "risk_reward_ratio", getattr(signal, "rr", 0.0)) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
                 flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
                 flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
                 self._last_flow_debug = flow; return
 
             # ---- gates
-            gates = self._risk_gates_for(sig)
+            gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
             if not all(gates.values()):
                 flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
-                entry=float(sig.entry_price),
-                stop=float(sig.stop_loss),
+                entry=float(signal.entry_price),
+                stop=float(signal.stop_loss),
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
@@ -150,28 +147,28 @@ class StrategyRunner:
             placed_ok = False
             if hasattr(self.executor, "place_order"):
                 exec_payload = {
-                    "action": sig.action,
+                    "action": signal.action,
                     "quantity": int(qty),
-                    "entry_price": float(sig.entry_price),
-                    "stop_loss": float(sig.stop_loss),
-                    "take_profit": float(sig.take_profit),
-                    "strike": float(sig.strike),
-                    "option_type": sig.option_type,
+                    "entry_price": float(signal.entry_price),
+                    "stop_loss": float(signal.stop_loss),
+                    "take_profit": float(signal.take_profit),
+                    "strike": float(getattr(signal, "strike", 0.0)),
+                    "option_type": getattr(signal, "option_type", "CE"),
                 }
                 placed_ok = bool(self.executor.place_order(exec_payload))
             elif hasattr(self.executor, "place_entry_order"):
-                side = "BUY" if str(sig.action).upper() == "BUY" else "SELL"
+                side = "BUY" if str(signal.action).upper() == "BUY" else "SELL"
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
                 token = int(getattr(settings.instruments, "instrument_token", 0))
                 oid = self.executor.place_entry_order(
                     token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(sig.entry_price)
+                    quantity=int(qty), price=float(signal.entry_price)
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
                     try:
                         self.executor.setup_gtt_orders(
-                            record_id=oid, sl_price=float(sig.stop_loss), tp_price=float(sig.take_profit)
+                            record_id=oid, sl_price=float(signal.stop_loss), tp_price=float(signal.take_profit)
                         )
                     except Exception as e:
                         self.log.warning("setup_gtt_orders failed: %s", e)
@@ -185,9 +182,9 @@ class StrategyRunner:
             if placed_ok:
                 self.risk.trades_today += 1
                 self._notify(
-                    f"✅ Placed: {sig.action} {qty} {getattr(sig, 'option_type', '?')} {int(getattr(sig, 'strike', 0))} "
-                    f"@ {float(sig.entry_price):.2f} (SL {float(sig.stop_loss):.2f}, "
-                    f"TP {float(sig.take_profit):.2f})"
+                    f"✅ Placed: {signal.action} {qty} {getattr(signal, 'option_type', 'OPT')} "
+                    f"{int(getattr(signal, 'strike', 0))} @ {float(signal.entry_price):.2f} "
+                    f"(SL {float(signal.stop_loss):.2f}, TP {float(signal.take_profit):.2f})"
                 )
 
             self._last_flow_debug = flow
