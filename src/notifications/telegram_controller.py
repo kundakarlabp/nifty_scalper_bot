@@ -1,492 +1,624 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 import logging
+import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-import pandas as pd
+import requests
 
 from src.config import settings
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.execution.order_executor import OrderExecutor
 
-# Optional broker SDK
-try:
-    from kiteconnect import KiteConnect  # type: ignore
-except Exception:
-    KiteConnect = None  # type: ignore
-
-# Data source
-try:
-    from src.data.source import LiveKiteSource  # type: ignore
-except Exception:
-    LiveKiteSource = None  # type: ignore
+log = logging.getLogger(__name__)
 
 
-@dataclass
-class RiskState:
-    trading_day: datetime
-    trades_today: int = 0
-    consecutive_losses: int = 0
-    day_realized_loss: float = 0.0
-    day_realized_pnl: float = 0.0
-
-
-class StrategyRunner:
+class TelegramController:
     """
-    Orchestrates: data → signal → risk gates → sizing → execution.
-    TelegramController is REQUIRED but constructed/wired in main.py; we only consume it.
+    Minimal, production-safe Telegram controller that:
+      - Pulls bot_token/chat_id from settings.telegram (no ctor kwargs).
+      - Provides public send_message(), notify_entry(), notify_fills().
+      - Starts a polling thread and handles the command set.
+      - Dedup/rate-limit and exponential backoff on send failures.
     """
-    def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
-        self.log = logging.getLogger(self.__class__.__name__)
-        self.kite = kite
 
-        # Telegram is mandatory in this app (main wires the real one after ctor)
-        if telegram_controller is None:
-            raise RuntimeError("TelegramController must be provided to StrategyRunner.")
-        self.telegram = telegram_controller
-        self.telegram_controller = telegram_controller  # compat alias
+    def __init__(
+        self,
+        *,
+        # providers
+        status_provider: Callable[[], Dict[str, Any]],
+        positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        actives_provider: Optional[Callable[[], List[Any]]] = None,
+        diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        logs_provider: Optional[Callable[[int], List[str]]] = None,
+        last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+        # controls
+        runner_pause: Optional[Callable[[], None]] = None,
+        runner_resume: Optional[Callable[[], None]] = None,
+        runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
+        cancel_all: Optional[Callable[[], None]] = None,
+        # execution mutators
+        set_risk_pct: Optional[Callable[[float], None]] = None,
+        toggle_trailing: Optional[Callable[[bool], None]] = None,
+        set_trailing_mult: Optional[Callable[[float], None]] = None,
+        toggle_partial: Optional[Callable[[bool], None]] = None,
+        set_tp1_ratio: Optional[Callable[[float], None]] = None,
+        set_breakeven_ticks: Optional[Callable[[int], None]] = None,
+        set_live_mode: Optional[Callable[[bool], None]] = None,
+        # strategy mutators
+        set_min_score: Optional[Callable[[int], None]] = None,
+        set_conf_threshold: Optional[Callable[[float], None]] = None,
+        set_atr_period: Optional[Callable[[int], None]] = None,
+        set_sl_mult: Optional[Callable[[float], None]] = None,
+        set_tp_mult: Optional[Callable[[float], None]] = None,
+        set_trend_boosts: Optional[Callable[[float, float], None]] = None,   # (tp_boost, sl_relax)
+        set_range_tighten: Optional[Callable[[float, float], None]] = None,  # (tp_tighten, sl_tighten)
+        http_timeout: float = 20.0,
+    ) -> None:
+        # --- credentials from settings (MANDATORY) ---
+        tg = getattr(settings, "telegram", object())
+        self._token: Optional[str] = getattr(tg, "bot_token", None)
+        self._chat_id: Optional[int] = int(getattr(tg, "chat_id", 0) or 0)
+        if not self._token or not self._chat_id:
+            raise RuntimeError("TelegramController: TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID missing")
 
-        # Core components
-        self.strategy = EnhancedScalpingStrategy()
-        self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
+        self._base = f"https://api.telegram.org/bot{self._token}"
+        self._timeout = http_timeout
+        self._session = requests.Session()
 
-        # Data source (live or shadow)
-        self.data_source = None
-        if LiveKiteSource is not None:
+        # --- hooks (unchanged API) ---
+        self._status_provider = status_provider
+        self._positions_provider = positions_provider
+        self._actives_provider = actives_provider
+        self._diag_provider = diag_provider
+        self._logs_provider = logs_provider
+        self._last_signal_provider = last_signal_provider
+
+        self._runner_pause = runner_pause
+        self._runner_resume = runner_resume
+        self._runner_tick = runner_tick
+        self._cancel_all = cancel_all
+
+        self._set_risk_pct = set_risk_pct
+        self._toggle_trailing = toggle_trailing
+        self._set_trailing_mult = set_trailing_mult
+        self._toggle_partial = toggle_partial
+        self._set_tp1_ratio = set_tp1_ratio
+        self._set_breakeven_ticks = set_breakeven_ticks
+        self._set_live_mode = set_live_mode
+
+        self._set_min_score = set_min_score
+        self._set_conf_threshold = set_conf_threshold
+        self._set_atr_period = set_atr_period
+        self._set_sl_mult = set_sl_mult
+        self._set_tp_mult = set_tp_mult
+        self._set_trend_boosts = set_trend_boosts
+        self._set_range_tighten = set_range_tighten
+
+        # --- polling state ---
+        self._poll_thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._started = False
+        self._last_update_id: Optional[int] = None
+
+        # --- allowlist (admin + extras) ---
+        extra = getattr(tg, "extra_admin_ids", []) or []
+        self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
+
+        # --- rate-limit / backoff ---
+        self._send_min_interval = 0.9
+        self._last_sends: List[tuple[float, str]] = []
+        self._backoff = 1.0
+        self._backoff_max = 20.0
+
+    # ================= outbound =================
+    def _rate_ok(self, text: str) -> bool:
+        now = time.time()
+        h = hashlib.md5(text.encode("utf-8")).hexdigest()
+        self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
+        if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
+            return False
+        if any(hh == h for _, hh in self._last_sends):
+            return False
+        self._last_sends.append((now, h))
+        return True
+
+    def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
+        if not self._rate_ok(text):
+            return
+        delay = self._backoff
+        while True:
             try:
-                self.data_source = LiveKiteSource(kite=self.kite)
-                self.log.info("Data source initialized: LiveKiteSource")
-            except Exception as e:
-                self.log.warning(f"Data source init failed; proceeding without: {e}")
+                payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                self._backoff = 1.0
+                return
+            except Exception:
+                time.sleep(delay)
+                delay = min(self._backoff_max, delay * 2)
+                self._backoff = delay
 
-        # Risk + equity cache
-        self.risk = RiskState(trading_day=self._today_ist())
-        self._equity_last_refresh_ts: float = 0.0
-        self._equity_cached_value: float = float(settings.risk.default_equity)
-        self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+    def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
+        payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
+        try:
+            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+        except Exception as e:
+            log.debug("Inline send failed: %s", e)
 
-        # Trading window
-        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
-        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
+    # public API used by runner/main
+    def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
+        self._send(text, parse_mode=parse_mode)
 
-        self._paused: bool = False
-        self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
-        self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
-
-        self.log.info(
-            "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
-            settings.enable_live_trading, settings.risk.use_live_equity
+    def send_startup_alert(self) -> None:
+        s = {}
+        try:
+            s = self._status_provider() if self._status_provider else {}
+        except Exception:
+            pass
+        self._send(
+            "🚀 Bot started\n"
+            f"🔁 Trading: {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'}\n"
+            f"🧠 Broker: {s.get('broker')}\n"
+            f"📦 Active: {s.get('active_orders', 0)}"
         )
 
-    # ---------------- Main loop entry ----------------
+    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
+        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`",
+                   parse_mode="Markdown")
 
-    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
-        flow: Dict[str, Any] = {
-            "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
-            "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
-            "executed": False, "reason_block": None,
-        }
+    def notify_fills(self, fills: List[tuple[str, float]]) -> None:
+        if not fills:
+            return
+        lines = ["✅ Fills"]
+        for rid, px in fills:
+            lines.append(f"• {rid} @ {px:.2f}")
+        self._send("\n".join(lines))
 
+    # ================= polling =================
+    def start_polling(self) -> None:
+        if self._started:
+            log.info("Telegram polling already running; skipping start.")
+            return
+        self._stop.clear()
+        self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
+        self._poll_thread.start()
+        self._started = True
+
+    def stop_polling(self) -> None:
+        if not self._started:
+            return
+        self._stop.set()
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
+        self._started = False
+
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                params = {"timeout": 25}
+                if self._last_update_id is not None:
+                    params["offset"] = self._last_update_id + 1
+                r = self._session.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                data = r.json()
+                if not data.get("ok"):
+                    time.sleep(1.0)
+                    continue
+                for upd in data.get("result", []):
+                    self._last_update_id = int(upd.get("update_id", 0))
+                    self._handle_update(upd)
+            except Exception as e:
+                log.debug("Telegram poll error: %s", e)
+                time.sleep(1.0)
+
+    # ================= helpers =================
+    def _authorized(self, chat_id: int) -> bool:
+        return int(chat_id) in self._allowlist
+
+    def _do_tick(self, *, dry: bool) -> str:
+        """Run one tick. If runner provider doesn't accept 'dry', emulate by flipping live/offhours flags."""
+        if not self._runner_tick:
+            return "Tick not wired."
+
+        # detect if provider accepts 'dry'
+        accepts_dry = False
         try:
-            if not self._within_trading_window() and not settings.allow_offhours_testing:
-                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
-            flow["within_window"] = True
+            sig = inspect.signature(self._runner_tick)  # type: ignore[arg-type]
+            accepts_dry = "dry" in sig.parameters
+        except Exception:
+            accepts_dry = False
 
-            if self._paused:
-                flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
+        # snapshot flags
+        live_before = getattr(settings, "enable_live_trading", False)
+        allow_off_before = getattr(settings, "allow_offhours_testing", False)
 
-            self._ensure_day_state()
-            self._refresh_equity_if_due()
-
-            # ---- data
-            df = self._fetch_spot_ohlc()
-            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
-            if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
-                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
-            flow["data_ok"] = True
-
-            # ---- signal
-            signal = self.strategy.generate_signal(df, current_tick=tick)
-            self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
-            if not signal:
-                flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
-                self._last_flow_debug = flow; return
-            flow["signal_ok"] = True
-
-            # ---- RR minimum
-            rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
-            rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
-            if rr_min and rr_val and rr_val < rr_min:
-                flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
-                flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
-                self._last_flow_debug = flow; return
-
-            # ---- gates
-            gates = self._risk_gates_for(signal)
-            flow["risk_gates"] = gates
-            if not all(gates.values()):
-                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
-
-            # ---- sizing
-            qty, diag = self._calculate_quantity_diag(
-                entry=float(signal["entry_price"]),
-                stop=float(signal["stop_loss"]),
-                lot_size=int(settings.instruments.nifty_lot_size),
-                equity=self._active_equity(),
-            )
-            flow["sizing"] = diag; flow["qty"] = int(qty)
-            if qty <= 0:
-                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
-
-            # ---- execution (supports both our newer and older ZIP styles)
-            placed_ok = False
-            if hasattr(self.executor, "place_order"):
-                exec_payload = {
-                    "action": signal["action"],
-                    "quantity": int(qty),
-                    "entry_price": float(signal["entry_price"]),
-                    "stop_loss": float(signal["stop_loss"]),
-                    "take_profit": float(signal["take_profit"]),
-                    "strike": float(signal["strike"]),
-                    "option_type": signal["option_type"],
-                }
-                placed_ok = bool(self.executor.place_order(exec_payload))
-            elif hasattr(self.executor, "place_entry_order"):
-                side = "BUY" if str(signal["action"]).upper() == "BUY" else "SELL"
-                symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
-                token = int(getattr(settings.instruments, "instrument_token", 0))
-                oid = self.executor.place_entry_order(
-                    token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(signal["entry_price"])
-                )
-                placed_ok = bool(oid)
-                if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
-                    try:
-                        self.executor.setup_gtt_orders(
-                            record_id=oid, sl_price=float(signal["stop_loss"]), tp_price=float(signal["take_profit"])
-                        )
-                    except Exception as e:
-                        self.log.warning("setup_gtt_orders failed: %s", e)
-            else:
-                self.log.error("No known execution method found on OrderExecutor")
-
-            flow["executed"] = placed_ok
-            if not placed_ok:
-                flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
-
-            if placed_ok:
-                self.risk.trades_today += 1
-                self._notify(
-                    f"✅ Placed: {signal['action']} {int(qty)} {signal['option_type']} {int(signal['strike'])} "
-                    f"@ {float(signal['entry_price']):.2f} (SL {float(signal['stop_loss']):.2f}, "
-                    f"TP {float(signal['take_profit']):.2f})"
-                )
-
-            self._last_flow_debug = flow
-
-        except Exception as e:
-            flow["reason_block"] = f"exception:{e.__class__.__name__}"
-            self._last_flow_debug = flow
-            self.log.exception("process_tick error: %s", e)
-
-    # ----- one‑shot tick used by Telegram
-    def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
-        prev = bool(settings.allow_offhours_testing)
         try:
             if dry:
-                setattr(settings, "allow_offhours_testing", True)
-            self.process_tick(tick=None)
-            return dict(self._last_flow_debug)
+                try:
+                    setattr(settings, "allow_offhours_testing", True)
+                except Exception:
+                    pass
+                if accepts_dry:
+                    res = self._runner_tick(dry=True)  # type: ignore[misc]
+                else:
+                    if self._set_live_mode:
+                        self._set_live_mode(False)
+                    res = self._runner_tick()
+            else:
+                res = self._runner_tick()
+        except Exception as e:
+            return f"Tick error: {e}"
         finally:
-            setattr(settings, "allow_offhours_testing", prev)
-
-    def health_check(self) -> None:
-        self._refresh_equity_if_due(silent=True)
-        try:
-            if hasattr(self.executor, "health_check"):
-                self.executor.health_check()
-        except Exception as e:
-            self.log.warning("Executor health check warning: %s", e)
-
-    def shutdown(self) -> None:
-        try:
-            if hasattr(self.executor, "shutdown"):
-                self.executor.shutdown()
-        except Exception:
-            pass
-
-    # ---------------- Equity & risk ----------------
-
-    def _refresh_equity_if_due(self, silent: bool = False) -> None:
-        now = time.time()
-        if not settings.risk.use_live_equity:
-            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
-            return
-        if (now - self._equity_last_refresh_ts) < int(settings.risk.equity_refresh_seconds):
-            return
-
-        new_eq = None
-        if self.kite is not None:
             try:
-                margins = self.kite.margins()  # type: ignore[attr-defined]
-                if isinstance(margins, dict):
-                    # Try common keys in descending likelihood
-                    for k in ("equity", "available", "net", "final", "cash"):
-                        v = margins.get(k)
-                        if isinstance(v, (int, float)):
-                            new_eq = float(v)
-                            break
-                if new_eq is None:
-                    new_eq = float(settings.risk.default_equity)
+                if self._set_live_mode:
+                    self._set_live_mode(bool(live_before))
+            except Exception:
+                pass
+            try:
+                setattr(settings, "allow_offhours_testing", bool(allow_off_before))
+            except Exception:
+                pass
+
+        return "✅ Tick executed." if res else ("Dry tick executed (no action)." if dry else "Tick executed (no action).")
+
+    # ================= command handling =================
+    def _handle_update(self, upd: Dict[str, Any]) -> None:
+        # inline callbacks
+        if "callback_query" in upd:
+            cq = upd["callback_query"]
+            chat_id = cq.get("message", {}).get("chat", {}).get("id")
+            if not self._authorized(int(chat_id)):
+                return
+            data = cq.get("data", "")
+            try:
+                if data == "confirm_cancel_all" and self._cancel_all:
+                    self._cancel_all()
+                    self._send("🧹 Cancelled all open orders.")
+            finally:
+                try:
+                    self._session.post(
+                        f"{self._base}/answerCallbackQuery",
+                        json={"callback_query_id": cq.get("id")},
+                        timeout=self._timeout,
+                    )
+                except Exception:
+                    pass
+            return
+
+        # text messages
+        msg = upd.get("message") or upd.get("edited_message")
+        if not msg:
+            return
+        chat_id = msg.get("chat", {}).get("id")
+        text = (msg.get("text") or "").strip()
+        if not text:
+            return
+        if not self._authorized(int(chat_id)):
+            self._send("Unauthorized.")
+            return
+
+        parts = text.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        # ---- HELP ----
+        if cmd in ("/start", "/help"):
+            return self._send(
+                "🤖 Nifty Scalper Bot — commands\n"
+                "*Core*\n"
+                "/status [verbose] — basic or JSON status\n"
+                "/active [page] — list active orders\n"
+                "/positions — broker day positions\n"
+                "/cancel_all — cancel all (with confirm)\n"
+                "/pause | /resume — control entries\n"
+                "/mode live|dry — toggle live trading\n"
+                "/tick — one tick | /tickdry — one dry tick (after-hours ok)\n"
+                "/logs [n] — recent log lines\n"
+                "/diag — health/flow summary  •  /check — deep check\n"
+                "*Execution Tuning*\n"
+                "/risk <pct> • /trail on|off • /trailmult <x>\n"
+                "/partial on|off • /tp1 <pct> • /breakeven <ticks>\n"
+                "*Strategy Tuning*\n"
+                "/minscore <n> • /conf <x> • /atrp <n>\n"
+                "/slmult <x> • /tpmult <x> • /trend a b • /range a b\n",
+                parse_mode="Markdown",
+            )
+
+        # ---- STATUS ----
+        if cmd == "/status":
+            try:
+                s = self._status_provider() if self._status_provider else {}
+            except Exception:
+                s = {}
+            verbose = (args and args[0].lower().startswith("v"))
+            if verbose:
+                return self._send("```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+            return self._send(
+                f"📊 {s.get('time_ist')}\n"
+                f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
+                f"📦 Active: {s.get('active_orders', 0)}"
+            )
+
+        # ---- ACTIVES ----
+        if cmd == "/active":
+            if not self._actives_provider:
+                return self._send("No active-orders provider wired.")
+            try:
+                page = int(args[0]) if args else 1
+            except Exception:
+                page = 1
+            acts = self._actives_provider() or []
+            n = len(acts)
+            page_size = 6
+            pages = max(1, (n + page_size - 1) // page_size)
+            page = max(1, min(page, pages))
+            i0, i1 = (page - 1) * page_size, min(n, page * page_size)
+            lines = [f"📦 Active Orders (p{page}/{pages})"]
+            for rec in acts[i0:i1]:
+                sym = getattr(rec, "symbol", "?")
+                side = getattr(rec, "side", "?")
+                qty = getattr(rec, "quantity", "?")
+                rid = getattr(rec, "order_id", getattr(rec, "record_id", "?"))
+                lines.append(f"• {sym} {side} qty={qty} id={rid}")
+            return self._send("\n".join(lines))
+
+        # ---- POSITIONS ----
+        if cmd == "/positions":
+            if not self._positions_provider:
+                return self._send("No positions provider wired.")
+            pos = self._positions_provider() or {}
+            if not pos:
+                return self._send("No positions (day).")
+            lines = ["📒 Positions (day)"]
+            for sym, p in pos.items():
+                if isinstance(p, dict):
+                    qty = p.get("quantity")
+                    avg = p.get("average_price")
+                else:
+                    qty = getattr(p, "quantity", "?")
+                    avg = getattr(p, "average_price", "?")
+                lines.append(f"• {sym}: qty={qty} avg={avg}")
+            return self._send("\n".join(lines))
+
+        # ---- CANCEL ALL ----
+        if cmd == "/cancel_all":
+            return self._send_inline(
+                "Confirm cancel all?",
+                [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
+                  {"text": "❌ Abort", "callback_data": "abort"}]],
+            )
+
+        # ---- PAUSE / RESUME ----
+        if cmd == "/pause":
+            if self._runner_pause:
+                self._runner_pause()
+                return self._send("⏸️ Entries paused.")
+            return self._send("Pause not wired.")
+
+        if cmd == "/resume":
+            if self._runner_resume:
+                self._runner_resume()
+                return self._send("▶️ Entries resumed.")
+            return self._send("Resume not wired.")
+
+        # ---- MODE ----
+        if cmd == "/mode":
+            if not args:
+                return self._send("Usage: /mode live|dry")
+            state = str(args[0]).lower()
+            if state not in ("live", "dry"):
+                return self._send("Usage: /mode live|dry")
+            val = (state == "live")
+            if self._set_live_mode:
+                self._set_live_mode(val)
+            else:
+                setattr(settings, "enable_live_trading", val)
+            return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
+
+        # ---- TICKS ----
+        if cmd in ("/tick", "/tickdry"):
+            dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
+            out = self._do_tick(dry=dry)
+            return self._send(out)
+
+        # ---- LOGS ----
+        if cmd == "/logs":
+            if not self._logs_provider:
+                return self._send("Logs provider not wired.")
+            try:
+                n = int(args[0]) if args else 30
+                lines = self._logs_provider(max(5, min(200, n))) or []
+                if not lines:
+                    return self._send("No logs available.")
+                block = "\n".join(lines[-n:])
+                if len(block) > 3500:
+                    block = block[-3500:]
+                return self._send("```text\n" + block + "\n```", parse_mode="Markdown")
             except Exception as e:
-                if not silent:
-                    self.log.warning("Equity refresh failed; using fallback: %s", e)
+                return self._send(f"Logs error: {e}")
 
-        self._equity_cached_value = float(new_eq) if (isinstance(new_eq, (int, float)) and new_eq > 0) \
-            else float(settings.risk.default_equity)
-        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
-        self._equity_last_refresh_ts = now
+        # ---- DIAG (compact) ----
+        if cmd == "/diag":
+            if not self._diag_provider:
+                return self._send("Diag provider not wired.")
+            try:
+                d = self._diag_provider() or {}
+                ok = d.get("ok", False)
+                checks = d.get("checks", [])
+                summary = []
+                for c in checks:
+                    mark = "🟢" if c.get("ok") else "🔴"
+                    summary.append(f"{mark} {c.get('name')}")
+                head = "✅ Flow looks good" if ok else "❗ Flow has issues"
+                return self._send(f"{head}\n" + " · ".join(summary))
+            except Exception as e:
+                return self._send(f"Diag error: {e}")
 
-        if not silent:
-            self.log.info(
-                "Equity snapshot: ₹%s | Max daily loss: ₹%s",
-                f"{self._equity_cached_value:,.0f}", f"{self._max_daily_loss_rupees:,.0f}"
-            )
+        # ---- CHECK (deep) ----
+        if cmd == "/check":
+            if not self._diag_provider:
+                return self._send("Diag provider not wired.")
+            try:
+                d = self._diag_provider() or {}
+                lines = ["🔍 Full system check"]
+                for c in d.get("checks", []):
+                    mark = "🟢" if c.get("ok") else "🔴"
+                    extra = c.get("hint") or c.get("detail") or ""
+                    if extra:
+                        lines.append(f"{mark} {c.get('name')} — {extra}")
+                    else:
+                        lines.append(f"{mark} {c.get('name')}")
+                lines.append("📈 last_signal: present" if d.get("last_signal") else "📈 last_signal: none")
+                return self._send("\n".join(lines))
+            except Exception as e:
+                return self._send(f"Check error: {e}")
 
-    def _active_equity(self) -> float:
-        return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
+        # ---- EXECUTION TUNING ----
+        if cmd == "/risk":
+            if not args:
+                return self._send("Usage: /risk 0.5  (for 0.5%)")
+            try:
+                pct = float(args[0])
+                if self._set_risk_pct:
+                    self._set_risk_pct(pct)
+                else:
+                    settings.risk.risk_per_trade = pct / 100.0
+                return self._send(f"Risk per trade set to {pct:.2f}%.")
+            except Exception:
+                return self._send("Invalid number. Example: /risk 0.5")
 
-    def _risk_gates_for(self, signal) -> Dict[str, bool]:
-        gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
-                 "trades_per_day": True, "sl_valid": True}
-        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
-            gates["equity_floor"] = False
-        if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
-            gates["daily_drawdown"] = False
-        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
-            gates["loss_streak"] = False
-        if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
-            gates["trades_per_day"] = False
-        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
-            gates["sl_valid"] = False
-        return gates
+        if cmd == "/trail":
+            if not args:
+                return self._send("Usage: /trail on|off")
+            val = str(args[0]).lower() in ("on", "true", "1", "yes")
+            if self._toggle_trailing:
+                self._toggle_trailing(val)
+            return self._send(f"Trailing {'enabled' if val else 'disabled'}.")
 
-    def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
-        risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
-        sl_points = abs(float(entry) - float(stop))
-        rupee_risk_per_lot = sl_points * int(lot_size)
+        if cmd == "/trailmult":
+            if not args:
+                return self._send("Usage: /trailmult 1.4")
+            try:
+                x = float(args[0])
+                if self._set_trailing_mult:
+                    self._set_trailing_mult(x)
+                return self._send(f"Trailing ATR multiplier set to {x:.2f}.")
+            except Exception:
+                return self._send("Invalid number. Example: /trailmult 1.4")
 
-        if rupee_risk_per_lot <= 0:
-            return 0, {
-                "entry": entry, "stop": stop, "equity": equity,
-                "risk_per_trade": settings.risk.risk_per_trade,
-                "sl_points": sl_points, "rupee_risk_per_lot": rupee_risk_per_lot,
-                "lots_raw": 0, "lots_final": 0, "exposure_notional_est": 0.0, "max_notional_cap": 0.0,
-            }
+        if cmd == "/partial":
+            if not args:
+                return self._send("Usage: /partial on|off")
+            val = str(args[0]).lower() in ("on", "true", "1", "yes")
+            if self._toggle_partial:
+                self._toggle_partial(val)
+            return self._send(f"Partial TP {'enabled' if val else 'disabled'}.")
 
-        lots_raw = int(risk_rupees // rupee_risk_per_lot)
-        lots = max(lots_raw, int(settings.instruments.min_lots))
-        lots = min(lots, int(settings.instruments.max_lots))
+        if cmd == "/tp1":
+            if not args:
+                return self._send("Usage: /tp1 50   (for 50%)")
+            try:
+                pct = float(args[0])
+                if self._set_tp1_ratio:
+                    self._set_tp1_ratio(pct)
+                return self._send(f"TP1 ratio set to {pct:.1f}%.")
+            except Exception:
+                return self._send("Invalid number. Example: /tp1 50")
 
-        notional = float(entry) * int(lot_size) * lots
-        max_notional = float(equity) * float(settings.risk.max_position_size_pct)
-        if max_notional > 0 and notional > max_notional:
-            denom = float(entry) * int(lot_size)
-            lots_cap = int(max_notional // denom) if denom > 0 else 0
-            lots = max(min(lots_cap, lots), 0)
+        if cmd == "/breakeven":
+            if not args:
+                return self._send("Usage: /breakeven 2   (ticks)")
+            try:
+                ticks = int(args[0])
+                if self._set_breakeven_ticks:
+                    self._set_breakeven_ticks(ticks)
+                return self._send(f"Breakeven ticks set to {ticks}.")
+            except Exception:
+                return self._send("Invalid integer. Example: /breakeven 2")
 
-        qty = lots * int(lot_size)
-        diag = {
-            "entry": round(entry, 4), "stop": round(stop, 4), "equity": round(float(equity), 2),
-            "risk_per_trade": float(settings.risk.risk_per_trade), "lot_size": int(lot_size),
-            "sl_points": round(sl_points, 4), "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
-            "lots_raw": int(lots_raw), "lots_final": int(lots),
-            "exposure_notional_est": round(notional, 2), "max_notional_cap": round(max_notional, 2),
-        }
-        return int(qty), diag
+        # ---- STRATEGY TUNING ----
+        if cmd == "/minscore":
+            if not args:
+                return self._send("Usage: /minscore 3")
+            try:
+                n = int(args[0])
+                if self._set_min_score:
+                    self._set_min_score(n)
+                return self._send(f"Min signal score set to {n}.")
+            except Exception:
+                return self._send("Invalid integer.")
 
-    # ---------------- data helpers ----------------
+        if cmd == "/conf":
+            if not args:
+                return self._send("Usage: /conf 0.6")
+            try:
+                x = float(args[0])
+                if self._set_conf_threshold:
+                    self._set_conf_threshold(x)
+                return self._send(f"Confidence threshold set to {x:.2f}.")
+            except Exception:
+                return self._send("Invalid number.")
 
-    def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
-        """
-        Build a spot OHLC frame using LiveKiteSource.fetch_ohlc with the configured lookback.
-        """
-        if self.data_source is None:
-            return None
+        if cmd == "/atrp":
+            if not args:
+                return self._send("Usage: /atrp 14")
+            try:
+                n = int(args[0])
+                if self._set_atr_period:
+                    self._set_atr_period(n)
+                return self._send(f"ATR period set to {n}.")
+            except Exception:
+                return self._send("Invalid integer.")
 
-        try:
-            lookback = int(settings.data.lookback_minutes)
-            end = self._now_ist().replace(second=0, microsecond=0)
-            start = end - timedelta(minutes=lookback)
-            token = int(getattr(settings.instruments, "instrument_token", 0))
-            if token <= 0:
-                return None
-            df = self.data_source.fetch_ohlc(
-                token=token,
-                start=start,
-                end=end,
-                timeframe=str(settings.data.timeframe),
-            )
-            need = {"open", "high", "low", "close", "volume"}
-            if df is None or not isinstance(df, pd.DataFrame) or not need.issubset(df.columns):
-                return None
-            return df.sort_index()
-        except Exception as e:
-            self.log.warning("OHLC fetch failed: %s", e)
-            return None
+        if cmd == "/slmult":
+            if not args:
+                return self._send("Usage: /slmult 1.3")
+            try:
+                x = float(args[0])
+                if self._set_sl_mult:
+                    self._set_sl_mult(x)
+                return self._send(f"SL ATR multiplier set to {x:.2f}.")
+            except Exception:
+                return self._send("Invalid number.")
 
-    # ---------------- session/window ----------------
+        if cmd == "/tpmult":
+            if not args:
+                return self._send("Usage: /tpmult 2.2")
+            try:
+                x = float(args[0])
+                if self._set_tp_mult:
+                    self._set_tp_mult(x)
+                return self._send(f"TP ATR multiplier set to {x:.2f}.")
+            except Exception:
+                return self._send("Invalid number.")
 
-    def _ensure_day_state(self) -> None:
-        today = self._today_ist()
-        if today.date() != self.risk.trading_day.date():
-            self.risk = RiskState(trading_day=today)
-            self._notify("🔁 New trading day — risk counters reset")
+        if cmd == "/trend":
+            if len(args) < 2:
+                return self._send("Usage: /trend <tp_boost> <sl_relax>")
+            try:
+                a, b = float(args[0]), float(args[1])
+                if self._set_trend_boosts:
+                    self._set_trend_boosts(a, b)
+                return self._send(f"Trend boosts: tp+{a}, sl+{b}")
+            except Exception:
+                return self._send("Invalid numbers.")
 
-    def _within_trading_window(self) -> bool:
-        now_ist = self._now_ist().time()
-        return self._start_time <= now_ist <= self._end_time
+        if cmd == "/range":
+            if len(args) < 2:
+                return self._send("Usage: /range <tp_tighten> <sl_tighten>")
+            try:
+                a, b = float(args[0]), float(args[1])
+                if self._set_range_tighten:
+                    self._set_range_tighten(a, b)
+                return self._send(f"Range tighten: tp{a:+}, sl{b:+}")
+            except Exception:
+                return self._send("Invalid numbers.")
 
-    @staticmethod
-    def _parse_hhmm(text: str):
-        from datetime import datetime as _dt
-        return _dt.strptime(text, "%H:%M").time()
+        # unknown
+        return self._send("Unknown command. Try /help.")
 
-    @staticmethod
-    def _now_ist():
-        return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
-    @staticmethod
-    def _today_ist():
-        now = StrategyRunner._now_ist()
-        return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # ---------------- Diagnostics for Telegram ----------------
-
-    def get_system_diag(self) -> Dict[str, Any]:
-        """
-        Returns a dict with:
-          - ok: bool
-          - checks: list[{name, ok, hint/detail?}]
-          - last_signal: bool
-        Used by Telegram /diag (compact) and /check (deep).
-        """
-        checks: list[dict] = []
-
-        # 1) config
-        checks.append({"name": "config.py", "ok": True})
-
-        # 2) telegram controller
-        checks.append({"name": "notifications/telegram_controller.py", "ok": bool(self.telegram_controller)})
-
-        # 3) data source
-        ds_ok = self.data_source is not None
-        checks.append({"name": "data/source.py", "ok": ds_ok})
-
-        # 4) strategy
-        checks.append({"name": "strategies/scalping_strategy.py", "ok": self.strategy is not None})
-
-        # 5) executor
-        checks.append({"name": "execution/order_executor.py", "ok": self.executor is not None})
-
-        # 6) broker connectivity
-        broker_ok = True
-        hint = None
-        if settings.enable_live_trading:
-            broker_ok = self.kite is not None
-            hint = None if broker_ok else "not connected (check access token)"
-        checks.append({"name": "broker/kiteconnect", "ok": broker_ok, "hint": hint})
-
-        # 7) flow/window & data
-        win_ok = self._within_trading_window() or bool(settings.allow_offhours_testing)
-        win_hint = "off-hours" if not win_ok else None
-        # quick data check
-        had_bars = bool(self._last_flow_debug.get("bars")) if isinstance(self._last_flow_debug, dict) else False
-        data_ok = bool(self._last_flow_debug.get("data_ok")) if isinstance(self._last_flow_debug, dict) else False
-        flow_ok = win_ok and (had_bars or data_ok)
-        checks.append({"name": "flow/window & data", "ok": flow_ok, "hint": win_hint})
-
-        # 8) risk/limits
-        gates = self._risk_gates_for({"entry_price": 1.0, "stop_loss": 0.0})  # dummy SL check will be False
-        # For risk overall, evaluate structural limits only
-        risk_ok = True
-        risk_detail = []
-        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
-            risk_ok = False; risk_detail.append("equity_floor")
-        if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
-            risk_ok = False; risk_detail.append("daily_drawdown")
-        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
-            risk_ok = False; risk_detail.append("loss_streak")
-        if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
-            risk_ok = False; risk_detail.append("trades_per_day")
-        checks.append({"name": "risk/limits", "ok": risk_ok, "detail": ", ".join(risk_detail) or None})
-
-        ok = all(c.get("ok", False) for c in checks)
-
-        return {
-            "ok": ok,
-            "checks": checks,
-            "last_signal": bool(self._last_signal_debug and self._last_signal_debug.get("reason_block") is None),
-        }
-
-    # ---------------- Telegram helpers ----------------
-
-    def get_last_signal_debug(self) -> Dict[str, Any]:
-        return dict(self._last_signal_debug)
-
-    def get_last_flow_debug(self) -> Dict[str, Any]:
-        return dict(self._last_flow_debug)
-
-    def get_equity_snapshot(self) -> Dict[str, Any]:
-        return {
-            "use_live_equity": bool(settings.risk.use_live_equity),
-            "equity_cached": round(float(self._equity_cached_value), 2),
-            "equity_floor": float(settings.risk.min_equity_floor),
-            "max_daily_loss_rupees": round(float(self._max_daily_loss_rupees), 2),
-            "refresh_seconds": int(settings.risk.equity_refresh_seconds),
-        }
-
-    def get_status_snapshot(self) -> Dict[str, Any]:
-        return {
-            "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
-            "live_trading": bool(settings.enable_live_trading),
-            "broker": "Kite" if self.kite is not None else "Paper",
-            "within_window": self._within_trading_window(),
-            "paused": self._paused,
-            "trades_today": self.risk.trades_today,
-            "consecutive_losses": self.risk.consecutive_losses,
-            "day_realized_loss": round(self.risk.day_realized_loss, 2),
-            "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
-            "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
-        }
-
-    def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
-        qty, diag = self._calculate_quantity_diag(
-            entry=float(entry), stop=float(sl),
-            lot_size=int(settings.instruments.nifty_lot_size),
-            equity=self._active_equity(),
-        )
-        return {"qty": int(qty), "diag": diag}
-
-    def pause(self) -> None:
-        self._paused = True
-
-    def resume(self) -> None:
-        self._paused = False
-
-    def set_live_mode(self, val: bool) -> None:
-        try:
-            setattr(settings, "enable_live_trading", bool(val))
-        except Exception:
-            pass
-
-    def _notify(self, msg: str) -> None:
-        logging.info(msg)
-        try:
-            if self.telegram:
-                self.telegram.send_message(msg)
-        except Exception:
-            pass
+__all__ = ["TelegramController"]
