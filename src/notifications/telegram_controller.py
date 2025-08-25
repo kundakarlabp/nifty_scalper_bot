@@ -1,4 +1,3 @@
-# Path: src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import hashlib
