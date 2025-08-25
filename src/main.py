@@ -5,7 +5,7 @@ import logging
 import signal
 import sys
 import time
-from typing import Optional, Any, Dict, List
+from typing import Optional
 
 from src.config import settings
 from src.strategies.runner import StrategyRunner
@@ -42,8 +42,10 @@ def _setup_logging() -> None:
 class _NoopTelegram:
     def send_message(self, *_a, **_k) -> None:
         pass
+
     def start_polling(self) -> None:
         pass
+
     def stop_polling(self) -> None:
         pass
 
@@ -66,10 +68,29 @@ def _build_kite() -> Optional["KiteConnect"]:
     return kite
 
 
+def _tail_logs(n: int = 100, path: str = "trading_bot.log") -> list[str]:
+    """Return last n lines from log file; used by /logs. Safe if file missing."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = 4096
+            data = b""
+            while size > 0 and data.count(b"\n") <= n:
+                read_size = block if size >= block else size
+                size -= read_size
+                f.seek(size)
+                data = f.read(read_size) + data
+        text = data.decode(errors="ignore")
+        return text.splitlines()[-n:]
+    except Exception:
+        return []
+
+
 def _wire_real_telegram(runner: StrategyRunner):
     """
     Build your real TelegramController and wire providers from the runner,
-    keeping original names/flow.
+    keeping original names/flow. Minimal wiring; avoids attribute errors.
     """
     if TelegramController is None:
         raise RuntimeError("src.notifications.telegram_controller not found.")
@@ -78,8 +99,8 @@ def _wire_real_telegram(runner: StrategyRunner):
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=lambda: runner.get_last_flow_debug(),
-        logs_provider=None,  # keep original; wire a tailer later if you want /logs
+        diag_provider=runner.get_last_flow_debug,
+        logs_provider=_tail_logs,  # enables /logs [n]
         last_signal_provider=runner.get_last_signal_debug,
         runner_pause=runner.pause,
         runner_resume=runner.resume,
@@ -101,8 +122,9 @@ def _wire_real_telegram(runner: StrategyRunner):
         set_range_tighten=None,
     )
 
-    # IMPORTANT: your runner uses `telegram_controller`
+    # Keep both attributes to match old/new code paths
     runner.telegram_controller = tg
+    runner.telegram = tg
 
     try:
         tg.start_polling()
@@ -116,11 +138,12 @@ def _wire_real_telegram(runner: StrategyRunner):
 _stop_flag = False
 
 
-def _install_signal_handlers(runner: StrategyRunner) -> None:
+def _install_signal_handlers(_runner: StrategyRunner) -> None:
     def _handler(signum, _frame):
         global _stop_flag
         logging.getLogger("main").info(f"Signal {signum} received — shutting down…")
         _stop_flag = True
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _handler)
