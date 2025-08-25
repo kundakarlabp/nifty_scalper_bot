@@ -1,4 +1,3 @@
-# Path: src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import hashlib
@@ -186,7 +185,7 @@ class TelegramController:
         self._stop.clear()
         self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
         self._poll_thread.start()
-        self._started = True
+               self._started = True
 
     def stop_polling(self) -> None:
         if not self._started:
