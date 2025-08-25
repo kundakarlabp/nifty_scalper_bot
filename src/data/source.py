@@ -30,6 +30,10 @@ class DataSource:
         """Connect or noop."""
         return
 
+    def is_ready(self) -> bool:
+        """Optional readiness check used by /diag."""
+        return True
+
     def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
         """
         Return OHLC DataFrame with columns: open, high, low, close, volume
@@ -152,6 +156,9 @@ class LiveKiteSource(DataSource):
         else:
             log.info("LiveKiteSource: connected to Kite.")
 
+    def is_ready(self) -> bool:
+        return self.kite is not None
+
     # --- public API ---
 
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
@@ -230,7 +237,7 @@ class LiveKiteSource(DataSource):
                         {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
                         index=[ts],
                     )
-            # Cache the fresh frame for a breath or two
+            # Cache the fresh frame briefly
             if df is not None:
                 self._cache.set(token, interval, df)
             # Clip to requested window (safety)
