@@ -1,3 +1,4 @@
+# Path: src/notifications/telegram_controller.py
 from __future__ import annotations
 
 import hashlib
@@ -66,6 +67,7 @@ class TelegramController:
 
         self._base = f"https://api.telegram.org/bot{self._token}"
         self._timeout = http_timeout
+        self._session = requests.Session()
 
         # --- hooks (unchanged API) ---
         self._status_provider = status_provider
@@ -116,9 +118,12 @@ class TelegramController:
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
+        # keep only last 10s
         self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
+        # spacing throttle
         if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
             return False
+        # dedup by hash
         if any(hh == h for _, hh in self._last_sends):
             return False
         self._last_sends.append((now, h))
@@ -133,7 +138,7 @@ class TelegramController:
                 payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
                 self._backoff = 1.0
                 return
             except Exception:
@@ -144,7 +149,7 @@ class TelegramController:
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
         payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
         try:
-            requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
@@ -200,7 +205,7 @@ class TelegramController:
                 params = {"timeout": 25}
                 if self._last_update_id is not None:
                     params["offset"] = self._last_update_id + 1
-                r = requests.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                r = self._session.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
                 data = r.json()
                 if not data.get("ok"):
                     time.sleep(1.0)
@@ -277,9 +282,11 @@ class TelegramController:
                     self._send("🧹 Cancelled all open orders.")
             finally:
                 try:
-                    requests.post(f"{self._base}/answerCallbackQuery",
-                                  json={"callback_query_id": cq.get("id")},
-                                  timeout=self._timeout)
+                    self._session.post(
+                        f"{self._base}/answerCallbackQuery",
+                        json={"callback_query_id": cq.get("id")},
+                        timeout=self._timeout,
+                    )
                 except Exception:
                     pass
             return
