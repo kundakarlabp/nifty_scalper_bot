@@ -12,7 +12,7 @@ import pandas as pd
 from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 # IMPORTANT: match your project’s path/file name
-from src.execution.order_executor import Order_Executor 
+from src.execution.order_executor import OrderExecutor 
 
 try:
     from kiteconnect import KiteConnect  # type: ignore
