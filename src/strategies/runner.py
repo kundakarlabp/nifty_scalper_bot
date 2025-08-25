@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -13,7 +13,7 @@ from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
 
-# Optional broker SDK
+# Optional broker SDK (lazy import for runtime /mode live)
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:
@@ -44,12 +44,11 @@ class StrategyRunner:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
 
-        # Telegram is mandatory in this app, but main wires the real one;
-        # here we only need *an* object with send_message() to avoid None checks.
+        # Telegram is mandatory in this app
         if telegram_controller is None:
             raise RuntimeError("TelegramController must be provided to StrategyRunner.")
+        # keep both names to satisfy old/new code paths
         self.telegram = telegram_controller
-        # compat alias so main.py can set either .telegram or .telegram_controller
         self.telegram_controller = telegram_controller
 
         # Core components
@@ -88,63 +87,99 @@ class StrategyRunner:
 
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         flow: Dict[str, Any] = {
+            "ok": False,
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
             "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
             "executed": False, "reason_block": None,
+            "checks": []  # compact diag list consumed by TelegramController /diag & /check
         }
 
+        def add_check(name: str, ok: bool, **extra):
+            item = {"name": name, "ok": bool(ok)}
+            item.update({k: v for k, v in extra.items() if v is not None})
+            flow["checks"].append(item)
+
         try:
+            # Window / pause
             if not self._within_trading_window() and not settings.allow_offhours_testing:
-                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "off_hours"
+                add_check("trading_window", False, hint="Outside window; use /tickdry or enable allow_offhours_testing")
+                self._last_flow_debug = flow
+                return
             flow["within_window"] = True
+            add_check("trading_window", True)
 
             if self._paused:
-                flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "paused"
+                add_check("paused", False)
+                self._last_flow_debug = flow
+                return
+            add_check("paused", True)
 
             self._ensure_day_state()
             self._refresh_equity_if_due()
 
-            # ---- data
+            # Data
             df = self._fetch_spot_ohlc()
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            add_check("data_source", self.data_source is not None, detail="LiveKiteSource wired" if self.data_source else "None")
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
-                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "insufficient_data"
+                add_check("ohlc_history", False, hint=f"bars={flow['bars']}, need>={settings.strategy.min_bars_for_signal}")
+                self._last_flow_debug = flow
+                return
             flow["data_ok"] = True
+            add_check("ohlc_history", True, detail=f"bars={flow['bars']}")
 
-            # ---- signal
+            # Signal
             signal = self.strategy.generate_signal(df, current_tick=tick)
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             if not signal:
                 flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
-                self._last_flow_debug = flow; return
+                add_check("signal", False, hint=flow["reason_block"])
+                self._last_flow_debug = flow
+                return
             flow["signal_ok"] = True
+            add_check("signal", True, detail=f"rr~{getattr(signal, 'rr', 0)}")
 
-            # ---- RR minimum
+            # RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
             rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
-                flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
+                flow["rr_ok"] = False
+                flow["reason_block"] = f"rr<{rr_min}"
                 flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
-                self._last_flow_debug = flow; return
+                add_check("rr_gate", False, detail=f"{rr_val}<{rr_min}")
+                self._last_flow_debug = flow
+                return
+            add_check("rr_gate", True, detail=f"{rr_val}>={rr_min}" if rr_min else "n/a")
 
-            # ---- gates
+            # Risk gates
             gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
+            for k, v in gates.items():
+                add_check(f"risk_{k}", bool(v))
             if not all(gates.values()):
-                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "risk_gate_block"
+                self._last_flow_debug = flow
+                return
 
-            # ---- sizing
+            # Sizing
             qty, diag = self._calculate_quantity_diag(
                 entry=float(signal["entry_price"]),
                 stop=float(signal["stop_loss"]),
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
-            flow["sizing"] = diag; flow["qty"] = int(qty)
+            flow["sizing"] = diag
+            flow["qty"] = int(qty)
+            add_check("sizing_qty", qty > 0, detail=f"qty={qty}")
             if qty <= 0:
-                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "qty_zero"
+                self._last_flow_debug = flow
+                return
 
-            # ---- execution (supports both our newer and older ZIP styles)
+            # Execution
             placed_ok = False
             if hasattr(self.executor, "place_order"):
                 exec_payload = {
@@ -177,6 +212,7 @@ class StrategyRunner:
                 self.log.error("No known execution method found on OrderExecutor")
 
             flow["executed"] = placed_ok
+            add_check("execution_submit", placed_ok, hint=getattr(self.executor, "last_error", "") or None)
             if not placed_ok:
                 flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
 
@@ -188,6 +224,7 @@ class StrategyRunner:
                     f"TP {float(signal['take_profit']):.2f})"
                 )
 
+            flow["ok"] = placed_ok or True  # ok path even if we decide not to place
             self._last_flow_debug = flow
 
         except Exception as e:
@@ -272,7 +309,11 @@ class StrategyRunner:
             gates["loss_streak"] = False
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
-        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
+        try:
+            entry = float(signal["entry_price"])
+            stop = float(signal["stop_loss"])
+            gates["sl_valid"] = (abs(entry - stop) > 0)
+        except Exception:
             gates["sl_valid"] = False
         return gates
 
@@ -397,50 +438,6 @@ class StrategyRunner:
             "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
         }
 
-    # ---- Rich diag used by /diag and /check
-    def get_diag_snapshot(self) -> Dict[str, Any]:
-        checks: List[Dict[str, Any]] = []
-
-        # Config
-        checks.append({"name": "config.py", "ok": True})
-
-        # Telegram (this process)
-        checks.append({"name": "notifications/telegram_controller.py", "ok": hasattr(self.telegram, "send_message")})
-
-        # Data
-        ds_ok = self.data_source is not None
-        checks.append({"name": "data/source.py", "ok": ds_ok})
-
-        # Strategy
-        checks.append({"name": "strategies/scalping_strategy.py", "ok": self.strategy is not None})
-
-        # Executor
-        checks.append({"name": "execution/order_executor.py", "ok": self.executor is not None})
-
-        # Broker connectivity
-        broker_ok = self.kite is not None
-        checks.append({
-            "name": "broker/kiteconnect",
-            "ok": broker_ok,
-            "hint": "connected" if broker_ok else "not connected (check access token)"
-        })
-
-        # Session / window & data
-        window_ok = self._within_trading_window() or bool(getattr(settings, "allow_offhours_testing", False))
-        checks.append({"name": "flow/window & data", "ok": window_ok, "hint": "off-hours" if not window_ok else ""})
-
-        # Risk
-        risk_ok = self.risk.trades_today < int(settings.risk.max_trades_per_day) \
-                  and self.risk.consecutive_losses < int(settings.risk.consecutive_loss_limit)
-        checks.append({"name": "risk/limits", "ok": risk_ok})
-
-        ok = all(c.get("ok", False) for c in checks)
-        return {
-            "ok": ok,
-            "checks": checks,
-            "last_signal": (self._last_signal_debug.get("reason_block") is None)
-        }
-
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
         qty, diag = self._calculate_quantity_diag(
             entry=float(entry), stop=float(sl),
@@ -456,10 +453,47 @@ class StrategyRunner:
         self._paused = False
 
     def set_live_mode(self, val: bool) -> None:
+        """
+        Toggle live mode. When turning ON, build a KiteConnect session on the fly
+        and re-wire executor + data source. When turning OFF, keep kite for data
+        (so historical fetch continues to work) but executor should honor dry mode.
+        """
         try:
-            setattr(settings, "enable_live_trading", bool(val))
-        except Exception:
-            pass
+            prev = bool(settings.enable_live_trading)
+            settings.enable_live_trading = bool(val)
+
+            if val and self.kite is None:
+                if KiteConnect is None:
+                    self.log.warning("Live mode requested but kiteconnect not installed.")
+                    return
+                api_key = getattr(settings.zerodha, "api_key", "")
+                access_token = getattr(settings.zerodha, "access_token", "")
+                if not api_key or not access_token:
+                    self.log.warning("Live mode requested but Zerodha credentials missing.")
+                    return
+                k = KiteConnect(api_key=api_key)  # type: ignore
+                k.set_access_token(access_token)
+                self.kite = k
+                # Re-wire executor & data source
+                if hasattr(self.executor, "set_kite"):
+                    try:
+                        self.executor.set_kite(k)  # type: ignore[attr-defined]
+                    except Exception:
+                        self.executor.kite = k
+                else:
+                    self.executor.kite = k  # type: ignore[attr-defined]
+                if self.data_source is None and LiveKiteSource is not None:
+                    try:
+                        self.data_source = LiveKiteSource(kite=k)
+                    except Exception as e:
+                        self.log.warning("LiveKiteSource reinit failed: %s", e)
+
+                self._notify("🔓 Live mode ON — broker session initialized.")
+            elif not val and prev:
+                # Switching to dry mode — keep kite for data, trade execution should respect settings flag.
+                self._notify("🔒 Live mode OFF — shadow execution only.")
+        except Exception as e:
+            self.log.warning("set_live_mode error: %s", e)
 
     def _notify(self, msg: str) -> None:
         logging.info(msg)
