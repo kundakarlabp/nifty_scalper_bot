@@ -68,25 +68,24 @@ def _build_kite() -> Optional["KiteConnect"]:
 
 def _wire_real_telegram(runner: StrategyRunner):
     """
-    Build your real TelegramController (the one you shared) and wire all providers
-    from the runner, then replace the runner's temporary telegram with this real one.
+    Build your real TelegramController and wire providers from the runner,
+    keeping original names/flow.
     """
     if TelegramController is None:
         raise RuntimeError("src.notifications.telegram_controller not found.")
 
-    # Your controller takes many keyword-only providers. We wire what it expects:
     tg = TelegramController(
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
         diag_provider=lambda: runner.get_last_flow_debug(),
-        logs_provider=None,  # wire if you have a logs provider
+        logs_provider=None,  # keep original; wire a tailer later if you want /logs
         last_signal_provider=runner.get_last_signal_debug,
         runner_pause=runner.pause,
         runner_resume=runner.resume,
         runner_tick=runner.runner_tick,        # accepts dry=bool in our runner
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
-        set_risk_pct=None,                      # optional: mutate settings if you want
+        set_risk_pct=None,
         toggle_trailing=None,
         set_trailing_mult=None,
         toggle_partial=None,
@@ -102,9 +101,9 @@ def _wire_real_telegram(runner: StrategyRunner):
         set_range_tighten=None,
     )
 
-    # swap into runner
-    runner.telegram = tg
-    # start polling if you use it
+    # IMPORTANT: your runner uses `telegram_controller`
+    runner.telegram_controller = tg
+
     try:
         tg.start_polling()
     except Exception:
@@ -152,7 +151,7 @@ def main() -> int:
 
     # announce
     try:
-        runner.telegram.send_message("🚀 Bot starting (shadow mode by default).")
+        runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")
     except Exception:
         log.warning("Telegram startup message failed (continuing).")
 
@@ -180,7 +179,7 @@ def main() -> int:
         except Exception:
             pass
         try:
-            runner.telegram.send_message("🛑 Bot stopped.")
+            runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception:
             pass
 
