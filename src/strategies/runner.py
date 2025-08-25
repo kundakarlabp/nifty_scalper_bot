@@ -1,4 +1,4 @@
-# src/strategies/runner.py
+# Path: src/strategies/runner.py
 from __future__ import annotations
 
 """
@@ -47,6 +47,10 @@ class StrategyRunner:
     def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
+
+        # Telegram is mandatory (per requirement)
+        if telegram_controller is None:
+            raise RuntimeError("TelegramController is required and must be wired before starting the runner.")
         self.telegram = telegram_controller
 
         # Core components
@@ -67,16 +71,16 @@ class StrategyRunner:
 
         # Equity cache (live-equity sizing)
         self._equity_last_refresh_ts: float = 0.0
-        self._equity_cached_value: float = float(settings.risk_default_equity)
+        self._equity_cached_value: float = float(settings.risk.default_equity)
 
         # Dynamic daily loss cap derived from equity snapshot
         self._max_daily_loss_rupees: float = (
-            self._equity_cached_value * float(settings.risk_max_daily_drawdown_pct)
+            self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
         )
 
         # Market-time window
-        self._start_time = self._parse_hhmm(settings.time_filter_start)
-        self._end_time = self._parse_hhmm(settings.time_filter_end)
+        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
+        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
 
         # Controls
         self._paused: bool = False
@@ -88,7 +92,7 @@ class StrategyRunner:
         self.log.info(
             "StrategyRunner ready "
             f"(live_trading={settings.enable_live_trading}, "
-            f"use_live_equity={settings.risk_use_live_equity})"
+            f"use_live_equity={settings.risk.use_live_equity})"
         )
 
     # --------------------------
@@ -134,7 +138,7 @@ class StrategyRunner:
             # Obtain OHLC data
             df = self._fetch_spot_ohlc()
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
-            if df is None or len(df) < int(settings.strategy_min_bars_for_signal):
+            if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
                 flow["reason_block"] = "insufficient_data"
                 self._last_flow_debug = flow
                 return
@@ -150,23 +154,12 @@ class StrategyRunner:
             flow["signal_ok"] = True
 
             # RR gate (configurable)
-            rr_min = None
-            try:
-                rr_min = float(getattr(settings.strategy, "rr_min", 0.0))
-            except Exception:
-                rr_min = 0.0
-            rr_value = None
-            try:
-                rr_value = float(getattr(signal, "rr", 0.0))
-            except Exception:
-                rr_value = 0.0
+            rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
+            rr_value = float(getattr(signal, "rr", 0.0) or 0.0)
             if rr_min and rr_value and rr_value < rr_min:
                 flow["rr_ok"] = False
                 flow["reason_block"] = f"rr<{rr_min}"
-                flow["signal"] = {
-                    "rr": rr_value,
-                    "rr_min": rr_min,
-                }
+                flow["signal"] = {"rr": rr_value, "rr_min": rr_min}
                 self._last_flow_debug = flow
                 return
 
@@ -200,7 +193,7 @@ class StrategyRunner:
             qty, diag = self._calculate_quantity_diag(
                 entry=float(signal.entry_price),
                 stop=float(signal.stop_loss),
-                lot_size=int(settings.instruments_nifty_lot_size),
+                lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
             flow["sizing"] = diag
@@ -276,12 +269,12 @@ class StrategyRunner:
     def _refresh_equity_if_due(self, silent: bool = False) -> None:
         """Refresh live equity snapshot from broker at configured cadence."""
         now = time.time()
-        if not settings.risk_use_live_equity:
+        if not settings.risk.use_live_equity:
             # Ensure derived cap still uses current cached value (which may be default)
-            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk_max_daily_drawdown_pct)
+            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
             return
 
-        if (now - self._equity_last_refresh_ts) < int(settings.equity_refresh_seconds):
+        if (now - self._equity_last_refresh_ts) < int(settings.risk.equity_refresh_seconds):
             return
 
         new_equity = None
@@ -296,7 +289,7 @@ class StrategyRunner:
                             new_equity = float(v)
                             break
                 if new_equity is None:
-                    new_equity = float(settings.risk_default_equity)
+                    new_equity = float(settings.risk.default_equity)
             except Exception as e:
                 if not silent:
                     self.log.warning(f"Equity refresh failed; using fallback: {e}")
@@ -306,10 +299,10 @@ class StrategyRunner:
             self._equity_cached_value = float(new_equity)
         else:
             # fallback to configured default
-            self._equity_cached_value = float(settings.risk_default_equity)
+            self._equity_cached_value = float(settings.risk.default_equity)
 
         # Recompute daily loss cap from current snapshot
-        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk_max_daily_drawdown_pct)
+        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
         self._equity_last_refresh_ts = now
 
         if not silent:
@@ -320,9 +313,9 @@ class StrategyRunner:
 
     def _active_equity(self) -> float:
         """Equity used for sizing (cached live or fallback)."""
-        if settings.risk_use_live_equity:
+        if settings.risk.use_live_equity:
             return float(self._equity_cached_value)
-        return float(settings.risk_default_equity)
+        return float(settings.risk.default_equity)
 
     def _risk_gates_for(self, signal) -> Dict[str, bool]:
         """Compute risk gates without side-effects."""
@@ -335,7 +328,7 @@ class StrategyRunner:
         }
 
         # Equity floor
-        if settings.risk_use_live_equity and self._active_equity() < float(settings.risk_min_equity_floor):
+        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
             gates["equity_floor"] = False
 
         # Daily drawdown gate
@@ -343,11 +336,11 @@ class StrategyRunner:
             gates["daily_drawdown"] = False
 
         # Loss-streak gate
-        if self.risk.consecutive_losses >= int(settings.risk_consecutive_loss_limit):
+        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
             gates["loss_streak"] = False
 
         # Trades-per-day gate
-        if self.risk.trades_today >= int(settings.risk_max_trades_per_day):
+        if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
 
         # Basic SL sanity
@@ -369,7 +362,7 @@ class StrategyRunner:
         """
         Same logic as _calculate_quantity, but returns a diagnostics dictionary as well.
         """
-        risk_rupees = float(equity) * float(settings.risk_risk_per_trade)
+        risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
 
         sl_points = abs(float(entry) - float(stop))
         rupee_risk_per_lot = sl_points * int(lot_size)
@@ -379,7 +372,7 @@ class StrategyRunner:
                 "entry": entry,
                 "stop": stop,
                 "equity": equity,
-                "risk_per_trade": settings.risk_risk_per_trade,
+                "risk_per_trade": settings.risk.risk_per_trade,
                 "sl_points": sl_points,
                 "rupee_risk_per_lot": rupee_risk_per_lot,
                 "lots_raw": 0,
@@ -389,12 +382,12 @@ class StrategyRunner:
             }
 
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
-        lots = max(lots_raw, int(settings.instruments_min_lots))
-        lots = min(lots, int(settings.instruments_max_lots))
+        lots = max(lots_raw, int(settings.instruments.min_lots))
+        lots = min(lots, int(settings.instruments.max_lots))
 
         # Enforce exposure cap
         notional = float(entry) * int(lot_size) * lots
-        max_notional = float(equity) * float(settings.risk_max_position_size_pct)
+        max_notional = float(equity) * float(settings.risk.max_position_size_pct)
         if max_notional > 0 and notional > max_notional:
             denom = float(entry) * int(lot_size)
             lots_cap = int(max_notional // denom) if denom > 0 else 0
@@ -405,7 +398,7 @@ class StrategyRunner:
             "entry": round(entry, 4),
             "stop": round(stop, 4),
             "equity": round(float(equity), 2),
-            "risk_per_trade": float(settings.risk_risk_per_trade),
+            "risk_per_trade": float(settings.risk.risk_per_trade),
             "lot_size": int(lot_size),
             "sl_points": round(sl_points, 4),
             "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
@@ -430,7 +423,7 @@ class StrategyRunner:
 
         try:
             # Expecting data source to accept lookback in minutes and return standardized DF
-            df = self.data_source.get_spot_ohlc(lookback_minutes=int(settings.data_lookback_minutes))
+            df = self.data_source.get_spot_ohlc(lookback_minutes=int(settings.data.lookback_minutes))
             # Basic schema sanitation (strategy expects these columns)
             needed = {"open", "high", "low", "close", "volume"}
             if df is None or not isinstance(df, pd.DataFrame) or not needed.issubset(df.columns):
@@ -483,11 +476,11 @@ class StrategyRunner:
 
     def get_equity_snapshot(self) -> Dict[str, Any]:
         return {
-            "use_live_equity": bool(settings.risk_use_live_equity),
+            "use_live_equity": bool(settings.risk.use_live_equity),
             "equity_cached": round(float(self._equity_cached_value), 2),
-            "equity_floor": float(settings.risk_min_equity_floor),
+            "equity_floor": float(settings.risk.min_equity_floor),
             "max_daily_loss_rupees": round(float(self._max_daily_loss_rupees), 2),
-            "refresh_seconds": int(getattr(settings, "equity_refresh_seconds", 60)),
+            "refresh_seconds": int(settings.risk.equity_refresh_seconds),
         }
 
     def get_status_snapshot(self) -> Dict[str, Any]:
@@ -508,7 +501,7 @@ class StrategyRunner:
         qty, diag = self._calculate_quantity_diag(
             entry=float(entry),
             stop=float(sl),
-            lot_size=int(settings.instruments_nifty_lot_size),
+            lot_size=int(settings.instruments.nifty_lot_size),
             equity=self._active_equity(),
         )
         return {"qty": int(qty), "diag": diag}
