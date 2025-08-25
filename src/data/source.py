@@ -28,11 +28,11 @@ class DataSource:
         return
 
     def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
-        """Return OHLC DataFrame with columns: open, high, low, close, volume."""
+        """Return OHLC DataFrame with: open, high, low, close, volume."""
         raise NotImplementedError
 
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
-        """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or token int."""
+        """Return LTP for a trading symbol or token int."""
         raise NotImplementedError
 
 
@@ -44,8 +44,11 @@ def _now_ist_naive() -> datetime:
 
 
 _INTERVAL_MAP = {
-    "minute": "minute", "1minute": "minute", "1m": "minute",
-    "5minute": "5minute", "5m": "5minute",
+    "minute": "minute",
+    "1minute": "minute",
+    "1m": "minute",
+    "5minute": "5minute",
+    "5m": "5minute",
 }
 
 @dataclass
@@ -79,19 +82,15 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
         df = pd.DataFrame(rows or [])
         if df.empty:
             return pd.DataFrame()
-        # Normalize column names
         rename_map = {c: c.lower() for c in df.columns}
         df = df.rename(columns=rename_map)
-        # Kite historical returns 'date' timestamps; ensure timezone-naive
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
             df["date"] = df["date"].dt.tz_localize(None)
             df = df.set_index("date")
-        # Ensure all needed columns exist
         need = {"open", "high", "low", "close"}
         if not need.issubset(df.columns):
             return pd.DataFrame()
-        # Volume may be missing for some instruments → default 0
         if "volume" not in df.columns:
             df["volume"] = 0
         return df[["open", "high", "low", "close", "volume"]]
@@ -110,12 +109,14 @@ def _retry(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
             last = e
             if i == tries - 1:
                 raise
-            time.sleep(delay); delay *= 2.0
+            time.sleep(delay)
+            delay *= 2.0
         except Exception as e:  # other unexpected
             last = e
             if i == tries - 1:
                 raise
-            time.sleep(delay); delay *= 2.0
+            time.sleep(delay)
+            delay *= 2.0
     if last:
         raise last
 
@@ -130,7 +131,7 @@ class LiveKiteSource(DataSource):
 
     def __init__(self, kite: Optional["KiteConnect"]) -> None:
         self.kite = kite
-        self._cache = _TTLCache(ttl_sec=4.0)  # tiny per-token cache
+        self._cache = _TTLCache(ttl_sec=4.0)
 
     def connect(self) -> None:
         if not self.kite:
@@ -173,7 +174,6 @@ class LiveKiteSource(DataSource):
             log.warning("Unsupported timeframe '%s' → using 'minute'.", timeframe)
             interval = "minute"
 
-        # Cache window key: (token, interval).
         cached = self._cache.get(token, interval)
         if cached is not None and not cached.empty:
             try:
@@ -187,7 +187,13 @@ class LiveKiteSource(DataSource):
         try:
             rows = _retry(
                 self.kite.historical_data,
-                token, frm, to, interval, continuous=False, oi=False, tries=2,
+                token,
+                frm,
+                to,
+                interval,
+                continuous=False,
+                oi=False,
+                tries=2,
             )
             df = _safe_dataframe(rows)
             if df.empty:
