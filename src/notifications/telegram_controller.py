@@ -118,12 +118,9 @@ class TelegramController:
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
-        # keep only last 10s
         self._last_sends[:] = [(t, hh) for t, hh in self._last_sends if now - t < 10]
-        # spacing throttle
         if self._last_sends and now - self._last_sends[-1][0] < self._send_min_interval:
             return False
-        # dedup by hash
         if any(hh == h for _, hh in self._last_sends):
             return False
         self._last_sends.append((now, h))
@@ -491,7 +488,6 @@ class TelegramController:
                 if self._set_risk_pct:
                     self._set_risk_pct(pct)
                 else:
-                    # fallback: mutate settings directly (keeps bot usable)
                     settings.risk.risk_per_trade = pct / 100.0
                 return self._send(f"Risk per trade set to {pct:.2f}%.")
             except Exception:
