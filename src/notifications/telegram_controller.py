@@ -20,7 +20,7 @@ class TelegramController:
     Minimal, production-safe Telegram controller that:
       - Pulls bot_token/chat_id from settings.telegram (no ctor kwargs).
       - Provides public send_message(), notify_entry(), notify_fills().
-      - Starts a polling thread and handles the original command set.
+      - Starts a polling thread and handles the command set.
       - Includes dedup/rate-limit and exponential backoff on send failures.
     """
 
@@ -39,7 +39,7 @@ class TelegramController:
         runner_resume: Optional[Callable[[], None]] = None,
         runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
         cancel_all: Optional[Callable[[], None]] = None,
-        # execution mutators
+        # execution/strategy mutators (optional)
         set_risk_pct: Optional[Callable[[float], None]] = None,
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
@@ -47,14 +47,13 @@ class TelegramController:
         set_tp1_ratio: Optional[Callable[[float], None]] = None,
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
         set_live_mode: Optional[Callable[[bool], None]] = None,
-        # strategy mutators
         set_min_score: Optional[Callable[[int], None]] = None,
         set_conf_threshold: Optional[Callable[[float], None]] = None,
         set_atr_period: Optional[Callable[[int], None]] = None,
         set_sl_mult: Optional[Callable[[float], None]] = None,
         set_tp_mult: Optional[Callable[[float], None]] = None,
-        set_trend_boosts: Optional[Callable[[float, float], None]] = None,   # (tp_boost, sl_relax)
-        set_range_tighten: Optional[Callable[[float, float], None]] = None,  # (tp_tighten, sl_tighten)
+        set_trend_boosts: Optional[Callable[[float, float], None]] = None,
+        set_range_tighten: Optional[Callable[[float, float], None]] = None,
         http_timeout: float = 20.0,
     ) -> None:
         # --- credentials from settings (MANDATORY) ---
@@ -167,7 +166,10 @@ class TelegramController:
         )
 
     def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
-        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`", parse_mode="Markdown")
+        self._send(
+            f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`",
+            parse_mode="Markdown",
+        )
 
     def notify_fills(self, fills: List[tuple[str, float]]) -> None:
         if not fills:
@@ -185,7 +187,7 @@ class TelegramController:
         self._stop.clear()
         self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
         self._poll_thread.start()
-               self._started = True
+        self._started = True
 
     def stop_polling(self) -> None:
         if not self._started:
@@ -478,7 +480,7 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Check error: {e}")
 
-        # ---- EXECUTION TUNING ----
+        # ---- Strategy/execution tuning commands (optional wiring kept) ----
         if cmd == "/risk":
             if not args:
                 return self._send("Usage: /risk 0.5  (for 0.5%)")
@@ -541,7 +543,6 @@ class TelegramController:
             except Exception:
                 return self._send("Invalid integer. Example: /breakeven 2")
 
-        # ---- STRATEGY TUNING ----
         if cmd == "/minscore":
             if not args:
                 return self._send("Usage: /minscore 3")
