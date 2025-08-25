@@ -19,7 +19,7 @@ try:
 except Exception:
     KiteConnect = None  # type: ignore
 
-# Data source
+# Optional data source
 try:
     from src.data.source import LiveKiteSource  # type: ignore
 except Exception:
@@ -38,16 +38,16 @@ class RiskState:
 class StrategyRunner:
     """
     Orchestrates: data → signal → risk gates → sizing → execution.
-    TelegramController is REQUIRED but constructed/wired in main.py; we only consume it.
+    A TelegramController is REQUIRED and is injected from main.py.
     """
     def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
 
-        # Telegram is mandatory in this app
+        # Telegram is mandatory for runtime control
         if telegram_controller is None:
             raise RuntimeError("TelegramController must be provided to StrategyRunner.")
-        # support both attributes so main.py can use either one
+        # Keep both names for compatibility across your codebase
         self.telegram = telegram_controller
         self.telegram_controller = telegram_controller
 
@@ -120,13 +120,13 @@ class StrategyRunner:
 
             # ---- RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
-            rr_val = float(getattr(signal, "risk_reward_ratio", getattr(signal, "rr", 0.0)) or 0.0)
+            rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
                 flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
                 flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
                 self._last_flow_debug = flow; return
 
-            # ---- gates
+            # ---- risk gates
             gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
             if not all(gates.values()):
@@ -134,8 +134,8 @@ class StrategyRunner:
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
-                entry=float(signal.entry_price),
-                stop=float(signal.stop_loss),
+                entry=float(signal["entry_price"]),
+                stop=float(signal["stop_loss"]),
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
@@ -143,32 +143,33 @@ class StrategyRunner:
             if qty <= 0:
                 flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
 
-            # ---- execution (supports both our newer and older ZIP styles)
+            # ---- execution (supports both old/new executors)
             placed_ok = False
             if hasattr(self.executor, "place_order"):
-                exec_payload = {
-                    "action": signal.action,
+                placed_ok = bool(self.executor.place_order({
+                    "action": signal["action"],
                     "quantity": int(qty),
-                    "entry_price": float(signal.entry_price),
-                    "stop_loss": float(signal.stop_loss),
-                    "take_profit": float(signal.take_profit),
-                    "strike": float(getattr(signal, "strike", 0.0)),
-                    "option_type": getattr(signal, "option_type", "CE"),
-                }
-                placed_ok = bool(self.executor.place_order(exec_payload))
+                    "entry_price": float(signal["entry_price"]),
+                    "stop_loss": float(signal["stop_loss"]),
+                    "take_profit": float(signal["take_profit"]),
+                    "strike": float(signal.get("strike", 0)),
+                    "option_type": signal.get("option_type"),
+                }))
             elif hasattr(self.executor, "place_entry_order"):
-                side = "BUY" if str(signal.action).upper() == "BUY" else "SELL"
+                side = "BUY" if str(signal["action"]).upper() == "BUY" else "SELL"
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
                 token = int(getattr(settings.instruments, "instrument_token", 0))
                 oid = self.executor.place_entry_order(
                     token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(signal.entry_price)
+                    quantity=int(qty), price=float(signal["entry_price"])
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
                     try:
                         self.executor.setup_gtt_orders(
-                            record_id=oid, sl_price=float(signal.stop_loss), tp_price=float(signal.take_profit)
+                            record_id=oid,
+                            sl_price=float(signal["stop_loss"]),
+                            tp_price=float(signal["take_profit"]),
                         )
                     except Exception as e:
                         self.log.warning("setup_gtt_orders failed: %s", e)
@@ -182,9 +183,9 @@ class StrategyRunner:
             if placed_ok:
                 self.risk.trades_today += 1
                 self._notify(
-                    f"✅ Placed: {signal.action} {qty} {getattr(signal, 'option_type', 'OPT')} "
-                    f"{int(getattr(signal, 'strike', 0))} @ {float(signal.entry_price):.2f} "
-                    f"(SL {float(signal.stop_loss):.2f}, TP {float(signal.take_profit):.2f})"
+                    f"✅ Placed: {signal['action']} {qty} {signal.get('option_type','')} "
+                    f"{int(signal.get('strike', 0))} @ {float(signal['entry_price']):.2f} "
+                    f"(SL {float(signal['stop_loss']):.2f}, TP {float(signal['take_profit']):.2f})"
                 )
 
             self._last_flow_debug = flow
@@ -238,8 +239,7 @@ class StrategyRunner:
                     for k in ("equity", "available", "net", "final", "cash"):
                         v = margins.get(k)
                         if isinstance(v, (int, float)):
-                            new_eq = float(v)
-                            break
+                            new_eq = float(v); break
                 if new_eq is None:
                     new_eq = float(settings.risk.default_equity)
             except Exception as e:
@@ -271,7 +271,7 @@ class StrategyRunner:
             gates["loss_streak"] = False
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
-        if abs(float(signal.entry_price) - float(signal.stop_loss)) <= 0:
+        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
             gates["sl_valid"] = False
         return gates
 
