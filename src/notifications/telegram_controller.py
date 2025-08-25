@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
+import math
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import inspect
 import requests
 
 from src.config import settings
@@ -27,22 +28,26 @@ class TelegramController:
         diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         logs_provider: Optional[Callable[[int], List[str]]] = None,
         last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+        flow_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        equity_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        config_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        sizing_test_provider: Optional[Callable[[float, float], Dict[str, Any]]] = None,
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
         runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
         cancel_all: Optional[Callable[[], None]] = None,
+        set_live_mode: Optional[Callable[[bool], None]] = None,
         # execution mutators
-        set_risk_pct: Optional[Callable[[float], None]] = None,
+        set_risk_pct: Optional[Callable[[float], None]] = None,  # pct as fraction (0.01 = 1%)
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
         toggle_partial: Optional[Callable[[bool], None]] = None,
-        set_tp1_ratio: Optional[Callable[[float], None]] = None,
+        set_tp1_ratio: Optional[Callable[[float], None]] = None,   # 0..1
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
-        set_live_mode: Optional[Callable[[bool], None]] = None,
         # strategy mutators
         set_min_score: Optional[Callable[[int], None]] = None,
-        set_conf_threshold: Optional[Callable[[float], None]] = None,
+        set_conf_threshold: Optional[Callable[[float], None]] = None,   # 0..100
         set_atr_period: Optional[Callable[[int], None]] = None,
         set_sl_mult: Optional[Callable[[float], None]] = None,
         set_tp_mult: Optional[Callable[[float], None]] = None,
@@ -66,11 +71,16 @@ class TelegramController:
         self._diag_provider = diag_provider
         self._logs_provider = logs_provider
         self._last_signal_provider = last_signal_provider
+        self._flow_provider = flow_provider
+        self._equity_provider = equity_provider
+        self._config_provider = config_provider
+        self._sizing_test_provider = sizing_test_provider
 
         self._runner_pause = runner_pause
         self._runner_resume = runner_resume
         self._runner_tick = runner_tick
         self._cancel_all = cancel_all
+        self._set_live_mode = set_live_mode
 
         self._set_risk_pct = set_risk_pct
         self._toggle_trailing = toggle_trailing
@@ -78,7 +88,6 @@ class TelegramController:
         self._toggle_partial = toggle_partial
         self._set_tp1_ratio = set_tp1_ratio
         self._set_breakeven_ticks = set_breakeven_ticks
-        self._set_live_mode = set_live_mode
 
         self._set_min_score = set_min_score
         self._set_conf_threshold = set_conf_threshold
@@ -104,7 +113,7 @@ class TelegramController:
         self._backoff = 1.0
         self._backoff_max = 20.0
 
-    # ------------- outbound -------------
+    # ============ outbound ============
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -128,10 +137,26 @@ class TelegramController:
                 requests.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
                 self._backoff = 1.0
                 return
-            except Exception:
+            except Exception as e:
+                log.debug("send failed, retrying: %s", e)
                 time.sleep(delay)
                 delay = min(self._backoff_max, delay * 2)
                 self._backoff = delay
+
+    def _send_long_json(self, title: str, obj: Any) -> None:
+        try:
+            s = json.dumps(obj, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self._send(f"{title}: (serialization error: {e})")
+            return
+        # Telegram hard limit: 4096 chars; use modest chunking
+        head = f"{title}:\n"
+        maxlen = 3800
+        chunks = math.ceil(len(s) / maxlen)
+        for i in range(chunks):
+            seg = s[i * maxlen : (i + 1) * maxlen]
+            prefix = head if i == 0 else "(cont.)\n"
+            self._send(prefix + seg)
 
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
         payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
@@ -164,7 +189,7 @@ class TelegramController:
             lines.append(f"• {rid} @ {px:.2f}")
         self._send("\n".join(lines))
 
-    # ------------- polling -------------
+    # ============ polling ============
     def start_polling(self) -> None:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
@@ -203,7 +228,7 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
-    # ------------- helpers -------------
+    # ============ helpers ============
     def _do_tick(self, *, dry: bool) -> str:
         """Run one tick. If runner provider doesn't accept 'dry', emulate by flipping live + offhours flags."""
         if not self._runner_tick:
@@ -258,13 +283,13 @@ class TelegramController:
 
         return "✅ Tick executed." if res else "Dry tick executed (no action)." if dry else "Tick executed (no action)."
 
-    # ------------- command handling -------------
+    # ============ command handling ============
     def _handle_update(self, upd: Dict[str, Any]) -> None:
         # inline callbacks
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq.get("message", {}).get("chat", {}).get("id")
-            if not self._authorized(int(chat_id)):
+            if chat_id is None or not self._authorized(int(chat_id)):
                 return
             data = cq.get("data", "")
             try:
@@ -285,7 +310,7 @@ class TelegramController:
             return
         chat_id = msg.get("chat", {}).get("id")
         text = (msg.get("text") or "").strip()
-        if not text:
+        if not text or chat_id is None:
             return
         if not self._authorized(int(chat_id)):
             self._send("Unauthorized.")
@@ -309,12 +334,9 @@ class TelegramController:
                 "/tick — one tick | /tickdry — one dry tick (after-hours ok)\n"
                 "/logs [n] — recent log lines\n"
                 "/diag — health/flow summary  •  /check — deep check\n"
-                "*Execution Tuning*\n"
-                "/risk <pct> • /trail on|off • /trailmult <x>\n"
-                "/partial on|off • /tp1 <pct> • /breakeven <ticks>\n"
-                "*Strategy Tuning*\n"
-                "/minscore <n> • /conf <x> • /atrp <n>\n"
-                "/slmult <x> • /tpmult <x> • /trend a b • /range a b\n",
+                "/flow — last decision flow (why trade was/wasn’t taken)\n"
+                "/equity — equity snapshot  •  /config — key runtime config\n"
+                "/sizingtest <entry> <sl> — qty + diagnostics\n",
                 parse_mode="Markdown",
             )
 
@@ -326,12 +348,56 @@ class TelegramController:
                 s = {}
             verbose = (args and args[0].lower().startswith("v"))
             if verbose:
-                return self._send("```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+                return self._send_long_json("📊 Status", s)
             return self._send(
                 f"📊 {s.get('time_ist')}\n"
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
                 f"📦 Active: {s.get('active_orders', 0)}"
             )
+
+        # ---- FLOW (full last decision) ----
+        if cmd == "/flow":
+            if not self._flow_provider:
+                return self._send("No flow provider wired.")
+            try:
+                flow = self._flow_provider() or {}
+                self._send_long_json("🧭 Last Flow", flow)
+            except Exception as e:
+                self._send(f"/flow error: {e}")
+            return
+
+        # ---- CHECK (deep system diag) ----
+        if cmd == "/check":
+            if not self._diag_provider:
+                return self._send("Diag provider not wired.")
+            try:
+                d = self._diag_provider() or {}
+                self._send_long_json("🔎 Full system check", d)
+            except Exception as e:
+                self._send(f"Check error: {e}")
+            return
+
+        # ---- EQUITY ----
+        if cmd == "/equity":
+            if not self._equity_provider:
+                return self._send("Equity provider not wired.")
+            try:
+                eq = self._equity_provider() or {}
+                self._send_long_json("💰 Equity snapshot", eq)
+            except Exception as e:
+                self._send(f"/equity error: {e}")
+            return
+
+        # ---- CONFIG ----
+        if cmd == "/config":
+            if not self._config_provider:
+                return self._send("Config provider not wired.")
+            try:
+                cfg = self._config_provider() or {}
+                self._send_long_json("⚙️ Config (subset)", cfg)
+            except Exception as e:
+                self._send(f"/config error: {e}")
+            return
 
         # ---- ACTIVES ----
         if cmd == "/active":
@@ -349,9 +415,9 @@ class TelegramController:
             i0, i1 = (page - 1) * page_size, min(n, page * page_size)
             lines = [f"📦 Active Orders (p{page}/{pages})"]
             for rec in acts[i0:i1]:
-                sym = getattr(rec, "symbol", "?")
-                side = getattr(rec, "side", "?")
-                qty = getattr(rec, "quantity", "?")
+                sym = getattr(rec, "symbol", getattr(rec, "tradingsymbol", "?"))
+                side = getattr(rec, "side", getattr(rec, "transaction_type", "?"))
+                qty = getattr(rec, "quantity", getattr(rec, "qty", "?"))
                 rid = getattr(rec, "order_id", getattr(rec, "record_id", "?"))
                 lines.append(f"• {sym} {side} qty={qty} id={rid}")
             return self._send("\n".join(lines))
@@ -420,10 +486,12 @@ class TelegramController:
                 lines = self._logs_provider(max(5, min(200, n))) or []
                 if not lines:
                     return self._send("No logs available.")
+                # safe chunking
                 block = "\n".join(lines[-n:])
-                if len(block) > 3500:
-                    block = block[-3500:]
-                return self._send("```text\n" + block + "\n```", parse_mode="Markdown")
+                while block:
+                    chunk = block[:3500]
+                    self._send(chunk)
+                    block = block[3500:]
             except Exception as e:
                 return self._send(f"Logs error: {e}")
 
@@ -444,39 +512,19 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 
-        # ---- CHECK (deep) ----
-        if cmd == "/check":
-            if not self._diag_provider:
-                return self._send("Diag provider not wired.")
-            try:
-                d = self._diag_provider() or {}
-                lines = ["🔍 Full system check"]
-                for c in d.get("checks", []):
-                    mark = "🟢" if c.get("ok") else "🔴"
-                    extra = c.get("hint") or c.get("detail") or ""
-                    if extra:
-                        lines.append(f"{mark} {c.get('name')} — {extra}")
-                    else:
-                        lines.append(f"{mark} {c.get('name')}")
-                if d.get("last_signal"):
-                    lines.append("📈 last_signal: present")
-                else:
-                    lines.append("📈 last_signal: none")
-                return self._send("\n".join(lines))
-            except Exception as e:
-                return self._send(f"Check error: {e}")
-
         # ---- EXECUTION TUNING ----
         if cmd == "/risk":
             if not args:
                 return self._send("Usage: /risk 0.5  (for 0.5%)")
             try:
-                pct = float(args[0])
+                val = float(args[0])
+                # accept 0.5 (percent) or 0.005 (fraction)
+                pct_fraction = val / 100.0 if val > 1 else val
                 if self._set_risk_pct:
-                    self._set_risk_pct(pct)
+                    self._set_risk_pct(pct_fraction)
                 else:
-                    setattr(settings.risk, "risk_per_trade", pct / 100.0)
-                return self._send(f"Risk per trade set to {pct:.2f}%.")
+                    setattr(settings.risk, "risk_per_trade", pct_fraction)
+                return self._send(f"Risk per trade set to {pct_fraction*100:.2f}%.")
             except Exception:
                 return self._send("Invalid number. Example: /risk 0.5")
 
@@ -488,20 +536,20 @@ class TelegramController:
                 self._toggle_trailing(val)
             else:
                 setattr(settings.executor, "enable_trailing", val)
-            return self._send(f"Trailing {'enabled' if val else 'disabled'}.")
+            return self._send(f"Trailing {'ON' if val else 'OFF'}.")
 
         if cmd == "/trailmult":
             if not args:
-                return self._send("Usage: /trailmult 1.8")
+                return self._send("Usage: /trailmult <x>")
             try:
-                v = float(args[0])
+                x = float(args[0])
                 if self._set_trailing_mult:
-                    self._set_trailing_mult(v)
+                    self._set_trailing_mult(x)
                 else:
-                    setattr(settings.executor, "trailing_atr_multiplier", v)
-                return self._send(f"Trailing ATR multiplier set to {v:.2f}.")
+                    setattr(settings.executor, "trailing_atr_multiplier", x)
+                return self._send(f"Trailing ATR multiplier set to {x}.")
             except Exception:
-                return self._send("Invalid number. Example: /trailmult 1.8")
+                return self._send("Invalid number. Example: /trailmult 1.4")
 
         if cmd == "/partial":
             if not args:
@@ -511,162 +559,143 @@ class TelegramController:
                 self._toggle_partial(val)
             else:
                 setattr(settings.executor, "partial_tp_enable", val)
-            return self._send(f"Partial TP {'enabled' if val else 'disabled'}.")
+            return self._send(f"Partial TP {'ON' if val else 'OFF'}.")
 
         if cmd == "/tp1":
             if not args:
-                return self._send("Usage: /tp1 40  (for 40% of qty)")
+                return self._send("Usage: /tp1 <ratio 0..1>")
             try:
-                pct = float(args[0])
+                r = float(args[0])
                 if self._set_tp1_ratio:
-                    self._set_tp1_ratio(pct)
+                    self._set_tp1_ratio(r)
                 else:
-                    setattr(settings.executor, "tp1_qty_ratio", pct / 100.0)
-                return self._send(f"TP1 set to {pct:.1f}%% of qty.")
+                    setattr(settings.executor, "tp1_qty_ratio", r)
+                return self._send(f"TP1 ratio set to {r:.2f}.")
             except Exception:
-                return self._send("Invalid number. Example: /tp1 40")
+                return self._send("Invalid number. Example: /tp1 0.50")
 
         if cmd == "/breakeven":
             if not args:
-                return self._send("Usage: /breakeven 2")
+                return self._send("Usage: /breakeven <ticks>")
             try:
-                ticks = int(args[0])
+                n = int(args[0])
                 if self._set_breakeven_ticks:
-                    self._set_breakeven_ticks(ticks)
+                    self._set_breakeven_ticks(n)
                 else:
-                    setattr(settings.executor, "breakeven_ticks", ticks)
-                return self._send(f"Breakeven hop set to {ticks} ticks.")
+                    setattr(settings.executor, "breakeven_ticks", n)
+                return self._send(f"Breakeven ticks set to {n}.")
             except Exception:
-                return self._send("Invalid number. Example: /breakeven 2")
+                return self._send("Invalid integer. Example: /breakeven 2")
 
         # ---- STRATEGY TUNING ----
         if cmd == "/minscore":
             if not args:
-                return self._send("Usage: /minscore 5")
+                return self._send("Usage: /minscore <n>")
             try:
-                v = int(args[0])
+                n = int(args[0])
                 if self._set_min_score:
-                    self._set_min_score(v)
+                    self._set_min_score(n)
                 else:
-                    setattr(settings.strategy, "min_signal_score", v)
-                return self._send(f"min_signal_score → {v}")
+                    setattr(settings.strategy, "min_signal_score", n)
+                return self._send(f"Min signal score set to {n}.")
             except Exception:
-                return self._send("Invalid number.")
+                return self._send("Invalid integer. Example: /minscore 3")
 
         if cmd == "/conf":
             if not args:
-                return self._send("Usage: /conf 6")
+                return self._send("Usage: /conf <0..100>")
             try:
-                v = float(args[0])
+                x = float(args[0])
                 if self._set_conf_threshold:
-                    self._set_conf_threshold(v)
+                    self._set_conf_threshold(x)
                 else:
-                    setattr(settings.strategy, "confidence_threshold", v)
-                return self._send(f"confidence_threshold → {v:.2f}")
+                    setattr(settings.strategy, "confidence_threshold", x)
+                return self._send(f"Confidence threshold set to {x:.1f}.")
             except Exception:
-                return self._send("Invalid number.")
+                return self._send("Invalid number. Example: /conf 55")
 
         if cmd == "/atrp":
             if not args:
-                return self._send("Usage: /atrp 14")
+                return self._send("Usage: /atrp <period>")
             try:
-                v = int(args[0])
+                n = int(args[0])
                 if self._set_atr_period:
-                    self._set_atr_period(v)
+                    self._set_atr_period(n)
                 else:
-                    setattr(settings.strategy, "atr_period", v)
-                return self._send(f"atr_period → {v}")
+                    setattr(settings.strategy, "atr_period", n)
+                return self._send(f"ATR period set to {n}.")
             except Exception:
-                return self._send("Invalid number.")
+                return self._send("Invalid integer. Example: /atrp 14")
 
         if cmd == "/slmult":
             if not args:
-                return self._send("Usage: /slmult 1.5")
+                return self._send("Usage: /slmult <x>")
             try:
-                v = float(args[0])
+                x = float(args[0])
                 if self._set_sl_mult:
-                    self._set_sl_mult(v)
+                    self._set_sl_mult(x)
                 else:
-                    setattr(settings.strategy, "atr_sl_multiplier", v)
-                return self._send(f"SL multiplier → {v:.2f}")
+                    setattr(settings.strategy, "atr_sl_multiplier", x)
+                return self._send(f"SL ATR multiplier set to {x}.")
             except Exception:
-                return self._send("Invalid number.")
+                return self._send("Invalid number. Example: /slmult 1.3")
 
         if cmd == "/tpmult":
             if not args:
-                return self._send("Usage: /tpmult 3.0")
+                return self._send("Usage: /tpmult <x>")
             try:
-                v = float(args[0])
+                x = float(args[0])
                 if self._set_tp_mult:
-                    self._set_tp_mult(v)
+                    self._set_tp_mult(x)
                 else:
-                    setattr(settings.strategy, "atr_tp_multiplier", v)
-                return self._send(f"TP multiplier → {v:.2f}")
+                    setattr(settings.strategy, "atr_tp_multiplier", x)
+                return self._send(f"TP ATR multiplier set to {x}.")
             except Exception:
-                return self._send("Invalid number.")
+                return self._send("Invalid number. Example: /tpmult 2.2")
 
         if cmd == "/trend":
-            if len(args) != 2:
-                return self._send("Usage: /trend <tp_boost> <sl_relax>  (e.g., /trend 0.6 0.2)")
+            if len(args) < 2:
+                return self._send("Usage: /trend <tp_boost> <sl_relax>")
             try:
                 tp_boost = float(args[0]); sl_relax = float(args[1])
                 if self._set_trend_boosts:
                     self._set_trend_boosts(tp_boost, sl_relax)
-                else:
-                    setattr(settings.strategy, "trend_tp_boost", tp_boost)
-                    setattr(settings.strategy, "trend_sl_relax", sl_relax)
-                return self._send(f"Trend boosts → tp+{tp_boost}, sl+{sl_relax}")
+                return self._send(f"Trend boosts set: tp+{tp_boost}, slx{sl_relax}.")
             except Exception:
-                return self._send("Invalid numbers.")
+                return self._send("Invalid numbers. Example: /trend 0.3 0.2")
 
         if cmd == "/range":
-            if len(args) != 2:
-                return self._send("Usage: /range <tp_tighten> <sl_tighten>  (e.g., /range -0.4 -0.2)")
+            if len(args) < 2:
+                return self._send("Usage: /range <tp_tighten> <sl_tighten>")
             try:
-                tp_t = float(args[0]); sl_t = float(args[1])
+                tp_tight = float(args[0]); sl_tight = float(args[1])
                 if self._set_range_tighten:
-                    self._set_range_tighten(tp_t, sl_t)
-                else:
-                    setattr(settings.strategy, "range_tp_tighten", tp_t)
-                    setattr(settings.strategy, "range_sl_tighten", sl_t)
-                return self._send(f"Range tighten → tp{tp_t:+}, sl{sl_t:+}")
+                    self._set_range_tighten(tp_tight, sl_tight)
+                return self._send(f"Range tighten set: tp-{tp_tight}, sl-{sl_tight}.")
             except Exception:
-                return self._send("Invalid numbers.")
+                return self._send("Invalid numbers. Example: /range 0.2 0.1")
 
-        # ---- LAST SIGNAL (optional) ----
+        # ---- SIZING TEST ----
+        if cmd == "/sizingtest":
+            if not self._sizing_test_provider:
+                return self._send("Sizing test provider not wired.")
+            if len(args) < 2:
+                return self._send("Usage: /sizingtest <entry> <sl>")
+            try:
+                entry = float(args[0]); sl = float(args[1])
+                result = self._sizing_test_provider(entry, sl) or {}
+                self._send_long_json("📐 Sizing Test", result)
+            except Exception as e:
+                return self._send(f"Sizing test error: {e}")
+
+        # ---- LAST SIGNAL (optional legacy) ----
         if cmd == "/last":
             if not self._last_signal_provider:
-                return self._send("Last-signal provider not wired.")
+                return self._send("No last-signal provider wired.")
             try:
-                s = self._last_signal_provider()
-                return self._send("```json\n" + json.dumps(s or {}, indent=2) + "\n```", parse_mode="Markdown")
+                ls = self._last_signal_provider()
+                if not ls:
+                    return self._send("No last signal.")
+                self._send_long_json("📈 Last signal", ls)
             except Exception as e:
-                return self._send(f"Last-signal error: {e}")
-
-        # fallback
-        return self._send(f"Unknown command: {cmd}")
-
-
-# --- add near the top of TelegramController.__init__ signature ---
-        runner_tick_mock: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
-
-# --- store it in __init__ ---
-        self._runner_tick_mock = runner_tick_mock
-
-# --- in _handle_update(), add a handler (below /tick and above /logs is fine) ---
-        # ---- TICK (MOCK) ----
-        if cmd == "/tickmock":
-            if not self._runner_tick_mock:
-                return self._send("Mock tick not wired.")
-            try:
-                res = self._runner_tick_mock()
-                if res and res.get("signal_ok"):
-                    msg = "✅ Mock tick: signal ✓, sizing ✓\n"
-                    msg += f"{res.get('side')} lots={res.get('lots')} sl={res.get('sl_points'):.2f} tp={res.get('tp_points'):.2f}"
-                elif res and res.get("signal_ok"):
-                    msg = "ℹ️ Mock tick: signal ✓, sizing 0 (not affordable)."
-                else:
-                    msg = "Mock tick: no signal."
-                return self._send(msg)
-            except Exception as e:
-                return self._send(f"Mock tick error: {e}")
+                return self._send(f"/last error: {e}")
