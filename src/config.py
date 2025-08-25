@@ -8,12 +8,13 @@ from pydantic import BaseModel, Field, validator
 # ===== Sub-models =====
 
 class ZerodhaSettings(BaseModel):
-    api_key: str = Field(default="")
-    api_secret: str = Field(default="")
-    access_token: str = Field(default="")
+    api_key: str = ""
+    api_secret: str = ""
+    access_token: str = ""
 
 
 class TelegramSettings(BaseModel):
+    # Telegram is compulsory — keep the flag, but enforce True in validation
     enabled: bool = True
     bot_token: str = ""
     chat_id: str = ""
@@ -142,7 +143,7 @@ class ExecutorSettings(BaseModel):
     enable_trailing: bool = True
     trailing_atr_multiplier: float = 1.4
     fee_per_lot: float = 20.0
-    slippage_ticks: int = 1            # paper-mode math/logs only
+    slippage_ticks: int = 1
 
 
 class HealthSettings(BaseModel):
@@ -178,7 +179,6 @@ class AppSettings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
-        # STRATEGY__EMA_FAST → settings.strategy.ema_fast
         env_nested_delimiter = "__"
 
 
@@ -188,7 +188,7 @@ settings = AppSettings()
 def validate_critical_settings() -> None:
     errors = []
 
-    # Broker creds required only in live mode
+    # Broker creds — only if live
     if settings.enable_live_trading:
         if not settings.zerodha.api_key:
             errors.append("ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true")
@@ -197,21 +197,22 @@ def validate_critical_settings() -> None:
         if not settings.zerodha.access_token:
             errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
 
-    # Telegram only if enabled
-    if settings.telegram.enabled:
-        if not settings.telegram.bot_token:
-            errors.append("TELEGRAM__BOT_TOKEN is required when TELEGRAM__ENABLED=true")
-        if not settings.telegram.chat_id:
-            errors.append("TELEGRAM__CHAT_ID is required when TELEGRAM__ENABLED=true")
+    # Telegram is compulsory
+    if not settings.telegram.enabled:
+        errors.append("TELEGRAM__ENABLED must be true (Telegram is mandatory)")
+    if not settings.telegram.bot_token:
+        errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
+    if not settings.telegram.chat_id:
+        errors.append("TELEGRAM__CHAT_ID is required (Telegram is mandatory)")
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
-# Validate at import
+# validate at import
 validate_critical_settings()
 
-# ---- Optional shorthand aliases for legacy code (read-only) ----
+# Convenience aliases (some legacy code expects these)
 risk_default_equity = settings.risk.default_equity
 risk_risk_per_trade = settings.risk.risk_per_trade
 instruments_nifty_lot_size = settings.instruments.nifty_lot_size
