@@ -3,435 +3,484 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional, Tuple, Literal
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
 from src.config import settings
-from src.utils.atr_helper import compute_atr, atr_sl_tp_points, latest_atr_value
-from src.utils.indicators import calculate_vwap
-from src.signals.regime_detector import detect_market_regime
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.execution.order_executor import OrderExecutor
 
-logger = logging.getLogger(__name__)
+# Optional broker SDK
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:  # pragma: no cover
+    KiteConnect = None  # type: ignore
 
-# --- 60s log throttle (avoid spam in deploy logs) ---
-_LOG_EVERY = 60.0
-_last_log_ts = {
-    "drop_strict": 0.0,
-    "drop_relaxed": 0.0,
-    "auto_relax": 0.0,
-    "generated": 0.0,
-}
-
-
-def _log_throttled(key: str, level: int, msg: str, *args) -> None:
-    now = time.time()
-    if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
-        _last_log_ts[key] = now
-        logger.log(level, msg, *args)
+# Data source
+try:
+    from src.data.source import LiveKiteSource  # type: ignore
+except Exception:  # pragma: no cover
+    LiveKiteSource = None  # type: ignore
 
 
-Side = Literal["BUY", "SELL"]
-SignalOutput = Optional[Dict[str, Any]]
+@dataclass
+class RiskState:
+    trading_day: datetime
+    trades_today: int = 0
+    consecutive_losses: int = 0
+    day_realized_loss: float = 0.0
+    day_realized_pnl: float = 0.0
 
 
-class EnhancedScalpingStrategy:
+class StrategyRunner:
     """
-    Regime‑aware scalping strategy (runner‑aligned).
-
-    Inputs
-    ------
-    - df: OHLCV dataframe (ascending index). In current wiring this is SPOT.
-    - current_tick: optional dict; may contain 'ltp', 'spot_ltp', 'option_ltp'
-    - current_price: explicit option LTP (overrides tick if provided)
-    - spot_df: optional SPOT dataframe (if 'df' were option candles in the future)
-
-    Output (executor expects)
-    -------------------------
-    dict with keys:
-      action, option_type, strike, entry_price, stop_loss, take_profit, rr
-    plus diagnostics (score, confidence, regime, reasons, etc.)
+    Orchestrates: data → signal → risk gates → sizing → execution.
+    TelegramController is REQUIRED but constructed/wired in main.py; we only consume it.
     """
+    def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.kite = kite
 
-    def __init__(
-        self,
-        *,
-        ema_fast: int = 9,
-        ema_slow: int = 21,
-        rsi_period: int = 14,
-        adx_period: int = 14,
-        adx_trend_strength: int = 20,
-    ) -> None:
-        strat = getattr(settings, "strategy", object())
+        # Telegram is mandatory in this app
+        if telegram_controller is None:
+            raise RuntimeError("TelegramController must be provided to StrategyRunner.")
+        # keep both names for back-compat with old code
+        self.telegram = telegram_controller
+        self.telegram_controller = telegram_controller
 
-        # Core lookbacks
-        self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
-        self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
-        self.rsi_period = int(getattr(strat, "rsi_period", rsi_period))
-        self.adx_period = int(getattr(strat, "adx_period", adx_period))
-        self.adx_trend_strength = int(getattr(strat, "adx_trend_strength", adx_trend_strength))
-        self.atr_period = int(getattr(strat, "atr_period", 14))
+        # Core components
+        self.strategy = EnhancedScalpingStrategy()
+        self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
 
-        # Regime shaping (add to multipliers; can be negative)
-        self.trend_tp_boost = float(getattr(strat, "trend_tp_boost", 0.6))
-        self.trend_sl_relax = float(getattr(strat, "trend_sl_relax", 0.2))
-        self.range_tp_tighten = float(getattr(strat, "range_tp_tighten", -0.4))
-        self.range_sl_tighten = float(getattr(strat, "range_sl_tighten", -0.2))
+        # Data source (live or shadow)
+        self.data_source = None
+        if LiveKiteSource is not None:
+            try:
+                self.data_source = LiveKiteSource(kite=self.kite)
+                self.data_source.connect()
+                self.log.info("Data source initialized: LiveKiteSource")
+            except Exception as e:
+                self.log.warning(f"Data source init failed; proceeding without: {e}")
 
-        # Bars threshold for validity
-        self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
+        # Risk + equity cache
+        self.risk = RiskState(trading_day=self._today_ist())
+        self._equity_last_refresh_ts: float = 0.0
+        self._equity_cached_value: float = float(settings.risk.default_equity)
+        self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
 
-        # Confidence thresholds (config often 0..100; internal 0..~8)
-        raw_conf = float(getattr(strat, "confidence_threshold", 55))
-        raw_conf_rel = float(getattr(strat, "confidence_threshold_relaxed", max(0.0, raw_conf - 20)))
-        self.min_conf_strict = raw_conf / 10.0           # 55 -> 5.5
-        self.min_conf_relaxed = raw_conf_rel / 10.0
+        # Trading window
+        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
+        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
 
-        self.min_score_strict = int(getattr(strat, "min_signal_score", 3))
-        self.auto_relax_enabled = bool(getattr(strat, "auto_relax_enabled", True))
-        self.min_score_relaxed = int(getattr(strat, "min_signal_score_relaxed", max(2, self.min_score_strict - 1)))
+        self._paused: bool = False
+        self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
+        self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
 
-        # ATR & confidence shaping
-        self.base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.3))
-        self.base_tp_mult = float(getattr(strat, "atr_tp_multiplier", 2.2))
-        self.sl_conf_adj = float(getattr(strat, "sl_confidence_adj", 0.2))
-        self.tp_conf_adj = float(getattr(strat, "tp_confidence_adj", 0.3))
+        self.log.info(
+            "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
+            settings.enable_live_trading, settings.risk.use_live_equity
+        )
 
-        # Exportable debug snapshot
-        self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
+    # ---------------- Main loop entry ----------------
 
-    # ---------- tech utils ----------
-    @staticmethod
-    def _ema(s: pd.Series, period: int) -> pd.Series:
-        period = max(1, int(period))
-        return pd.Series(pd.to_numeric(s, errors="coerce")).ewm(span=period, adjust=False).mean()
-
-    @staticmethod
-    def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
-        close = pd.Series(pd.to_numeric(close, errors="coerce"))
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-        avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-        rs = (avg_gain / (avg_loss.replace(0.0, 1e-9))).fillna(0.0)
-        return 100.0 - (100.0 / (1.0 + rs))
-
-    @staticmethod
-    def _extract_adx_columns(
-        spot_df: pd.DataFrame,
-    ) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
-        """Return (adx, di_plus, di_minus) from spot_df; tolerant to suffix (_{n}) naming."""
-        if spot_df is None or spot_df.empty:
-            return None, None, None
-        adx_cols = sorted([c for c in spot_df.columns if c.startswith("adx_")])
-        dip_cols = sorted([c for c in spot_df.columns if c.startswith("di_plus_")])
-        dim_cols = sorted([c for c in spot_df.columns if c.startswith("di_minus_")])
-        adx = spot_df[adx_cols[-1]] if adx_cols else spot_df.get("adx")
-        di_plus = spot_df[dip_cols[-1]] if dip_cols else spot_df.get("di_plus")
-        di_minus = spot_df[dim_cols[-1]] if dim_cols else spot_df.get("di_minus")
-        return adx, di_plus, di_minus
-
-    # ---------- thresholds ----------
-    def _score_confidence(self, score: int) -> float:
-        # compact 0..8-ish scale mapped to thresholds above
-        if score >= 8:
-            return 8.0
-        if score >= 6:
-            return 6.0
-        if score >= 4:
-            return 2.5
-        return 0.0
-
-    def _passes(self, score: int, conf: float, *, strict: bool) -> bool:
-        if strict:
-            return (score >= self.min_score_strict) and (conf >= self.min_conf_strict)
-        return (score >= self.min_score_relaxed) and (conf >= self.min_conf_relaxed)
-
-    # ---------- debug export ----------
-    def get_debug(self) -> Dict[str, Any]:
-        return dict(self._last_debug)
-
-    # ---------- main ----------
-    def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_tick: Optional[Dict[str, Any]] = None,
-        current_price: Optional[float] = None,
-        spot_df: Optional[pd.DataFrame] = None,
-    ) -> SignalOutput:
-        dbg: Dict[str, Any] = {"reason_block": None}
+    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
+        flow: Dict[str, Any] = {
+            "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
+            "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
+            "executed": False, "reason_block": None,
+        }
 
         try:
-            # ---- basic guards
-            if df is None or len(df) < self.min_bars_for_signal:
-                dbg["reason_block"] = "insufficient_bars"
-                self._last_debug = dbg
-                return None
+            if not self._within_trading_window() and not settings.allow_offhours_testing:
+                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
+            flow["within_window"] = True
 
-            # ensure required columns exist and numeric
-            need = {"open", "high", "low", "close"}
-            if not need.issubset(df.columns):
-                dbg["reason_block"] = "missing_ohlc_columns"
-                self._last_debug = dbg
-                return None
-            df = df.copy()
-            for c in ("open", "high", "low", "close", "volume"):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-            df = df.dropna(subset=["close"])
-            if df.empty:
-                dbg["reason_block"] = "no_valid_prices"
-                self._last_debug = dbg
-                return None
-            if not df.index.is_monotonic_increasing:
-                df = df.sort_index()
+            if self._paused:
+                flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
 
-            # Default spot_df to df (current wiring provides SPOT df)
-            if spot_df is None:
-                spot_df = df
+            self._ensure_day_state()
+            self._refresh_equity_if_due()
 
-            # ---- derive spot last and option current price
-            spot_last = None
-            if current_tick and isinstance(current_tick, dict):
-                spot_last = current_tick.get("spot_ltp", None)
-            if spot_last is None and spot_df is not None and len(spot_df) > 0:
-                spot_last = float(pd.to_numeric(spot_df["close"].iloc[-1], errors="coerce"))
+            # ---- data
+            df = self._fetch_spot_ohlc()
+            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
+                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
+            flow["data_ok"] = True
 
-            if current_price is None and current_tick:
-                current_price = current_tick.get("option_ltp", None)
-            if current_price is None and current_tick:
-                current_price = current_tick.get("ltp", None)
-            if current_price is None:
-                current_price = spot_last  # last resort to keep flow running
+            # ---- signal
+            signal = self.strategy.generate_signal(df, current_tick=tick)
+            self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
+            if not signal:
+                flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
+                self._last_flow_debug = flow; return
+            flow["signal_ok"] = True
 
-            if current_price is None or float(current_price) <= 0:
-                dbg["reason_block"] = "invalid_current_price"
-                self._last_debug = dbg
-                return None
+            # ---- RR minimum
+            rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
+            rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
+            if rr_min and rr_val and rr_val < rr_min:
+                flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
+                flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
+                self._last_flow_debug = flow; return
 
-            # ---- trend/momentum on df (SPOT)
-            ema_fast = self._ema(df["close"], self.ema_fast)
-            ema_slow = self._ema(df["close"], self.ema_slow)
-            if len(ema_fast) < 2 or len(ema_slow) < 2:
-                dbg["reason_block"] = "ema_insufficient"
-                self._last_debug = dbg
-                return None
+            # ---- gates
+            gates = self._risk_gates_for(signal)
+            flow["risk_gates"] = gates
+            if not all(gates.values()):
+                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
 
-            ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
-            ema_cross_up = bool((ema_fast.iloc[-2] <= ema_slow.iloc[-2]) and ema_bias_up)
-            ema_cross_down = bool((ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up)
+            # ---- sizing
+            qty, diag = self._calculate_quantity_diag(
+                entry=float(signal["entry_price"]),
+                stop=float(signal["stop_loss"]),
+                lot_size=int(settings.instruments.nifty_lot_size),
+                equity=self._active_equity(),
+            )
+            flow["sizing"] = diag; flow["qty"] = int(qty)
+            if qty <= 0:
+                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
 
-            score = 0
-            reasons: list[str] = []
-
-            if ema_cross_up:
-                score += 2
-                reasons.append(f"EMA fast({self.ema_fast}) crossed above slow({self.ema_slow}).")
-            elif ema_cross_down:
-                score += 2
-                reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
-
-            rsi_series = self._rsi(df["close"], self.rsi_period)
-            rsi_val = float(rsi_series.iloc[-1])
-            if ema_bias_up and rsi_val > 50:
-                score += 1
-                reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
-            elif not ema_bias_up and rsi_val < 50:
-                score += 1
-                reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
-
-            # ---- SPOT regime / VWAP filters
-            regime = None
-            if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
-                adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
-                try:
-                    regime = detect_market_regime(
-                        df=spot_df,
-                        adx=adx_series,
-                        di_plus=di_plus_series,
-                        di_minus=di_minus_series,
-                        adx_trend_strength=self.adx_trend_strength,
-                    )
-                except Exception:
-                    regime = None
-
-                if regime == "trend_up" and ema_bias_up:
-                    score += 2
-                    reasons.append("Spot ADX trend_up (aligned).")
-                elif regime == "trend_down" and not ema_bias_up:
-                    score += 2
-                    reasons.append("Spot ADX trend_down (aligned).")
-                elif regime == "range":
-                    reasons.append("Spot ADX range.")
-
-            if spot_df is not None and len(spot_df) > 0:
-                try:
-                    vwap_series = calculate_vwap(spot_df)
-                    if vwap_series is not None and len(vwap_series) > 0:
-                        vwap_val = float(vwap_series.iloc[-1])
-                        current_spot_price = float(pd.to_numeric(spot_df["close"].iloc[-1], errors="coerce"))
-                        if ema_bias_up and current_spot_price > vwap_val:
-                            score += 1
-                            reasons.append("Spot > VWAP (risk-on).")
-                        elif not ema_bias_up and current_spot_price < vwap_val:
-                            score += 1
-                            reasons.append("Spot < VWAP (risk-off).")
-                except Exception:
-                    # VWAP is advisory; ignore failures
-                    pass
-
-            # ---- Score -> confidence; apply thresholds
-            confidence = self._score_confidence(score)
-            strict_ok = self._passes(score, confidence, strict=True)
-            relaxed_ok = self._passes(score, confidence, strict=False)
-
-            if not strict_ok:
-                _log_throttled(
-                    "drop_strict",
-                    logging.INFO,
-                    "Signal drop (strict): confidence(%.2f) < threshold(%.2f) | score=%d",
-                    confidence,
-                    self.min_conf_strict,
-                    score,
+            # ---- execution (supports both our newer and older ZIP styles)
+            placed_ok = False
+            if hasattr(self.executor, "place_order"):
+                placed_ok = bool(self.executor.place_order({
+                    "action": signal["action"],
+                    "quantity": int(qty),
+                    "entry_price": float(signal["entry_price"]),
+                    "stop_loss": float(signal["stop_loss"]),
+                    "take_profit": float(signal["take_profit"]),
+                    "strike": float(signal["strike"]),
+                    "option_type": signal["option_type"],
+                }))
+            elif hasattr(self.executor, "place_entry_order"):
+                side = "BUY" if str(signal["action"]).upper() == "BUY" else "SELL"
+                symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
+                token = int(getattr(settings.instruments, "instrument_token", 0))
+                oid = self.executor.place_entry_order(
+                    token=token, symbol=symbol, side=side,
+                    quantity=int(qty), price=float(signal["entry_price"])
                 )
-                if not self.auto_relax_enabled or not relaxed_ok:
-                    if not relaxed_ok:
-                        _log_throttled(
-                            "drop_relaxed",
-                            logging.INFO,
-                            "Signal drop (relaxed): confidence(%.2f) < threshold(%.2f) | score=%d",
-                            confidence,
-                            self.min_conf_relaxed,
-                            score,
+                placed_ok = bool(oid)
+                if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
+                    try:
+                        self.executor.setup_gtt_orders(
+                            record_id=oid, sl_price=float(signal["stop_loss"]), tp_price=float(signal["take_profit"])
                         )
-                        dbg["reason_block"] = "confidence_below_threshold"
-                    else:
-                        dbg["reason_block"] = "auto_relax_disabled"
-                    self._last_debug = {**dbg, "score": score, "confidence": confidence, "reasons": reasons}
-                    return None
-                _log_throttled(
-                    "auto_relax",
-                    logging.INFO,
-                    "Auto‑relax applied: min_score->%d, confidence_threshold->%.2f",
-                    self.min_score_relaxed,
-                    self.min_conf_relaxed,
+                    except Exception as e:
+                        self.log.warning("setup_gtt_orders failed: %s", e)
+            else:
+                self.log.error("No known execution method found on OrderExecutor")
+
+            flow["executed"] = placed_ok
+            if not placed_ok:
+                flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
+
+            if placed_ok:
+                self.risk.trades_today += 1
+                self._notify(
+                    f"✅ Placed: {signal['action']} {qty} {signal['option_type']} {int(signal['strike'])} "
+                    f"@ {float(signal['entry_price']):.2f} (SL {float(signal['stop_loss']):.2f}, "
+                    f"TP {float(signal['take_profit']):.2f})"
                 )
 
-            # ---- ATR‑based SL/TP (on df; currently SPOT)
-            atr_series = compute_atr(df, period=self.atr_period)
-            atr_val = latest_atr_value(atr_series, default=0.0)
-            if atr_val is None or atr_val <= 0:
-                dbg["reason_block"] = "atr_unavailable"
-                self._last_debug = {**dbg, "score": score, "confidence": confidence, "reasons": reasons}
-                return None
-
-            sl_mult = max(0.2, float(self.base_sl_mult))
-            tp_mult = max(0.4, float(self.base_tp_mult))
-            if regime in ("trend_up", "trend_down"):
-                tp_mult += float(self.trend_tp_boost)
-                sl_mult += float(self.trend_sl_relax)
-                reasons.append(f"Regime boost: trend (tp+{self.trend_tp_boost}, sl+{self.trend_sl_relax}).")
-            elif regime == "range":
-                tp_mult += float(self.range_tp_tighten)
-                sl_mult += float(self.range_sl_tighten)
-                reasons.append(f"Regime tighten: range (tp{self.range_tp_tighten:+}, sl{self.range_sl_tighten:+}).")
-
-            base_sl = float(atr_val) * sl_mult
-            base_tp = float(atr_val) * tp_mult
-
-            sl_points, tp_points = atr_sl_tp_points(
-                base_sl_points=base_sl,
-                base_tp_points=base_tp,
-                atr_value=float(atr_val),
-                sl_mult=sl_mult,
-                tp_mult=tp_mult,
-                confidence=float(confidence),
-                sl_conf_adj=float(self.sl_conf_adj),
-                tp_conf_adj=float(self.tp_conf_adj),
-            )
-
-            side: Side = "BUY" if ema_bias_up else "SELL"
-            entry_price = float(current_price)
-            eps = 1e-4
-            if side == "BUY":
-                stop_loss = max(eps, entry_price - sl_points)
-                target = entry_price + tp_points
-            else:
-                stop_loss = max(eps, entry_price + sl_points)
-                target = entry_price - tp_points
-
-            # Option selection: nearest 50‑point ATM from spot
-            try:
-                s_last = float(spot_last) if spot_last is not None else float(df["close"].iloc[-1])
-            except Exception:
-                s_last = float(df["close"].iloc[-1])
-            strike = int(round(s_last / 50.0) * 50)
-            option_type = "CE" if side == "BUY" else "PE"
-            action = side
-
-            # RR
-            risk = abs(entry_price - stop_loss)
-            reward = abs(target - entry_price)
-            rr = round((reward / risk) if risk > 0 else 0.0, 2)
-
-            signal: Dict[str, Any] = {
-                # required by runner/executor
-                "action": action,
-                "option_type": option_type,
-                "strike": strike,
-                "entry_price": float(entry_price),
-                "stop_loss": float(stop_loss),
-                "take_profit": float(target),
-                "rr": rr,
-                # diagnostics
-                "side": side,
-                "confidence": float(confidence),
-                "sl_points": float(sl_points),
-                "tp_points": float(tp_points),
-                "score": int(score),
-                "target": float(target),
-                "reasons": reasons,
-                "regime": regime or "unknown",
-                "emas": {"fast": float(ema_fast.iloc[-1]), "slow": float(ema_slow.iloc[-1])},
-                "rsi": float(rsi_val),
-                "atr": float(atr_val),
-            }
-
-            _log_throttled(
-                "generated",
-                logging.INFO,
-                "Generated signal (%s): %s",
-                "relaxed" if (relaxed_ok and not strict_ok) else "strict",
-                {
-                    k: (round(v, 4) if isinstance(v, float) else v)
-                    for k, v in signal.items()
-                    if k not in ("reasons", "emas")
-                },
-            )
-
-            self._last_debug = {
-                "score": score,
-                "confidence": confidence,
-                "rr": rr,
-                "regime": regime or "unknown",
-                "ema_bias_up": ema_bias_up,
-                "reason_block": None,
-                "reasons": reasons[-6:],  # compact tail
-                "thresholds": {
-                    "min_score_strict": self.min_score_strict,
-                    "min_conf_strict": self.min_conf_strict,
-                    "min_score_relaxed": self.min_score_relaxed,
-                    "min_conf_relaxed": self.min_conf_relaxed,
-                },
-                "atr_val": float(atr_val),
-                "sl_mult": sl_mult,
-                "tp_mult": tp_mult,
-            }
-            return signal
+            self._last_flow_debug = flow
 
         except Exception as e:
-            dbg["reason_block"] = f"exception:{e.__class__.__name__}"
-            self._last_debug = dbg
-            logger.debug("generate_signal exception: %s", e, exc_info=True)
+            flow["reason_block"] = f"exception:{e.__class__.__name__}"
+            self._last_flow_debug = flow
+            self.log.exception("process_tick error: %s", e)
+
+    # ----- one‑shot tick used by Telegram
+    def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
+        prev = bool(getattr(settings, "allow_offhours_testing", False))
+        try:
+            if dry:
+                setattr(settings, "allow_offhours_testing", True)
+            self.process_tick(tick=None)
+            return dict(self._last_flow_debug)
+        finally:
+            setattr(settings, "allow_offhours_testing", prev)
+
+    def health_check(self) -> None:
+        self._refresh_equity_if_due(silent=True)
+        try:
+            if hasattr(self.executor, "health_check"):
+                self.executor.health_check()
+        except Exception as e:
+            self.log.warning("Executor health check warning: %s", e)
+
+    def shutdown(self) -> None:
+        try:
+            if hasattr(self.executor, "shutdown"):
+                self.executor.shutdown()
+        except Exception:
+            pass
+
+    # ---------------- Equity & risk ----------------
+
+    def _refresh_equity_if_due(self, silent: bool = False) -> None:
+        now = time.time()
+        if not settings.risk.use_live_equity:
+            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+            return
+        if (now - self._equity_last_refresh_ts) < int(settings.risk.equity_refresh_seconds):
+            return
+
+        new_eq = None
+        if self.kite is not None:
+            try:
+                margins = self.kite.margins()  # type: ignore[attr-defined]
+                if isinstance(margins, dict):
+                    for k in ("equity", "available", "net", "final", "cash"):
+                        v = margins.get(k)
+                        if isinstance(v, (int, float)):
+                            new_eq = float(v); break
+                if new_eq is None:
+                    new_eq = float(settings.risk.default_equity)
+            except Exception as e:
+                if not silent:
+                    self.log.warning("Equity refresh failed; using fallback: %s", e)
+
+        self._equity_cached_value = float(new_eq) if (isinstance(new_eq, (int, float)) and new_eq > 0) \
+            else float(settings.risk.default_equity)
+        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+        self._equity_last_refresh_ts = now
+
+        if not silent:
+            self.log.info(
+                "Equity snapshot: ₹%s | Max daily loss: ₹%s",
+                f"{self._equity_cached_value:,.0f}", f"{self._max_daily_loss_rupees:,.0f}"
+            )
+
+    def _active_equity(self) -> float:
+        return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
+
+    def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
+        gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
+                 "trades_per_day": True, "sl_valid": True}
+        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
+            gates["equity_floor"] = False
+        if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
+            gates["daily_drawdown"] = False
+        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
+            gates["loss_streak"] = False
+        if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
+            gates["trades_per_day"] = False
+        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
+            gates["sl_valid"] = False
+        return gates
+
+    def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
+        risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
+        sl_points = abs(float(entry) - float(stop))
+        rupee_risk_per_lot = sl_points * int(lot_size)
+
+        if rupee_risk_per_lot <= 0:
+            return 0, {
+                "entry": entry, "stop": stop, "equity": equity,
+                "risk_per_trade": settings.risk.risk_per_trade,
+                "sl_points": sl_points, "rupee_risk_per_lot": rupee_risk_per_lot,
+                "lots_raw": 0, "lots_final": 0, "exposure_notional_est": 0.0, "max_notional_cap": 0.0,
+            }
+
+        lots_raw = int(risk_rupees // rupee_risk_per_lot)
+        lots = max(lots_raw, int(settings.instruments.min_lots))
+        lots = min(lots, int(settings.instruments.max_lots))
+
+        notional = float(entry) * int(lot_size) * lots
+        max_notional = float(equity) * float(settings.risk.max_position_size_pct)
+        if max_notional > 0 and notional > max_notional:
+            denom = float(entry) * int(lot_size)
+            lots_cap = int(max_notional // denom) if denom > 0 else 0
+            lots = max(min(lots_cap, lots), 0)
+
+        qty = lots * int(lot_size)
+        diag = {
+            "entry": round(entry, 4), "stop": round(stop, 4), "equity": round(float(equity), 2),
+            "risk_per_trade": float(settings.risk.risk_per_trade), "lot_size": int(lot_size),
+            "sl_points": round(sl_points, 4), "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
+            "lots_raw": int(lots_raw), "lots_final": int(lots),
+            "exposure_notional_est": round(notional, 2), "max_notional_cap": round(max_notional, 2),
+        }
+        return int(qty), diag
+
+    # ---------------- data helpers ----------------
+
+    def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
+        """
+        Build a spot OHLC frame using LiveKiteSource.fetch_ohlc with the configured lookback.
+        """
+        if self.data_source is None:
             return None
+
+        try:
+            lookback = int(settings.data.lookback_minutes)
+            end = self._now_ist().replace(second=0, microsecond=0)
+            start = end - timedelta(minutes=lookback)
+            token = int(getattr(settings.instruments, "instrument_token", 0))
+            if token <= 0:
+                return None
+            df = self.data_source.fetch_ohlc(
+                token=token,
+                start=start,
+                end=end,
+                timeframe=str(settings.data.timeframe),
+            )
+            need = {"open", "high", "low", "close", "volume"}
+            if df is None or not isinstance(df, pd.DataFrame) or not need.issubset(df.columns):
+                return None
+            return df.sort_index()
+        except Exception as e:
+            self.log.warning("OHLC fetch failed: %s", e)
+            return None
+
+    # ---------------- session/window ----------------
+
+    def _ensure_day_state(self) -> None:
+        today = self._today_ist()
+        if today.date() != self.risk.trading_day.date():
+            self.risk = RiskState(trading_day=today)
+            self._notify("🔁 New trading day — risk counters reset")
+
+    def _within_trading_window(self) -> bool:
+        now_ist = self._now_ist().time()
+        return self._start_time <= now_ist <= self._end_time
+
+    @staticmethod
+    def _parse_hhmm(text: str):
+        from datetime import datetime as _dt
+        return _dt.strptime(text, "%H:%M").time()
+
+    @staticmethod
+    def _now_ist():
+        return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+    @staticmethod
+    def _today_ist():
+        now = StrategyRunner._now_ist()
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # ---------------- Telegram helpers ----------------
+
+    def perform_full_check(self) -> Dict[str, Any]:
+        """
+        Returns the structured checklist consumed by Telegram /check and /diag.
+        Each item is named after a module/flow stage.
+        """
+        checks = []
+
+        # config sanity
+        cfg_ok = True
+        try:
+            cfg_ok = bool(settings.telegram.bot_token and settings.telegram.chat_id)
+        except Exception:
+            cfg_ok = False
+        checks.append({"name": "config.py", "ok": cfg_ok, "hint": None if cfg_ok else "missing TELEGRAM creds"})
+
+        # telegram controller wiring
+        tg_ok = bool(self.telegram_controller)
+        checks.append({"name": "notifications/telegram_controller.py", "ok": tg_ok})
+
+        # data source
+        ds_ok = self.data_source is not None
+        checks.append({"name": "data/source.py", "ok": ds_ok, "hint": None if ds_ok else "LiveKiteSource not init"})
+
+        # strategy module
+        strat_ok = isinstance(self.strategy, EnhancedScalpingStrategy)
+        checks.append({"name": "strategies/scalping_strategy.py", "ok": strat_ok})
+
+        # executor wiring
+        exec_ok = isinstance(self.executor, OrderExecutor)
+        checks.append({"name": "execution/order_executor.py", "ok": exec_ok})
+
+        # broker
+        broker_ok = self.kite is not None if settings.enable_live_trading else True
+        checks.append({
+            "name": "broker/kiteconnect",
+            "ok": broker_ok,
+            "hint": None if broker_ok else "not connected (check access token)"
+        })
+
+        # flow/window & data
+        within = self._within_trading_window() or bool(getattr(settings, "allow_offhours_testing", False))
+        df = self._fetch_spot_ohlc()
+        data_ok = (df is not None and not df.empty and len(df) >= getattr(settings.strategy, "min_bars_for_signal", 50))
+        checks.append({"name": "flow/window & data", "ok": (within and data_ok),
+                       "hint": None if (within and data_ok) else ("off-hours" if not within else "insufficient OHLC")})
+
+        # risk/limits
+        risk_ok = True
+        gates = self._risk_gates_for({
+            "entry_price": 100.0,
+            "stop_loss": 99.0
+        })
+        risk_ok = all(gates.values())
+        checks.append({"name": "risk/limits", "ok": risk_ok})
+
+        ok = all(i["ok"] for i in checks)
+        return {"ok": ok, "checks": checks, "last_signal": self._last_signal_debug}
+
+    def get_last_signal_debug(self) -> Dict[str, Any]:
+        return dict(self._last_signal_debug)
+
+    def get_last_flow_debug(self) -> Dict[str, Any]:
+        # Prefer the richer structured check
+        try:
+            return self.perform_full_check()
+        except Exception:
+            return dict(self._last_flow_debug)
+
+    def get_equity_snapshot(self) -> Dict[str, Any]:
+        return {
+            "use_live_equity": bool(settings.risk.use_live_equity),
+            "equity_cached": round(float(self._equity_cached_value), 2),
+            "equity_floor": float(settings.risk.min_equity_floor),
+            "max_daily_loss_rupees": round(float(self._max_daily_loss_rupees), 2),
+            "refresh_seconds": int(settings.risk.equity_refresh_seconds),
+        }
+
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        return {
+            "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+            "live_trading": bool(settings.enable_live_trading),
+            "broker": "Kite" if self.kite is not None else "Paper",
+            "within_window": self._within_trading_window(),
+            "paused": self._paused,
+            "trades_today": self.risk.trades_today,
+            "consecutive_losses": self.risk.consecutive_losses,
+            "day_realized_loss": round(self.risk.day_realized_loss, 2),
+            "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
+            "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
+        }
+
+    def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
+        qty, diag = self._calculate_quantity_diag(
+            entry=float(entry), stop=float(sl),
+            lot_size=int(settings.instruments.nifty_lot_size),
+            equity=self._active_equity(),
+        )
+        return {"qty": int(qty), "diag": diag}
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
+
+    def set_live_mode(self, val: bool) -> None:
+        try:
+            setattr(settings, "enable_live_trading", bool(val))
+        except Exception:
+            pass
+
+    def _notify(self, msg: str) -> None:
+        logging.info(msg)
+        try:
+            if self.telegram:
+                self.telegram.send_message(msg)
+        except Exception:
+            pass
