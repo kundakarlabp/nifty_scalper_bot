@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from src.config import settings
@@ -34,6 +35,16 @@ def _setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    # File logs → support /logs from Telegram
+    try:
+        fh = RotatingFileHandler("trading_bot.log", maxBytes=2_000_000, backupCount=3)
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        logging.getLogger().addHandler(fh)
+    except Exception:
+        # Non-fatal; console-only logging still works
+        pass
 
 
 # -----------------------------
@@ -99,12 +110,12 @@ def _wire_real_telegram(runner: StrategyRunner):
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.get_last_flow_debug,
-        logs_provider=_tail_logs,  # enables /logs [n]
+        diag_provider=runner.get_system_diag,          # << detailed /diag and /check
+        logs_provider=_tail_logs,                      # enables /logs [n]
         last_signal_provider=runner.get_last_signal_debug,
         runner_pause=runner.pause,
         runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,        # accepts dry=bool in our runner
+        runner_tick=runner.runner_tick,                # accepts dry=bool in our runner
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
         set_risk_pct=None,
         toggle_trailing=None,
