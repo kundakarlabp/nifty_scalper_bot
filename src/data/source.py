@@ -22,23 +22,13 @@ except Exception:  # pragma: no cover
 # ------------------------------- Base Interface --------------------------------
 
 class DataSource:
-    """
-    Minimal interface used by the runner/executor.
-    """
+    """Minimal interface used by the runner/executor."""
 
     def connect(self) -> None:
-        """Connect or noop."""
         return
 
-    def is_ready(self) -> bool:
-        """Optional readiness check used by /diag."""
-        return True
-
     def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
-        """
-        Return OHLC DataFrame with columns: open, high, low, close, volume
-        Index or 'date' column will be parsed to pandas Timestamps (naive/IST OK).
-        """
+        """Return OHLC DataFrame with columns: open, high, low, close, volume."""
         raise NotImplementedError
 
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
@@ -54,12 +44,8 @@ def _now_ist_naive() -> datetime:
 
 
 _INTERVAL_MAP = {
-    # our config value -> Kite interval string
-    "minute": "minute",
-    "1minute": "minute",
-    "1m": "minute",
-    "5minute": "5minute",
-    "5m": "5minute",
+    "minute": "minute", "1minute": "minute", "1m": "minute",
+    "5minute": "5minute", "5m": "5minute",
 }
 
 @dataclass
@@ -99,7 +85,6 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
         # Kite historical returns 'date' timestamps; ensure timezone-naive
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            # Drop tz info for simplicity (runner expects naive IST series)
             df["date"] = df["date"].dt.tz_localize(None)
             df = df.set_index("date")
         # Ensure all needed columns exist
@@ -109,7 +94,6 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
         # Volume may be missing for some instruments → default 0
         if "volume" not in df.columns:
             df["volume"] = 0
-        # Keep only standard columns
         return df[["open", "high", "low", "close", "volume"]]
     except Exception as e:
         log.warning("Failed to normalize OHLC frame: %s", e)
@@ -126,14 +110,12 @@ def _retry(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
             last = e
             if i == tries - 1:
                 raise
-            time.sleep(delay)
-            delay *= 2.0
+            time.sleep(delay); delay *= 2.0
         except Exception as e:  # other unexpected
             last = e
             if i == tries - 1:
                 raise
-            time.sleep(delay)
-            delay *= 2.0
+            time.sleep(delay); delay *= 2.0
     if last:
         raise last
 
@@ -156,16 +138,10 @@ class LiveKiteSource(DataSource):
         else:
             log.info("LiveKiteSource: connected to Kite.")
 
-    def is_ready(self) -> bool:
-        return self.kite is not None
-
-    # --- public API ---
-
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
         if not self.kite:
             return None
         try:
-            # Accept either "NSE:NIFTY 50" or token int
             if isinstance(symbol_or_token, int):
                 data = _retry(self.kite.ltp, [symbol_or_token], tries=2)
                 for _, v in (data or {}).items():
@@ -176,7 +152,6 @@ class LiveKiteSource(DataSource):
                 data = _retry(self.kite.ltp, [sym], tries=2)
                 if sym in data:
                     return float(data[sym].get("last_price"))
-                # fallback first value
                 for _, v in (data or {}).items():
                     return float(v.get("last_price"))
                 return None
@@ -187,8 +162,7 @@ class LiveKiteSource(DataSource):
     def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
         """
         Primary path: Kite historical_data
-        Fallback: if empty, synthesize one 'bar' from current LTP to avoid a hard stop
-        (this lets diags show progress, but strategy still requires history to score well).
+        Fallback: if empty, synthesize one 'bar' from current LTP to avoid a hard stop.
         """
         if not self.kite:
             log.warning("LiveKiteSource.fetch_ohlc: kite is None.")
@@ -199,29 +173,21 @@ class LiveKiteSource(DataSource):
             log.warning("Unsupported timeframe '%s' → using 'minute'.", timeframe)
             interval = "minute"
 
-        # Cache window key: (token, interval). We only cache *very* briefly
+        # Cache window key: (token, interval).
         cached = self._cache.get(token, interval)
         if cached is not None and not cached.empty:
-            # Ensure we respect requested window: filter by time
             try:
                 return cached.loc[(cached.index >= start) & (cached.index <= end)]
             except Exception:
-                pass  # fall through and refetch
+                pass
 
-        # Ensure from/to are timezone-naive as Kite accepts naive dt or tz-aware UTC
         frm = pd.to_datetime(start).to_pydatetime()
         to = pd.to_datetime(end).to_pydatetime()
 
         try:
             rows = _retry(
                 self.kite.historical_data,
-                token,
-                frm,
-                to,
-                interval,
-                continuous=False,
-                oi=False,
-                tries=2,
+                token, frm, to, interval, continuous=False, oi=False, tries=2,
             )
             df = _safe_dataframe(rows)
             if df.empty:
@@ -229,7 +195,6 @@ class LiveKiteSource(DataSource):
                     "historical_data returned empty for token=%s interval=%s window=%s→%s",
                     token, interval, start, end,
                 )
-                # Fallback: single synthetic bar around LTP to keep the pipeline alive
                 ltp = self.get_last_price(token)
                 if ltp is not None:
                     ts = _now_ist_naive().replace(second=0, microsecond=0)
@@ -237,15 +202,12 @@ class LiveKiteSource(DataSource):
                         {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
                         index=[ts],
                     )
-            # Cache the fresh frame briefly
             if df is not None:
                 self._cache.set(token, interval, df)
-            # Clip to requested window (safety)
             try:
                 df = df.loc[(df.index >= start) & (df.index <= end)]
             except Exception:
                 pass
-            # Schema guarantee
             need = {"open", "high", "low", "close"}
             if df.empty or not need.issubset(df.columns):
                 return pd.DataFrame()
