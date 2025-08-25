@@ -1,11 +1,9 @@
-# Path: src/main.py
 from __future__ import annotations
 
 import logging
 import signal
 import sys
 import time
-from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from src.config import settings
@@ -17,7 +15,7 @@ try:
 except Exception:
     KiteConnect = None  # type: ignore
 
-# Your Telegram controller (the one you shared)
+# Telegram controller
 try:
     from src.notifications.telegram_controller import TelegramController  # type: ignore
 except Exception:
@@ -34,17 +32,8 @@ def _setup_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # quiet common noisy libs
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-    # File logs → support /logs from Telegram
-    try:
-        fh = RotatingFileHandler("trading_bot.log", maxBytes=2_000_000, backupCount=3)
-        fh.setLevel(level)
-        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        logging.getLogger().addHandler(fh)
-    except Exception:
-        # Non-fatal; console-only logging still works
-        pass
 
 
 # -----------------------------
@@ -79,7 +68,7 @@ def _build_kite() -> Optional["KiteConnect"]:
     return kite
 
 
-def _tail_logs(n: int = 100, path: str = "trading_bot.log") -> list[str]:
+def _tail_logs(n: int = 120, path: str = "trading_bot.log") -> list[str]:
     """Return last n lines from log file; used by /logs. Safe if file missing."""
     try:
         with open(path, "rb") as f:
@@ -98,10 +87,9 @@ def _tail_logs(n: int = 100, path: str = "trading_bot.log") -> list[str]:
         return []
 
 
-def _wire_real_telegram(runner: StrategyRunner):
+def _wire_real_telegram(runner: StrategyRunner) -> None:
     """
-    Build your real TelegramController and wire providers from the runner,
-    keeping original names/flow. Minimal wiring; avoids attribute errors.
+    Build TelegramController and wire providers from the runner.
     """
     if TelegramController is None:
         raise RuntimeError("src.notifications.telegram_controller not found.")
@@ -110,27 +98,14 @@ def _wire_real_telegram(runner: StrategyRunner):
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.get_system_diag,          # << detailed /diag and /check
-        logs_provider=_tail_logs,                      # enables /logs [n]
+        diag_provider=runner.get_diagnostic_report,  # << detailed checks for /diag & /check
+        logs_provider=_tail_logs,                     # enables /logs [n]
         last_signal_provider=runner.get_last_signal_debug,
         runner_pause=runner.pause,
         runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,                # accepts dry=bool in our runner
+        runner_tick=runner.runner_tick,               # accepts dry=bool in our runner
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
-        set_risk_pct=None,
-        toggle_trailing=None,
-        set_trailing_mult=None,
-        toggle_partial=None,
-        set_tp1_ratio=None,
-        set_breakeven_ticks=None,
         set_live_mode=runner.set_live_mode,
-        set_min_score=None,
-        set_conf_threshold=None,
-        set_atr_period=None,
-        set_sl_mult=None,
-        set_tp_mult=None,
-        set_trend_boosts=None,
-        set_range_tighten=None,
     )
 
     # Keep both attributes to match old/new code paths
