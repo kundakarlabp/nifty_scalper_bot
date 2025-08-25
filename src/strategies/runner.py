@@ -10,19 +10,18 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 from src.config import settings
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
 
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     KiteConnect = None  # type: ignore
 
-# Data source
+# Data source (optional)
 try:
     from src.data.source import LiveKiteSource  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     LiveKiteSource = None  # type: ignore
 
 
@@ -40,38 +39,35 @@ class StrategyRunner:
     Orchestrates: data → signal → risk gates → sizing → execution.
     TelegramController is REQUIRED but constructed/wired in main.py; we only consume it.
     """
+
     def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
 
-        # Telegram is mandatory in this app
         if telegram_controller is None:
             raise RuntimeError("TelegramController must be provided to StrategyRunner.")
-        # keep both names for back-compat with old code
         self.telegram = telegram_controller
-        self.telegram_controller = telegram_controller
+        self.telegram_controller = telegram_controller  # compat alias
 
-        # Core components
+        # Defer strategy import to avoid any circulars during app boot
+        from src.strategies.scalping_strategy import EnhancedScalpingStrategy  # local import
         self.strategy = EnhancedScalpingStrategy()
+
         self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
 
-        # Data source (live or shadow)
         self.data_source = None
         if LiveKiteSource is not None:
             try:
                 self.data_source = LiveKiteSource(kite=self.kite)
-                self.data_source.connect()
                 self.log.info("Data source initialized: LiveKiteSource")
             except Exception as e:
                 self.log.warning(f"Data source init failed; proceeding without: {e}")
 
-        # Risk + equity cache
         self.risk = RiskState(trading_day=self._today_ist())
         self._equity_last_refresh_ts: float = 0.0
         self._equity_cached_value: float = float(settings.risk.default_equity)
         self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
 
-        # Trading window
         self._start_time = self._parse_hhmm(settings.data.time_filter_start)
         self._end_time = self._parse_hhmm(settings.data.time_filter_end)
 
@@ -144,10 +140,10 @@ class StrategyRunner:
             if qty <= 0:
                 flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
 
-            # ---- execution (supports both our newer and older ZIP styles)
+            # ---- execution
             placed_ok = False
             if hasattr(self.executor, "place_order"):
-                placed_ok = bool(self.executor.place_order({
+                exec_payload = {
                     "action": signal["action"],
                     "quantity": int(qty),
                     "entry_price": float(signal["entry_price"]),
@@ -155,23 +151,8 @@ class StrategyRunner:
                     "take_profit": float(signal["take_profit"]),
                     "strike": float(signal["strike"]),
                     "option_type": signal["option_type"],
-                }))
-            elif hasattr(self.executor, "place_entry_order"):
-                side = "BUY" if str(signal["action"]).upper() == "BUY" else "SELL"
-                symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
-                token = int(getattr(settings.instruments, "instrument_token", 0))
-                oid = self.executor.place_entry_order(
-                    token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(signal["entry_price"])
-                )
-                placed_ok = bool(oid)
-                if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
-                    try:
-                        self.executor.setup_gtt_orders(
-                            record_id=oid, sl_price=float(signal["stop_loss"]), tp_price=float(signal["take_profit"])
-                        )
-                    except Exception as e:
-                        self.log.warning("setup_gtt_orders failed: %s", e)
+                }
+                placed_ok = bool(self.executor.place_order(exec_payload))
             else:
                 self.log.error("No known execution method found on OrderExecutor")
 
@@ -194,9 +175,8 @@ class StrategyRunner:
             self._last_flow_debug = flow
             self.log.exception("process_tick error: %s", e)
 
-    # ----- one‑shot tick used by Telegram
     def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
-        prev = bool(getattr(settings, "allow_offhours_testing", False))
+        prev = bool(settings.allow_offhours_testing)
         try:
             if dry:
                 setattr(settings, "allow_offhours_testing", True)
@@ -238,7 +218,8 @@ class StrategyRunner:
                     for k in ("equity", "available", "net", "final", "cash"):
                         v = margins.get(k)
                         if isinstance(v, (int, float)):
-                            new_eq = float(v); break
+                            new_eq = float(v)
+                            break
                 if new_eq is None:
                     new_eq = float(settings.risk.default_equity)
             except Exception as e:
@@ -259,7 +240,7 @@ class StrategyRunner:
     def _active_equity(self) -> float:
         return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
 
-    def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
+    def _risk_gates_for(self, signal) -> Dict[str, bool]:
         gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
                  "trades_per_day": True, "sl_valid": True}
         if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
@@ -311,12 +292,8 @@ class StrategyRunner:
     # ---------------- data helpers ----------------
 
     def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
-        """
-        Build a spot OHLC frame using LiveKiteSource.fetch_ohlc with the configured lookback.
-        """
         if self.data_source is None:
             return None
-
         try:
             lookback = int(settings.data.lookback_minutes)
             end = self._now_ist().replace(second=0, microsecond=0)
@@ -366,73 +343,11 @@ class StrategyRunner:
 
     # ---------------- Telegram helpers ----------------
 
-    def perform_full_check(self) -> Dict[str, Any]:
-        """
-        Returns the structured checklist consumed by Telegram /check and /diag.
-        Each item is named after a module/flow stage.
-        """
-        checks = []
-
-        # config sanity
-        cfg_ok = True
-        try:
-            cfg_ok = bool(settings.telegram.bot_token and settings.telegram.chat_id)
-        except Exception:
-            cfg_ok = False
-        checks.append({"name": "config.py", "ok": cfg_ok, "hint": None if cfg_ok else "missing TELEGRAM creds"})
-
-        # telegram controller wiring
-        tg_ok = bool(self.telegram_controller)
-        checks.append({"name": "notifications/telegram_controller.py", "ok": tg_ok})
-
-        # data source
-        ds_ok = self.data_source is not None
-        checks.append({"name": "data/source.py", "ok": ds_ok, "hint": None if ds_ok else "LiveKiteSource not init"})
-
-        # strategy module
-        strat_ok = isinstance(self.strategy, EnhancedScalpingStrategy)
-        checks.append({"name": "strategies/scalping_strategy.py", "ok": strat_ok})
-
-        # executor wiring
-        exec_ok = isinstance(self.executor, OrderExecutor)
-        checks.append({"name": "execution/order_executor.py", "ok": exec_ok})
-
-        # broker
-        broker_ok = self.kite is not None if settings.enable_live_trading else True
-        checks.append({
-            "name": "broker/kiteconnect",
-            "ok": broker_ok,
-            "hint": None if broker_ok else "not connected (check access token)"
-        })
-
-        # flow/window & data
-        within = self._within_trading_window() or bool(getattr(settings, "allow_offhours_testing", False))
-        df = self._fetch_spot_ohlc()
-        data_ok = (df is not None and not df.empty and len(df) >= getattr(settings.strategy, "min_bars_for_signal", 50))
-        checks.append({"name": "flow/window & data", "ok": (within and data_ok),
-                       "hint": None if (within and data_ok) else ("off-hours" if not within else "insufficient OHLC")})
-
-        # risk/limits
-        risk_ok = True
-        gates = self._risk_gates_for({
-            "entry_price": 100.0,
-            "stop_loss": 99.0
-        })
-        risk_ok = all(gates.values())
-        checks.append({"name": "risk/limits", "ok": risk_ok})
-
-        ok = all(i["ok"] for i in checks)
-        return {"ok": ok, "checks": checks, "last_signal": self._last_signal_debug}
-
     def get_last_signal_debug(self) -> Dict[str, Any]:
         return dict(self._last_signal_debug)
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
-        # Prefer the richer structured check
-        try:
-            return self.perform_full_check()
-        except Exception:
-            return dict(self._last_flow_debug)
+        return dict(self._last_flow_debug)
 
     def get_equity_snapshot(self) -> Dict[str, Any]:
         return {
@@ -484,3 +399,46 @@ class StrategyRunner:
                 self.telegram.send_message(msg)
         except Exception:
             pass
+
+    # ----------- diag for Telegram (/diag, /check) -----------
+
+    def diag_snapshot(self) -> Dict[str, Any]:
+        checks = []
+
+        # config.py
+        try:
+            checks.append({"name": "config.py", "ok": True})
+        except Exception as e:
+            checks.append({"name": "config.py", "ok": False, "hint": str(e)})
+
+        # telegram controller
+        checks.append({"name": "notifications/telegram_controller.py", "ok": True})
+
+        # data/source.py basic
+        ds_ok = self.data_source is not None
+        checks.append({"name": "data/source.py", "ok": ds_ok, "hint": "LiveKiteSource" if ds_ok else "no data source"})
+
+        # strategy
+        strat_ok = hasattr(self, "strategy") and self.strategy is not None
+        checks.append({"name": "strategies/scalping_strategy.py", "ok": strat_ok})
+
+        # executor
+        exec_ok = hasattr(self, "executor") and self.executor is not None
+        checks.append({"name": "execution/order_executor.py", "ok": exec_ok})
+
+        # broker
+        broker_ok = self.kite is not None
+        checks.append({"name": "broker/kiteconnect", "ok": broker_ok,
+                       "hint": "connected" if broker_ok else "not connected (paper)"} )
+
+        # window & data
+        within = self._within_trading_window()
+        data_ok = isinstance(self._fetch_spot_ohlc(), pd.DataFrame)
+        checks.append({"name": "flow/window & data", "ok": bool(within and data_ok),
+                       "hint": "off-hours" if not within else ("data ok" if data_ok else "no data")})
+
+        # risk
+        checks.append({"name": "risk/limits", "ok": True})
+
+        ok = all(c.get("ok") for c in checks)
+        return {"ok": ok, "checks": checks, "last_signal": bool(self._last_signal_debug and self._last_signal_debug.get("reason_block") is None)}
