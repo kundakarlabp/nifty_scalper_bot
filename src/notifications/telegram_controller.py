@@ -17,11 +17,12 @@ log = logging.getLogger(__name__)
 
 class TelegramController:
     """
-    Production-safe Telegram controller that:
-      - Pulls bot_token/chat_id from settings.telegram (no ctor kwargs).
-      - Provides send_message(), notify_entry(), notify_fills().
-      - Starts a polling thread and handles the command set.
-      - Includes dedup/rate-limit and exponential backoff on send failures.
+    Production-safe Telegram controller:
+      - Reads creds from settings.telegram
+      - Exposes send_message(), notify_entry(), notify_fills()
+      - Polls updates in a background thread
+      - Dedup/rate-limit + backoff on send failures
+      - Adds /ping and clearer /diag & /check summaries
     """
 
     def __init__(
@@ -39,8 +40,9 @@ class TelegramController:
         runner_resume: Optional[Callable[[], None]] = None,
         runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
         cancel_all: Optional[Callable[[], None]] = None,
-        # tuning
+        # live toggle
         set_live_mode: Optional[Callable[[bool], None]] = None,
+        # http
         http_timeout: float = 20.0,
     ) -> None:
         # --- credentials from settings (MANDATORY) ---
@@ -54,7 +56,7 @@ class TelegramController:
         self._timeout = http_timeout
         self._session = requests.Session()
 
-        # --- hooks ---
+        # --- hooks (unchanged API) ---
         self._status_provider = status_provider
         self._positions_provider = positions_provider
         self._actives_provider = actives_provider
@@ -124,6 +126,30 @@ class TelegramController:
     def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
         self._send(text, parse_mode=parse_mode)
 
+    def send_startup_alert(self) -> None:
+        s = {}
+        try:
+            s = self._status_provider() if self._status_provider else {}
+        except Exception:
+            pass
+        self._send(
+            "🚀 Bot started\n"
+            f"🔁 Trading: {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'}\n"
+            f"🧠 Broker: {s.get('broker')}\n"
+            f"📦 Active: {s.get('active_orders', 0)}"
+        )
+
+    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
+        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`", parse_mode="Markdown")
+
+    def notify_fills(self, fills: List[tuple[str, float]]) -> None:
+        if not fills:
+            return
+        lines = ["✅ Fills"]
+        for rid, px in fills:
+            lines.append(f"• {rid} @ {px:.2f}")
+        self._send("\n".join(lines))
+
     # ================= polling =================
     def start_polling(self) -> None:
         if self._started:
@@ -133,6 +159,7 @@ class TelegramController:
         self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
         self._poll_thread.start()
         self._started = True
+        log.info("Telegram polling started (chat_id=%s).", self._chat_id)
 
     def stop_polling(self) -> None:
         if not self._started:
@@ -141,6 +168,7 @@ class TelegramController:
         if self._poll_thread:
             self._poll_thread.join(timeout=5)
         self._started = False
+        log.info("Telegram polling stopped.")
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
@@ -250,11 +278,16 @@ class TelegramController:
         cmd = parts[0].lower()
         args = parts[1:]
 
+        # ---- PING (simple sanity) ----
+        if cmd == "/ping":
+            return self._send("pong")
+
         # ---- HELP ----
         if cmd in ("/start", "/help"):
             return self._send(
                 "🤖 Nifty Scalper Bot — commands\n"
                 "*Core*\n"
+                "/ping — quick health\n"
                 "/status [verbose] — basic or JSON status\n"
                 "/active [page] — list active orders\n"
                 "/positions — broker day positions\n"
@@ -388,12 +421,17 @@ class TelegramController:
                 d = self._diag_provider() or {}
                 ok = d.get("ok", False)
                 checks = d.get("checks", [])
-                summary = []
-                for c in checks:
-                    mark = "🟢" if c.get("ok") else "🔴"
-                    summary.append(f"{mark} {c.get('name')}")
-                head = "✅ Flow looks good" if ok else "❗ Flow has issues"
-                return self._send(f"{head}\n" + " · ".join(summary))
+                if checks:
+                    summary = []
+                    for c in checks:
+                        mark = "🟢" if c.get("ok") else "🔴"
+                        label = c.get("name", "?")
+                        extra = c.get("detail") or c.get("hint") or ""
+                        summary.append(f"{mark} {label}" + (f" — {extra}" if extra else ""))
+                    head = "✅ Flow looks good" if ok else "❗ Flow has issues"
+                    return self._send(f"{head}\n" + "\n".join(summary[:16]))
+                # fallback
+                return self._send("No checks available.")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 
@@ -415,7 +453,7 @@ class TelegramController:
                     lines.append("📈 last_signal: present")
                 else:
                     lines.append("📈 last_signal: none")
-                return self._send("\n".join(lines))
+                return self._send("\n".join(lines[:32]))
             except Exception as e:
                 return self._send(f"Check error: {e}")
 
