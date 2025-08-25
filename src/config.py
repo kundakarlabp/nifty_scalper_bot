@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 from pydantic import BaseModel, Field, validator
 
 
-# ===== Sub-models (preserve your original nested shape) =====
+# ===== Sub-models =====
 
 class ZerodhaSettings(BaseModel):
     api_key: str = Field(default="")
@@ -69,7 +69,7 @@ class StrategySettings(BaseModel):
     atr_period: int = 14
     atr_sl_multiplier: float = 1.3
     atr_tp_multiplier: float = 2.2
-    rr_min: float = 1.30                # NEW: minimum acceptable RR
+    rr_min: float = 1.30
 
     @validator("confidence_threshold")
     def _v_conf(cls, v: float) -> float:
@@ -142,7 +142,7 @@ class ExecutorSettings(BaseModel):
     enable_trailing: bool = True
     trailing_atr_multiplier: float = 1.4
     fee_per_lot: float = 20.0
-    slippage_ticks: int = 1            # NEW: used only for paper-mode math/logs
+    slippage_ticks: int = 1            # paper-mode math/logs only
 
 
 class HealthSettings(BaseModel):
@@ -157,7 +157,7 @@ class SystemSettings(BaseModel):
     position_sync_interval: int = 60
 
 
-# ===== Root settings (same nested shape as your ZIP) =====
+# ===== Root settings =====
 
 class AppSettings(BaseSettings):
     enable_live_trading: bool = False
@@ -178,7 +178,7 @@ class AppSettings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
-        # critical: allows STRATEGY__MIN_SIGNAL_SCORE → settings.strategy.min_signal_score
+        # STRATEGY__EMA_FAST → settings.strategy.ema_fast
         env_nested_delimiter = "__"
 
 
@@ -204,18 +204,14 @@ def validate_critical_settings() -> None:
         if not settings.telegram.chat_id:
             errors.append("TELEGRAM__CHAT_ID is required when TELEGRAM__ENABLED=true")
 
-    # Strategy sanity (fast < slow, TP > SL already enforced in validators)
-
-    # Instruments sanity (max_lots >= min_lots already enforced in validators)
-
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
-# validate at import
+# Validate at import
 validate_critical_settings()
 
-# ---- Optional convenience aliases (keeps older calls working if any remain) ----
+# ---- Optional shorthand aliases for legacy code (read-only) ----
 risk_default_equity = settings.risk.default_equity
 risk_risk_per_trade = settings.risk.risk_per_trade
 instruments_nifty_lot_size = settings.instruments.nifty_lot_size
