@@ -1,4 +1,15 @@
+# Path: src/config.py
 from __future__ import annotations
+
+"""
+Config with nested models (original structure) + flat aliases for compatibility.
+
+- Keeps your original flow, field names, and validators.
+- Adds flat properties like `settings.strategy_ema_fast`, `settings.risk_risk_per_trade`,
+  `settings.instruments_nifty_lot_size`, etc., so optimized modules that expect
+  flat access won’t break.
+- Validates critical env on import (Telegram mandatory; Zerodha only if live).
+"""
 
 from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
@@ -136,8 +147,8 @@ class RiskSettings(BaseModel):
 class ExecutorSettings(BaseModel):
     exchange: str = "NFO"
     order_product: str = "NRML"
-    order_variety: str = "regular"
-    entry_order_type: str = "LIMIT"
+    order_variety: str = "regular"   # regular | bo | amo | co (depending on broker support)
+    entry_order_type: str = "LIMIT"  # LIMIT | MARKET | SL | SLM
     tick_size: float = 0.05
     exchange_freeze_qty: int = 1800
     preferred_exit_mode: str = "REGULAR"
@@ -186,7 +197,133 @@ class AppSettings(BaseSettings):
         case_sensitive = False
         env_nested_delimiter = "__"   # e.g., TELEGRAM__BOT_TOKEN
 
+    # -------- Flat alias properties (read-only) --------
+    # Strategy (flat)
+    @property
+    def strategy_min_signal_score(self) -> int: return self.strategy.min_signal_score
+    @property
+    def strategy_confidence_threshold(self) -> float: return self.strategy.confidence_threshold
+    @property
+    def strategy_min_bars_for_signal(self) -> int: return self.strategy.min_bars_for_signal
+    @property
+    def strategy_ema_fast(self) -> int: return self.strategy.ema_fast
+    @property
+    def strategy_ema_slow(self) -> int: return self.strategy.ema_slow
+    @property
+    def strategy_rsi_period(self) -> int: return self.strategy.rsi_period
+    @property
+    def strategy_bb_period(self) -> int: return self.strategy.bb_period
+    @property
+    def strategy_bb_std(self) -> float: return self.strategy.bb_std
+    @property
+    def strategy_atr_period(self) -> int: return self.strategy.atr_period
+    @property
+    def strategy_atr_sl_multiplier(self) -> float: return self.strategy.atr_sl_multiplier
+    @property
+    def strategy_atr_tp_multiplier(self) -> float: return self.strategy.atr_tp_multiplier
+    @property
+    def strategy_rr_min(self) -> float: return self.strategy.rr_min
 
+    # Risk (flat)
+    @property
+    def risk_use_live_equity(self) -> bool: return self.risk.use_live_equity
+    @property
+    def risk_default_equity(self) -> float: return self.risk.default_equity
+    @property
+    def risk_min_equity_floor(self) -> float: return self.risk.min_equity_floor
+    @property
+    def risk_equity_refresh_seconds(self) -> int: return self.risk.equity_refresh_seconds
+    @property
+    def risk_risk_per_trade(self) -> float: return self.risk.risk_per_trade
+    @property
+    def risk_max_trades_per_day(self) -> int: return self.risk.max_trades_per_day
+    @property
+    def risk_consecutive_loss_limit(self) -> int: return self.risk.consecutive_loss_limit
+    @property
+    def risk_max_daily_drawdown_pct(self) -> float: return self.risk.max_daily_drawdown_pct
+    @property
+    def risk_max_position_size_pct(self) -> float: return self.risk.max_position_size_pct
+
+    # Instruments (flat)
+    @property
+    def instruments_spot_symbol(self) -> str: return self.instruments.spot_symbol
+    @property
+    def instruments_trade_symbol(self) -> str: return self.instruments.trade_symbol
+    @property
+    def instruments_trade_exchange(self) -> str: return self.instruments.trade_exchange
+    @property
+    def instruments_instrument_token(self) -> int: return self.instruments.instrument_token
+    @property
+    def instruments_nifty_lot_size(self) -> int: return self.instruments.nifty_lot_size
+    @property
+    def instruments_strike_range(self) -> int: return self.instruments.strike_range
+    @property
+    def instruments_min_lots(self) -> int: return self.instruments.min_lots
+    @property
+    def instruments_max_lots(self) -> int: return self.instruments.max_lots
+
+    # Data (flat)
+    @property
+    def data_lookback_minutes(self) -> int: return self.data.lookback_minutes
+    @property
+    def data_timeframe(self) -> str: return self.data.timeframe
+    @property
+    def data_time_filter_start(self) -> str: return self.data.time_filter_start
+    @property
+    def data_time_filter_end(self) -> str: return self.data.time_filter_end
+    @property
+    def data_cache_enabled(self) -> bool: return self.data.cache_enabled
+    @property
+    def data_cache_ttl_seconds(self) -> int: return self.data.cache_ttl_seconds
+
+    # Executor (flat)
+    @property
+    def executor_exchange(self) -> str: return self.executor.exchange
+    @property
+    def executor_order_product(self) -> str: return self.executor.order_product
+    @property
+    def executor_order_variety(self) -> str: return self.executor.order_variety
+    @property
+    def executor_entry_order_type(self) -> str: return self.executor.entry_order_type
+    @property
+    def executor_tick_size(self) -> float: return self.executor.tick_size
+    @property
+    def executor_exchange_freeze_qty(self) -> int: return self.executor.exchange_freeze_qty
+    @property
+    def executor_preferred_exit_mode(self) -> str: return self.executor.preferred_exit_mode
+    @property
+    def executor_use_slm_exit(self) -> bool: return self.executor.use_slm_exit
+    @property
+    def executor_partial_tp_enable(self) -> bool: return self.executor.partial_tp_enable
+    @property
+    def executor_tp1_qty_ratio(self) -> float: return self.executor.tp1_qty_ratio
+    @property
+    def executor_breakeven_ticks(self) -> int: return self.executor.breakeven_ticks
+    @property
+    def executor_enable_trailing(self) -> bool: return self.executor.enable_trailing
+    @property
+    def executor_trailing_atr_multiplier(self) -> float: return self.executor.trailing_atr_multiplier
+    @property
+    def executor_fee_per_lot(self) -> float: return self.executor.fee_per_lot
+    @property
+    def executor_slippage_ticks(self) -> int: return self.executor.slippage_ticks
+
+    # Health/System (flat)
+    @property
+    def health_enable_server(self) -> bool: return self.health.enable_server
+    @property
+    def health_port(self) -> int: return self.health.port
+    @property
+    def system_max_api_calls_per_second(self) -> float: return self.system.max_api_calls_per_second
+    @property
+    def system_websocket_reconnect_attempts(self) -> int: return self.system.websocket_reconnect_attempts
+    @property
+    def system_order_timeout_seconds(self) -> int: return self.system.order_timeout_seconds
+    @property
+    def system_position_sync_interval(self) -> int: return self.system.position_sync_interval
+
+
+# Instantiate settings
 settings = AppSettings()
 
 
@@ -215,9 +352,10 @@ def validate_critical_settings() -> None:
 # Validate on import
 validate_critical_settings()
 
-# Back-compat convenience aliases (read-only)
-risk_default_equity = settings.risk.default_equity
-risk_risk_per_trade = settings.risk.risk_per_trade
-instruments_nifty_lot_size = settings.instruments.nifty_lot_size
-time_filter_start = settings.data.time_filter_start
-time_filter_end = settings.data.time_filter_end
+# -------- Back-compat convenience aliases (read-only) --------
+# (These mirror the flat properties as plain module-level names if other modules import them.)
+risk_default_equity = settings.risk_default_equity
+risk_risk_per_trade = settings.risk_risk_per_trade
+instruments_nifty_lot_size = settings.instruments_nifty_lot_size
+time_filter_start = settings.data_time_filter_start
+time_filter_end = settings.data_time_filter_end
