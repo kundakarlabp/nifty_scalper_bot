@@ -48,6 +48,8 @@ class StrategyRunner:
         if telegram_controller is None:
             raise RuntimeError("TelegramController must be provided to StrategyRunner.")
         self.telegram = telegram_controller
+        # 🔧 compat alias so main.py can set either .telegram or .telegram_controller
+        self.telegram_controller = telegram_controller
 
         # Core components
         self.strategy = EnhancedScalpingStrategy()
