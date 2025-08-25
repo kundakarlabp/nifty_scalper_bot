@@ -1,11 +1,10 @@
-# Path: src/config.py
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings
 from pydantic import BaseModel, Field, validator
+from pydantic_settings import BaseSettings
 
 
-# ===== Sub-models =====
+# ================= Sub-models =================
 
 class ZerodhaSettings(BaseModel):
     api_key: str = ""
@@ -14,10 +13,16 @@ class ZerodhaSettings(BaseModel):
 
 
 class TelegramSettings(BaseModel):
-    # Telegram is compulsory — keep the flag, but enforce True in validation
+    # Telegram is COMPULSORY in your deployment
     enabled: bool = True
     bot_token: str = ""
-    chat_id: str = ""
+    chat_id: int = 0  # store as int to match controller usage
+
+    @validator("chat_id")
+    def _v_chat_id(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("TELEGRAM__CHAT_ID must be a positive integer")
+        return v
 
 
 class DataSettings(BaseModel):
@@ -60,7 +65,7 @@ class InstrumentsSettings(BaseModel):
 
 class StrategySettings(BaseModel):
     min_signal_score: int = 3
-    confidence_threshold: float = 55.0   # 0..100
+    confidence_threshold: float = 55.0  # 0..100
     min_bars_for_signal: int = 50
     ema_fast: int = 9
     ema_slow: int = 21
@@ -158,7 +163,7 @@ class SystemSettings(BaseModel):
     position_sync_interval: int = 60
 
 
-# ===== Root settings =====
+# ================= Root settings =================
 
 class AppSettings(BaseSettings):
     enable_live_trading: bool = False
@@ -176,10 +181,10 @@ class AppSettings(BaseSettings):
     system: SystemSettings = SystemSettings()
 
     class Config:
-        env_file = ".env"
+        env_file = ".env"              # used locally; Railway uses real env vars
         env_file_encoding = "utf-8"
         case_sensitive = False
-        env_nested_delimiter = "__"
+        env_nested_delimiter = "__"   # e.g., TELEGRAM__BOT_TOKEN
 
 
 settings = AppSettings()
@@ -188,7 +193,7 @@ settings = AppSettings()
 def validate_critical_settings() -> None:
     errors = []
 
-    # Broker creds — only if live
+    # Live trading requires broker creds
     if settings.enable_live_trading:
         if not settings.zerodha.api_key:
             errors.append("ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true")
@@ -197,9 +202,7 @@ def validate_critical_settings() -> None:
         if not settings.zerodha.access_token:
             errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
 
-    # Telegram is compulsory
-    if not settings.telegram.enabled:
-        errors.append("TELEGRAM__ENABLED must be true (Telegram is mandatory)")
+    # Telegram is MANDATORY in your deployment
     if not settings.telegram.bot_token:
         errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
     if not settings.telegram.chat_id:
@@ -209,10 +212,10 @@ def validate_critical_settings() -> None:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
-# validate at import
+# Validate on import
 validate_critical_settings()
 
-# Convenience aliases (some legacy code expects these)
+# Back-compat convenience aliases (read-only)
 risk_default_equity = settings.risk.default_equity
 risk_risk_per_trade = settings.risk.risk_per_trade
 instruments_nifty_lot_size = settings.instruments.nifty_lot_size
