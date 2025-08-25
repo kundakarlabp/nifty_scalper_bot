@@ -15,6 +15,11 @@ class SizingInputs:
 
 @dataclass(frozen=True)
 class SizingParams:
+    """
+    risk_per_trade: fraction of equity to risk per trade (0.01 = 1%)
+    min_lots / max_lots: hard clamps on lots
+    max_position_size_pct: cap notional exposure vs equity (0.10 = 10%)
+    """
     risk_per_trade: float = 0.01
     min_lots: int = 1
     max_lots: int = 10
@@ -22,6 +27,17 @@ class SizingParams:
 
 
 class PositionSizer:
+    """
+    Long options position sizing:
+      - risk_rupees = equity * risk_per_trade
+      - rupee risk per 1 lot = sl_points * lot_size
+      - lots_raw = floor(risk_rupees / rupee_risk_per_lot)
+      - clamp to [min_lots, max_lots]
+      - exposure cap: entry_price * lot_size * lots <= equity * max_position_size_pct
+      - quantity = lots * lot_size
+    Returns (quantity, lots, diagnostics).
+    """
+
     def __init__(
         self,
         risk_per_trade: float,
@@ -41,6 +57,23 @@ class PositionSizer:
             min_lots=min_lots,
             max_lots=max_lots,
             max_position_size_pct=max_position_size_pct,
+        )
+
+    @classmethod
+    def from_settings(
+        cls,
+        *,
+        risk_per_trade: float,
+        min_lots: int,
+        max_lots: int,
+        max_position_size_pct: float,
+    ) -> "PositionSizer":
+        """Convenience creator to mirror env/config fields; keeps imports clean here."""
+        return cls(
+            risk_per_trade=float(risk_per_trade),
+            min_lots=int(min_lots),
+            max_lots=int(max_lots),
+            max_position_size_pct=float(max_position_size_pct),
         )
 
     def size_from_signal(
@@ -85,6 +118,8 @@ class PositionSizer:
             denom = si.entry_price * si.lot_size
             lots_cap = int(max_notional // denom) if denom > 0 else 0
             lots = max(min(lots_cap, lots), 0)
+            # recompute after cap so diagnostics reflect the final state
+            exposure_notional = si.entry_price * si.lot_size * lots
 
         quantity = lots * si.lot_size
         diag = PositionSizer._diag(
