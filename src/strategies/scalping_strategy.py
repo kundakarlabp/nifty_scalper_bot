@@ -1,3 +1,4 @@
+# Path: src/strategies/scalping_strategy.py
 from __future__ import annotations
 
 import logging
@@ -21,11 +22,14 @@ _last_log_ts = {
     "auto_relax": 0.0,
     "generated": 0.0,
 }
+
+
 def _log_throttled(key: str, level: int, msg: str, *args) -> None:
     now = time.time()
     if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
         _last_log_ts[key] = now
         logger.log(level, msg, *args)
+
 
 Side = Literal["BUY", "SELL"]
 SignalOutput = Optional[Dict[str, Any]]
@@ -33,25 +37,20 @@ SignalOutput = Optional[Dict[str, Any]]
 
 class EnhancedScalpingStrategy:
     """
-    Regime-aware scalping strategy (minimal, runner-aligned).
+    Regime‑aware scalping strategy (runner‑aligned).
 
     Inputs
     ------
-    - df:           OHLCV dataframe (ascending index). In current wiring this is SPOT.
-    - current_tick: optional dict from broker stream; may contain 'ltp', 'spot_ltp', 'option_ltp'
+    - df: OHLCV dataframe (ascending index). In current wiring this is SPOT.
+    - current_tick: optional dict; may contain 'ltp', 'spot_ltp', 'option_ltp'
     - current_price: explicit option LTP (overrides tick if provided)
-    - spot_df:      optional SPOT dataframe (if 'df' were option candles in the future)
+    - spot_df: optional SPOT dataframe (if 'df' were option candles in the future)
 
-    Outputs (runner/executor expect these keys)
-    ------------------------------------------
-    - action: "BUY" | "SELL"
-    - option_type: "CE" | "PE"
-    - strike: int (nearest 50-point ATM from spot)
-    - entry_price: float
-    - stop_loss: float
-    - take_profit: float
-    - rr: float
-    - score, confidence, regime, reasons, diagnostics...
+    Output (executor expects)
+    -------------------------
+    dict with keys:
+      action, option_type, strike, entry_price, stop_loss, take_profit, rr
+    plus diagnostics (score, confidence, regime, reasons, etc.)
     """
 
     def __init__(
@@ -82,11 +81,10 @@ class EnhancedScalpingStrategy:
         # Bars threshold for validity
         self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
 
-        # Thresholds (normalize confidence scale)
-        # Config is typically 0..100; internal scoring below returns ~0..8
-        raw_conf = float(getattr(strat, "confidence_threshold", 55))  # e.g., 55 (%)
+        # Confidence thresholds (config often 0..100; internal 0..~8)
+        raw_conf = float(getattr(strat, "confidence_threshold", 55))
         raw_conf_rel = float(getattr(strat, "confidence_threshold_relaxed", max(0.0, raw_conf - 20)))
-        self.min_conf_strict = raw_conf / 10.0   # 55 -> 5.5 on a 0..10-ish scale
+        self.min_conf_strict = raw_conf / 10.0           # 55 -> 5.5
         self.min_conf_relaxed = raw_conf_rel / 10.0
 
         self.min_score_strict = int(getattr(strat, "min_signal_score", 3))
@@ -105,21 +103,24 @@ class EnhancedScalpingStrategy:
     # ---------- tech utils ----------
     @staticmethod
     def _ema(s: pd.Series, period: int) -> pd.Series:
-        return s.ewm(span=max(1, int(period)), adjust=False).mean()
+        period = max(1, int(period))
+        return pd.Series(pd.to_numeric(s, errors="coerce")).ewm(span=period, adjust=False).mean()
 
     @staticmethod
     def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+        close = pd.Series(pd.to_numeric(close, errors="coerce"))
         delta = close.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
         avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
         avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
         rs = (avg_gain / (avg_loss.replace(0.0, 1e-9))).fillna(0.0)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        return rsi
+        return 100.0 - (100.0 / (1.0 + rs))
 
     @staticmethod
-    def _extract_adx_columns(spot_df: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
+    def _extract_adx_columns(
+        spot_df: pd.DataFrame,
+    ) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
         """Return (adx, di_plus, di_minus) from spot_df; tolerant to suffix (_{n}) naming."""
         if spot_df is None or spot_df.empty:
             return None, None, None
@@ -133,7 +134,7 @@ class EnhancedScalpingStrategy:
 
     # ---------- thresholds ----------
     def _score_confidence(self, score: int) -> float:
-        # compact 0..8-ish scale mapped to our thresholds above
+        # compact 0..8-ish scale mapped to thresholds above
         if score >= 8:
             return 8.0
         if score >= 6:
@@ -159,25 +160,44 @@ class EnhancedScalpingStrategy:
         current_price: Optional[float] = None,
         spot_df: Optional[pd.DataFrame] = None,
     ) -> SignalOutput:
-
         dbg: Dict[str, Any] = {"reason_block": None}
+
         try:
-            if df is None or df.empty or len(df) < self.min_bars_for_signal:
+            # ---- basic guards
+            if df is None or len(df) < self.min_bars_for_signal:
                 dbg["reason_block"] = "insufficient_bars"
+                self._last_debug = dbg
                 return None
 
-            # Default spot_df to df (current wiring provides SPOT df through runner)
+            # ensure required columns exist and numeric
+            need = {"open", "high", "low", "close"}
+            if not need.issubset(df.columns):
+                dbg["reason_block"] = "missing_ohlc_columns"
+                self._last_debug = dbg
+                return None
+            df = df.copy()
+            for c in ("open", "high", "low", "close", "volume"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            df = df.dropna(subset=["close"])
+            if df.empty:
+                dbg["reason_block"] = "no_valid_prices"
+                self._last_debug = dbg
+                return None
+            if not df.index.is_monotonic_increasing:
+                df = df.sort_index()
+
+            # Default spot_df to df (current wiring provides SPOT df)
             if spot_df is None:
                 spot_df = df
 
-            # Derive spot last and option current price
+            # ---- derive spot last and option current price
             spot_last = None
             if current_tick and isinstance(current_tick, dict):
                 spot_last = current_tick.get("spot_ltp", None)
-            if spot_last is None and spot_df is not None and not spot_df.empty:
-                spot_last = float(spot_df["close"].iloc[-1])
+            if spot_last is None and spot_df is not None and len(spot_df) > 0:
+                spot_last = float(pd.to_numeric(spot_df["close"].iloc[-1], errors="coerce"))
 
-            # Priority for option price: explicit -> tick.option_ltp -> tick.ltp -> fall back to spot last
             if current_price is None and current_tick:
                 current_price = current_tick.get("option_ltp", None)
             if current_price is None and current_tick:
@@ -187,11 +207,17 @@ class EnhancedScalpingStrategy:
 
             if current_price is None or float(current_price) <= 0:
                 dbg["reason_block"] = "invalid_current_price"
+                self._last_debug = dbg
                 return None
 
-            # --- Trend/momentum (on the provided df; currently SPOT in runner) ---
+            # ---- trend/momentum on df (SPOT)
             ema_fast = self._ema(df["close"], self.ema_fast)
             ema_slow = self._ema(df["close"], self.ema_slow)
+            if len(ema_fast) < 2 or len(ema_slow) < 2:
+                dbg["reason_block"] = "ema_insufficient"
+                self._last_debug = dbg
+                return None
+
             ema_bias_up = bool(ema_fast.iloc[-1] > ema_slow.iloc[-1])
             ema_cross_up = bool((ema_fast.iloc[-2] <= ema_slow.iloc[-2]) and ema_bias_up)
             ema_cross_down = bool((ema_fast.iloc[-2] >= ema_slow.iloc[-2]) and not ema_bias_up)
@@ -206,7 +232,8 @@ class EnhancedScalpingStrategy:
                 score += 2
                 reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
 
-            rsi_val = float(self._rsi(df["close"], self.rsi_period).iloc[-1])
+            rsi_series = self._rsi(df["close"], self.rsi_period)
+            rsi_val = float(rsi_series.iloc[-1])
             if ema_bias_up and rsi_val > 50:
                 score += 1
                 reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
@@ -214,17 +241,21 @@ class EnhancedScalpingStrategy:
                 score += 1
                 reasons.append(f"RSI({self.rsi_period}) < 50 (down momentum).")
 
-            # --- SPOT regime / VWAP filters ---
+            # ---- SPOT regime / VWAP filters
             regime = None
             if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
                 adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
-                regime = detect_market_regime(
-                    df=spot_df,
-                    adx=adx_series,
-                    di_plus=di_plus_series,
-                    di_minus=di_minus_series,
-                    adx_trend_strength=self.adx_trend_strength,
-                )
+                try:
+                    regime = detect_market_regime(
+                        df=spot_df,
+                        adx=adx_series,
+                        di_plus=di_plus_series,
+                        di_minus=di_minus_series,
+                        adx_trend_strength=self.adx_trend_strength,
+                    )
+                except Exception:
+                    regime = None
+
                 if regime == "trend_up" and ema_bias_up:
                     score += 2
                     reasons.append("Spot ADX trend_up (aligned).")
@@ -235,18 +266,22 @@ class EnhancedScalpingStrategy:
                     reasons.append("Spot ADX range.")
 
             if spot_df is not None and len(spot_df) > 0:
-                vwap_series = calculate_vwap(spot_df)
-                if vwap_series is not None and len(vwap_series) > 0:
-                    vwap_val = float(vwap_series.iloc[-1])
-                    current_spot_price = float(spot_df["close"].iloc[-1])
-                    if ema_bias_up and current_spot_price > vwap_val:
-                        score += 1
-                        reasons.append("Spot > VWAP (risk-on).")
-                    elif not ema_bias_up and current_spot_price < vwap_val:
-                        score += 1
-                        reasons.append("Spot < VWAP (risk-off).")
+                try:
+                    vwap_series = calculate_vwap(spot_df)
+                    if vwap_series is not None and len(vwap_series) > 0:
+                        vwap_val = float(vwap_series.iloc[-1])
+                        current_spot_price = float(pd.to_numeric(spot_df["close"].iloc[-1], errors="coerce"))
+                        if ema_bias_up and current_spot_price > vwap_val:
+                            score += 1
+                            reasons.append("Spot > VWAP (risk-on).")
+                        elif not ema_bias_up and current_spot_price < vwap_val:
+                            score += 1
+                            reasons.append("Spot < VWAP (risk-off).")
+                except Exception:
+                    # VWAP is advisory; ignore failures
+                    pass
 
-            # --- Score -> confidence; apply thresholds (strict, then relaxed) ---
+            # ---- Score -> confidence; apply thresholds
             confidence = self._score_confidence(score)
             strict_ok = self._passes(score, confidence, strict=True)
             relaxed_ok = self._passes(score, confidence, strict=False)
@@ -256,7 +291,9 @@ class EnhancedScalpingStrategy:
                     "drop_strict",
                     logging.INFO,
                     "Signal drop (strict): confidence(%.2f) < threshold(%.2f) | score=%d",
-                    confidence, self.min_conf_strict, score,
+                    confidence,
+                    self.min_conf_strict,
+                    score,
                 )
                 if not self.auto_relax_enabled or not relaxed_ok:
                     if not relaxed_ok:
@@ -264,7 +301,9 @@ class EnhancedScalpingStrategy:
                             "drop_relaxed",
                             logging.INFO,
                             "Signal drop (relaxed): confidence(%.2f) < threshold(%.2f) | score=%d",
-                            confidence, self.min_conf_relaxed, score,
+                            confidence,
+                            self.min_conf_relaxed,
+                            score,
                         )
                         dbg["reason_block"] = "confidence_below_threshold"
                     else:
@@ -274,44 +313,42 @@ class EnhancedScalpingStrategy:
                 _log_throttled(
                     "auto_relax",
                     logging.INFO,
-                    "Auto-relax applied: min_score->%d, confidence_threshold->%.2f",
-                    self.min_score_relaxed, self.min_conf_relaxed,
+                    "Auto‑relax applied: min_score->%d, confidence_threshold->%.2f",
+                    self.min_score_relaxed,
+                    self.min_conf_relaxed,
                 )
 
-            # --- ATR-based SL/TP (on df; currently SPOT in runner) ---
+            # ---- ATR‑based SL/TP (on df; currently SPOT)
             atr_series = compute_atr(df, period=self.atr_period)
             atr_val = latest_atr_value(atr_series, default=0.0)
-            if atr_val <= 0:
+            if atr_val is None or atr_val <= 0:
                 dbg["reason_block"] = "atr_unavailable"
                 self._last_debug = {**dbg, "score": score, "confidence": confidence, "reasons": reasons}
                 return None
 
-            sl_mult = self.base_sl_mult
-            tp_mult = self.base_tp_mult
+            sl_mult = max(0.2, float(self.base_sl_mult))
+            tp_mult = max(0.4, float(self.base_tp_mult))
             if regime in ("trend_up", "trend_down"):
-                tp_mult += self.trend_tp_boost
-                sl_mult += self.trend_sl_relax
+                tp_mult += float(self.trend_tp_boost)
+                sl_mult += float(self.trend_sl_relax)
                 reasons.append(f"Regime boost: trend (tp+{self.trend_tp_boost}, sl+{self.trend_sl_relax}).")
             elif regime == "range":
-                tp_mult += self.range_tp_tighten
-                sl_mult += self.range_sl_tighten
+                tp_mult += float(self.range_tp_tighten)
+                sl_mult += float(self.range_sl_tighten)
                 reasons.append(f"Regime tighten: range (tp{self.range_tp_tighten:+}, sl{self.range_sl_tighten:+}).")
 
-            sl_mult = max(0.2, sl_mult)
-            tp_mult = max(0.4, tp_mult)
-
-            base_sl = atr_val * sl_mult
-            base_tp = atr_val * tp_mult
+            base_sl = float(atr_val) * sl_mult
+            base_tp = float(atr_val) * tp_mult
 
             sl_points, tp_points = atr_sl_tp_points(
                 base_sl_points=base_sl,
                 base_tp_points=base_tp,
-                atr_value=atr_val,
+                atr_value=float(atr_val),
                 sl_mult=sl_mult,
                 tp_mult=tp_mult,
-                confidence=confidence,
-                sl_conf_adj=self.sl_conf_adj,
-                tp_conf_adj=self.tp_conf_adj,
+                confidence=float(confidence),
+                sl_conf_adj=float(self.sl_conf_adj),
+                tp_conf_adj=float(self.tp_conf_adj),
             )
 
             side: Side = "BUY" if ema_bias_up else "SELL"
@@ -324,15 +361,14 @@ class EnhancedScalpingStrategy:
                 stop_loss = max(eps, entry_price + sl_points)
                 target = entry_price - tp_points
 
-            # Option selection fields
-            # Use spot_last to compute nearest ATM strike (50 step for NIFTY)
+            # Option selection: nearest 50‑point ATM from spot
             try:
                 s_last = float(spot_last) if spot_last is not None else float(df["close"].iloc[-1])
             except Exception:
                 s_last = float(df["close"].iloc[-1])
             strike = int(round(s_last / 50.0) * 50)
             option_type = "CE" if side == "BUY" else "PE"
-            action = side  # alias the same semantics
+            action = side
 
             # RR
             risk = abs(entry_price - stop_loss)
@@ -340,7 +376,7 @@ class EnhancedScalpingStrategy:
             rr = round((reward / risk) if risk > 0 else 0.0, 2)
 
             signal: Dict[str, Any] = {
-                # runner/executor required fields
+                # required by runner/executor
                 "action": action,
                 "option_type": option_type,
                 "strike": strike,
@@ -348,8 +384,7 @@ class EnhancedScalpingStrategy:
                 "stop_loss": float(stop_loss),
                 "take_profit": float(target),
                 "rr": rr,
-
-                # useful extras (keep originals for backward-compat)
+                # diagnostics
                 "side": side,
                 "confidence": float(confidence),
                 "sl_points": float(sl_points),
@@ -382,18 +417,17 @@ class EnhancedScalpingStrategy:
                 "regime": regime or "unknown",
                 "ema_bias_up": ema_bias_up,
                 "reason_block": None,
-                "reasons": reasons[-6:],  # tail to keep it compact
+                "reasons": reasons[-6:],  # compact tail
                 "thresholds": {
                     "min_score_strict": self.min_score_strict,
                     "min_conf_strict": self.min_conf_strict,
                     "min_score_relaxed": self.min_score_relaxed,
                     "min_conf_relaxed": self.min_conf_relaxed,
                 },
-                "atr_val": atr_val,
+                "atr_val": float(atr_val),
                 "sl_mult": sl_mult,
                 "tp_mult": tp_mult,
             }
-
             return signal
 
         except Exception as e:
