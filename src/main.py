@@ -1,3 +1,4 @@
+# src/main.py
 from __future__ import annotations
 
 import logging
@@ -15,16 +16,16 @@ try:
 except Exception:
     KiteConnect = None  # type: ignore
 
-# Telegram
-def _import_telegram_class():
-    try:
-        from src.notifications.telegram_controller import TelegramController  # type: ignore
-        return TelegramController
-    except Exception as e:
-        logging.getLogger("main").error("TelegramController import failed — running with no-op Telegram.\nCause: %s", e)
-        return None
+# Your Telegram controller
+try:
+    from src.notifications.telegram_controller import TelegramController  # type: ignore
+except Exception:
+    TelegramController = None  # type: ignore
 
 
+# -----------------------------
+# Logging
+# -----------------------------
 def _setup_logging() -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -35,15 +36,23 @@ def _setup_logging() -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+# -----------------------------
+# Tiny no-op Telegram used only to satisfy runner ctor
+# -----------------------------
 class _NoopTelegram:
     def send_message(self, *_a, **_k) -> None:
         pass
+
     def start_polling(self) -> None:
         pass
+
     def stop_polling(self) -> None:
         pass
 
 
+# -----------------------------
+# Builders
+# -----------------------------
 def _build_kite() -> Optional["KiteConnect"]:
     if not settings.enable_live_trading:
         logging.getLogger("main").info("Live trading disabled → paper mode.")
@@ -60,6 +69,7 @@ def _build_kite() -> Optional["KiteConnect"]:
 
 
 def _tail_logs(n: int = 100, path: str = "trading_bot.log") -> list[str]:
+    """Return last n lines from log file; used by /logs. Safe if file missing."""
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -78,33 +88,55 @@ def _tail_logs(n: int = 100, path: str = "trading_bot.log") -> list[str]:
 
 
 def _wire_real_telegram(runner: StrategyRunner):
-    Tg = _import_telegram_class()
-    if Tg is None:
-        return _NoopTelegram()
+    """
+    Build your real TelegramController and wire providers from the runner,
+    keeping original names/flow. Minimal wiring; avoids attribute errors.
+    """
+    if TelegramController is None:
+        raise RuntimeError("src.notifications.telegram_controller not found.")
 
-    tg = Tg(
+    tg = TelegramController(
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.get_health_report,   # <- uses cards
-        logs_provider=_tail_logs,
+        # Use the new health report for both /diag (compact) and /check (multiline)
+        diag_provider=runner.get_health_report,
+        logs_provider=_tail_logs,  # enables /logs [n]
         last_signal_provider=runner.get_last_signal_debug,
         runner_pause=runner.pause,
         runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,
+        runner_tick=runner.runner_tick,        # accepts dry=bool in our runner
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
         set_live_mode=runner.set_live_mode,
+        # Strategy/executor tuners (wire when available)
+        set_risk_pct=None,
+        toggle_trailing=None,
+        set_trailing_mult=None,
+        toggle_partial=None,
+        set_tp1_ratio=None,
+        set_breakeven_ticks=None,
+        set_min_score=None,
+        set_conf_threshold=None,
+        set_atr_period=None,
+        set_sl_mult=None,
+        set_tp_mult=None,
+        set_trend_boosts=None,
+        set_range_tighten=None,
     )
 
+    # Keep both attributes to match old/new code paths
     runner.telegram_controller = tg
     runner.telegram = tg
+
     try:
         tg.start_polling()
     except Exception:
         logging.getLogger("main").warning("Telegram polling failed to start; continuing.")
-    return tg
 
 
+# -----------------------------
+# App lifecycle
+# -----------------------------
 _stop_flag = False
 
 
@@ -113,6 +145,7 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
         global _stop_flag
         logging.getLogger("main").info(f"Signal {signum} received — shutting down…")
         _stop_flag = True
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _handler)
@@ -134,31 +167,44 @@ def main() -> int:
 
     kite = _build_kite()
 
-    # temporary noop telegram so runner ctor won't raise
+    # 1) create runner with a temporary no-op telegram so ctor won't raise
     runner = StrategyRunner(kite=kite, telegram_controller=_NoopTelegram())
     _install_signal_handlers(runner)
 
-    tg = _wire_real_telegram(runner)
+    # 2) now build your real TelegramController and wire providers from runner
+    _wire_real_telegram(runner)
 
+    # announce
     try:
-        tg.send_message("🚀 Bot starting (shadow mode by default).")
+        runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")
     except Exception:
         log.warning("Telegram startup message failed (continuing).")
 
+    # If your runner has start(), call it (else we just health-loop)
+    try:
+        if hasattr(runner, "start"):
+            runner.start()
+    except Exception as e:
+        log.exception("Runner start failed: %s", e)
+        return 1
+
+    # health loop
     try:
         while not _stop_flag:
             try:
-                runner.health_check()
+                if hasattr(runner, "health_check"):
+                    runner.health_check()
             except Exception as e:
                 log.warning("Health check warn: %s", e)
             time.sleep(5)
     finally:
         try:
-            runner.shutdown()
+            if hasattr(runner, "shutdown"):
+                runner.shutdown()
         except Exception:
             pass
         try:
-            tg.send_message("🛑 Bot stopped.")
+            runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception:
             pass
 
