@@ -18,18 +18,20 @@ log = logging.getLogger(__name__)
 
 class TelegramController:
     """
-    Minimal, production-safe Telegram controller that:
-      - Pulls bot_token/chat_id from settings.telegram (no ctor kwargs).
-      - Provides public send_message(), notify_entry(), notify_fills().
-      - Starts a polling thread and handles the command set.
-      - Includes dedup/rate-limit and exponential backoff on send failures.
-      - NEW: /diag compact summary, /check multiline health cards.
+    Telegram control plane with:
+      * compact /diag
+      * multiline /check "health cards"
+      * safe rate limiting & retries
+      * same command set you already use
     """
 
+    # ------------------------------------------------------------------ #
+    # ctor
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         *,
-        # providers
+        # providers (all optional except status)
         status_provider: Callable[[], Dict[str, Any]],
         positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         actives_provider: Optional[Callable[[], List[Any]]] = None,
@@ -39,9 +41,9 @@ class TelegramController:
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
-        runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # accepts optional dry=bool
+        runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,  # may accept dry=bool
         cancel_all: Optional[Callable[[], None]] = None,
-        # execution/strategy mutators
+        # execution mutators
         set_risk_pct: Optional[Callable[[float], None]] = None,
         toggle_trailing: Optional[Callable[[bool], None]] = None,
         set_trailing_mult: Optional[Callable[[float], None]] = None,
@@ -49,6 +51,7 @@ class TelegramController:
         set_tp1_ratio: Optional[Callable[[float], None]] = None,
         set_breakeven_ticks: Optional[Callable[[int], None]] = None,
         set_live_mode: Optional[Callable[[bool], None]] = None,
+        # strategy mutators
         set_min_score: Optional[Callable[[int], None]] = None,
         set_conf_threshold: Optional[Callable[[float], None]] = None,
         set_atr_period: Optional[Callable[[int], None]] = None,
@@ -58,7 +61,6 @@ class TelegramController:
         set_range_tighten: Optional[Callable[[float, float], None]] = None,
         http_timeout: float = 20.0,
     ) -> None:
-        # --- credentials from settings (MANDATORY) ---
         tg = getattr(settings, "telegram", object())
         self._token: Optional[str] = getattr(tg, "bot_token", None)
         self._chat_id: Optional[int] = int(getattr(tg, "chat_id", 0) or 0)
@@ -69,7 +71,7 @@ class TelegramController:
         self._timeout = http_timeout
         self._session = requests.Session()
 
-        # --- hooks (unchanged API) ---
+        # hooks
         self._status_provider = status_provider
         self._positions_provider = positions_provider
         self._actives_provider = actives_provider
@@ -81,7 +83,6 @@ class TelegramController:
         self._runner_resume = runner_resume
         self._runner_tick = runner_tick
         self._cancel_all = cancel_all
-
         self._set_risk_pct = set_risk_pct
         self._toggle_trailing = toggle_trailing
         self._set_trailing_mult = set_trailing_mult
@@ -98,23 +99,25 @@ class TelegramController:
         self._set_trend_boosts = set_trend_boosts
         self._set_range_tighten = set_range_tighten
 
-        # --- polling state ---
+        # polling state
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._started = False
         self._last_update_id: Optional[int] = None
 
-        # --- allowlist (admin + extras) ---
+        # allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
         self._allowlist = {int(self._chat_id), *[int(x) for x in extra]}
 
-        # --- rate-limit / backoff ---
+        # rate-limit / backoff
         self._send_min_interval = 0.9
         self._last_sends: List[tuple[float, str]] = []
         self._backoff = 1.0
         self._backoff_max = 20.0
 
-    # ================= outbound =================
+    # ------------------------------------------------------------------ #
+    # outbound helpers
+    # ------------------------------------------------------------------ #
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
         h = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -144,41 +147,22 @@ class TelegramController:
                 self._backoff = delay
 
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
-        payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
         try:
-            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            self._session.post(
+                f"{self._base}/sendMessage",
+                json={"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}},
+                timeout=self._timeout,
+            )
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
-    # public API used by runner/main
+    # public API
     def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
         self._send(text, parse_mode=parse_mode)
 
-    def send_startup_alert(self) -> None:
-        s = {}
-        try:
-            s = self._status_provider() if self._status_provider else {}
-        except Exception:
-            pass
-        self._send(
-            "🚀 Bot started\n"
-            f"🔁 Trading: {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'}\n"
-            f"🧠 Broker: {s.get('broker')}\n"
-            f"📦 Active: {s.get('active_orders', 0)}"
-        )
-
-    def notify_entry(self, *, symbol: str, side: str, qty: int, price: float, record_id: str) -> None:
-        self._send(f"🟢 Entry placed\n{symbol} | {side}\nQty: {qty} @ {price:.2f}\nID: `{record_id}`", parse_mode="Markdown")
-
-    def notify_fills(self, fills: List[tuple[str, float]]) -> None:
-        if not fills:
-            return
-        lines = ["✅ Fills"]
-        for rid, px in fills:
-            lines.append(f"• {rid} @ {px:.2f}")
-        self._send("\n".join(lines))
-
-    # ================= polling =================
+    # ------------------------------------------------------------------ #
+    # polling
+    # ------------------------------------------------------------------ #
     def start_polling(self) -> None:
         if self._started:
             log.info("Telegram polling already running; skipping start.")
@@ -215,24 +199,168 @@ class TelegramController:
                 log.debug("Telegram poll error: %s", e)
                 time.sleep(1.0)
 
-    # ================= helpers =================
+    # ------------------------------------------------------------------ #
+    # health card rendering
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _mark(ok: Optional[bool]) -> str:
+        return "🟢" if ok else "🔴"
+
+    def _render_health_cards(self, diag: Dict[str, Any], status: Dict[str, Any]) -> str:
+        """
+        Build the multiline 'Health Report' like the screenshot.
+        Works even if diag/status are missing fields.
+        """
+        # convenience getters
+        def g(d, *keys, default=None):
+            cur = d or {}
+            for k in keys:
+                cur = cur.get(k, {})
+            return cur if cur not in (None, {}) else default
+
+        # flat checks into dict for quick lookup
+        checks = {str(c.get("name")).lower(): bool(c.get("ok")) for c in (diag.get("checks") or [])}
+
+        # Data
+        data_rows = g(diag, "data", default={})
+        rows = data_rows.get("rows")
+        age = data_rows.get("age")
+        tf = data_rows.get("tf")
+        src = data_rows.get("src")
+
+        # Strategy
+        strat = g(diag, "strategy", default={})
+        score = strat.get("score")
+        conf = strat.get("confidence")
+        rr = strat.get("rr")
+        regime = (strat.get("regime") or "").replace("_", " ")
+        last_age = strat.get("last_age")
+
+        # Orders
+        orders = g(diag, "orders", default={})
+        actives = orders.get("active")
+        last_exec_age = orders.get("last_exec_age")
+        last_err = orders.get("err")
+
+        # Risk
+        risk = g(diag, "risk", default={})
+        pnl = risk.get("pnl", 0.0)
+        loss = risk.get("loss", "0/0")
+        trades = risk.get("trades", 0)
+        streak = risk.get("streak", 0)
+        equity = risk.get("equity", 0.0)
+        floor = risk.get("floor", 0.0)
+
+        # System
+        sysd = g(diag, "system", default={})
+        ticks = sysd.get("ticks")
+        errs = sysd.get("errs")
+        rate = sysd.get("rate")
+        cpu = sysd.get("cpu")
+        mem = sysd.get("mem")
+
+        # Broker
+        live = status.get("live_trading")
+        broker = status.get("broker")
+
+        # Compose
+        lines: List[str] = []
+        lines.append("🔎 *Health Report*")
+        lines.append("")
+        # headline check line (like compact /diag)
+        headline = []
+        for key in (
+            "flow",
+            "telegram controller",
+            "broker session",
+            "zerodha credentials",
+            "data source",
+            "instrument token",
+            "trading window",
+            "ohlc fetch",
+            "equity snapshot",
+            "risk gates",
+            "executor",
+        ):
+            # allow variety of names from the runner
+            ok = None
+            for k in checks:
+                if key in k:
+                    ok = checks[k]
+                    break
+            if ok is not None:
+                headline.append(f"{self._mark(ok)} {key.replace('session', 'session (Kite)')}")
+        if headline:
+            lines.append(" · ".join(headline))
+            lines.append("")
+
+        # Sections
+        def sec(title: str, body: List[str], ok: Optional[bool] = None):
+            mark = "" if ok is None else f"{self._mark(ok)} "
+            lines.append(f"{mark}*{title}*")
+            if body:
+                for b in body:
+                    lines.append(b)
+            else:
+                lines.append("—")
+            lines.append("")
+
+        # Data
+        sec("🧰 Data", [f"rows={rows or 0}  age={age or '—'}  tf={tf or '—'}  src={src or '—'}"],
+            checks.get("ohlc fetch"))
+
+        # Strategy
+        sec("🧠 Strategy", [
+            f"score={score or '—'}  conf={conf or '—'}  rr={rr or '—'}  regime={regime or '—'}  last_age={last_age or '—'}"
+        ], checks.get("strategy"))
+
+        # Orders
+        sec("🛠 Orders", [
+            f"active={actives or '—'}  last_exec_age={last_exec_age or '—'}  err={last_err or '—'}"
+        ], checks.get("executor"))
+
+        # Risk
+        sec("💰 Risk", [
+            f"pnl={pnl:.2f}  loss={loss}  trades={trades}  streak={streak}  equity={equity:.2f}  floor={floor:.2f}"
+        ], checks.get("risk gates"))
+
+        # System
+        sec("⚙️ System", [
+            f"ticks={ticks or '—'}  errs={errs or '—'}  rate={rate or '—'}  cpu={cpu or '—'}  mem={mem or '—'}  last_err={last_err or '—'}"
+        ], checks.get("flow"))
+
+        # Broker
+        sec("🧩 Broker", [f"live={'Yes' if live else 'None'}  broker={broker or 'None'}"],
+            checks.get("broker session"))
+
+        # last signal
+        try:
+            ls = self._last_signal_provider() if self._last_signal_provider else None
+        except Exception:
+            ls = None
+        lines.append(f"📈 last_signal: {'present' if ls else 'none'}")
+
+        text = "\n".join(lines)
+        # Telegram Markdown-safe block (avoid backticks inside)
+        return text.replace("_", "\\_")
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
     def _do_tick(self, *, dry: bool) -> str:
-        """Run one tick. If runner provider doesn't accept 'dry', emulate by flipping live/offhours flags."""
         if not self._runner_tick:
             return "Tick not wired."
 
-        # detect if provider accepts 'dry'
         accepts_dry = False
         try:
             sig = inspect.signature(self._runner_tick)  # type: ignore[arg-type]
             accepts_dry = "dry" in sig.parameters
         except Exception:
-            accepts_dry = False
+            pass
 
-        # snapshot flags
         live_before = getattr(settings, "enable_live_trading", False)
         allow_off_before = getattr(settings, "allow_offhours_testing", False)
 
@@ -265,79 +393,11 @@ class TelegramController:
 
         return "✅ Tick executed." if res else ("Dry tick executed (no action)." if dry else "Tick executed (no action).")
 
-    # ================= formatting helpers for health =================
-    @staticmethod
-    def _fmt_bool(ok: Optional[bool]) -> str:
-        return "🟢" if ok else "🔴"
-
-    @staticmethod
-    def _fmt_none(v: Any) -> str:
-        return "—" if v is None else str(v)
-
-    def _format_compact_diag(self, d: Dict[str, Any]) -> str:
-        checks = d.get("checks", [])
-        parts = [f"{self._fmt_bool(d.get('ok', False))} Flow"]
-        for c in checks:
-            parts.append(f"{self._fmt_bool(c.get('ok'))} {c.get('name')}")
-        return " · ".join(parts)
-
-    def _format_multiline_health(self, d: Dict[str, Any]) -> str:
-        c = d.get("cards", {}) if isinstance(d, dict) else {}
-        data = c.get("data", {})
-        strat = c.get("strategy", {})
-        ords = c.get("orders", {})
-        risk = c.get("risk", {})
-        sysc = c.get("system", {})
-        brok = c.get("broker", {})
-
-        lines = ["🔍 Health Report"]
-        # Data
-        lines.append(f"{self._fmt_bool(data.get('ok'))} 📡 Data")
-        lines.append(
-            f"   rows={data.get('ohlc_rows', 0)}  age={self._fmt_none(data.get('last_data_age_s'))}s  "
-            f"tf={data.get('timeframe','?')}  src={data.get('source','?')}"
-        )
-        # Strategy
-        lines.append(f"{self._fmt_bool(strat.get('ok'))} 🧠 Strategy")
-        lines.append(
-            f"   score={self._fmt_none(strat.get('score'))} conf={self._fmt_none(strat.get('confidence'))} "
-            f"rr={self._fmt_none(strat.get('rr'))} regime={self._fmt_none(strat.get('regime'))} "
-            f"last_age={self._fmt_none(strat.get('last_signal_age_s'))}s"
-        )
-        # Orders
-        lines.append(f"{self._fmt_bool(ords.get('ok'))} 🛠️ Orders")
-        lines.append(
-            f"   active={self._fmt_none(ords.get('active_orders'))} last_exec_age={self._fmt_none(ords.get('last_execution_age_s'))}s "
-            f"err={self._fmt_none(ords.get('last_exec_error'))}"
-        )
-        # Risk
-        lines.append(f"{self._fmt_bool(risk.get('ok'))} 💰 Risk")
-        lines.append(
-            "   pnl={:.2f} loss={:.2f}/{:.2f} trades={} streak={} equity={:.2f} floor={:.2f}".format(
-                float(risk.get("day_realized_pnl", 0.0)),
-                float(risk.get("day_realized_loss", 0.0)),
-                float(risk.get("max_daily_loss_rupees", 0.0)),
-                int(risk.get("trades_today", 0)),
-                int(risk.get("consecutive_losses", 0)),
-                float(risk.get("equity", 0.0)),
-                float(risk.get("equity_floor", 0.0)),
-            )
-        )
-        # System
-        lines.append(f"{self._fmt_bool(sysc.get('error_rate_pct', 0.0) <= 15.0)} ⚙️ System")
-        lines.append(
-            f"   ticks={self._fmt_none(sysc.get('ticks'))} errs={self._fmt_none(sysc.get('errors'))} "
-            f"rate={self._fmt_none(sysc.get('error_rate_pct'))}% cpu={self._fmt_none(sysc.get('cpu_pct'))}% "
-            f"mem={self._fmt_none(sysc.get('mem_pct'))}% last_err={self._fmt_none(sysc.get('last_error'))}"
-        )
-        # Broker
-        lines.append(f"{self._fmt_bool(brok.get('ok'))} 🧩 Broker")
-        lines.append(f"   live={brok.get('live_mode')} broker={brok.get('broker')}")
-        return "\n".join(lines)
-
-    # ================= command handling =================
+    # ------------------------------------------------------------------ #
+    # command handling
+    # ------------------------------------------------------------------ #
     def _handle_update(self, upd: Dict[str, Any]) -> None:
-        # inline callbacks
+        # callbacks
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq.get("message", {}).get("chat", {}).get("id")
@@ -359,7 +419,7 @@ class TelegramController:
                     pass
             return
 
-        # text messages
+        # text
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
             return
@@ -375,7 +435,7 @@ class TelegramController:
         cmd = parts[0].lower()
         args = parts[1:]
 
-        # ---- HELP ----
+        # HELP
         if cmd in ("/start", "/help"):
             return self._send(
                 "🤖 Nifty Scalper Bot — commands\n"
@@ -388,8 +448,7 @@ class TelegramController:
                 "/mode live|dry — toggle live trading\n"
                 "/tick — one tick | /tickdry — one dry tick (after-hours ok)\n"
                 "/logs [n] — recent log lines\n"
-                "/diag — compact health\n"
-                "/check — multiline health report\n"
+                "/diag — compact dot list  •  /check — Health Report\n"
                 "*Execution Tuning*\n"
                 "/risk <pct> • /trail on|off • /trailmult <x>\n"
                 "/partial on|off • /tp1 <pct> • /breakeven <ticks>\n"
@@ -399,7 +458,7 @@ class TelegramController:
                 parse_mode="Markdown",
             )
 
-        # ---- STATUS ----
+        # STATUS
         if cmd == "/status":
             try:
                 s = self._status_provider() if self._status_provider else {}
@@ -414,7 +473,7 @@ class TelegramController:
                 f"📦 Active: {s.get('active_orders', 0)}"
             )
 
-        # ---- ACTIVES ----
+        # ACTIVES
         if cmd == "/active":
             if not self._actives_provider:
                 return self._send("No active-orders provider wired.")
@@ -437,7 +496,7 @@ class TelegramController:
                 lines.append(f"• {sym} {side} qty={qty} id={rid}")
             return self._send("\n".join(lines))
 
-        # ---- POSITIONS ----
+        # POSITIONS
         if cmd == "/positions":
             if not self._positions_provider:
                 return self._send("No positions provider wired.")
@@ -455,7 +514,7 @@ class TelegramController:
                 lines.append(f"• {sym}: qty={qty} avg={avg}")
             return self._send("\n".join(lines))
 
-        # ---- CANCEL ALL ----
+        # CANCEL ALL
         if cmd == "/cancel_all":
             return self._send_inline(
                 "Confirm cancel all?",
@@ -463,7 +522,7 @@ class TelegramController:
                   {"text": "❌ Abort", "callback_data": "abort"}]],
             )
 
-        # ---- PAUSE / RESUME ----
+        # PAUSE / RESUME
         if cmd == "/pause":
             if self._runner_pause:
                 self._runner_pause()
@@ -476,7 +535,7 @@ class TelegramController:
                 return self._send("▶️ Entries resumed.")
             return self._send("Resume not wired.")
 
-        # ---- MODE ----
+        # MODE
         if cmd == "/mode":
             if not args:
                 return self._send("Usage: /mode live|dry")
@@ -490,13 +549,13 @@ class TelegramController:
                 setattr(settings, "enable_live_trading", val)
             return self._send(f"Mode set to {'LIVE' if val else 'DRY'}.")
 
-        # ---- TICKS ----
+        # TICKS
         if cmd in ("/tick", "/tickdry"):
             dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
             out = self._do_tick(dry=dry)
             return self._send(out)
 
-        # ---- LOGS ----
+        # LOGS
         if cmd == "/logs":
             if not self._logs_provider:
                 return self._send("Logs provider not wired.")
@@ -512,31 +571,37 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Logs error: {e}")
 
-        # ---- DIAG (compact) ----
+        # DIAG (compact)
         if cmd == "/diag":
             if not self._diag_provider:
-                return self._send("Diag provider not wired.")
+                return self._send("No checks available.")
             try:
                 d = self._diag_provider() or {}
-                return self._send(self._format_compact_diag(d))
+                ok = d.get("ok", False)
+                checks = d.get("checks", [])
+                summary = []
+                for c in checks:
+                    mark = "🟢" if c.get("ok") else "🔴"
+                    summary.append(f"{mark} {c.get('name')}")
+                head = "✅ Flow looks good" if ok else "❗ Flow has issues"
+                return self._send(f"{head}\n" + " · ".join(summary))
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 
-        # ---- CHECK (multiline health cards) ----
+        # CHECK (multiline cards)
         if cmd == "/check":
             if not self._diag_provider:
-                return self._send("Diag provider not wired.")
+                return self._send("No checks available.")
             try:
                 d = self._diag_provider() or {}
-                text = self._format_multiline_health(d)
-                # Telegram message limit guard
-                if len(text) > 3800:
-                    text = text[:3790] + "\n…(truncated)"
-                return self._send(text)
+                s = self._status_provider() if self._status_provider else {}
+                card = self._render_health_cards(d, s)
+                # Markdown: we avoid triple backticks to keep line wrapping consistent on mobile
+                return self._send(card, parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Check error: {e}")
 
-        # ---- EXECUTION TUNING ----
+        # --- execution tuning ---
         if cmd == "/risk":
             if not args:
                 return self._send("Usage: /risk 0.5  (for 0.5%)")
@@ -599,7 +664,7 @@ class TelegramController:
             except Exception:
                 return self._send("Invalid integer. Example: /breakeven 2")
 
-        # ---- STRATEGY TUNING ----
+        # strategy tuning
         if cmd == "/minscore":
             if not args:
                 return self._send("Usage: /minscore 3")
