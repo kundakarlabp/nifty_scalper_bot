@@ -103,13 +103,32 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     if not TelegramController:
         return
 
+    log = logging.getLogger("main")
+
+    # Defensive fallback: status_provider must be a callable.
+    status_provider = getattr(runner, "get_status_snapshot", None)
+    if not callable(status_provider):
+        log.error("StrategyRunner missing get_status_snapshot; wiring a minimal stub to avoid crash.")
+        status_provider = lambda: {
+            "time_ist": "unknown",
+            "live_trading": bool(getattr(settings, "enable_live_trading", False)),
+            "broker": "Kite" if getattr(runner, "kite", None) else "Paper",
+            "within_window": False,
+            "paused": True,
+            "trades_today": 0,
+            "consecutive_losses": 0,
+            "day_realized_loss": 0.0,
+            "day_realized_pnl": 0.0,
+            "active_orders": 0,
+        }
+
     tg = TelegramController(
         # providers
-        status_provider=runner.get_status_snapshot,
+        status_provider=status_provider,  # ← pass callable, NOT a call
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.build_diag,                         # detailed → /check
-        compact_diag_provider=runner.get_compact_diag_summary,   # compact → /diag
+        diag_provider=runner.build_diag,  # detailed → /check
+        compact_diag_provider=getattr(runner, "get_compact_diag_summary", None),  # compact → /diag
         logs_provider=_tail_logs,
         last_signal_provider=runner.get_last_signal_debug,
         # controls
