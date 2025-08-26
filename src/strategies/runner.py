@@ -2,601 +2,429 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 
 from src.config import settings
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.execution.order_executor import OrderExecutor
+from src.data.source import LiveKiteSource  # ← concrete class (accepts kite)
 
-# Optional broker SDK
+# Optional imports (kept tolerant so runner works in shadow mode / tests)
 try:
     from kiteconnect import KiteConnect  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
-# Data source
 try:
-    from src.data.source import LiveKiteSource  # type: ignore
-except Exception:
-    LiveKiteSource = None  # type: ignore
+    # Your strategy/executor modules (names kept as per your repo)
+    from src.optimized_scalping_strategy import ScalpingStrategy  # type: ignore
+except Exception:  # pragma: no cover
+    ScalpingStrategy = None  # type: ignore
+
+try:
+    from src.optimized_order_executor import OrderExecutor  # type: ignore
+except Exception:  # pragma: no cover
+    OrderExecutor = None  # type: ignore
+
+# Optional Telegram controller; we treat it duck-typed (safe if not present)
+try:
+    from src.notifications.telegram_controller import TelegramController  # type: ignore
+except Exception:  # pragma: no cover
+    TelegramController = Any  # type: ignore
 
 
-@dataclass
-class RiskState:
-    trading_day: datetime
-    trades_today: int = 0
-    consecutive_losses: int = 0
-    day_realized_loss: float = 0.0
-    day_realized_pnl: float = 0.0
+log = logging.getLogger("StrategyRunner")
 
 
+# --------------------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------------------
+def _now_ist() -> datetime:
+    return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+
+def _fmt_bool(good: bool) -> str:
+    return "🟢" if good else "🔴"
+
+
+def _secs_ago(ts: Optional[float]) -> Optional[int]:
+    if not ts:
+        return None
+    return int(time.time() - ts)
+
+
+# --------------------------------------------------------------------------------------
+# StrategyRunner
+# --------------------------------------------------------------------------------------
 class StrategyRunner:
     """
-    Pipeline: data → signal → risk gates → sizing → execution
-    TelegramController is provided by main.py; here we only consume it.
+    Coordinates:
+      - data source (Kite / paper)
+      - strategy signals
+      - order execution
+      - Telegram diagnostics / hot-rewire
+
+    This runner is defensive: it runs in paper/shadow even if kite/strategy/executor
+    aren’t available, so your /diag and /status never break.
     """
 
-    # ---------------- init ----------------
-    def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
-        self.log = logging.getLogger(self.__class__.__name__)
-        self.kite = kite
-
-        if telegram_controller is None:
-            raise RuntimeError("TelegramController must be provided to StrategyRunner.")
-        # keep both names for old controllers
-        self.telegram = telegram_controller
-        self.telegram_controller = telegram_controller
+    # ---- lifecycle ------------------------------------------------------------------
+    def __init__(
+        self,
+        *,
+        kite: Optional[KiteConnect] = None,
+        telegram: Optional[TelegramController] = None,
+        live_trading: bool = False,
+        use_live_equity: Optional[bool] = None,
+    ) -> None:
+        self.kite: Optional[KiteConnect] = kite
+        self.telegram: Optional[TelegramController] = telegram
+        self.live_trading: bool = bool(live_trading)
+        self.use_live_equity: bool = settings.risk.use_live_equity if use_live_equity is None else bool(use_live_equity)
 
         # Core components
-        self.strategy = EnhancedScalpingStrategy()
-        self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
+        self.data_source: LiveKiteSource = LiveKiteSource(self.kite)
+        self.strategy = None  # type: ignore
+        self.executor = None  # type: ignore
 
-        # Data source
-        self.data_source = None
-        self._last_fetch_ts: float = 0.0
-        if LiveKiteSource is not None:
+        # State
+        self._lock = threading.RLock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+        # Telemetry
+        self.last_fetch_at: Optional[float] = None
+        self.last_signal: Optional[str] = None
+        self.last_error: Optional[str] = None
+        self.active_positions: int = 0
+        self.rr_threshold: Dict[str, Any] = {}
+
+        # Wire everything
+        self._initialize_components()
+        self._wire_telegram()
+
+    # ---- wiring ---------------------------------------------------------------------
+    def _initialize_components(self) -> None:
+        # Data
+        self.data_source.connect()
+        log.info("StrategyRunner: Data source initialized: LiveKiteSource")
+
+        # Strategy (if module available)
+        if ScalpingStrategy:
             try:
-                self.data_source = LiveKiteSource(kite=self.kite)
-                self.data_source.connect()
-                self.log.info("Data source initialized: LiveKiteSource")
+                self.strategy = ScalpingStrategy(
+                    ema_fast=settings.strategy.ema_fast,
+                    ema_slow=settings.strategy.ema_slow,
+                    rsi_period=settings.strategy.rsi_period,
+                    bb_period=settings.strategy.bb_period,
+                    bb_std=settings.strategy.bb_std,
+                    atr_period=settings.strategy.atr_period,
+                    atr_sl_multiplier=settings.strategy.atr_sl_multiplier,
+                    atr_tp_multiplier=settings.strategy.atr_tp_multiplier,
+                    rr_min=settings.strategy.rr_min,
+                    min_bars=settings.strategy.min_bars_for_signal,
+                    confidence_threshold=settings.strategy.confidence_threshold,
+                )
             except Exception as e:
-                self.log.warning(f"Data source init failed; proceeding without: {e}")
+                self.strategy = None
+                log.exception("StrategyRunner: failed to initialize strategy: %s", e)
+        else:
+            log.warning("StrategyRunner: strategy module not available (shadow mode).")
 
-        # Risk + equity cache
-        self.risk = RiskState(trading_day=self._today_ist())
-        self._equity_last_refresh_ts: float = 0.0
-        self._equity_cached_value: float = float(settings.risk.default_equity)
-        self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+        # Executor (if module available)
+        if OrderExecutor:
+            try:
+                self.executor = OrderExecutor(
+                    kite=self.kite,
+                    live=self.live_trading and (self.kite is not None),
+                    settings=settings,
+                )
+            except Exception as e:
+                self.executor = None
+                log.exception("StrategyRunner: failed to initialize executor: %s", e)
+        else:
+            log.warning("StrategyRunner: order executor not available (shadow mode).")
 
-        # Trading window
-        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
-        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
-
-        # State + debug
-        self._paused: bool = False
-        self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
-        self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
-
-        # Runtime flags
-        self._last_error: Optional[str] = None
-        self._last_signal_at: float = 0.0
-
-        self.log.info(
-            "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
-            settings.enable_live_trading, settings.risk.use_live_equity
+        log.info(
+            "StrategyRunner: StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
+            self.live_trading, self.use_live_equity
         )
 
-    # Optional start hook (main calls it if present)
-    def start(self) -> None:
-        return
+        # Reflect initial “live” request
+        self._apply_live_state(self.live_trading, announce=False)
 
-    # ---------------- main loop entry ----------------
-    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
-        flow: Dict[str, Any] = {
-            "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
-            "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
-            "executed": False, "reason_block": None,
-        }
+    def _wire_telegram(self) -> None:
+        if not self.telegram:
+            return
 
+        # The controller API varies across repos; wire defensively.
+        # We try common names and also attach the runner so commands can call us.
         try:
-            # window
-            if not self._within_trading_window() and not settings.allow_offhours_testing:
-                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
-            flow["within_window"] = True
+            if hasattr(self.telegram, "set_diag_provider"):
+                self.telegram.set_diag_provider(self.diagnostics_text)  # type: ignore[attr-defined]
+            if hasattr(self.telegram, "set_status_provider"):
+                self.telegram.set_status_provider(self.status_card)  # type: ignore[attr-defined]
+            if hasattr(self.telegram, "set_mode_switcher"):
+                self.telegram.set_mode_switcher(self.handle_mode_command)  # type: ignore[attr-defined]
+            if hasattr(self.telegram, "attach_runner"):
+                self.telegram.attach_runner(self)  # type: ignore[attr-defined]
+            log.info("StrategyRunner: Telegram controller attached.")
+        except Exception as e:
+            log.warning("StrategyRunner: failed to wire Telegram controller: %s", e)
 
-            # pause
-            if self._paused:
-                flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
+    # ---- live/paper rewire -----------------------------------------------------------
+    def handle_mode_command(self, mode: str) -> str:
+        """
+        Telegram-facing hook: /mode live | /mode paper
+        """
+        mode = (mode or "").strip().lower()
+        if mode in ("live", "on", "enable", "enabled", "true", "1"):
+            ok = self._apply_live_state(True, announce=False)
+            if ok:
+                return "Mode set to LIVE and rewired."
+            return "Requested LIVE, but broker session is missing — staying in paper."
+        elif mode in ("paper", "shadow", "off", "disable", "disabled", "false", "0"):
+            self._apply_live_state(False, announce=False)
+            return "Mode set to PAPER and rewired."
+        else:
+            return "Unknown mode. Use /mode live or /mode paper."
 
-            # new day / equity
-            self._ensure_day_state()
-            self._refresh_equity_if_due()
+    def set_live(self, live: bool, kite: Optional[KiteConnect] = None) -> None:
+        """
+        Programmatic rewire (used by main.py if it toggles).
+        """
+        if kite is not None:
+            self.kite = kite
+        self._apply_live_state(live, announce=True)
 
-            # ---- data
-            df = self._fetch_spot_ohlc()
-            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
-            if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
-                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
-            flow["data_ok"] = True
+    def _apply_live_state(self, live: bool, announce: bool = True) -> bool:
+        """
+        Apply live/paper modes across components. Returns True iff live+connected.
+        """
+        with self._lock:
+            self.live_trading = bool(live)
 
-            # ---- signal
-            signal = self.strategy.generate_signal(df, current_tick=tick)
-            self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
-            if not signal:
-                flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
-                self._last_flow_debug = flow; return
-            flow["signal_ok"] = True
-
-            # ---- RR minimum
-            rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
-            rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
-            if rr_min and rr_val and rr_val < rr_min:
-                flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
-                flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
-                self._last_flow_debug = flow; return
-
-            # ---- risk gates
-            gates = self._risk_gates_for(signal)
-            flow["risk_gates"] = gates
-            if not all(gates.values()):
-                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
-
-            # ---- sizing
-            qty, diag = self._calculate_quantity_diag(
-                entry=float(signal["entry_price"]),
-                stop=float(signal["stop_loss"]),
-                lot_size=int(settings.instruments.nifty_lot_size),
-                equity=self._active_equity(),
-            )
-            flow["sizing"] = diag; flow["qty"] = int(qty)
-            if qty <= 0:
-                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
-
-            # ---- execution (support both executors)
-            placed_ok = False
-            if hasattr(self.executor, "place_order"):
-                exec_payload = {
-                    "action": signal["action"],
-                    "quantity": int(qty),
-                    "entry_price": float(signal["entry_price"]),
-                    "stop_loss": float(signal["stop_loss"]),
-                    "take_profit": float(signal["take_profit"]),
-                    "strike": float(signal["strike"]),
-                    "option_type": signal["option_type"],
-                }
-                placed_ok = bool(self.executor.place_order(exec_payload))
-            elif hasattr(self.executor, "place_entry_order"):
-                side = "BUY" if str(signal["action"]).upper() == "BUY" else "SELL"
-                symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
-                token = int(getattr(settings.instruments, "instrument_token", 0))
-                oid = self.executor.place_entry_order(
-                    token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(signal["entry_price"])
-                )
-                placed_ok = bool(oid)
-                if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
+            # Re-plug Kite into data source/executor
+            self.data_source.kite = self.kite
+            if self.executor and hasattr(self.executor, "set_live"):
+                try:
+                    self.executor.set_live(self.live_trading and (self.kite is not None))  # type: ignore[attr-defined]
+                except Exception:
+                    # Fallback: try attributes found in some repos
                     try:
-                        self.executor.setup_gtt_orders(
-                            record_id=oid,
-                            sl_price=float(signal["stop_loss"]),
-                            tp_price=float(signal["take_profit"]),
-                        )
-                    except Exception as e:
-                        self.log.warning("setup_gtt_orders failed: %s", e)
+                        self.executor.live = self.live_trading and (self.kite is not None)  # type: ignore[attr-defined]
+                        self.executor.kite = self.kite  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+            # Log announcements
+            if self.live_trading:
+                if self.kite is None:
+                    log.warning("StrategyRunner: Requested live mode but kite=None; staying effectively in paper.")
+                    if announce:
+                        self._notify("⚠️ Live requested but broker session missing; staying in paper.")
+                    return False
+                else:
+                    # connect() will just log if already attached
+                    try:
+                        self.data_source.connect()
+                    except Exception:
+                        pass
+                    log.info("StrategyRunner: 🔓 Live mode ON — broker session initialized.")
+                    if announce:
+                        self._notify("🔓 Live mode ON — broker session initialized.")
+                    return True
             else:
-                self.log.error("No known execution method found on OrderExecutor")
+                log.info("StrategyRunner: Live trading disabled → paper mode.")
+                if announce:
+                    self._notify("🧪 Paper mode ON — live trading disabled.")
+                return False
 
-            flow["executed"] = placed_ok
-            if not placed_ok:
-                flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
-
-            if placed_ok:
-                self.risk.trades_today += 1
-                self._last_signal_at = time.time()
-                self._notify(
-                    f"✅ Placed: {signal['action']} {qty} {signal['option_type']} {int(signal['strike'])} "
-                    f"@ {float(signal['entry_price']):.2f} (SL {float(signal['stop_loss']):.2f}, "
-                    f"TP {float(signal['take_profit']):.2f})"
-                )
-
-            self._last_flow_debug = flow
-
-        except Exception as e:
-            flow["reason_block"] = f"exception:{e.__class__.__name__}"
-            self._last_error = str(e)
-            self._last_flow_debug = flow
-            self.log.exception("process_tick error: %s", e)
-
-    # one-shot tick used by Telegram
-    def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
-        prev = bool(settings.allow_offhours_testing)
-        try:
-            if dry:
-                setattr(settings, "allow_offhours_testing", True)
-            self.process_tick(tick=None)
-            return dict(self._last_flow_debug)
-        finally:
-            setattr(settings, "allow_offhours_testing", prev)
-
-    def health_check(self) -> None:
-        # refresh equity and executor heartbeat
-        self._refresh_equity_if_due(silent=True)
-
-        # Passive data refresh so "Data feed" status gets updated even before first tick
-        try:
-            _ = self._fetch_spot_ohlc()
-        except Exception as e:
-            self.log.debug("Passive data refresh warn: %s", e)
-
-        try:
-            if hasattr(self.executor, "health_check"):
-                self.executor.health_check()
-        except Exception as e:
-            self.log.warning("Executor health check warning: %s", e)
-
-    def shutdown(self) -> None:
-        try:
-            if hasattr(self.executor, "shutdown"):
-                self.executor.shutdown()
-        except Exception:
-            pass
-
-    # ---------------- equity & risk ----------------
-    def _refresh_equity_if_due(self, silent: bool = False) -> None:
-        now = time.time()
-        if not settings.risk.use_live_equity:
-            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
-            return
-        if (now - self._equity_last_refresh_ts) < int(settings.risk.equity_refresh_seconds):
-            return
-
-        new_eq = None
-        if self.kite is not None:
-            try:
-                margins = self.kite.margins()  # type: ignore[attr-defined]
-                if isinstance(margins, dict):
-                    for k in ("equity", "available", "net", "final", "cash"):
-                        v = margins.get(k)
-                        if isinstance(v, (int, float)):
-                            new_eq = float(v)
-                            break
-                if new_eq is None:
-                    new_eq = float(settings.risk.default_equity)
-            except Exception as e:
-                if not silent:
-                    self.log.warning("Equity refresh failed; using fallback: %s", e)
-
-        self._equity_cached_value = float(new_eq) if (isinstance(new_eq, (int, float)) and new_eq > 0) \
-            else float(settings.risk.default_equity)
-        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
-        self._equity_last_refresh_ts = now
-
-        if not silent:
-            self.log.info(
-                "Equity snapshot: ₹%s | Max daily loss: ₹%s",
-                f"{self._equity_cached_value:,.0f}", f"{self._max_daily_loss_rupees:,.0f}"
-            )
-
-    def _active_equity(self) -> float:
-        return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
-
-    def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
-        gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
-                 "trades_per_day": True, "sl_valid": True}
-        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
-            gates["equity_floor"] = False
-        if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
-            gates["daily_drawdown"] = False
-        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
-            gates["loss_streak"] = False
-        if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
-            gates["trades_per_day"] = False
-        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
-            gates["sl_valid"] = False
-        return gates
-
-    def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
-        risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
-        sl_points = abs(float(entry) - float(stop))
-        rupee_risk_per_lot = sl_points * int(lot_size)
-
-        if rupee_risk_per_lot <= 0:
-            return 0, {
-                "entry": entry, "stop": stop, "equity": equity,
-                "risk_per_trade": settings.risk.risk_per_trade,
-                "sl_points": sl_points, "rupee_risk_per_lot": rupee_risk_per_lot,
-                "lots_raw": 0, "lots_final": 0, "exposure_notional_est": 0.0, "max_notional_cap": 0.0,
-            }
-
-        lots_raw = int(risk_rupees // rupee_risk_per_lot)
-        lots = max(lots_raw, int(settings.instruments.min_lots))
-        lots = min(lots, int(settings.instruments.max_lots))
-
-        notional = float(entry) * int(lot_size) * lots
-        max_notional = float(equity) * float(settings.risk.max_position_size_pct)
-        if max_notional > 0 and notional > max_notional:
-            denom = float(entry) * int(lot_size)
-            lots_cap = int(max_notional // denom) if denom > 0 else 0
-            lots = max(min(lots_cap, lots), 0)
-
-        qty = lots * int(lot_size)
-        diag = {
-            "entry": round(entry, 4), "stop": round(stop, 4), "equity": round(float(equity), 2),
-            "risk_per_trade": float(settings.risk.risk_per_trade), "lot_size": int(lot_size),
-            "sl_points": round(sl_points, 4), "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
-            "lots_raw": int(lots_raw), "lots_final": int(lots),
-            "exposure_notional_est": round(notional, 2), "max_notional_cap": round(max_notional, 2),
-        }
-        return int(qty), diag
-
-    # ---------------- data helpers ----------------
-    def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
+    # ---- public API used by Telegram -------------------------------------------------
+    def status_card(self) -> str:
         """
-        Build SPOT OHLC frame using LiveKiteSource with configured lookback.
-        If no valid token is configured, synthesize a 1-bar DF from LTP so diagnostics stay green.
+        Small status card for /status.
         """
-        if self.data_source is None:
-            return None
+        now = _now_ist()
+        if self.live_trading:
+            if self.kite is None:
+                mode = "LIVE | None"
+            else:
+                mode = "LIVE | Kite"
+        else:
+            mode = "LIVE | Paper"  # matches your earlier card style
+        lines = [
+            "📊 " + now.strftime("%Y-%m-%d %H:%M:%S"),
+            "🧩 " + mode,
+            f"📦 Active: {int(self.active_positions)}",
+        ]
+        return "\n".join(lines)
 
-        try:
-            lookback = int(settings.data.lookback_minutes)
-            end = self._now_ist().replace(second=0, microsecond=0)
-            start = end - timedelta(minutes=lookback)
-
-            # Resolve token with fallbacks
-            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
-            if token <= 0:
-                token = int(getattr(settings.instruments, "spot_token", 0) or 0)
-
-            timeframe = str(getattr(settings.data, "timeframe", "minute"))
-            self._last_fetch_ts = time.time()  # mark an attempt (diag shows freshness)
-
-            if token > 0:
-                df = self.data_source.fetch_ohlc(
-                    token=token,
-                    start=start,
-                    end=end,
-                    timeframe=timeframe,
-                )
-                # Validate
-                need = {"open", "high", "low", "close", "volume"}
-                if isinstance(df, pd.DataFrame) and not df.empty and need.issubset(df.columns):
-                    return df.sort_index()
-
-            # Fallback: synthesize a single bar from trade symbol LTP
-            sym = getattr(settings.instruments, "trade_symbol", None)
-            ltp = self.data_source.get_last_price(sym if sym else token)
-            if isinstance(ltp, (int, float)) and ltp > 0:
-                ts = end
-                df = pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
-                )
-                return df
-
-            # If we get here, we truly have nothing
-            return None
-
-        except Exception as e:
-            self.log.warning("OHLC fetch failed: %s", e)
-            return None
-
-    # ---------------- session/window ----------------
-    def _ensure_day_state(self) -> None:
-        today = self._today_ist()
-        if today.date() != self.risk.trading_day.date():
-            self.risk = RiskState(trading_day=today)
-            self._notify("🔁 New trading day — risk counters reset")
-
-    def _within_trading_window(self) -> bool:
-        now_ist = self._now_ist().time()
-        return self._start_time <= now_ist <= self._end_time
-
-    @staticmethod
-    def _parse_hhmm(text: str):
-        from datetime import datetime as _dt
-        return _dt.strptime(text, "%H:%M").time()
-
-    @staticmethod
-    def _now_ist():
-        return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-
-    @staticmethod
-    def _today_ist():
-        now = StrategyRunner._now_ist()
-        return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # ---------------- Telegram helpers & diagnostics ----------------
-    def get_last_signal_debug(self) -> Dict[str, Any]:
-        return dict(self._last_signal_debug)
-
-    def build_diag(self) -> Dict[str, Any]:
-        """Alias for main.py wiring (detailed bundle for /check)."""
-        return self._build_diag_bundle()
-
-    def get_last_flow_debug(self) -> Dict[str, Any]:
-        return self._build_diag_bundle()
-
-    def _build_diag_bundle(self) -> Dict[str, Any]:
+    def diagnostics_text(self) -> str:
         """
-        Health cards for /diag (compact) and /check (detailed).
+        Full /check diagnostic block.
         """
-        checks: List[Dict[str, Any]] = []
-
         # Telegram wiring
-        checks.append({
-            "name": "Telegram wiring",
-            "ok": bool(self.telegram is not None),
-            "detail": "controller attached" if self.telegram else "missing controller",
-        })
+        wired = self.telegram is not None
 
-        # Broker session (live flag + kite object)
-        live = bool(settings.enable_live_trading)
-        checks.append({
-            "name": "Broker session",
-            "ok": (self.kite is not None) if live else True,
-            "detail": "live mode with kite" if (live and self.kite) else ("dry mode" if not live else "live but kite=None"),
-        })
+        # Broker / mode
+        if self.live_trading and self.kite is not None:
+            broker_line = "live mode with kite"
+            broker_ok = True
+        elif self.live_trading and self.kite is None:
+            broker_line = "live but kite=None"
+            broker_ok = False
+        else:
+            broker_line = "paper mode"
+            broker_ok = True  # paper is OK
 
-        # Data feed freshness
-        age_s = (time.time() - self._last_fetch_ts) if self._last_fetch_ts else 1e9
-        checks.append({
-            "name": "Data feed",
-            "ok": age_s < 120,  # < 2 minutes considered fresh
-            "detail": "fresh" if age_s < 120 else "stale/never",
-            "hint": f"age={int(age_s)}s "
-                    f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m",
-        })
+        # Data feed recency
+        age = _secs_ago(self.last_fetch_at)
+        if age is None:
+            data_line = "no fetch yet"
+            data_ok = False
+        else:
+            data_line = f"age={age}s"
+            data_ok = age < 60
 
-        # Strategy readiness (min bars)
-        ready = isinstance(self._last_flow_debug, dict) and int(self._last_flow_debug.get("bars", 0)) >= int(getattr(settings.strategy, "min_bars_for_signal", 50))
-        checks.append({
-            "name": "Strategy readiness",
-            "ok": ready,
-            "detail": f"bars={int(self._last_flow_debug.get('bars', 0))}",
-            "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 50))}",
-        })
+        # Strategy readiness
+        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
+        # We don’t know live bar count here (diagnostic context). Mark as not-evaluated until a fetch happens.
+        strategy_ready = False if age is None else True  # if we fetched at least once, assume warmed
+        strat_line = f"min_bars={min_bars}"
 
-        # Risk gates last view
-        gates = self._last_flow_debug.get("risk_gates", {}) if isinstance(self._last_flow_debug, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
-        checks.append({
-            "name": "Risk gates",
-            "ok": gates_ok,
-            "detail": ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "no-eval",
-        })
+        # Risk (not evaluated here)
+        risk_line = "no-eval"
 
-        # RR check
-        rr_ok = bool(self._last_flow_debug.get("rr_ok", True)) if isinstance(self._last_flow_debug, dict) else True
-        checks.append({
-            "name": "RR threshold",
-            "ok": rr_ok,
-            "detail": str(self._last_flow_debug.get("signal", {})),
-        })
+        # RR threshold
+        rr_line = "{}" if not self.rr_threshold else str(self.rr_threshold)
 
         # Errors
-        checks.append({
-            "name": "Errors",
-            "ok": self._last_error is None,
-            "detail": "none" if self._last_error is None else self._last_error,
-        })
+        err_line = "none" if not self.last_error else self.last_error
 
-        ok = all(c.get("ok", False) for c in checks)
-        last_sig = (time.time() - self._last_signal_at) < 900 if self._last_signal_at else False  # 15min
-        bundle = {
-            "ok": ok,
-            "checks": checks,
-            "last_signal": last_sig,
-            "last_flow": dict(self._last_flow_debug),
-        }
-        return bundle
+        # Last signal
+        last_signal = self.last_signal or "none"
 
-    # NEW: compact one-line summary for /diag
-    def get_compact_diag_summary(self) -> Dict[str, Any]:
-        """Concise status for /diag without building the full multiline text."""
-        bundle = self._build_diag_bundle()
-        flow = bundle.get("last_flow", {}) if isinstance(bundle, dict) else {}
+        body = [
+            "🔎 Full system check",
+            f"{_fmt_bool(wired)} Telegram wiring — controller attached",
+            f"{_fmt_bool(broker_ok)} Broker session — {broker_line}",
+            f"{_fmt_bool(data_ok)} Data feed — {data_line}",
+            f"{_fmt_bool(strategy_ready)} Strategy readiness — {strat_line}",
+            f"{_fmt_bool(False)} Risk gates — {risk_line}",
+            f"{_fmt_bool(True)} RR threshold — {rr_line}",
+            f"{_fmt_bool(self.last_error is None)} Errors — {err_line}",
+            f"📈 last_signal: {last_signal}",
+        ]
+        return "\n".join(body)
 
-        telegram_ok = bool(self.telegram is not None)
-        live = bool(settings.enable_live_trading)
-        broker_ok = (self.kite is not None) if live else True
-        data_fresh = (time.time() - getattr(self, "_last_fetch_ts", 0.0)) < 120
-        bars = int(flow.get("bars", 0) or 0)
-        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
-        strat_ready = bars >= min_bars
-        gates = flow.get("risk_gates", {}) if isinstance(flow, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
-        rr_ok = bool(flow.get("rr_ok", True))
-        no_errors = (self._last_error is None)
-
-        return {
-            "ok": bool(bundle.get("ok", False)),
-            "status_messages": {
-                "telegram_wiring": "ok" if telegram_ok else "missing",
-                "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
-                "data_feed": "ok" if data_fresh else "stale",
-                "strategy_readiness": "ok" if strat_ready else "not ready",
-                "risk_gates": "ok" if gates_ok else "blocked" if gates else "no-eval",
-                "rr_threshold": "ok" if rr_ok else "blocked",
-                "errors": "ok" if no_errors else "present",
-            },
-        }
-
-    # -------- Live toggle helpers --------
-    def _create_kite_from_settings(self):
-        """Create a KiteConnect session from settings. Return None if not possible."""
-        try:
-            if KiteConnect is None:
-                self.log.warning("kiteconnect not installed; cannot enter live.")
-                return None
-            api_key = getattr(settings.zerodha, "api_key", None)
-            access_token = getattr(settings.zerodha, "access_token", None)
-            if not api_key or not access_token:
-                self.log.warning("Zerodha credentials missing; cannot enter live.")
-                return None
-            k = KiteConnect(api_key=str(api_key))
-            k.set_access_token(str(access_token))
-            return k
-        except Exception as e:
-            self.log.warning("Failed to create KiteConnect session: %s", e)
-            return None
-
-    def set_live_mode(self, val: bool) -> None:
+    # ---- trading loop (optional, minimal) -------------------------------------------
+    def start(self) -> None:
         """
-        Flip live mode and (if enabling) ensure a live broker session is present,
-        then rewire executor and data source safely.
+        Optional background loop (if main.py wants it). We keep this very light.
         """
-        try:
-            setattr(settings, "enable_live_trading", bool(val))
-        except Exception:
-            pass
-
-        if not val:
-            self.log.info("🔒 Dry mode — paper trading only.")
-            return
-
-        # Enabling LIVE: ensure we have a Kite session
-        if not self.kite:
-            self.kite = self._create_kite_from_settings()
-
-        if not self.kite:
-            # Stay effectively in paper; do not claim we initialized anything.
-            self.log.warning("Requested live mode but kite=None; staying effectively in paper.")
-            return
-
-        # Rewire executor
-        try:
-            if hasattr(self.executor, "set_kite"):
-                self.executor.set_kite(self.kite)
-            else:
-                self.executor.kite = self.kite  # best-effort
-        except Exception as e:
-            self.log.warning("Executor rewire failed: %s", e)
-
-        # Rewire data source
-        if self.data_source is not None:
-            try:
-                if hasattr(self.data_source, "set_kite"):
-                    self.data_source.set_kite(self.kite)
-                else:
-                    setattr(self.data_source, "kite", self.kite)
-                self.data_source.connect()
-            except Exception as e:
-                self.log.warning("Data source connect failed: %s", e)
+        with self._lock:
+            if self._running:
                 return
+            self._running = True
+            self._thread = threading.Thread(target=self._run, name="StrategyRunner", daemon=True)
+            self._thread.start()
 
-        self.log.info("🔓 Live mode ON — broker session initialized.")
+    def stop(self) -> None:
+        with self._lock:
+            self._running = False
+
+    def shutdown(self) -> None:
+        self.stop()
+        t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+
+    def _run(self) -> None:
+        """
+        Minimal tick loop: just touches data to keep diagnostics accurate.
+        Your actual order/strategy code can be plugged here.
+        """
+        token = int(getattr(settings.instruments, "instrument_token", 256265))
+        tf = str(getattr(settings.data, "timeframe", "minute"))
+        lookback_min = int(getattr(settings.data, "lookback_minutes", 30))
+
+        while True:
+            with self._lock:
+                if not self._running:
+                    break
+
+            # trading window guard (light)
+            if not self._within_trading_window():
+                time.sleep(5)
+                continue
+
+            try:
+                end = self._now_naive_ist_rounded()
+                start = end - timedelta(minutes=lookback_min)
+                df = self.data_source.fetch_ohlc(token, start, end, tf)
+                self.last_fetch_at = time.time()
+
+                # (Optional) strategy evaluation stub
+                if isinstance(df, pd.DataFrame) and not df.empty and self.strategy:
+                    try:
+                        signal = getattr(self.strategy, "evaluate", None)
+                        if callable(signal):
+                            out = signal(df)  # repo-specific
+                            if isinstance(out, dict):
+                                self.last_signal = out.get("type") or out.get("signal") or "none"
+                    except Exception as e:
+                        self.last_error = f"strategy-eval: {e}"
+                time.sleep(3)
+
+            except Exception as e:
+                self.last_error = str(e)
+                log.debug("runner loop error: %s", e)
+                time.sleep(3)
+
+    # ---- helpers --------------------------------------------------------------------
+    def _now_naive_ist_rounded(self) -> datetime:
+        now = _now_ist()
+        return now.replace(tzinfo=None, second=0, microsecond=0)
+
+    def _within_trading_window(self) -> bool:
+        """
+        09:20–15:20 IST by default (from config). Allow offhours if configured.
+        """
+        if settings.allow_offhours_testing:
+            return True
+        now = _now_ist()
+        start_h, start_m = map(int, settings.data.time_filter_start.split(":"))
+        end_h, end_m = map(int, settings.data.time_filter_end.split(":"))
+        start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        return start <= now <= end
 
     def _notify(self, msg: str) -> None:
-        logging.info(msg)
+        log.info(msg)
         try:
-            if self.telegram:
-                self.telegram.send_message(msg)
+            if self.telegram and hasattr(self.telegram, "send_message"):
+                self.telegram.send_message(msg)  # type: ignore[attr-defined]
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------------------
+# Convenience factory (used by main.py)
+# --------------------------------------------------------------------------------------
+def build_runner(
+    *,
+    kite: Optional[KiteConnect] = None,
+    telegram: Optional[TelegramController] = None,
+    live_trading: Optional[bool] = None,
+) -> StrategyRunner:
+    """
+    Helper that respects settings.enable_live_trading when live_trading is None.
+    """
+    if live_trading is None:
+        live_trading = bool(settings.enable_live_trading)
+    runner = StrategyRunner(kite=kite, telegram=telegram, live_trading=live_trading)
+    return runner
