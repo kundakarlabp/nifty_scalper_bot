@@ -66,7 +66,9 @@ def _round_to_step(qty: int, step: int) -> int:
 
 def _chunks(total: int, chunk: int) -> List[int]:
     """Split a quantity into exchange-compliant child orders."""
-    if chunk <= 0:
+    if total <= 0:
+        return []
+    if chunk <= 0 or chunk >= total:
         return [total]
     out, left = [], total
     while left > 0:
@@ -143,7 +145,7 @@ class OrderExecutor:
       - health_check(), shutdown()
 
     Extra:
-      - set_live_broker(kite) to flip live/paper mode safely
+      - set_live_broker(kite) / set_kite(kite) to flip live/paper mode safely
       - togglers for trailing/partial/breakeven/tp1_ratio
       - last_error for diag
     """
@@ -182,6 +184,10 @@ class OrderExecutor:
         with self._lock:
             self.kite = kite
             self._live = kite is not None
+
+    # Back-compat alias used by some runners
+    def set_kite(self, kite: Optional[KiteConnect]) -> None:
+        self.set_live_broker(kite)
 
     # ----------- public info ----------
     def get_active_orders(self) -> List[_OrderRecord]:
@@ -231,6 +237,7 @@ class OrderExecutor:
             log.warning("Invalid order payload: %s", payload)
             return None
 
+        # round down to lot step
         qty = _round_to_step(qty, self.lot_size)
         if qty <= 0:
             self.last_error = "qty_rounded_to_zero"
@@ -245,8 +252,9 @@ class OrderExecutor:
 
         if not self.kite:
             # PAPER MODE: create a synthetic record so the rest of the flow works
+            rid = f"PAPER-{int(time.time() * 1000)}"
             rec = _OrderRecord(
-                order_id="PAPER",
+                order_id=rid,
                 instrument_token=token,
                 symbol=symbol,
                 side=action,
@@ -268,11 +276,8 @@ class OrderExecutor:
             )
             with self._lock:
                 self._active[rec.record_id] = rec
-            try:
-                if self.telegram:
-                    self.telegram.notify_entry(symbol=symbol, side=action, qty=qty, price=price, record_id=rec.record_id)
-            except Exception:
-                pass
+            # Notify (best-effort)
+            self._notify(f"🧪 PAPER entry: {symbol} {action} qty={qty} @ {price}")
             log.info("Paper entry recorded: %s %s qty=%d @%s", symbol, action, qty, price)
             return rec.record_id
 
@@ -335,12 +340,7 @@ class OrderExecutor:
         with self._lock:
             self._active[rec.record_id] = rec
 
-        try:
-            if self.telegram:
-                self.telegram.notify_entry(symbol=symbol, side=action, qty=qty, price=price, record_id=rec.record_id)
-        except Exception:
-            pass
-
+        self._notify(f"✅ LIVE entry: {symbol} {action} qty={qty} @ {price} (rid={rec.record_id})")
         return rec.record_id
 
     # ----------- SL/TP orchestration ----------
@@ -352,6 +352,9 @@ class OrderExecutor:
             return
 
         qty = rec.remaining_qty or rec.quantity
+        if qty <= 0:
+            return
+
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
         tp_price = _round_to_tick(tp_price, rec.tick_size)
         sl_price = _round_to_tick(sl_price, rec.tick_size)
@@ -413,7 +416,7 @@ class OrderExecutor:
 
     def _refresh_sl_gtt(self, rec: _OrderRecord, *, sl_price: float, qty: int) -> None:
         """(Re)create SL GTT as single-leg order."""
-        if not self.kite:
+        if not self.kite or qty <= 0:
             return
         # cancel existing GTT
         if rec.sl_gtt_id:
@@ -435,6 +438,8 @@ class OrderExecutor:
             "trigger_price": sl_price,
         }
         try:
+            # Note: Real Kite API expects trigger_values list etc.
+            # We keep current signature as per your existing integration.
             res = _retry_call(
                 self.kite.place_gtt,
                 trigger_type="single",
@@ -530,6 +535,8 @@ class OrderExecutor:
             # TP fills / breakeven bump after TP1
             for tid in ("tp1_order_id", "tp2_order_id"):
                 oid = getattr(rec, tid)
+                if not oid:
+                    continue
                 o = omap.get(oid, {})
                 if o.get("status", "").upper() == "COMPLETE":
                     if tid == "tp1_order_id" and rec.partial_enabled and not rec.tp1_done:
@@ -547,7 +554,7 @@ class OrderExecutor:
             if rec.sl_gtt_id:
                 g = (gmap.get(rec.sl_gtt_id) or {})
                 s = (g.get("status") or g.get("state") or "").lower()
-                if s in ("triggered", "cancelled", "deleted", "expired"):
+                if s in ("triggered", "cancelled", "deleted", "expired", "completed"):
                     rec.is_open = False
                     fills.append((rec.record_id, float(rec.sl_price or 0.0)))
                     continue
@@ -567,9 +574,12 @@ class OrderExecutor:
         if fills:
             with self._lock:
                 self._active = {k: v for k, v in self._active.items() if v.is_open}
+            # Notify (best-effort)
             try:
-                if self.telegram:
+                if self.telegram and hasattr(self.telegram, "notify_fills"):
                     self.telegram.notify_fills(fills)
+                else:
+                    self._notify("📬 Fills: " + ", ".join([f"{rid}@{px}" for rid, px in fills]))
             except Exception:
                 pass
 
@@ -674,6 +684,21 @@ class OrderExecutor:
             base = "NIFTY"
         strike = payload.get("strike")
         opt = str(payload.get("option_type", "")).upper()  # CE/PE
-        if not strike or opt not in ("CE", "PE"):
+        if strike is None or opt not in ("CE", "PE"):
             return None
-        return f"{base}{int(float(strike))}{opt}"
+        try:
+            s = int(float(strike))
+        except Exception:
+            return None
+        return f"{base}{s}{opt}"
+
+    # ----------- internal notify helper ----------
+    def _notify(self, text: str) -> None:
+        try:
+            if self.telegram:
+                if hasattr(self.telegram, "send_message"):
+                    self.telegram.send_message(text)
+                elif hasattr(self.telegram, "notify"):
+                    self.telegram.notify(text)  # legacy fallback
+        except Exception:
+            pass
