@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover
 # Logging
 # -----------------------------
 def _setup_logging() -> None:
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    level = getattr(logging, str(settings.log_level).upper(), logging.INFO)
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -49,7 +49,7 @@ class _NoopTelegram:
 # Builders
 # -----------------------------
 def _build_kite() -> Optional["KiteConnect"]:
-    if not settings.enable_live_trading:
+    if not bool(settings.enable_live_trading):
         logging.getLogger("main").info("Live trading disabled → paper mode.")
         return None
     if KiteConnect is None:
@@ -108,23 +108,23 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.build_diag,          # compact+deep health bundle
+        diag_provider=runner.get_last_flow_debug,  # ✅ fixed (no more build_diag)
         logs_provider=_tail_logs,
         last_signal_provider=runner.get_last_signal_debug,
         # controls
         runner_pause=runner.pause,
         runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,           # accepts dry=bool
+        runner_tick=runner.runner_tick,  # accepts dry=bool
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
-        # strategy/bot controls
+        # strategy/bot controls (all optional)
         set_live_mode=runner.set_live_mode,
-        set_min_score=runner.set_min_score,
-        set_conf_threshold=runner.set_conf_threshold,
-        set_atr_period=runner.set_atr_period,
-        set_sl_mult=runner.set_sl_mult,
-        set_tp_mult=runner.set_tp_mult,
-        set_trend_boosts=runner.set_trend_boosts,
-        set_range_tighten=runner.set_range_tighten,
+        set_min_score=getattr(runner, "set_min_score", None),
+        set_conf_threshold=getattr(runner, "set_conf_threshold", None),
+        set_atr_period=getattr(runner, "set_atr_period", None),
+        set_sl_mult=getattr(runner, "set_sl_mult", None),
+        set_tp_mult=getattr(runner, "set_tp_mult", None),
+        set_trend_boosts=getattr(runner, "set_trend_boosts", None),
+        set_range_tighten=getattr(runner, "set_range_tighten", None),
     )
 
     # keep attribute for backwards compatibility
@@ -165,10 +165,10 @@ def main() -> int:
 
     log.info(
         "Boot | live=%s window=%s-%s rr_min=%.2f",
-        settings.enable_live_trading,
+        bool(settings.enable_live_trading),
         settings.data.time_filter_start,
         settings.data.time_filter_end,
-        getattr(settings.strategy, "rr_min", 0.0),
+        float(getattr(settings.strategy, "rr_min", 0.0) or 0.0),
     )
 
     kite = _build_kite()
@@ -186,7 +186,7 @@ def main() -> int:
     except Exception:
         log.warning("Telegram startup message failed (continuing).")
 
-    # Optional start hook
+    # If your runner has start(), call it (else we just health-loop)
     try:
         if hasattr(runner, "start"):
             runner.start()
