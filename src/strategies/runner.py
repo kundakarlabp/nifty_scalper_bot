@@ -13,18 +13,20 @@ from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
 
-# Optional broker SDK
+# Optional broker SDK (graceful if not installed)
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:
     KiteConnect = None  # type: ignore
 
-# Data source
+# Optional live data source (graceful if not present)
 try:
     from src.data.source import LiveKiteSource  # type: ignore
 except Exception:
     LiveKiteSource = None  # type: ignore
 
+
+# ================================ Models ================================
 
 @dataclass
 class RiskState:
@@ -34,6 +36,8 @@ class RiskState:
     day_realized_loss: float = 0.0
     day_realized_pnl: float = 0.0
 
+
+# ============================== Runner =================================
 
 class StrategyRunner:
     """
@@ -46,7 +50,9 @@ class StrategyRunner:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
 
-        # tolerate None (main wires a Noop or real TG after)
+        if telegram_controller is None:
+            raise RuntimeError("TelegramController must be provided to StrategyRunner.")
+        # keep both names for old controllers
         self.telegram = telegram_controller
         self.telegram_controller = telegram_controller
 
@@ -212,7 +218,7 @@ class StrategyRunner:
 
     # one-shot tick used by Telegram
     def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
-        prev = bool(getattr(settings, "allow_offhours_testing", False))
+        prev = bool(settings.allow_offhours_testing)
         try:
             if dry:
                 setattr(settings, "allow_offhours_testing", True)
@@ -224,7 +230,7 @@ class StrategyRunner:
     def health_check(self) -> None:
         # refresh equity and executor heartbeat
         self._refresh_equity_if_due(silent=True)
-        # passive data refresh updates "Data feed" freshness in diag
+        # try a passive data refresh so "Data feed" check gets updated
         try:
             _ = self._fetch_spot_ohlc()
         except Exception as e:
@@ -236,7 +242,11 @@ class StrategyRunner:
             self.log.warning("Executor health check warning: %s", e)
 
     def shutdown(self) -> None:
+        """Graceful shutdown used by /stop or process exit."""
         try:
+            # IMPORTANT: use cancel_all_orders (compat) instead of nonexistent close_all_positions
+            if hasattr(self.executor, "cancel_all_orders"):
+                self.executor.cancel_all_orders()
             if hasattr(self.executor, "shutdown"):
                 self.executor.shutdown()
         except Exception:
@@ -259,7 +269,8 @@ class StrategyRunner:
                     for k in ("equity", "available", "net", "final", "cash"):
                         v = margins.get(k)
                         if isinstance(v, (int, float)):
-                            new_eq = float(v); break
+                            new_eq = float(v)
+                            break
                 if new_eq is None:
                     new_eq = float(settings.risk.default_equity)
             except Exception as e:
@@ -278,8 +289,7 @@ class StrategyRunner:
             )
 
     def _active_equity(self) -> float:
-        return float(self._equity_cached_value) if settings.risk.use_live_equity \
-            else float(settings.risk.default_equity)
+        return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
 
     def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
         gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
@@ -304,7 +314,7 @@ class StrategyRunner:
         if rupee_risk_per_lot <= 0:
             return 0, {
                 "entry": entry, "stop": stop, "equity": equity,
-                "risk_per_trade": float(settings.risk.risk_per_trade),
+                "risk_per_trade": settings.risk.risk_per_trade,
                 "sl_points": sl_points, "rupee_risk_per_lot": rupee_risk_per_lot,
                 "lots_raw": 0, "lots_final": 0, "exposure_notional_est": 0.0, "max_notional_cap": 0.0,
             }
@@ -334,15 +344,13 @@ class StrategyRunner:
     def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
         """
         Build SPOT OHLC frame using LiveKiteSource with configured lookback.
-        Optionally stitches prior sessions using settings.data.history_days.
-        Falls back to a 1-bar synthetic DF from LTP so diagnostics stay informative.
+        If no valid token is configured or broker returns empty data, synthesize a 1-bar DF from LTP.
         """
         if self.data_source is None:
             return None
 
         try:
-            lookback = int(getattr(settings.data, "lookback_minutes", 30))
-            timeframe = str(getattr(settings.data, "timeframe", "minute"))
+            lookback = int(settings.data.lookback_minutes)
             end = self._now_ist().replace(second=0, microsecond=0)
             start = end - timedelta(minutes=lookback)
 
@@ -351,45 +359,27 @@ class StrategyRunner:
             if token <= 0:
                 token = int(getattr(settings.instruments, "spot_token", 0) or 0)
 
+            timeframe = str(getattr(settings.data, "timeframe", "minute"))
             self._last_fetch_ts = time.time()  # mark an attempt (diag shows freshness)
 
-            frames: List[pd.DataFrame] = []
             if token > 0:
-                # current window
-                df0 = self.data_source.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
-                if isinstance(df0, pd.DataFrame) and not df0.empty:
-                    frames.append(df0)
+                df = self.data_source.fetch_ohlc(
+                    token=token,
+                    start=start,
+                    end=end,
+                    timeframe=timeframe,
+                )
+                # Validate
+                need = {"open", "high", "low", "close", "volume"}
+                if isinstance(df, pd.DataFrame) and not df.empty and need.issubset(df.columns):
+                    return df.sort_index()
+                else:
+                    self.log.warning(
+                        "historical_data empty for token=%s interval=%s window=%s..%s; using LTP fallback.",
+                        token, timeframe, start.isoformat(), end.isoformat()
+                    )
 
-                # optional backfill of prior days (safe if provider ignores)
-                bdays = int(getattr(settings.data, "history_days", 0) or 0)
-                if bdays > 0:
-                    t0 = self._parse_hhmm(settings.data.time_filter_start)
-                    t1 = self._parse_hhmm(settings.data.time_filter_end)
-                    for i in range(1, bdays + 1):
-                        day = (self._today_ist() - timedelta(days=i))
-                        s = day.replace(hour=t0.hour, minute=t0.minute)
-                        e = day.replace(hour=t1.hour, minute=t1.minute)
-                        try:
-                            dfi = self.data_source.fetch_ohlc(token=token, start=s, end=e, timeframe=timeframe)
-                            if isinstance(dfi, pd.DataFrame) and not dfi.empty:
-                                frames.append(dfi)
-                        except Exception as ee:
-                            self.log.debug("Backfill day-%s fetch warn: %s", i, ee)
-
-                if frames:
-                    df = pd.concat(frames, axis=0).sort_index()
-                    # normalize and dedupe
-                    need = {"open", "high", "low", "close", "volume"}
-                    if need.issubset(df.columns):
-                        df = df[["open", "high", "low", "close", "volume"]]
-                        df = df[~df.index.duplicated(keep="last")]
-                        # optional candle cap
-                        max_c = int(getattr(settings.data, "history_max_candles", 0) or 0)
-                        if max_c > 0 and len(df) > max_c:
-                            df = df.iloc[-max_c:]
-                        return df
-
-            # Fallback: synthesize a single bar from trade symbol LTP
+            # Fallback: synthesize a single bar from trade symbol/token LTP
             sym = getattr(settings.instruments, "trade_symbol", None)
             ltp = self.data_source.get_last_price(sym if sym else token)
             if isinstance(ltp, (int, float)) and ltp > 0:
@@ -436,17 +426,15 @@ class StrategyRunner:
     def get_last_signal_debug(self) -> Dict[str, Any]:
         return dict(self._last_signal_debug)
 
+    # detailed bundle used by /check
     def build_diag(self) -> Dict[str, Any]:
-        """Alias for detailed bundle (used by /check)."""
         return self._build_diag_bundle()
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
         return self._build_diag_bundle()
 
     def _build_diag_bundle(self) -> Dict[str, Any]:
-        """
-        Health cards for /diag (compact) and /check (detailed).
-        """
+        """Health cards for /diag (compact) and /check (detailed)."""
         checks: List[Dict[str, Any]] = []
 
         # Telegram wiring
@@ -520,8 +508,9 @@ class StrategyRunner:
         }
         return bundle
 
-    # Compact one-line summary for /diag
+    # compact one-line summary for /diag
     def get_compact_diag_summary(self) -> Dict[str, Any]:
+        """Concise status for /diag without building the full multiline text."""
         bundle = self._build_diag_bundle()
         flow = bundle.get("last_flow", {}) if isinstance(bundle, dict) else {}
 
@@ -587,7 +576,7 @@ class StrategyRunner:
     def resume(self) -> None:
         self._paused = False
 
-    # -------- LIVE wiring helpers --------
+    # ---------------- live-mode wiring ----------------
     def _create_kite_from_settings(self):
         """Create a KiteConnect session from settings. Return None if not possible."""
         try:
@@ -608,8 +597,7 @@ class StrategyRunner:
 
     def set_live_mode(self, val: bool) -> None:
         """
-        Flip live mode and (if enabling) ensure a live broker session is present,
-        then rewire executor and data source safely.
+        Flip live mode and (if enabling) ensure a live broker session is present, then rewire executor and data source safely.
         """
         try:
             setattr(settings, "enable_live_trading", bool(val))
@@ -631,7 +619,9 @@ class StrategyRunner:
 
         # Rewire executor
         try:
-            if hasattr(self.executor, "set_kite"):
+            if hasattr(self.executor, "set_live_broker"):
+                self.executor.set_live_broker(self.kite)
+            elif hasattr(self.executor, "set_kite"):
                 self.executor.set_kite(self.kite)
             else:
                 self.executor.kite = self.kite  # best-effort
@@ -646,12 +636,12 @@ class StrategyRunner:
                 else:
                     setattr(self.data_source, "kite", self.kite)
                 self.data_source.connect()
-                self.log.info("LiveKiteSource rewired with new kite session")
             except Exception as e:
                 self.log.warning("Data source connect failed: %s", e)
 
         self.log.info("🔓 Live mode ON — broker session initialized.")
 
+    # ---------------- notify ----------------
     def _notify(self, msg: str) -> None:
         logging.info(msg)
         try:
