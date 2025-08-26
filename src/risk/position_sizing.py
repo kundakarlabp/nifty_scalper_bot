@@ -110,12 +110,13 @@ class PositionSizer:
         if rupee_risk_per_lot <= 0:
             return 0, 0, PositionSizer._diag(si, sp, sl_points, 0, risk_rupees, 0, 0, 0, 0)
 
-        # If one lot already exceeds risk budget → size 0 (do NOT force min_lots).
-        if rupee_risk_per_lot > risk_rupees:
-            return 0, 0, PositionSizer._diag(si, sp, sl_points, rupee_risk_per_lot, risk_rupees, 0, 0, 0, 0)
-
         # Lots affordable under risk budget
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
+
+        if lots_raw < 1:
+            return 0, 0, PositionSizer._diag(
+                si, sp, sl_points, rupee_risk_per_lot, risk_rupees, lots_raw, 0, 0, 0
+            )
 
         # Enforce min/max only when at least one lot is affordable
         lots = max(lots_raw, sp.min_lots)
