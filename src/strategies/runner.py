@@ -1,3 +1,4 @@
+# src/strategies/runner.py
 from __future__ import annotations
 
 import logging
@@ -225,6 +226,13 @@ class StrategyRunner:
     def health_check(self) -> None:
         # refresh equity and executor heartbeat
         self._refresh_equity_if_due(silent=True)
+
+        # Passive data refresh so "Data feed" status gets updated even before first tick
+        try:
+            _ = self._fetch_spot_ohlc()
+        except Exception as e:
+            self.log.debug("Passive data refresh warn: %s", e)
+
         try:
             if hasattr(self.executor, "health_check"):
                 self.executor.health_check()
@@ -408,7 +416,7 @@ class StrategyRunner:
         return dict(self._last_signal_debug)
 
     def build_diag(self) -> Dict[str, Any]:
-        """Alias for detailed bundle (used by /check)."""
+        """Alias for main.py wiring (detailed bundle for /check)."""
         return self._build_diag_bundle()
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
@@ -441,11 +449,9 @@ class StrategyRunner:
             "name": "Data feed",
             "ok": age_s < 120,  # < 2 minutes considered fresh
             "detail": "fresh" if age_s < 120 else "stale/never",
-            "hint": (
-                f"age={int(age_s)}s "
-                f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m"
-            ),
+            "hint": f"age={int(age_s)}s "
+                    f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
+                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m",
         })
 
         # Strategy readiness (min bars)
@@ -522,64 +528,70 @@ class StrategyRunner:
             },
         }
 
-    def get_equity_snapshot(self) -> Dict[str, Any]:
-        return {
-            "use_live_equity": bool(settings.risk.use_live_equity),
-            "equity_cached": round(float(self._equity_cached_value), 2),
-            "equity_floor": float(settings.risk.min_equity_floor),
-            "max_daily_loss_rupees": round(float(self._max_daily_loss_rupees), 2),
-            "refresh_seconds": int(settings.risk.equity_refresh_seconds),
-        }
-
-    def get_status_snapshot(self) -> Dict[str, Any]:
-        return {
-            "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
-            "live_trading": bool(settings.enable_live_trading),
-            "broker": "Kite" if self.kite is not None else "Paper",
-            "within_window": self._within_trading_window(),
-            "paused": self._paused,
-            "trades_today": self.risk.trades_today,
-            "consecutive_losses": self.risk.consecutive_losses,
-            "day_realized_loss": round(self.risk.day_realized_loss, 2),
-            "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
-            "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
-        }
-
-    def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
-        qty, diag = self._calculate_quantity_diag(
-            entry=float(entry), stop=float(sl),
-            lot_size=int(settings.instruments.nifty_lot_size),
-            equity=self._active_equity(),
-        )
-        return {"qty": int(qty), "diag": diag}
-
-    def pause(self) -> None:
-        self._paused = True
-
-    def resume(self) -> None:
-        self._paused = False
+    # -------- Live toggle helpers --------
+    def _create_kite_from_settings(self):
+        """Create a KiteConnect session from settings. Return None if not possible."""
+        try:
+            if KiteConnect is None:
+                self.log.warning("kiteconnect not installed; cannot enter live.")
+                return None
+            api_key = getattr(settings.zerodha, "api_key", None)
+            access_token = getattr(settings.zerodha, "access_token", None)
+            if not api_key or not access_token:
+                self.log.warning("Zerodha credentials missing; cannot enter live.")
+                return None
+            k = KiteConnect(api_key=str(api_key))
+            k.set_access_token(str(access_token))
+            return k
+        except Exception as e:
+            self.log.warning("Failed to create KiteConnect session: %s", e)
+            return None
 
     def set_live_mode(self, val: bool) -> None:
         """
-        Flip live mode and rewire data source as needed.
-        Controller calls this from /mode.
+        Flip live mode and (if enabling) ensure a live broker session is present,
+        then rewire executor and data source safely.
         """
         try:
             setattr(settings, "enable_live_trading", bool(val))
         except Exception:
             pass
 
-        if val:
-            if not self.kite:
-                self.log.warning("Requested live mode but kite=None; staying effectively in paper.")
-            if self.data_source is not None:
-                try:
-                    self.data_source.connect()
-                    self.log.info("🔓 Live mode ON — broker session initialized.")
-                except Exception as e:
-                    self.log.warning("Data source connect failed: %s", e)
-        else:
+        if not val:
             self.log.info("🔒 Dry mode — paper trading only.")
+            return
+
+        # Enabling LIVE: ensure we have a Kite session
+        if not self.kite:
+            self.kite = self._create_kite_from_settings()
+
+        if not self.kite:
+            # Stay effectively in paper; do not claim we initialized anything.
+            self.log.warning("Requested live mode but kite=None; staying effectively in paper.")
+            return
+
+        # Rewire executor
+        try:
+            if hasattr(self.executor, "set_kite"):
+                self.executor.set_kite(self.kite)
+            else:
+                self.executor.kite = self.kite  # best-effort
+        except Exception as e:
+            self.log.warning("Executor rewire failed: %s", e)
+
+        # Rewire data source
+        if self.data_source is not None:
+            try:
+                if hasattr(self.data_source, "set_kite"):
+                    self.data_source.set_kite(self.kite)
+                else:
+                    setattr(self.data_source, "kite", self.kite)
+                self.data_source.connect()
+            except Exception as e:
+                self.log.warning("Data source connect failed: %s", e)
+                return
+
+        self.log.info("🔓 Live mode ON — broker session initialized.")
 
     def _notify(self, msg: str) -> None:
         logging.info(msg)
