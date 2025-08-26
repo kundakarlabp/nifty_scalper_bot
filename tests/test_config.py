@@ -34,7 +34,7 @@ def test_load_from_env():
 def test_validation_error_on_invalid_data():
     """Tests that Pydantic raises a ValidationError for out-of-bounds data."""
     test_env = {
-        "MAX_DAILY_DRAWDOWN_PCT": "2.0",  # Invalid (must be < 0.5)
+        "MAX_DAILY_DRAWDOWN_PCT": "2.0",  # Invalid (must be < 0.2)
     }
     with mock.patch.dict(os.environ, test_env):
         # The validation happens at the level of the specific model
