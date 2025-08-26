@@ -4,12 +4,12 @@ import logging
 import signal
 import sys
 import time
-from typing import Optional
+from typing import Optional, List
 
 from src.config import settings
-from src.strategies.runner import StrategyRunner  # <- THIS runner (above)
+from src.strategies.runner import StrategyRunner
 
-# Optional broker SDK (live only)
+# Optional broker SDK (used only at boot if live is already enabled)
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:  # pragma: no cover
@@ -30,33 +30,44 @@ def _setup_logging() -> None:
 
 
 # -----------------------------
-# Tiny no-op Telegram used only to satisfy runner ctor
+# Tiny no-op Telegram (so runner ctor can never fail)
 # -----------------------------
 class _NoopTelegram:
-    def send_message(self, *_a, **_k) -> None: ...
-    def start_polling(self) -> None: ...
-    def stop_polling(self) -> None: ...
+    def send_message(self, *_a, **_k) -> None:
+        pass
+
+    def start_polling(self) -> None:
+        pass
+
+    def stop_polling(self) -> None:
+        pass
 
 
 # -----------------------------
 # Builders
 # -----------------------------
-def _build_kite() -> Optional["KiteConnect"]:
-    if not settings.enable_live_trading:
-        logging.getLogger("main").info("Live trading disabled → paper mode.")
+def _build_kite_if_live_enabled() -> Optional["KiteConnect"]:
+    """Create a KiteConnect only if live is enabled at process boot."""
+    log = logging.getLogger("main")
+    if not bool(getattr(settings, "enable_live_trading", False)):
+        log.info("Live trading disabled → paper mode.")
         return None
+
     if KiteConnect is None:
         raise RuntimeError("ENABLE_LIVE_TRADING=true but kiteconnect is not installed.")
-    api_key = settings.zerodha.api_key
-    access_token = settings.zerodha.access_token
+
+    api_key = getattr(settings.zerodha, "api_key", None)
+    access_token = getattr(settings.zerodha, "access_token", None)
     if not api_key or not access_token:
         raise RuntimeError("Missing Zerodha credentials while live mode is enabled.")
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
+
+    kite = KiteConnect(api_key=str(api_key))
+    kite.set_access_token(str(access_token))
     return kite
 
 
-def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> list[str]:
+def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
+    """Return last n lines from log file; safe if file missing."""
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -75,12 +86,13 @@ def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> list[str]:
 
 
 def _import_telegram_class():
+    """Import inside a wrapper so a TG file issue won't crash the bot."""
     try:
         from src.notifications.telegram_controller import TelegramController  # type: ignore
         return TelegramController
     except Exception as e:
         logging.getLogger("main").error(
-            "TelegramController import failed — running with no-op Telegram. Cause: %s",
+            "TelegramController import failed — running with no-op Telegram.\nCause: %s",
             e,
         )
         return None
@@ -96,28 +108,27 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.build_diag,             # <— exists now
+        diag_provider=runner.get_last_flow_debug,  # ← correct provider
         logs_provider=_tail_logs,
         last_signal_provider=runner.get_last_signal_debug,
         # controls
         runner_pause=runner.pause,
         runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,              # accepts dry=bool
+        runner_tick=runner.runner_tick,  # accepts dry=bool
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
-        # strategy/bot controls
+        # strategy/bot mutators (optional — use getattr to avoid AttributeError)
         set_live_mode=runner.set_live_mode,
-        # (the following are optional; your controller will no-op if not wired)
-        set_min_score=getattr(runner.strategy, "set_min_score", None),
-        set_conf_threshold=getattr(runner.strategy, "set_conf_threshold", None),
-        set_atr_period=getattr(runner.strategy, "set_atr_period", None),
-        set_sl_mult=getattr(runner.strategy, "set_sl_mult", None),
-        set_tp_mult=getattr(runner.strategy, "set_tp_mult", None),
-        set_trend_boosts=getattr(runner.strategy, "set_trend_boosts", None),
-        set_range_tighten=getattr(runner.strategy, "set_range_tighten", None),
+        set_min_score=getattr(runner, "set_min_score", None),
+        set_conf_threshold=getattr(runner, "set_conf_threshold", None),
+        set_atr_period=getattr(runner, "set_atr_period", None),
+        set_sl_mult=getattr(runner, "set_sl_mult", None),
+        set_tp_mult=getattr(runner, "set_tp_mult", None),
+        set_trend_boosts=getattr(runner, "set_trend_boosts", None),
+        set_range_tighten=getattr(runner, "set_range_tighten", None),
     )
 
     # keep attribute for backwards compatibility
-    runner.telegram_controller = tg
+    runner.telegram_controller = tg  # type: ignore[attr-defined]
     runner.telegram = tg
 
     try:
@@ -138,7 +149,7 @@ _stop_flag = False
 def _install_signal_handlers(_runner: StrategyRunner) -> None:
     def _handler(signum, _frame):
         global _stop_flag
-        logging.getLogger("main").info(f"Signal {signum} received — shutting down…")
+        logging.getLogger("main").info("Signal %s received — shutting down…", signum)
         _stop_flag = True
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -154,28 +165,28 @@ def main() -> int:
 
     log.info(
         "Boot | live=%s window=%s-%s rr_min=%.2f",
-        settings.enable_live_trading,
-        settings.data.time_filter_start,
-        settings.data.time_filter_end,
-        getattr(settings.strategy, "rr_min", 0.0),
+        getattr(settings, "enable_live_trading", False),
+        getattr(settings.data, "time_filter_start", "09:20"),
+        getattr(settings.data, "time_filter_end", "15:20"),
+        float(getattr(settings.strategy, "rr_min", 0.0) or 0.0),
     )
 
-    kite = _build_kite()
+    kite = _build_kite_if_live_enabled()
 
-    # 1) Create runner with a temporary no-op telegram so ctor will never raise
+    # Create runner with a temporary no-op telegram so ctor never raises
     runner = StrategyRunner(kite=kite, telegram_controller=_NoopTelegram())
     _install_signal_handlers(runner)
 
-    # 2) now build your real TelegramController and wire providers from runner
+    # Build the real TelegramController and wire providers from runner
     _wire_real_telegram(runner)
 
     # Announce
     try:
-        runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")
+        runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")  # type: ignore[attr-defined]
     except Exception:
         log.warning("Telegram startup message failed (continuing).")
 
-    # Optional start
+    # Optionally start a runner loop if provided by your code
     try:
         if hasattr(runner, "start"):
             runner.start()
@@ -197,7 +208,7 @@ def main() -> int:
         except Exception:
             pass
         try:
-            runner.telegram_controller.send_message("🛑 Bot stopped.")
+            runner.telegram_controller.send_message("🛑 Bot stopped.")  # type: ignore[attr-defined]
         except Exception:
             pass
 
