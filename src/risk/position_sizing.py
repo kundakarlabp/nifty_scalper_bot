@@ -32,7 +32,8 @@ class PositionSizer:
       - risk_rupees = equity * risk_per_trade
       - rupee risk per 1 lot = sl_points * lot_size
       - lots_raw = floor(risk_rupees / rupee_risk_per_lot)
-      - clamp to [min_lots, max_lots]
+      - if 1 lot exceeds risk_rupees → size 0 (SAFE)
+      - else clamp to [min_lots, max_lots]
       - exposure cap: entry_price * lot_size * lots <= equity * max_position_size_pct
       - quantity = lots * lot_size
     Returns (quantity, lots, diagnostics).
@@ -95,6 +96,7 @@ class PositionSizer:
 
     @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
+        # Basic input validation
         if si.entry_price <= 0 or si.stop_loss <= 0 or si.lot_size <= 0 or si.equity <= 0:
             return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0)
 
@@ -102,16 +104,24 @@ class PositionSizer:
         if sl_points <= 0:
             return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0)
 
+        # Risk math
         risk_rupees = si.equity * sp.risk_per_trade
         rupee_risk_per_lot = sl_points * si.lot_size
         if rupee_risk_per_lot <= 0:
             return 0, 0, PositionSizer._diag(si, sp, sl_points, 0, risk_rupees, 0, 0, 0, 0)
 
+        # If one lot already exceeds risk budget → size 0 (do NOT force min_lots).
+        if rupee_risk_per_lot > risk_rupees:
+            return 0, 0, PositionSizer._diag(si, sp, sl_points, rupee_risk_per_lot, risk_rupees, 0, 0, 0, 0)
+
+        # Lots affordable under risk budget
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
+
+        # Enforce min/max only when at least one lot is affordable
         lots = max(lots_raw, sp.min_lots)
         lots = min(lots, sp.max_lots)
 
-        # exposure cap
+        # Exposure cap (notional)
         exposure_notional = si.entry_price * si.lot_size * lots
         max_notional = si.equity * sp.max_position_size_pct if sp.max_position_size_pct > 0 else float("inf")
         if exposure_notional > max_notional:
@@ -140,20 +150,21 @@ class PositionSizer:
         exposure_notional: float,
         max_notional: float,
     ) -> Dict:
+        # Round floats for compact Telegram display and logs
         return {
             "entry_price": round(si.entry_price, 4),
             "stop_loss": round(si.stop_loss, 4),
             "equity": round(si.equity, 2),
-            "lot_size": si.lot_size,
-            "risk_per_trade": sp.risk_per_trade,
-            "min_lots": sp.min_lots,
-            "max_lots": sp.max_lots,
-            "max_position_size_pct": sp.max_position_size_pct,
+            "lot_size": int(si.lot_size),
+            "risk_per_trade": float(sp.risk_per_trade),
+            "min_lots": int(sp.min_lots),
+            "max_lots": int(sp.max_lots),
+            "max_position_size_pct": float(sp.max_position_size_pct),
             "sl_points": round(sl_points, 4),
             "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
             "risk_rupees": round(risk_rupees, 2),
-            "lots_raw": lots_raw,
-            "lots_final": lots_capped,
+            "lots_raw": int(lots_raw),
+            "lots_final": int(lots_capped),
             "exposure_notional_est": round(exposure_notional, 2),
             "max_notional_cap": round(max_notional, 2),
         }
