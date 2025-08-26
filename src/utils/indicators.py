@@ -120,7 +120,12 @@ def calculate_atr(
             "low": pd.to_numeric(low, errors="coerce").astype(float),
             "close": pd.to_numeric(close, errors="coerce").astype(float),
         })
-    return compute_atr_df(df, period=period, method="rma")
+    # ``compute_atr_df`` returns the original DataFrame with an ``atr`` column
+    # appended.  ``calculate_atr`` is expected to return only the ATR values
+    # as a ``Series`` to keep function outputs simple and consistent with
+    # callers such as ``calculate_supertrend``.  Extract the ``atr`` column
+    # explicitly.
+    return compute_atr_df(df, period=period, method="rma")["atr"]
 
 
 # ------------------------------- SuperTrend ------------------------------- #
