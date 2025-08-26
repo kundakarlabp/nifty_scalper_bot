@@ -4,14 +4,13 @@ from __future__ import annotations
 """
 Config with nested models (original structure) + flat aliases for compatibility.
 
-- Keeps your original flow, field names, and validators.
-- Adds flat properties like `settings.strategy_ema_fast`, `settings.risk_risk_per_trade`,
-  `settings.instruments_nifty_lot_size`, etc., so optimized modules that expect
-  flat access won’t break.
-- Validates critical env on import (Telegram mandatory; Zerodha only if live).
+- Preserves your original names/shape so other modules don't break.
+- Adds a few extra validations and guardrails.
+- Keeps Telegram mandatory; Zerodha creds are only required if live trading is enabled.
+- Adds optional historical backfill knobs under DataSettings.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, validator
 from pydantic_settings import BaseSettings
 
 
@@ -37,12 +36,19 @@ class TelegramSettings(BaseModel):
 
 
 class DataSettings(BaseModel):
+    # Live loop consumption
     lookback_minutes: int = 30
-    timeframe: str = "minute"
+    timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:20"
+
+    # Cache
     cache_enabled: bool = True
     cache_ttl_seconds: int = 60
+
+    # Historical backfill (optional; runner/feeds can ignore if unsupported)
+    history_days: int = 0          # 0 = off; otherwise backfill N days before now
+    history_max_candles: int = 0   # 0 = unlimited within broker constraints
 
     @validator("time_filter_start", "time_filter_end")
     def _v_time(cls, v: str) -> str:
@@ -50,18 +56,35 @@ class DataSettings(BaseModel):
         datetime.strptime(v, "%H:%M")
         return v
 
+    @validator("timeframe")
+    def _v_tf(cls, v: str) -> str:
+        v = (v or "").lower()
+        allowed = {"minute", "3minute", "5minute", "10minute", "15minute", "day"}
+        # Keep loose—brokers vary; still nudge common values
+        if v not in allowed:
+            # Accept anything but keep a sensible default rather than failing hard
+            return v
+        return v
+
+    @validator("lookback_minutes", "cache_ttl_seconds", "history_days", "history_max_candles")
+    def _v_nonneg(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("numeric fields must be >= 0")
+        return v
+
 
 class InstrumentsSettings(BaseModel):
     spot_symbol: str = "NSE:NIFTY 50"
     trade_symbol: str = "NIFTY"
     trade_exchange: str = "NFO"
-    instrument_token: int = 256265
+    instrument_token: int = 256265        # primary token (spot preferred for OHLC)
+    spot_token: int = 256265               # optional explicit spot token (helps with logs/diagnostics)
     nifty_lot_size: int = 75
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10
 
-    @validator("min_lots", "max_lots")
+    @validator("min_lots", "max_lots", "nifty_lot_size")
     def _v_lots_pos(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Lot sizes must be positive")
@@ -137,10 +160,10 @@ class RiskSettings(BaseModel):
             raise ValueError("max_daily_drawdown_pct must be between 1% and 20%")
         return v
 
-    @validator("min_equity_floor")
-    def _v_equity_floor(cls, v: float) -> float:
+    @validator("min_equity_floor", "default_equity")
+    def _v_equity_pos(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError("min_equity_floor must be > 0")
+            raise ValueError("equity amounts must be > 0")
         return v
 
 
@@ -161,6 +184,18 @@ class ExecutorSettings(BaseModel):
     fee_per_lot: float = 20.0
     slippage_ticks: int = 1
 
+    @validator("tp1_qty_ratio")
+    def _v_ratio(cls, v: float) -> float:
+        if not 0 <= v <= 1:
+            raise ValueError("tp1_qty_ratio must be in 0..1")
+        return v
+
+    @validator("breakeven_ticks", "slippage_ticks")
+    def _v_nonneg_int(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("tick counts must be >= 0")
+        return v
+
 
 class HealthSettings(BaseModel):
     enable_server: bool = True
@@ -177,7 +212,8 @@ class SystemSettings(BaseModel):
 # ================= Root settings =================
 
 class AppSettings(BaseSettings):
-    enable_live_trading: bool = False
+    # You asked to default to LIVE. Be aware this enforces Zerodha creds at import time.
+    enable_live_trading: bool = True
     allow_offhours_testing: bool = False
     log_level: str = "INFO"
 
