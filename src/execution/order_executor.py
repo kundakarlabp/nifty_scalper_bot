@@ -110,7 +110,7 @@ class _OrderRecord:
 
     # trailing / partials
     partial_enabled: bool = False
-    tp1_ratio: float = 0.5
+    tp1_ratio: float = 0.5  # 0..1
     breakeven_ticks: int = 2
     trailing_enabled: bool = True
     trailing_mult: float = 1.5
@@ -135,16 +135,26 @@ class OrderExecutor:
     """
     Thin, robust wrapper around Kite order placement/management.
     Matches the runner/telegram expectations:
-      - place_order(payload) -> bool/str
-      - get_active_orders(), get_positions_kite()
-      - cancel_all_orders(), health_check(), shutdown()
+      - place_order(payload) -> bool/str (record_id/"PAPER"/None)
+      - setup_gtt_orders(record_id, sl_price, tp_price)
+      - update_trailing_stop(...)
+      - sync_and_enforce_oco() -> fills list
+      - get_active_orders(), get_positions_kite(), cancel_all_orders()
+      - health_check(), shutdown()
+
+    Extra:
+      - set_live_broker(kite) to flip live/paper mode safely
+      - togglers for trailing/partial/breakeven/tp1_ratio
+      - last_error for diag
     """
 
     def __init__(self, kite: Optional[KiteConnect], telegram_controller: Any = None) -> None:
-        self.kite = kite
-        self.telegram = telegram_controller
         self._lock = threading.Lock()
+        self.kite = kite
+        self._live = kite is not None
+        self.telegram = telegram_controller
         self._active: Dict[str, _OrderRecord] = {}
+        self.last_error: Optional[str] = None
 
         # execution config (default-safe if settings missing)
         ex = getattr(settings, "executor", object()) if settings else object()
@@ -166,6 +176,13 @@ class OrderExecutor:
         self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
 
+    # ----------- live/paper control ----------
+    def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
+        """Hot-swap Kite session (None => paper)."""
+        with self._lock:
+            self.kite = kite
+            self._live = kite is not None
+
     # ----------- public info ----------
     def get_active_orders(self) -> List[_OrderRecord]:
         with self._lock:
@@ -183,6 +200,7 @@ class OrderExecutor:
             data = _retry_call(self.kite.positions, tries=2) or {}
             return {p.get("tradingsymbol"): p for p in data.get("day", [])}
         except Exception as e:
+            self.last_error = f"positions: {e}"
             log.error("positions() failed: %s", e)
             return {}
 
@@ -200,9 +218,7 @@ class OrderExecutor:
           (symbol|instrument_token) optional if you resolve elsewhere
         }
         """
-        if not self.kite:
-            log.info("Paper mode: no broker wired, skipping real placement.")
-            return "PAPER"
+        self.last_error = None
 
         action = str(payload.get("action", "")).upper()
         qty = int(payload.get("quantity", 0))
@@ -211,20 +227,56 @@ class OrderExecutor:
         token = int(payload.get("instrument_token") or 0)
 
         if action not in ("BUY", "SELL") or qty <= 0 or price <= 0 or not symbol:
+            self.last_error = "invalid_payload"
             log.warning("Invalid order payload: %s", payload)
             return None
 
         qty = _round_to_step(qty, self.lot_size)
         if qty <= 0:
+            self.last_error = "qty_rounded_to_zero"
             return None
 
         # prevent duplicate symbol entries
         with self._lock:
             if any(rec.symbol == symbol and rec.is_open for rec in self._active.values()):
+                self.last_error = "duplicate_symbol_open"
                 log.warning("Open record exists on %s; skip new entry.", symbol)
                 return None
 
-        # split for freeze quantity
+        if not self.kite:
+            # PAPER MODE: create a synthetic record so the rest of the flow works
+            rec = _OrderRecord(
+                order_id="PAPER",
+                instrument_token=token,
+                symbol=symbol,
+                side=action,
+                quantity=qty,
+                entry_price=float(price),
+                tick_size=self.tick_size,
+                exchange=self.exchange,
+                product=self.product,
+                variety=self.variety,
+                entry_order_type=self.entry_order_type,
+                freeze_qty=self.freeze_qty,
+                use_slm_exit=self.use_slm_exit,
+                partial_enabled=self.partial_enable,
+                tp1_ratio=self.tp1_ratio,
+                breakeven_ticks=self.breakeven_ticks,
+                trailing_enabled=self.enable_trailing,
+                trailing_mult=self.trailing_mult,
+                child_order_ids=[],
+            )
+            with self._lock:
+                self._active[rec.record_id] = rec
+            try:
+                if self.telegram:
+                    self.telegram.notify_entry(symbol=symbol, side=action, qty=qty, price=price, record_id=rec.record_id)
+            except Exception:
+                pass
+            log.info("Paper entry recorded: %s %s qty=%d @%s", symbol, action, qty, price)
+            return rec.record_id
+
+        # LIVE MODE
         parts = _chunks(qty, self.freeze_qty if self.exchange.upper() == "NFO" else qty)
         child_ids: List[str] = []
         record_id: Optional[str] = None
@@ -250,13 +302,10 @@ class OrderExecutor:
                 record_id = record_id or oid
                 log.info(
                     "Entry child placed: %s %s qty=%d price=%s -> %s",
-                    symbol,
-                    action,
-                    q,
-                    params.get("price"),
-                    oid,
+                    symbol, action, q, params.get("price"), oid,
                 )
             except Exception as e:
+                self.last_error = f"place_order: {e}"
                 log.error("place_order failed: %s", e)
 
         if not record_id:
@@ -285,6 +334,13 @@ class OrderExecutor:
         )
         with self._lock:
             self._active[rec.record_id] = rec
+
+        try:
+            if self.telegram:
+                self.telegram.notify_entry(symbol=symbol, side=action, qty=qty, price=price, record_id=rec.record_id)
+        except Exception:
+            pass
+
         return rec.record_id
 
     # ----------- SL/TP orchestration ----------
@@ -332,6 +388,7 @@ class OrderExecutor:
                     tries=2,
                 )
             except Exception as e:
+                self.last_error = f"tp1: {e}"
                 log.error("TP1 failed: %s", e)
         if q_tp2 > 0:
             try:
@@ -348,6 +405,7 @@ class OrderExecutor:
                     tries=2,
                 )
             except Exception as e:
+                self.last_error = f"tp2: {e}"
                 log.error("TP2 failed: %s", e)
         rec.tp_price = tp_price
 
@@ -390,6 +448,7 @@ class OrderExecutor:
             gid = res["id"] if isinstance(res, dict) else int(res)
             rec.sl_gtt_id, rec.sl_price = gid, sl_price
         except Exception as e:
+            self.last_error = f"sl_gtt: {e}"
             log.error("SL GTT failed: %s", e)
 
     # ----------- trailing stop maintenance ----------
@@ -439,6 +498,7 @@ class OrderExecutor:
         try:
             omap = {o.get("order_id"): o for o in _retry_call(self.kite.orders, tries=2) or []}
         except Exception as e:
+            self.last_error = f"orders: {e}"
             log.error("orders() failed: %s", e)
             omap = {}
         try:
@@ -448,6 +508,7 @@ class OrderExecutor:
                 if gid:
                     gmap[int(gid)] = g
         except Exception as e:
+            self.last_error = f"gtts: {e}"
             log.error("gtts() failed: %s", e)
             gmap = {}
 
@@ -506,13 +567,23 @@ class OrderExecutor:
         if fills:
             with self._lock:
                 self._active = {k: v for k, v in self._active.items() if v.is_open}
+            try:
+                if self.telegram:
+                    self.telegram.notify_fills(fills)
+            except Exception:
+                pass
+
         return fills
 
     # ----------- admin ----------
     def cancel_all_orders(self) -> None:
         """Best-effort cancel of all live child orders + SL GTTs for our records."""
         if not self.kite:
+            with self._lock:
+                self._active.clear()
+            log.info("Paper mode: cleared in-memory orders.")
             return
+
         with self._lock:
             recs = list(self._active.values())
 
@@ -540,7 +611,7 @@ class OrderExecutor:
         try:
             if not self.kite:
                 return
-            # touch lightweight endpoints occasionally if needed
+            # optionally touch lightweight endpoints
             # _retry_call(self.kite.profile, tries=1)
         except Exception as e:
             log.warning("OrderExecutor health warning: %s", e)
@@ -551,6 +622,44 @@ class OrderExecutor:
             self.cancel_all_orders()
         except Exception:
             pass
+
+    # ----------- telegram-wired mutators ----------
+    def set_trailing_enabled(self, on: bool) -> None:
+        self.enable_trailing = bool(on)
+        with self._lock:
+            for r in self._active.values():
+                r.trailing_enabled = self.enable_trailing
+
+    def set_trailing_mult(self, x: float) -> None:
+        if x <= 0:
+            return
+        self.trailing_mult = float(x)
+        with self._lock:
+            for r in self._active.values():
+                r.trailing_mult = self.trailing_mult
+
+    def set_partial_enabled(self, on: bool) -> None:
+        self.partial_enable = bool(on)
+        with self._lock:
+            for r in self._active.values():
+                r.partial_enabled = self.partial_enable
+
+    def set_tp1_ratio(self, pct: float) -> None:
+        # accepts 0..100 or 0..1
+        v = float(pct)
+        v = v / 100.0 if v > 1.0 else v
+        v = max(0.0, min(1.0, v))
+        self.tp1_ratio = v
+        with self._lock:
+            for r in self._active.values():
+                r.tp1_ratio = self.tp1_ratio
+
+    def set_breakeven_ticks(self, ticks: int) -> None:
+        t = int(max(0, ticks))
+        self.breakeven_ticks = t
+        with self._lock:
+            for r in self._active.values():
+                r.breakeven_ticks = self.breakeven_ticks
 
     # ----------- util ----------
     @staticmethod
