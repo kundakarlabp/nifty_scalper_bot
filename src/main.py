@@ -1,43 +1,67 @@
+# Path: src/main.py
 from __future__ import annotations
 
 import logging
 import signal
 import sys
 import time
-from typing import Optional
+from typing import Optional, Callable, Any
 
 from src.config import settings
 from src.strategies.runner import StrategyRunner
+from src.utils.logging_tools import log_buffer_handler  # ring buffer for /logs
 
-# Optional broker SDK (live only at boot)
+# Optional broker SDK (live only)
 try:
     from kiteconnect import KiteConnect  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
 
-# ---------- logging ----------
+# -----------------------------
+# Logging
+# -----------------------------
 def _setup_logging() -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(level)
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S"))
+    root.addHandler(ch)
+
+    # In-memory ring buffer (used by Telegram /logs)
+    log_buffer_handler.setLevel(level)
+    root.addHandler(log_buffer_handler)
+
+    # Quiet noisy libs
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
-# ---------- tiny no-op Telegram ----------
+# -----------------------------
+# Tiny no-op Telegram (so runner ctor never fails)
+# -----------------------------
 class _NoopTelegram:
-    def send_message(self, *_a, **_k) -> None: ...
-    def start_polling(self) -> None: ...
-    def stop_polling(self) -> None: ...
+    def send_message(self, *_a, **_k) -> None:
+        pass
+
+    def start_polling(self) -> None:
+        pass
+
+    def stop_polling(self) -> None:
+        pass
 
 
-# ---------- builders ----------
+# -----------------------------
+# Builders
+# -----------------------------
 def _build_kite() -> Optional["KiteConnect"]:
+    log = logging.getLogger("main")
     if not settings.enable_live_trading:
-        logging.getLogger("main").info("Live trading disabled → paper mode.")
+        log.info("Live trading disabled → paper mode.")
         return None
     if KiteConnect is None:
         raise RuntimeError("ENABLE_LIVE_TRADING=true but kiteconnect is not installed.")
@@ -50,31 +74,16 @@ def _build_kite() -> Optional["KiteConnect"]:
     return kite
 
 
-def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> list[str]:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            block = 4096
-            data = b""
-            while size > 0 and data.count(b"\n") <= n:
-                read_size = block if size >= block else size
-                size -= read_size
-                f.seek(size)
-                data = f.read(read_size) + data
-        text = data.decode(errors="ignore")
-        return text.splitlines()[-n:]
-    except Exception:
-        return []
-
-
 def _import_telegram_class():
+    """
+    Import inside a wrapper so any syntax/import issues in the controller don't crash boot.
+    """
     try:
         from src.notifications.telegram_controller import TelegramController  # type: ignore
         return TelegramController
     except Exception as e:
         logging.getLogger("main").error(
-            "TelegramController import failed — running with no-op Telegram.\nCause: %s",
+            "TelegramController import failed — continuing with no-op Telegram. Cause: %s",
             e,
         )
         return None
@@ -83,32 +92,35 @@ def _import_telegram_class():
 def _wire_real_telegram(runner: StrategyRunner) -> None:
     TelegramController = _import_telegram_class()
     if not TelegramController:
+        # Keep runner.telegram as the _NoopTelegram from construction
         return
 
+    # Providers & controls — use getattr to avoid AttributeErrors if a hook is absent
     tg = TelegramController(
         # providers
         status_provider=runner.get_status_snapshot,
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
         actives_provider=getattr(runner.executor, "get_active_orders", None),
-        diag_provider=runner.get_diag,              # <- consistent provider
-        logs_provider=_tail_logs,
-        last_signal_provider=runner.get_last_signal_debug,
+        diag_provider=getattr(runner, "get_last_flow_debug", None),
+        logs_provider=lambda n=120: log_buffer_handler.tail(n),  # ring buffer
+        last_signal_provider=getattr(runner, "get_last_signal_debug", None),
         # controls
-        runner_pause=runner.pause,
-        runner_resume=runner.resume,
-        runner_tick=runner.runner_tick,             # accepts dry=bool
+        runner_pause=getattr(runner, "pause", None),
+        runner_resume=getattr(runner, "resume", None),
+        runner_tick=getattr(runner, "runner_tick", None),  # accepts dry=bool
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
-        # strategy/bot controls
-        set_live_mode=runner.set_live_mode,
-        set_min_score=getattr(runner.strategy, "set_min_score", None),
-        set_conf_threshold=getattr(runner.strategy, "set_conf_threshold", None),
-        set_atr_period=getattr(runner.strategy, "set_atr_period", None),
-        set_sl_mult=getattr(runner.strategy, "set_sl_mult", None),
-        set_tp_mult=getattr(runner.strategy, "set_tp_mult", None),
-        set_trend_boosts=getattr(runner.strategy, "set_trend_boosts", None),
-        set_range_tighten=getattr(runner.strategy, "set_range_tighten", None),
+        # strategy/bot controls (only if runner implements them)
+        set_live_mode=getattr(runner, "set_live_mode", None),
+        set_min_score=getattr(runner, "set_min_score", None),
+        set_conf_threshold=getattr(runner, "set_conf_threshold", None),
+        set_atr_period=getattr(runner, "set_atr_period", None),
+        set_sl_mult=getattr(runner, "set_sl_mult", None),
+        set_tp_mult=getattr(runner, "set_tp_mult", None),
+        set_trend_boosts=getattr(runner, "set_trend_boosts", None),
+        set_range_tighten=getattr(runner, "set_range_tighten", None),
     )
 
+    # Back-compat attributes the runner may expect
     runner.telegram_controller = tg
     runner.telegram = tg
 
@@ -121,14 +133,17 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         logging.getLogger("main").warning("Telegram polling failed to start; continuing.")
 
 
-# ---------- lifecycle ----------
+# -----------------------------
+# App lifecycle
+# -----------------------------
 _stop_flag = False
 
 
 def _install_signal_handlers(_runner: StrategyRunner) -> None:
     def _handler(signum, _frame):
+        nonlocal _runner
         global _stop_flag
-        logging.getLogger("main").info(f"Signal {signum} received — shutting down…")
+        logging.getLogger("main").info("Signal %s received — shutting down…", signum)
         _stop_flag = True
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -150,20 +165,32 @@ def main() -> int:
         getattr(settings.strategy, "rr_min", 0.0),
     )
 
+    # Broker (None in paper mode)
     kite = _build_kite()
+
+    # 1) Create runner with a temporary no-op telegram so ctor will never raise
     runner = StrategyRunner(kite=kite, telegram_controller=_NoopTelegram())
     _install_signal_handlers(runner)
 
+    # 2) Build & wire the real Telegram controller (non-fatal if it fails)
     _wire_real_telegram(runner)
 
+    # Announce (best-effort)
     try:
-        runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")
+        if getattr(runner, "telegram_controller", None):
+            runner.telegram_controller.send_message("🚀 Bot starting (shadow mode by default).")
     except Exception:
         log.warning("Telegram startup message failed (continuing).")
 
-    # Start background loop
-    runner.start()
+    # If your runner has start(), call it; else we just do the health loop
+    try:
+        if hasattr(runner, "start"):
+            runner.start()
+    except Exception as e:
+        log.exception("Runner start failed: %s", e)
+        return 1
 
+    # Health loop
     try:
         while not _stop_flag:
             try:
@@ -177,7 +204,8 @@ def main() -> int:
         except Exception:
             pass
         try:
-            runner.telegram_controller.send_message("🛑 Bot stopped.")
+            if getattr(runner, "telegram_controller", None):
+                runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception:
             pass
 
