@@ -1,4 +1,3 @@
-# src/strategies/runner.py
 from __future__ import annotations
 
 import logging
@@ -416,7 +415,7 @@ class StrategyRunner:
         return dict(self._last_signal_debug)
 
     def build_diag(self) -> Dict[str, Any]:
-        """Alias for main.py wiring (detailed bundle for /check)."""
+        """Alias for detailed bundle (used by /check)."""
         return self._build_diag_bundle()
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
@@ -449,9 +448,11 @@ class StrategyRunner:
             "name": "Data feed",
             "ok": age_s < 120,  # < 2 minutes considered fresh
             "detail": "fresh" if age_s < 120 else "stale/never",
-            "hint": f"age={int(age_s)}s "
-                    f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m",
+            "hint": (
+                f"age={int(age_s)}s "
+                f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
+                f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m"
+            ),
         })
 
         # Strategy readiness (min bars)
@@ -527,6 +528,43 @@ class StrategyRunner:
                 "errors": "ok" if no_errors else "present",
             },
         }
+
+    def get_equity_snapshot(self) -> Dict[str, Any]:
+        return {
+            "use_live_equity": bool(settings.risk.use_live_equity),
+            "equity_cached": round(float(self._equity_cached_value), 2),
+            "equity_floor": float(settings.risk.min_equity_floor),
+            "max_daily_loss_rupees": round(float(self._max_daily_loss_rupees), 2),
+            "refresh_seconds": int(settings.risk.equity_refresh_seconds),
+        }
+
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        return {
+            "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+            "live_trading": bool(settings.enable_live_trading),
+            "broker": "Kite" if self.kite is not None else "Paper",
+            "within_window": self._within_trading_window(),
+            "paused": self._paused,
+            "trades_today": self.risk.trades_today,
+            "consecutive_losses": self.risk.consecutive_losses,
+            "day_realized_loss": round(self.risk.day_realized_loss, 2),
+            "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
+            "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
+        }
+
+    def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
+        qty, diag = self._calculate_quantity_diag(
+            entry=float(entry), stop=float(sl),
+            lot_size=int(settings.instruments.nifty_lot_size),
+            equity=self._active_equity(),
+        )
+        return {"qty": int(qty), "diag": diag}
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
 
     # -------- Live toggle helpers --------
     def _create_kite_from_settings(self):
