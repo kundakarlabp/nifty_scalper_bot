@@ -75,10 +75,10 @@ def test_signal_direction_on_trends(strategy_config: StrategyConfig):
 
     df_up = create_test_dataframe(trending_up=True)
     sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
-    if sig_up:
-        assert sig_up.signal == "BUY"
+    assert sig_up is not None
+    assert sig_up.signal == "BUY"
 
     df_down = create_test_dataframe(trending_up=False)
     sig_down = strategy.generate_signal(df_down, current_price=float(df_down['close'].iloc[-1]))
-    if sig_down:
-        assert sig_down.signal == "SELL"
+    assert sig_down is not None
+    assert sig_down.signal == "SELL"
