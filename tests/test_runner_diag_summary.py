@@ -39,3 +39,18 @@ def test_non_dict_risk_gates_handled() -> None:
 
     assert summary["status_messages"]["risk_gates"] == "no-eval"
 
+
+def test_empty_risk_gates_treated_ok() -> None:
+    """Empty dict for risk gates should be treated as a non-issue."""
+
+    runner = StrategyRunner(telegram_controller=DummyTelegram())
+    runner._last_flow_debug = {"risk_gates": {}, "bars": 0}
+
+    bundle = runner._build_diag_bundle()
+    summary = runner.get_compact_diag_summary()
+
+    risk_check = next(c for c in bundle["checks"] if c["name"] == "Risk gates")
+    assert risk_check["ok"] is True
+    assert risk_check["detail"] == "no-eval"
+    assert summary["status_messages"]["risk_gates"] == "no-eval"
+
