@@ -308,7 +308,15 @@ class StrategyRunner:
             gates["loss_streak"] = False
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
-        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= float(getattr(settings.executor, "tick_size", 0.0)):
+        entry = signal.get("entry_price")
+        stop = signal.get("stop_loss")
+        try:
+            entry_f = float(entry)
+            stop_f = float(stop)
+        except (TypeError, ValueError):
+            gates["sl_valid"] = False
+            return gates
+        if abs(entry_f - stop_f) <= float(getattr(settings.executor, "tick_size", 0.0)):
             # stop loss must differ from entry by at least one tick
             gates["sl_valid"] = False
         return gates
