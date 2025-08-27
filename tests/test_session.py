@@ -3,31 +3,29 @@ Tests for the TradingSession state manager.
 """
 
 import pytest
-from src.config import RiskConfig, ExecutorConfig
+from src.config import ExecutorSettings, RiskSettings
 from src.risk.session import TradingSession, Trade
 
 
 @pytest.fixture
-def risk_config() -> RiskConfig:
-    """Provides a default RiskConfig for tests."""
-    return RiskConfig(
+def risk_config() -> RiskSettings:
+    """Provides a default RiskSettings for tests."""
+    return RiskSettings(
         max_daily_drawdown_pct=0.05,  # 5%
         consecutive_loss_limit=3,
         max_trades_per_day=5,
-        risk_per_trade_pct=0.01,
-        min_lots=1,
-        max_lots=10,
+        risk_per_trade=0.01,
     )
 
 
 @pytest.fixture
-def executor_config() -> ExecutorConfig:
-    """Provides a default ExecutorConfig for tests."""
-    return ExecutorConfig()
+def executor_config() -> ExecutorSettings:
+    """Provides a default ExecutorSettings for tests."""
+    return ExecutorSettings()
 
 
 @pytest.fixture
-def session(risk_config: RiskConfig, executor_config: ExecutorConfig) -> TradingSession:
+def session(risk_config: RiskSettings, executor_config: ExecutorSettings) -> TradingSession:
     """Provides a TradingSession with 100k equity."""
     return TradingSession(risk_config=risk_config, executor_config=executor_config, starting_equity=100_000.0)
 
@@ -116,7 +114,7 @@ def test_risk_limit_consecutive_loss(session: TradingSession):
     assert session.check_risk_limits() is not None  # Limit reached
 
 
-def test_risk_limit_max_drawdown(risk_config: RiskConfig, executor_config: ExecutorConfig):
+def test_risk_limit_max_drawdown(risk_config: RiskSettings, executor_config: ExecutorSettings):
     # Increase consecutive loss limit to isolate drawdown behavior
     risk_config.consecutive_loss_limit = 10
     session = TradingSession(risk_config=risk_config, executor_config=executor_config, starting_equity=100_000.0)

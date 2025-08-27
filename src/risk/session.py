@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, TYPE_CHECKING, Optional
 
-from src.config import RiskConfig
+from src.config import RiskSettings
 
 if TYPE_CHECKING:
-    from src.config import ExecutorConfig
+    from src.config import ExecutorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +70,16 @@ class TradingSession:
 
     def __init__(
         self,
-        risk_config: RiskConfig,
-        executor_config: "ExecutorConfig",
+        risk_config: RiskSettings,
+        executor_config: "ExecutorSettings",
         starting_equity: float,
         fee_per_lot: float = 20.0,  # simple, configurable fee model
     ):
-        if not isinstance(risk_config, RiskConfig):
-            raise TypeError("A valid RiskConfig instance is required.")
+        if not isinstance(risk_config, RiskSettings):
+            raise TypeError("A valid RiskSettings instance is required.")
 
         self.risk_config = risk_config
-        self.executor_config: "ExecutorConfig" = executor_config
+        self.executor_config: "ExecutorSettings" = executor_config
 
         self.start_equity = float(starting_equity)
         self.current_equity = float(starting_equity)
