@@ -375,6 +375,9 @@ class TelegramController:
             if not self._positions_provider:
                 return self._send("Positions provider not wired.")
             pos = self._positions_provider() or {}
+            err = getattr(getattr(self._positions_provider, "__self__", None), "last_error", None)
+            if err:
+                return self._send(f"Positions error: {err}")
             if not pos:
                 return self._send("No positions (day).")
             lines = ["📒 Positions (day)"]
@@ -397,6 +400,9 @@ class TelegramController:
             except Exception:
                 page = 1
             acts = self._actives_provider() or []
+            err = getattr(getattr(self._actives_provider, "__self__", None), "last_error", None)
+            if err:
+                return self._send(f"Active-orders error: {err}")
             n = len(acts)
             page_size = 6
             pages = max(1, (n + page_size - 1) // page_size)
