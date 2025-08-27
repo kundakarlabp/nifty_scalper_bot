@@ -10,23 +10,38 @@ Config with nested models (original structure) + flat aliases for compatibility.
 - Adds optional historical backfill knobs under DataSettings.
 """
 
-from pydantic import BaseModel, validator
+from pydantic import Field, validator
 from pydantic_settings import BaseSettings
+
+
+# Shared settings base to load from .env and support env vars
+class _BaseSettings(BaseSettings):
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = False
+        extra = "ignore"
 
 
 # ================= Sub-models =================
 
-class ZerodhaSettings(BaseModel):
-    api_key: str = ""
-    api_secret: str = ""
-    access_token: str = ""
+class ZerodhaSettings(_BaseSettings):
+    api_key: str | None = Field(None, env="API_KEY")
+    api_secret: str | None = Field(None, env="API_SECRET")
+    access_token: str | None = Field(None, env="ACCESS_TOKEN")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "ZERODHA__"
 
 
-class TelegramSettings(BaseModel):
+class TelegramSettings(_BaseSettings):
     # Telegram is COMPULSORY in your deployment
-    enabled: bool = True
-    bot_token: str = ""
-    chat_id: int = 0  # store as int to match controller usage
+    enabled: bool = Field(..., env="ENABLED")
+    bot_token: str = Field(..., env="BOT_TOKEN")
+    chat_id: int = Field(..., env="CHAT_ID")  # store as int to match controller usage
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "TELEGRAM__"
 
     @validator("chat_id")
     def _v_chat_id(cls, v: int) -> int:
@@ -35,20 +50,23 @@ class TelegramSettings(BaseModel):
         return v
 
 
-class DataSettings(BaseModel):
+class DataSettings(_BaseSettings):
     # Live loop consumption
-    lookback_minutes: int = 30
-    timeframe: str = "minute"  # 'minute' recommended
-    time_filter_start: str = "09:20"
-    time_filter_end: str = "15:20"
+    lookback_minutes: int = Field(..., env="LOOKBACK_MINUTES")
+    timeframe: str = Field(..., env="TIMEFRAME")  # 'minute' recommended
+    time_filter_start: str = Field(..., env="TIME_FILTER_START")
+    time_filter_end: str = Field(..., env="TIME_FILTER_END")
 
     # Cache
-    cache_enabled: bool = True
-    cache_ttl_seconds: int = 60
+    cache_enabled: bool = Field(..., env="CACHE_ENABLED")
+    cache_ttl_seconds: int = Field(..., env="CACHE_TTL_SECONDS")
 
     # Historical backfill (optional; runner/feeds can ignore if unsupported)
-    history_days: int = 0          # 0 = off; otherwise backfill N days before now
-    history_max_candles: int = 0   # 0 = unlimited within broker constraints
+    history_days: int = Field(..., env="HISTORY_DAYS")          # 0 = off; otherwise backfill N days before now
+    history_max_candles: int = Field(..., env="HISTORY_MAX_CANDLES")   # 0 = unlimited within broker constraints
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "DATA__"
 
     @validator("time_filter_start", "time_filter_end")
     def _v_time(cls, v: str) -> str:
@@ -73,16 +91,19 @@ class DataSettings(BaseModel):
         return v
 
 
-class InstrumentsSettings(BaseModel):
-    spot_symbol: str = "NSE:NIFTY 50"
-    trade_symbol: str = "NIFTY"
-    trade_exchange: str = "NFO"
-    instrument_token: int = 256265        # primary token (spot preferred for OHLC)
-    spot_token: int = 256265               # optional explicit spot token (helps with logs/diagnostics)
-    nifty_lot_size: int = 75
-    strike_range: int = 0
-    min_lots: int = 1
-    max_lots: int = 10
+class InstrumentsSettings(_BaseSettings):
+    spot_symbol: str = Field(..., env="SPOT_SYMBOL")
+    trade_symbol: str = Field(..., env="TRADE_SYMBOL")
+    trade_exchange: str = Field(..., env="TRADE_EXCHANGE")
+    instrument_token: int = Field(..., env="INSTRUMENT_TOKEN")        # primary token (spot preferred for OHLC)
+    spot_token: int = Field(..., env="SPOT_TOKEN")               # optional explicit spot token (helps with logs/diagnostics)
+    nifty_lot_size: int = Field(..., env="NIFTY_LOT_SIZE")
+    strike_range: int = Field(..., env="STRIKE_RANGE")
+    min_lots: int = Field(..., env="MIN_LOTS")
+    max_lots: int = Field(..., env="MAX_LOTS")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "INSTRUMENTS__"
 
     @validator("min_lots", "max_lots", "nifty_lot_size")
     def _v_lots_pos(cls, v: int) -> int:
@@ -97,19 +118,22 @@ class InstrumentsSettings(BaseModel):
         return v
 
 
-class StrategySettings(BaseModel):
-    min_signal_score: int = 3
-    confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 30
-    ema_fast: int = 9
-    ema_slow: int = 21
-    rsi_period: int = 14
-    bb_period: int = 20
-    bb_std: float = 2.0
-    atr_period: int = 14
-    atr_sl_multiplier: float = 1.3
-    atr_tp_multiplier: float = 2.2
-    rr_min: float = 1.30
+class StrategySettings(_BaseSettings):
+    min_signal_score: int = Field(..., env="MIN_SIGNAL_SCORE")
+    confidence_threshold: float = Field(..., env="CONFIDENCE_THRESHOLD")  # 0..100
+    min_bars_for_signal: int = Field(..., env="MIN_BARS_FOR_SIGNAL")
+    ema_fast: int = Field(..., env="EMA_FAST")
+    ema_slow: int = Field(..., env="EMA_SLOW")
+    rsi_period: int = Field(..., env="RSI_PERIOD")
+    bb_period: int = Field(..., env="BB_PERIOD")
+    bb_std: float = Field(..., env="BB_STD")
+    atr_period: int = Field(..., env="ATR_PERIOD")
+    atr_sl_multiplier: float = Field(..., env="ATR_SL_MULTIPLIER")
+    atr_tp_multiplier: float = Field(..., env="ATR_TP_MULTIPLIER")
+    rr_min: float = Field(..., env="RR_MIN")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "STRATEGY__"
 
     @validator("confidence_threshold")
     def _v_conf(cls, v: float) -> float:
@@ -136,17 +160,20 @@ class StrategySettings(BaseModel):
         return v
 
 
-class RiskSettings(BaseModel):
-    use_live_equity: bool = True
-    default_equity: float = 30000.0
-    min_equity_floor: float = 25000.0
-    equity_refresh_seconds: int = 60
+class RiskSettings(_BaseSettings):
+    use_live_equity: bool = Field(..., env="USE_LIVE_EQUITY")
+    default_equity: float = Field(..., env="DEFAULT_EQUITY")
+    min_equity_floor: float = Field(..., env="MIN_EQUITY_FLOOR")
+    equity_refresh_seconds: int = Field(..., env="EQUITY_REFRESH_SECONDS")
 
-    risk_per_trade: float = 0.01
-    max_trades_per_day: int = 12
-    consecutive_loss_limit: int = 3
-    max_daily_drawdown_pct: float = 0.04
-    max_position_size_pct: float = 0.10
+    risk_per_trade: float = Field(..., env="RISK_PER_TRADE")
+    max_trades_per_day: int = Field(..., env="MAX_TRADES_PER_DAY")
+    consecutive_loss_limit: int = Field(..., env="CONSECUTIVE_LOSS_LIMIT")
+    max_daily_drawdown_pct: float = Field(..., env="MAX_DAILY_DRAWDOWN_PCT")
+    max_position_size_pct: float = Field(..., env="MAX_POSITION_SIZE_PCT")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "RISK__"
 
     @validator("risk_per_trade")
     def _v_risk_pct(cls, v: float) -> float:
@@ -167,22 +194,25 @@ class RiskSettings(BaseModel):
         return v
 
 
-class ExecutorSettings(BaseModel):
-    exchange: str = "NFO"
-    order_product: str = "NRML"
-    order_variety: str = "regular"   # regular | bo | amo | co (depending on broker support)
-    entry_order_type: str = "LIMIT"  # LIMIT | MARKET | SL | SLM
-    tick_size: float = 0.05
-    exchange_freeze_qty: int = 1800
-    preferred_exit_mode: str = "REGULAR"
-    use_slm_exit: bool = True
-    partial_tp_enable: bool = True
-    tp1_qty_ratio: float = 0.5
-    breakeven_ticks: int = 2
-    enable_trailing: bool = True
-    trailing_atr_multiplier: float = 1.4
-    fee_per_lot: float = 20.0
-    slippage_ticks: int = 1
+class ExecutorSettings(_BaseSettings):
+    exchange: str = Field(..., env="EXCHANGE")
+    order_product: str = Field(..., env="ORDER_PRODUCT")
+    order_variety: str = Field(..., env="ORDER_VARIETY")   # regular | bo | amo | co (depending on broker support)
+    entry_order_type: str = Field(..., env="ENTRY_ORDER_TYPE")  # LIMIT | MARKET | SL | SLM
+    tick_size: float = Field(..., env="TICK_SIZE")
+    exchange_freeze_qty: int = Field(..., env="EXCHANGE_FREEZE_QTY")
+    preferred_exit_mode: str = Field(..., env="PREFERRED_EXIT_MODE")
+    use_slm_exit: bool = Field(..., env="USE_SLM_EXIT")
+    partial_tp_enable: bool = Field(..., env="PARTIAL_TP_ENABLE")
+    tp1_qty_ratio: float = Field(..., env="TP1_QTY_RATIO")
+    breakeven_ticks: int = Field(..., env="BREAKEVEN_TICKS")
+    enable_trailing: bool = Field(..., env="ENABLE_TRAILING")
+    trailing_atr_multiplier: float = Field(..., env="TRAILING_ATR_MULTIPLIER")
+    fee_per_lot: float = Field(..., env="FEE_PER_LOT")
+    slippage_ticks: int = Field(..., env="SLIPPAGE_TICKS")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "EXECUTOR__"
 
     @validator("tp1_qty_ratio")
     def _v_ratio(cls, v: float) -> float:
@@ -197,16 +227,22 @@ class ExecutorSettings(BaseModel):
         return v
 
 
-class HealthSettings(BaseModel):
-    enable_server: bool = True
-    port: int = 8000
+class HealthSettings(_BaseSettings):
+    enable_server: bool = Field(..., env="ENABLE_SERVER")
+    port: int = Field(..., env="PORT")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "HEALTH__"
 
 
-class SystemSettings(BaseModel):
-    max_api_calls_per_second: float = 8.0
-    websocket_reconnect_attempts: int = 5
-    order_timeout_seconds: int = 30
-    position_sync_interval: int = 60
+class SystemSettings(_BaseSettings):
+    max_api_calls_per_second: float = Field(..., env="MAX_API_CALLS_PER_SECOND")
+    websocket_reconnect_attempts: int = Field(..., env="WEBSOCKET_RECONNECT_ATTEMPTS")
+    order_timeout_seconds: int = Field(..., env="ORDER_TIMEOUT_SECONDS")
+    position_sync_interval: int = Field(..., env="POSITION_SYNC_INTERVAL")
+
+    class Config(_BaseSettings.Config):
+        env_prefix = "SYSTEM__"
 
 
 # ================= Root settings =================
@@ -217,15 +253,15 @@ class AppSettings(BaseSettings):
     allow_offhours_testing: bool = False
     log_level: str = "INFO"
 
-    zerodha: ZerodhaSettings = ZerodhaSettings()
-    telegram: TelegramSettings = TelegramSettings()
-    data: DataSettings = DataSettings()
-    instruments: InstrumentsSettings = InstrumentsSettings()
-    strategy: StrategySettings = StrategySettings()
-    risk: RiskSettings = RiskSettings()
-    executor: ExecutorSettings = ExecutorSettings()
-    health: HealthSettings = HealthSettings()
-    system: SystemSettings = SystemSettings()
+    zerodha: ZerodhaSettings
+    telegram: TelegramSettings
+    data: DataSettings
+    instruments: InstrumentsSettings
+    strategy: StrategySettings
+    risk: RiskSettings
+    executor: ExecutorSettings
+    health: HealthSettings
+    system: SystemSettings
 
     class Config:
         env_file = ".env"              # used locally; Railway uses real env vars

@@ -29,7 +29,7 @@ class Trade:
     entry_price: float
     quantity: int               # contracts (NOT lots)
     order_id: str
-    atr_at_entry: float
+    atr: float
     entry_time: datetime = field(default_factory=datetime.now)
 
     # Filled on close
@@ -150,17 +150,17 @@ class TradingSession:
         Checks if any session-level risk limits have been breached.
         Returns a string reason if a limit is breached, otherwise None.
         """
-        if self.trades_today >= int(self.risk_config.max_trades_per_day):
-            return f"Max trades per day ({self.risk_config.max_trades_per_day}) reached."
-
-        if self.consecutive_losses >= int(self.risk_config.consecutive_loss_limit):
-            return f"Consecutive loss limit ({self.risk_config.consecutive_loss_limit}) reached."
-
         if self.drawdown_pct >= float(self.risk_config.max_daily_drawdown_pct):
             return (
                 f"Max daily drawdown ({self.risk_config.max_daily_drawdown_pct:.2%}) breached. "
                 f"Current DD: {self.drawdown_pct:.2%}"
             )
+
+        if self.consecutive_losses >= int(self.risk_config.consecutive_loss_limit):
+            return f"Consecutive loss limit ({self.risk_config.consecutive_loss_limit}) reached."
+
+        if self.trades_today >= int(self.risk_config.max_trades_per_day):
+            return f"Max trades per day ({self.risk_config.max_trades_per_day}) reached."
 
         return None
 
@@ -172,11 +172,7 @@ class TradingSession:
         Quantity is in contracts; lots = qty / lot_size.
         """
         try:
-            lot_size = int(self.executor_config.nifty_lot_size or 0)
-            if lot_size <= 0:
-                return 0.0
-            lots = max(0, quantity_contracts // lot_size)
-            return lots * self.fee_per_lot
+            return self.fee_per_lot if quantity_contracts > 0 else 0.0
         except Exception:
             return 0.0
 
