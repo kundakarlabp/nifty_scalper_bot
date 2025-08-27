@@ -43,3 +43,28 @@ def test_get_last_price_yfinance_fallback(monkeypatch):
     price = src.get_last_price("NSE:FOO")
     assert price == 100.0
 
+
+def test_fetch_ohlc_kite_error_uses_yfinance(monkeypatch):
+    start = datetime(2024, 1, 1, 9, 0)
+    end = start + timedelta(minutes=2)
+    df = pd.DataFrame(
+        {
+            "Open": [1, 1],
+            "High": [1, 1],
+            "Low": [1, 1],
+            "Close": [1, 1],
+            "Volume": [0, 0],
+        },
+        index=[start, start + timedelta(minutes=1)],
+    )
+
+    class BoomKite:
+        def historical_data(self, *args, **kwargs):
+            raise Exception("no sub")
+
+    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: df)
+
+    src = LiveKiteSource(BoomKite())
+    out = src.fetch_ohlc(123, start, end, "minute")
+    assert out is not None and len(out) == 2
+
