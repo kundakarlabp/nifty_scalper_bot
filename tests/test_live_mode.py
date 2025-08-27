@@ -1,4 +1,4 @@
-import types
+import pandas as pd
 
 from src import main as main_mod
 from src.config import settings
@@ -11,6 +11,21 @@ def _prep_live_env(monkeypatch):
     monkeypatch.setattr(settings.zerodha, "access_token", "t")
     monkeypatch.setattr(settings.telegram, "bot_token", "x")
     monkeypatch.setattr(settings.telegram, "chat_id", 1)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_, **__):
+            ts = pd.Timestamp("2024-01-01")
+            return pd.DataFrame(
+                {"open": [1], "high": [1], "low": [1], "close": [1], "volume": [0]}, index=[ts]
+            )
+
+    monkeypatch.setattr("src.config.LiveKiteSource", DummySource)
 
 
 def test_build_kite_session_success(monkeypatch):

@@ -35,6 +35,9 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.config import settings, validate_critical_settings
+
+# Backtests run in paper mode; skip live trading validations
+settings.enable_live_trading = False
 from src.backtesting.data_source import BacktestCsvSource
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
