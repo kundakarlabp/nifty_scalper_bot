@@ -114,6 +114,7 @@ class StrategyRunner:
         try:
             # window
             if not self._within_trading_window() and not settings.allow_offhours_testing:
+                flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
             flow["within_window"] = True
 
