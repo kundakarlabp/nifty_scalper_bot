@@ -12,6 +12,18 @@ Config with nested models (original structure) + flat aliases for compatibility.
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
+from datetime import datetime, timedelta, timezone
+import pandas as pd
+
+# Optional external dependencies for validation
+try:
+    from kiteconnect import KiteConnect  # type: ignore
+except Exception:  # pragma: no cover
+    KiteConnect = None  # type: ignore
+try:
+    from src.data.source import LiveKiteSource  # type: ignore
+except Exception:  # pragma: no cover
+    LiveKiteSource = None  # type: ignore
 
 
 # ================= Sub-models =================
@@ -406,6 +418,34 @@ def validate_critical_settings() -> None:
         errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
     if not settings.telegram.chat_id:
         errors.append("TELEGRAM__CHAT_ID is required (Telegram is mandatory)")
+
+    # Instrument token sanity check (only in live mode with deps available)
+    if (
+        settings.enable_live_trading
+        and KiteConnect is not None
+        and LiveKiteSource is not None
+        and not errors  # only attempt if creds are present
+    ):
+        token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        if token <= 0:
+            errors.append("INSTRUMENTS__INSTRUMENT_TOKEN must be a positive integer")
+        else:
+            try:
+                kite = KiteConnect(api_key=str(settings.zerodha.api_key))
+                kite.set_access_token(str(settings.zerodha.access_token))
+                src = LiveKiteSource(kite=kite)
+                src.connect()
+                end = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
+                    second=0, microsecond=0
+                )
+                start = end - timedelta(minutes=1)
+                df = src.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    errors.append(
+                        f"instrument_token {token} returned no data; configure a valid F&O token"
+                    )
+            except Exception as e:
+                errors.append(f"instrument_token validation failed: {e}")
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

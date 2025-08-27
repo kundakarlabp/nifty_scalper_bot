@@ -7,6 +7,7 @@ Tests for the Pydantic configuration system.
 import os
 from unittest import mock
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -100,3 +101,32 @@ def test_negative_chat_id_allowed():
         # Should not raise for negative IDs
         validate_critical_settings()
         assert settings.telegram.chat_id == -12345
+
+
+def test_invalid_instrument_token_detected(monkeypatch):
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_, **__):
+            return pd.DataFrame()
+
+    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
+        m.setattr("src.config.LiveKiteSource", DummySource)
+        with pytest.raises(ValueError) as exc:
+            validate_critical_settings()
+    assert "valid F&O token" in str(exc.value)
