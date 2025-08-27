@@ -431,7 +431,7 @@ class StrategyRunner:
         return self._build_diag_bundle()
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
-        return self._build_diag_bundle()
+        return dict(self._last_flow_debug)
 
     def _build_diag_bundle(self) -> Dict[str, Any]:
         """Health cards for /diag (compact) and /check (detailed)."""
