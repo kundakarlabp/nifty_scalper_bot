@@ -178,6 +178,9 @@ class OrderExecutor:
         self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
 
+        # track last notification to throttle duplicates
+        self._last_notification: Tuple[str, float] = ("", 0.0)
+
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
         """Hot-swap Kite session (None => paper)."""
@@ -705,6 +708,11 @@ class OrderExecutor:
 
     # ----------- internal notify helper ----------
     def _notify(self, text: str) -> None:
+        now = time.time()
+        last_msg, last_ts = self._last_notification
+        if text == last_msg and (now - last_ts) < 300:
+            return
+        self._last_notification = (text, now)
         try:
             if self.telegram:
                 if hasattr(self.telegram, "send_message"):
