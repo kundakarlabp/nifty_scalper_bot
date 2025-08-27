@@ -578,22 +578,32 @@ class StrategyRunner:
 
     # ---------------- live-mode wiring ----------------
     def _create_kite_from_settings(self):
-        """Create a KiteConnect session from settings. Return None if not possible."""
+        """Create a KiteConnect session from settings.
+
+        Raises:
+            RuntimeError: If the broker SDK is missing or credentials are not
+                provided.
+        """
+        if KiteConnect is None:
+            msg = "kiteconnect not installed; cannot enter live."
+            self.log.warning(msg)
+            raise RuntimeError(msg)
+
+        api_key = getattr(settings.zerodha, "api_key", None)
+        access_token = getattr(settings.zerodha, "access_token", None)
+        if not api_key or not access_token:
+            msg = "Zerodha credentials missing; cannot enter live."
+            self.log.error(msg)
+            raise RuntimeError(msg)
+
         try:
-            if KiteConnect is None:
-                self.log.warning("kiteconnect not installed; cannot enter live.")
-                return None
-            api_key = getattr(settings.zerodha, "api_key", None)
-            access_token = getattr(settings.zerodha, "access_token", None)
-            if not api_key or not access_token:
-                self.log.warning("Zerodha credentials missing; cannot enter live.")
-                return None
             k = KiteConnect(api_key=str(api_key))
             k.set_access_token(str(access_token))
             return k
         except Exception as e:
-            self.log.warning("Failed to create KiteConnect session: %s", e)
-            return None
+            msg = f"Failed to create KiteConnect session: {e}"
+            self.log.warning(msg)
+            raise RuntimeError(msg)
 
     def set_live_mode(self, val: bool) -> None:
         """
@@ -610,12 +620,18 @@ class StrategyRunner:
 
         # Enabling LIVE: ensure we have a Kite session
         if not self.kite:
-            self.kite = self._create_kite_from_settings()
-
-        if not self.kite:
-            # Stay effectively in paper; do not claim we initialized anything.
-            self.log.warning("Requested live mode but kite=None; staying effectively in paper.")
-            return
+            try:
+                self.kite = self._create_kite_from_settings()
+            except Exception as e:
+                msg = f"Broker init failed: {e}"
+                self.log.error(msg)
+                try:
+                    if self.telegram:
+                        self.telegram.send_message(msg)
+                except Exception:
+                    pass
+                # Re-raise so callers know live mode failed
+                raise
 
         # Rewire executor
         try:
