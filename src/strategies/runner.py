@@ -537,7 +537,10 @@ class StrategyRunner:
             if isinstance(self._last_flow_debug, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = gates is RISK_GATES_SKIPPED
+        skipped = (
+            gates is RISK_GATES_SKIPPED
+            or (isinstance(gates, dict) and bool(gates.get("skipped")))
+        )
         gates_ok = True if skipped else (bool(gates) and all(bool(v) for v in gates.values()))
         checks.append({
             "name": "Risk gates",
@@ -592,7 +595,10 @@ class StrategyRunner:
             if isinstance(flow, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = gates is RISK_GATES_SKIPPED
+        skipped = (
+            gates is RISK_GATES_SKIPPED
+            or (isinstance(gates, dict) and bool(gates.get("skipped")))
+        )
         gates_ok = isinstance(gates, dict) and all(bool(v) for v in gates.values())
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
