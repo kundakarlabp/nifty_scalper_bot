@@ -114,6 +114,8 @@ class StrategyRunner:
         # Runtime flags
         self._last_error: Optional[str] = None
         self._last_signal_at: float = 0.0
+        # ensure off-hours notification is not spammed
+        self._offhours_notified: bool = False
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -146,15 +148,18 @@ class StrategyRunner:
             if not self._within_trading_window() and not settings.allow_offhours_testing:
                 flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "off_hours"; self._last_flow_debug = flow
-                now = self._now_ist().strftime("%H:%M:%S")
-                msg = (
-                    f"⏰ Tick blocked outside trading window at {now} IST "
-                    f"(window {self._start_time.strftime('%H:%M')}-{self._end_time.strftime('%H:%M')})"
-                )
-                self._notify(msg)
+                if not self._offhours_notified:
+                    now = self._now_ist().strftime("%H:%M:%S")
+                    msg = (
+                        f"⏰ Tick blocked outside trading window at {now} IST "
+                        f"(window {self._start_time.strftime('%H:%M')}-{self._end_time.strftime('%H:%M')})"
+                    )
+                    self._notify(msg)
+                    self._offhours_notified = True
                 self.log.debug("Skipping tick: outside trading window")
                 return
             flow["within_window"] = True
+            self._offhours_notified = False
 
             # pause
             if self._paused:
