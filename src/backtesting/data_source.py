@@ -20,8 +20,10 @@ from pandas.errors import EmptyDataError
 
 from src.config import settings
 from src.data.source import DataSource
+from src.utils.logging_tools import RateLimitFilter
 
 logger = logging.getLogger(__name__)
+logging.getLogger().addFilter(RateLimitFilter(interval=120.0))
 if not logger.handlers:
     logging.basicConfig(
         level=getattr(logging, str(settings.log_level).upper(), logging.INFO),

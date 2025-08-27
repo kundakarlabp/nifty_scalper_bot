@@ -9,11 +9,13 @@ import pandas as pd
 from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.risk.position_sizing import PositionSizer
+from src.utils.logging_tools import RateLimitFilter
 
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
+logging.getLogger().addFilter(RateLimitFilter(interval=120.0))
 logging.basicConfig(
     level=getattr(logging, str(settings.log_level).upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(message)s",
