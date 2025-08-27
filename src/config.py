@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings
 
 # Optional external dependencies for validation
