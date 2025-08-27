@@ -859,7 +859,7 @@ class StrategyRunner:
         except Exception as e:
             self.log.warning("Executor rewire failed: %s", e)
 
-        # Rewire data source
+        # Rewire or initialize data source
         if self.data_source is not None:
             try:
                 if hasattr(self.data_source, "set_kite"):
@@ -869,6 +869,17 @@ class StrategyRunner:
                 self.data_source.connect()
             except Exception as e:
                 self.log.warning("Data source connect failed: %s", e)
+        elif LiveKiteSource is not None:
+            try:
+                self.data_source = LiveKiteSource(kite=self.kite)
+                self.data_source.connect()
+                try:
+                    self._fetch_spot_ohlc()
+                except Exception as e:
+                    self.log.debug("Initial OHLC fetch failed: %s", e)
+            except Exception as e:
+                self.log.warning("Data source init failed: %s", e)
+                self.data_source = None
 
         self.log.info("🔓 Live mode ON — broker session initialized.")
 
