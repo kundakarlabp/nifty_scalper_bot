@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.strategies.runner import StrategyRunner
 from src.config import settings
+import pandas as pd
 
 
 class DummyTelegram:
@@ -49,4 +50,32 @@ def test_offhours_notifies_only_once(monkeypatch) -> None:
 
     messages = [m for m in telegram.messages if "outside trading window" in m]
     assert len(messages) == 1
+
+
+def test_offhours_still_fetches_data(monkeypatch) -> None:
+    """Even outside the window, runner fetches historical data for diagnostics."""
+
+    telegram = DummyTelegram()
+    runner = StrategyRunner(telegram_controller=telegram)
+
+    monkeypatch.setattr(runner, "_within_trading_window", lambda: False)
+    monkeypatch.setattr(settings, "allow_offhours_testing", False, raising=False)
+
+    called = {"n": 0}
+
+    def fake_fetch():
+        called["n"] += 1
+        idx = pd.date_range("2024-01-01", periods=1, freq="1min")
+        return pd.DataFrame(
+            {"open": [1], "high": [1], "low": [1], "close": [1], "volume": [0]},
+            index=idx,
+        )
+
+    monkeypatch.setattr(runner, "_fetch_spot_ohlc", fake_fetch)
+
+    runner.process_tick(None)
+
+    assert called["n"] == 1
+    flow = runner.get_last_flow_debug()
+    assert flow["bars"] == 1
 
