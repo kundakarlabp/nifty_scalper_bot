@@ -438,9 +438,15 @@ def validate_critical_settings() -> None:
                 start = end - timedelta(minutes=1)
                 df = src.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
                 if not isinstance(df, pd.DataFrame) or df.empty:
-                    errors.append(
-                        f"instrument_token {token} returned no data; configure a valid F&O token"
-                    )
+                    # Outside market hours the historical API may return no data.
+                    # Fall back to a simple last-price lookup so that a valid token
+                    # doesn't trigger a false validation error.
+                    ltp_fn = getattr(src, "get_last_price", None)
+                    ltp = ltp_fn(token) if callable(ltp_fn) else None
+                    if not isinstance(ltp, (int, float)):
+                        errors.append(
+                            f"instrument_token {token} returned no data; configure a valid F&O token"
+                        )
             except Exception as e:
                 errors.append(f"instrument_token validation failed: {e}")
 
