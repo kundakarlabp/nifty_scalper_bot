@@ -133,7 +133,21 @@ class TelegramController:
                 payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+                response = self._session.post(
+                    f"{self._base}/sendMessage", json=payload, timeout=self._timeout
+                )
+                try:
+                    data = response.json()
+                except Exception as e:
+                    log.error("Telegram send JSON decode failed: %s", e)
+                    raise
+                if not response.ok or not data.get("ok"):
+                    log.error(
+                        "Telegram send failed: status=%s, data=%s",
+                        response.status_code,
+                        data,
+                    )
+                    raise RuntimeError("telegram send failed")
                 self._backoff = 1.0
                 return
             except Exception:
@@ -144,7 +158,20 @@ class TelegramController:
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
         payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
         try:
-            self._session.post(f"{self._base}/sendMessage", json=payload, timeout=self._timeout)
+            response = self._session.post(
+                f"{self._base}/sendMessage", json=payload, timeout=self._timeout
+            )
+            try:
+                data = response.json()
+            except Exception as e:
+                log.error("Inline send JSON decode failed: %s", e)
+                return
+            if not response.ok or not data.get("ok"):
+                log.error(
+                    "Inline send failed: status=%s, data=%s",
+                    response.status_code,
+                    data,
+                )
         except Exception as e:
             log.debug("Inline send failed: %s", e)
 
