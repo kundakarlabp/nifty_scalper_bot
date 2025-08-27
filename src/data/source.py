@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple, Callable
+from typing import Any, Dict, Optional, Tuple, Callable, List
 
 import pandas as pd
 
@@ -276,18 +276,45 @@ class LiveKiteSource(DataSource):
         frm = pd.to_datetime(start).to_pydatetime()
         to = pd.to_datetime(end).to_pydatetime()
 
+        # Kite limits historical_data to ~2000 candles per call.  Chunk long
+        # requests (e.g., multi‑day backfills) into smaller ranges and stitch
+        # the results together.  This keeps the external behaviour the same
+        # while avoiding silent truncation.
+        interval_minutes = {
+            "minute": 1,
+            "3minute": 3,
+            "5minute": 5,
+            "10minute": 10,
+            "15minute": 15,
+        }
+        step: Optional[timedelta] = None
+        if interval in interval_minutes:
+            step = timedelta(minutes=interval_minutes[interval] * 2000)
+        elif interval == "day":
+            step = timedelta(days=2000)
+
+        frames: List[pd.DataFrame] = []
+        cur = frm
         try:
-            rows = _retry(
-                self.kite.historical_data,
-                token,
-                frm,
-                to,
-                interval,
-                continuous=False,
-                oi=False,
-                tries=3,
-            )
-            df = _safe_dataframe(rows)
+            while cur < to:
+                cur_end = to if step is None else min(to, cur + step)
+                rows = _retry(
+                    self.kite.historical_data,
+                    token,
+                    cur,
+                    cur_end,
+                    interval,
+                    continuous=False,
+                    oi=False,
+                    tries=3,
+                )
+                part = _safe_dataframe(rows)
+                if not part.empty:
+                    frames.append(part)
+                cur = cur_end
+
+            df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
+            df = df[~df.index.duplicated(keep="last")]
 
             if df.empty:
                 # This can happen near the right edge of a session or with brief API hiccups.
