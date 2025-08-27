@@ -55,8 +55,7 @@ class BacktestRunner:
         self.sizer = PositionSizer(settings.risk)
         self.session = TradingSession(
             risk_config=settings.risk,
-            executor_config=settings.executor,
-            starting_equity=100_000.0
+            starting_equity=100_000.0,
         )
         self.active_trade: Trade | None = None
 
@@ -128,7 +127,7 @@ class BacktestRunner:
             session=self.session,
             entry_price=current_price,
             stop_loss_price=sig.stop_loss,
-            lot_size=settings.executor.nifty_lot_size,  # should be 75 as per config
+            lot_size=settings.instruments.nifty_lot_size,  # should be 75 as per config
         )
         if quantity <= 0:
             return
@@ -139,7 +138,7 @@ class BacktestRunner:
             entry_price=current_price,
             quantity=quantity,
             order_id=f"order_{current_dt.isoformat()}",
-            atr=sig.market_volatility or 0.0,
+            atr_at_entry=sig.market_volatility or 0.0,
         )
         # Attach SL/TP for the bar-by-bar simulator
         setattr(trade, "stop_loss", sig.stop_loss)
