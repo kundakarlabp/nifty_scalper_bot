@@ -463,11 +463,19 @@ class TelegramController:
             if state not in ("live", "dry"):
                 return self._send("Usage: /mode live|dry")
             val = (state == "live")
+            runner = getattr(self._set_live_mode, "__self__", None) if self._set_live_mode else None
             if self._set_live_mode:
-                self._set_live_mode(val)
+                try:
+                    self._set_live_mode(val)
+                except Exception as e:
+                    return self._send(f"Mode error: {e}")
             else:
                 setattr(settings, "enable_live_trading", val)
-            return self._send(f"Mode set to {'LIVE' if val else 'DRY'} and rewired.")
+            msg = f"Mode set to {'LIVE' if val else 'DRY'} and rewired."
+            self._send(msg)
+            if runner is not None and getattr(runner, "kite", None) is None:
+                self._send("⚠️ Broker session missing.")
+            return
 
         # TICK / TICKDRY
         if cmd in ("/tick", "/tickdry"):
