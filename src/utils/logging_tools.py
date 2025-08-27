@@ -2,21 +2,21 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from collections import deque
 from typing import Deque, List, Optional, Tuple
 
+from src.config import settings
+
 
 class InMemoryLogHandler(logging.Handler):
-    """
-    Ring-buffer log handler so we can fetch recent logs via Telegram (/logs).
-    Stores (ts, levelno, formatted_message). Thread-safe.
-    """
-    def __init__(self, capacity: int = 4000) -> None:
+    """Ring-buffer log handler so we can fetch recent logs via Telegram (/logs).
+    Stores (ts, levelno, formatted_message). Thread-safe."""
+
+    def __init__(self) -> None:
         super().__init__()
-        self.capacity = int(os.environ.get("LOG_BUFFER_CAPACITY", capacity))
+        self.capacity = settings.system.log_buffer_capacity
         self._buf: Deque[Tuple[float, int, str]] = deque(maxlen=self.capacity)
         self._lock = threading.Lock()
         self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
