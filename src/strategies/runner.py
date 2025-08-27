@@ -117,6 +117,8 @@ class StrategyRunner:
         self._last_signal_at: float = 0.0
         # ensure off-hours notification is not spammed
         self._offhours_notified: bool = False
+        # track last notification to avoid spamming identical messages
+        self._last_notification: Tuple[str, float] = ("", 0.0)
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -896,6 +898,12 @@ class StrategyRunner:
 
     # ---------------- notify ----------------
     def _notify(self, msg: str) -> None:
+        now = time.time()
+        last_msg, last_ts = self._last_notification
+        # Skip duplicate messages within a short time window
+        if msg == last_msg and (now - last_ts) < 300:
+            return
+        self._last_notification = (msg, now)
         logging.info(msg)
         try:
             if self.telegram:
