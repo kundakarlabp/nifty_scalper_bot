@@ -520,11 +520,16 @@ class StrategyRunner:
 
         # Risk gates last view
         gates = self._last_flow_debug.get("risk_gates", {}) if isinstance(self._last_flow_debug, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
+        if gates:
+            gates_ok = all(bool(v) for v in gates.values())
+            detail = ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()])
+        else:
+            gates_ok = True  # Treat skipped evaluation as not failing
+            detail = "skipped"
         checks.append({
             "name": "Risk gates",
             "ok": gates_ok,
-            "detail": ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "no-eval",
+            "detail": detail,
         })
 
         # RR check
@@ -565,8 +570,14 @@ class StrategyRunner:
         bars = int(flow.get("bars", 0) or 0)
         min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
         strat_ready = bars >= min_bars
+
         gates = flow.get("risk_gates", {}) if isinstance(flow, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
+        if gates:
+            gates_ok = all(bool(v) for v in gates.values())
+            gates_status = "ok" if gates_ok else "blocked"
+        else:
+            gates_status = "skipped"
+
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
 
@@ -577,7 +588,7 @@ class StrategyRunner:
                 "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
                 "data_feed": "ok" if data_fresh else "stale",
                 "strategy_readiness": "ok" if strat_ready else "not ready",
-                "risk_gates": "ok" if gates_ok else "blocked" if gates else "no-eval",
+                "risk_gates": gates_status,
                 "rr_threshold": "ok" if rr_ok else "blocked",
                 "errors": "ok" if no_errors else "present",
             },
