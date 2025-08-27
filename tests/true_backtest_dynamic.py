@@ -51,8 +51,13 @@ class BacktestRunner:
     def __init__(self, csv_filepath: Path):
         logger.info("Initializing backtest components...")
         self.data_source = BacktestCsvSource(csv_filepath, symbol="NIFTY_SPOT_PROXY")
-        self.strategy = EnhancedScalpingStrategy(settings.strategy)
-        self.sizer = PositionSizer(settings.risk)
+        self.strategy = EnhancedScalpingStrategy()
+        self.sizer = PositionSizer.from_settings(
+            risk_per_trade=settings.risk.risk_per_trade,
+            min_lots=settings.instruments.min_lots,
+            max_lots=settings.instruments.max_lots,
+            max_position_size_pct=settings.risk.max_position_size_pct,
+        )
         self.session = TradingSession(
             risk_config=settings.risk,
             executor_config=settings.executor,

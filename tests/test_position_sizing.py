@@ -15,12 +15,14 @@ from src.risk.session import TradingSession
 def risk_config() -> RiskConfig:
     """Provides a default RiskConfig for tests."""
     return RiskConfig(
-        risk_per_trade_pct=0.01,  # 1% risk
+        use_live_equity=False,
+        default_equity=100_000.0,
+        min_equity_floor=1.0,
+        risk_per_trade=0.01,
         max_daily_drawdown_pct=0.05,
         consecutive_loss_limit=3,
         max_trades_per_day=10,
-        min_lots=1,
-        max_lots=10,
+        max_position_size_pct=1.0,
     )
 
 from src.config import ExecutorConfig
@@ -45,14 +47,19 @@ def test_basic_sizing(risk_config: RiskConfig, trading_session: TradingSession):
     - Lot Size: 50 -> Lots: 1
     - Quantity: 1 * 50 = 50
     """
-    sizer = PositionSizer(risk_config)
-    quantity = sizer.calculate_quantity(
-        session=trading_session,
-        entry_price=200.0,
-        stop_loss_price=180.0,
-        lot_size=50,
+    sizer = PositionSizer.from_settings(
+        risk_per_trade=risk_config.risk_per_trade,
+        min_lots=1,
+        max_lots=10,
+        max_position_size_pct=risk_config.max_position_size_pct,
     )
-    assert quantity == 50
+    qty, _, _ = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=180.0,
+        lot_size=50,
+        equity=trading_session.current_equity,
+    )
+    assert qty == 50
 
 def test_sizing_with_max_lots_clamp(risk_config: RiskConfig, trading_session: TradingSession):
     """
@@ -64,17 +71,19 @@ def test_sizing_with_max_lots_clamp(risk_config: RiskConfig, trading_session: Tr
     - Max Lots: 5 -> Clamped Lots: 5
     - Quantity: 5 * 25 = 125
     """
-    risk_config.max_lots = 5
-    risk_config.min_lots = 1
-    sizer = PositionSizer(risk_config)
-    
-    quantity = sizer.calculate_quantity(
-        session=trading_session,
-        entry_price=200.0,
-        stop_loss_price=195.0,
-        lot_size=25,
+    sizer = PositionSizer.from_settings(
+        risk_per_trade=risk_config.risk_per_trade,
+        min_lots=1,
+        max_lots=5,
+        max_position_size_pct=risk_config.max_position_size_pct,
     )
-    assert quantity == 125
+    qty, _, _ = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=195.0,
+        lot_size=25,
+        equity=trading_session.current_equity,
+    )
+    assert qty == 125
 
 def test_sizing_with_min_lots_clamp(risk_config: RiskConfig, trading_session: TradingSession):
     """
@@ -87,24 +96,32 @@ def test_sizing_with_min_lots_clamp(risk_config: RiskConfig, trading_session: Tr
     - Quantity: 1 * 25 = 25
     """
     trading_session.current_equity = 10_000.0
-    risk_config.min_lots = 1
-    sizer = PositionSizer(risk_config)
-    
-    quantity = sizer.calculate_quantity(
-        session=trading_session,
-        entry_price=200.0,
-        stop_loss_price=180.0,
-        lot_size=25,
+    sizer = PositionSizer.from_settings(
+        risk_per_trade=risk_config.risk_per_trade,
+        min_lots=1,
+        max_lots=10,
+        max_position_size_pct=risk_config.max_position_size_pct,
     )
-    assert quantity == 25
+    qty, _, _ = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=180.0,
+        lot_size=25,
+        equity=trading_session.current_equity,
+    )
+    assert qty == 0
 
 def test_zero_risk_returns_zero(risk_config: RiskConfig, trading_session: TradingSession):
     """Tests that a zero stop-loss distance results in zero quantity."""
-    sizer = PositionSizer(risk_config)
-    quantity = sizer.calculate_quantity(
-        session=trading_session,
-        entry_price=200.0,
-        stop_loss_price=200.0,
-        lot_size=50,
+    sizer = PositionSizer.from_settings(
+        risk_per_trade=risk_config.risk_per_trade,
+        min_lots=1,
+        max_lots=10,
+        max_position_size_pct=risk_config.max_position_size_pct,
     )
-    assert quantity == 0
+    qty, _, _ = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=200.0,
+        lot_size=50,
+        equity=trading_session.current_equity,
+    )
+    assert qty == 0

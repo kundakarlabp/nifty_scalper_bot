@@ -100,7 +100,7 @@ class InstrumentsSettings(BaseModel):
 class StrategySettings(BaseModel):
     min_signal_score: int = 3
     confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 50
+    min_bars_for_signal: int = 30
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14
@@ -232,6 +232,7 @@ class AppSettings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
         env_nested_delimiter = "__"   # e.g., TELEGRAM__BOT_TOKEN
+        extra = "ignore"
 
     # -------- Flat alias properties (read-only) --------
     # Strategy (flat)
@@ -362,6 +363,11 @@ class AppSettings(BaseSettings):
 # Instantiate settings
 settings = AppSettings()
 
+# Backward-compatible aliases for existing modules/tests
+RiskConfig = RiskSettings
+ExecutorConfig = ExecutorSettings
+StrategyConfig = StrategySettings
+
 
 def validate_critical_settings() -> None:
     errors = []
@@ -380,6 +386,12 @@ def validate_critical_settings() -> None:
         errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
     if not settings.telegram.chat_id:
         errors.append("TELEGRAM__CHAT_ID is required (Telegram is mandatory)")
+
+    # Strategy lookback vs bars sanity check
+    if settings.strategy.min_bars_for_signal > settings.data.lookback_minutes:
+        errors.append(
+            "STRATEGY__MIN_BARS_FOR_SIGNAL must be <= DATA__LOOKBACK_MINUTES"
+        )
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

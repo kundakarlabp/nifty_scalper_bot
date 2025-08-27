@@ -125,6 +125,8 @@ class StrategyRunner:
             df = self._fetch_spot_ohlc()
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
+                # Still evaluate risk gates so /diag has visibility
+                flow["risk_gates"] = self._risk_gates_for(None)
                 flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
             flow["data_ok"] = True
 
@@ -139,9 +141,9 @@ class StrategyRunner:
             # ---- RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
             rr_val = float(getattr(signal, "rr", 0.0) or 0.0)
+            flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
             if rr_min and rr_val and rr_val < rr_min:
                 flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
-                flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
                 self._last_flow_debug = flow; return
 
             # ---- risk gates
@@ -291,9 +293,14 @@ class StrategyRunner:
     def _active_equity(self) -> float:
         return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
 
-    def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
-        gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
-                 "trades_per_day": True, "sl_valid": True}
+    def _risk_gates_for(self, signal: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+        gates = {
+            "equity_floor": True,
+            "daily_drawdown": True,
+            "loss_streak": True,
+            "trades_per_day": True,
+            "sl_valid": True,
+        }
         if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
             gates["equity_floor"] = False
         if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
@@ -302,8 +309,9 @@ class StrategyRunner:
             gates["loss_streak"] = False
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
-        if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
-            gates["sl_valid"] = False
+        if signal and "entry_price" in signal and "stop_loss" in signal:
+            if abs(float(signal["entry_price"]) - float(signal["stop_loss"])) <= 0:
+                gates["sl_valid"] = False
         return gates
 
     def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
@@ -480,15 +488,16 @@ class StrategyRunner:
         checks.append({
             "name": "Risk gates",
             "ok": gates_ok,
-            "detail": ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "no-eval",
+            "detail": ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "pending",
         })
 
         # RR check
+        signal_info = self._last_flow_debug.get("signal", {}) if isinstance(self._last_flow_debug, dict) else {}
         rr_ok = bool(self._last_flow_debug.get("rr_ok", True)) if isinstance(self._last_flow_debug, dict) else True
         checks.append({
             "name": "RR threshold",
             "ok": rr_ok,
-            "detail": str(self._last_flow_debug.get("signal", {})),
+            "detail": ", ".join([f"{k}={v}" for k, v in signal_info.items()]) if signal_info else "pending",
         })
 
         # Errors
@@ -524,6 +533,7 @@ class StrategyRunner:
         gates = flow.get("risk_gates", {}) if isinstance(flow, dict) else {}
         gates_ok = bool(gates) and all(bool(v) for v in gates.values())
         rr_ok = bool(flow.get("rr_ok", True))
+        signal_info = flow.get("signal", {}) if isinstance(flow, dict) else {}
         no_errors = (self._last_error is None)
 
         return {
@@ -533,8 +543,8 @@ class StrategyRunner:
                 "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
                 "data_feed": "ok" if data_fresh else "stale",
                 "strategy_readiness": "ok" if strat_ready else "not ready",
-                "risk_gates": "ok" if gates_ok else "blocked" if gates else "no-eval",
-                "rr_threshold": "ok" if rr_ok else "blocked",
+                "risk_gates": "ok" if gates_ok else "blocked" if gates else "pending",
+                "rr_threshold": "ok" if rr_ok else "blocked" if signal_info else "pending",
                 "errors": "ok" if no_errors else "present",
             },
         }

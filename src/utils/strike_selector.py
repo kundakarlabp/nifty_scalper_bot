@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
@@ -73,7 +73,15 @@ def is_market_open() -> bool:
     Trading hours are from 09:15 to 15:30, Monday to Friday.
     """
     now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if now.weekday() > 4:  # Saturday or Sunday
+    if now.weekday() > 4:
+        return False
+    # Simple holiday list (extend as needed)
+    holidays = {
+        date(2024, 1, 26),  # Republic Day
+        date(2024, 8, 15),  # Independence Day
+        date(2024, 10, 2),  # Gandhi Jayanti
+    }
+    if now.date() in holidays:
         return False
     start_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
     end_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -212,6 +220,8 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
 def get_instrument_tokens(
     kite_instance: Optional[KiteConnect] = None,
     spot_price: Optional[float] = None,
+    cached_nfo_instruments: Optional[List[Dict[str, Any]]] = None,
+    cached_nse_instruments: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Resolve spot token, ATM and target option strikes and tokens for the configured trade symbol.
@@ -277,7 +287,7 @@ def get_instrument_tokens(
         target = int(atm + strike_range * step)
 
         # --- fetch instruments and resolve CE/PE tokens (shadow-safe) ---
-        nfo = _fetch_instruments_nfo(kite_instance) or []
+        nfo = cached_nfo_instruments or _fetch_instruments_nfo(kite_instance) or []
         if not nfo:
             logger.debug("NFO instruments unavailable; returning strike math without tokens.")
             return {
