@@ -34,7 +34,7 @@ import pandas as pd
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from src.backtesting.data_source import BacktestCsvSource
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
@@ -225,6 +225,7 @@ class BacktestRunner:
 
 def main():
     """Entry point for the backtest script."""
+    validate_critical_settings()
     # Use the nifty_ohlc.csv file provided in the repo
     csv_file = project_root / "src" / "data" / "nifty_ohlc.csv"
     if not csv_file.exists():

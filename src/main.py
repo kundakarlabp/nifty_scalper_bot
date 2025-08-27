@@ -7,7 +7,7 @@ import sys
 import time
 from typing import Optional, List
 
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from src.strategies.runner import StrategyRunner
 
 # Optional broker SDK
@@ -159,6 +159,11 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
 
 def main() -> int:
     _setup_logging()
+    try:
+        validate_critical_settings()
+    except Exception as e:
+        logging.getLogger("main").error("\u274c Config validation failed: %s", e)
+        return 1
     log = logging.getLogger("main")
 
     kite = None
