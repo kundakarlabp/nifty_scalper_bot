@@ -10,7 +10,7 @@ Config with nested models (original structure) + flat aliases for compatibility.
 - Adds optional historical backfill knobs under DataSettings.
 """
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -38,7 +38,7 @@ class TelegramSettings(BaseModel):
 
 class DataSettings(BaseModel):
     # Live loop consumption
-    lookback_minutes: int = 30
+    lookback_minutes: int = 50
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:20"
@@ -106,7 +106,7 @@ class InstrumentsSettings(BaseModel):
 class StrategySettings(BaseModel):
     min_signal_score: int = 3
     confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 30
+    min_bars_for_signal: int = 50
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14
@@ -250,6 +250,14 @@ class AppSettings(BaseSettings):
         env_nested_delimiter="__",  # e.g., TELEGRAM__BOT_TOKEN
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _v_lookback_vs_min_bars(self) -> "AppSettings":
+        if self.data.lookback_minutes < self.strategy.min_bars_for_signal:
+            raise ValueError(
+                "DATA__LOOKBACK_MINUTES must be >= STRATEGY__MIN_BARS_FOR_SIGNAL"
+            )
+        return self
 
     # -------- Flat alias properties (read-only) --------
     # Strategy (flat)
