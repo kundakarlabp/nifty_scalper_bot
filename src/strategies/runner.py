@@ -122,7 +122,8 @@ class StrategyRunner:
             "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
             "executed": False, "reason_block": None,
         }
-
+        # clear stale error before starting
+        self._last_error = None
         try:
             # window
             if not self._within_trading_window() and not settings.allow_offhours_testing:
@@ -281,6 +282,8 @@ class StrategyRunner:
                 self.executor.health_check()
         except Exception as e:
             self.log.warning("Executor health check warning: %s", e)
+        # clear stale errors if health check completed
+        self._last_error = None
 
     def shutdown(self) -> None:
         """Graceful shutdown used by /stop or process exit."""
@@ -347,14 +350,22 @@ class StrategyRunner:
         stop = signal.get("stop_loss")
         try:
             entry_f = float(entry)
+        except (TypeError, ValueError):
+            gates["sl_valid"] = False
+            self._last_error = f"invalid entry_price: {entry}"
+            self.log.warning("Invalid entry_price: %r", entry)
+            return {k: bool(v) for k, v in gates.items()}
+        try:
             stop_f = float(stop)
         except (TypeError, ValueError):
             gates["sl_valid"] = False
-            return gates
+            self._last_error = f"invalid stop_loss: {stop}"
+            self.log.warning("Invalid stop_loss: %r", stop)
+            return {k: bool(v) for k, v in gates.items()}
         if abs(entry_f - stop_f) <= float(getattr(settings.executor, "tick_size", 0.0)):
             # stop loss must differ from entry by at least one tick
             gates["sl_valid"] = False
-        return gates
+        return {k: bool(v) for k, v in gates.items()}
 
     def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
         risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
