@@ -125,6 +125,8 @@ class TelegramController:
         return True
 
     def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
+        if not text or not text.strip():
+            return
         if not self._rate_ok(text):
             return
         delay = self._backoff
