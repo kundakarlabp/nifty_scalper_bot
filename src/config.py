@@ -262,14 +262,6 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
-    @model_validator(mode="after")
-    def _v_lookback_vs_min_bars(self) -> "AppSettings":
-        if self.data.lookback_minutes < self.strategy.min_bars_for_signal:
-            raise ValueError(
-                "DATA__LOOKBACK_MINUTES must be >= STRATEGY__MIN_BARS_FOR_SIGNAL"
-            )
-        return self
-
     # -------- Flat alias properties (read-only) --------
     # Strategy (flat)
     @property
@@ -417,6 +409,12 @@ def validate_critical_settings() -> None:
         errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
     if not settings.telegram.chat_id:
         errors.append("TELEGRAM__CHAT_ID is required (Telegram is mandatory)")
+
+    # Ensure lookback window can satisfy minimum bars requirement
+    if settings.data.lookback_minutes < settings.strategy.min_bars_for_signal:
+        errors.append(
+            "DATA__LOOKBACK_MINUTES must be >= STRATEGY__MIN_BARS_FOR_SIGNAL"
+        )
 
     # Instrument token sanity check (only in live mode with deps available)
     if (
