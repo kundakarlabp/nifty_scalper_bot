@@ -5,7 +5,7 @@ import logging
 import signal
 import sys
 import time
-from typing import Optional, List
+from typing import List, Optional
 
 from src.config import settings, validate_critical_settings
 from src.strategies.runner import StrategyRunner
@@ -88,7 +88,10 @@ def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
 # -----------------------------
 def _import_telegram_class():
     try:
-        from src.notifications.telegram_controller import TelegramController  # type: ignore
+        from src.notifications.telegram_controller import (
+            TelegramController,
+        )  # type: ignore
+
         return TelegramController
     except Exception as e:
         logging.getLogger("main").error("TelegramController import failed: %s", e)
