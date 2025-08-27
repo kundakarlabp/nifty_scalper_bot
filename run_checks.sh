@@ -98,8 +98,8 @@ BACKTEST="tests/true_backtest_dynamic.py"
 if [[ -f "$BACKTEST" ]]; then
   echo "--- Running backtester: $BACKTEST ---"
   # Provide sane defaults for time filters if your script reads them
-  export TIME_FILTER_START="${TIME_FILTER_START:-09:15}"
-  export TIME_FILTER_END="${TIME_FILTER_END:-15:30}"
+  export DATA__TIME_FILTER_START="${DATA__TIME_FILTER_START:-09:15}"
+  export DATA__TIME_FILTER_END="${DATA__TIME_FILTER_END:-15:30}"
   $PYTHON_BIN "$BACKTEST"
 else
   echo "ℹ $BACKTEST not found; skipping backtest run."

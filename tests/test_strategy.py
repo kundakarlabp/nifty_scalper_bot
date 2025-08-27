@@ -7,15 +7,15 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from src.config import StrategyConfig
+from src.config import StrategySettings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.signals.signal import Signal
 
 
 @pytest.fixture
-def strategy_config() -> StrategyConfig:
-    """Provides a default StrategyConfig for tests."""
-    return StrategyConfig(
+def strategy_config() -> StrategySettings:
+    """Provides a default StrategySettings for tests."""
+    return StrategySettings(
         min_signal_score=5.0,
         confidence_threshold=6.0,
         atr_period=14,
@@ -42,7 +42,7 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
     return pd.DataFrame(data, index=pd.to_datetime(index))
 
 
-def test_generate_signal_returns_valid_structure(strategy_config: StrategyConfig):
+def test_generate_signal_returns_valid_structure(strategy_config: StrategySettings):
     """A generated signal should be a Signal with valid fields."""
     strategy = EnhancedScalpingStrategy(strategy_config)
     df = create_test_dataframe(trending_up=True)
@@ -57,7 +57,7 @@ def test_generate_signal_returns_valid_structure(strategy_config: StrategyConfig
         assert sig.target != sig.stop_loss
 
 
-def test_no_signal_on_flat_data(strategy_config: StrategyConfig):
+def test_no_signal_on_flat_data(strategy_config: StrategySettings):
     """No signal when ATR is effectively zero (flat series)."""
     strategy = EnhancedScalpingStrategy(strategy_config)
     df = create_test_dataframe(constant_price=True)
@@ -66,7 +66,7 @@ def test_no_signal_on_flat_data(strategy_config: StrategyConfig):
     assert sig is None, "Should not generate a signal when ATR is ~0"
 
 
-def test_signal_direction_on_trends(strategy_config: StrategyConfig):
+def test_signal_direction_on_trends(strategy_config: StrategySettings):
     """
     Up-trend should bias BUY; down-trend should bias SELL,
     subject to scoring/thresholds.
