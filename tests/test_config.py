@@ -83,3 +83,18 @@ def test_zerodha_creds_optional_when_paper():
     with mock.patch("src.config.settings", settings):
         # Should not raise
         validate_critical_settings()
+
+
+def test_negative_chat_id_allowed():
+    """Telegram chat IDs can be negative for group chats."""
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "-12345",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    with mock.patch("src.config.settings", settings):
+        # Should not raise for negative IDs
+        validate_critical_settings()
+        assert settings.telegram.chat_id == -12345

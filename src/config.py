@@ -30,8 +30,8 @@ class TelegramSettings(BaseModel):
 
     @validator("chat_id")
     def _v_chat_id(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("TELEGRAM__CHAT_ID must be a positive integer")
+        if v == 0:
+            raise ValueError("TELEGRAM__CHAT_ID must be a non-zero integer")
         return v
 
 
