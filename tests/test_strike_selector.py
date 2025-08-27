@@ -10,6 +10,7 @@ import pytest
 from freezegun import freeze_time
 
 from src.utils.strike_selector import is_market_open, get_instrument_tokens
+from src.config import settings
 
 
 # Test cases for is_market_open
@@ -78,3 +79,11 @@ def test_get_instrument_tokens_monthly_expiry(mock_kite):
     )
     assert tokens is not None
     assert tokens["expiry"] == "2024-08-29"
+
+
+@freeze_time("2024-08-05 10:00:00+05:30")
+def test_get_instrument_tokens_missing_trade_symbol(mock_kite, monkeypatch):
+    """Returns None when trade symbol not found in instruments."""
+    monkeypatch.setattr(settings.instruments, "trade_symbol", "FAKE", raising=False)
+    tokens = get_instrument_tokens(kite_instance=mock_kite)
+    assert tokens is None
