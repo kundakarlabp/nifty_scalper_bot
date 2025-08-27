@@ -110,11 +110,13 @@ class StrategyRunner:
         try:
             # window
             if not self._within_trading_window() and not settings.allow_offhours_testing:
+                flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
             flow["within_window"] = True
 
             # pause
             if self._paused:
+                flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
 
             # new day / equity
@@ -125,6 +127,7 @@ class StrategyRunner:
             df = self._fetch_spot_ohlc()
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
+                flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
             flow["data_ok"] = True
 
@@ -132,6 +135,7 @@ class StrategyRunner:
             signal = self.strategy.generate_signal(df, current_tick=tick)
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             if not signal:
+                flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
                 self._last_flow_debug = flow; return
             flow["signal_ok"] = True
@@ -140,6 +144,7 @@ class StrategyRunner:
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
             rr_val = float(signal.get("rr", 0.0) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
+                flow["risk_gates"] = {"skipped": True}
                 flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
                 flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
                 self._last_flow_debug = flow; return
@@ -214,6 +219,8 @@ class StrategyRunner:
             self._last_flow_debug = flow
 
         except Exception as e:
+            if not flow.get("risk_gates"):
+                flow["risk_gates"] = {"skipped": True}
             flow["reason_block"] = f"exception:{e.__class__.__name__}"
             self._last_error = str(e)
             self._last_flow_debug = flow
@@ -480,11 +487,19 @@ class StrategyRunner:
 
         # Risk gates last view
         gates = self._last_flow_debug.get("risk_gates", {}) if isinstance(self._last_flow_debug, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
+        if isinstance(gates, dict) and gates.get("skipped"):
+            gates_ok = False
+            detail = "skipped"
+        elif gates:
+            gates_ok = all(bool(v) for v in gates.values())
+            detail = ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()])
+        else:
+            gates_ok = False
+            detail = "no-eval"
         checks.append({
             "name": "Risk gates",
             "ok": gates_ok,
-            "detail": ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "no-eval",
+            "detail": detail,
         })
 
         # RR check
