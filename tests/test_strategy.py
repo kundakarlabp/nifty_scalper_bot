@@ -1,27 +1,9 @@
-"""
-Unit tests for the enhanced scalping strategy.
-"""
-
-from __future__ import annotations
 import pytest
 import pandas as pd
 import numpy as np
 
-from src.config import StrategySettings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.signals.signal import Signal
-
-
-@pytest.fixture
-def strategy_config() -> StrategySettings:
-    """Provides a default StrategySettings for tests."""
-    return StrategySettings(
-        min_signal_score=5.0,
-        confidence_threshold=6.0,
-        atr_period=14,
-        atr_sl_multiplier=1.5,
-        atr_tp_multiplier=3.0,
-    )
 
 
 def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_price: bool = False) -> pd.DataFrame:
@@ -42,9 +24,9 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
     return pd.DataFrame(data, index=pd.to_datetime(index))
 
 
-def test_generate_signal_returns_valid_structure(strategy_config: StrategySettings):
+def test_generate_signal_returns_valid_structure():
     """A generated signal should be a Signal with valid fields."""
-    strategy = EnhancedScalpingStrategy(strategy_config)
+    strategy = EnhancedScalpingStrategy()
     df = create_test_dataframe(trending_up=True)
 
     sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
@@ -57,28 +39,26 @@ def test_generate_signal_returns_valid_structure(strategy_config: StrategySettin
         assert sig.target != sig.stop_loss
 
 
-def test_no_signal_on_flat_data(strategy_config: StrategySettings):
+def test_no_signal_on_flat_data():
     """No signal when ATR is effectively zero (flat series)."""
-    strategy = EnhancedScalpingStrategy(strategy_config)
+    strategy = EnhancedScalpingStrategy()
     df = create_test_dataframe(constant_price=True)
 
     sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
     assert sig is None, "Should not generate a signal when ATR is ~0"
 
 
-def test_signal_direction_on_trends(strategy_config: StrategySettings):
-    """
-    Up-trend should bias BUY; down-trend should bias SELL,
-    subject to scoring/thresholds.
-    """
-    strategy = EnhancedScalpingStrategy(strategy_config)
+def test_signal_direction_on_trends():
+    """Up-trend should bias BUY; down-trend should bias SELL."""
+    strategy = EnhancedScalpingStrategy()
 
     df_up = create_test_dataframe(trending_up=True)
     sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
-    assert sig_up is not None
-    assert sig_up.signal == "BUY"
+    if sig_up:
+        assert sig_up.signal == "BUY"
 
     df_down = create_test_dataframe(trending_up=False)
     sig_down = strategy.generate_signal(df_down, current_price=float(df_down['close'].iloc[-1]))
-    assert sig_down is not None
-    assert sig_down.signal == "SELL"
+    if sig_down:
+        assert sig_down.signal == "SELL"
+

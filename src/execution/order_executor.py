@@ -20,11 +20,8 @@ except Exception:
     KiteConnect = None  # type: ignore
     NetworkException = TokenException = InputException = Exception  # type: ignore
 
-# --- Local imports (settings is optional for tests) ---
-try:
-    from src.config import settings
-except Exception:  # pragma: no cover
-    settings = None  # type: ignore
+# --- Local imports ---
+from src.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -158,25 +155,25 @@ class OrderExecutor:
         self._active: Dict[str, _OrderRecord] = {}
         self.last_error: Optional[str] = None
 
-        # execution config (default-safe if settings missing)
-        ex = getattr(settings, "executor", object()) if settings else object()
-        ins = getattr(settings, "instruments", object()) if settings else object()
+        # execution config from settings
+        ex = settings.executor
+        ins = settings.instruments
 
-        self.exchange = getattr(ex, "exchange", "NFO")
-        self.product = getattr(ex, "order_product", "NRML")
-        self.variety = getattr(ex, "order_variety", "regular")
-        self.entry_order_type = getattr(ex, "entry_order_type", "LIMIT")
-        self.tick_size = float(getattr(ex, "tick_size", 0.05))
-        self.freeze_qty = int(getattr(ex, "exchange_freeze_qty", 900))
-        self.lot_size = int(getattr(ins, "nifty_lot_size", 75))  # NIFTY lot
+        self.exchange = ex.exchange
+        self.product = ex.order_product
+        self.variety = ex.order_variety
+        self.entry_order_type = ex.entry_order_type
+        self.tick_size = ex.tick_size
+        self.freeze_qty = ex.exchange_freeze_qty
+        self.lot_size = ins.nifty_lot_size  # NIFTY lot
 
         # exits / risk
-        self.partial_enable = bool(getattr(ex, "partial_tp_enable", False))
-        self.tp1_ratio = float(getattr(ex, "tp1_qty_ratio", 0.5))
-        self.breakeven_ticks = int(getattr(ex, "breakeven_ticks", 2))
-        self.enable_trailing = bool(getattr(ex, "enable_trailing", True))
-        self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
-        self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
+        self.partial_enable = ex.partial_tp_enable
+        self.tp1_ratio = ex.tp1_qty_ratio
+        self.breakeven_ticks = ex.breakeven_ticks
+        self.enable_trailing = ex.enable_trailing
+        self.trailing_mult = ex.trailing_atr_multiplier
+        self.use_slm_exit = ex.use_slm_exit
 
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
