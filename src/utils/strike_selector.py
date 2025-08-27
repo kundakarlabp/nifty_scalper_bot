@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
@@ -29,6 +29,34 @@ except Exception:  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Static NSE holiday calendar (limited to years needed in tests/backtests)
+# -----------------------------------------------------------------------------
+# Source: https://www.nseindia.com/ (trading holidays)
+_NSE_HOLIDAYS: dict[int, set[date]] = {
+    2024: {
+        date(2024, 1, 26),  # Republic Day
+        date(2024, 3, 8),  # Mahashivratri
+        date(2024, 3, 25),  # Holi
+        date(2024, 3, 29),  # Good Friday
+        date(2024, 4, 8),  # Gudi Padwa
+        date(2024, 4, 11),  # Id-Ul-Fitr
+        date(2024, 5, 1),  # Maharashtra Day
+        date(2024, 6, 17),  # Bakri Id
+        date(2024, 7, 17),  # Muharram
+        date(2024, 8, 15),  # Independence Day
+        date(2024, 10, 2),  # Gandhi Jayanti
+        date(2024, 11, 1),  # Diwali (Laxmi Puja)
+        date(2024, 11, 15),  # Gurunanak Jayanti
+        date(2024, 12, 25),  # Christmas
+    }
+}
+
+
+def _is_nse_holiday(dt: datetime) -> bool:
+    """Return True if the given datetime falls on an NSE trading holiday."""
+    return dt.date() in _NSE_HOLIDAYS.get(dt.year, set())
 
 # -----------------------------------------------------------------------------
 # Module-level rate limiting and small caches
@@ -70,10 +98,12 @@ def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
 def is_market_open() -> bool:
     """
     Checks if the market is currently open in IST (Indian Standard Time).
-    Trading hours are from 09:15 to 15:30, Monday to Friday.
+    Trading hours are from 09:15 to 15:30, Monday to Friday, excluding NSE holidays.
     """
     now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     if now.weekday() > 4:  # Saturday or Sunday
+        return False
+    if _is_nse_holiday(now):  # NSE holiday
         return False
     start_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
     end_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
