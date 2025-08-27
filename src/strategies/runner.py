@@ -72,21 +72,22 @@ class StrategyRunner:
                 self.data_source = LiveKiteSource(kite=self.kite)
                 self.data_source.connect()
 
-                # Validate configured instrument token with a tiny fetch
-                token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
-                if token > 0:
-                    end = self._now_ist().replace(second=0, microsecond=0)
-                    start = end - timedelta(minutes=1)
-                    df = self.data_source.fetch_ohlc(
-                        token=token, start=start, end=end, timeframe="minute"
-                    )
-                    if not isinstance(df, pd.DataFrame) or df.empty:
-                        self.log.warning(
-                            "instrument_token %s returned no historical data — please"
-                            " configure a valid F&O token; disabling data source.",
-                            token,
+                if self.kite is not None:
+                    # Validate configured instrument token with a tiny fetch
+                    token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+                    if token > 0:
+                        end = self._now_ist().replace(second=0, microsecond=0)
+                        start = end - timedelta(minutes=1)
+                        df = self.data_source.fetch_ohlc(
+                            token=token, start=start, end=end, timeframe="minute"
                         )
-                        self.data_source = None
+                        if not isinstance(df, pd.DataFrame) or df.empty:
+                            self.log.warning(
+                                "instrument_token %s returned no historical data — please"
+                                " configure a valid F&O token; disabling data source.",
+                                token,
+                            )
+                            self.data_source = None
                 if self.data_source is not None:
                     self.log.info("Data source initialized: LiveKiteSource")
                     try:
