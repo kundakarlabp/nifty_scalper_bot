@@ -222,23 +222,14 @@ class LiveKiteSource(DataSource):
             return None
         try:
             # Accept either token int or exchange:symbol string
-            if isinstance(symbol_or_token, int):
-                data = _retry(self.kite.ltp, [symbol_or_token], tries=2)
-                for _, v in (data or {}).items():
-                    val = v.get("last_price")
-                    return float(val) if isinstance(val, (int, float)) else None
+            data = _retry(self.kite.ltp, [symbol_or_token], tries=2)
+            key = str(symbol_or_token)
+            v = (data or {}).get(key)
+            if not isinstance(v, dict):
+                log.warning("get_last_price: %s not found in LTP response", symbol_or_token)
                 return None
-            else:
-                sym = str(symbol_or_token)
-                data = _retry(self.kite.ltp, [sym], tries=2)
-                v = (data or {}).get(sym)
-                if isinstance(v, dict) and "last_price" in v:
-                    return float(v["last_price"])
-                # fallback: first value
-                for _, vv in (data or {}).items():
-                    val = vv.get("last_price")
-                    return float(val) if isinstance(val, (int, float)) else None
-                return None
+            val = v.get("last_price")
+            return float(val) if isinstance(val, (int, float)) else None
         except Exception as e:
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
