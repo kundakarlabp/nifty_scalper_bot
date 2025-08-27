@@ -37,6 +37,9 @@ class RiskState:
     day_realized_pnl: float = 0.0
 
 
+# Sentinel returned when risk gate evaluation is skipped
+RISK_GATES_SKIPPED = {"skipped": True}
+
 # ============================== Runner =================================
 
 class StrategyRunner:
@@ -103,7 +106,7 @@ class StrategyRunner:
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
-            "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
+            "signal_ok": False, "rr_ok": True, "risk_gates": RISK_GATES_SKIPPED, "sizing": {}, "qty": 0,
             "executed": False, "reason_block": None,
         }
 
@@ -520,6 +523,8 @@ class StrategyRunner:
 
         # Risk gates last view
         gates = self._last_flow_debug.get("risk_gates", {}) if isinstance(self._last_flow_debug, dict) else {}
+        if gates == RISK_GATES_SKIPPED:
+            gates = {}
         gates_ok = bool(gates) and all(bool(v) for v in gates.values())
         checks.append({
             "name": "Risk gates",
@@ -566,6 +571,8 @@ class StrategyRunner:
         min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
         strat_ready = bars >= min_bars
         gates = flow.get("risk_gates", {}) if isinstance(flow, dict) else {}
+        if gates == RISK_GATES_SKIPPED:
+            gates = {}
         gates_ok = bool(gates) and all(bool(v) for v in gates.values())
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
