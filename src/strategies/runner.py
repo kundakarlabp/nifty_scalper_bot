@@ -373,15 +373,52 @@ class StrategyRunner:
                     end=end,
                     timeframe=timeframe,
                 )
-                # Validate
                 need = {"open", "high", "low", "close", "volume"}
-                if isinstance(df, pd.DataFrame) and not df.empty and need.issubset(df.columns):
-                    return df.sort_index()
-                else:
-                    self.log.warning(
-                        "historical_data empty for token=%s interval=%s window=%s..%s; using LTP fallback.",
-                        token, timeframe, start.isoformat(), end.isoformat()
+                min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 0))
+                valid = isinstance(df, pd.DataFrame) and need.issubset(df.columns)
+                rows = len(df) if isinstance(df, pd.DataFrame) else 0
+
+                if not valid or rows < min_bars:
+                    # First attempt yielded insufficient data; try again with expanded window
+                    if rows < min_bars:
+                        self.log.warning(
+                            "historical_data short %s<%s; refetching with expanded lookback",
+                            rows,
+                            min_bars,
+                        )
+                    else:
+                        self.log.warning(
+                            "historical_data empty for token=%s interval=%s window=%s..%s; refetching with expanded lookback.",
+                            token,
+                            timeframe,
+                            start.isoformat(),
+                            end.isoformat(),
+                        )
+
+                    start2 = end - timedelta(minutes=lookback * 2)
+                    df2 = self.data_source.fetch_ohlc(
+                        token=token,
+                        start=start2,
+                        end=end,
+                        timeframe=timeframe,
                     )
+                    if (
+                        isinstance(df2, pd.DataFrame)
+                        and not df2.empty
+                        and need.issubset(df2.columns)
+                    ):
+                        df = df2.sort_index()
+                        valid = True
+                        rows = len(df)
+
+                if valid and rows >= min_bars:
+                    return df.sort_index()
+
+                self.log.warning(
+                    "Insufficient historical_data (%s<%s) after expanded fetch; using LTP fallback.",
+                    rows,
+                    min_bars,
+                )
 
             # Fallback: synthesize a single bar from trade symbol/token LTP
             sym = getattr(settings.instruments, "trade_symbol", None)
