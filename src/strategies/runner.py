@@ -412,8 +412,39 @@ class StrategyRunner:
 
         try:
             lookback = int(settings.data.lookback_minutes)
-            end = self._now_ist().replace(second=0, microsecond=0)
-            start = end - timedelta(minutes=lookback)
+
+            now = self._now_ist().replace(second=0, microsecond=0)
+            start_time = self._start_time
+            end_time = self._end_time
+
+            session_start_today = now.replace(
+                hour=start_time.hour, minute=start_time.minute, second=0, microsecond=0
+            )
+            session_end_today = now.replace(
+                hour=end_time.hour, minute=end_time.minute, second=0, microsecond=0
+            )
+
+            if now < session_start_today:
+                # Before today's session: use previous day's close
+                session_start = session_start_today - timedelta(days=1)
+                session_end = session_end_today - timedelta(days=1)
+            elif now > session_end_today:
+                # After today's session: clamp to today's close
+                session_start = session_start_today
+                session_end = session_end_today
+            else:
+                # Within today's session
+                session_start = session_start_today
+                session_end = min(now, session_end_today)
+
+            start = max(session_start, session_end - timedelta(minutes=lookback))
+            end = session_end
+
+            if start >= end:
+                self.log.debug(
+                    "Skipping fetch_ohlc: invalid window %s >= %s", start, end
+                )
+                return None
 
             # Resolve token with fallbacks
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
