@@ -10,7 +10,7 @@ Config with nested models (original structure) + flat aliases for compatibility.
 - Adds optional historical backfill knobs under DataSettings.
 """
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -28,7 +28,8 @@ class TelegramSettings(BaseModel):
     bot_token: str = ""
     chat_id: int = 0  # store as int to match controller usage
 
-    @validator("chat_id")
+    @field_validator("chat_id")
+    @classmethod
     def _v_chat_id(cls, v: int) -> int:
         if v == 0:
             raise ValueError("TELEGRAM__CHAT_ID must be a non-zero integer")
@@ -50,13 +51,15 @@ class DataSettings(BaseModel):
     history_days: int = 0          # 0 = off; otherwise backfill N days before now
     history_max_candles: int = 0   # 0 = unlimited within broker constraints
 
-    @validator("time_filter_start", "time_filter_end")
+    @field_validator("time_filter_start", "time_filter_end")
+    @classmethod
     def _v_time(cls, v: str) -> str:
         from datetime import datetime
         datetime.strptime(v, "%H:%M")
         return v
 
-    @validator("timeframe")
+    @field_validator("timeframe")
+    @classmethod
     def _v_tf(cls, v: str) -> str:
         v = (v or "").lower()
         allowed = {"minute", "3minute", "5minute", "10minute", "15minute", "day"}
@@ -66,7 +69,8 @@ class DataSettings(BaseModel):
             return v
         return v
 
-    @validator("lookback_minutes", "cache_ttl_seconds", "history_days", "history_max_candles")
+    @field_validator("lookback_minutes", "cache_ttl_seconds", "history_days", "history_max_candles")
+    @classmethod
     def _v_nonneg(cls, v: int) -> int:
         if v < 0:
             raise ValueError("numeric fields must be >= 0")
@@ -84,15 +88,17 @@ class InstrumentsSettings(BaseModel):
     min_lots: int = 1
     max_lots: int = 10
 
-    @validator("min_lots", "max_lots", "nifty_lot_size")
+    @field_validator("min_lots", "max_lots", "nifty_lot_size")
+    @classmethod
     def _v_lots_pos(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Lot sizes must be positive")
         return v
 
-    @validator("max_lots")
-    def _v_lots_order(cls, v: int, values) -> int:
-        if "min_lots" in values and v < values["min_lots"]:
+    @field_validator("max_lots")
+    @classmethod
+    def _v_lots_order(cls, v: int, info: ValidationInfo) -> int:
+        if "min_lots" in info.data and v < info.data["min_lots"]:
             raise ValueError("max_lots must be >= min_lots")
         return v
 
@@ -111,25 +117,29 @@ class StrategySettings(BaseModel):
     atr_tp_multiplier: float = 2.2
     rr_min: float = 1.30
 
-    @validator("confidence_threshold")
+    @field_validator("confidence_threshold")
+    @classmethod
     def _v_conf(cls, v: float) -> float:
         if not 0 <= v <= 100:
             raise ValueError("confidence_threshold must be 0..100")
         return v
 
-    @validator("ema_slow")
-    def _v_emas(cls, v: int, values) -> int:
-        if "ema_fast" in values and values["ema_fast"] >= v:
+    @field_validator("ema_slow")
+    @classmethod
+    def _v_emas(cls, v: int, info: ValidationInfo) -> int:
+        if "ema_fast" in info.data and info.data["ema_fast"] >= v:
             raise ValueError("ema_fast must be < ema_slow")
         return v
 
-    @validator("atr_tp_multiplier")
-    def _v_tp_gt_sl(cls, v: float, values) -> float:
-        if "atr_sl_multiplier" in values and v <= values["atr_sl_multiplier"]:
+    @field_validator("atr_tp_multiplier")
+    @classmethod
+    def _v_tp_gt_sl(cls, v: float, info: ValidationInfo) -> float:
+        if "atr_sl_multiplier" in info.data and v <= info.data["atr_sl_multiplier"]:
             raise ValueError("ATR_TP_MULTIPLIER must be > ATR_SL_MULTIPLIER")
         return v
 
-    @validator("rr_min")
+    @field_validator("rr_min")
+    @classmethod
     def _v_rr_min(cls, v: float) -> float:
         if v <= 1.0:
             raise ValueError("rr_min must be > 1.0")
@@ -148,19 +158,22 @@ class RiskSettings(BaseModel):
     max_daily_drawdown_pct: float = 0.04
     max_position_size_pct: float = 0.10
 
-    @validator("risk_per_trade")
+    @field_validator("risk_per_trade")
+    @classmethod
     def _v_risk_pct(cls, v: float) -> float:
         if not 0.001 <= v <= 0.10:
             raise ValueError("risk_per_trade must be between 0.1% and 10%")
         return v
 
-    @validator("max_daily_drawdown_pct")
+    @field_validator("max_daily_drawdown_pct")
+    @classmethod
     def _v_dd_pct(cls, v: float) -> float:
         if not 0.01 <= v <= 0.20:
             raise ValueError("max_daily_drawdown_pct must be between 1% and 20%")
         return v
 
-    @validator("min_equity_floor", "default_equity")
+    @field_validator("min_equity_floor", "default_equity")
+    @classmethod
     def _v_equity_pos(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("equity amounts must be > 0")
@@ -184,13 +197,15 @@ class ExecutorSettings(BaseModel):
     fee_per_lot: float = 20.0
     slippage_ticks: int = 1
 
-    @validator("tp1_qty_ratio")
+    @field_validator("tp1_qty_ratio")
+    @classmethod
     def _v_ratio(cls, v: float) -> float:
         if not 0 <= v <= 1:
             raise ValueError("tp1_qty_ratio must be in 0..1")
         return v
 
-    @validator("breakeven_ticks", "slippage_ticks")
+    @field_validator("breakeven_ticks", "slippage_ticks")
+    @classmethod
     def _v_nonneg_int(cls, v: int) -> int:
         if v < 0:
             raise ValueError("tick counts must be >= 0")
@@ -228,11 +243,13 @@ class AppSettings(BaseSettings):
     health: HealthSettings = HealthSettings()
     system: SystemSettings = SystemSettings()
 
-    class Config:
-        env_file = ".env"              # used locally; Railway uses real env vars
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-        env_nested_delimiter = "__"   # e.g., TELEGRAM__BOT_TOKEN
+    model_config = ConfigDict(
+        env_file=".env",             # used locally; Railway uses real env vars
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        env_nested_delimiter="__",  # e.g., TELEGRAM__BOT_TOKEN
+        extra="ignore",
+    )
 
     # -------- Flat alias properties (read-only) --------
     # Strategy (flat)
