@@ -48,7 +48,7 @@ class DataSettings(BaseModel):
     cache_ttl_seconds: int = 60
 
     # Historical backfill (optional; runner/feeds can ignore if unsupported)
-    history_days: int = 0          # 0 = off; otherwise backfill N days before now
+    history_days: int = 3          # 0 = off; otherwise backfill N days before now
     history_max_candles: int = 0   # 0 = unlimited within broker constraints
 
     @field_validator("time_filter_start", "time_filter_end")
