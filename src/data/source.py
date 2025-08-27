@@ -228,6 +228,41 @@ def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
         return None
 
 
+def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) -> Optional[pd.DataFrame]:
+    """Fetch OHLC data from yfinance for the given symbol/timeframe."""
+    if yf is None or not symbol:
+        return None
+    try:
+        interval_map = {
+            "minute": "1m",
+            "3minute": "3m",
+            "5minute": "5m",
+            "10minute": "10m",
+            "15minute": "15m",
+            "day": "1d",
+        }
+        yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
+        df = yf.download(
+            symbol,
+            start=start,
+            end=end,
+            interval=yf_interval,
+            progress=False,
+        )
+        if df.empty:
+            return None
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        df = df.rename(columns={c: c.lower() for c in df.columns})
+        if "volume" not in df.columns:
+            df["volume"] = 0
+        need = {"open", "high", "low", "close"}
+        if need.issubset(df.columns):
+            return df[["open", "high", "low", "close", "volume"]].copy()
+    except Exception as e:  # pragma: no cover - best effort fallback
+        log.debug("yfinance fetch_ohlc failed: %s", e)
+    return None
+
+
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
@@ -291,41 +326,11 @@ class LiveKiteSource(DataSource):
             log.warning(
                 "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
             )
-            if yf is None:
-                return None
             sym = _yf_symbol(token)
-            if not sym:
-                return None
-            try:
-                interval_map = {
-                    "minute": "1m",
-                    "3minute": "3m",
-                    "5minute": "5m",
-                    "10minute": "10m",
-                    "15minute": "15m",
-                    "day": "1d",
-                }
-                yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
-                df = yf.download(
-                    sym,
-                    start=start,
-                    end=end,
-                    interval=yf_interval,
-                    progress=False,
-                )
-                if df.empty:
-                    return None
-                df.index = pd.to_datetime(df.index).tz_localize(None)
-                df = df.rename(columns={c: c.lower() for c in df.columns})
-                if "volume" not in df.columns:
-                    df["volume"] = 0
-                need = {"open", "high", "low", "close"}
-                if need.issubset(df.columns):
-                    out = df[["open", "high", "low", "close", "volume"]].copy()
-                    self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
-                    return _clip_window(out, start, end)
-            except Exception as e:  # pragma: no cover
-                log.debug("yfinance fetch_ohlc failed: %s", e)
+            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            if out is not None:
+                self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
+                return _clip_window(out, start, end)
             return None
 
         # Guard inputs
@@ -397,28 +402,35 @@ class LiveKiteSource(DataSource):
             df = df[~df.index.duplicated(keep="last")]
 
             if df.empty:
-                # No data retrieved — let caller handle this explicitly.
                 log.error(
-                    "historical_data empty for token=%s interval=%s window=%s→%s", 
-                    token, interval, start, end,
+                    "historical_data empty for token=%s interval=%s window=%s→%s",
+                    token,
+                    interval,
+                    start,
+                    end,
                 )
+                sym = _yf_symbol(token)
+                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+                if out is not None:
+                    self._cache.set(token, interval, out, start, end)
+                    return _clip_window(out, start, end)
                 return None
 
-            if df is not None and not df.empty:
-                # Clip to requested window and cache the *unclipped* frame covering the window
-                clipped = _clip_window(df, start, end)
-                self._cache.set(token, interval, df, start, end)
-                # Validate schema again (defensive)
-                need = {"open", "high", "low", "close"}
-                if not clipped.empty and need.issubset(clipped.columns):
-                    return clipped
+            clipped = _clip_window(df, start, end)
+            self._cache.set(token, interval, df, start, end)
+            need = {"open", "high", "low", "close"}
+            if not clipped.empty and need.issubset(clipped.columns):
+                return clipped
 
             return None
 
         except Exception as e:
-            # Network hiccups are common; degrade to a single LTP bar so callers
-            # can continue running diagnostics without spamming errors.
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
+            sym = _yf_symbol(token)
+            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            if out is not None:
+                self._cache.set(token, _coerce_interval(timeframe), out, start, end)
+                return _clip_window(out, start, end)
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 ts = _now_ist_naive().replace(second=0, microsecond=0)
