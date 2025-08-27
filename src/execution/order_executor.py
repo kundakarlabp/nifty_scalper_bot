@@ -365,7 +365,7 @@ class OrderExecutor:
                 try:
                     _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=old, tries=2)
                 except Exception:
-                    pass
+                    log.debug("Failed to cancel TP order %s", old, exc_info=True)
         rec.tp1_order_id = rec.tp2_order_id = None
 
         # partial split
@@ -423,7 +423,7 @@ class OrderExecutor:
             try:
                 _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
             except Exception:
-                pass
+                log.debug("Failed to cancel existing SL GTT %s", rec.sl_gtt_id, exc_info=True)
             rec.sl_gtt_id = None
 
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
@@ -569,7 +569,7 @@ class OrderExecutor:
                     try:
                         _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
                     except Exception:
-                        pass
+                        log.debug("Failed to cancel SL GTT %s during sweep", rec.sl_gtt_id, exc_info=True)
 
         if fills:
             with self._lock:
@@ -581,7 +581,7 @@ class OrderExecutor:
                 else:
                     self._notify("📬 Fills: " + ", ".join([f"{rid}@{px}" for rid, px in fills]))
             except Exception:
-                pass
+                log.debug("Failed to send fills notification", exc_info=True)
 
         return fills
 
@@ -604,12 +604,12 @@ class OrderExecutor:
                 try:
                     _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=oid, tries=2)
                 except Exception:
-                    pass
+                    log.debug("Failed to cancel order %s", oid, exc_info=True)
             if rec.sl_gtt_id:
                 try:
                     _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
                 except Exception:
-                    pass
+                    log.debug("Failed to cancel SL GTT %s", rec.sl_gtt_id, exc_info=True)
             rec.is_open = False
 
         with self._lock:
@@ -631,7 +631,7 @@ class OrderExecutor:
         try:
             self.cancel_all_orders()
         except Exception:
-            pass
+            log.debug("Error during executor shutdown", exc_info=True)
 
     # ----------- telegram-wired mutators ----------
     def set_trailing_enabled(self, on: bool) -> None:
@@ -701,4 +701,4 @@ class OrderExecutor:
                 elif hasattr(self.telegram, "notify"):
                     self.telegram.notify(text)  # legacy fallback
         except Exception:
-            pass
+            log.debug("Failed to send notification", exc_info=True)

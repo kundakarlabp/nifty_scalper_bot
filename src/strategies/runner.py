@@ -250,7 +250,7 @@ class StrategyRunner:
             if hasattr(self.executor, "shutdown"):
                 self.executor.shutdown()
         except Exception:
-            pass
+            self.log.warning("Executor shutdown encountered an error", exc_info=True)
 
     # ---------------- equity & risk ----------------
     def _refresh_equity_if_due(self, silent: bool = False) -> None:
@@ -612,7 +612,7 @@ class StrategyRunner:
         try:
             setattr(settings, "enable_live_trading", bool(val))
         except Exception:
-            pass
+            self.log.debug("Unable to set enable_live_trading flag", exc_info=True)
 
         if not val:
             self.log.info("🔒 Dry mode — paper trading only.")
@@ -629,7 +629,7 @@ class StrategyRunner:
                     if self.telegram:
                         self.telegram.send_message(msg)
                 except Exception:
-                    pass
+                    self.log.warning("Failed to notify Telegram about broker init failure", exc_info=True)
                 # Re-raise so callers know live mode failed
                 raise
 
@@ -664,4 +664,4 @@ class StrategyRunner:
             if self.telegram:
                 self.telegram.send_message(msg)
         except Exception:
-            pass
+            self.log.debug("Failed to send Telegram notification", exc_info=True)
