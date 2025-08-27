@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 from src.config import settings
 from src.data.source import DataSource
@@ -82,7 +83,10 @@ class BacktestCsvSource(DataSource):
     def _load_and_prepare_data(self, csv_filepath: Path) -> pd.DataFrame:
         """Loads and prepares the CSV data."""
         logger.info("Loading backtest data from %s ...", csv_filepath)
-        df = pd.read_csv(csv_filepath)
+        try:
+            df = pd.read_csv(csv_filepath)
+        except EmptyDataError as exc:
+            raise ValueError(f"CSV file is empty: {csv_filepath}") from exc
 
         # Standardize column names
         rename_map = {col: self._COL_MAP.get(col, col) for col in df.columns}
