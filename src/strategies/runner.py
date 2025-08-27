@@ -147,7 +147,8 @@ class StrategyRunner:
             # window
             if not self._within_trading_window() and not settings.allow_offhours_testing:
                 flow["risk_gates"] = {"skipped": True}
-                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow
+                flow["reason_block"] = "off_hours"
+                self._last_flow_debug = flow
                 if not self._offhours_notified:
                     now = self._now_ist().strftime("%H:%M:%S")
                     msg = (
@@ -163,7 +164,8 @@ class StrategyRunner:
 
             # pause
             if self._paused:
-                flow["reason_block"] = "paused"; self._last_flow_debug = flow
+                flow["reason_block"] = "paused"
+                self._last_flow_debug = flow
                 self.log.debug("Skipping tick: runner paused")
                 return
 
@@ -176,7 +178,8 @@ class StrategyRunner:
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
             self.log.debug("Fetched %s bars", flow["bars"])
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
-                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow
+                flow["reason_block"] = "insufficient_data"
+                self._last_flow_debug = flow
                 self.log.debug(
                     "Signal evaluation skipped: insufficient data (bars=%s, need=%s)",
                     flow["bars"], int(settings.strategy.min_bars_for_signal)
@@ -211,7 +214,8 @@ class StrategyRunner:
             flow["risk_gates"] = gates
             if not all(gates.values()):
                 blocked = [k for k, v in gates.items() if not v]
-                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow
+                flow["reason_block"] = "risk_gate_block"
+                self._last_flow_debug = flow
                 self.log.info("Signal blocked by risk gates: %s", blocked)
                 return
 
@@ -222,9 +226,11 @@ class StrategyRunner:
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
-            flow["sizing"] = diag; flow["qty"] = int(qty)
+            flow["sizing"] = diag
+            flow["qty"] = int(qty)
             if qty <= 0:
-                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow
+                flow["reason_block"] = "qty_zero"
+                self._last_flow_debug = flow
                 self.log.debug("Signal skipped: quantity %s <= 0", qty)
                 return
 

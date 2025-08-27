@@ -1,8 +1,4 @@
-# Path: src/config.py
-from __future__ import annotations
-
-"""
-Config with nested models (original structure) + flat aliases for compatibility.
+"""Config with nested models (original structure) + flat aliases for compatibility.
 
 - Preserves your original names/shape so other modules don't break.
 - Adds a few extra validations and guardrails.
@@ -10,10 +6,13 @@ Config with nested models (original structure) + flat aliases for compatibility.
 - Adds optional historical backfill knobs under DataSettings.
 """
 
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
-from datetime import datetime, timedelta, timezone
-import pandas as pd
 
 # Optional external dependencies for validation
 try:

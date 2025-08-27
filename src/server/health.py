@@ -8,7 +8,7 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
