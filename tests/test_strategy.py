@@ -1,6 +1,4 @@
-"""
-Unit tests for the enhanced scalping strategy.
-"""
+"""Unit tests for the enhanced scalping strategy."""
 
 from __future__ import annotations
 import pytest
@@ -9,7 +7,6 @@ import numpy as np
 
 from src.config import StrategySettings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.signals.signal import Signal
 
 
 @pytest.fixture
@@ -49,7 +46,7 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
 
 
 def test_generate_signal_returns_valid_structure(strategy_config: StrategySettings):
-    """A generated signal should be a Signal with valid fields."""
+    """A generated signal should be a dict with valid fields."""
     strategy = EnhancedScalpingStrategy(
         min_signal_score=strategy_config.min_signal_score,
         confidence_threshold=strategy_config.confidence_threshold,
