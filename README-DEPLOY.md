@@ -4,7 +4,7 @@
 1. Add repository secrets or Railway variables for:
    - `ZERODHA__API_KEY`, `ZERODHA__ACCESS_TOKEN`
    - `TELEGRAM__BOT_TOKEN`, `TELEGRAM__CHAT_ID`
-   - Optional: `ENABLE_LIVE_TRADING=false` (start in shadow mode)
+   - Optional: `ENABLE_LIVE_TRADING=true` (enable live trades; default is false)
    - `DATA__TIME_FILTER_START=09:15`, `DATA__TIME_FILTER_END=15:30`
 
 2. Commit `.env.example` for local runs.

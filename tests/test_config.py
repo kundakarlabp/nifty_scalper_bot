@@ -10,7 +10,8 @@ from unittest import mock
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, RiskSettings
+import src.config as config
+from src.config import AppSettings, RiskSettings, validate_critical_settings, TelegramSettings, ZerodhaSettings
 
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
@@ -24,8 +25,8 @@ def test_load_from_env():
         "RISK__RISK_PER_TRADE": "0.02",
         "ENABLE_LIVE_TRADING": "true",
     }
-    with mock.patch.dict(os.environ, test_env):
-        settings = AppSettings()
+    with mock.patch.dict(os.environ, test_env, clear=True):
+        settings = AppSettings(_env_file=None)
         assert settings.zerodha.api_key == "test_key"
         assert settings.telegram.chat_id == 12345
         assert settings.risk.max_daily_drawdown_pct == 0.1
@@ -49,8 +50,32 @@ def test_default_values():
         "TELEGRAM__CHAT_ID": "12345",
     }
     with mock.patch.dict(os.environ, test_env, clear=True):
-        settings = AppSettings()
+        settings = AppSettings(_env_file=None)
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
-        assert settings.enable_live_trading is True  # Default value
+        assert settings.enable_live_trading is False  # Default value
         assert settings.system.log_buffer_capacity == 4000  # Default value
+
+
+def test_validate_critical_settings_live_requires_zerodha():
+    """Live trading should demand Zerodha credentials."""
+    live_settings = AppSettings(
+        enable_live_trading=True,
+        telegram=TelegramSettings(bot_token="x", chat_id=1),
+        _env_file=None,
+    )
+    with mock.patch.object(config, "settings", live_settings):
+        with pytest.raises(ValueError):
+            validate_critical_settings()
+
+
+def test_validate_critical_settings_paper_mode_skips_zerodha():
+    """Paper mode should not require Zerodha credentials."""
+    paper_settings = AppSettings(
+        enable_live_trading=False,
+        telegram=TelegramSettings(bot_token="x", chat_id=1),
+        zerodha=ZerodhaSettings(),
+        _env_file=None,
+    )
+    with mock.patch.object(config, "settings", paper_settings):
+        validate_critical_settings()
