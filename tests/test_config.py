@@ -130,3 +130,19 @@ def test_invalid_instrument_token_detected(monkeypatch):
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     assert "valid F&O token" in str(exc.value)
+
+
+def test_lookback_less_than_min_bars():
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+        "DATA__LOOKBACK_MINUTES": "30",
+        "STRATEGY__MIN_BARS_FOR_SIGNAL": "50",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    with mock.patch("src.config.settings", settings):
+        with pytest.raises(ValueError) as exc:
+            validate_critical_settings()
+    assert "LOOKBACK_MINUTES" in str(exc.value)
