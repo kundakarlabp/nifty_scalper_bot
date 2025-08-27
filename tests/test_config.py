@@ -49,11 +49,13 @@ def test_default_values():
         "TELEGRAM__CHAT_ID": "12345",
     }
     with mock.patch.dict(os.environ, test_env, clear=True):
-        settings = AppSettings()
+        settings = AppSettings(_env_file=None)
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True  # Default value
         assert settings.system.log_buffer_capacity == 4000  # Default value
+        assert settings.data.lookback_minutes == 50  # Updated default
+        assert settings.strategy.min_bars_for_signal == 50  # Updated default
 
 
 def test_zerodha_creds_required_when_live():
