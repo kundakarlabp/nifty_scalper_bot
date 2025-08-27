@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, TYPE_CHECKING, Optional
 
-from src.config import RiskConfig
+from src.config import RiskSettings
 
 if TYPE_CHECKING:
-    from src.config import ExecutorConfig
+    from src.config import ExecutorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +70,17 @@ class TradingSession:
 
     def __init__(
         self,
-        risk_config: RiskConfig,
-        executor_config: "ExecutorConfig",
+        risk_settings: RiskSettings,
+        executor_settings: "ExecutorSettings",
         starting_equity: float,
         fee_per_lot: float = 20.0,  # simple, configurable fee model
+        lot_size: int = 75,
     ):
-        if not isinstance(risk_config, RiskConfig):
-            raise TypeError("A valid RiskConfig instance is required.")
+        if not isinstance(risk_settings, RiskSettings):
+            raise TypeError("A valid RiskSettings instance is required.")
 
-        self.risk_config = risk_config
-        self.executor_config: "ExecutorConfig" = executor_config
+        self.risk_settings = risk_settings
+        self.executor_settings: "ExecutorSettings" = executor_settings
 
         self.start_equity = float(starting_equity)
         self.current_equity = float(starting_equity)
@@ -89,6 +90,7 @@ class TradingSession:
         self.trades_today: int = 0
 
         self.fee_per_lot = float(fee_per_lot)
+        self.lot_size = int(lot_size)
 
         # order_id -> Trade
         self.active_trades: Dict[str, Trade] = {}
@@ -150,15 +152,15 @@ class TradingSession:
         Checks if any session-level risk limits have been breached.
         Returns a string reason if a limit is breached, otherwise None.
         """
-        if self.trades_today >= int(self.risk_config.max_trades_per_day):
-            return f"Max trades per day ({self.risk_config.max_trades_per_day}) reached."
+        if self.trades_today >= int(self.risk_settings.max_trades_per_day):
+            return f"Max trades per day ({self.risk_settings.max_trades_per_day}) reached."
 
-        if self.consecutive_losses >= int(self.risk_config.consecutive_loss_limit):
-            return f"Consecutive loss limit ({self.risk_config.consecutive_loss_limit}) reached."
+        if self.consecutive_losses >= int(self.risk_settings.consecutive_loss_limit):
+            return f"Consecutive loss limit ({self.risk_settings.consecutive_loss_limit}) reached."
 
-        if self.drawdown_pct >= float(self.risk_config.max_daily_drawdown_pct):
+        if self.drawdown_pct >= float(self.risk_settings.max_daily_drawdown_pct):
             return (
-                f"Max daily drawdown ({self.risk_config.max_daily_drawdown_pct:.2%}) breached. "
+                f"Max daily drawdown ({self.risk_settings.max_daily_drawdown_pct:.2%}) breached. "
                 f"Current DD: {self.drawdown_pct:.2%}"
             )
 
@@ -172,7 +174,7 @@ class TradingSession:
         Quantity is in contracts; lots = qty / lot_size.
         """
         try:
-            lot_size = int(self.executor_config.nifty_lot_size or 0)
+            lot_size = int(self.lot_size or 0)
             if lot_size <= 0:
                 return 0.0
             lots = max(0, quantity_contracts // lot_size)

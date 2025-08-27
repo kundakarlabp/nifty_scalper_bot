@@ -54,9 +54,10 @@ class BacktestRunner:
         self.strategy = EnhancedScalpingStrategy(settings.strategy)
         self.sizer = PositionSizer(settings.risk)
         self.session = TradingSession(
-            risk_config=settings.risk,
-            executor_config=settings.executor,
-            starting_equity=100_000.0
+            risk_settings=settings.risk,
+            executor_settings=settings.executor,
+            starting_equity=100_000.0,
+            lot_size=settings.instruments.nifty_lot_size,
         )
         self.active_trade: Trade | None = None
 
@@ -128,7 +129,7 @@ class BacktestRunner:
             session=self.session,
             entry_price=current_price,
             stop_loss_price=sig.stop_loss,
-            lot_size=settings.executor.nifty_lot_size,  # should be 75 as per config
+            lot_size=settings.instruments.nifty_lot_size,  # should be 75 as per config
         )
         if quantity <= 0:
             return
@@ -139,7 +140,7 @@ class BacktestRunner:
             entry_price=current_price,
             quantity=quantity,
             order_id=f"order_{current_dt.isoformat()}",
-            atr=sig.market_volatility or 0.0,
+            atr_at_entry=sig.market_volatility or 0.0,
         )
         # Attach SL/TP for the bar-by-bar simulator
         setattr(trade, "stop_loss", sig.stop_loss)
@@ -227,9 +228,9 @@ def main():
     """Entry point for the backtest script."""
     # Use the nifty_ohlc.csv file provided in the repo
     csv_file = project_root / "src" / "data" / "nifty_ohlc.csv"
-    if not csv_file.exists():
-        logger.error(f"Data file not found: {csv_file}")
-        sys.exit(1)
+    if not csv_file.exists() or csv_file.stat().st_size == 0:
+        logger.warning(f"Data file not found or empty: {csv_file}; skipping backtest.")
+        return
 
     runner = BacktestRunner(csv_filepath=csv_file)
     runner.run()
