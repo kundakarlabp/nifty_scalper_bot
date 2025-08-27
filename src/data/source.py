@@ -343,6 +343,14 @@ class LiveKiteSource(DataSource):
             return pd.DataFrame()
 
         except Exception as e:
-            # Log once at error level; callers will treat empty frame as a soft failure
-            log.error("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
+            # Network hiccups are common; degrade to a single LTP bar so callers
+            # can continue running diagnostics without spamming errors.
+            log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
+            ltp = self.get_last_price(token)
+            if isinstance(ltp, (int, float)):
+                ts = _now_ist_naive().replace(second=0, microsecond=0)
+                return pd.DataFrame(
+                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
+                    index=[ts],
+                )
             return pd.DataFrame()
