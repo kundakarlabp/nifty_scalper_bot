@@ -100,7 +100,7 @@ class InstrumentsSettings(BaseModel):
 class StrategySettings(BaseModel):
     min_signal_score: int = 3
     confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 50
+    min_bars_for_signal: int = 30
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14
