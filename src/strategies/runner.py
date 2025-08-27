@@ -198,6 +198,9 @@ class StrategyRunner:
             flow["executed"] = placed_ok
             if not placed_ok:
                 flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
+                err = getattr(self.executor, "last_error", None)
+                if err:
+                    self._notify(f"⚠️ Execution error: {err}")
 
             if placed_ok:
                 self.risk.trades_today += 1

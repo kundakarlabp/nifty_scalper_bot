@@ -191,8 +191,18 @@ class OrderExecutor:
 
     # ----------- public info ----------
     def get_active_orders(self) -> List[_OrderRecord]:
+        """Return a snapshot of open records; touch broker for fresh state."""
+        self.last_error = None
         with self._lock:
-            return list(self._active.values())
+            recs = list(self._active.values())
+        if not self.kite:
+            return recs
+        try:
+            _retry_call(self.kite.orders, tries=2)
+        except Exception as e:
+            self.last_error = f"orders: {e}"
+            log.error("orders() failed: %s", e)
+        return recs
 
     @property
     def open_count(self) -> int:
@@ -200,6 +210,7 @@ class OrderExecutor:
             return sum(1 for r in self._active.values() if r.is_open)
 
     def get_positions_kite(self) -> Dict[str, Any]:
+        self.last_error = None
         if not self.kite:
             return {}
         try:
