@@ -105,7 +105,15 @@ class StrategyRunner:
 
     # Optional start hook (main calls it if present)
     def start(self) -> None:
-        return
+        if self.data_source is None:
+            return
+        try:
+            df = self._fetch_spot_ohlc()
+            bars = int(len(df)) if isinstance(df, pd.DataFrame) else 0
+            self._last_flow_debug["bars"] = bars
+        except Exception as e:
+            self.log.warning("Initial data fetch failed: %s", e)
+            self._last_flow_debug["bars"] = 0
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
