@@ -8,6 +8,7 @@ import time
 from typing import List, Optional
 
 from src.config import settings, validate_critical_settings
+from src.utils.logging_tools import RateLimitFilter
 from src.strategies.runner import StrategyRunner
 
 # Optional broker SDK
@@ -27,6 +28,8 @@ def _setup_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    root = logging.getLogger()
+    root.addFilter(RateLimitFilter(interval=120.0))
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 

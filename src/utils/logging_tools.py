@@ -5,9 +5,33 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 from src.config import settings
+
+
+class RateLimitFilter(logging.Filter):
+    """Filter that rate-limits identical log messages.
+
+    Each unique combination of ``logger name`` and ``format string`` is only
+    emitted once per ``interval`` seconds. Subsequent attempts within the window
+    are dropped silently. This is useful to avoid log spam when an error keeps
+    occurring repeatedly in a tight loop.
+    """
+
+    def __init__(self, interval: float = 120.0) -> None:
+        super().__init__()
+        self.interval = float(interval)
+        self._last: Dict[Tuple[str, str], float] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - trivial
+        key = (record.name, record.msg)
+        now = time.time()
+        last = self._last.get(key)
+        if last is None or (now - last) >= self.interval:
+            self._last[key] = now
+            return True
+        return False
 
 
 class InMemoryLogHandler(logging.Handler):
