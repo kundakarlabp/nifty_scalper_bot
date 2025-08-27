@@ -102,9 +102,16 @@ def _import_telegram_class():
 # Wire Telegram Controller
 # -----------------------------
 def _wire_real_telegram(runner: StrategyRunner) -> None:
+    """Replace the temporary placeholder Telegram controller with the real one."""
+
+    # Clear any placeholders so diagnostics don't see the no-op object
+    runner.telegram_controller = None
+    runner.telegram = None
+
     TelegramController = _import_telegram_class()
     if not TelegramController:
         return
+
     tg = TelegramController.create(
         # providers
         status_provider=getattr(runner, "get_status_snapshot", lambda: {"ok": False}),
