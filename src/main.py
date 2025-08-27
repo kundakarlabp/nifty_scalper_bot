@@ -158,7 +158,7 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
         try:
             signal.signal(sig, _handler)
         except Exception:
-            pass
+            logging.getLogger("main").warning("Failed to set handler for %s", sig)
 
 
 def main() -> int:
@@ -209,11 +209,11 @@ def main() -> int:
         try:
             runner.shutdown()
         except Exception:
-            pass
+            log.exception("Runner shutdown failed")
         try:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception:
-            pass
+            log.warning("Failed to send shutdown message to Telegram")
 
     return 0
 

@@ -250,11 +250,11 @@ class TelegramController:
                 if self._set_live_mode:
                     self._set_live_mode(bool(live_before))
             except Exception:
-                pass
+                log.debug("Failed to restore live trading mode", exc_info=True)
             try:
                 setattr(settings, "allow_offhours_testing", bool(allow_off_before))
             except Exception:
-                pass
+                log.debug("Failed to restore allow_offhours_testing flag", exc_info=True)
 
         return "✅ Tick executed." if res else ("Dry tick executed (no action)." if dry else "Tick executed (no action).")
 
@@ -300,7 +300,7 @@ class TelegramController:
                     timeout=self._timeout,
                 )
             except Exception:
-                pass
+                log.debug("Failed to answer callback query", exc_info=True)
             return
 
         # Text messages
