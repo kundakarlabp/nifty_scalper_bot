@@ -28,3 +28,14 @@ def test_skipped_gates_consistency(monkeypatch) -> None:
     assert risk_check["detail"] == "skipped"
     assert summary["status_messages"]["risk_gates"] == "skipped"
 
+
+def test_non_dict_risk_gates_handled() -> None:
+    """Non-dict risk gate info should not break summary generation."""
+
+    runner = StrategyRunner(telegram_controller=DummyTelegram())
+    runner._last_flow_debug = {"risk_gates": ["bad"], "bars": 0}
+
+    summary = runner.get_compact_diag_summary()
+
+    assert summary["status_messages"]["risk_gates"] == "no-eval"
+

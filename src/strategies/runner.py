@@ -541,14 +541,15 @@ class StrategyRunner:
             gates is RISK_GATES_SKIPPED
             or (isinstance(gates, dict) and bool(gates.get("skipped")))
         )
-        gates_ok = True if skipped else (bool(gates) and all(bool(v) for v in gates.values()))
+        gates_dict = gates if isinstance(gates, dict) else {}
+        gates_ok = True if skipped else (bool(gates_dict) and all(bool(v) for v in gates_dict.values()))
         checks.append({
             "name": "Risk gates",
             "ok": gates_ok,
             "detail": (
                 "skipped"
                 if skipped
-                else ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates.items()]) if gates else "no-eval"
+                else ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates_dict.items()]) if gates_dict else "no-eval"
             ),
         })
 
@@ -599,7 +600,8 @@ class StrategyRunner:
             gates is RISK_GATES_SKIPPED
             or (isinstance(gates, dict) and bool(gates.get("skipped")))
         )
-        gates_ok = isinstance(gates, dict) and all(bool(v) for v in gates.values())
+        gates_dict = gates if isinstance(gates, dict) else {}
+        gates_ok = bool(gates_dict) and all(bool(v) for v in gates_dict.values())
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
 
@@ -610,7 +612,7 @@ class StrategyRunner:
                 "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
                 "data_feed": "ok" if data_fresh else "stale",
                 "strategy_readiness": "ok" if strat_ready else "not ready",
-                "risk_gates": "skipped" if skipped else ("ok" if gates_ok else "blocked" if gates else "no-eval"),
+                "risk_gates": "skipped" if skipped else ("ok" if gates_ok else "blocked" if gates_dict else "no-eval"),
                 "rr_threshold": "ok" if rr_ok else "blocked",
                 "errors": "ok" if no_errors else "present",
             },
