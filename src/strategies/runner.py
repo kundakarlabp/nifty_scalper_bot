@@ -135,14 +135,17 @@ class StrategyRunner:
                 flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
                 self._last_flow_debug = flow; return
             flow["signal_ok"] = True
+            flow["signal"] = dict(signal)
 
             # ---- RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
             rr_val = float(signal.get("rr", 0.0) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
-                flow["rr_ok"] = False; flow["reason_block"] = f"rr<{rr_min}"
-                flow["signal"] = {"rr": rr_val, "rr_min": rr_min}
-                self._last_flow_debug = flow; return
+                flow["rr_ok"] = False
+                flow["reason_block"] = f"rr<{rr_min}"
+                flow["signal"] = {**signal, "rr_min": rr_min}
+                self._last_flow_debug = flow
+                return
 
             # ---- risk gates
             gates = self._risk_gates_for(signal)

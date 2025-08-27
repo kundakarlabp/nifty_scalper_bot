@@ -199,6 +199,7 @@ def main() -> int:
     try:
         while not _stop_flag:
             try:
+                runner.process_tick(tick=None)
                 runner.health_check()
                 time.sleep(5)
             except Exception as e:
