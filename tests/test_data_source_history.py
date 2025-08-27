@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import pandas as pd
+from freezegun import freeze_time
 
 from src.data.source import LiveKiteSource
 
@@ -38,3 +39,20 @@ def test_fetch_ohlc_chunks_multiple_calls():
     assert len(df) == 3 * 24 * 60
     assert df.index.min() == pd.Timestamp(start)
     assert df.index.max() == pd.Timestamp(end) - pd.Timedelta(minutes=1)
+
+
+@freeze_time("2024-01-01 09:30:00")
+def test_fetch_ohlc_network_failure_falls_back_to_ltp():
+    class BoomKite:
+        def historical_data(self, *args, **kwargs):
+            raise Exception("boom")
+
+        def ltp(self, instruments):
+            return {str(instruments[0]): {"last_price": 1}}
+
+    src = LiveKiteSource(BoomKite())
+    start = datetime(2024, 1, 1, 9, 0)
+    end = start + timedelta(minutes=1)
+    df = src.fetch_ohlc(123, start, end, "minute")
+    assert len(df) == 1
+    assert df.iloc[0].close == 1
