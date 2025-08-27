@@ -442,8 +442,47 @@ class StrategyRunner:
             # Add a small buffer (10%) to account for any missing candles.
             lookback = int(lookback * 1.1)
 
-            end = self._now_ist().replace(second=0, microsecond=0)
+            now = self._now_ist().replace(second=0, microsecond=0)
+
+            # Derive session bounds using configured start/end times.
+            session_start = now.replace(
+                hour=self._start_time.hour,
+                minute=self._start_time.minute,
+                second=0,
+                microsecond=0,
+            )
+            session_end = now.replace(
+                hour=self._end_time.hour,
+                minute=self._end_time.minute,
+                second=0,
+                microsecond=0,
+            )
+
+            if session_end <= session_start:
+                session_end += timedelta(days=1)
+
+            if now < session_start:
+                # Before today's session start: shift to the previous session
+                session_start -= timedelta(days=1)
+                session_end -= timedelta(days=1)
+                end = session_end
+            elif now > session_end:
+                # After today's session end: anchor to today's close
+                end = session_end
+            else:
+                # Within the session: end at current time
+                end = now
+
             start = end - timedelta(minutes=lookback)
+            if start < session_start:
+                start = session_start
+            if start >= end:
+                self.log.warning(
+                    "Adjusted OHLC window %s..%s collapses; aborting",
+                    start.isoformat(),
+                    end.isoformat(),
+                )
+                return None
 
             # Resolve token with fallbacks
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
