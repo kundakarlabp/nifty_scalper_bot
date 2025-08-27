@@ -17,7 +17,7 @@ Return shapes are aligned with scalping_strategy.py:
 
 from __future__ import annotations
 
-from typing import Dict, Tuple, Optional, Union
+from typing import Tuple, Optional, Union
 import pandas as pd
 import numpy as np
 
@@ -143,18 +143,18 @@ def calculate_supertrend(
     """
     if isinstance(high_or_df, pd.DataFrame):
         h = _series(high_or_df, "high")
-        l = _series(high_or_df, "low")
+        low_s = _series(high_or_df, "low")
         c = _series(high_or_df, "close")
     else:
         assert low is not None and close is not None, "Provide low & close series when passing high as Series."
-        h, l, c = (
+        h, low_s, c = (
             pd.to_numeric(high_or_df, errors="coerce").astype(float),
             pd.to_numeric(low, errors="coerce").astype(float),
             pd.to_numeric(close, errors="coerce").astype(float),
         )
 
-    atr = calculate_atr(pd.DataFrame({"high": h, "low": l, "close": c}), period=period)
-    hl2 = (h + l) / 2.0
+    atr = calculate_atr(pd.DataFrame({"high": h, "low": low_s, "close": c}), period=period)
+    hl2 = (h + low_s) / 2.0
     upperband = hl2 + (multiplier * atr)
     lowerband = hl2 - (multiplier * atr)
 
@@ -226,33 +226,33 @@ def calculate_adx(
     """
     if isinstance(high_or_df, pd.DataFrame):
         h = _series(high_or_df, "high")
-        l = _series(high_or_df, "low")
+        low_s = _series(high_or_df, "low")
         c = _series(high_or_df, "close")
     else:
         assert low is not None and close is not None, "Provide low & close series when passing high as Series."
-        h, l, c = (
+        h, low_s, c = (
             pd.to_numeric(high_or_df, errors="coerce").astype(float),
             pd.to_numeric(low, errors="coerce").astype(float),
             pd.to_numeric(close, errors="coerce").astype(float),
         )
 
     if TA_AVAILABLE and ADXIndicator:
-        adx_calc = ADXIndicator(high=h, low=l, close=c, window=period, fillna=False)
+        adx_calc = ADXIndicator(high=h, low=low_s, close=c, window=period, fillna=False)
         return adx_calc.adx(), adx_calc.adx_pos(), adx_calc.adx_neg()
 
     # Fallback (SMA-smoothing): adequate when TA unavailable
     prev_h = h.shift(1)
-    prev_l = l.shift(1)
+    prev_l = low_s.shift(1)
     prev_c = c.shift(1)
 
     up_move = h - prev_h
-    down_move = prev_l - l
+    down_move = prev_l - low_s
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
-    tr1 = (h - l)
+    tr1 = (h - low_s)
     tr2 = (h - prev_c).abs()
-    tr3 = (l - prev_c).abs()
+    tr3 = (low_s - prev_c).abs()
     tr = np.maximum.reduce([tr1, tr2, tr3])
 
     plus_dm_s = pd.Series(plus_dm, index=c.index)

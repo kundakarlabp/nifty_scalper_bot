@@ -6,7 +6,7 @@ import logging
 import random
 import asyncio
 from functools import wraps
-from typing import Any, Callable, Optional, Tuple, TypeVar, ParamSpec
+from typing import Callable, Optional, Tuple, TypeVar, ParamSpec
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def retry(
                 for attempt in range(1, tries + 1):
                     try:
                         return await func(*args, **kwargs)
-                    except exclude_exceptions as e:
+                    except exclude_exceptions:
                         # explicitly do not retry
                         raise
                     except exceptions as e:
