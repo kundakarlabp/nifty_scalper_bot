@@ -71,6 +71,39 @@ class StrategyRunner:
             except Exception as e:
                 self.log.warning(f"Data source init failed; proceeding without: {e}")
 
+        # Optional historical backfill for warmup
+        self._history_df: pd.DataFrame = pd.DataFrame()
+        hist_days = int(getattr(settings.data, "history_days", 0) or 0)
+        if self.data_source is not None and hist_days > 0:
+            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+            if token <= 0:
+                token = int(getattr(settings.instruments, "spot_token", 0) or 0)
+            if token > 0:
+                try:
+                    end = self._now_ist().replace(second=0, microsecond=0)
+                    start = (pd.Timestamp(end) - pd.tseries.offsets.BDay(hist_days)).to_pydatetime()
+                    hist_df = self.data_source.fetch_ohlc(
+                        token=token,
+                        start=start,
+                        end=end,
+                        timeframe=str(getattr(settings.data, "timeframe", "minute")),
+                    )
+                    if isinstance(hist_df, pd.DataFrame) and not hist_df.empty:
+                        hist_df = hist_df.sort_index()
+                        max_c = int(getattr(settings.data, "history_max_candles", 0) or 0)
+                        if max_c > 0 and len(hist_df) > max_c:
+                            hist_df = hist_df.iloc[-max_c:]
+                        self._history_df = hist_df
+                        self.log.info("Preloaded %s historical candles", len(hist_df))
+                    else:
+                        self.log.warning(
+                            "No historical data for last %s working days", hist_days
+                        )
+                except Exception as e:  # pragma: no cover - best effort
+                    self.log.warning("Historical backfill failed: %s", e)
+            else:
+                self.log.warning("Historical backfill skipped: no valid token")
+
         # Risk + equity cache
         self.risk = RiskState(trading_day=self._today_ist())
         self._equity_last_refresh_ts: float = 0.0
@@ -369,10 +402,18 @@ class StrategyRunner:
                     end=end,
                     timeframe=timeframe,
                 )
-                # Validate
+                # Validate and merge with any historical backfill
                 need = {"open", "high", "low", "close", "volume"}
                 if isinstance(df, pd.DataFrame) and not df.empty and need.issubset(df.columns):
-                    return df.sort_index()
+                    out = df.sort_index()
+                    if not self._history_df.empty:
+                        out = pd.concat([self._history_df, out])
+                        out = out[~out.index.duplicated(keep="last")].sort_index()
+                        max_c = int(getattr(settings.data, "history_max_candles", 0) or 0)
+                        if max_c > 0 and len(out) > max_c:
+                            out = out.iloc[-max_c:]
+                    self._history_df = out
+                    return out
                 else:
                     self.log.warning(
                         "historical_data empty for token=%s interval=%s window=%s..%s; using LTP fallback.",
@@ -388,6 +429,14 @@ class StrategyRunner:
                     {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
                     index=[ts],
                 )
+                if not self._history_df.empty:
+                    out = pd.concat([self._history_df, df])
+                    out = out[~out.index.duplicated(keep="last")].sort_index()
+                    max_c = int(getattr(settings.data, "history_max_candles", 0) or 0)
+                    if max_c > 0 and len(out) > max_c:
+                        out = out.iloc[-max_c:]
+                    self._history_df = out
+                    return out
                 return df
 
             # If we get here, we truly have nothing

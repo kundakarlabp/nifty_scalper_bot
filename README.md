@@ -56,7 +56,7 @@ nifty_scalper_bot/
    pip install -r requirements.txt
    ```
 
-3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.
+3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.  To prime the strategy with recent market context you may also set `DATA_HISTORY_DAYS` (e.g. `DATA_HISTORY_DAYS=3`) which backfills that many previous working days of candles on startup.  Use `DATA_HISTORY_MAX_CANDLES` to cap the number of cached bars if desired.
 
 4. **Run the bot locally**
 
