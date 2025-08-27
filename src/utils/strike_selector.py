@@ -92,6 +92,11 @@ def _fetch_instruments_nfo(kite: Optional[KiteConnect]) -> Optional[List[Dict[st
 
     # Return cached copy if fresh enough
     if _instruments_cache is not None and (now - _instruments_cache_ts) < _INSTRUMENTS_TTL:
+        trade_symbol = str(getattr(getattr(settings, "instruments", object()), "trade_symbol", "")).upper()
+        if not any(str(row.get("name", "")).upper() == trade_symbol for row in _instruments_cache):
+            msg = f"Trade symbol {trade_symbol} not found in NFO instruments dump"
+            logger.warning(msg)
+            raise ValueError(msg)
         return _instruments_cache
 
     if not kite or kite is object:
@@ -103,6 +108,11 @@ def _fetch_instruments_nfo(kite: Optional[KiteConnect]) -> Optional[List[Dict[st
         # Correct signature for Kite: instruments(exchange)
         instruments = _rate_call(kite.instruments, call_key, "NFO")
         if isinstance(instruments, list) and instruments:
+            trade_symbol = str(getattr(getattr(settings, "instruments", object()), "trade_symbol", "")).upper()
+            if not any(str(row.get("name", "")).upper() == trade_symbol for row in instruments):
+                msg = f"Trade symbol {trade_symbol} not found in NFO instruments dump"
+                logger.warning(msg)
+                raise ValueError(msg)
             _instruments_cache = instruments
             _instruments_cache_ts = now
             return instruments
@@ -269,7 +279,12 @@ def get_instrument_tokens(
         target = int(atm + strike_range * step)
 
         # --- fetch instruments and resolve CE/PE tokens (shadow-safe) ---
-        nfo = _fetch_instruments_nfo(kite_instance) or []
+        try:
+            nfo = _fetch_instruments_nfo(kite_instance)
+        except ValueError as e:
+            logger.warning("Instrument configuration issue: %s", e)
+            return None
+        nfo = nfo or []
         if not nfo:
             logger.debug("NFO instruments unavailable; returning strike math without tokens.")
             return {
