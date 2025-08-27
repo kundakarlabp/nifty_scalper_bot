@@ -26,6 +26,15 @@ class TelegramController:
     - Dedup + rate limiting + backoff on send
     """
 
+    @classmethod
+    def create(cls, *args: Any, **kwargs: Any) -> Optional["TelegramController"]:
+        """Factory that returns a controller or ``None`` if credentials are missing."""
+        try:
+            return cls(*args, **kwargs)
+        except RuntimeError:
+            log.warning("Telegram disabled: missing bot token or chat ID")
+            return None
+
     # ---------------- init ----------------
     def __init__(
         self,
