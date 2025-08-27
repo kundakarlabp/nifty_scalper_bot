@@ -9,6 +9,12 @@ from typing import Any, Dict, Optional, Tuple, Callable, List
 
 import pandas as pd
 
+# Optional lightweight market data fallback (e.g., when kite is unavailable)
+try:
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
+
 log = logging.getLogger(__name__)
 
 # Optional broker SDK (keep imports tolerant so paper mode works)
@@ -195,6 +201,33 @@ def _clip_window(df: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFra
         return df.copy()
 
 
+def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
+    """Best-effort mapping to a yfinance symbol.
+
+    Prefer configured instrument symbols; otherwise fall back to the provided
+    token/str.  Returns ``None`` if no reasonable guess can be made.
+    """
+    # Try to pull symbol from settings (avoids importing at module level)
+    try:  # pragma: no cover - executed in runtime, hard to trigger circular import in tests
+        from src.config import settings
+
+        sym = getattr(settings.instruments, "spot_symbol", None) or getattr(
+            settings.instruments, "trade_symbol", None
+        )
+        if isinstance(sym, str) and sym:
+            token_or_symbol = sym
+    except Exception:
+        pass
+
+    if isinstance(token_or_symbol, str):
+        # Accept 'NSE:FOO' or plain 'FOO'; strip exchange prefix and spaces
+        return token_or_symbol.split(":")[-1].replace(" ", "").strip()
+    try:
+        return str(int(token_or_symbol))
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
@@ -219,6 +252,18 @@ class LiveKiteSource(DataSource):
     # ---- quick LTP ----
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
         if not self.kite:
+            # Fallback to yfinance when running without broker access
+            if yf is None:
+                return None
+            try:
+                sym = _yf_symbol(symbol_or_token)
+                if not sym:
+                    return None
+                data = yf.Ticker(sym).history(period="1d", interval="1m")
+                if not data.empty:
+                    return float(data["Close"].iloc[-1])
+            except Exception as e:  # pragma: no cover - best effort fallback
+                log.debug("yfinance LTP fallback failed for %s: %s", symbol_or_token, e)
             return None
         try:
             # Accept either token int or exchange:symbol string
@@ -243,7 +288,44 @@ class LiveKiteSource(DataSource):
         Returns ``None`` if no candles were retrieved even after all retries.
         """
         if not self.kite:
-            log.warning("LiveKiteSource.fetch_ohlc: kite is None.")
+            log.warning(
+                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
+            )
+            if yf is None:
+                return None
+            sym = _yf_symbol(token)
+            if not sym:
+                return None
+            try:
+                interval_map = {
+                    "minute": "1m",
+                    "3minute": "3m",
+                    "5minute": "5m",
+                    "10minute": "10m",
+                    "15minute": "15m",
+                    "day": "1d",
+                }
+                yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
+                df = yf.download(
+                    sym,
+                    start=start,
+                    end=end,
+                    interval=yf_interval,
+                    progress=False,
+                )
+                if df.empty:
+                    return None
+                df.index = pd.to_datetime(df.index).tz_localize(None)
+                df = df.rename(columns={c: c.lower() for c in df.columns})
+                if "volume" not in df.columns:
+                    df["volume"] = 0
+                need = {"open", "high", "low", "close"}
+                if need.issubset(df.columns):
+                    out = df[["open", "high", "low", "close", "volume"]].copy()
+                    self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
+                    return _clip_window(out, start, end)
+            except Exception as e:  # pragma: no cover
+                log.debug("yfinance fetch_ohlc failed: %s", e)
             return None
 
         # Guard inputs
