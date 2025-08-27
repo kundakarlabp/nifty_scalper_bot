@@ -127,12 +127,16 @@ class StrategyRunner:
             # window
             if not self._within_trading_window() and not settings.allow_offhours_testing:
                 flow["risk_gates"] = {"skipped": True}
-                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "off_hours"; self._last_flow_debug = flow
+                self.log.debug("Skipping tick: outside trading window")
+                return
             flow["within_window"] = True
 
             # pause
             if self._paused:
-                flow["reason_block"] = "paused"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "paused"; self._last_flow_debug = flow
+                self.log.debug("Skipping tick: runner paused")
+                return
 
             # new day / equity
             self._ensure_day_state()
@@ -141,8 +145,14 @@ class StrategyRunner:
             # ---- data
             df = self._fetch_spot_ohlc()
             flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            self.log.debug("Fetched %s bars", flow["bars"])
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
-                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "insufficient_data"; self._last_flow_debug = flow
+                self.log.debug(
+                    "Signal evaluation skipped: insufficient data (bars=%s, need=%s)",
+                    flow["bars"], int(settings.strategy.min_bars_for_signal)
+                )
+                return
             flow["data_ok"] = True
 
             # ---- signal
@@ -150,7 +160,9 @@ class StrategyRunner:
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             if not signal:
                 flow["reason_block"] = self._last_signal_debug.get("reason_block", "no_signal")
-                self._last_flow_debug = flow; return
+                self._last_flow_debug = flow
+                self.log.debug("No signal generated: %s", flow["reason_block"])
+                return
             flow["signal_ok"] = True
             flow["signal"] = dict(signal)
 
@@ -162,13 +174,17 @@ class StrategyRunner:
                 flow["reason_block"] = f"rr<{rr_min}"
                 flow["signal"] = {**signal, "rr_min": rr_min}
                 self._last_flow_debug = flow
+                self.log.info("Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min)
                 return
 
             # ---- risk gates
             gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
             if not all(gates.values()):
-                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow; return
+                blocked = [k for k, v in gates.items() if not v]
+                flow["reason_block"] = "risk_gate_block"; self._last_flow_debug = flow
+                self.log.info("Signal blocked by risk gates: %s", blocked)
+                return
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
@@ -179,7 +195,9 @@ class StrategyRunner:
             )
             flow["sizing"] = diag; flow["qty"] = int(qty)
             if qty <= 0:
-                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow; return
+                flow["reason_block"] = "qty_zero"; self._last_flow_debug = flow
+                self.log.debug("Signal skipped: quantity %s <= 0", qty)
+                return
 
             # ---- execution (support both executors)
             placed_ok = False
