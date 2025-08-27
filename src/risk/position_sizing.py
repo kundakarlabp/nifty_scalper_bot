@@ -41,11 +41,40 @@ class PositionSizer:
 
     def __init__(
         self,
-        risk_per_trade: float,
-        min_lots: int,
-        max_lots: int,
-        max_position_size_pct: float,
+        risk_per_trade,
+        min_lots: int | None = None,
+        max_lots: int | None = None,
+        max_position_size_pct: float | None = None,
     ) -> None:
+        """Create a PositionSizer.
+
+        Accepts either a RiskSettings-like object as the first argument or the
+        individual parameters explicitly. This maintains backward compatibility
+        with callers that previously passed the risk settings object directly.
+        """
+
+        if (
+            min_lots is None
+            and max_lots is None
+            and max_position_size_pct is None
+            and hasattr(risk_per_trade, "risk_per_trade")
+        ):
+            rs = risk_per_trade
+            risk_per_trade = getattr(rs, "risk_per_trade")
+            min_lots = getattr(rs, "min_lots", 1)
+            max_lots = getattr(rs, "max_lots", 10)
+            max_position_size_pct = getattr(rs, "max_position_size_pct", 0.10)
+
+        if (
+            min_lots is None
+            or max_lots is None
+            or max_position_size_pct is None
+            or risk_per_trade is None
+        ):
+            raise TypeError(
+                "PositionSizer requires either a risk settings object or explicit parameters"
+            )
+
         if risk_per_trade <= 0 or risk_per_trade > 0.10:
             raise ValueError("risk_per_trade must be within (0, 0.10].")
         if min_lots <= 0 or max_lots <= 0 or max_lots < min_lots:
