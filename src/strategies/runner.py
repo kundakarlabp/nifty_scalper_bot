@@ -149,6 +149,12 @@ class StrategyRunner:
             if not self._within_trading_window() and not settings.allow_offhours_testing:
                 flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "off_hours"
+                try:
+                    df_off = self._fetch_spot_ohlc()
+                    flow["bars"] = int(len(df_off) if isinstance(df_off, pd.DataFrame) else 0)
+                except Exception as e:  # pragma: no cover - defensive
+                    self.log.debug("Off-hours data fetch failed: %s", e)
+                    flow["bars"] = 0
                 self._last_flow_debug = flow
                 if not self._offhours_notified:
                     now = self._now_ist().strftime("%H:%M:%S")
