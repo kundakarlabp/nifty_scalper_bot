@@ -13,7 +13,7 @@ from src.config import settings
 class RateLimitFilter(logging.Filter):
     """Filter that rate-limits identical log messages.
 
-    Each unique combination of ``logger name`` and ``format string`` is only
+    Each unique combination of ``logger name`` and fully formatted message is only
     emitted once per ``interval`` seconds. Subsequent attempts within the window
     are dropped silently. This is useful to avoid log spam when an error keeps
     occurring repeatedly in a tight loop.
@@ -25,7 +25,8 @@ class RateLimitFilter(logging.Filter):
         self._last: Dict[Tuple[str, str], float] = {}
 
     def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - trivial
-        key = (record.name, record.msg)
+        message = record.getMessage()
+        key = (record.name, message)
         now = time.time()
         last = self._last.get(key)
         if last is None or (now - last) >= self.interval:
