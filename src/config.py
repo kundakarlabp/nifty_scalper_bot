@@ -213,7 +213,7 @@ class SystemSettings(BaseModel):
 # ================= Root settings =================
 
 class AppSettings(BaseSettings):
-    # You asked to default to LIVE. Be aware this enforces Zerodha creds at import time.
+    # Live trading is enabled by default; set to False to run in paper mode.
     enable_live_trading: bool = True
     allow_offhours_testing: bool = False
     log_level: str = "INFO"
