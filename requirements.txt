@@ -19,6 +19,7 @@ scipy==1.13.1
 fastapi==0.111.0
 uvicorn==0.29.0
 flask==3.0.3
+pyngrok==6.0.0
 
 # Telegram
 python-telegram-bot==20.6
