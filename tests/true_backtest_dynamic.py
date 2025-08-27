@@ -36,10 +36,11 @@ sys.path.insert(0, str(project_root))
 
 from src.config import settings
 from src.backtesting.data_source import BacktestCsvSource
+from typing import Any, Dict
+
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from src.signals.signal import Signal
 
 # Configure logging for the backtest
 logging.basicConfig(level=settings.log_level, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
@@ -118,36 +119,39 @@ class BacktestRunner:
         df_history = self.data_source.fetch_ohlc(0, datetime.min, current_dt, "minute")
         current_price = float(current_bar["close"])
 
-        sig: Signal | None = self.strategy.generate_signal(df=df_history, current_price=current_price)
+        sig: Dict[str, Any] | None = self.strategy.generate_signal(df=df_history, current_price=current_price)
         if not sig:
             return
 
-        logger.info(f"Signal received at {current_dt}: {sig.to_dict()}")
+        logger.info(f"Signal received at {current_dt}: {sig}")
 
         quantity = self.sizer.calculate_quantity(
             session=self.session,
             entry_price=current_price,
-            stop_loss_price=sig.stop_loss,
-            lot_size=settings.executor.nifty_lot_size,  # should be 75 as per config
+            stop_loss_price=sig["stop_loss"],
+            lot_size=settings.instruments.nifty_lot_size,  # should be 75 as per config
         )
         if quantity <= 0:
             return
 
         trade = Trade(
             symbol="BACKTEST_INSTRUMENT",
-            direction=sig.signal,
-            entry_price=current_price,
+            direction=sig["action"],
+            entry_price=float(sig["entry_price"]),
             quantity=quantity,
             order_id=f"order_{current_dt.isoformat()}",
-            atr=sig.market_volatility or 0.0,
+            atr_at_entry=sig.get("atr", 0.0),
         )
         # Attach SL/TP for the bar-by-bar simulator
-        setattr(trade, "stop_loss", sig.stop_loss)
-        setattr(trade, "target", sig.target)
+        setattr(trade, "stop_loss", sig["stop_loss"])
+        setattr(trade, "target", sig["take_profit"])
 
         self.session.add_trade(trade)
         self.active_trade = trade
-        logger.info(f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ {trade.entry_price:.2f} | SL {sig.stop_loss:.2f} TP {sig.target:.2f}")
+        logger.info(
+            f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ {trade.entry_price:.2f} "
+            f"| SL {sig['stop_loss']:.2f} TP {sig['take_profit']:.2f}"
+        )
 
     # ------------------------------- Reporting ------------------------------- #
 

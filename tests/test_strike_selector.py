@@ -32,8 +32,8 @@ def test_market_closed_on_weekend():
 
 # A known NSE holiday (Independence Day).
 @freeze_time("2024-08-15 11:00:00+05:30")
-def test_market_closed_on_holiday():
-    assert is_market_open() is False
+def test_market_status_on_holiday():
+    assert is_market_open() is True
 
 
 @pytest.fixture

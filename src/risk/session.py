@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, TYPE_CHECKING, Optional
 
-from src.config import RiskSettings
+from src.config import RiskSettings, settings
 
 if TYPE_CHECKING:
     from src.config import ExecutorSettings
@@ -172,7 +172,7 @@ class TradingSession:
         Quantity is in contracts; lots = qty / lot_size.
         """
         try:
-            lot_size = int(self.executor_config.nifty_lot_size or 0)
+            lot_size = int(getattr(settings.instruments, "nifty_lot_size", 0))
             if lot_size <= 0:
                 return 0.0
             lots = max(0, quantity_contracts // lot_size)
