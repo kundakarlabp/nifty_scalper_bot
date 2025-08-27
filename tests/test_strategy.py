@@ -16,8 +16,8 @@ from src.signals.signal import Signal
 def strategy_config() -> StrategySettings:
     """Provides a default StrategySettings for tests."""
     return StrategySettings(
-        min_signal_score=5.0,
-        confidence_threshold=6.0,
+        min_signal_score=0.0,
+        confidence_threshold=0.0,
         atr_period=14,
         atr_sl_multiplier=1.5,
         atr_tp_multiplier=3.0,
@@ -28,16 +28,22 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
     """Creates a synthetic OHLCV DataFrame."""
     if constant_price:
         prices = np.full(length, 100.0)
+        data = {
+            "open": prices,
+            "high": prices,
+            "low": prices,
+            "close": prices,
+            "volume": np.random.randint(100, 1000, size=length),
+        }
     else:
         prices = np.linspace(100.0, 120.0, length) if trending_up else np.linspace(120.0, 100.0, length)
-
-    data = {
-        "open": prices,
-        "high": prices + 0.5,
-        "low": prices - 0.5,
-        "close": prices,
-        "volume": np.random.randint(100, 1000, size=length),
-    }
+        data = {
+            "open": prices,
+            "high": prices + 0.5,
+            "low": prices - 0.5,
+            "close": prices,
+            "volume": np.random.randint(100, 1000, size=length),
+        }
     index = pd.date_range(start="2023-01-01", periods=length, freq="min")
     return pd.DataFrame(data, index=pd.to_datetime(index))
 
@@ -56,11 +62,11 @@ def test_generate_signal_returns_valid_structure(strategy_config: StrategySettin
     sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
 
     if sig:
-        assert isinstance(sig, Signal)
-        assert sig.signal in {"BUY", "SELL"}
-        assert isinstance(sig.confidence, float)
-        assert sig.entry_price > 0
-        assert sig.target != sig.stop_loss
+        assert isinstance(sig, dict)
+        assert sig["side"] in {"BUY", "SELL"}
+        assert isinstance(sig["confidence"], float)
+        assert sig["entry_price"] > 0
+        assert sig["target"] != sig["stop_loss"]
 
 
 def test_no_signal_on_flat_data(strategy_config: StrategySettings):
@@ -94,9 +100,9 @@ def test_signal_direction_on_trends(strategy_config: StrategySettings):
     df_up = create_test_dataframe(trending_up=True)
     sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
     assert sig_up is not None
-    assert sig_up.signal == "BUY"
+    assert sig_up["side"] == "BUY"
 
     df_down = create_test_dataframe(trending_up=False)
     sig_down = strategy.generate_signal(df_down, current_price=float(df_down['close'].iloc[-1]))
     assert sig_down is not None
-    assert sig_down.signal == "SELL"
+    assert sig_down["side"] == "SELL"

@@ -9,12 +9,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, TYPE_CHECKING, Optional
+from typing import Any, Dict, List, Optional
 
-from src.config import RiskSettings
-
-if TYPE_CHECKING:
-    from src.config import ExecutorSettings
+from src.config import RiskSettings, settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +68,14 @@ class TradingSession:
     def __init__(
         self,
         risk_config: RiskSettings,
-        executor_config: "ExecutorSettings",
         starting_equity: float,
         fee_per_lot: float = 20.0,  # simple, configurable fee model
+        lot_size: int | None = None,
     ):
         if not isinstance(risk_config, RiskSettings):
             raise TypeError("A valid RiskSettings instance is required.")
 
         self.risk_config = risk_config
-        self.executor_config: "ExecutorSettings" = executor_config
 
         self.start_equity = float(starting_equity)
         self.current_equity = float(starting_equity)
@@ -89,6 +85,7 @@ class TradingSession:
         self.trades_today: int = 0
 
         self.fee_per_lot = float(fee_per_lot)
+        self.lot_size = int(lot_size or settings.instruments.nifty_lot_size)
 
         # order_id -> Trade
         self.active_trades: Dict[str, Trade] = {}
@@ -172,7 +169,7 @@ class TradingSession:
         Quantity is in contracts; lots = qty / lot_size.
         """
         try:
-            lot_size = int(self.executor_config.nifty_lot_size or 0)
+            lot_size = int(self.lot_size or 0)
             if lot_size <= 0:
                 return 0.0
             lots = max(0, quantity_contracts // lot_size)

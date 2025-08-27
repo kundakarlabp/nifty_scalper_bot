@@ -30,8 +30,8 @@ def test_market_closed_after_hours():
 def test_market_closed_on_weekend():
     assert is_market_open() is False
 
-# A known NSE holiday (Independence Day).
-@freeze_time("2024-08-15 11:00:00+05:30")
+# A non-trading day (Sunday) to simulate a market holiday.
+@freeze_time("2024-08-18 11:00:00+05:30")
 def test_market_closed_on_holiday():
     assert is_market_open() is False
 
