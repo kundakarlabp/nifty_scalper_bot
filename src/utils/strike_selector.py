@@ -232,23 +232,15 @@ def get_instrument_tokens(
         or None on unrecoverable failure.
     """
     try:
-        # --- read config with safe fallbacks ---
-        inst = getattr(settings, "instruments", object())
-        trade_symbol = str(getattr(inst, "trade_symbol", "NIFTY"))
-        spot_symbol = str(getattr(inst, "spot_symbol", "NSE:NIFTY 50"))
-        spot_token = int(getattr(inst, "instrument_token", 256265))  # NIFTY index token default
+        # --- read config ---
+        inst = settings.instruments
+        trade_symbol = str(inst.trade_symbol)
+        spot_symbol = str(inst.spot_symbol)
+        spot_token = int(inst.instrument_token)
 
         # strike step and target offset
         step = _infer_step(trade_symbol)
-        strike_range = getattr(inst, "strike_range", None)
-        if strike_range is None:
-            strike_range = getattr(inst, "strike_selection_range", None)
-        if strike_range is None:
-            strike_range = getattr(settings, "OPTION_RANGE", 0)  # default ATM-only if not set
-        try:
-            strike_range = int(strike_range)
-        except Exception:
-            strike_range = 0
+        strike_range = int(inst.strike_range)
 
         # --- resolve spot price ---
         px = None
