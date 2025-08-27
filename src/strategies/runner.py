@@ -72,6 +72,10 @@ class StrategyRunner:
                 self.data_source = LiveKiteSource(kite=self.kite)
                 self.data_source.connect()
                 self.log.info("Data source initialized: LiveKiteSource")
+                try:
+                    self._fetch_spot_ohlc()
+                except Exception as e:
+                    self.log.debug("Initial OHLC fetch failed: %s", e)
             except Exception as e:
                 self.log.warning(f"Data source init failed; proceeding without: {e}")
 
@@ -380,7 +384,6 @@ class StrategyRunner:
                 token = int(getattr(settings.instruments, "spot_token", 0) or 0)
 
             timeframe = str(getattr(settings.data, "timeframe", "minute"))
-            self._last_fetch_ts = time.time()  # mark an attempt (diag shows freshness)
 
             if token > 0:
                 df = self.data_source.fetch_ohlc(
@@ -428,6 +431,7 @@ class StrategyRunner:
                         rows = len(df)
 
                 if valid and rows >= min_bars:
+                    self._last_fetch_ts = time.time()
                     return df.sort_index()
 
                 self.log.warning(
@@ -445,6 +449,7 @@ class StrategyRunner:
                     {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
                     index=[ts],
                 )
+                self._last_fetch_ts = time.time()
                 return df
 
             # If we get here, we truly have nothing
