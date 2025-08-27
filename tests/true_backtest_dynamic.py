@@ -23,18 +23,46 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import sys
+import types
 import logging
 from pathlib import Path
-import sys
 from datetime import datetime
+from dataclasses import dataclass
 
 import pandas as pd
+
+# Provide lightweight mock settings to avoid loading real config/.env
+for _k in ("TRADING_ENV", "trading_env"):
+    os.environ.pop(_k, None)
+
+
+@dataclass
+class RiskConfig:
+    max_daily_drawdown_pct: float = 0.05
+    consecutive_loss_limit: int = 3
+    max_trades_per_day: int = 5
+
+
+mock_settings = types.SimpleNamespace(
+    log_level="INFO",
+    strategy=types.SimpleNamespace(),
+    risk=RiskConfig(),
+    executor=types.SimpleNamespace(nifty_lot_size=50, tick_size=0.05),
+)
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.config import settings
+config_module = types.ModuleType("src.config")
+config_module.__package__ = "src"
+config_module.RiskConfig = RiskConfig
+config_module.settings = mock_settings
+sys.modules["src.config"] = config_module
+
+settings = mock_settings
 from src.backtesting.data_source import BacktestCsvSource
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
@@ -139,7 +167,7 @@ class BacktestRunner:
             entry_price=current_price,
             quantity=quantity,
             order_id=f"order_{current_dt.isoformat()}",
-            atr=sig.market_volatility or 0.0,
+            atr_at_entry=sig.market_volatility or 0.0,
         )
         # Attach SL/TP for the bar-by-bar simulator
         setattr(trade, "stop_loss", sig.stop_loss)
