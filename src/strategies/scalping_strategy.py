@@ -58,47 +58,55 @@ class EnhancedScalpingStrategy:
     def __init__(
         self,
         *,
-        ema_fast: int = 9,
-        ema_slow: int = 21,
-        rsi_period: int = 14,
+        ema_fast: int = settings.strategy.ema_fast,
+        ema_slow: int = settings.strategy.ema_slow,
+        rsi_period: int = settings.strategy.rsi_period,
         adx_period: int = 14,
         adx_trend_strength: int = 20,
+        atr_period: int = settings.strategy.atr_period,
+        min_bars_for_signal: int = settings.strategy.min_bars_for_signal,
+        confidence_threshold: float = settings.strategy.confidence_threshold,
+        min_signal_score: int = settings.strategy.min_signal_score,
+        atr_sl_multiplier: float = settings.strategy.atr_sl_multiplier,
+        atr_tp_multiplier: float = settings.strategy.atr_tp_multiplier,
     ) -> None:
-        strat = getattr(settings, "strategy", object())
-
         # Core lookbacks
-        self.ema_fast = int(getattr(strat, "ema_fast", ema_fast))
-        self.ema_slow = int(getattr(strat, "ema_slow", ema_slow))
-        self.rsi_period = int(getattr(strat, "rsi_period", rsi_period))
-        self.adx_period = int(getattr(strat, "adx_period", adx_period))
-        self.adx_trend_strength = int(getattr(strat, "adx_trend_strength", adx_trend_strength))
-        self.atr_period = int(getattr(strat, "atr_period", 14))
+        self.ema_fast = int(ema_fast)
+        self.ema_slow = int(ema_slow)
+        self.rsi_period = int(rsi_period)
+        self.adx_period = int(adx_period)
+        self.adx_trend_strength = int(adx_trend_strength)
+        self.atr_period = int(atr_period)
 
         # Regime shaping (add to multipliers; can be negative)
-        self.trend_tp_boost = float(getattr(strat, "trend_tp_boost", 0.6))
-        self.trend_sl_relax = float(getattr(strat, "trend_sl_relax", 0.2))
-        self.range_tp_tighten = float(getattr(strat, "range_tp_tighten", -0.4))
-        self.range_sl_tighten = float(getattr(strat, "range_sl_tighten", -0.2))
+        self.trend_tp_boost = float(getattr(settings.strategy, "trend_tp_boost", 0.6))
+        self.trend_sl_relax = float(getattr(settings.strategy, "trend_sl_relax", 0.2))
+        self.range_tp_tighten = float(getattr(settings.strategy, "range_tp_tighten", -0.4))
+        self.range_sl_tighten = float(getattr(settings.strategy, "range_sl_tighten", -0.2))
 
         # Bars threshold for validity
-        self.min_bars_for_signal = int(getattr(strat, "min_bars_for_signal", max(self.ema_slow, 10)))
+        self.min_bars_for_signal = int(min_bars_for_signal)
 
         # Thresholds (normalize confidence scale)
         # Config is typically 0..100; internal scoring below returns ~0..8
-        raw_conf = float(getattr(strat, "confidence_threshold", 55))  # e.g., 55 (%)
-        raw_conf_rel = float(getattr(strat, "confidence_threshold_relaxed", max(0.0, raw_conf - 20)))
+        raw_conf = float(confidence_threshold)  # e.g., 55 (%)
+        raw_conf_rel = float(
+            getattr(settings.strategy, "confidence_threshold_relaxed", max(0.0, raw_conf - 20))
+        )
         self.min_conf_strict = raw_conf / 10.0   # 55 -> 5.5 on a 0..10-ish scale
         self.min_conf_relaxed = raw_conf_rel / 10.0
 
-        self.min_score_strict = int(getattr(strat, "min_signal_score", 3))
-        self.auto_relax_enabled = bool(getattr(strat, "auto_relax_enabled", True))
-        self.min_score_relaxed = int(getattr(strat, "min_signal_score_relaxed", max(2, self.min_score_strict - 1)))
+        self.min_score_strict = int(min_signal_score)
+        self.auto_relax_enabled = bool(getattr(settings.strategy, "auto_relax_enabled", True))
+        self.min_score_relaxed = int(
+            getattr(settings.strategy, "min_signal_score_relaxed", max(2, self.min_score_strict - 1))
+        )
 
         # ATR & confidence shaping
-        self.base_sl_mult = float(getattr(strat, "atr_sl_multiplier", 1.3))
-        self.base_tp_mult = float(getattr(strat, "atr_tp_multiplier", 2.2))
-        self.sl_conf_adj = float(getattr(strat, "sl_confidence_adj", 0.2))
-        self.tp_conf_adj = float(getattr(strat, "tp_confidence_adj", 0.3))
+        self.base_sl_mult = float(atr_sl_multiplier)
+        self.base_tp_mult = float(atr_tp_multiplier)
+        self.sl_conf_adj = float(getattr(settings.strategy, "sl_confidence_adj", 0.2))
+        self.tp_conf_adj = float(getattr(settings.strategy, "tp_confidence_adj", 0.3))
 
         # Exportable debug snapshot
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}

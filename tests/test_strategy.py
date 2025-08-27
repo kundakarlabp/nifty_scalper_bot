@@ -44,7 +44,13 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
 
 def test_generate_signal_returns_valid_structure(strategy_config: StrategySettings):
     """A generated signal should be a Signal with valid fields."""
-    strategy = EnhancedScalpingStrategy(strategy_config)
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
     df = create_test_dataframe(trending_up=True)
 
     sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
@@ -59,7 +65,13 @@ def test_generate_signal_returns_valid_structure(strategy_config: StrategySettin
 
 def test_no_signal_on_flat_data(strategy_config: StrategySettings):
     """No signal when ATR is effectively zero (flat series)."""
-    strategy = EnhancedScalpingStrategy(strategy_config)
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
     df = create_test_dataframe(constant_price=True)
 
     sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
@@ -71,7 +83,13 @@ def test_signal_direction_on_trends(strategy_config: StrategySettings):
     Up-trend should bias BUY; down-trend should bias SELL,
     subject to scoring/thresholds.
     """
-    strategy = EnhancedScalpingStrategy(strategy_config)
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
 
     df_up = create_test_dataframe(trending_up=True)
     sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
