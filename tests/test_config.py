@@ -132,6 +132,48 @@ def test_invalid_instrument_token_detected(monkeypatch):
     assert "valid F&O token" in str(exc.value)
 
 
+def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
+    """A valid token with empty OHLC data should pass via LTP fallback."""
+
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": "111",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_, **__):
+            return pd.DataFrame()
+
+        def get_last_price(self, token):
+            return 1.0
+
+    class DummyKite:
+        def __init__(self, api_key):
+            pass
+
+        def set_access_token(self, token):
+            pass
+
+    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
+        m.setattr("src.config.LiveKiteSource", DummySource)
+        m.setattr("src.config.KiteConnect", DummyKite)
+        # Should not raise
+        validate_critical_settings()
+
+
 def test_lookback_less_than_min_bars():
     env = {
         "TELEGRAM__BOT_TOKEN": "bot",
