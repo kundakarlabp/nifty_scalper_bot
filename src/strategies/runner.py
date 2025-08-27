@@ -411,7 +411,14 @@ class StrategyRunner:
             return None
 
         try:
-            lookback = int(settings.data.lookback_minutes)
+            # Use the larger of configured lookback or required bars for signal.
+            lookback = max(
+                int(settings.data.lookback_minutes),
+                int(settings.strategy.min_bars_for_signal),
+            )
+            # Add a small buffer (10%) to account for any missing candles.
+            lookback = int(lookback * 1.1)
+
             end = self._now_ist().replace(second=0, microsecond=0)
             start = end - timedelta(minutes=lookback)
 
