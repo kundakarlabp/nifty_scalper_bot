@@ -9,14 +9,18 @@ from src.config import settings
 class DummyTelegram:
     """Minimal telegram controller stub for StrategyRunner."""
 
-    def send_message(self, msg: str) -> None:  # pragma: no cover - no behavior
-        pass
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def send_message(self, msg: str) -> None:  # pragma: no cover - capture only
+        self.messages.append(msg)
 
 
 def test_offhours_skips_risk_gates(monkeypatch) -> None:
     """Risk gates are marked as skipped when outside trading hours."""
 
-    runner = StrategyRunner(telegram_controller=DummyTelegram())
+    telegram = DummyTelegram()
+    runner = StrategyRunner(telegram_controller=telegram)
 
     # Simulate being outside the trading window and ensure off-hours testing is disabled
     monkeypatch.setattr(runner, "_within_trading_window", lambda: False)
@@ -28,4 +32,5 @@ def test_offhours_skips_risk_gates(monkeypatch) -> None:
 
     assert summary["status_messages"]["risk_gates"] == "skipped"
     assert flow["reason_block"] == "off_hours"
+    assert any("outside trading window" in m for m in telegram.messages)
 
