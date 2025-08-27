@@ -586,7 +586,10 @@ class StrategyRunner:
         bundle = self._build_diag_bundle()
         flow = bundle.get("last_flow", {}) if isinstance(bundle, dict) else {}
 
-        telegram_ok = bool(self.telegram is not None)
+        telegram_obj = getattr(self, "telegram", None)
+        telegram_ok = bool(
+            telegram_obj and telegram_obj.__class__.__name__ != "_NoopTelegram"
+        )
         live = bool(settings.enable_live_trading)
         broker_ok = (self.kite is not None) if live else True
         data_fresh = (time.time() - getattr(self, "_last_fetch_ts", 0.0)) < 120
