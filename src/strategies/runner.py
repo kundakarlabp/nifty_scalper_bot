@@ -532,12 +532,16 @@ class StrategyRunner:
         })
 
         # Risk gates last view
-        gates = (
+        gates_raw = (
             self._last_flow_debug.get("risk_gates", RISK_GATES_SKIPPED)
             if isinstance(self._last_flow_debug, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = gates is RISK_GATES_SKIPPED
+        skipped = (
+            gates_raw is RISK_GATES_SKIPPED
+            or (isinstance(gates_raw, dict) and bool(gates_raw.get("skipped")))
+        )
+        gates = gates_raw if isinstance(gates_raw, dict) else {}
         gates_ok = True if skipped else (bool(gates) and all(bool(v) for v in gates.values()))
         checks.append({
             "name": "Risk gates",
@@ -587,13 +591,17 @@ class StrategyRunner:
         bars = int(flow.get("bars", 0) or 0)
         min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
         strat_ready = bars >= min_bars
-        gates = (
+        gates_raw = (
             flow.get("risk_gates", RISK_GATES_SKIPPED)
             if isinstance(flow, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = gates is RISK_GATES_SKIPPED
-        gates_ok = isinstance(gates, dict) and all(bool(v) for v in gates.values())
+        skipped = (
+            gates_raw is RISK_GATES_SKIPPED
+            or (isinstance(gates_raw, dict) and bool(gates_raw.get("skipped")))
+        )
+        gates = gates_raw if isinstance(gates_raw, dict) else {}
+        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
 
