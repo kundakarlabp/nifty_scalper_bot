@@ -113,6 +113,7 @@ class PositionSizer:
         # Lots affordable under risk budget
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
 
+        # If the risk budget can't fund even a single lot, exit early
         if lots_raw < 1:
             return 0, 0, PositionSizer._diag(
                 si, sp, sl_points, rupee_risk_per_lot, risk_rupees, lots_raw, 0, 0, 0
