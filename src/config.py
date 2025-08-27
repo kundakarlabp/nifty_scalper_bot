@@ -207,6 +207,7 @@ class SystemSettings(BaseModel):
     websocket_reconnect_attempts: int = 5
     order_timeout_seconds: int = 30
     position_sync_interval: int = 60
+    log_buffer_capacity: int = 4000
 
 
 # ================= Root settings =================

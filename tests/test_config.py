@@ -57,3 +57,4 @@ def test_default_values():
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True  # Default value
+        assert settings.system.log_buffer_capacity == 4000  # Default value
