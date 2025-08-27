@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src.config import settings
-from src.strategies.scalping_strategy import DynamicScalpingStrategy
-from src.risk.position_sizing import PositionSizing
+from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.risk.position_sizing import PositionSizer
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -22,18 +22,18 @@ logging.basicConfig(
 
 class BacktestEngine:
     """
-    Simple bar-by-bar backtesting engine using DynamicScalpingStrategy.
+    Simple bar-by-bar backtesting engine using ``EnhancedScalpingStrategy``.
 
     Assumptions:
-    - Input `data` is a pandas DataFrame indexed by timestamp with at least a 'close' column.
-    - Strategy `generate_signal(df)` returns either:
-        None (no trade)
+    - Input ``data`` is a pandas DataFrame indexed by timestamp with at least a ``close`` column.
+    - Strategy ``generate_signal(df)`` returns either:
+        ``None`` (no trade)
         or a dict with keys like:
-            side: "BUY" | "SELL" (optional; default BUY)
-            sl: float  (stop distance or stop price context-dependent; we treat as distance)
-            tp: float  (optional; not enforced here, but kept for future use)
+            ``side``: ``"BUY"`` | ``"SELL"`` (optional; default BUY)
+            ``sl``: float  (stop distance or stop price context-dependent; we treat as distance)
+            ``tp``: float  (optional; not enforced here, but kept for future use)
     - Exit logic: next-bar close (integration smoke test style).
-    - Sizing: delegated to PositionSizing(account_size=initial_capital).
+    - Sizing: delegated to ``PositionSizer`` driven by risk settings.
     """
 
     def __init__(self, data: pd.DataFrame, initial_capital: float = 100_000.0) -> None:
@@ -47,8 +47,8 @@ class BacktestEngine:
         self.positions: List[Dict[str, Any]] = []
 
         # Strategy & risk
-        self.strategy = DynamicScalpingStrategy()
-        self.risk_manager = PositionSizing(account_size=self.initial_capital)
+        self.strategy = EnhancedScalpingStrategy()
+        self.risk_manager = PositionSizer(settings.risk)
 
         # Config-driven params
         self.min_bars_for_signal: int = int(settings.strategy.min_bars_for_signal or 10)
@@ -93,7 +93,13 @@ class BacktestEngine:
                     stop_loss = entry_price - sl_dist
 
                 # Position size via risk manager
-                qty = int(self.risk_manager.calculate_position_size(entry_price, stop_loss))
+                lot_size = getattr(settings.instruments, "nifty_lot_size", 1)
+                qty, _, _ = self.risk_manager.size_from_signal(
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    lot_size=lot_size,
+                    equity=self.current_capital,
+                )
                 if qty <= 0:
                     continue
 
