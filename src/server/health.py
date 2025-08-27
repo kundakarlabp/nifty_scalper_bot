@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response
+from src.config import settings
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
@@ -70,15 +70,14 @@ def run(
             daemon=True,
         ).start()
 
-    Env overrides:
-      HEALTH_HOST (default "0.0.0.0")
-      HEALTH_PORT (default "8000")
+    Configuration is sourced from ``settings.health`` which reads
+    ``HEALTH__HOST`` and ``HEALTH__PORT`` from the environment.
     """
     global _status_callback
     _status_callback = callback
 
-    bind_host = host or os.environ.get("HEALTH_HOST", "0.0.0.0")
-    bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
+    bind_host = host or settings.health.host
+    bind_port = int(port or settings.health.port)
 
     # No reloader, multi-threaded to avoid blocking the trading loop
     app.run(host=bind_host, port=bind_port, debug=False, use_reloader=False, threaded=True)

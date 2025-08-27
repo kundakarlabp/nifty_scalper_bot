@@ -10,7 +10,9 @@ Config with nested models (original structure) + flat aliases for compatibility.
 - Adds optional historical backfill knobs under DataSettings.
 """
 
-from pydantic import BaseModel, validator
+import os
+
+from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 
 
@@ -145,7 +147,12 @@ class RiskSettings(BaseModel):
     risk_per_trade: float = 0.01
     max_trades_per_day: int = 12
     consecutive_loss_limit: int = 3
-    max_daily_drawdown_pct: float = 0.04
+    max_daily_drawdown_pct: float = Field(
+        default_factory=lambda: float(os.environ.get("RISK__MAX_DAILY_DRAWDOWN_PCT", 0.04)),
+        ge=0.01,
+        le=0.20,
+        validate_default=True,
+    )
     max_position_size_pct: float = 0.10
 
     @validator("risk_per_trade")
@@ -154,11 +161,6 @@ class RiskSettings(BaseModel):
             raise ValueError("risk_per_trade must be between 0.1% and 10%")
         return v
 
-    @validator("max_daily_drawdown_pct")
-    def _v_dd_pct(cls, v: float) -> float:
-        if not 0.01 <= v <= 0.20:
-            raise ValueError("max_daily_drawdown_pct must be between 1% and 20%")
-        return v
 
     @validator("min_equity_floor", "default_equity")
     def _v_equity_pos(cls, v: float) -> float:
@@ -199,7 +201,8 @@ class ExecutorSettings(BaseModel):
 
 class HealthSettings(BaseModel):
     enable_server: bool = True
-    port: int = 8000
+    host: str
+    port: int
 
 
 class SystemSettings(BaseModel):
@@ -224,7 +227,7 @@ class AppSettings(BaseSettings):
     strategy: StrategySettings = StrategySettings()
     risk: RiskSettings = RiskSettings()
     executor: ExecutorSettings = ExecutorSettings()
-    health: HealthSettings = HealthSettings()
+    health: HealthSettings
     system: SystemSettings = SystemSettings()
 
     class Config:
@@ -347,6 +350,8 @@ class AppSettings(BaseSettings):
     # Health/System (flat)
     @property
     def health_enable_server(self) -> bool: return self.health.enable_server
+    @property
+    def health_host(self) -> str: return self.health.host
     @property
     def health_port(self) -> int: return self.health.port
     @property
