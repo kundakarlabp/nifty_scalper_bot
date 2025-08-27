@@ -566,7 +566,8 @@ class StrategyRunner:
         min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
         strat_ready = bars >= min_bars
         gates = flow.get("risk_gates", {}) if isinstance(flow, dict) else {}
-        gates_ok = bool(gates) and all(bool(v) for v in gates.values())
+        skipped = isinstance(gates, dict) and gates.get("skipped")
+        gates_ok = bool(gates) and not skipped and all(bool(v) for v in gates.values())
         rr_ok = bool(flow.get("rr_ok", True))
         no_errors = (self._last_error is None)
 
@@ -577,7 +578,7 @@ class StrategyRunner:
                 "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
                 "data_feed": "ok" if data_fresh else "stale",
                 "strategy_readiness": "ok" if strat_ready else "not ready",
-                "risk_gates": "ok" if gates_ok else "blocked" if gates else "no-eval",
+                "risk_gates": "skipped" if skipped else ("ok" if gates_ok else "blocked" if gates else "no-eval"),
                 "rr_threshold": "ok" if rr_ok else "blocked",
                 "errors": "ok" if no_errors else "present",
             },
