@@ -177,6 +177,12 @@ def main() -> int:
         log.error("❌ Kite session init failed: %s", e)
 
     runner = StrategyRunner(kite=kite or None, telegram_controller=_NoopTelegram())
+
+    try:
+        runner.set_live_mode(settings.enable_live_trading)
+    except Exception as e:
+        log.error("⚠️ Live mode setup failed: %s", e)
+
     _install_signal_handlers(runner)
 
     # Wire Telegram
