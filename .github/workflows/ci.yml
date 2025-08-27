@@ -1,11 +1,214 @@
 # .github/workflows/ci.yml
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # optional; used only by ai-review job
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   build-test:
+    name: Build, Lint, Test, Backtest
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: chmod +x run_checks.sh && ./run_checks.sh
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Make run_checks executable
+        run: chmod +x run_checks.sh
+
+      - name: Run checks
+        run: ./run_checks.sh
+
+  ai-review:
+    name: AI Code Review (PRs only)
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Harden shell & mask secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "::add-mask::${OPENAI_API_KEY}"
+          fi
+          echo "✅ Shell hardened; secrets masked."
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: AI code review (safe, no secret logs)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_API_URL: https://api.github.com
+        run: |
+          python - <<'PY'
+          import os, sys, subprocess, textwrap, time, requests
+
+          def fail(msg: str):
+              print(msg, file=sys.stderr); sys.exit(1)
+
+          # Secrets present?
+          OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+          if not (OPENAI_API_KEY and OPENAI_API_KEY.strip()):
+              # Don’t fail PRs if key isn’t configured; just skip with a note.
+              print("ℹ OPENAI_API_KEY not set; skipping AI review.")
+              sys.exit(0)
+
+          GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+          if not (GITHUB_TOKEN and GITHUB_TOKEN.strip()):
+              fail("❌ GITHUB_TOKEN missing.")
+
+          BASE = os.getenv("BASE_SHA","").strip()
+          HEAD = os.getenv("HEAD_SHA","").strip()
+          REPO = os.getenv("REPO","").strip()
+          PR_NUMBER = os.getenv("PR_NUMBER","").strip()
+          GH_API = os.getenv("GITHUB_API_URL","https://api.github.com").strip()
+          if not (BASE and HEAD and REPO and PR_NUMBER):
+              fail("❌ Missing PR context (BASE/HEAD/REPO/PR_NUMBER).")
+
+          def sh(cmd):
+              try:
+                  return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+              except subprocess.CalledProcessError as e:
+                  raise SystemExit(f"❌ Command failed: {' '.join(cmd)}\nExit {e.returncode}\n--- stdout+stderr ---\n{e.output}")
+
+          # Fetch refs
+          try:
+              sh(["git","fetch","origin",BASE,HEAD,"--depth","50"])
+          except Exception as e:
+              fail(f"❌ Error fetching refs {BASE}/{HEAD}: {e}")
+
+          # Changed files
+          try:
+              changed = sh(["git","diff","--name-only",BASE,HEAD]).splitlines()
+          except Exception as e:
+              fail(f"❌ Error listing changed files: {e}")
+
+          if not changed:
+              # Nothing to review
+              def gh_comment(body: str):
+                  url = f"{GH_API}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+                  r = requests.post(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                                                  "Accept":"application/vnd.github+json"},
+                                    json={"body": body}, timeout=30)
+                  if r.status_code >= 300:
+                      fail(f"❌ Failed to post comment: {r.status_code} {r.text[:300]}")
+              gh_comment("✅ No changed files between base and head. Nothing to review.")
+              sys.exit(0)
+
+          # Collect diffs
+          snippets = []
+          for p in changed:
+              p = p.strip()
+              if not p: continue
+              try:
+                  d = sh(["git","diff","--unified=0",BASE,HEAD,"--",p])
+              except Exception as e:
+                  fail(f"❌ Error collecting diff for '{p}': {e}")
+              if d.strip():
+                  snippets.append(f"--- FILE: {p}\n{d[:120_000]}\n")
+          if not snippets:
+              def gh_comment(body: str):
+                  url = f"{GH_API}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+                  r = requests.post(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                                                  "Accept":"application/vnd.github+json"},
+                                    json={"body": body}, timeout=30)
+                  if r.status_code >= 300:
+                      fail(f"❌ Failed to post comment: {r.status_code} {r.text[:300]}")
+              gh_comment("ℹ Changes detected, but no reviewable diff hunks (binary/whitespace-only).")
+              sys.exit(0)
+
+          full_diff = "\n".join(snippets)
+          if len(full_diff) > 400_000:
+              full_diff = full_diff[:400_000]
+
+          system_msg = "You are a senior code reviewer. Be concise and actionable. Prioritize security, error handling, reliability, CI hygiene, rate limits."
+          user_msg = textwrap.dedent(f"""
+          Review this PR diff. Focus on:
+          - API key/secret exposure (validate presence without echoing).
+          - Git/diff error surfacing (no silent failures).
+          - GitHub API rate-limit handling (exponential backoff/Retry-After).
+          - Secret-safe logging.
+          - If trading logic appears, remind about pre-trade safety (market open, margin, risk caps, SL/TP).
+          Return sections: High-Severity, Functional Bugs, Risk & Safety, Rate-Limit/Performance, Concrete Fixes, Quick-Win Tests.
+
+          DIFF START
+          {full_diff}
+          DIFF END
+          """)
+
+          def post_with_backoff(url, payload, headers, max_attempts=6):
+              last=None
+              for a in range(1,max_attempts+1):
+                  r = requests.post(url, json=payload, headers=headers, timeout=45)
+                  last=r
+                  txt=(r.text or "").lower()
+                  if r.status_code==403 and ("rate limit" in txt or r.headers.get("X-RateLimit-Remaining")=="0"):
+                      ra=r.headers.get("Retry-After")
+                      sleep_s=int(ra) if ra and ra.isdigit() else min(60,2**a)
+                      time.sleep(sleep_s); continue
+                  if 500 <= r.status_code < 600:
+                      time.sleep(min(60,2**a)); continue
+                  r.raise_for_status(); return r
+              raise SystemExit(f"❌ API failed after {max_attempts} attempts. Last: {last.status_code if last else 'n/a'} {'' if not last else last.text[:300]}")
+
+          # OpenAI call
+          headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"}
+          payload={"model":"gpt-4o-mini","messages":[{"role":"system","content":system_msg},{"role":"user","content":user_msg}],"temperature":0.2,"max_tokens":1200}
+          try:
+              data = post_with_backoff("https://api.openai.com/v1/chat/completions", payload, headers).json()
+              review = (data.get("choices",[{}])[0].get("message",{}).get("content","")).strip() or "No findings."
+          except Exception as e:
+              fail(f"❌ OpenAI request failed: {e}")
+
+          safety_tail = """
+          ---
+          **Pre-Trade Safety (if relevant):**
+          Gate orders on market_open, margin OK, daily loss cap, 3-loss shutdown, SL/TP computed, spread/liquidity OK, lot limits, duplicate prevention. Place server-side SL/TP immediately after entry.
+          """.strip()
+
+          final_comment = review + "\n\n" + safety_tail
+
+          # Post to PR
+          gh_url = f"{GH_API}/repos/{REPO}/issues/{PR_NUMBER}/comments"
+          try:
+              post_with_backoff(gh_url, {"body": final_comment},
+                                {"Authorization": f"Bearer {GITHUB_TOKEN}",
+                                 "Accept":"application/vnd.github+json"})
+          except Exception as e:
+              fail(f"❌ Failed to post review comment: {e}")
+
+          print("✅ AI code review comment posted.")
+          PY
