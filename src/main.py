@@ -197,9 +197,11 @@ def main() -> int:
         while not _stop_flag:
             try:
                 runner.health_check()
+                time.sleep(5)
             except Exception as e:
-                log.warning("Health check warn: %s", e)
-            time.sleep(5)
+                log.exception("Main loop error: %s", e)
+                time.sleep(1)
+                continue
     finally:
         try:
             runner.shutdown()
