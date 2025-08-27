@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, RiskSettings
+from src.config import AppSettings, RiskSettings, validate_critical_settings
 
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
@@ -54,3 +54,32 @@ def test_default_values():
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True  # Default value
         assert settings.system.log_buffer_capacity == 4000  # Default value
+
+
+def test_zerodha_creds_required_when_live():
+    """Zerodha credentials must be present when live trading is enabled."""
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    with mock.patch("src.config.settings", settings):
+        with pytest.raises(ValueError) as exc:
+            validate_critical_settings()
+    assert "ZERODHA__API_KEY is required" in str(exc.value)
+
+
+def test_zerodha_creds_optional_when_paper():
+    """Zerodha credentials are not required in paper trading mode."""
+    env = {
+        "ENABLE_LIVE_TRADING": "false",
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    with mock.patch("src.config.settings", settings):
+        # Should not raise
+        validate_critical_settings()
