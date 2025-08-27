@@ -102,8 +102,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     TelegramController = _import_telegram_class()
     if not TelegramController:
         return
-
-    tg = TelegramController(
+    tg = TelegramController.create(
         # providers
         status_provider=getattr(runner, "get_status_snapshot", lambda: {"ok": False}),
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
@@ -127,6 +126,8 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         set_trend_boosts=getattr(runner, "set_trend_boosts", None),
         set_range_tighten=getattr(runner, "set_range_tighten", None),
     )
+    if tg is None:
+        return
 
     runner.telegram_controller = tg  # back-compat
     runner.telegram = tg
