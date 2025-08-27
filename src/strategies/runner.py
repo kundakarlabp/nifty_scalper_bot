@@ -551,10 +551,14 @@ class StrategyRunner:
                     self._last_fetch_ts = time.time()
                     return df.sort_index()
 
-                self.log.warning(
-                    "Insufficient historical_data (%s<%s) after expanded fetch; using LTP fallback.",
+                self.log.error(
+                    "Insufficient historical_data (%s<%s) after expanded fetch.",
                     rows,
                     min_bars,
+                )
+                self._last_error = "no_historical_data"
+                self._notify(
+                    "⚠️ Historical data unavailable from broker — check credentials or subscription."
                 )
 
             # Fallback: synthesize a single bar from trade symbol/token LTP

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from typing import List
 
 import pandas as pd
 
@@ -87,3 +88,36 @@ def test_fetch_spot_ohlc_invalid_window(monkeypatch):
     df = runner._fetch_spot_ohlc()
     assert df is None
     assert ds.calls == []
+
+
+def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
+    """If the data source returns None, the runner should alert the user."""
+
+    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+
+    class _Telegram:
+        def __init__(self) -> None:
+            self.msgs: List[str] = []
+
+        def send_message(self, msg: str) -> None:
+            self.msgs.append(msg)
+
+    class _FailSource:
+        def fetch_ohlc(self, *args, **kwargs):
+            return None
+
+        def get_last_price(self, symbol):
+            return 1.0
+
+    telegram = _Telegram()
+    runner = StrategyRunner(telegram_controller=telegram)
+    runner._start_time = runner._parse_hhmm("09:20")
+    runner._end_time = runner._parse_hhmm("15:20")
+    runner.data_source = _FailSource()
+    monkeypatch.setattr(runner, "_now_ist", lambda: now_dt)
+
+    df = runner._fetch_spot_ohlc()
+
+    assert df is not None  # falls back to LTP
+    assert telegram.msgs, "No alert sent"
+    assert "historical data" in telegram.msgs[0].lower()

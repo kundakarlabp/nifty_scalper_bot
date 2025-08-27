@@ -37,10 +37,13 @@ class DataSource:
         """Connect or noop."""
         return
 
-    def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
+    def fetch_ohlc(
+        self, token: int, start: datetime, end: datetime, timeframe: str
+    ) -> Optional[pd.DataFrame]:
         """
-        Return OHLC DataFrame with columns: open, high, low, close, volume.
+        Return an OHLC DataFrame with columns: open, high, low, close, volume.
         Index should be pandas Timestamps (timezone‑naive IST is fine).
+        A subclass may return ``None`` if no data could be retrieved.
         """
         raise NotImplementedError
 
@@ -241,25 +244,29 @@ class LiveKiteSource(DataSource):
             return None
 
     # ---- main candle fetch ----
-    def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> pd.DataFrame:
+    def fetch_ohlc(
+        self, token: int, start: datetime, end: datetime, timeframe: str
+    ) -> Optional[pd.DataFrame]:
         """
-        Primary path: Kite historical_data
-        Fallback: if empty, synthesize one 'bar' from current LTP to keep diagnostics alive.
+        Primary path: Kite ``historical_data``.
+        Returns ``None`` if no candles were retrieved even after all retries.
         """
         if not self.kite:
             log.warning("LiveKiteSource.fetch_ohlc: kite is None.")
-            return pd.DataFrame()
+            return None
 
         # Guard inputs
         try:
             token = int(token)
         except Exception:
             log.error("fetch_ohlc: invalid token %r", token)
-            return pd.DataFrame()
+            return None
 
         if not isinstance(start, datetime) or not isinstance(end, datetime):
-            log.error("fetch_ohlc: start/end must be datetime, got %r %r", type(start), type(end))
-            return pd.DataFrame()
+            log.error(
+                "fetch_ohlc: start/end must be datetime, got %r %r", type(start), type(end)
+            )
+            return None
 
         if start >= end:
             # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
@@ -317,19 +324,12 @@ class LiveKiteSource(DataSource):
             df = df[~df.index.duplicated(keep="last")]
 
             if df.empty:
-                # This can happen near the right edge of a session or with brief API hiccups.
-                # Use LTP to synthesize a single bar to avoid a hard stop.
-                log.warning(
-                    "historical_data empty for token=%s interval=%s window=%s→%s; using LTP fallback.",
+                # No data retrieved — let caller handle this explicitly.
+                log.error(
+                    "historical_data empty for token=%s interval=%s window=%s→%s", 
                     token, interval, start, end,
                 )
-                ltp = self.get_last_price(token)
-                if isinstance(ltp, (int, float)):
-                    ts = _now_ist_naive().replace(second=0, microsecond=0)
-                    df = pd.DataFrame(
-                        {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                        index=[ts],
-                    )
+                return None
 
             if df is not None and not df.empty:
                 # Clip to requested window and cache the *unclipped* frame covering the window
@@ -340,7 +340,7 @@ class LiveKiteSource(DataSource):
                 if not clipped.empty and need.issubset(clipped.columns):
                     return clipped
 
-            return pd.DataFrame()
+            return None
 
         except Exception as e:
             # Network hiccups are common; degrade to a single LTP bar so callers
@@ -353,4 +353,4 @@ class LiveKiteSource(DataSource):
                     {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
                     index=[ts],
                 )
-            return pd.DataFrame()
+            return None
