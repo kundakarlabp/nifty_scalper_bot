@@ -386,9 +386,6 @@ def validate_critical_settings() -> None:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
-# Validate on import
-validate_critical_settings()
-
 # -------- Back-compat convenience aliases (read-only) --------
 # (These mirror the flat properties as plain module-level names if other modules import them.)
 risk_default_equity = settings.risk_default_equity
