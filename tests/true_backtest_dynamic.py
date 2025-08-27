@@ -164,6 +164,8 @@ class BacktestRunner:
 
         if not self.session.trade_history:
             logger.warning("No trades were executed. Cannot generate report.")
+            # Still provide a minimal summary so callers have consistent output
+            self._generate_simple_report()
             return
 
         # Build a (very) simple equity curve from discrete trade outcomes
