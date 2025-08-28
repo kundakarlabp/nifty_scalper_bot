@@ -178,6 +178,11 @@ class OrderExecutor:
         self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
 
+        # microstructure constraints
+        self.max_spread_pct = float(getattr(ex, "max_spread_pct", 0.0035))
+        self.depth_multiplier = float(getattr(ex, "depth_multiplier", 5.0))
+        self.micro_retry_limit = int(getattr(ex, "micro_retry_limit", 3))
+
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
 
@@ -243,6 +248,10 @@ class OrderExecutor:
         action = str(payload.get("action", "")).upper()
         qty = int(payload.get("quantity", 0))
         price = float(payload.get("entry_price", 0))
+        bid = payload.get("bid")
+        ask = payload.get("ask")
+        depth = payload.get("depth")
+        refresh_cb = payload.get("refresh_market")
         symbol = payload.get("symbol") or self._infer_symbol(payload)
         token = int(payload.get("instrument_token") or 0)
 
@@ -264,6 +273,34 @@ class OrderExecutor:
                 self.last_error = "duplicate_symbol_open"
                 log.warning("Open record exists on %s; skip new entry.", norm_symbol)
                 return None
+
+        # microstructure gates + mid execution
+        if bid and ask:
+            tries = 0
+            while tries < self.micro_retry_limit:
+                mid = (float(bid) + float(ask)) / 2.0
+                spread = float(ask) - float(bid)
+                spread_pct = spread / mid if mid else float("inf")
+                depth_ok = True
+                if depth is not None:
+                    try:
+                        depth_ok = float(depth) >= self.depth_multiplier * qty
+                    except Exception:
+                        depth_ok = True
+                if spread_pct <= self.max_spread_pct and depth_ok:
+                    price = min(float(ask), mid + 0.15 * spread)
+                    price = _round_to_tick(price, self.tick_size)
+                    break
+                tries += 1
+                if callable(refresh_cb):
+                    try:
+                        bid, ask, depth = refresh_cb()
+                        continue
+                    except Exception:
+                        pass
+                if tries >= self.micro_retry_limit:
+                    self.last_error = "microstructure_block"
+                    return None
 
         if not self.kite:
             # PAPER MODE: create a synthetic record so the rest of the flow works
