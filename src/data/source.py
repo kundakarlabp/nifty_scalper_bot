@@ -276,6 +276,57 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
     return None
 
 
+def get_historical_data(
+    source: DataSource,
+    token: int,
+    end: datetime,
+    timeframe: str,
+    warmup_bars: int = 50,
+) -> Optional[pd.DataFrame]:
+    """Fetch at least ``warmup_bars`` rows of OHLC data.
+
+    The helper expands the lookback window progressively until the desired
+    number of bars is retrieved or returns whatever data could be obtained
+    after a few attempts. Returned data is capped to the most recent
+    ``warmup_bars`` rows.
+    """
+
+    try:
+        warmup = int(warmup_bars)
+    except Exception:
+        warmup = 0
+
+    if warmup <= 0:
+        warmup = 1
+
+    interval = _coerce_interval(timeframe)
+    interval_minutes = {
+        "minute": 1,
+        "3minute": 3,
+        "5minute": 5,
+        "10minute": 10,
+        "15minute": 15,
+        "day": 1440,
+    }
+    step = timedelta(minutes=interval_minutes.get(interval, 1) * warmup)
+    start = end - step
+
+    attempts = 0
+    df: Optional[pd.DataFrame] = None
+
+    while attempts < 3:
+        df = source.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
+        if isinstance(df, pd.DataFrame) and len(df) >= warmup:
+            return df.tail(warmup).copy()
+        start -= step
+        attempts += 1
+
+    # Return whatever data was fetched (may be ``None`` or short).
+    if isinstance(df, pd.DataFrame) and len(df) > warmup:
+        return df.tail(warmup).copy()
+    return df
+
+
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
