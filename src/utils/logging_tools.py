@@ -9,6 +9,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from src.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 class RateLimitFilter(logging.Filter):
     """Filter that rate-limits identical log messages.
