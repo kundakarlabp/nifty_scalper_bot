@@ -331,6 +331,13 @@ class LiveKiteSource(DataSource):
             if out is not None:
                 self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
                 return _clip_window(out, start, end)
+            ltp = self.get_last_price(sym or token)
+            if isinstance(ltp, (int, float)):
+                ts = _now_ist_naive().replace(second=0, microsecond=0)
+                return pd.DataFrame(
+                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
+                    index=[ts],
+                )
             return None
 
         # Guard inputs
@@ -414,6 +421,13 @@ class LiveKiteSource(DataSource):
                 if out is not None:
                     self._cache.set(token, interval, out, start, end)
                     return _clip_window(out, start, end)
+                ltp = self.get_last_price(sym or token)
+                if isinstance(ltp, (int, float)):
+                    ts = _now_ist_naive().replace(second=0, microsecond=0)
+                    return pd.DataFrame(
+                        {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
+                        index=[ts],
+                    )
                 return None
 
             clipped = _clip_window(df, start, end)

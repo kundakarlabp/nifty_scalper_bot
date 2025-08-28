@@ -83,11 +83,10 @@ class StrategyRunner:
                         )
                         if not isinstance(df, pd.DataFrame) or df.empty:
                             self.log.warning(
-                                "instrument_token %s returned no historical data — please"
-                                " configure a valid F&O token; disabling data source.",
+                                "instrument_token %s returned no historical data; "
+                                "falling back to symbol lookup if available.",
                                 token,
                             )
-                            self.data_source = None
                 if self.data_source is not None:
                     self.log.info("Data source initialized: LiveKiteSource")
                     try:
