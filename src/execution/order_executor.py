@@ -275,7 +275,7 @@ class OrderExecutor:
                 return None
 
         # microstructure gates + mid execution
-        if bid and ask:
+        if bid is not None and ask is not None:
             tries = 0
             while tries < self.micro_retry_limit:
                 mid = (float(bid) + float(ask)) / 2.0
@@ -284,7 +284,11 @@ class OrderExecutor:
                 depth_ok = True
                 if depth is not None:
                     try:
-                        depth_ok = float(depth) >= self.depth_multiplier * qty
+                        if isinstance(depth, (tuple, list)):
+                            depth_val = min(float(depth[0]), float(depth[1]))
+                        else:
+                            depth_val = float(depth)
+                        depth_ok = depth_val >= self.depth_multiplier * qty
                     except Exception:
                         depth_ok = True
                 if spread_pct <= self.max_spread_pct and depth_ok:
@@ -295,9 +299,9 @@ class OrderExecutor:
                 if callable(refresh_cb):
                     try:
                         bid, ask, depth = refresh_cb()
-                        continue
                     except Exception:
                         pass
+                time.sleep(0.2 + 0.1 * tries)
                 if tries >= self.micro_retry_limit:
                     self.last_error = "microstructure_block"
                     return None
