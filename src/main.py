@@ -37,9 +37,16 @@ def _setup_logging() -> None:
 # No-op Telegram fallback
 # -----------------------------
 class _NoopTelegram:
-    def send_message(self, *_a, **_k) -> None: ...
-    def start_polling(self) -> None: ...
-    def stop_polling(self) -> None: ...
+    """Minimal stand-in when Telegram is disabled."""
+
+    def send_message(self, *_a, **_k) -> None:  # pragma: no cover - trivial
+        return None
+
+    def start_polling(self) -> None:  # pragma: no cover - trivial
+        return None
+
+    def stop_polling(self) -> None:  # pragma: no cover - trivial
+        return None
 
 
 # -----------------------------
@@ -231,6 +238,10 @@ def main() -> int:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception:
             log.warning("Failed to send shutdown message to Telegram")
+        try:
+            runner.telegram_controller.stop_polling()
+        except Exception:
+            log.warning("Failed to stop Telegram polling")
 
     return 0
 
