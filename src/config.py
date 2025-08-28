@@ -110,8 +110,10 @@ class DataSettings(BaseModel):
         allowed = {"minute", "3minute", "5minute", "10minute", "15minute", "day"}
         # Keep loose—brokers vary; still nudge common values
         if v not in allowed:
-            # Accept anything but keep a sensible default rather than failing hard
-            return v
+            logging.getLogger("config").warning(
+                "Unsupported timeframe '%s'; defaulting to 'minute'", v
+            )
+            return "minute"
         return v
 
     @field_validator("lookback_minutes", "cache_ttl_seconds", "history_days", "history_max_candles")

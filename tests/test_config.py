@@ -4,6 +4,7 @@
 Tests for the Pydantic configuration system.
 """
 
+import logging
 import os
 from unittest import mock
 
@@ -11,7 +12,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, RiskSettings, validate_critical_settings
+from src.config import AppSettings, DataSettings, RiskSettings, validate_critical_settings
 
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
@@ -244,3 +245,11 @@ def test_instrument_token_validation_skips_on_network_error(monkeypatch):
         m.setattr("src.config.KiteConnect", DummyKite)
         # Should not raise even though fetch_ohlc errors
         validate_critical_settings()
+
+
+def test_invalid_timeframe_defaults_to_minute(caplog):
+    """Unsupported timeframe values should fall back to 'minute' with a warning."""
+    with caplog.at_level(logging.WARNING, logger="config"):
+        ds = DataSettings(timeframe="hourly")
+    assert ds.timeframe == "minute"
+    assert any("Unsupported timeframe" in r.message for r in caplog.records)
