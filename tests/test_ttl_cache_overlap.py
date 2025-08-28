@@ -1,0 +1,47 @@
+from datetime import datetime, timedelta
+import pandas as pd
+
+from src.data.source import LiveKiteSource
+
+
+class FakeKite:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def historical_data(self, token, frm, to, interval, continuous=False, oi=False):
+        self.calls += 1
+        start = frm - timedelta(minutes=60)
+        end = to + timedelta(minutes=60)
+        idx = pd.date_range(start, end, freq="1min", inclusive="left")
+        return [
+            {
+                "date": ts.to_pydatetime(),
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "volume": 0,
+            }
+            for ts in idx
+        ]
+
+    def ltp(self, instruments):
+        return {str(instruments[0]): {"last_price": 1}}
+
+
+def test_overlapping_requests_hit_cache():
+    kite = FakeKite()
+    src = LiveKiteSource(kite)
+    start = datetime(2024, 1, 1, 9, 0)
+    end = datetime(2024, 1, 1, 9, 30)
+    df1 = src.fetch_ohlc(123, start, end, "minute")
+    assert df1 is not None
+    assert kite.calls == 1
+
+    start2 = datetime(2024, 1, 1, 9, 15)
+    end2 = datetime(2024, 1, 1, 9, 45)
+    df2 = src.fetch_ohlc(123, start2, end2, "minute")
+    assert df2 is not None
+    assert kite.calls == 1  # cache hit
+    expected_len = len(pd.date_range(start2, end2, freq="1min"))
+    assert len(df2) == expected_len
