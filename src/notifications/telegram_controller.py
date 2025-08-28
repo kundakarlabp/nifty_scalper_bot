@@ -373,48 +373,79 @@ class TelegramController:
                 status = self._status_provider() if self._status_provider else {}
                 plan = self._last_signal_provider() if self._last_signal_provider else {}
                 verbose = os.getenv("DIAG_VERBOSE", "true").lower() != "false"
-                lines: List[str] = ["Status"]
-                lines.append(f"market_open: {status.get('market_open')}")
-                lines.append(f"within_window: {status.get('within_window')}")
-                lines.append(f"daily_dd_hit: {status.get('daily_dd_hit')}")
-                lines.append(f"cooloff_until: {status.get('cooloff_until', '-')}")
-                lines.append(f"trades_today: {status.get('trades_today')}")
-                lines.append(f"consecutive_losses: {status.get('consecutive_losses')}")
+
+                def be(val: Any) -> str:
+                    return "✅" if val else "❌"
+
+                lines: List[str] = ["📊 Status"]
+                lines.append(f"• Market Open: {be(status.get('market_open'))}")
+                lines.append(f"• Within Window: {be(status.get('within_window'))}")
+                lines.append(f"• Daily DD Hit: {be(status.get('daily_dd_hit'))}")
+                lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
+                lines.append(f"• Trades Today: {status.get('trades_today')}")
+                lines.append(f"• Consecutive Losses: {status.get('consecutive_losses')}")
                 lines.append("")
-                lines.append("Signal")
+                lines.append("📈 Signal")
                 reason_block = plan.get("reason_block") or "-"
                 if verbose:
                     micro = plan.get("micro", {})
                     lines.append(
-                        f"action: {plan.get('action')}  option: {plan.get('option_type')}  strike: {plan.get('strike')}  qty: {plan.get('qty_lots')}"
+                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
+                            a=plan.get("action"),
+                            o=plan.get("option_type"),
+                            s=plan.get("strike"),
+                            q=plan.get("qty_lots"),
+                        )
                     )
                     lines.append(
-                        f"regime: {plan.get('regime')}  score: {plan.get('score')}  rr: {plan.get('rr')}"
+                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
+                            r=plan.get("regime"),
+                            sc=plan.get("score"),
+                            rr=plan.get("rr"),
+                        )
                     )
                     lines.append(
-                        f"atr%: {plan.get('atr_pct')}  spread%: {micro.get('spread_pct')}  depth_ok: {micro.get('depth_ok')}"
+                        "• ATR%: {a} | Spread%: {sp} | Depth OK: {d}".format(
+                            a=plan.get("atr_pct"),
+                            sp=micro.get("spread_pct"),
+                            d=be(micro.get("depth_ok")),
+                        )
                     )
                     lines.append(
-                        f"entry: {plan.get('entry')}  sl: {plan.get('sl')}  tp1: {plan.get('tp1')}  tp2: {plan.get('tp2')}"
+                        "• Entry: {e} | SL: {sl} | TP1: {tp1} | TP2: {tp2}".format(
+                            e=plan.get("entry"),
+                            sl=plan.get("sl"),
+                            tp1=plan.get("tp1"),
+                            tp2=plan.get("tp2"),
+                        )
                     )
-                    lines.append(f"reason_block: {reason_block}")
-                    lines.append("reasons:")
+                    lines.append(f"• Block: {reason_block}")
                     reasons = plan.get("reasons") or []
                     if reasons:
+                        lines.append("• Reasons:")
                         for r in reasons[:4]:
-                            lines.append(f"- {r}")
+                            lines.append(f"  - {r}")
                     else:
-                        lines.append("-")
-                    lines.append(f"ts: {plan.get('ts')}")
+                        lines.append("• Reasons: -")
+                    lines.append(f"• TS: {plan.get('ts')}")
                 else:
                     lines.append(
-                        f"action: {plan.get('action')} option: {plan.get('option_type')} strike: {plan.get('strike')} qty: {plan.get('qty_lots')}"
+                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
+                            a=plan.get("action"),
+                            o=plan.get("option_type"),
+                            s=plan.get("strike"),
+                            q=plan.get("qty_lots"),
+                        )
                     )
                     lines.append(
-                        f"regime: {plan.get('regime')} score: {plan.get('score')} rr: {plan.get('rr')}"
+                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
+                            r=plan.get("regime"),
+                            sc=plan.get("score"),
+                            rr=plan.get("rr"),
+                        )
                     )
-                    lines.append(f"reason_block: {reason_block}")
-                return self._send("\n".join(lines))
+                    lines.append(f"• Block: {reason_block}")
+                return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 

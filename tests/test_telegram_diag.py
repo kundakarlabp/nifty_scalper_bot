@@ -44,6 +44,6 @@ def test_diag_shows_status_and_signal(monkeypatch):
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/diag"}})
     msg = sent[0]
-    assert "Status" in msg and "Signal" in msg
-    assert "market_open: True" in msg
-    assert "action: BUY" in msg
+    assert "📊 Status" in msg and "📈 Signal" in msg
+    assert "Market Open: ✅" in msg
+    assert "Action: BUY" in msg
