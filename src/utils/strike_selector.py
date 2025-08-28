@@ -347,3 +347,59 @@ def health_check() -> Dict[str, Any]:
         "ist_open": is_market_open(),
         "trade_symbol": getattr(getattr(settings, "instruments", object()), "trade_symbol", "NIFTY"),
     }
+
+
+# -----------------------------------------------------------------------------
+# Simple strike selection helpers (used by strategy)
+# -----------------------------------------------------------------------------
+from dataclasses import dataclass
+from statistics import median
+from typing import Callable
+
+
+@dataclass
+class StrikeInfo:
+    strike: int
+    meta: Dict[str, Any] | None = None
+
+
+_option_info_fetcher: Callable[[int], Optional[Dict[str, Any]]] = lambda s: None
+
+
+def set_option_info_fetcher(fn: Callable[[int], Optional[Dict[str, Any]]]) -> None:
+    """Allow tests or callers to provide option market info."""
+    global _option_info_fetcher
+    _option_info_fetcher = fn
+
+
+def select_strike(spot: float, score: int, allow_pm1_if_score_ge: int = 9) -> Optional[StrikeInfo]:
+    """Pick an ATM (or +/-1) strike subject to basic liquidity guards."""
+    step = _infer_step(getattr(getattr(settings, "instruments", object()), "trade_symbol", ""))
+    atm = int(round(float(spot) / step) * step)
+    candidates = [atm]
+    if score >= int(allow_pm1_if_score_ge):
+        candidates.extend([atm - step, atm + step])
+
+    for st in candidates:
+        info = _option_info_fetcher(st) or {}
+        oi = float(info.get("oi", 0.0) or 0.0)
+        spreads = info.get("spreads")
+        if isinstance(spreads, (list, tuple)) and spreads:
+            spread_pct = float(median([float(x) for x in spreads]))
+        else:
+            spread_pct = float(info.get("spread_pct", 999.0))
+        if oi >= 500_000 and spread_pct <= 0.35:
+            return StrikeInfo(strike=int(st), meta={"oi": oi, "spread_pct": spread_pct})
+    return None
+
+
+def needs_reatm(entry_spot: float, current_spot: float, drift_pct: float = 0.35) -> bool:
+    """Return True if spot drift from entry exceeds ``drift_pct`` percent."""
+    try:
+        entry = float(entry_spot)
+        curr = float(current_spot)
+        if entry <= 0 or curr <= 0:
+            return False
+        return abs(curr - entry) / entry * 100.0 >= float(drift_pct)
+    except Exception:
+        return False

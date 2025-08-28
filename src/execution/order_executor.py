@@ -78,6 +78,60 @@ def _chunks(total: int, chunk: int) -> List[int]:
     return out
 
 
+def micro_ok(
+    quote: Dict[str, Any],
+    qty_lots: int,
+    lot_size: int,
+    max_spread_pct: float,
+    depth_mult: float,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Evaluate basic microstructure conditions for an order.
+
+    Parameters
+    ----------
+    quote : dict
+        Quote snapshot with ``bid``/``ask`` and optional depth info.
+    qty_lots : int
+        Desired quantity in lots.
+    lot_size : int
+        Lot size of the instrument.
+    max_spread_pct : float
+        Maximum allowed bid/ask spread percentage (e.g., 0.35 for 0.35%).
+    depth_mult : float
+        Required multiple of quantity available at top of book.
+
+    Returns
+    -------
+    (ok, info) : tuple
+        ``ok`` is True when both spread and depth requirements pass.
+        ``info`` contains ``spread_pct``, ``depth_ok``, ``bid5`` and ``ask5`` for diagnostics.
+    """
+
+    bid = float(quote.get("bid", 0.0) or 0.0)
+    ask = float(quote.get("ask", 0.0) or 0.0)
+    mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
+    spread_pct = ((ask - bid) / mid * 100.0) if mid else float("inf")
+
+    depth = quote.get("depth")
+    bid5 = ask5 = None
+    depth_ok = True
+    try:
+        if isinstance(depth, (list, tuple)) and len(depth) >= 2:
+            bid5, ask5 = float(depth[0]), float(depth[1])
+            need = float(qty_lots * lot_size) * float(depth_mult)
+            depth_ok = bid5 >= need and ask5 >= need
+    except Exception:
+        depth_ok = True
+
+    ok = (spread_pct <= float(max_spread_pct) * 100.0) and depth_ok
+    return ok, {
+        "spread_pct": spread_pct,
+        "depth_ok": depth_ok,
+        "bid5": bid5,
+        "ask5": ask5,
+    }
+
+
 # ------------------- in-memory order record -------------------
 @dataclass
 class _OrderRecord:
@@ -116,6 +170,10 @@ class _OrderRecord:
     breakeven_ticks: int = 2
     trailing_enabled: bool = True
     trailing_mult: float = 1.5
+    trail_atr_mult: float = 1.5
+
+    # risk metrics
+    r_value: float = 0.0
 
     # children
     child_order_ids: List[str] = field(default_factory=list)
@@ -328,6 +386,8 @@ class OrderExecutor:
                 breakeven_ticks=self.breakeven_ticks,
                 trailing_enabled=self.enable_trailing,
                 trailing_mult=self.trailing_mult,
+                trail_atr_mult=float(payload.get("trail_atr_mult", self.trailing_mult)),
+                r_value=abs(float(price) - float(payload.get("stop_loss", 0.0))),
                 child_order_ids=[],
             )
             with self._lock:
@@ -391,6 +451,8 @@ class OrderExecutor:
             breakeven_ticks=self.breakeven_ticks,
             trailing_enabled=self.enable_trailing,
             trailing_mult=self.trailing_mult,
+            trail_atr_mult=float(payload.get("trail_atr_mult", self.trailing_mult)),
+            r_value=abs(float(price) - float(payload.get("stop_loss", 0.0))),
             child_order_ids=child_ids,
         )
         with self._lock:
@@ -404,7 +466,7 @@ class OrderExecutor:
         """Place/refresh SL-GTT and TP limit orders for an active record."""
         with self._lock:
             rec = self._active.get(record_id)
-        if not rec or not rec.is_open or not self.kite:
+        if not rec or not rec.is_open:
             return
 
         qty = rec.remaining_qty or rec.quantity
@@ -523,7 +585,7 @@ class OrderExecutor:
     ) -> None:
         with self._lock:
             rec = self._active.get(record_id)
-        if not rec or not rec.is_open or not self.kite:
+        if not rec or not rec.is_open:
             return
         if not rec.trailing_enabled or atr <= 0 or current_price <= 0:
             return
@@ -531,24 +593,32 @@ class OrderExecutor:
         m = float(atr_multiplier or rec.trailing_mult)
         if rec.side == "BUY":
             proposed = _round_to_tick(current_price - m * atr, rec.tick_size)
-            if rec.tp1_done:
-                proposed = max(
-                    proposed,
-                    _round_to_tick(rec.entry_price + rec.breakeven_ticks * rec.tick_size, rec.tick_size),
-                )
-            if rec.sl_price and proposed <= rec.sl_price:
-                return
+            if rec.tp1_done and rec.sl_price is not None:
+                proposed = max(proposed, rec.sl_price)
         else:
             proposed = _round_to_tick(current_price + m * atr, rec.tick_size)
-            if rec.tp1_done:
-                proposed = min(
-                    proposed,
-                    _round_to_tick(rec.entry_price - rec.breakeven_ticks * rec.tick_size, rec.tick_size),
-                )
-            if rec.sl_price and proposed >= rec.sl_price:
-                return
+            if rec.tp1_done and rec.sl_price is not None:
+                proposed = min(proposed, rec.sl_price)
 
+        rec.sl_price = proposed
         self._refresh_sl_gtt(rec, sl_price=proposed, qty=rec.remaining_qty or rec.quantity)
+
+    def handle_tp1_fill(self, record_id: str) -> None:
+        """Internal helper used to apply TP1 partial exit effects."""
+        with self._lock:
+            rec = self._active.get(record_id)
+        if not rec or rec.tp1_done:
+            return
+        tp_qty = int(round(rec.quantity * rec.tp1_ratio)) if rec.partial_enabled else 0
+        rec.tp1_done = True
+        if tp_qty > 0:
+            rec.quantity -= tp_qty
+            if rec.quantity < 0:
+                rec.quantity = 0
+        new_sl = rec.entry_price + rec.side_sign() * 0.1 * rec.r_value
+        rec.sl_price = _round_to_tick(new_sl, rec.tick_size)
+        rec.trailing_mult = rec.trail_atr_mult or rec.trailing_mult
+        self._refresh_sl_gtt(rec, sl_price=rec.sl_price, qty=rec.remaining_qty or rec.quantity)
 
     # ----------- polling / OCO enforcement ----------
     def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
@@ -596,15 +666,7 @@ class OrderExecutor:
                 o = omap.get(oid, {})
                 if o.get("status", "").upper() == "COMPLETE":
                     if tid == "tp1_order_id" and rec.partial_enabled and not rec.tp1_done:
-                        rec.tp1_done = True
-                        self._refresh_sl_gtt(
-                            rec,
-                            sl_price=_round_to_tick(
-                                rec.entry_price + rec.side_sign() * rec.breakeven_ticks * rec.tick_size,
-                                rec.tick_size,
-                            ),
-                            qty=rec.remaining_qty or rec.quantity,
-                        )
+                        self.handle_tp1_fill(rec.record_id)
 
             # SL GTT state
             if rec.sl_gtt_id:
