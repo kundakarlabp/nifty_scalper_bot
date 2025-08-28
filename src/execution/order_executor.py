@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
+__all__ = ["OrderExecutor", "micro_ok"]
+
 
 # ------------------- small helpers -------------------
 def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
@@ -96,7 +98,8 @@ def micro_ok(
     lot_size : int
         Lot size of the instrument.
     max_spread_pct : float
-        Maximum allowed bid/ask spread percentage (e.g., 0.35 for 0.35%).
+        Maximum allowed bid/ask spread percentage. Values <=1 are treated
+        as percentages (0.35 == 0.35%).
     depth_mult : float
         Required multiple of quantity available at top of book.
 
@@ -111,6 +114,9 @@ def micro_ok(
     ask = float(quote.get("ask", 0.0) or 0.0)
     mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
     spread_pct = ((ask - bid) / mid * 100.0) if mid else float("inf")
+    max_spread_pct = float(max_spread_pct)
+    if max_spread_pct < 1:
+        max_spread_pct *= 100.0
 
     depth = quote.get("depth")
     bid5 = ask5 = None
@@ -123,7 +129,7 @@ def micro_ok(
     except Exception:
         depth_ok = True
 
-    ok = (spread_pct <= float(max_spread_pct) * 100.0) and depth_ok
+    ok = (spread_pct <= max_spread_pct) and depth_ok
     return ok, {
         "spread_pct": spread_pct,
         "depth_ok": depth_ok,
@@ -338,7 +344,10 @@ class OrderExecutor:
             while tries < self.micro_retry_limit:
                 mid = (float(bid) + float(ask)) / 2.0
                 spread = float(ask) - float(bid)
-                spread_pct = spread / mid if mid else float("inf")
+                spread_pct = spread / mid * 100.0 if mid else float("inf")
+                max_sp = self.max_spread_pct
+                if max_sp < 1:
+                    max_sp *= 100.0
                 depth_ok = True
                 if depth is not None:
                     try:
@@ -349,7 +358,7 @@ class OrderExecutor:
                         depth_ok = depth_val >= self.depth_multiplier * qty
                     except Exception:
                         depth_ok = True
-                if spread_pct <= self.max_spread_pct and depth_ok:
+                if spread_pct <= max_sp and depth_ok:
                     price = min(float(ask), mid + 0.15 * spread)
                     price = _round_to_tick(price, self.tick_size)
                     break
