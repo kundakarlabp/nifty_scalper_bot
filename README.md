@@ -3,7 +3,7 @@
 This repository contains an advanced options scalping bot designed for the Nifty‑50 index.  It integrates with Zerodha's KiteConnect API for market data and order placement, and exposes a Telegram interface for control and monitoring.  The codebase has been refactored for clarity, stability and extensibility.  Key features include:
 
 * **Modular architecture** – core components are separated into strategy, risk management, execution and notifications.
-* **Indicator‑rich strategy** – combines EMA, RSI, MACD, ATR, SuperTrend, VWAP, ADX and Bollinger Band width to generate high‑confidence signals.  Market regime detection adjusts behaviour for trending versus ranging conditions.
+* **Indicator‑rich strategy** – combines EMA, RSI, MACD, ATR, SuperTrend, VWAP, ADX and Bollinger bandwidth to generate high‑confidence signals.  Market regime detection adjusts behaviour for trending versus ranging conditions.
 * **Adaptive position sizing** – calculates lot sizes based on account capital, risk per trade, market volatility, recent performance and daily drawdown limits.
 * **Good‑Till‑Triggered (GTT) orders with trailing logic** – entries automatically attach stop‑loss and take‑profit orders and adjust them when the trade moves in your favour.
 * **Telegram bot control** – supports `/start`, `/stop`, `/status` and `/summary` commands.  It pushes P&L updates, error alerts and session notifications to the configured chat.
