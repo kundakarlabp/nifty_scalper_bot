@@ -257,11 +257,12 @@ class OrderExecutor:
             self.last_error = "qty_rounded_to_zero"
             return None
 
-        # prevent duplicate symbol entries
+        # prevent duplicate symbol entries (case-insensitive)
+        norm_symbol = str(symbol).upper()
         with self._lock:
-            if any(rec.symbol == symbol and rec.is_open for rec in self._active.values()):
+            if any(rec.symbol.upper() == norm_symbol and rec.is_open for rec in self._active.values()):
                 self.last_error = "duplicate_symbol_open"
-                log.warning("Open record exists on %s; skip new entry.", symbol)
+                log.warning("Open record exists on %s; skip new entry.", norm_symbol)
                 return None
 
         if not self.kite:
