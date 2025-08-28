@@ -13,6 +13,13 @@ from src.utils.indicators import (
     calculate_vwap,
     calculate_macd,
 )
+from src.signals.regime_detector import detect_market_regime
+from src.execution.order_executor import micro_ok
+from src.utils.strike_selector import (
+    get_instrument_tokens,
+    select_strike,
+    needs_reatm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,66 +213,212 @@ class EnhancedScalpingStrategy:
             ema21_slope = float(ema21.iloc[-1] - ema21.iloc[-2])
             macd_val = float(macd_line.iloc[-1])
             rsi_val = float(rsi.iloc[-1])
-            rsi_rising = rsi_val > float(rsi.iloc[-2])
+            rsi_prev = float(rsi.iloc[-2])
+            rsi_rising = rsi_val > rsi_prev
 
+            # --- regime detection ---
+            reg = detect_market_regime(
+                df=df,
+                adx=spot_df.get("adx"),
+                di_plus=spot_df.get("di_plus"),
+                di_minus=spot_df.get("di_minus"),
+            )
+            if reg.regime == "RANGE" and spot_df.get("adx") is None:
+                reg.regime = "TREND"  # fallback when ADX not available
+            if reg.regime == "NO_TRADE":
+                dbg["reason_block"] = "regime_no_trade"
+                self._last_debug = dbg
+                return None
+
+            # swing levels for breakout guard
             swing_high = df["high"].rolling(window=20, min_periods=2).max().iloc[-2]
-            breakout_dist = abs(price - swing_high) / price * 100.0
+            swing_low = df["low"].rolling(window=20, min_periods=2).min().iloc[-2]
+            breakout_dist_long = abs(price - swing_high) / price * 100.0
+            breakout_dist_short = abs(price - swing_low) / price * 100.0
 
-            long_ok = (
-                price > float(vwap.iloc[-1])
-                and ema21_val > ema50_val
-                and ema21_slope > 0
-                and macd_val > 0
-                and rsi_val >= 48 and rsi_rising
-                and breakout_dist >= 0.15
-            )
-            short_ok = (
-                price < float(vwap.iloc[-1])
-                and ema21_val < ema50_val
-                and ema21_slope < 0
-                and macd_val < 0
-                and rsi_val <= 52 and not rsi_rising
-                and breakout_dist >= 0.15
-            )
-
-            regime = None
             side: Optional[Side] = None
-            if long_ok or short_ok:
-                regime = "trend"
-                side = "BUY" if long_ok else "SELL"
+            option_type: Optional[str] = None
+            reasons: list[str] = []
+
+            if reg.regime == "TREND":
+                long_ok = (
+                    price > float(vwap.iloc[-1])
+                    and ema21_val > ema50_val
+                    and ema21_slope > 0
+                    and macd_val > 0
+                    and rsi_val >= 48
+                    and rsi_rising
+                    and breakout_dist_long >= 0.15
+                )
+                short_ok = (
+                    price < float(vwap.iloc[-1])
+                    and ema21_val < ema50_val
+                    and ema21_slope < 0
+                    and macd_val < 0
+                    and rsi_val <= 52
+                    and not rsi_rising
+                    and breakout_dist_short >= 0.15
+                )
+                if long_ok or short_ok:
+                    side = "BUY" if long_ok else "SELL"
+                    option_type = "CE" if long_ok else "PE"
+                    reasons.append("trend_playbook")
+                else:
+                    dbg["reason_block"] = "trend_gates_failed"
+                    self._last_debug = dbg
+                    return None
+            elif reg.regime == "RANGE":
+                close = float(df["close"].iloc[-1])
+                bb_mid = df["close"].rolling(20).mean()
+                bb_std = df["close"].rolling(20).std()
+                upper = float(bb_mid.iloc[-1] + 2 * bb_std.iloc[-1])
+                lower = float(bb_mid.iloc[-1] - 2 * bb_std.iloc[-1])
+                vwap_val = float(vwap.iloc[-1])
+                std_val = float(bb_std.iloc[-1])
+
+                upper_fade = (
+                    (close >= upper or close >= vwap_val + 1.9 * std_val)
+                    and rsi_val > 65
+                    and rsi_val < rsi_prev
+                    and float(df["close"].iloc[-1]) < float(df["open"].iloc[-1])
+                )
+                lower_fade = (
+                    (close <= lower or close <= vwap_val - 1.9 * std_val)
+                    and rsi_val < 35
+                    and rsi_val > rsi_prev
+                    and float(df["close"].iloc[-1]) > float(df["open"].iloc[-1])
+                )
+
+                if upper_fade:
+                    side = "SELL"
+                    option_type = "PE"
+                    reasons.append("range_playbook_upper")
+                elif lower_fade:
+                    side = "BUY"
+                    option_type = "CE"
+                    reasons.append("range_playbook_lower")
+                else:
+                    dbg["reason_block"] = "range_gates_failed"
+                    self._last_debug = dbg
+                    return None
             else:
-                dbg["reason_block"] = "trend_gates_failed"
+                dbg["reason_block"] = "regime_no_trade"
                 self._last_debug = dbg
                 return None
 
             atr_pct = atr_val / price
-            if not (0.0030 <= atr_pct <= 0.0150):
+            if not (0.0030 <= atr_pct <= 0.0105):
                 dbg["reason_block"] = "atr_pct_out_of_range"
                 self._last_debug = dbg
                 return None
 
-            score = 10
-            reasons = ["trend_playbook"]
+            # ----- scoring -----
+            regime_score = 2
+            momentum_score = 0
+            macd_rising = macd_line.iloc[-1] > macd_line.iloc[-2]
+            if (side == "BUY" and macd_val > 0) or (side == "SELL" and macd_val < 0):
+                momentum_score += 1
+            if (side == "BUY" and macd_rising) or (side == "SELL" and not macd_rising):
+                momentum_score += 1
+            if (side == "BUY" and rsi_rising) or (side == "SELL" and not rsi_rising):
+                momentum_score += 1
+            obv = spot_df.get("obv") or df.get("obv")
+            try:
+                if obv is not None and len(obv) >= 2:
+                    obv_rising = float(obv.iloc[-1]) > float(obv.iloc[-2])
+                    if (side == "BUY" and obv_rising) or (side == "SELL" and not obv_rising):
+                        momentum_score += 1
+            except Exception:
+                pass
+            momentum_score = min(3, momentum_score)
+
+            structure_score = 0
+            candle_bull = float(df["close"].iloc[-1]) > float(df["open"].iloc[-1])
+            candle_bear = float(df["close"].iloc[-1]) < float(df["open"].iloc[-1])
+            if side == "BUY" and candle_bull:
+                structure_score += 1
+            if side == "SELL" and candle_bear:
+                structure_score += 1
+            if (side == "BUY" and breakout_dist_long >= 0.15) or (
+                side == "SELL" and breakout_dist_short >= 0.15
+            ):
+                structure_score += 1
+
+            vol_score = 1 if 0.0030 <= atr_pct <= 0.0105 else 0
+
+            micro_score = 2
+            if current_tick and current_tick.get("bid") is not None and current_tick.get("ask") is not None:
+                lot_sz = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
+                ex_cfg = getattr(settings, "executor", object())
+                max_spread_pct = float(getattr(ex_cfg, "max_spread_pct", 0.35))
+                depth_mult = float(getattr(ex_cfg, "depth_multiplier", 5.0))
+                quote = {
+                    "bid": current_tick.get("bid"),
+                    "ask": current_tick.get("ask"),
+                    "depth": current_tick.get("depth"),
+                }
+                ok_micro, _info = micro_ok(quote, 1, lot_sz, max_spread_pct, depth_mult)
+                if not ok_micro:
+                    micro_score = 0
+
+            score = regime_score + momentum_score + structure_score + vol_score + micro_score
+
+            threshold = 9 if reg.regime == "TREND" else 8
+            if score < threshold:
+                dbg["reason_block"] = "score_below_threshold"
+                self._last_debug = dbg
+                return None
+
             entry_price = float(current_price)
-            sl_dist = max(0.8 * atr_val, 0.8 * atr_val)
+            tick_size = float(getattr(getattr(settings, "executor", object()), "tick_size", 0.05))
+
+            if reg.regime == "RANGE" and side == "SELL":
+                struct_sl_price = float(df["high"].iloc[-1]) + 0.25 * atr_val
+                struct_dist = struct_sl_price - entry_price
+            elif reg.regime == "RANGE" and side == "BUY":
+                struct_sl_price = float(df["low"].iloc[-1]) - 0.25 * atr_val
+                struct_dist = entry_price - struct_sl_price
+            else:
+                struct_dist = 0.8 * atr_val
+
+            sl_dist = max(0.8 * atr_val, struct_dist)
             if side == "BUY":
                 stop_loss = entry_price - sl_dist
-                tp1 = entry_price + 1.1 * sl_dist
-                tp2 = entry_price + 1.8 * sl_dist
-                option_type = "CE"
             else:
                 stop_loss = entry_price + sl_dist
-                tp1 = entry_price - 1.1 * sl_dist
-                tp2 = entry_price - 1.8 * sl_dist
-                option_type = "PE"
 
-            risk = abs(entry_price - stop_loss)
-            rr = (abs(tp2 - entry_price) / risk) if risk > 0 else 0.0
+            R = abs(entry_price - stop_loss)
+            tp1_mult = 1.1
+            tp2_mult = 1.8 if reg.regime == "TREND" else 1.3
+            if side == "BUY":
+                tp1 = entry_price + tp1_mult * R
+                tp2 = entry_price + tp2_mult * R
+            else:
+                tp1 = entry_price - tp1_mult * R
+                tp2 = entry_price - tp2_mult * R
 
-            from src.utils.strike_selector import select_strike, StrikeInfo
+            breakeven_ticks = int(max(1, round(0.1 * R / tick_size)))
+            rr = (abs(tp2 - entry_price) / R) if R > 0 else 0.0
 
-            strike_info: Optional[StrikeInfo] = select_strike(price, score)
-            strike = int(strike_info.strike) if strike_info else int(round(price / 50.0) * 50)
+            # strike selection & liquidity
+            try:
+                _ = get_instrument_tokens(spot_price=price)
+            except Exception:
+                pass
+            strike_info = select_strike(price, score)
+            if not strike_info:
+                try:
+                    from src.utils import strike_selector as ss
+                    info = ss._option_info_fetcher(int(round(price / 50.0) * 50))
+                except Exception:
+                    info = None
+                if info is not None:
+                    dbg["reason_block"] = "liquidity_fail"
+                    self._last_debug = dbg
+                    return None
+                strike = int(round(price / 50.0) * 50)
+            else:
+                strike = int(strike_info.strike)
 
             signal: Dict[str, Any] = {
                 "action": side,
@@ -277,19 +430,21 @@ class EnhancedScalpingStrategy:
                 "tp1": tp1,
                 "tp2": tp2,
                 "trail_atr_mult": 0.8,
+                "breakeven_ticks": breakeven_ticks,
+                "tp1_qty_ratio": 0.5,
                 "time_stop_min": 12,
                 "rr": round(rr, 2),
-                "regime": regime,
+                "regime": reg.regime,
                 "score": score,
                 "reasons": reasons,
                 "side": side,
-                "confidence": 1.0,
+                "confidence": min(1.0, max(0.0, score / 10.0)),
                 "target": tp2,
             }
 
             self._last_debug = {
                 "score": score,
-                "regime": regime,
+                "regime": reg.regime,
                 "rr": rr,
                 "reason_block": None,
                 "atr_pct": atr_pct,
