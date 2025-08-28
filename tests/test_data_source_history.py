@@ -3,12 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from freezegun import freeze_time
 
-from src.config import settings
-from src.data.source import LiveKiteSource
-
-WARMUP_BARS = int(
-    max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal)
-)
+from src.data.source import LiveKiteSource, WARMUP_BARS
 
 
 class FakeKite:
@@ -64,5 +59,5 @@ def test_fetch_ohlc_network_failure_falls_back_to_ltp():
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=1)
     df = src.fetch_ohlc(123, start, end, "minute")
-    assert len(df) == 1
-    assert df.iloc[0].close == 1
+    assert len(df) >= WARMUP_BARS
+    assert (df.close == 1).all()
