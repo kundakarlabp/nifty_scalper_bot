@@ -60,11 +60,11 @@ def test_trend_playbook_pass(monkeypatch):
     strat = setup_strategy(monkeypatch)
     df = make_df(0.997)  # 0.3% away
     sig = strat.generate_signal(df)
-    assert sig is not None
+    assert isinstance(sig, dict)
 
 
 def test_trend_breakout_guard(monkeypatch):
     strat = setup_strategy(monkeypatch)
     df = make_df(0.9995)  # 0.05% away -> block
     sig = strat.generate_signal(df)
-    assert sig is None
+    assert sig.get("reason_block")

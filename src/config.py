@@ -438,6 +438,13 @@ class AppSettings(BaseSettings):
 # Instantiate settings
 settings = AppSettings()
 
+import os as _os  # noqa: E402
+object.__setattr__(settings, "ENABLE_SIGNAL_DEBUG", str(_os.getenv("ENABLE_SIGNAL_DEBUG", "false")).lower() in ("1","true","yes"))
+object.__setattr__(settings, "TELEGRAM__PRETRADE_ALERTS", str(_os.getenv("TELEGRAM__PRETRADE_ALERTS", "false")).lower() in ("1","true","yes"))
+object.__setattr__(settings, "DIAG_INTERVAL_SECONDS", int(_os.getenv("DIAG_INTERVAL_SECONDS", "60")))
+object.__setattr__(settings, "MIN_PREVIEW_SCORE", float(_os.getenv("MIN_PREVIEW_SCORE", "8")))
+
+
 
 def validate_critical_settings() -> None:
     errors = []

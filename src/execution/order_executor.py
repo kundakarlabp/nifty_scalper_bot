@@ -85,53 +85,25 @@ def micro_ok(
     qty_lots: int,
     lot_size: int,
     max_spread_pct: float,
-    depth_mult: float,
+    depth_mult: int,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Evaluate basic microstructure conditions for an order.
-
-    Parameters
-    ----------
-    quote : dict
-        Quote snapshot with ``bid``/``ask`` and optional depth info.
-    qty_lots : int
-        Desired quantity in lots.
-    lot_size : int
-        Lot size of the instrument.
-    max_spread_pct : float
-        Maximum allowed bid/ask spread percentage. Values <=1 are treated
-        as percentages (0.35 == 0.35%).
-    depth_mult : float
-        Required multiple of quantity available at top of book.
-
-    Returns
-    -------
-    (ok, info) : tuple
-        ``ok`` is True when both spread and depth requirements pass.
-        ``info`` contains ``spread_pct``, ``depth_ok``, ``bid5`` and ``ask5`` for diagnostics.
     """
-
-    bid = float(quote.get("bid", 0.0) or 0.0)
-    ask = float(quote.get("ask", 0.0) or 0.0)
+    Returns (ok: bool, meta: dict). max_spread_pct accepts 0.35 (percent) or 0.0035 (fraction).
+    meta: {'spread_pct': float, 'depth_ok': bool, 'bid5': int, 'ask5': int}
+    """
+    ms = float(max_spread_pct)
+    max_spread_frac = ms / 100.0 if ms > 1.0 else ms
+    bid = float(getattr(quote, "bid", 0.0) or quote.get("bid", 0.0))
+    ask = float(getattr(quote, "ask", 0.0) or quote.get("ask", 0.0))
     mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
-    spread_pct = ((ask - bid) / mid * 100.0) if mid else float("inf")
-    max_spread_pct = float(max_spread_pct)
-    if max_spread_pct < 1:
-        max_spread_pct *= 100.0
-
-    depth = quote.get("depth")
-    bid5 = ask5 = None
-    depth_ok = True
-    try:
-        if isinstance(depth, (list, tuple)) and len(depth) >= 2:
-            bid5, ask5 = float(depth[0]), float(depth[1])
-            need = float(qty_lots * lot_size) * float(depth_mult)
-            depth_ok = bid5 >= need and ask5 >= need
-    except Exception:
-        depth_ok = True
-
-    ok = (spread_pct <= max_spread_pct) and depth_ok
+    spread_pct = ((ask - bid) / mid * 100.0) if (mid > 0 and ask > bid) else 999.0
+    # depth: use top-5 cum quantities if available; else fallback to top-1
+    bid5 = int(quote.get("bid_qty_top5", quote.get("bid_qty", 0)))
+    ask5 = int(quote.get("ask_qty_top5", quote.get("ask_qty", 0)))
+    depth_ok = min(bid5, ask5) >= depth_mult * qty_lots * lot_size
+    ok = (spread_pct <= max_spread_frac * 100.0) and depth_ok
     return ok, {
-        "spread_pct": spread_pct,
+        "spread_pct": round(spread_pct, 2),
         "depth_ok": depth_ok,
         "bid5": bid5,
         "ask5": ask5,

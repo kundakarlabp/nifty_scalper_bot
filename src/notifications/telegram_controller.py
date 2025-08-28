@@ -511,6 +511,13 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Logs error: {e}")
 
+        if cmd == "/watch":
+            if not args:
+                return self._send("Usage: /watch on|off")
+            val = args[0].lower() in ("on", "true", "1", "yes")
+            settings.TELEGRAM__PRETRADE_ALERTS = val
+            return self._send(f"Pre-trade alerts: {'ON' if val else 'OFF'}")
+
         # PAUSE / RESUME
         if cmd == "/pause":
             if self._runner_pause:

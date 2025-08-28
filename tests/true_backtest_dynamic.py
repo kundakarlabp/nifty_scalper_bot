@@ -126,37 +126,37 @@ class BacktestRunner:
         )
         current_price = float(current_bar["close"])
 
-        sig: Dict[str, Any] | None = self.strategy.generate_signal(df=df_history, current_price=current_price)
-        if not sig:
+        plan: Dict[str, Any] = self.strategy.generate_signal(df=df_history, current_price=current_price)
+        if plan.get("reason_block"):
             return
 
-        logger.info(f"Trade signal at {current_dt}: {sig}")
+        logger.info(f"Trade signal at {current_dt}: {plan}")
 
-        quantity = self.sizer.calculate_quantity(
-            session=self.session,
+        qty, _lots, _diag = self.sizer.size_from_signal(
             entry_price=current_price,
-            stop_loss_price=sig["stop_loss"],
-            lot_size=settings.instruments.nifty_lot_size,  # should be 75 as per config
+            stop_loss=float(plan["stop_loss"]),
+            lot_size=settings.instruments.nifty_lot_size,
+            equity=self.session.equity,
         )
-        if quantity <= 0:
+        if qty <= 0:
             return
 
         trade = Trade(
             symbol="BACKTEST_INSTRUMENT",
-            direction=sig["side"],
+            direction=plan["side"],
             entry_price=current_price,
-            quantity=quantity,
+            quantity=qty,
             order_id=f"order_{current_dt.isoformat()}",
-            atr_at_entry=sig.get("atr", 0.0),
+            atr_at_entry=plan.get("atr", 0.0),
         )
         # Attach SL/TP for the bar-by-bar simulator
-        setattr(trade, "stop_loss", sig["stop_loss"])
-        setattr(trade, "target", sig["target"])
+        setattr(trade, "stop_loss", plan["stop_loss"])
+        setattr(trade, "target", plan["target"])
 
         self.session.add_trade(trade)
         self.active_trade = trade
         logger.info(
-            f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ {trade.entry_price:.2f} | SL {sig['stop_loss']:.2f} TP {sig['target']:.2f}"
+            f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ {trade.entry_price:.2f} | SL {plan['stop_loss']:.2f} TP {plan['target']:.2f}"
         )
 
     # ------------------------------- Reporting ------------------------------- #

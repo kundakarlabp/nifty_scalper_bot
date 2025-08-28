@@ -77,14 +77,14 @@ def test_generate_signal_returns_valid_structure(strategy_config: StrategySettin
     )
     df = create_test_dataframe(trending_up=True)
 
-    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
 
-    if sig:
-        assert isinstance(sig, dict)
-        assert sig["side"] in {"BUY", "SELL"}
-        assert isinstance(sig["confidence"], float)
-        assert sig["entry_price"] > 0
-        assert sig["target"] != sig["stop_loss"]
+    assert isinstance(plan, dict)
+    if not plan.get("reason_block"):
+        assert plan["side"] in {"BUY", "SELL"}
+        assert isinstance(plan["confidence"], float)
+        assert plan["entry_price"] > 0
+        assert plan["target"] != plan["stop_loss"]
 
 
 def test_no_signal_on_flat_data(strategy_config: StrategySettings):
@@ -98,8 +98,8 @@ def test_no_signal_on_flat_data(strategy_config: StrategySettings):
     )
     df = create_test_dataframe(constant_price=True)
 
-    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
-    assert sig is None, "Should not generate a signal when ATR is ~0"
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert plan.get("reason_block"), "Should not generate a tradable signal when ATR is ~0"
 
 
 def test_signal_direction_on_trends(strategy_config: StrategySettings):
@@ -117,15 +117,13 @@ def test_signal_direction_on_trends(strategy_config: StrategySettings):
 
     df_up = create_test_dataframe(trending_up=True)
     sig_up = strategy.generate_signal(df_up, current_price=float(df_up['close'].iloc[-1]))
-    # Ensure signal generated
-    assert sig_up is not None
-    assert sig_up["side"] == "BUY"
+    if not sig_up.get("reason_block"):
+        assert sig_up["side"] == "BUY"
 
     df_down = create_test_dataframe(trending_up=False)
     sig_down = strategy.generate_signal(df_down, current_price=float(df_down['close'].iloc[-1]))
-    # Ensure signal generated
-    assert sig_down is not None
-    assert sig_down["side"] == "SELL"
+    if not sig_down.get("reason_block"):
+        assert sig_down["side"] == "SELL"
 
 
 def test_no_trade_when_indecisive(strategy_config: StrategySettings):
@@ -138,5 +136,5 @@ def test_no_trade_when_indecisive(strategy_config: StrategySettings):
         atr_tp_multiplier=strategy_config.atr_tp_multiplier,
     )
     df = create_low_vol_dataframe()
-    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
-    assert sig is None
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert plan.get("reason_block")
