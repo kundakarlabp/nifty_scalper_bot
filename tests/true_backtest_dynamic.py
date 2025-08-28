@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 # tests/true_backtest_dynamic.py
 """
 High-fidelity backtesting engine for the Nifty Scalper Bot.

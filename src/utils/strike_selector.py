@@ -138,11 +138,13 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
 
     try:
         data = _rate_call(kite.ltp, f"kite-ltp-{symbol}", [symbol])
+        px: Optional[float] = None
         if symbol in data:
             px = float(data[symbol]["last_price"])
         else:
-            # fallback: first value
-            (px,) = [float(v["last_price"]) for v in data.values()][0:1] or (None,)
+            values = [float(v["last_price"]) for v in data.values()]
+            if values:
+                px = values[0]
         if px is not None:
             _ltp_cache[symbol] = (px, now)
             return px
@@ -308,7 +310,10 @@ def get_instrument_tokens(
                     continue
                 if expiry and not str(row.get("expiry", "")).startswith(expiry):
                     continue
-                strike = int(row.get("strike"))
+                strike_val = row.get("strike")
+                if strike_val is None:
+                    continue
+                strike = int(strike_val)
                 if strike != target:
                     continue
                 itype = row.get("instrument_type")
