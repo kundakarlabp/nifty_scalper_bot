@@ -242,8 +242,13 @@ class EnhancedScalpingStrategy:
                     adx=adx_series,
                     di_plus=di_plus_series,
                     di_minus=di_minus_series,
-                    adx_trend_strength=self.adx_trend_strength,
                 )
+                if regime == "trend":
+                    regime = "trend_up" if ema_bias_up else "trend_down"
+                elif regime == "no_trade":
+                    dbg["reason_block"] = "no_trade_regime"
+                    self._last_debug = dbg
+                    return None
                 if regime == "trend_up" and ema_bias_up:
                     score += 2
                     reasons.append("Spot ADX trend_up (aligned).")

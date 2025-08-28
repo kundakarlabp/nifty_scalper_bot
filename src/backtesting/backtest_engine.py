@@ -81,14 +81,14 @@ class BacktestEngine:
 
                 # Extract fields with safe defaults
                 side = str(signal.get("side", "BUY")).upper()
-                entry_price = float(row["close"])
+                mid = float(row["close"])
+                spread = mid * float(getattr(settings.executor, "max_spread_pct", 0.0035))
+                entry_price = mid + spread / 2.0 if side == "BUY" else mid - spread / 2.0
+                entry_price *= 1 + (0.0015 if side == "BUY" else -0.0015)
 
-                # Interpret 'sl' as a distance if provided; default small cushion
                 sl_dist = float(signal.get("sl", 5.0))
                 if sl_dist <= 0:
                     sl_dist = 5.0
-
-                # Convert stop to a price based on direction
                 if side == "SELL":
                     stop_loss = entry_price + sl_dist
                 else:
@@ -109,9 +109,11 @@ class BacktestEngine:
                 if idx + 1 >= len(closes):
                     break  # no next bar
 
-                exit_price = float(closes.iloc[idx + 1])
+                exit_mid = float(closes.iloc[idx + 1])
+                exit_spread = exit_mid * float(getattr(settings.executor, "max_spread_pct", 0.0035))
+                exit_price = exit_mid - exit_spread / 2.0 if side == "BUY" else exit_mid + exit_spread / 2.0
+                exit_price *= 1 - (0.0010 if side == "BUY" else -0.0010)
 
-                # P&L by direction
                 if side == "SELL":
                     pnl = (entry_price - exit_price) * qty
                 else:
@@ -155,3 +157,10 @@ class BacktestEngine:
         logger.info(f"Total Trades:    {total_trades}")
         logger.info(f"Winning Trades:  {win_trades} ({win_rate:.2f}%)")
         logger.info(f"Net PnL:         ₹{total_pnl:,.2f}")
+
+    # ------------------------------------------------------------------
+    # Walk-forward optimisation (simplified stub)
+    # ------------------------------------------------------------------
+    def walk_forward_optimize(self) -> List[Dict[str, Any]]:
+        """Placeholder for future walk-forward grid search."""
+        return []

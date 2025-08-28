@@ -145,27 +145,36 @@ class StrategyRunner:
             "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
             "executed": False, "reason_block": None,
         }
-        # clear stale error before starting
         self._last_error = None
         try:
-            # window
-            if not self._within_trading_window() and not settings.allow_offhours_testing:
+            # fetch data first to allow ADX‑based window override
+            df = self._fetch_spot_ohlc()
+            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            adx_val = None
+            try:
+                adx_series = df.get("adx")
+                if adx_series is None:
+                    adx_cols = [c for c in df.columns if c.startswith("adx_")]
+                    if adx_cols:
+                        adx_series = df[sorted(adx_cols)[-1]]
+                if adx_series is not None and len(adx_series):
+                    adx_val = float(adx_series.iloc[-1])
+            except Exception:
+                adx_val = None
+
+            try:
+                within = self._within_trading_window(adx_val)
+            except TypeError:
+                within = self._within_trading_window()
+            if not within and not settings.allow_offhours_testing:
                 flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "off_hours"
-                try:
-                    df_off = self._fetch_spot_ohlc()
-                    flow["bars"] = int(len(df_off) if isinstance(df_off, pd.DataFrame) else 0)
-                except Exception as e:  # pragma: no cover - defensive
-                    self.log.debug("Off-hours data fetch failed: %s", e)
-                    flow["bars"] = 0
                 self._last_flow_debug = flow
                 if not self._offhours_notified:
                     now = self._now_ist().strftime("%H:%M:%S")
-                    msg = (
-                        f"⏰ Tick blocked outside trading window at {now} IST "
-                        f"(window {self._start_time.strftime('%H:%M')}-{self._end_time.strftime('%H:%M')})"
+                    self._notify(
+                        f"⏰ Tick blocked outside trading window at {now} IST"
                     )
-                    self._notify(msg)
                     self._offhours_notified = True
                 self.log.debug("Skipping tick: outside trading window")
                 return
@@ -183,9 +192,7 @@ class StrategyRunner:
             self._ensure_day_state()
             self._refresh_equity_if_due()
 
-            # ---- data
-            df = self._fetch_spot_ohlc()
-            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            # we already fetched df above; validate sufficiency
             self.log.debug("Fetched %s bars", flow["bars"])
             if df is None or len(df) < int(settings.strategy.min_bars_for_signal):
                 flow["reason_block"] = "insufficient_data"
@@ -408,10 +415,15 @@ class StrategyRunner:
                 # Cool-off finished; reset counters
                 self.risk.loss_cooldown_until = None
                 self.risk.consecutive_losses = 0
-        if gates.get("loss_streak", True) and self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
+        if gates.get("loss_streak", True) and self.risk.consecutive_losses >= 3:
             gates["loss_streak"] = False
-            # set cool-off timer (minimum 45 minutes)
-            self.risk.loss_cooldown_until = now + timedelta(minutes=45)
+            cutoff = self._parse_hhmm("14:30")
+            if now.time() >= cutoff:
+                # stop for the rest of the day
+                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                self.risk.loss_cooldown_until = tomorrow
+            else:
+                self.risk.loss_cooldown_until = now + timedelta(minutes=45)
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
         entry = signal.get("entry_price")
@@ -622,9 +634,19 @@ class StrategyRunner:
             self.risk = RiskState(trading_day=today)
             self._notify("🔁 New trading day — risk counters reset")
 
-    def _within_trading_window(self) -> bool:
-        now_ist = self._now_ist().time()
-        return self._start_time <= now_ist <= self._end_time
+    def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
+        now = self._now_ist().time()
+        start = self._parse_hhmm("09:25")
+        mid1 = self._parse_hhmm("11:20")
+        mid2 = self._parse_hhmm("13:45")
+        end = self._parse_hhmm("15:00")
+        if start <= now <= mid1:
+            return True
+        if mid1 < now < mid2:
+            return bool(adx_val is not None and adx_val >= 22)
+        if mid2 <= now <= end:
+            return True
+        return False
 
     @staticmethod
     def _parse_hhmm(text: str):
@@ -810,7 +832,7 @@ class StrategyRunner:
             "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if self.kite is not None else "Paper",
-            "within_window": self._within_trading_window(),
+            "within_window": self._within_trading_window(None),
             "paused": self._paused,
             "trades_today": self.risk.trades_today,
             "consecutive_losses": self.risk.consecutive_losses,
