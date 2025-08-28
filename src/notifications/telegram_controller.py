@@ -377,9 +377,10 @@ class TelegramController:
                 is_ok = bool(diag_data.get("ok", False))
                 summary_items = diag_data.get("status_messages", {})
 
-                parts_line = []
+                parts_line: List[str] = []
+                ok_statuses = {"ok", "skipped", "no-eval", "dry mode"}
                 for name, status in summary_items.items():
-                    icon = "🟢" if status == "ok" else "🔴"
+                    icon = "🟢" if status in ok_statuses else "🔴"
                     parts_line.append(f"{icon} {name.replace('_', ' ').capitalize()}")
 
                 head = "✅ Flow looks good" if is_ok else "❗ Flow has issues"
