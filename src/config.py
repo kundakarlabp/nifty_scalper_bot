@@ -11,8 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ValidationInfo, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Optional external dependencies for validation
 try:
@@ -254,7 +254,7 @@ class AppSettings(BaseSettings):
     health: HealthSettings = HealthSettings()
     system: SystemSettings = SystemSettings()
 
-    model_config = ConfigDict(
+    model_config = SettingsConfigDict(
         env_file=".env",             # used locally; Railway uses real env vars
         env_file_encoding="utf-8",
         case_sensitive=False,
