@@ -84,10 +84,9 @@ class StrategyRunner:
                         if not isinstance(df, pd.DataFrame) or df.empty:
                             self.log.warning(
                                 "instrument_token %s returned no historical data — please"
-                                " configure a valid F&O token; disabling data source.",
+                                " configure a valid F&O token; falling back to symbol.",
                                 token,
                             )
-                            self.data_source = None
                 if self.data_source is not None:
                     self.log.info("Data source initialized: LiveKiteSource")
                     try:
@@ -504,12 +503,20 @@ class StrategyRunner:
                 )
                 return None
 
-            # Resolve token with fallbacks
+            # Resolve token/symbol with fallbacks
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
             if token <= 0:
                 token = int(getattr(settings.instruments, "spot_token", 0) or 0)
+            symbol = (
+                getattr(settings.instruments, "spot_symbol", None)
+                or getattr(settings.instruments, "trade_symbol", None)
+            )
 
             timeframe = str(getattr(settings.data, "timeframe", "minute"))
+
+            need = {"open", "high", "low", "close", "volume"}
+            min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 0))
+            rows = 0
 
             if token > 0:
                 df = self.data_source.fetch_ohlc(
@@ -518,8 +525,6 @@ class StrategyRunner:
                     end=end,
                     timeframe=timeframe,
                 )
-                need = {"open", "high", "low", "close", "volume"}
-                min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 0))
                 valid = isinstance(df, pd.DataFrame) and need.issubset(df.columns)
                 rows = len(df) if isinstance(df, pd.DataFrame) else 0
 
@@ -560,15 +565,31 @@ class StrategyRunner:
                     self._last_fetch_ts = time.time()
                     return df.sort_index()
 
-                self.log.error(
-                    "Insufficient historical_data (%s<%s) after expanded fetch.",
-                    rows,
-                    min_bars,
+            # If token fetch failed or no token, try symbol-based fetch (yfinance fallback)
+            if symbol:
+                df = self.data_source.fetch_ohlc(
+                    token=symbol,
+                    start=start,
+                    end=end,
+                    timeframe=timeframe,
                 )
-                self._last_error = "no_historical_data"
-                self._notify(
-                    "⚠️ Historical data unavailable from broker — check credentials or subscription."
-                )
+                valid = isinstance(df, pd.DataFrame) and need.issubset(df.columns)
+                rows = len(df) if isinstance(df, pd.DataFrame) else 0
+                if not valid or rows < min_bars:
+                    self.log.error(
+                        "Insufficient historical_data for symbol %s (%s<%s)",
+                        symbol,
+                        rows,
+                        min_bars,
+                    )
+                else:
+                    self._last_fetch_ts = time.time()
+                    return df.sort_index()
+
+            self._last_error = "no_historical_data"
+            self._notify(
+                "⚠️ Historical data unavailable from broker — check credentials or subscription."
+            )
 
             # Fallback: synthesize a single bar from trade symbol/token LTP
             sym = getattr(settings.instruments, "trade_symbol", None)

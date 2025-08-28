@@ -44,7 +44,7 @@ class DataSource:
         return
 
     def fetch_ohlc(
-        self, token: int, start: datetime, end: datetime, timeframe: str
+        self, token: Any, start: datetime, end: datetime, timeframe: str
     ) -> Optional[pd.DataFrame]:
         """
         Return an OHLC DataFrame with columns: open, high, low, close, volume.
@@ -281,149 +281,135 @@ class LiveKiteSource(DataSource):
 
     # ---- main candle fetch ----
     def fetch_ohlc(
-        self, token: int, start: datetime, end: datetime, timeframe: str
+        self, token: Any, start: datetime, end: datetime, timeframe: str
     ) -> Optional[pd.DataFrame]:
-        """
-        Primary path: Kite ``historical_data``.
-        Returns ``None`` if no candles were retrieved even after all retries.
-        """
-        if not self.kite:
-            log.warning(
-                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
-            )
-            if yf is None:
-                return None
-            sym = _yf_symbol(token)
-            if not sym:
-                return None
-            try:
-                interval_map = {
-                    "minute": "1m",
-                    "3minute": "3m",
-                    "5minute": "5m",
-                    "10minute": "10m",
-                    "15minute": "15m",
-                    "day": "1d",
-                }
-                yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
-                df = yf.download(
-                    sym,
-                    start=start,
-                    end=end,
-                    interval=yf_interval,
-                    progress=False,
-                )
-                if df.empty:
-                    return None
-                df.index = pd.to_datetime(df.index).tz_localize(None)
-                df = df.rename(columns={c: c.lower() for c in df.columns})
-                if "volume" not in df.columns:
-                    df["volume"] = 0
-                need = {"open", "high", "low", "close"}
-                if need.issubset(df.columns):
-                    out = df[["open", "high", "low", "close", "volume"]].copy()
-                    self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
-                    return _clip_window(out, start, end)
-            except Exception as e:  # pragma: no cover
-                log.debug("yfinance fetch_ohlc failed: %s", e)
-            return None
+        """Primary path: Kite historical_data with yfinance fallback."""
 
-        # Guard inputs
+        sym = _yf_symbol(token)
+        token_int: Optional[int] = None
         try:
-            token = int(token)
+            token_int = int(token)
         except Exception:
-            log.error("fetch_ohlc: invalid token %r", token)
-            return None
+            token_int = None
 
-        if not isinstance(start, datetime) or not isinstance(end, datetime):
-            log.error(
-                "fetch_ohlc: start/end must be datetime, got %r %r", type(start), type(end)
-            )
-            return None
-
-        if start >= end:
-            # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
-            start = end - timedelta(minutes=10)
-
-        interval = _coerce_interval(str(timeframe))
-
-        # Try cache
-        cached = self._cache.get(token, interval, start, end)
-        if cached is not None and not cached.empty:
-            return _clip_window(cached, start, end)
-
-        # Kite expects naive or tz-aware UTC; we'll pass naive (already)
-        frm = pd.to_datetime(start).to_pydatetime()
-        to = pd.to_datetime(end).to_pydatetime()
-
-        # Kite limits historical_data to ~2000 candles per call.  Chunk long
-        # requests (e.g., multi‑day backfills) into smaller ranges and stitch
-        # the results together.  This keeps the external behaviour the same
-        # while avoiding silent truncation.
-        interval_minutes = {
-            "minute": 1,
-            "3minute": 3,
-            "5minute": 5,
-            "10minute": 10,
-            "15minute": 15,
-        }
-        step: Optional[timedelta] = None
-        if interval in interval_minutes:
-            step = timedelta(minutes=interval_minutes[interval] * 2000)
-        elif interval == "day":
-            step = timedelta(days=2000)
-
-        frames: List[pd.DataFrame] = []
-        cur = frm
-        try:
-            while cur < to:
-                cur_end = to if step is None else min(to, cur + step)
-                rows = _retry(
-                    self.kite.historical_data,
-                    token,
-                    cur,
-                    cur_end,
-                    interval,
-                    continuous=False,
-                    oi=False,
-                    tries=3,
-                )
-                part = _safe_dataframe(rows)
-                if not part.empty:
-                    frames.append(part)
-                cur = cur_end
-
-            df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
-            df = df[~df.index.duplicated(keep="last")]
-
-            if df.empty:
-                # No data retrieved — let caller handle this explicitly.
+        if self.kite and token_int is not None:
+            if not isinstance(start, datetime) or not isinstance(end, datetime):
                 log.error(
-                    "historical_data empty for token=%s interval=%s window=%s→%s", 
-                    token, interval, start, end,
+                    "fetch_ohlc: start/end must be datetime, got %r %r",
+                    type(start),
+                    type(end),
                 )
                 return None
 
-            if df is not None and not df.empty:
-                # Clip to requested window and cache the *unclipped* frame covering the window
-                clipped = _clip_window(df, start, end)
-                self._cache.set(token, interval, df, start, end)
-                # Validate schema again (defensive)
-                need = {"open", "high", "low", "close"}
-                if not clipped.empty and need.issubset(clipped.columns):
-                    return clipped
+            if start >= end:
+                # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
+                start = end - timedelta(minutes=10)
 
-            return None
+            interval = _coerce_interval(str(timeframe))
 
-        except Exception as e:
-            # Network hiccups are common; degrade to a single LTP bar so callers
-            # can continue running diagnostics without spamming errors.
-            log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
-            ltp = self.get_last_price(token)
-            if isinstance(ltp, (int, float)):
-                ts = _now_ist_naive().replace(second=0, microsecond=0)
-                return pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
+            cached = self._cache.get(token_int, interval, start, end)
+            if cached is not None and not cached.empty:
+                return _clip_window(cached, start, end)
+
+            frm = pd.to_datetime(start).to_pydatetime()
+            to = pd.to_datetime(end).to_pydatetime()
+
+            interval_minutes = {
+                "minute": 1,
+                "3minute": 3,
+                "5minute": 5,
+                "10minute": 10,
+                "15minute": 15,
+            }
+            step: Optional[timedelta] = None
+            if interval in interval_minutes:
+                step = timedelta(minutes=interval_minutes[interval] * 2000)
+            elif interval == "day":
+                step = timedelta(days=2000)
+
+            frames: List[pd.DataFrame] = []
+            cur = frm
+            try:
+                while cur < to:
+                    cur_end = to if step is None else min(to, cur + step)
+                    rows = _retry(
+                        self.kite.historical_data,
+                        token_int,
+                        cur,
+                        cur_end,
+                        interval,
+                        continuous=False,
+                        oi=False,
+                        tries=3,
+                    )
+                    part = _safe_dataframe(rows)
+                    if not part.empty:
+                        frames.append(part)
+                    cur = cur_end
+
+                df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
+                df = df[~df.index.duplicated(keep="last")]
+
+                if not df.empty:
+                    clipped = _clip_window(df, start, end)
+                    self._cache.set(token_int, interval, df, start, end)
+                    need = {"open", "high", "low", "close"}
+                    if not clipped.empty and need.issubset(clipped.columns):
+                        return clipped
+                else:
+                    log.warning(
+                        "historical_data empty for token=%s interval=%s window=%s→%s",
+                        token_int,
+                        interval,
+                        start,
+                        end,
+                    )
+            except Exception as e:
+                log.warning(
+                    "fetch_ohlc failed token=%s interval=%s: %s",
+                    token_int,
+                    interval,
+                    e,
                 )
+                ltp = self.get_last_price(token_int)
+                if isinstance(ltp, (int, float)):
+                    ts = _now_ist_naive().replace(second=0, microsecond=0)
+                    return pd.DataFrame(
+                        {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
+                        index=[ts],
+                    )
+
+        if yf is None or not sym:
             return None
+        try:
+            interval_map = {
+                "minute": "1m",
+                "3minute": "3m",
+                "5minute": "5m",
+                "10minute": "10m",
+                "15minute": "15m",
+                "day": "1d",
+            }
+            yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
+            df = yf.download(
+                sym,
+                start=start,
+                end=end,
+                interval=yf_interval,
+                progress=False,
+            )
+            if df.empty:
+                return None
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df = df.rename(columns={c: c.lower() for c in df.columns})
+            if "volume" not in df.columns:
+                df["volume"] = 0
+            need = {"open", "high", "low", "close"}
+            if need.issubset(df.columns):
+                out = df[["open", "high", "low", "close", "volume"]].copy()
+                cache_key = token_int if token_int is not None else sym
+                self._cache.set(cache_key, _coerce_interval(timeframe), out, start, end)
+                return _clip_window(out, start, end)
+        except Exception as e:  # pragma: no cover
+            log.debug("yfinance fetch_ohlc failed: %s", e)
+        return None

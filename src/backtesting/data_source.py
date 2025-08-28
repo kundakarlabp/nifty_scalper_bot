@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import pandas as pd
 from pandas.errors import EmptyDataError
@@ -154,7 +154,7 @@ class BacktestCsvSource(DataSource):
 
     def fetch_ohlc(
         self,
-        instrument_token: int,
+        instrument_token: Any,
         from_date: datetime,
         to_date: datetime,
         interval: str,
