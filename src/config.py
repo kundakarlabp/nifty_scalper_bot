@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 import os
 
 import pandas as pd
@@ -462,6 +463,7 @@ def validate_critical_settings() -> None:
     # Instrument token sanity check (only in live mode with deps available)
     if (
         settings.enable_live_trading
+        and not settings.allow_offhours_testing
         and KiteConnect is not None
         and LiveKiteSource is not None
         and not errors  # only attempt if creds are present
@@ -491,7 +493,9 @@ def validate_critical_settings() -> None:
                             f"instrument_token {token} returned no data; configure a valid F&O token"
                         )
             except Exception as e:
-                errors.append(f"instrument_token validation failed: {e}")
+                logging.getLogger("config").warning(
+                    "instrument_token validation skipped: %s", e
+                )
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

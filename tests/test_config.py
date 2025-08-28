@@ -207,3 +207,40 @@ def test_lookback_less_than_min_bars():
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     assert "LOOKBACK_MINUTES" in str(exc.value)
+
+
+def test_instrument_token_validation_skips_on_network_error(monkeypatch):
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": "111",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_, **__):
+            raise RuntimeError("network down")
+
+    class DummyKite:
+        def __init__(self, api_key):
+            pass
+
+        def set_access_token(self, token):
+            pass
+
+    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
+        m.setattr("src.config.LiveKiteSource", DummySource)
+        m.setattr("src.config.KiteConnect", DummyKite)
+        # Should not raise even though fetch_ohlc errors
+        validate_critical_settings()
