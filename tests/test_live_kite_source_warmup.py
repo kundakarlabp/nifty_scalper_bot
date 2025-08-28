@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -9,7 +9,8 @@ def test_fetch_ohlc_warmup(monkeypatch):
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=WARMUP_BARS)
 
-    index = pd.date_range(start, periods=WARMUP_BARS, freq="1min")
+    ist = timezone(timedelta(hours=5, minutes=30))
+    index = pd.date_range(start, periods=WARMUP_BARS, freq="1min", tz=ist)
     data = {
         "Open": list(range(WARMUP_BARS)),
         "High": list(range(WARMUP_BARS)),

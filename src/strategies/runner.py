@@ -620,7 +620,10 @@ class StrategyRunner:
 
     @staticmethod
     def _now_ist():
-        return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        """Current time in IST as a timezone‑naive ``datetime``."""
+        return datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
+            tzinfo=None
+        )
 
     @staticmethod
     def _today_ist():
