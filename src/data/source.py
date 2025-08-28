@@ -86,8 +86,9 @@ _INTERVAL_MAP: Dict[str, str] = {
 @dataclass
 class _CacheEntry:
     df: pd.DataFrame
-    ts: float               # insertion timestamp (epoch seconds)
-    window: Tuple[datetime, datetime]  # (start, end) that the DF covers
+    ts: float  # insertion timestamp (epoch seconds)
+    fetched_window: Tuple[datetime, datetime]
+    requested_window: Tuple[datetime, datetime]
 
 
 class _TTLCache:
@@ -107,19 +108,30 @@ class _TTLCache:
         if time.time() - ent.ts > self._ttl:
             self._data.pop(key, None)
             return None
-        # If our cached window fully contains the requested window, subset it
-        s0, e0 = ent.window
+        # If our cached expanded window fully contains the requested window, subset it
+        s0, e0 = ent.fetched_window
         if s0 <= start and e0 >= end:
             try:
                 return ent.df.loc[(ent.df.index >= start) & (ent.df.index <= end)].copy()
             except Exception:
-                # fall through to miss
                 return None
         return None
 
-    def set(self, token: int, interval: str, df: pd.DataFrame, start: datetime, end: datetime) -> None:
+    def set(
+        self,
+        token: int,
+        interval: str,
+        df: pd.DataFrame,
+        fetched_window: Tuple[datetime, datetime],
+        requested_window: Tuple[datetime, datetime],
+    ) -> None:
         key = (int(token), interval)
-        self._data[key] = _CacheEntry(df=df.copy(), ts=time.time(), window=(start, end))
+        self._data[key] = _CacheEntry(
+            df=df.copy(),
+            ts=time.time(),
+            fetched_window=fetched_window,
+            requested_window=requested_window,
+        )
 
 
 def _safe_dataframe(rows: Any) -> pd.DataFrame:
@@ -330,7 +342,17 @@ class LiveKiteSource(DataSource):
             sym = _yf_symbol(token)
             out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
             if out is not None:
-                self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
+                fetched_window = (
+                    pd.to_datetime(out.index.min()).to_pydatetime(),
+                    pd.to_datetime(out.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    int(token),
+                    _coerce_interval(timeframe),
+                    out,
+                    fetched_window,
+                    (start, end),
+                )
                 return _clip_window(out, start, end)
             ltp = self.get_last_price(sym or token)
             if isinstance(ltp, (int, float)):
@@ -420,7 +442,17 @@ class LiveKiteSource(DataSource):
                 sym = _yf_symbol(token)
                 out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
                 if out is not None:
-                    self._cache.set(token, interval, out, start, end)
+                    fetched_window = (
+                        pd.to_datetime(out.index.min()).to_pydatetime(),
+                        pd.to_datetime(out.index.max()).to_pydatetime(),
+                    )
+                    self._cache.set(
+                        token,
+                        interval,
+                        out,
+                        fetched_window,
+                        (start, end),
+                    )
                     return _clip_window(out, start, end)
                 ltp = self.get_last_price(sym or token)
                 if isinstance(ltp, (int, float)):
@@ -432,7 +464,17 @@ class LiveKiteSource(DataSource):
                 return None
 
             clipped = _clip_window(df, start, end)
-            self._cache.set(token, interval, df, start, end)
+            fetched_window = (
+                pd.to_datetime(df.index.min()).to_pydatetime(),
+                pd.to_datetime(df.index.max()).to_pydatetime(),
+            )
+            self._cache.set(
+                token,
+                interval,
+                df,
+                fetched_window,
+                (start, end),
+            )
             need = {"open", "high", "low", "close"}
             if not clipped.empty and need.issubset(clipped.columns):
                 return clipped
@@ -444,7 +486,17 @@ class LiveKiteSource(DataSource):
             sym = _yf_symbol(token)
             out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
             if out is not None:
-                self._cache.set(token, _coerce_interval(timeframe), out, start, end)
+                fetched_window = (
+                    pd.to_datetime(out.index.min()).to_pydatetime(),
+                    pd.to_datetime(out.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    token,
+                    _coerce_interval(timeframe),
+                    out,
+                    fetched_window,
+                    (start, end),
+                )
                 return _clip_window(out, start, end)
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
