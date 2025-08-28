@@ -669,17 +669,17 @@ class StrategyRunner:
             "hint": (
                 f"age={int(age_s)}s "
                 f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m"
+                f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',20))}m"
             ),
         })
 
         # Strategy readiness (min bars)
-        ready = isinstance(self._last_flow_debug, dict) and int(self._last_flow_debug.get("bars", 0)) >= int(getattr(settings.strategy, "min_bars_for_signal", 50))
+        ready = isinstance(self._last_flow_debug, dict) and int(self._last_flow_debug.get("bars", 0)) >= int(getattr(settings.strategy, "min_bars_for_signal", 20))
         checks.append({
             "name": "Strategy readiness",
             "ok": ready,
             "detail": f"bars={int(self._last_flow_debug.get('bars', 0))}",
-            "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 50))}",
+            "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 20))}",
         })
 
         # Risk gates last view
@@ -745,7 +745,7 @@ class StrategyRunner:
         broker_ok = (self.kite is not None) if live else True
         data_fresh = (time.time() - getattr(self, "_last_fetch_ts", 0.0)) < 120
         bars = int(flow.get("bars", 0) or 0)
-        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 50))
+        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 20))
         strat_ready = bars >= min_bars
         gates = (
             flow.get("risk_gates", RISK_GATES_SKIPPED)
