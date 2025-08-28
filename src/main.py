@@ -5,11 +5,17 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
-from src.config import settings, validate_critical_settings
-from src.utils.logging_tools import RateLimitFilter
-from src.strategies.runner import StrategyRunner
+# Ensure project root in sys.path when executed as a script
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.config import settings, validate_critical_settings  # noqa: E402
+from src.utils.logging_tools import RateLimitFilter  # noqa: E402
+from src.strategies.runner import StrategyRunner  # noqa: E402
 
 # Optional broker SDK
 try:
