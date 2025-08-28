@@ -124,12 +124,23 @@ class TelegramController:
         self._last_sends.append((now, h))
         return True
 
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        """Escape Markdown special characters for safe Telegram messages."""
+        escape_chars = "_*[]()~`>#+-=|{}.!\\"
+        return "".join(
+            "\\" + ch if ch in escape_chars else ch
+            for ch in text
+        )
+
     def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
         if not text or not text.strip():
             return
         if not self._rate_ok(text):
             return
         delay = self._backoff
+        if parse_mode:
+            text = self._escape_markdown(text)
         while True:
             try:
                 payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
