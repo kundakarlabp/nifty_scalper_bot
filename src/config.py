@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
 import os
 
 import pandas as pd
@@ -72,9 +71,12 @@ class TelegramSettings(BaseModel):
 
     @field_validator("chat_id")
     @classmethod
-    def _v_chat_id(cls, v: int) -> int:
-        if v == 0:
-            raise ValueError("TELEGRAM__CHAT_ID must be a non-zero integer")
+    def _v_chat_id(cls, v: int, info: ValidationInfo) -> int:
+        """Ensure chat_id is provided when Telegram is enabled."""
+        if info.data.get("enabled", True) and v == 0:
+            raise ValueError(
+                "TELEGRAM__CHAT_ID must be a non-zero integer when TELEGRAM__ENABLED is true"
+            )
         return v
 
 
@@ -440,11 +442,16 @@ def validate_critical_settings() -> None:
         if not settings.zerodha.access_token:
             errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
 
-    # Telegram is MANDATORY in your deployment
-    if not settings.telegram.bot_token:
-        errors.append("TELEGRAM__BOT_TOKEN is required (Telegram is mandatory)")
-    if not settings.telegram.chat_id:
-        errors.append("TELEGRAM__CHAT_ID is required (Telegram is mandatory)")
+    # Telegram configuration (required only when enabled)
+    if settings.telegram.enabled:
+        if not settings.telegram.bot_token:
+            errors.append(
+                "TELEGRAM__BOT_TOKEN is required when TELEGRAM__ENABLED=true"
+            )
+        if not settings.telegram.chat_id:
+            errors.append(
+                "TELEGRAM__CHAT_ID is required when TELEGRAM__ENABLED=true"
+            )
 
     # Ensure lookback window can satisfy minimum bars requirement
     if settings.data.lookback_minutes < settings.strategy.min_bars_for_signal:
