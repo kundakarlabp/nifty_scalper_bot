@@ -38,7 +38,7 @@ def test_validation_error_on_invalid_data():
     """Tests that Pydantic raises a ValidationError for out-of-bounds data."""
     with pytest.raises(ValidationError):
         # Direct instantiation to trigger validation errors
-        RiskSettings(max_daily_drawdown_pct=2.0)
+        RiskSettings(max_daily_drawdown_pct=2.0)  # Invalid (must be < 0.2)
 
 def test_default_values():
     """Tests that default values are used when environment variables are not set."""
