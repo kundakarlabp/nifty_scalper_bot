@@ -216,8 +216,23 @@ def calculate_bollinger_bands(
     return upper, lower
 
 
-# Backward compatibility
-calculate_bb_width = calculate_bollinger_bands
+def calculate_bb_width(
+    close: SeriesOrDF,
+    window: int = 20,
+    std: float = 2.0,
+    use_percentage: bool = False,
+) -> pd.Series:
+    """Return the Bollinger Band width.
+
+    If ``use_percentage`` is True, the width is expressed as a percentage of the
+    mid-band (average of upper and lower bands).
+    """
+    upper, lower = calculate_bollinger_bands(close, window=window, std=std)
+    width = upper - lower
+    if use_percentage:
+        mid = (upper + lower) / 2.0
+        width = width / mid.replace(0, np.nan) * 100.0
+    return width
 
 
 # ---------------------------------- ADX ----------------------------------- #

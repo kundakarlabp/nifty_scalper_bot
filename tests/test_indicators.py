@@ -1,7 +1,12 @@
 import pandas as pd
 import pytest
 
-from src.utils.indicators import calculate_atr, calculate_supertrend
+from src.utils.indicators import (
+    calculate_atr,
+    calculate_supertrend,
+    calculate_bb_width,
+    calculate_bollinger_bands,
+)
 
 
 def test_calculate_atr_returns_series():
@@ -47,3 +52,10 @@ def test_calculate_supertrend_missing_series_raises_value_error():
     high = pd.Series([100, 101, 102])
     with pytest.raises(ValueError):
         calculate_supertrend(high)
+
+
+def test_calculate_bb_width_matches_band_difference():
+    close = pd.Series([1, 2, 3, 4, 5], name="close")
+    width = calculate_bb_width(close, window=2, std=1)
+    upper, lower = calculate_bollinger_bands(close, window=2, std=1)
+    pd.testing.assert_series_equal(width, upper - lower)
