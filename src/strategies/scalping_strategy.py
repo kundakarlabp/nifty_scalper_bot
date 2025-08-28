@@ -22,11 +22,14 @@ _last_log_ts = {
     "auto_relax": 0.0,
     "generated": 0.0,
 }
+
+
 def _log_throttled(key: str, level: int, msg: str, *args) -> None:
     now = time.time()
     if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
         _last_log_ts[key] = now
         logger.log(level, msg, *args)
+
 
 Side = Literal["BUY", "SELL"]
 SignalOutput = Optional[Dict[str, Any]]

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any
 
+
 @dataclass
 class HealthItem:
     name: str
@@ -10,6 +11,7 @@ class HealthItem:
     hint: str | None = None
     detail: str | None = None
     severity: str = "info"  # info|warn|error
+
 
 def to_dict(items: List[HealthItem], *, last_signal: dict | None = None, meta: dict | None = None) -> Dict[str, Any]:
     return {
@@ -19,6 +21,7 @@ def to_dict(items: List[HealthItem], *, last_signal: dict | None = None, meta: d
         "meta": meta or {},
     }
 
+
 def render_compact(items: List[HealthItem]) -> str:
     bullets = []
     for x in items:
@@ -26,6 +29,7 @@ def render_compact(items: List[HealthItem]) -> str:
         bullets.append(f"{dot} {x.name}")
     head = "✅ Flow looks good" if all(i.ok for i in items) else "❗ Flow has issues"
     return head + "\n" + " · ".join(bullets)
+
 
 def render_detailed(items: List[HealthItem], *, last_signal_present: bool) -> str:
     lines = ["🔍 Full system check"]
