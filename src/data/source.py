@@ -323,15 +323,18 @@ class LiveKiteSource(DataSource):
         Primary path: Kite ``historical_data``.
         Returns ``None`` if no candles were retrieved even after all retries.
         """
+        orig_start = start
+        orig_end = end
+
         if not self.kite:
             log.warning(
                 "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
             )
             sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            out = _fetch_ohlc_yf(sym or "", orig_start, orig_end, timeframe)
             if out is not None:
-                self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
-                return _clip_window(out, start, end)
+                self._cache.set(int(token), _coerce_interval(timeframe), out, orig_start, orig_end)
+                return _clip_window(out, orig_start, orig_end)
             ltp = self.get_last_price(sym or token)
             if isinstance(ltp, (int, float)):
                 ts = _now_ist_naive().replace(second=0, microsecond=0)
@@ -357,13 +360,15 @@ class LiveKiteSource(DataSource):
         if start >= end:
             # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
             start = end - timedelta(minutes=10)
+            orig_start = start
+            orig_end = end
 
         interval = _coerce_interval(str(timeframe))
 
         # Try cache
-        cached = self._cache.get(token, interval, start, end)
+        cached = self._cache.get(token, interval, orig_start, orig_end)
         if cached is not None and not cached.empty:
-            return _clip_window(cached, start, end)
+            return _clip_window(cached, orig_start, orig_end)
 
         # Kite expects naive or tz-aware UTC; we'll pass naive (already)
         frm = pd.to_datetime(start).to_pydatetime()
@@ -414,14 +419,14 @@ class LiveKiteSource(DataSource):
                     "historical_data empty for token=%s interval=%s window=%s→%s",
                     token,
                     interval,
-                    start,
-                    end,
+                    orig_start,
+                    orig_end,
                 )
                 sym = _yf_symbol(token)
-                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+                out = _fetch_ohlc_yf(sym or "", orig_start, orig_end, timeframe)
                 if out is not None:
-                    self._cache.set(token, interval, out, start, end)
-                    return _clip_window(out, start, end)
+                    self._cache.set(token, interval, out, orig_start, orig_end)
+                    return _clip_window(out, orig_start, orig_end)
                 ltp = self.get_last_price(sym or token)
                 if isinstance(ltp, (int, float)):
                     ts = _now_ist_naive().replace(second=0, microsecond=0)
@@ -431,8 +436,8 @@ class LiveKiteSource(DataSource):
                     )
                 return None
 
-            clipped = _clip_window(df, start, end)
-            self._cache.set(token, interval, df, start, end)
+            clipped = _clip_window(df, orig_start, orig_end)
+            self._cache.set(token, interval, df, orig_start, orig_end)
             need = {"open", "high", "low", "close"}
             if not clipped.empty and need.issubset(clipped.columns):
                 return clipped
@@ -442,10 +447,10 @@ class LiveKiteSource(DataSource):
         except Exception as e:
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
             sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            out = _fetch_ohlc_yf(sym or "", orig_start, orig_end, timeframe)
             if out is not None:
-                self._cache.set(token, _coerce_interval(timeframe), out, start, end)
-                return _clip_window(out, start, end)
+                self._cache.set(token, _coerce_interval(timeframe), out, orig_start, orig_end)
+                return _clip_window(out, orig_start, orig_end)
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 ts = _now_ist_naive().replace(second=0, microsecond=0)
