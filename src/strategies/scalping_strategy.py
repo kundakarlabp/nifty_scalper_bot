@@ -237,12 +237,13 @@ class EnhancedScalpingStrategy:
             regime = None
             if spot_df is not None and len(spot_df) >= max(10, self.adx_period):
                 adx_series, di_plus_series, di_minus_series = self._extract_adx_columns(spot_df)
-                regime = detect_market_regime(
+                regime_res = detect_market_regime(
                     df=spot_df,
                     adx=adx_series,
                     di_plus=di_plus_series,
                     di_minus=di_minus_series,
                 )
+                regime = regime_res.regime.lower()
                 if regime == "trend":
                     regime = "trend_up" if ema_bias_up else "trend_down"
                 elif regime == "no_trade":
