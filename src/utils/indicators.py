@@ -115,7 +115,8 @@ def calculate_atr(
     if isinstance(high_or_df, pd.DataFrame):
         df = high_or_df
     else:
-        assert low is not None and close is not None, "Provide low & close series when passing high as Series."
+        if low is None or close is None:
+            raise ValueError("Provide low & close series when passing high as Series.")
         df = pd.DataFrame({
             "high": pd.to_numeric(high_or_df, errors="coerce").astype(float),
             "low": pd.to_numeric(low, errors="coerce").astype(float),
@@ -147,7 +148,8 @@ def calculate_supertrend(
         low_s = _series(high_or_df, "low")
         c = _series(high_or_df, "close")
     else:
-        assert low is not None and close is not None, "Provide low & close series when passing high as Series."
+        if low is None or close is None:
+            raise ValueError("Provide low & close series when passing high as Series.")
         h, low_s, c = (
             pd.to_numeric(high_or_df, errors="coerce").astype(float),
             pd.to_numeric(low, errors="coerce").astype(float),
