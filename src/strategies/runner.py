@@ -246,12 +246,6 @@ class StrategyRunner:
                 }
             )
 
-            # block new entries after 15:05 IST
-            if self._now_ist().time() >= self._parse_hhmm("15:05"):
-                flow["reason_block"] = "after_1505"
-                self._last_flow_debug = flow
-                return
-
             # ---- risk gates
             gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
@@ -675,27 +669,15 @@ class StrategyRunner:
     def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
         """Return ``True`` if current IST time falls within the configured window.
 
-        The legacy implementation hard‑coded session times which caused the
-        runner to mis-classify valid market hours as off-hours when the user
-        customised ``TIME_FILTER_START`` or ``TIME_FILTER_END``.  We now honour
-        the parsed start/end values from configuration while keeping the ADX
-        based mid-session filter.
+        Start and end times are sourced from the environment via ``settings``
+        so trading hours can be tuned without modifying code.
         """
 
+        _ = adx_val  # legacy arg ignored; window no longer depends on ADX
         now = self._now_ist().time()
-        start = getattr(self, "_start_time", self._parse_hhmm("09:25"))
-        end = getattr(self, "_end_time", self._parse_hhmm("15:00"))
-
-        if not (start <= now <= end):
-            return False
-
-        mid1 = self._parse_hhmm("11:20")
-        mid2 = self._parse_hhmm("13:45")
-        if now <= mid1:
-            return True
-        if mid1 < now < mid2:
-            return bool(adx_val is not None and adx_val >= 22)
-        return True
+        start = getattr(self, "_start_time", self._parse_hhmm(settings.data.time_filter_start))
+        end = getattr(self, "_end_time", self._parse_hhmm(settings.data.time_filter_end))
+        return start <= now <= end
 
     @staticmethod
     def _parse_hhmm(text: str):

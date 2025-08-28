@@ -86,7 +86,7 @@ class DataSettings(BaseModel):
     lookback_minutes: int = 20
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
-    time_filter_end: str = "15:20"
+    time_filter_end: str = "15:25"
 
     # Cache
     cache_enabled: bool = True
