@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, Tuple, List
 
 import pandas as pd
@@ -163,17 +164,24 @@ class StrategyRunner:
                 adx_val = None
 
             try:
-                within = self._within_trading_window(adx_val)
+                window_ok = self._within_trading_window(adx_val)
             except TypeError:
-                within = self._within_trading_window()
-            if not within and not settings.allow_offhours_testing:
+                window_ok = self._within_trading_window()
+            enable_windows = getattr(settings, "enable_time_windows", True)
+            within = (
+                (not enable_windows)
+                or window_ok
+                or bool(settings.allow_offhours_testing)
+            )
+            if not within:
                 flow["risk_gates"] = {"skipped": True}
-                flow["reason_block"] = "off_hours"
+                flow["reason_block"] = "outside_window"
                 self._last_flow_debug = flow
                 if not self._offhours_notified:
                     now = self._now_ist().strftime("%H:%M:%S")
+                    tz_name = getattr(settings, "tz", "IST")
                     self._notify(
-                        f"⏰ Tick blocked outside trading window at {now} IST"
+                        f"⏰ Tick blocked outside trading window at {now} {tz_name}"
                     )
                     self._offhours_notified = True
                 self.log.debug("Skipping tick: outside trading window")
@@ -696,10 +704,9 @@ class StrategyRunner:
 
     @staticmethod
     def _now_ist():
-        """Current time in IST as a timezone‑naive ``datetime``."""
-        return datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
-            tzinfo=None
-        )
+        """Current time in configured timezone as a timezone-naive ``datetime``."""
+        tz_name = getattr(settings, "tz", "Asia/Kolkata")
+        return datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
 
     @staticmethod
     def _today_ist():
@@ -873,7 +880,11 @@ class StrategyRunner:
             "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if self.kite is not None else "Paper",
-            "within_window": self._within_trading_window(None),
+            "within_window": (
+                (not getattr(settings, "enable_time_windows", True))
+                or self._within_trading_window(None)
+                or bool(settings.allow_offhours_testing)
+            ),
             "paused": self._paused,
             "trades_today": self.risk.trades_today,
             "consecutive_losses": self.risk.consecutive_losses,
