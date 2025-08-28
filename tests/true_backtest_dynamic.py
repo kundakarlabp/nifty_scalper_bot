@@ -118,7 +118,12 @@ class BacktestRunner:
 
     def _check_entry(self, current_dt: datetime, current_bar: pd.Series) -> None:
         # History up to current bar (inclusive) prevents look-ahead
-        df_history = self.data_source.fetch_ohlc(0, datetime.min, current_dt, "minute")
+        df_history = self.data_source.fetch_ohlc(
+            token=0,
+            start=datetime.min,
+            end=current_dt,
+            timeframe="minute",
+        )
         current_price = float(current_bar["close"])
 
         sig: Dict[str, Any] | None = self.strategy.generate_signal(df=df_history, current_price=current_price)
