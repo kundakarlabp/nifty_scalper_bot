@@ -7,6 +7,7 @@ import numpy as np
 
 from src.config import StrategySettings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.utils.indicators import calculate_adx
 
 
 @pytest.fixture
@@ -41,6 +42,26 @@ def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_
             "close": prices,
             "volume": np.random.randint(100, 1000, size=length),
         }
+    index = pd.date_range(start="2023-01-01", periods=length, freq="min")
+    df = pd.DataFrame(data, index=pd.to_datetime(index))
+    adx, di_plus, di_minus = calculate_adx(df)
+    df["adx"] = adx
+    df["di_plus"] = di_plus
+    df["di_minus"] = di_minus
+    return df
+
+
+def create_low_vol_dataframe(length: int = 100) -> pd.DataFrame:
+    """Create a narrow-range DataFrame to simulate indecisive markets."""
+    base = 100.0
+    prices = base + np.sin(np.linspace(0, 2 * np.pi, length)) * 0.1
+    data = {
+        "open": prices,
+        "high": prices + 0.1,
+        "low": prices - 0.1,
+        "close": prices,
+        "volume": np.random.randint(100, 1000, size=length),
+    }
     index = pd.date_range(start="2023-01-01", periods=length, freq="min")
     return pd.DataFrame(data, index=pd.to_datetime(index))
 
@@ -105,3 +126,17 @@ def test_signal_direction_on_trends(strategy_config: StrategySettings):
     # Ensure signal generated
     assert sig_down is not None
     assert sig_down["side"] == "SELL"
+
+
+def test_no_trade_when_indecisive(strategy_config: StrategySettings):
+    """Strategy should abstain when ADX and BB width show indecision."""
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = create_low_vol_dataframe()
+    sig = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert sig is None

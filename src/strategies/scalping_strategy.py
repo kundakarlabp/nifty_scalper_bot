@@ -9,7 +9,11 @@ import pandas as pd
 
 from src.config import settings
 from src.utils.atr_helper import compute_atr, atr_sl_tp_points, latest_atr_value
-from src.utils.indicators import calculate_vwap
+from src.utils.indicators import (
+    calculate_vwap,
+    calculate_macd,
+    calculate_bollinger_bands,
+)
 from src.signals.regime_detector import detect_market_regime
 
 logger = logging.getLogger(__name__)
@@ -218,7 +222,10 @@ class EnhancedScalpingStrategy:
                 score += 2
                 reasons.append(f"EMA fast({self.ema_fast}) crossed below slow({self.ema_slow}).")
 
-            rsi_val = float(self._rsi(df["close"], self.rsi_period).iloc[-1])
+            rsi_series = self._rsi(df["close"], self.rsi_period)
+            rsi_val = float(rsi_series.iloc[-1])
+            macd_line, _, _ = calculate_macd(df["close"])
+            bb_upper, bb_lower = calculate_bollinger_bands(df["close"])
             if ema_bias_up and rsi_val > 50:
                 score += 1
                 reasons.append(f"RSI({self.rsi_period}) > 50 (up momentum).")
@@ -246,6 +253,8 @@ class EnhancedScalpingStrategy:
                 elif regime == "range":
                     reasons.append("Spot ADX range.")
 
+            vwap_val = None
+            current_spot_price = None
             if spot_df is not None and len(spot_df) > 0:
                 vwap_series = calculate_vwap(spot_df)
                 if vwap_series is not None and len(vwap_series) > 0:
@@ -257,6 +266,61 @@ class EnhancedScalpingStrategy:
                     elif not ema_bias_up and current_spot_price < vwap_val:
                         score += 1
                         reasons.append("Spot < VWAP (risk-off).")
+
+            adx_val = float(adx_series.iloc[-1]) if 'adx_series' in locals() and adx_series is not None and len(adx_series) else 0.0
+            bb_width = float((bb_upper.iloc[-1] - bb_lower.iloc[-1])) if len(bb_upper) else 0.0
+            bb_width_pct = bb_width / float(current_spot_price) if current_spot_price else 0.0
+            if adx_val < (self.adx_trend_strength / 2) and bb_width_pct < 0.01:
+                dbg["reason_block"] = "indecisive_market"
+                self._last_debug = dbg
+                return None
+
+            macd_val = float(macd_line.iloc[-1]) if len(macd_line) else 0.0
+            ema_fast_slope = float(ema_fast.iloc[-1] - ema_fast.iloc[-2])
+            ema_slow_slope = float(ema_slow.iloc[-1] - ema_slow.iloc[-2])
+
+            if regime in ("trend_up", "trend_down") and vwap_val is not None and current_spot_price is not None:
+                vwap_ok = (current_spot_price > vwap_val) if regime == "trend_up" else (current_spot_price < vwap_val)
+                ema_slope_ok = (
+                    (ema_fast_slope > 0 and ema_slow_slope > 0)
+                    if regime == "trend_up"
+                    else (ema_fast_slope < 0 and ema_slow_slope < 0)
+                )
+                macd_ok = macd_val > 0 if regime == "trend_up" else macd_val < 0
+                if not (vwap_ok and ema_slope_ok and macd_ok):
+                    dbg["reason_block"] = "trend_gates_failed"
+                    self._last_debug = dbg
+                    return None
+            elif regime == "range" and vwap_val is not None and current_spot_price is not None:
+                price = current_spot_price
+                std_from_vwap = df["close"].rolling(window=20, min_periods=20).std().iloc[-1]
+                if abs(price - vwap_val) < std_from_vwap:
+                    dbg["reason_block"] = "not_far_from_vwap"
+                    self._last_debug = dbg
+                    return None
+                prev_open, prev_close = float(df["open"].iloc[-2]), float(df["close"].iloc[-2])
+                curr_open, curr_close = float(df["open"].iloc[-1]), float(df["close"].iloc[-1])
+                rsi_prev = float(rsi_series.iloc[-2])
+                if price >= float(bb_upper.iloc[-1]):
+                    reversal = prev_close > prev_open and curr_close < curr_open
+                    rsi_roll = rsi_prev > rsi_val
+                    if not (reversal and rsi_roll):
+                        dbg["reason_block"] = "range_gates_failed"
+                        self._last_debug = dbg
+                        return None
+                    ema_bias_up = False
+                elif price <= float(bb_lower.iloc[-1]):
+                    reversal = prev_close < prev_open and curr_close > curr_open
+                    rsi_roll = rsi_prev < rsi_val
+                    if not (reversal and rsi_roll):
+                        dbg["reason_block"] = "range_gates_failed"
+                        self._last_debug = dbg
+                        return None
+                    ema_bias_up = True
+                else:
+                    dbg["reason_block"] = "no_range_setup"
+                    self._last_debug = dbg
+                    return None
 
             # --- Score -> confidence; apply thresholds (strict, then relaxed) ---
             confidence = self._score_confidence(score)
