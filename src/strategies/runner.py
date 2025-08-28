@@ -665,18 +665,29 @@ class StrategyRunner:
             self._notify("🔁 New trading day — risk counters reset")
 
     def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
+        """Return ``True`` if current IST time falls within the configured window.
+
+        The legacy implementation hard‑coded session times which caused the
+        runner to mis-classify valid market hours as off-hours when the user
+        customised ``TIME_FILTER_START`` or ``TIME_FILTER_END``.  We now honour
+        the parsed start/end values from configuration while keeping the ADX
+        based mid-session filter.
+        """
+
         now = self._now_ist().time()
-        start = self._parse_hhmm("09:25")
+        start = getattr(self, "_start_time", self._parse_hhmm("09:25"))
+        end = getattr(self, "_end_time", self._parse_hhmm("15:00"))
+
+        if not (start <= now <= end):
+            return False
+
         mid1 = self._parse_hhmm("11:20")
         mid2 = self._parse_hhmm("13:45")
-        end = self._parse_hhmm("15:00")
-        if start <= now <= mid1:
+        if now <= mid1:
             return True
         if mid1 < now < mid2:
             return bool(adx_val is not None and adx_val >= 22)
-        if mid2 <= now <= end:
-            return True
-        return False
+        return True
 
     @staticmethod
     def _parse_hhmm(text: str):
