@@ -82,6 +82,13 @@ _INTERVAL_MAP: Dict[str, str] = {
     "15m": "15minute",
 }
 
+# Minimum number of bars to fetch from the broker. The strategy warmup
+# depends on at least this many candles being available; requesting a
+# shorter window often leads to downstream "Insufficient historical data"
+# errors.  Keep this small and conservative – callers can always request
+# more, but we guarantee at least this many bars when possible.
+WARMUP_BARS = 50
+
 @dataclass
 class _CacheEntry:
     df: pd.DataFrame
@@ -359,6 +366,24 @@ class LiveKiteSource(DataSource):
 
         interval = _coerce_interval(str(timeframe))
 
+        # Map each supported interval to its duration in minutes.  Used for both
+        # the warmup window adjustment and chunk sizing below.
+        interval_minutes = {
+            "minute": 1,
+            "3minute": 3,
+            "5minute": 5,
+            "10minute": 10,
+            "15minute": 15,
+            "day": 1440,
+        }
+
+        # Ensure the requested window spans at least ``WARMUP_BARS`` candles.
+        mins = interval_minutes.get(interval)
+        if mins is not None:
+            min_span = timedelta(minutes=mins * WARMUP_BARS)
+            if end - start < min_span:
+                start = end - min_span
+
         # Try cache
         cached = self._cache.get(token, interval, start, end)
         if cached is not None and not cached.empty:
@@ -372,15 +397,8 @@ class LiveKiteSource(DataSource):
         # requests (e.g., multi‑day backfills) into smaller ranges and stitch
         # the results together.  This keeps the external behaviour the same
         # while avoiding silent truncation.
-        interval_minutes = {
-            "minute": 1,
-            "3minute": 3,
-            "5minute": 5,
-            "10minute": 10,
-            "15minute": 15,
-        }
         step: Optional[timedelta] = None
-        if interval in interval_minutes:
+        if interval in interval_minutes and interval != "day":
             step = timedelta(minutes=interval_minutes[interval] * 2000)
         elif interval == "day":
             step = timedelta(days=2000)
