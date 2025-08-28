@@ -226,12 +226,35 @@ class StrategyRunner:
                 self.log.info("Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min)
                 return
 
+            # store some diagnostics from signal
+            flow.update(
+                {
+                    "regime": signal.get("regime"),
+                    "score": signal.get("score"),
+                    "rr": signal.get("rr"),
+                    "sl": signal.get("stop_loss"),
+                    "tp1": signal.get("tp1"),
+                    "tp2": signal.get("tp2"),
+                }
+            )
+
+            # block new entries after 15:05 IST
+            if self._now_ist().time() >= self._parse_hhmm("15:05"):
+                flow["reason_block"] = "after_1505"
+                self._last_flow_debug = flow
+                return
+
             # ---- risk gates
             gates = self._risk_gates_for(signal)
             flow["risk_gates"] = gates
             if not all(gates.values()):
                 blocked = [k for k, v in gates.items() if not v]
-                flow["reason_block"] = "risk_gate_block"
+                if "daily_drawdown" in blocked:
+                    flow["reason_block"] = "daily_dd_hit"
+                elif "loss_streak" in blocked:
+                    flow["reason_block"] = "loss_cooloff"
+                else:
+                    flow["reason_block"] = "risk_gate_block"
                 self._last_flow_debug = flow
                 self.log.info("Signal blocked by risk gates: %s", blocked)
                 return
@@ -245,6 +268,13 @@ class StrategyRunner:
             )
             flow["sizing"] = diag
             flow["qty"] = int(qty)
+            flow["equity"] = self._active_equity()
+            flow["risk_rupees"] = round(
+                float(diag.get("rupee_risk_per_lot", 0.0)) * float(diag.get("lots_final", 0)),
+                2,
+            )
+            flow["trades_today"] = self.risk.trades_today
+            flow["consecutive_losses"] = self.risk.consecutive_losses
             if qty <= 0:
                 flow["reason_block"] = "qty_zero"
                 self._last_flow_debug = flow
