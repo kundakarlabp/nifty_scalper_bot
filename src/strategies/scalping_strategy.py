@@ -8,13 +8,11 @@ from typing import Any, Dict, Optional, Tuple, Literal
 import pandas as pd
 
 from src.config import settings
-from src.utils.atr_helper import compute_atr, atr_sl_tp_points, latest_atr_value
+from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_vwap,
     calculate_macd,
-    calculate_bollinger_bands,
 )
-from src.signals.regime_detector import detect_market_regime
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +205,6 @@ class EnhancedScalpingStrategy:
             ema21_val, ema50_val = float(ema21.iloc[-1]), float(ema50.iloc[-1])
             ema21_slope = float(ema21.iloc[-1] - ema21.iloc[-2])
             macd_val = float(macd_line.iloc[-1])
-            hist_rising = float(macd_hist.iloc[-1]) > float(macd_hist.iloc[-2])
             rsi_val = float(rsi.iloc[-1])
             rsi_rising = rsi_val > float(rsi.iloc[-2])
 

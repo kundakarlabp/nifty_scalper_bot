@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from src.execution.order_executor import OrderExecutor
 from src.config import settings
 
