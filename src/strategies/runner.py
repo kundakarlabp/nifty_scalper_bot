@@ -352,11 +352,24 @@ class StrategyRunner:
             try:
                 margins = self.kite.margins()  # type: ignore[attr-defined]
                 if isinstance(margins, dict):
-                    for k in ("equity", "available", "net", "final", "cash"):
-                        v = margins.get(k)
-                        if isinstance(v, (int, float)):
-                            new_eq = float(v)
-                            break
+                    # Typical structure: {'equity': {'net': ..., 'available': {'cash': ...}}}
+                    segment = margins.get("equity") if isinstance(margins.get("equity"), dict) else margins
+                    if isinstance(segment, dict):
+                        # First try direct numeric fields (net/cash/final)
+                        for k in ("net", "cash", "final", "equity"):
+                            v = segment.get(k)
+                            if isinstance(v, (int, float)):
+                                new_eq = float(v)
+                                break
+                        # Then drill into nested 'available' dicts
+                        if new_eq is None:
+                            avail = segment.get("available")
+                            if isinstance(avail, dict):
+                                for k in ("cash", "net", "equity", "final"):
+                                    v = avail.get(k)
+                                    if isinstance(v, (int, float)):
+                                        new_eq = float(v)
+                                        break
                 if new_eq is None:
                     new_eq = float(settings.risk.default_equity)
             except Exception as e:
