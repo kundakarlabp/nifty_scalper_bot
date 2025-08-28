@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
+import os
 
 import pandas as pd
-from pydantic import BaseModel, ValidationInfo, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Optional external dependencies for validation
@@ -32,12 +34,41 @@ class ZerodhaSettings(BaseModel):
     api_secret: str = ""
     access_token: str = ""
 
+    @classmethod
+    def from_env(cls) -> "ZerodhaSettings":
+        """Load legacy flat env vars if present."""
+        return cls(
+            api_key=os.getenv("KITE_API_KEY", ""),
+            api_secret=os.getenv("KITE_API_SECRET", ""),
+            access_token=os.getenv("KITE_ACCESS_TOKEN", ""),
+        )
+
 
 class TelegramSettings(BaseModel):
     # Telegram is COMPULSORY in your deployment
     enabled: bool = True
     bot_token: str = ""
     chat_id: int = 0  # store as int to match controller usage
+
+    @classmethod
+    def from_env(cls) -> "TelegramSettings":
+        """Support legacy flat env vars such as TELEGRAM_CHAT_ID."""
+        raw_chat = os.getenv("TELEGRAM_CHAT_ID")
+        try:
+            chat = int(raw_chat) if raw_chat is not None else 0
+        except ValueError:
+            chat = 0
+        enabled_env = os.getenv("TELEGRAM_ENABLED")
+        enabled = (
+            str(enabled_env).lower() not in {"0", "false"}
+            if enabled_env is not None
+            else True
+        )
+        return cls.model_construct(
+            enabled=enabled,
+            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            chat_id=chat,
+        )
 
     @field_validator("chat_id")
     @classmethod
@@ -239,13 +270,18 @@ class SystemSettings(BaseModel):
 # ================= Root settings =================
 
 class AppSettings(BaseSettings):
+    # General optional settings
+    app_env: str = "production"
+    ai_provider: str = ""
+    openai_api_key: str = ""
+
     # Live trading is enabled by default; set to False to run in paper mode.
     enable_live_trading: bool = True
     allow_offhours_testing: bool = False
     log_level: str = "INFO"
 
-    zerodha: ZerodhaSettings = ZerodhaSettings()
-    telegram: TelegramSettings = TelegramSettings()
+    zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
