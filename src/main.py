@@ -6,7 +6,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -231,7 +231,7 @@ def main() -> int:
         while not _stop_flag:
             try:
                 runner.process_tick(tick=None)
-                flow = getattr(runner, "get_last_flow_debug", lambda: {})()
+                flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
                 if isinstance(flow, dict):
                     if flow.get("signal_ok"):
                         log.info("Signal generated: %s", flow.get("signal"))

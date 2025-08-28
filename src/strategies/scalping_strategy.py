@@ -18,7 +18,6 @@ from src.execution.order_executor import micro_ok
 from src.utils.strike_selector import (
     get_instrument_tokens,
     select_strike,
-    needs_reatm,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,12 +179,30 @@ class EnhancedScalpingStrategy:
         current_price: Optional[float] = None,
         spot_df: Optional[pd.DataFrame] = None,
     ) -> SignalOutput:
+        plan = {
+            "regime": "NO_TRADE",
+            "atr_pct": 0.0,
+            "score": 0,
+            "reasons": [],
+            "reason_block": "",
+            "option_type": "NONE",
+            "strike": None,
+            "entry_price": None,
+            "stop_loss": None,
+            "tp1": None,
+            "tp2": None,
+            "rr": None,
+            "trail_atr_mult": 0.8,
+            "time_stop_min": 12,
+        }
 
         dbg: Dict[str, Any] = {"reason_block": None}
         try:
             if df is None or df.empty or len(df) < self.min_bars_for_signal:
-                dbg["reason_block"] = "insufficient_bars"
-                return None
+                plan["reason_block"] = "warmup"
+                dbg["reason_block"] = "warmup"
+                self._last_debug = dbg
+                return plan
             if spot_df is None:
                 spot_df = df
 
@@ -193,8 +210,10 @@ class EnhancedScalpingStrategy:
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
             if current_price is None or current_price <= 0:
-                dbg["reason_block"] = "invalid_price"
-                return None
+                plan["reason_block"] = "warmup"
+                dbg["reason_block"] = "warmup"
+                self._last_debug = dbg
+                return plan
 
             ema21 = self._ema(df["close"], 21)
             ema50 = self._ema(df["close"], 50)
@@ -205,8 +224,10 @@ class EnhancedScalpingStrategy:
             atr_val = latest_atr_value(atr_series, default=0.0)
 
             if vwap is None or len(vwap) == 0 or atr_val <= 0:
-                dbg["reason_block"] = "indicators_missing"
-                return None
+                plan["reason_block"] = "warmup"
+                dbg["reason_block"] = "warmup"
+                self._last_debug = dbg
+                return plan
 
             price = float(spot_last)
             ema21_val, ema50_val = float(ema21.iloc[-1]), float(ema50.iloc[-1])
@@ -225,10 +246,12 @@ class EnhancedScalpingStrategy:
             )
             if reg.regime == "RANGE" and spot_df.get("adx") is None:
                 reg.regime = "TREND"  # fallback when ADX not available
+            plan["regime"] = reg.regime
             if reg.regime == "NO_TRADE":
+                plan["reason_block"] = "regime_no_trade"
                 dbg["reason_block"] = "regime_no_trade"
                 self._last_debug = dbg
-                return None
+                return plan
 
             # swing levels for breakout guard
             swing_high = df["high"].rolling(window=20, min_periods=2).max().iloc[-2]
@@ -264,9 +287,10 @@ class EnhancedScalpingStrategy:
                     option_type = "CE" if long_ok else "PE"
                     reasons.append("trend_playbook")
                 else:
-                    dbg["reason_block"] = "trend_gates_failed"
+                    plan["reason_block"] = "score_low"
+                    dbg["reason_block"] = "score_low"
                     self._last_debug = dbg
-                    return None
+                    return plan
             elif reg.regime == "RANGE":
                 close = float(df["close"].iloc[-1])
                 bb_mid = df["close"].rolling(20).mean()
@@ -298,19 +322,28 @@ class EnhancedScalpingStrategy:
                     option_type = "CE"
                     reasons.append("range_playbook_lower")
                 else:
-                    dbg["reason_block"] = "range_gates_failed"
+                    plan["reason_block"] = "score_low"
+                    dbg["reason_block"] = "score_low"
                     self._last_debug = dbg
-                    return None
+                    return plan
             else:
+                plan["reason_block"] = "regime_no_trade"
                 dbg["reason_block"] = "regime_no_trade"
                 self._last_debug = dbg
-                return None
+                return plan
 
-            atr_pct = atr_val / price
-            if not (0.0030 <= atr_pct <= 0.0105):
-                dbg["reason_block"] = "atr_pct_out_of_range"
+            atr_pct = (atr_val / price) * 100.0
+            plan["atr_pct"] = round(atr_pct, 2)
+            if atr_pct < 0.3:
+                plan["reason_block"] = "atr_low"
+                dbg["reason_block"] = "atr_low"
                 self._last_debug = dbg
-                return None
+                return plan
+            if atr_pct > 1.05:
+                plan["reason_block"] = "atr_high"
+                dbg["reason_block"] = "atr_high"
+                self._last_debug = dbg
+                return plan
 
             # ----- scoring -----
             regime_score = 2
@@ -351,23 +384,29 @@ class EnhancedScalpingStrategy:
                 lot_sz = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
                 ex_cfg = getattr(settings, "executor", object())
                 max_spread_pct = float(getattr(ex_cfg, "max_spread_pct", 0.35))
-                depth_mult = float(getattr(ex_cfg, "depth_multiplier", 5.0))
+                depth_mult = int(getattr(ex_cfg, "depth_multiplier", 5))
                 quote = {
                     "bid": current_tick.get("bid"),
                     "ask": current_tick.get("ask"),
-                    "depth": current_tick.get("depth"),
+                    "bid_qty": current_tick.get("bid_qty"),
+                    "ask_qty": current_tick.get("ask_qty"),
+                    "bid_qty_top5": current_tick.get("bid_qty_top5"),
+                    "ask_qty_top5": current_tick.get("ask_qty_top5"),
                 }
                 ok_micro, _info = micro_ok(quote, 1, lot_sz, max_spread_pct, depth_mult)
                 if not ok_micro:
                     micro_score = 0
 
             score = regime_score + momentum_score + structure_score + vol_score + micro_score
+            plan["score"] = score
+            plan["reasons"] = reasons
 
             threshold = 9 if reg.regime == "TREND" else 8
             if score < threshold:
-                dbg["reason_block"] = "score_below_threshold"
+                plan["reason_block"] = "score_low"
+                dbg["reason_block"] = "score_low"
                 self._last_debug = dbg
-                return None
+                return plan
 
             entry_price = float(current_price)
             tick_size = float(getattr(getattr(settings, "executor", object()), "tick_size", 0.05))
@@ -413,16 +452,17 @@ class EnhancedScalpingStrategy:
                 except Exception:
                     info = None
                 if info is not None:
+                    plan["reason_block"] = "liquidity_fail"
                     dbg["reason_block"] = "liquidity_fail"
                     self._last_debug = dbg
-                    return None
+                    return plan
                 strike = int(round(price / 50.0) * 50)
             else:
                 strike = int(strike_info.strike)
 
-            signal: Dict[str, Any] = {
+            plan.update({
                 "action": side,
-                "option_type": option_type,
+                "option_type": option_type or "NONE",
                 "strike": strike,
                 "entry_price": entry_price,
                 "stop_loss": stop_loss,
@@ -440,19 +480,20 @@ class EnhancedScalpingStrategy:
                 "side": side,
                 "confidence": min(1.0, max(0.0, score / 10.0)),
                 "target": tp2,
-            }
+            })
 
             self._last_debug = {
                 "score": score,
                 "regime": reg.regime,
                 "rr": rr,
                 "reason_block": None,
-                "atr_pct": atr_pct,
+                "atr_pct": plan["atr_pct"],
             }
-            return signal
+            return plan
 
         except Exception as e:
-            dbg["reason_block"] = f"exception:{e.__class__.__name__}"
+            plan["reason_block"] = f"exception:{e.__class__.__name__}"
+            dbg["reason_block"] = plan["reason_block"]
             self._last_debug = dbg
             logger.debug("generate_signal exception: %s", e, exc_info=True)
-            return None
+            return plan
