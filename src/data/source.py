@@ -82,6 +82,35 @@ _INTERVAL_MAP: Dict[str, str] = {
     "15m": "15minute",
 }
 
+# Map intervals to their minute counts and pandas frequency strings
+_INTERVAL_TO_MINUTES: Dict[str, int] = {
+    "minute": 1,
+    "3minute": 3,
+    "5minute": 5,
+    "10minute": 10,
+    "15minute": 15,
+    "day": 1440,
+}
+
+_INTERVAL_TO_FREQ: Dict[str, str] = {
+    "minute": "1min",
+    "3minute": "3min",
+    "5minute": "5min",
+    "10minute": "10min",
+    "15minute": "15min",
+    "day": "1D",
+}
+
+try:  # pragma: no cover - imported lazily to avoid circular dependency during settings init
+    from src.config import settings
+
+    WARMUP_BARS = int(
+        max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal)
+    )
+except Exception:  # pragma: no cover
+    # Fallback for early imports or missing settings
+    WARMUP_BARS = 50
+
 
 @dataclass
 class _CacheEntry:
@@ -276,12 +305,37 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
     return None
 
 
+def _synthetic_ohlc(
+    price: float, end: datetime, interval: str, bars: int = WARMUP_BARS
+) -> pd.DataFrame:
+    """Generate a synthetic OHLC frame repeating ``price`` for ``bars`` rows."""
+    try:
+        bars = int(bars)
+    except Exception:
+        bars = WARMUP_BARS
+    if bars <= 0:
+        bars = 1
+
+    minutes = _INTERVAL_TO_MINUTES.get(_coerce_interval(interval), 1)
+    freq = _INTERVAL_TO_FREQ.get(_coerce_interval(interval), "1min")
+    start = end - timedelta(minutes=minutes * bars)
+    idx = pd.date_range(start=start, periods=bars, freq=freq)
+    data = {
+        "open": [price] * bars,
+        "high": [price] * bars,
+        "low": [price] * bars,
+        "close": [price] * bars,
+        "volume": [0] * bars,
+    }
+    return pd.DataFrame(data, index=idx)
+
+
 def get_historical_data(
     source: DataSource,
     token: int,
     end: datetime,
     timeframe: str,
-    warmup_bars: int = 50,
+    warmup_bars: int = WARMUP_BARS,
 ) -> Optional[pd.DataFrame]:
     """Fetch at least ``warmup_bars`` rows of OHLC data.
 
@@ -300,15 +354,7 @@ def get_historical_data(
         warmup = 1
 
     interval = _coerce_interval(timeframe)
-    interval_minutes = {
-        "minute": 1,
-        "3minute": 3,
-        "5minute": 5,
-        "10minute": 10,
-        "15minute": 15,
-        "day": 1440,
-    }
-    step = timedelta(minutes=interval_minutes.get(interval, 1) * warmup)
+    step = timedelta(minutes=_INTERVAL_TO_MINUTES.get(interval, 1) * warmup)
     start = end - step
 
     attempts = 0
@@ -386,34 +432,6 @@ class LiveKiteSource(DataSource):
         Primary path: Kite ``historical_data``.
         Returns ``None`` if no candles were retrieved even after all retries.
         """
-        if not self.kite:
-            log.warning(
-                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
-            )
-            sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-            if out is not None:
-                fetched_window = (
-                    pd.to_datetime(out.index.min()).to_pydatetime(),
-                    pd.to_datetime(out.index.max()).to_pydatetime(),
-                )
-                self._cache.set(
-                    int(token),
-                    _coerce_interval(timeframe),
-                    out,
-                    fetched_window,
-                    (start, end),
-                )
-                return _clip_window(out, start, end)
-            ltp = self.get_last_price(sym or token)
-            if isinstance(ltp, (int, float)):
-                ts = _now_ist_naive().replace(second=0, microsecond=0)
-                return pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
-                )
-            return None
-
         # Guard inputs
         try:
             token = int(token)
@@ -433,10 +451,53 @@ class LiveKiteSource(DataSource):
 
         interval = _coerce_interval(str(timeframe))
 
-        # Try cache
+        # Ensure warmup window
+        needed = timedelta(
+            minutes=_INTERVAL_TO_MINUTES.get(interval, 1) * WARMUP_BARS
+        )
+        if end - start < needed:
+            start = end - needed
+
+        # Try cache first
         cached = self._cache.get(token, interval, start, end)
         if cached is not None and not cached.empty:
             return _clip_window(cached, start, end)
+
+        if not self.kite:
+            log.warning(
+                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
+            )
+            sym = _yf_symbol(token)
+            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            if out is not None and len(out) >= WARMUP_BARS:
+                fetched_window = (
+                    pd.to_datetime(out.index.min()).to_pydatetime(),
+                    pd.to_datetime(out.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    int(token),
+                    interval,
+                    out,
+                    fetched_window,
+                    (start, end),
+                )
+                return _clip_window(out, start, end)
+            ltp = self.get_last_price(sym or token)
+            if isinstance(ltp, (int, float)):
+                syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
+                fetched_window = (
+                    pd.to_datetime(syn.index.min()).to_pydatetime(),
+                    pd.to_datetime(syn.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    int(token),
+                    interval,
+                    syn,
+                    fetched_window,
+                    (start, end),
+                )
+                return syn
+            return None
 
         # Kite expects naive or tz-aware UTC; we'll pass naive (already)
         frm = pd.to_datetime(start).to_pydatetime()
@@ -446,16 +507,9 @@ class LiveKiteSource(DataSource):
         # requests (e.g., multi‑day backfills) into smaller ranges and stitch
         # the results together.  This keeps the external behaviour the same
         # while avoiding silent truncation.
-        interval_minutes = {
-            "minute": 1,
-            "3minute": 3,
-            "5minute": 5,
-            "10minute": 10,
-            "15minute": 15,
-        }
         step: Optional[timedelta] = None
-        if interval in interval_minutes:
-            step = timedelta(minutes=interval_minutes[interval] * 2000)
+        if interval in _INTERVAL_TO_MINUTES:
+            step = timedelta(minutes=_INTERVAL_TO_MINUTES[interval] * 2000)
         elif interval == "day":
             step = timedelta(days=2000)
 
@@ -492,7 +546,7 @@ class LiveKiteSource(DataSource):
                 )
                 sym = _yf_symbol(token)
                 out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-                if out is not None:
+                if out is not None and len(out) >= WARMUP_BARS:
                     fetched_window = (
                         pd.to_datetime(out.index.min()).to_pydatetime(),
                         pd.to_datetime(out.index.max()).to_pydatetime(),
@@ -507,11 +561,19 @@ class LiveKiteSource(DataSource):
                     return _clip_window(out, start, end)
                 ltp = self.get_last_price(sym or token)
                 if isinstance(ltp, (int, float)):
-                    ts = _now_ist_naive().replace(second=0, microsecond=0)
-                    return pd.DataFrame(
-                        {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                        index=[ts],
+                    syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
+                    fetched_window = (
+                        pd.to_datetime(syn.index.min()).to_pydatetime(),
+                        pd.to_datetime(syn.index.max()).to_pydatetime(),
                     )
+                    self._cache.set(
+                        token,
+                        interval,
+                        syn,
+                        fetched_window,
+                        (start, end),
+                    )
+                    return syn
                 return None
 
             clipped = _clip_window(df, start, end)
@@ -536,14 +598,14 @@ class LiveKiteSource(DataSource):
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
             sym = _yf_symbol(token)
             out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-            if out is not None:
+            if out is not None and len(out) >= WARMUP_BARS:
                 fetched_window = (
                     pd.to_datetime(out.index.min()).to_pydatetime(),
                     pd.to_datetime(out.index.max()).to_pydatetime(),
                 )
                 self._cache.set(
                     token,
-                    _coerce_interval(timeframe),
+                    interval,
                     out,
                     fetched_window,
                     (start, end),
@@ -551,9 +613,17 @@ class LiveKiteSource(DataSource):
                 return _clip_window(out, start, end)
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
-                ts = _now_ist_naive().replace(second=0, microsecond=0)
-                return pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
+                syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
+                fetched_window = (
+                    pd.to_datetime(syn.index.min()).to_pydatetime(),
+                    pd.to_datetime(syn.index.max()).to_pydatetime(),
                 )
+                self._cache.set(
+                    token,
+                    interval,
+                    syn,
+                    fetched_window,
+                    (start, end),
+                )
+                return syn
             return None

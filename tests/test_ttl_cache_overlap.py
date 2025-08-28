@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 import pandas as pd
 
-from src.data.source import LiveKiteSource
+from src.data.source import LiveKiteSource, WARMUP_BARS
 
 
 class FakeKite:
@@ -43,5 +43,6 @@ def test_overlapping_requests_hit_cache():
     df2 = src.fetch_ohlc(123, start2, end2, "minute")
     assert df2 is not None
     assert kite.calls == 1  # cache hit
-    expected_len = len(pd.date_range(start2, end2, freq="1min"))
-    assert len(df2) == expected_len
+    assert len(df2) >= WARMUP_BARS
+    assert df2.index.min() <= start2
+    assert df2.index.max() >= end2

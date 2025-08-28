@@ -2,32 +2,30 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from src.data.source import LiveKiteSource
+from src.data.source import LiveKiteSource, WARMUP_BARS
 
 
 def test_fetch_ohlc_yfinance_fallback(monkeypatch):
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=2)
-    df = pd.DataFrame(
-        {
-            "Open": [1, 1],
-            "High": [1, 1],
-            "Low": [1, 1],
-            "Close": [1, 1],
-            "Volume": [0, 0],
-        },
-        index=[start, start + timedelta(minutes=1)],
-    )
 
-    def fake_download(*args, **kwargs):
-        return df
+    def fake_download(symbol, start, end, interval, progress=False):
+        idx = pd.date_range(start, periods=WARMUP_BARS, freq="1min")
+        data = {
+            "Open": [1] * WARMUP_BARS,
+            "High": [1] * WARMUP_BARS,
+            "Low": [1] * WARMUP_BARS,
+            "Close": [1] * WARMUP_BARS,
+            "Volume": [0] * WARMUP_BARS,
+        }
+        return pd.DataFrame(data, index=idx)
 
     monkeypatch.setattr("yfinance.download", fake_download)
 
     src = LiveKiteSource(kite=None)
     out = src.fetch_ohlc(123, start, end, "minute")
-    assert out is not None and len(out) == 2
-    assert out.iloc[0].close == 1
+    assert out is not None and len(out) >= WARMUP_BARS
+    assert (out.close == 1).all()
 
 
 def test_get_last_price_yfinance_fallback(monkeypatch):
@@ -47,24 +45,25 @@ def test_get_last_price_yfinance_fallback(monkeypatch):
 def test_fetch_ohlc_kite_error_uses_yfinance(monkeypatch):
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=2)
-    df = pd.DataFrame(
-        {
-            "Open": [1, 1],
-            "High": [1, 1],
-            "Low": [1, 1],
-            "Close": [1, 1],
-            "Volume": [0, 0],
-        },
-        index=[start, start + timedelta(minutes=1)],
-    )
+
+    def fake_download(symbol, start, end, interval, progress=False):
+        idx = pd.date_range(start, periods=WARMUP_BARS, freq="1min")
+        data = {
+            "Open": [1] * WARMUP_BARS,
+            "High": [1] * WARMUP_BARS,
+            "Low": [1] * WARMUP_BARS,
+            "Close": [1] * WARMUP_BARS,
+            "Volume": [0] * WARMUP_BARS,
+        }
+        return pd.DataFrame(data, index=idx)
 
     class BoomKite:
         def historical_data(self, *args, **kwargs):
             raise Exception("no sub")
 
-    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: df)
+    monkeypatch.setattr("yfinance.download", fake_download)
 
     src = LiveKiteSource(BoomKite())
     out = src.fetch_ohlc(123, start, end, "minute")
-    assert out is not None and len(out) == 2
+    assert out is not None and len(out) >= WARMUP_BARS
 
