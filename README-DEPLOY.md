@@ -5,7 +5,7 @@
    - `ZERODHA__API_KEY`, `ZERODHA__ACCESS_TOKEN`
    - `TELEGRAM__BOT_TOKEN`, `TELEGRAM__CHAT_ID`
    - `ENABLE_LIVE_TRADING=false` (disable live trades; default is true)
-   - `DATA__TIME_FILTER_START=09:15`, `DATA__TIME_FILTER_END=15:30`
+   - `DATA__TIME_FILTER_START=09:20`, `DATA__TIME_FILTER_END=15:25`
 
 2. Commit `.env.example` for local runs.
 

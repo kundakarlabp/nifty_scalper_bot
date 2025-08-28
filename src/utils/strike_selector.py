@@ -3,7 +3,7 @@
 Strike resolution helpers and market-time gates.
 
 Clean signatures (no exchange-calendars):
-- is_market_open() -> bool, pure IST gate 09:15–15:30 Mon–Fri
+- is_market_open() -> bool, IST gate using configured trading window
 - get_instrument_tokens(kite_instance=None, spot_price: float|None=None) -> dict|None
     Reads symbols from `settings.instruments`
     Returns a dict with ATM math and CE/PE tokens for the chosen target strike.
@@ -70,15 +70,17 @@ def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
 # Pure time gate (IST)
 # -----------------------------------------------------------------------------
 def is_market_open() -> bool:
-    """
-    Checks if the market is currently open in IST (Indian Standard Time).
-    Trading hours are from 09:15 to 15:30, Monday to Friday.
-    """
+    """Return ``True`` if current IST time falls within the configured window."""
     now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     if now.weekday() > 4:  # Saturday or Sunday
         return False
-    start_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    end_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    try:
+        start_h, start_m = map(int, str(settings.data.time_filter_start).split(":"))
+        end_h, end_m = map(int, str(settings.data.time_filter_end).split(":"))
+    except Exception:
+        start_h, start_m, end_h, end_m = 9, 15, 15, 30
+    start_time = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+    end_time = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
     return start_time <= now < end_time
 
 

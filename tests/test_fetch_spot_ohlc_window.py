@@ -28,7 +28,7 @@ def _setup_runner(monkeypatch, now_dt: datetime) -> tuple[StrategyRunner, StubDa
 
     runner = StrategyRunner(telegram_controller=_DummyTelegram())
     runner._start_time = runner._parse_hhmm("09:20")
-    runner._end_time = runner._parse_hhmm("15:20")
+    runner._end_time = runner._parse_hhmm("15:25")
     ds = StubDataSource()
     runner.data_source = ds
     monkeypatch.setattr(runner, "_now_ist", lambda: now_dt)
@@ -59,7 +59,7 @@ def test_fetch_spot_ohlc_post_session(monkeypatch):
     _, start, end, _ = ds.calls[0]
 
     lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
-    expected_end = datetime(2024, 1, 1, 15, 20, tzinfo=timezone.utc)
+    expected_end = datetime(2024, 1, 1, 15, 25, tzinfo=timezone.utc)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
 
@@ -74,7 +74,7 @@ def test_fetch_spot_ohlc_pre_session(monkeypatch):
     _, start, end, _ = ds.calls[0]
 
     lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
-    expected_end = datetime(2023, 12, 31, 15, 20, tzinfo=timezone.utc)
+    expected_end = datetime(2023, 12, 31, 15, 25, tzinfo=timezone.utc)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
 
@@ -112,7 +112,7 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
     telegram = _Telegram()
     runner = StrategyRunner(telegram_controller=telegram)
     runner._start_time = runner._parse_hhmm("09:20")
-    runner._end_time = runner._parse_hhmm("15:20")
+    runner._end_time = runner._parse_hhmm("15:25")
     runner.data_source = _FailSource()
     monkeypatch.setattr(runner, "_now_ist", lambda: now_dt)
 
