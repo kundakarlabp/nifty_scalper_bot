@@ -1,6 +1,7 @@
 import pandas as pd
+import pytest
 
-from src.utils.indicators import calculate_atr
+from src.utils.indicators import calculate_atr, calculate_supertrend
 
 
 def test_calculate_atr_returns_series():
@@ -34,3 +35,15 @@ def test_calculate_atr_with_series_inputs_returns_series():
     assert isinstance(atr_series, pd.Series)
     assert atr_series.name == "atr"
     assert len(atr_series) == len(df)
+
+
+def test_calculate_atr_missing_series_raises_value_error():
+    high = pd.Series([100, 101, 102])
+    with pytest.raises(ValueError):
+        calculate_atr(high)
+
+
+def test_calculate_supertrend_missing_series_raises_value_error():
+    high = pd.Series([100, 101, 102])
+    with pytest.raises(ValueError):
+        calculate_supertrend(high)
