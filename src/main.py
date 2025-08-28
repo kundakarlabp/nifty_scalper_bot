@@ -120,6 +120,8 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
 
     TelegramController = _import_telegram_class()
     if not TelegramController:
+        runner.telegram_controller = _NoopTelegram()
+        runner.telegram = runner.telegram_controller
         return
 
     tg = TelegramController.create(
