@@ -231,6 +231,14 @@ def main() -> int:
         while not _stop_flag:
             try:
                 runner.process_tick(tick=None)
+                flow = getattr(runner, "get_last_flow_debug", lambda: {})()
+                if isinstance(flow, dict):
+                    if flow.get("signal_ok"):
+                        log.info("Signal generated: %s", flow.get("signal"))
+                    else:
+                        log.debug(
+                            "No signal generated: %s", flow.get("reason_block")
+                        )
                 runner.health_check()
                 time.sleep(5)
             except Exception as e:
