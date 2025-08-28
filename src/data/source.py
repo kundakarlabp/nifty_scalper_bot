@@ -82,6 +82,7 @@ _INTERVAL_MAP: Dict[str, str] = {
     "15m": "15minute",
 }
 
+
 @dataclass
 class _CacheEntry:
     df: pd.DataFrame
