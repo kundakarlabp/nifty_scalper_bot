@@ -66,6 +66,10 @@ class StrategyRunner:
         self.strategy = EnhancedScalpingStrategy()
         self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
 
+        # Trading window
+        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
+        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
+
         # Data source
         self.data_source = None
         self._last_fetch_ts: float = 0.0
@@ -103,10 +107,6 @@ class StrategyRunner:
         self._equity_last_refresh_ts: float = 0.0
         self._equity_cached_value: float = float(settings.risk.default_equity)
         self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
-
-        # Trading window
-        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
-        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
 
         # State + debug
         self._paused: bool = False
