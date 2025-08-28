@@ -10,7 +10,7 @@ Return shapes are aligned with scalping_strategy.py:
 - calculate_macd -> (macd_line, macd_signal, macd_hist)
 - calculate_atr -> Series
 - calculate_supertrend -> (trend_dir_series, upper_band, lower_band)
-- calculate_bb_width -> (upper_band, lower_band)
+- calculate_bollinger_bands -> (upper_band, lower_band)
 - calculate_adx -> (adx, di_plus, di_minus)
 - calculate_vwap -> Series
 """
@@ -196,13 +196,13 @@ def calculate_supertrend(
 
 
 # ---------------------------- Bollinger Bands ----------------------------- #
-def calculate_bb_width(
+def calculate_bollinger_bands(
     close: SeriesOrDF,
     window: int = 20,
     std: float = 2.0,
 ) -> Tuple[pd.Series, pd.Series]:
     """
-    Return Bollinger upper & lower bands (your strategy only needs these two).
+    Return the Bollinger upper and lower bands.
     """
     s = _series(close, "close")
     if TA_AVAILABLE and BollingerBands:
@@ -214,6 +214,10 @@ def calculate_bb_width(
     upper = sma + std * rolling_std
     lower = sma - std * rolling_std
     return upper, lower
+
+
+# Backward compatibility
+calculate_bb_width = calculate_bollinger_bands
 
 
 # ---------------------------------- ADX ----------------------------------- #
