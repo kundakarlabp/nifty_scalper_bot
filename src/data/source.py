@@ -270,6 +270,29 @@ def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
     return None
 
 
+def _kite_symbol(symbol_or_token: Any) -> Any:
+    """Best effort normalization for symbols passed to Kite LTP.
+
+    ``LiveKiteSource.get_last_price`` accepts either instrument tokens or
+    trading symbols.  Users often supply shorthand strings like ``"NIFTY50"``
+    which Kite expects as ``"NSE:NIFTY 50"``. This helper preserves numeric
+    tokens and returns a best‑guess exchange‑qualified symbol for strings.
+    """
+
+    if not isinstance(symbol_or_token, str):
+        return symbol_or_token
+
+    sym = symbol_or_token.strip()
+    if ":" in sym:
+        return sym
+
+    cleaned = sym.replace(" ", "").upper()
+    if cleaned in {"NIFTY50", "NIFTY"}:
+        return "NSE:NIFTY 50"
+
+    return f"NSE:{sym}"
+
+
 def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) -> Optional[pd.DataFrame]:
     """Fetch OHLC data from yfinance for the given symbol/timeframe."""
     if yf is None or not symbol:
@@ -422,11 +445,12 @@ class LiveKiteSource(DataSource):
             return None
         try:
             # Accept either token int or exchange:symbol string
-            data = _retry(self.kite.ltp, [symbol_or_token], tries=2)
-            key = str(symbol_or_token)
+            sym_or_token = _kite_symbol(symbol_or_token)
+            data = _retry(self.kite.ltp, [sym_or_token], tries=2)
+            key = str(sym_or_token)
             v = (data or {}).get(key)
             if not isinstance(v, dict):
-                log.warning("get_last_price: %s not found in LTP response", symbol_or_token)
+                log.warning("get_last_price: %s not found in LTP response", sym_or_token)
                 return None
             val = v.get("last_price")
             return float(val) if isinstance(val, (int, float)) else None
