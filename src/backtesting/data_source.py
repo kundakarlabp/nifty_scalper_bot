@@ -154,22 +154,22 @@ class BacktestCsvSource(DataSource):
 
     def fetch_ohlc(
         self,
-        instrument_token: int,
-        from_date: datetime,
-        to_date: datetime,
-        interval: str,
+        token: int,
+        start: datetime,
+        end: datetime,
+        timeframe: str,
     ) -> pd.DataFrame:
-        """
-        Returns a slice of the historical data up to the current simulation time.
+        """Return historical bars up to the current simulation time.
 
-        Note:
-        - Arguments are accepted for interface compatibility; this source uses
-          its pre-loaded CSV data and simply returns all bars up to the cursor.
-        - No look-ahead: the last row returned is the current bar.
+        Parameters are accepted for interface compatibility with other
+        ``DataSource`` implementations.  The CSV-backed source ignores them and
+        simply returns all rows up to the current cursor position.
+
+        No look-ahead is performed; the last row corresponds to the current bar.
         """
-        _ = instrument_token, from_date, to_date, interval  # Unused by CSV source
-        end = self._current_index + 1
-        return self._df.iloc[:end].copy()
+        _ = token, start, end, timeframe  # Unused by CSV source
+        end_idx = self._current_index + 1
+        return self._df.iloc[:end_idx].copy()
 
     # --------------------------------------------------------------------- #
     # Convenience helpers (useful in tests/backtester)
