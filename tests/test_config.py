@@ -59,6 +59,25 @@ def test_default_values():
         assert settings.strategy.min_bars_for_signal == 50  # Updated default
 
 
+def test_legacy_env_names_supported():
+    """Old flat env var names should still be recognized."""
+    env = {
+        "KITE_API_KEY": "old_key",
+        "KITE_API_SECRET": "old_secret",
+        "KITE_ACCESS_TOKEN": "old_token",
+        "TELEGRAM_BOT_TOKEN": "old_bot",
+        "TELEGRAM_CHAT_ID": "12345",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+        assert settings.zerodha.api_key == "old_key"
+        assert settings.zerodha.api_secret == "old_secret"
+        assert settings.zerodha.access_token == "old_token"
+        assert settings.telegram.bot_token == "old_bot"
+        assert settings.telegram.chat_id == 12345
+
+
 def test_zerodha_creds_required_when_live():
     """Zerodha credentials must be present when live trading is enabled."""
     env = {
