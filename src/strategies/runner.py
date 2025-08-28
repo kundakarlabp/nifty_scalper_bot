@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -113,6 +114,8 @@ class StrategyRunner:
         self._paused: bool = False
         self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
+        self.last_plan: Optional[Dict[str, Any]] = None
+        self._log_signal_changes_only = os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -130,6 +133,8 @@ class StrategyRunner:
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
             settings.enable_live_trading, settings.risk.use_live_equity
         )
+        # Log initial equity snapshot
+        self._refresh_equity_if_due(silent=False)
 
     # Optional start hook (main calls it if present)
     def start(self) -> None:
@@ -181,8 +186,8 @@ class StrategyRunner:
             return
         self._last_signal_hash = sig
         text = (f"\U0001F7E1 Candidate | {plan.get('regime')} {plan.get('option_type')} {plan.get('strike')} "
-                f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry_price')} "
-                f"sl={plan.get('stop_loss')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
+                f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry')} "
+                f"sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
                 f"reason_block={rb}")
         self.log.info(text)
         if getattr(self.settings, "TELEGRAM__PRETRADE_ALERTS", False):
@@ -190,6 +195,24 @@ class StrategyRunner:
                 self.telegram.send(text)
             except Exception:
                 pass
+
+    def _record_plan(self, plan: Dict[str, Any]) -> None:
+        micro = plan.get("micro") or {"spread_pct": 0.0, "depth_ok": False}
+        prev = self.last_plan or {}
+        changed = (
+            plan.get("has_signal") != prev.get("has_signal")
+            or plan.get("reason_block") != prev.get("reason_block")
+        )
+        if (not self._log_signal_changes_only) or changed:
+            self.log.info(
+                "Signal plan: action=%s %s strike=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s reason_block=%s",
+                plan.get("action"), plan.get("option_type"), plan.get("strike"), plan.get("qty_lots"),
+                plan.get("regime"), plan.get("score"), float(plan.get("atr_pct") or 0.0),
+                float(micro.get("spread_pct") or 0.0), micro.get("depth_ok"),
+                float(plan.get("rr") or 0.0), plan.get("sl"), plan.get("tp1"), plan.get("tp2"),
+                plan.get("reason_block"),
+            )
+        self.last_plan = dict(plan)
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
@@ -269,6 +292,7 @@ class StrategyRunner:
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
+                self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 self.log.debug("No tradable plan: %s", flow["reason_block"])
@@ -280,10 +304,12 @@ class StrategyRunner:
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
             rr_val = float(plan.get("rr", 0.0) or 0.0)
             if rr_min and rr_val and rr_val < rr_min:
+                plan["reason_block"] = f"rr<{rr_min}"
                 flow["rr_ok"] = False
-                flow["reason_block"] = f"rr<{rr_min}"
+                flow["reason_block"] = plan["reason_block"]
                 flow["plan"] = {**plan, "rr_min": rr_min}
                 self._last_flow_debug = flow
+                self._record_plan(plan)
                 self.log.info("Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min)
                 return
 
@@ -305,19 +331,21 @@ class StrategyRunner:
             if not all(gates.values()):
                 blocked = [k for k, v in gates.items() if not v]
                 if "daily_drawdown" in blocked:
-                    flow["reason_block"] = "daily_dd_hit"
+                    plan["reason_block"] = "daily_dd_hit"
                 elif "loss_streak" in blocked:
-                    flow["reason_block"] = "loss_cooloff"
+                    plan["reason_block"] = "loss_cooloff"
                 else:
-                    flow["reason_block"] = "risk_gate_block"
+                    plan["reason_block"] = "risk_gate_block"
+                flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                self._record_plan(plan)
                 self.log.info("Signal blocked by risk gates: %s", blocked)
                 return
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
-                entry=float(plan["entry_price"]),
-                stop=float(plan["stop_loss"]),
+                entry=float(plan.get("entry")),
+                stop=float(plan.get("sl")),
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
             )
@@ -331,12 +359,15 @@ class StrategyRunner:
             flow["trades_today"] = self.risk.trades_today
             flow["consecutive_losses"] = self.risk.consecutive_losses
             if qty <= 0:
-                flow["reason_block"] = "qty_zero"
+                plan["reason_block"] = "qty_zero"
+                flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                self._record_plan(plan)
                 self.log.debug("Signal skipped: quantity %s <= 0", qty)
                 return
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
+            plan["qty_lots"] = planned_lots
             quote = {
                 "bid": tick.get("bid") if tick else 0.0,
                 "ask": tick.get("ask") if tick else 0.0,
@@ -352,6 +383,7 @@ class StrategyRunner:
                 max_spread_pct=float(getattr(settings.executor, "max_spread_pct", 0.35)),
                 depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
             )
+            plan["micro"] = micro
             self._preview_candidate(plan, micro)
             if plan.get("reason_block") in (None, "") and ok_micro and plan.get("score", 0) >= int(settings.strategy.min_signal_score):
                 self._emit_diag(plan, micro)
@@ -360,7 +392,10 @@ class StrategyRunner:
                     plan["reason_block"] = "microstructure"
                 flow["reason_block"] = flow.get("reason_block") or plan.get("reason_block")
                 self._last_flow_debug = flow
+                self._record_plan(plan)
                 return
+
+            self._record_plan(plan)
 
             # ---- execution (support both executors)
             placed_ok = False
@@ -368,9 +403,9 @@ class StrategyRunner:
                 exec_payload = {
                     "action": plan["action"],
                     "quantity": int(qty),
-                    "entry_price": float(plan["entry_price"]),
-                    "stop_loss": float(plan["stop_loss"]),
-                    "take_profit": float(plan["take_profit"]),
+                    "entry_price": float(plan.get("entry")),
+                    "stop_loss": float(plan.get("sl")),
+                    "take_profit": float(plan.get("tp2")),
                     "strike": float(plan["strike"]),
                     "option_type": plan["option_type"],
                 }
@@ -381,15 +416,15 @@ class StrategyRunner:
                 token = int(getattr(settings.instruments, "instrument_token", 0))
                 oid = self.executor.place_entry_order(
                     token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(plan["entry_price"])
+                    quantity=int(qty), price=float(plan.get("entry"))
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
                     try:
                         self.executor.setup_gtt_orders(
                             record_id=oid,
-                            sl_price=float(plan["stop_loss"]),
-                            tp_price=float(plan["take_profit"]),
+                            sl_price=float(plan.get("sl")),
+                            tp_price=float(plan.get("tp2")),
                         )
                     except Exception as e:
                         self.log.warning("setup_gtt_orders failed: %s", e)
@@ -408,8 +443,8 @@ class StrategyRunner:
                 self._last_signal_at = time.time()
                 self._notify(
                     f"✅ Placed: {plan['action']} {qty} {plan['option_type']} {int(plan['strike'])} "
-                    f"@ {float(plan['entry_price']):.2f} (SL {float(plan['stop_loss']):.2f}, "
-                    f"TP {float(plan['take_profit']):.2f})"
+                    f"@ {float(plan.get('entry')):.2f} (SL {float(plan.get('sl')):.2f}, "
+                    f"TP {float(plan.get('tp2')):.2f})"
                 )
 
             self._last_flow_debug = flow
@@ -537,8 +572,8 @@ class StrategyRunner:
                 self.risk.loss_cooldown_until = now + timedelta(minutes=45)
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
-        entry = signal.get("entry_price")
-        stop = signal.get("stop_loss")
+        entry = signal.get("entry") or signal.get("entry_price")
+        stop = signal.get("sl") or signal.get("stop_loss")
         try:
             entry_f = float(entry)
         except (TypeError, ValueError):
@@ -776,7 +811,7 @@ class StrategyRunner:
 
     # ---------------- Telegram helpers & diagnostics ----------------
     def get_last_signal_debug(self) -> Dict[str, Any]:
-        return dict(self._last_signal_debug)
+        return dict(self.last_plan or {})
 
     # detailed bundle used by /check
     def build_diag(self) -> Dict[str, Any]:
@@ -937,15 +972,20 @@ class StrategyRunner:
         }
 
     def get_status_snapshot(self) -> Dict[str, Any]:
+        market_open = self._within_trading_window(None)
+        within_window = (
+            (not getattr(settings, "enable_time_windows", True))
+            or market_open
+            or bool(settings.allow_offhours_testing)
+        )
         return {
             "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if self.kite is not None else "Paper",
-            "within_window": (
-                (not getattr(settings, "enable_time_windows", True))
-                or self._within_trading_window(None)
-                or bool(settings.allow_offhours_testing)
-            ),
+            "market_open": market_open,
+            "within_window": within_window,
+            "daily_dd_hit": self.risk.day_realized_loss >= self._max_daily_loss_rupees,
+            "cooloff_until": self.risk.loss_cooldown_until.isoformat() if self.risk.loss_cooldown_until else "-",
             "paused": self._paused,
             "trades_today": self.risk.trades_today,
             "consecutive_losses": self.risk.consecutive_losses,

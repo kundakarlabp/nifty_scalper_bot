@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, Literal
 
 import pandas as pd
@@ -180,20 +181,34 @@ class EnhancedScalpingStrategy:
         spot_df: Optional[pd.DataFrame] = None,
     ) -> SignalOutput:
         plan = {
-            "regime": "NO_TRADE",
-            "atr_pct": 0.0,
-            "score": 0,
-            "reasons": [],
-            "reason_block": "",
-            "option_type": "NONE",
+            "has_signal": False,
+            "action": "NONE",
+            "option_type": None,
             "strike": None,
-            "entry_price": None,
-            "stop_loss": None,
+            "qty_lots": None,
+            "regime": "NO_TRADE",
+            "score": 0,
+            "atr_pct": 0.0,
+            "micro": {"spread_pct": 0.0, "depth_ok": False},
+            "rr": 0.0,
+            "entry": None,
+            "sl": None,
             "tp1": None,
             "tp2": None,
-            "rr": None,
-            "trail_atr_mult": 0.8,
-            "time_stop_min": 12,
+            "trail_atr_mult": None,
+            "time_stop_min": None,
+            "reasons": [],
+            "reason_block": None,
+            "ts": datetime.utcnow().isoformat(),
+            # legacy extras for compatibility
+            "entry_price": None,
+            "stop_loss": None,
+            "take_profit": None,
+            "target": None,
+            "side": None,
+            "confidence": 0.0,
+            "breakeven_ticks": None,
+            "tp1_qty_ratio": None,
         }
 
         dbg: Dict[str, Any] = {"reason_block": None}
@@ -393,7 +408,11 @@ class EnhancedScalpingStrategy:
                     "bid_qty_top5": current_tick.get("bid_qty_top5"),
                     "ask_qty_top5": current_tick.get("ask_qty_top5"),
                 }
-                ok_micro, _info = micro_ok(quote, 1, lot_sz, max_spread_pct, depth_mult)
+                ok_micro, info = micro_ok(quote, 1, lot_sz, max_spread_pct, depth_mult)
+                plan["micro"] = {
+                    "spread_pct": info.get("spread_pct", 0.0),
+                    "depth_ok": info.get("depth_ok", False),
+                }
                 if not ok_micro:
                     micro_score = 0
 
@@ -446,12 +465,13 @@ class EnhancedScalpingStrategy:
                 pass
             strike_info = select_strike(price, score)
             if not strike_info:
+                liquidity_info: Optional[Dict[str, Any]] = None
                 try:
                     from src.utils import strike_selector as ss
-                    info = ss._option_info_fetcher(int(round(price / 50.0) * 50))
+                    liquidity_info = ss._option_info_fetcher(int(round(price / 50.0) * 50))
                 except Exception:
-                    info = None
-                if info is not None:
+                    liquidity_info = None
+                if liquidity_info is not None:
                     plan["reason_block"] = "liquidity_fail"
                     dbg["reason_block"] = "liquidity_fail"
                     self._last_debug = dbg
@@ -461,26 +481,30 @@ class EnhancedScalpingStrategy:
                 strike = int(strike_info.strike)
 
             plan.update({
+                "has_signal": True,
                 "action": side,
-                "option_type": option_type or "NONE",
-                "strike": strike,
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "take_profit": tp2,
+                "option_type": option_type or None,
+                "strike": str(strike),
+                "entry": entry_price,
+                "sl": stop_loss,
                 "tp1": tp1,
                 "tp2": tp2,
                 "trail_atr_mult": 0.8,
-                "breakeven_ticks": breakeven_ticks,
-                "tp1_qty_ratio": 0.5,
                 "time_stop_min": 12,
                 "rr": round(rr, 2),
                 "regime": reg.regime,
                 "score": score,
                 "reasons": reasons,
-                "side": side,
-                "confidence": min(1.0, max(0.0, score / 10.0)),
-                "target": tp2,
             })
+            # backward compatibility extras
+            plan["entry_price"] = entry_price
+            plan["stop_loss"] = stop_loss
+            plan["take_profit"] = tp2
+            plan["target"] = tp2
+            plan["side"] = side
+            plan["confidence"] = min(1.0, max(0.0, score / 10.0))
+            plan["breakeven_ticks"] = breakeven_ticks
+            plan["tp1_qty_ratio"] = 0.5
 
             self._last_debug = {
                 "score": score,

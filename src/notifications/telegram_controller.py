@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -366,36 +367,54 @@ class TelegramController:
         if cmd == "/health":
             return self._send(self._health_cards(), parse_mode="Markdown")
 
-        # DIAG (compact one-line summary)
+        # DIAG – detailed status + last signal
         if cmd == "/diag":
             try:
-                if self._compact_diag_provider:
-                    diag_data = self._compact_diag_provider() or {}
-                elif self._diag_provider:
-                    # Fallback: derive compact view from detailed bundle
-                    full = self._diag_provider() or {}
-                    msgs = {}
-                    for c in full.get("checks", []):
-                        name = (c.get("name") or "").lower().replace(" ", "_")
-                        msgs[name] = "ok" if c.get("ok") else "blocked"
-                    diag_data = {
-                        "ok": bool(full.get("ok", False)),
-                        "status_messages": msgs,
-                    }
+                status = self._status_provider() if self._status_provider else {}
+                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                verbose = os.getenv("DIAG_VERBOSE", "true").lower() != "false"
+                lines: List[str] = ["Status"]
+                lines.append(f"market_open: {status.get('market_open')}")
+                lines.append(f"within_window: {status.get('within_window')}")
+                lines.append(f"daily_dd_hit: {status.get('daily_dd_hit')}")
+                lines.append(f"cooloff_until: {status.get('cooloff_until', '-')}")
+                lines.append(f"trades_today: {status.get('trades_today')}")
+                lines.append(f"consecutive_losses: {status.get('consecutive_losses')}")
+                lines.append("")
+                lines.append("Signal")
+                reason_block = plan.get("reason_block") or "-"
+                if verbose:
+                    micro = plan.get("micro", {})
+                    lines.append(
+                        f"action: {plan.get('action')}  option: {plan.get('option_type')}  strike: {plan.get('strike')}  qty: {plan.get('qty_lots')}"
+                    )
+                    lines.append(
+                        f"regime: {plan.get('regime')}  score: {plan.get('score')}  rr: {plan.get('rr')}"
+                    )
+                    lines.append(
+                        f"atr%: {plan.get('atr_pct')}  spread%: {micro.get('spread_pct')}  depth_ok: {micro.get('depth_ok')}"
+                    )
+                    lines.append(
+                        f"entry: {plan.get('entry')}  sl: {plan.get('sl')}  tp1: {plan.get('tp1')}  tp2: {plan.get('tp2')}"
+                    )
+                    lines.append(f"reason_block: {reason_block}")
+                    lines.append("reasons:")
+                    reasons = plan.get("reasons") or []
+                    if reasons:
+                        for r in reasons[:4]:
+                            lines.append(f"- {r}")
+                    else:
+                        lines.append("-")
+                    lines.append(f"ts: {plan.get('ts')}")
                 else:
-                    return self._send("Diag provider not wired.")
-
-                is_ok = bool(diag_data.get("ok", False))
-                summary_items = diag_data.get("status_messages", {})
-
-                parts_line: List[str] = []
-                ok_statuses = {"ok", "skipped", "no-eval", "dry mode"}
-                for name, status in summary_items.items():
-                    icon = "🟢" if status in ok_statuses else "🔴"
-                    parts_line.append(f"{icon} {name.replace('_', ' ').capitalize()}")
-
-                head = "✅ Flow looks good" if is_ok else "❗ Flow has issues"
-                return self._send(f"{head}\n" + " · ".join(parts_line))
+                    lines.append(
+                        f"action: {plan.get('action')} option: {plan.get('option_type')} strike: {plan.get('strike')} qty: {plan.get('qty_lots')}"
+                    )
+                    lines.append(
+                        f"regime: {plan.get('regime')} score: {plan.get('score')} rr: {plan.get('rr')}"
+                    )
+                    lines.append(f"reason_block: {reason_block}")
+                return self._send("\n".join(lines))
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 
