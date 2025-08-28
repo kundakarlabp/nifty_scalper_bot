@@ -109,7 +109,8 @@ def calculate_atr(
       - DataFrame with high/low/close (pass as first arg), or
       - high, low, close Series as first three args.
 
-    Uses atr_helper.compute_atr_df (Wilder/RMA by default) for consistency.
+    Uses atr_helper.compute_atr_df (Wilder/RMA by default) for consistency and
+    returns the resulting `atr` column as a standalone Series.
     """
     if isinstance(high_or_df, pd.DataFrame):
         df = high_or_df
