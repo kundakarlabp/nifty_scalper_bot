@@ -264,10 +264,10 @@ def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
     if isinstance(token_or_symbol, str):
         # Accept 'NSE:FOO' or plain 'FOO'; strip exchange prefix and spaces
         return token_or_symbol.split(":")[-1].replace(" ", "").strip()
-    try:
-        return str(int(token_or_symbol))
-    except Exception:
-        return None
+    # Instrument tokens do not map cleanly to yfinance tickers.  Returning
+    # ``None`` avoids pointless lookup attempts that spam logs with
+    # ``YFTzMissingError`` when a numeric token is passed.
+    return None
 
 
 def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) -> Optional[pd.DataFrame]:
@@ -284,16 +284,26 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
             "day": "1d",
         }
         yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
+        # ``yfinance`` expects UTC datetimes; our callers usually supply
+        # timezone‑naive IST.  Convert the requested window to UTC to avoid a
+        # 5h30 offset in the downloaded data.
+        ist = timezone(timedelta(hours=5, minutes=30))
+        start_utc = pd.Timestamp(start, tz=ist).tz_convert(timezone.utc)
+        end_utc = pd.Timestamp(end, tz=ist).tz_convert(timezone.utc)
+
         df = yf.download(
             symbol,
-            start=start,
-            end=end,
+            start=start_utc,
+            end=end_utc,
             interval=yf_interval,
             progress=False,
         )
         if df.empty:
             return None
-        df.index = pd.to_datetime(df.index).tz_localize(None)
+        # yfinance returns timestamps in the exchange's local timezone
+        # (Asia/Kolkata for NSE symbols).  Strip the timezone information so the
+        # rest of the codebase operates on naive IST datetimes.
+        df.index = pd.to_datetime(df.index).tz_convert(ist).tz_localize(None)
         df = df.rename(columns={c: c.lower() for c in df.columns})
         if "volume" not in df.columns:
             df["volume"] = 0
