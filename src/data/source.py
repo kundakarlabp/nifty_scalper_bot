@@ -82,6 +82,26 @@ _INTERVAL_MAP: Dict[str, str] = {
     "15m": "15minute",
 }
 
+_INTERVAL_MINUTES: Dict[str, int] = {
+    "minute": 1,
+    "3minute": 3,
+    "5minute": 5,
+    "10minute": 10,
+    "15minute": 15,
+    "day": 24 * 60,
+}
+
+_FREQ_MAP: Dict[str, str] = {
+    "minute": "1min",
+    "3minute": "3min",
+    "5minute": "5min",
+    "10minute": "10min",
+    "15minute": "15min",
+    "day": "1D",
+}
+
+WARMUP_BARS = 5
+
 
 @dataclass
 class _CacheEntry:
@@ -264,6 +284,21 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
     return None
 
 
+def _synthetic_ohlc(
+    price: float, start: datetime, end: datetime, interval: str
+) -> pd.DataFrame:
+    freq = _FREQ_MAP.get(interval, "1min")
+    idx = pd.date_range(start, end, freq=freq, inclusive="left")
+    data = {
+        "open": [price] * len(idx),
+        "high": [price] * len(idx),
+        "low": [price] * len(idx),
+        "close": [price] * len(idx),
+        "volume": [0] * len(idx),
+    }
+    return pd.DataFrame(data, index=idx)
+
+
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
@@ -323,24 +358,6 @@ class LiveKiteSource(DataSource):
         Primary path: Kite ``historical_data``.
         Returns ``None`` if no candles were retrieved even after all retries.
         """
-        if not self.kite:
-            log.warning(
-                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
-            )
-            sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-            if out is not None:
-                self._cache.set(int(token), _coerce_interval(timeframe), out, start, end)
-                return _clip_window(out, start, end)
-            ltp = self.get_last_price(sym or token)
-            if isinstance(ltp, (int, float)):
-                ts = _now_ist_naive().replace(second=0, microsecond=0)
-                return pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
-                )
-            return None
-
         # Guard inputs
         try:
             token = int(token)
@@ -355,10 +372,31 @@ class LiveKiteSource(DataSource):
             return None
 
         if start >= end:
-            # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
             start = end - timedelta(minutes=10)
 
         interval = _coerce_interval(str(timeframe))
+
+        # Ensure a minimum warmup window
+        min_delta = timedelta(minutes=_INTERVAL_MINUTES.get(interval, 1) * WARMUP_BARS)
+        if end - start < min_delta:
+            start = end - min_delta
+
+        if not self.kite:
+            log.warning(
+                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
+            )
+            sym = _yf_symbol(token)
+            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            if out is not None:
+                clipped = _clip_window(out, start, end)
+                self._cache.set(token, interval, clipped, start, end)
+                return clipped
+            ltp = self.get_last_price(sym or token)
+            if isinstance(ltp, (int, float)):
+                synthetic = _synthetic_ohlc(ltp, start, end, interval)
+                self._cache.set(token, interval, synthetic, start, end)
+                return synthetic
+            return None
 
         # Try cache
         cached = self._cache.get(token, interval, start, end)
@@ -420,15 +458,14 @@ class LiveKiteSource(DataSource):
                 sym = _yf_symbol(token)
                 out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
                 if out is not None:
-                    self._cache.set(token, interval, out, start, end)
-                    return _clip_window(out, start, end)
+                    clipped_fb = _clip_window(out, start, end)
+                    self._cache.set(token, interval, clipped_fb, start, end)
+                    return clipped_fb
                 ltp = self.get_last_price(sym or token)
                 if isinstance(ltp, (int, float)):
-                    ts = _now_ist_naive().replace(second=0, microsecond=0)
-                    return pd.DataFrame(
-                        {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                        index=[ts],
-                    )
+                    synthetic = _synthetic_ohlc(ltp, start, end, interval)
+                    self._cache.set(token, interval, synthetic, start, end)
+                    return synthetic
                 return None
 
             clipped = _clip_window(df, start, end)
@@ -444,13 +481,12 @@ class LiveKiteSource(DataSource):
             sym = _yf_symbol(token)
             out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
             if out is not None:
-                self._cache.set(token, _coerce_interval(timeframe), out, start, end)
-                return _clip_window(out, start, end)
+                clipped_fb = _clip_window(out, start, end)
+                self._cache.set(token, interval, clipped_fb, start, end)
+                return clipped_fb
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
-                ts = _now_ist_naive().replace(second=0, microsecond=0)
-                return pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
-                    index=[ts],
-                )
+                synthetic = _synthetic_ohlc(ltp, start, end, interval)
+                self._cache.set(token, interval, synthetic, start, end)
+                return synthetic
             return None

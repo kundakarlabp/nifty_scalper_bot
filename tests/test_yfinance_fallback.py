@@ -2,21 +2,23 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from src.data.source import LiveKiteSource
+from src.data.source import LiveKiteSource, WARMUP_BARS
 
 
 def test_fetch_ohlc_yfinance_fallback(monkeypatch):
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=2)
+    warm_start = end - timedelta(minutes=WARMUP_BARS)
+    idx = pd.date_range(warm_start, end, freq="1min", inclusive="left")
     df = pd.DataFrame(
         {
-            "Open": [1, 1],
-            "High": [1, 1],
-            "Low": [1, 1],
-            "Close": [1, 1],
-            "Volume": [0, 0],
+            "Open": [1] * len(idx),
+            "High": [1] * len(idx),
+            "Low": [1] * len(idx),
+            "Close": [1] * len(idx),
+            "Volume": [0] * len(idx),
         },
-        index=[start, start + timedelta(minutes=1)],
+        index=idx,
     )
 
     def fake_download(*args, **kwargs):
@@ -26,7 +28,8 @@ def test_fetch_ohlc_yfinance_fallback(monkeypatch):
 
     src = LiveKiteSource(kite=None)
     out = src.fetch_ohlc(123, start, end, "minute")
-    assert out is not None and len(out) == 2
+    assert out is not None and len(out) >= WARMUP_BARS
+    assert out.index[0] == warm_start
     assert out.iloc[0].close == 1
 
 
@@ -47,15 +50,17 @@ def test_get_last_price_yfinance_fallback(monkeypatch):
 def test_fetch_ohlc_kite_error_uses_yfinance(monkeypatch):
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=2)
+    warm_start = end - timedelta(minutes=WARMUP_BARS)
+    idx = pd.date_range(warm_start, end, freq="1min", inclusive="left")
     df = pd.DataFrame(
         {
-            "Open": [1, 1],
-            "High": [1, 1],
-            "Low": [1, 1],
-            "Close": [1, 1],
-            "Volume": [0, 0],
+            "Open": [1] * len(idx),
+            "High": [1] * len(idx),
+            "Low": [1] * len(idx),
+            "Close": [1] * len(idx),
+            "Volume": [0] * len(idx),
         },
-        index=[start, start + timedelta(minutes=1)],
+        index=idx,
     )
 
     class BoomKite:
@@ -66,5 +71,5 @@ def test_fetch_ohlc_kite_error_uses_yfinance(monkeypatch):
 
     src = LiveKiteSource(BoomKite())
     out = src.fetch_ohlc(123, start, end, "minute")
-    assert out is not None and len(out) == 2
+    assert out is not None and len(out) >= WARMUP_BARS
 
