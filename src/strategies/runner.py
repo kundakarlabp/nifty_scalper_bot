@@ -35,6 +35,8 @@ class RiskState:
     consecutive_losses: int = 0
     day_realized_loss: float = 0.0
     day_realized_pnl: float = 0.0
+    # If set, trading is halted until this timestamp after hitting loss streak
+    loss_cooldown_until: Optional[datetime] = None
 
 
 # Sentinel used when risk gates are intentionally skipped
@@ -397,8 +399,19 @@ class StrategyRunner:
             gates["equity_floor"] = False
         if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
             gates["daily_drawdown"] = False
-        if self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
+        # loss streak cooldown logic
+        now = self._now_ist()
+        if self.risk.loss_cooldown_until:
+            if now < self.risk.loss_cooldown_until:
+                gates["loss_streak"] = False
+            else:
+                # Cool-off finished; reset counters
+                self.risk.loss_cooldown_until = None
+                self.risk.consecutive_losses = 0
+        if gates.get("loss_streak", True) and self.risk.consecutive_losses >= int(settings.risk.consecutive_loss_limit):
             gates["loss_streak"] = False
+            # set cool-off timer (minimum 45 minutes)
+            self.risk.loss_cooldown_until = now + timedelta(minutes=45)
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
         entry = signal.get("entry_price")

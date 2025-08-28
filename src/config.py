@@ -243,6 +243,10 @@ class ExecutorSettings(BaseModel):
     trailing_atr_multiplier: float = 1.4
     fee_per_lot: float = 20.0
     slippage_ticks: int = 1
+    # microstructure execution guards
+    max_spread_pct: float = 0.0035  # 0.35%
+    depth_multiplier: float = 5.0   # top-5 depth >= mult * order size
+    micro_retry_limit: int = 3
 
     @field_validator("tp1_qty_ratio")
     @classmethod
