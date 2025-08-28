@@ -16,8 +16,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from statistics import median
+from typing import Any, Callable, Dict, List, Optional
 
 from src.config import settings
 
@@ -352,9 +354,6 @@ def health_check() -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 # Simple strike selection helpers (used by strategy)
 # -----------------------------------------------------------------------------
-from dataclasses import dataclass
-from statistics import median
-from typing import Callable
 
 
 @dataclass
@@ -363,7 +362,11 @@ class StrikeInfo:
     meta: Dict[str, Any] | None = None
 
 
-_option_info_fetcher: Callable[[int], Optional[Dict[str, Any]]] = lambda s: None
+def _default_option_info_fetcher(strike: int) -> Optional[Dict[str, Any]]:
+    return None
+
+
+_option_info_fetcher: Callable[[int], Optional[Dict[str, Any]]] = _default_option_info_fetcher
 
 
 def set_option_info_fetcher(fn: Callable[[int], Optional[Dict[str, Any]]]) -> None:
