@@ -28,4 +28,6 @@ def test_fetch_ohlc_warmup(monkeypatch):
 
     assert out is not None
     assert len(out) >= WARMUP_BARS
+    assert set(out.columns) == {"open", "high", "low", "close", "volume"}
+    assert out.index.tz is None
 
