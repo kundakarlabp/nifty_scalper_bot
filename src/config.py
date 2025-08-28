@@ -287,6 +287,8 @@ class AppSettings(BaseSettings):
     # Live trading is enabled by default; set to False to run in paper mode.
     enable_live_trading: bool = True
     allow_offhours_testing: bool = False
+    enable_time_windows: bool = True
+    tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
 
     zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)

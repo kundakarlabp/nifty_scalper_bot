@@ -32,7 +32,7 @@ def test_offhours_skips_risk_gates(monkeypatch) -> None:
     flow = runner.get_last_flow_debug()
 
     assert summary["status_messages"]["risk_gates"] == "skipped"
-    assert flow["reason_block"] == "off_hours"
+    assert flow["reason_block"] == "outside_window"
     assert any("outside trading window" in m for m in telegram.messages)
 
 
