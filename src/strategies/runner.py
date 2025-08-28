@@ -566,7 +566,8 @@ class StrategyRunner:
                     min_bars,
                 )
                 self._last_error = "no_historical_data"
-                self._notify(
+                # Avoid spamming Telegram with automatic notifications for missing historical data
+                self.log.warning(
                     "⚠️ Historical data unavailable from broker — check credentials or subscription."
                 )
 

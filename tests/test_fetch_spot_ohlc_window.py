@@ -119,5 +119,7 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
     df = runner._fetch_spot_ohlc()
 
     assert df is not None  # falls back to LTP
-    assert telegram.msgs, "No alert sent"
-    assert "historical data" in telegram.msgs[0].lower()
+    # No automatic alert should be sent to Telegram
+    assert telegram.msgs == []
+    # Internal error state should still be set for on-demand inspection
+    assert getattr(runner, "_last_error", None) == "no_historical_data"
