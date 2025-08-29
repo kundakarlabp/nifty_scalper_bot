@@ -8,6 +8,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+# Optional public market data fallback
+try:  # pragma: no cover
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
+
 # --- Optional broker SDK (graceful fallback in paper mode) ---
 try:
     from kiteconnect import KiteConnect  # type: ignore
@@ -316,19 +322,74 @@ class OrderExecutor:
                 "oi": 0,
             }
 
+    def _fetch_quote_yf(self, strike: int, opt_type: str, expiry: str) -> Dict[str, Any]:
+        """Fetch option quote via yfinance when broker access is unavailable."""
+        if yf is None:
+            return {
+                "ltp": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "bid_qty": 0,
+                "ask_qty": 0,
+                "bid_qty_top5": 0,
+                "ask_qty_top5": 0,
+                "oi": 0,
+            }
+        try:
+            ticker = yf.Ticker("^NSEI")
+            chain = ticker.option_chain(expiry)
+            df = chain.calls if opt_type.lower() == "ce" else chain.puts
+            row = df[df["strike"] == strike]
+            if row.empty:
+                raise ValueError("strike not found")
+            bid = float(row["bid"].iloc[0] or 0.0)
+            ask = float(row["ask"].iloc[0] or 0.0)
+            ltp = float(row["lastPrice"].iloc[0] or 0.0)
+            oi = float(row.get("openInterest", 0.0).iloc[0])
+            return {
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "bid_qty": 0,
+                "ask_qty": 0,
+                "bid_qty_top5": 0,
+                "ask_qty_top5": 0,
+                "oi": oi,
+            }
+        except Exception as e:
+            log.debug("yfinance quote fetch failed: %s", e)
+            return {
+                "ltp": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "bid_qty": 0,
+                "ask_qty": 0,
+                "bid_qty_top5": 0,
+                "ask_qty_top5": 0,
+                "oi": 0,
+            }
+
     def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
         info = get_instrument_tokens(self.kite)
         if not info:
             return "instrument resolution failed"
         tokens = info.get("atm_tokens") or {}
+        expiry = info.get("expiry")
+        strike = info.get("atm_strike")
         types = [opt.lower()] if opt.lower() in ("ce", "pe") else ["ce", "pe"]
         lines = []
         for t in types:
             token = tokens.get(t)
-            if not token:
-                lines.append(f"{t.upper()}: token_missing")
-                continue
-            q = self._fetch_quote(int(token))
+            if token and self.kite:
+                q = self._fetch_quote(int(token))
+            else:
+                if strike is None or not expiry:
+                    lines.append(f"{t.upper()}: token_missing")
+                    continue
+                q = self._fetch_quote_yf(int(strike), t, str(expiry))
+                if q["ltp"] == 0.0 and token is None:
+                    lines.append(f"{t.upper()}: token_missing")
+                    continue
             ok, meta = micro_ok(
                 q,
                 qty_lots=qty_lots,
@@ -336,8 +397,11 @@ class OrderExecutor:
                 max_spread_pct=self.max_spread_pct,
                 depth_mult=int(self.depth_multiplier),
             )
+            tok_disp = token if token else "yf"
             lines.append(
-                f"{t.upper()} token={token} ltp={q['ltp']} bid={q['bid']} ask={q['ask']} spread%={meta.get('spread_pct')} bid5={meta.get('bid5')} ask5={meta.get('ask5')} oi={q.get('oi')} micro={'OK' if ok else 'FAIL'}"
+                f"{t.upper()} token={tok_disp} ltp={q['ltp']} bid={q['bid']} ask={q['ask']} "
+                f"spread%={meta.get('spread_pct')} bid5={meta.get('bid5')} ask5={meta.get('ask5')} "
+                f"oi={q.get('oi')} micro={'OK' if ok else 'FAIL'}"
             )
         return "\n".join(lines)
 
@@ -346,9 +410,16 @@ class OrderExecutor:
         if not info:
             return "instrument resolution failed"
         token = info.get("atm_tokens", {}).get(opt.lower())
-        if not token:
-            return "token missing"
-        q = self._fetch_quote(int(token))
+        strike = info.get("atm_strike")
+        expiry = info.get("expiry")
+        if token and self.kite:
+            q = self._fetch_quote(int(token))
+        else:
+            if strike is None or not expiry:
+                return "token missing"
+            q = self._fetch_quote_yf(int(strike), opt, str(expiry))
+            if q["ltp"] == 0.0:
+                return "token missing"
         spread = q["ask"] - q["bid"]
         mid = (q["ask"] + q["bid"]) / 2 if (q["ask"] and q["bid"]) else 0.0
         ok, meta = micro_ok(
