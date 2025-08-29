@@ -157,9 +157,9 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
                 yf_symbol = yf_symbol + ".NS"
             data = yf.Ticker(yf_symbol).history(period="1d", interval="1m")
             if not data.empty:
-                px = float(data["Close"].iloc[-1])
-                _ltp_cache[symbol] = (px, now)
-                return px
+                yf_px = float(data["Close"].iloc[-1])
+                _ltp_cache[symbol] = (yf_px, now)
+                return yf_px
         except Exception as e:  # pragma: no cover - best effort fallback
             logger.debug("yfinance LTP fallback failed for %s: %s", symbol, e)
         return None
