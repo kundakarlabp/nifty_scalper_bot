@@ -278,6 +278,7 @@ def get_instrument_tokens(
                 "target_strike": None,
                 "expiry": None,
                 "tokens": {"ce": None, "pe": None},
+                "atm_tokens": {"ce": None, "pe": None},
             }
 
         # --- ATM rounding and target selection ---
@@ -300,11 +301,14 @@ def get_instrument_tokens(
                 "target_strike": target,
                 "expiry": None,
                 "tokens": {"ce": None, "pe": None},
+                "atm_tokens": {"ce": None, "pe": None},
             }
 
         expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
         ce_token = None
         pe_token = None
+        atm_ce = None
+        atm_pe = None
 
         for row in nfo:
             try:
@@ -318,13 +322,17 @@ def get_instrument_tokens(
                 if strike_val is None:
                     continue
                 strike = int(strike_val)
-                if strike != target:
-                    continue
                 itype = row.get("instrument_type")
-                if itype == "CE":
-                    ce_token = row.get("instrument_token")
-                elif itype == "PE":
-                    pe_token = row.get("instrument_token")
+                if strike == target:
+                    if itype == "CE":
+                        ce_token = row.get("instrument_token")
+                    elif itype == "PE":
+                        pe_token = row.get("instrument_token")
+                if strike == atm:
+                    if itype == "CE":
+                        atm_ce = row.get("instrument_token")
+                    elif itype == "PE":
+                        atm_pe = row.get("instrument_token")
             except Exception:
                 continue
 
@@ -335,6 +343,7 @@ def get_instrument_tokens(
             "target_strike": int(target),
             "expiry": expiry,
             "tokens": {"ce": ce_token, "pe": pe_token},
+            "atm_tokens": {"ce": atm_ce, "pe": atm_pe},
         }
 
     except Exception as e:

@@ -341,6 +341,7 @@ class TelegramController:
                 "/status [verbose] · /health · /diag · /check\n"
                 "/positions · /active [page]\n"
                 "/tick · /tickdry · /logs [n]\n"
+                "/why · /selftest · /smoketest\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
                 "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
@@ -384,6 +385,8 @@ class TelegramController:
                 lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
                 lines.append(f"• Trades Today: {status.get('trades_today')}")
                 lines.append(f"• Consecutive Losses: {status.get('consecutive_losses')}")
+                lines.append(f"• Eval Count: {status.get('eval_count')}")
+                lines.append(f"• Last Eval: {status.get('last_eval_ts')}")
                 lines.append("")
                 lines.append("📈 Signal")
                 reason_block = plan.get("reason_block") or "-"
@@ -448,6 +451,103 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
+
+        if cmd == "/why":
+            if not self._diag_provider:
+                return self._send("Diag provider not wired.")
+            try:
+                d = self._diag_provider() or {}
+                sb = d.get("gate_scoreboard", {})
+                gates = sb.get("gates", {})
+                order = [
+                    "window",
+                    "cooloff",
+                    "daily_dd",
+                    "bar_count",
+                    "data_stale",
+                    "regime",
+                    "atr_pct",
+                    "score",
+                    "micro_spread",
+                    "micro_depth",
+                    "liquidity",
+                    "mtf",
+                    "event_guard",
+                ]
+                lines = ["📋 Gate Scoreboard"]
+                for g in order:
+                    info = gates.get(g, {})
+                    mark = "✅" if info.get("ok") else "❌"
+                    val = info.get("val")
+                    lines.append(f"{g} {mark} {val}")
+                lines.append(f"reason_block={sb.get('reason_block')}")
+                reasons = sb.get("reasons") or []
+                if reasons:
+                    lines.append("reasons: " + ",".join(reasons))
+                return self._send("\n".join(lines))
+            except Exception as e:
+                return self._send(f"why error: {e}")
+
+        if cmd == "/selftest":
+            runner = getattr(self._status_provider, "__self__", None)
+            if runner is None:
+                return self._send("Selftest not wired.")
+            try:
+                from src.utils.strike_selector import get_instrument_tokens
+
+                info = get_instrument_tokens(
+                    kite_instance=getattr(runner.executor, "kite", None)
+                )
+                if not info:
+                    return self._send("Selftest: no instrument")
+                strike = info.get("atm_strike")
+                symbol = runner.executor._infer_symbol({"strike": strike, "option_type": "CE"}) or ""
+                kite = getattr(runner.executor, "kite", None)
+                quote: Dict[str, Any] = {}
+                if kite and symbol:
+                    sym = f"NFO:{symbol}"
+                    data = kite.quote([sym]).get(sym, {})
+                    depth = data.get("depth", {})
+                    buy = depth.get("buy", [{}])[0]
+                    sell = depth.get("sell", [{}])[0]
+                    quote = {
+                        "bid": float(buy.get("price", 0.0)),
+                        "ask": float(sell.get("price", 0.0)),
+                        "bid_qty": int(buy.get("quantity", 0)),
+                        "ask_qty": int(sell.get("quantity", 0)),
+                        "bid_qty_top5": sum(int(b.get("quantity", 0)) for b in depth.get("buy", [])),
+                        "ask_qty_top5": sum(int(s.get("quantity", 0)) for s in depth.get("sell", [])),
+                    }
+                spread = quote.get("ask", 0.0) - quote.get("bid", 0.0)
+                mid = (
+                    quote.get("ask", 0.0) + quote.get("bid", 0.0)
+                ) / 2.0 if spread > 0 else 0.0
+                ok, micro = runner.executor.micro_ok(
+                    quote=quote,
+                    qty_lots=1,
+                    lot_size=runner.executor.lot_size,
+                    max_spread_pct=runner.executor.max_spread_pct,
+                    depth_mult=int(runner.executor.depth_multiplier),
+                )
+                ladder = [round(mid + 0.25 * spread, 2), round(mid + 0.40 * spread, 2)]
+                res = "WOULD_PLACE" if ok else "WOULD_BLOCK"
+                reason = "" if ok else f"(depth_ok={micro.get('depth_ok')} spread%={micro.get('spread_pct')})"
+                return self._send(
+                    f"mid={mid:.2f} spread%={micro.get('spread_pct'):.2f} depth_ok={micro.get('depth_ok')} limit_steps={ladder} result={res}{reason}"
+                )
+            except Exception as e:
+                return self._send(f"selftest error: {e}")
+
+        if cmd == "/smoketest":
+            runner = getattr(self._status_provider, "__self__", None)
+            if runner is None or not hasattr(runner, "smoketest"):
+                return self._send("Smoketest not wired.")
+            opt = "PE" if args and args[0].lower().startswith("pe") else "CE"
+            try:
+                msg = runner.smoketest(opt)
+                return self._send(msg)
+            except Exception as e:
+                return self._send(f"smoketest error: {e}")
 
         # CHECK (multiline, with hints)
         if cmd == "/check":
