@@ -29,6 +29,12 @@ try:
 except Exception:  # pragma: no cover
     KiteConnect = object  # type: ignore
 
+# Lightweight market data fallback used when no broker session is available
+try:  # pragma: no cover
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
+
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +144,24 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
         return float(cached[0])
 
     if not kite or kite is object:
+        # Fallback to yfinance when running without a live broker session.  This
+        # keeps strike selection and diagnostics functional in paper/shadow mode
+        # where only public market data is available.
+        if yf is None:
+            return None
+        try:
+            yf_symbol = symbol.split(":")[-1].replace(" ", "")
+            # For NSE symbols yfinance expects the ".NS" suffix (indices like
+            # NIFTY 50 are handled without a suffix).
+            if yf_symbol and not yf_symbol.endswith(".NS") and yf_symbol.isalpha():
+                yf_symbol = yf_symbol + ".NS"
+            data = yf.Ticker(yf_symbol).history(period="1d", interval="1m")
+            if not data.empty:
+                px = float(data["Close"].iloc[-1])
+                _ltp_cache[symbol] = (px, now)
+                return px
+        except Exception as e:  # pragma: no cover - best effort fallback
+            logger.debug("yfinance LTP fallback failed for %s: %s", symbol, e)
         return None
 
     try:
@@ -222,6 +246,19 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
     return sorted_exp[-1]
 
 
+def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
+    """Return upcoming Thursday in IST as ``YYYY-MM-DD``.
+
+    Used as a lightweight fallback when the full instrument dump is unavailable.
+    """
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    # weekday(): Monday=0 … Sunday=6; Thursday is 3
+    days_ahead = (3 - now.weekday()) % 7
+    expiry = (now + timedelta(days=days_ahead)).date()
+    return expiry.isoformat()
+
+
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
@@ -270,7 +307,9 @@ def get_instrument_tokens(
 
         # Without a spot price, we can still return static info
         if px is None or px <= 0.0:
-            logger.debug("Spot LTP unavailable; returning minimal structure without strikes/tokens.")
+            logger.debug(
+                "Spot LTP unavailable; returning minimal structure without strikes/tokens."
+            )
             return {
                 "spot_token": spot_token,
                 "spot_price": None,
@@ -278,6 +317,7 @@ def get_instrument_tokens(
                 "target_strike": None,
                 "expiry": None,
                 "tokens": {"ce": None, "pe": None},
+                "atm_tokens": {"ce": None, "pe": None},
             }
 
         # --- ATM rounding and target selection ---
@@ -292,14 +332,17 @@ def get_instrument_tokens(
             return None
         nfo = nfo or []
         if not nfo:
-            logger.debug("NFO instruments unavailable; returning strike math without tokens.")
+            logger.debug(
+                "NFO instruments unavailable; returning strike math without tokens."
+            )
             return {
                 "spot_token": spot_token,
                 "spot_price": float(px),
                 "atm_strike": atm,
                 "target_strike": target,
-                "expiry": None,
+                "expiry": _next_weekly_expiry(),
                 "tokens": {"ce": None, "pe": None},
+                "atm_tokens": {"ce": None, "pe": None},
             }
 
         expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
