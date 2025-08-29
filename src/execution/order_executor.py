@@ -31,7 +31,6 @@ try:
     from src.config import settings
 except Exception:  # pragma: no cover
     settings = None  # type: ignore
-from src.utils.strike_selector import get_instrument_tokens
 
 log = logging.getLogger(__name__)
 
