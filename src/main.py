@@ -143,6 +143,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         quotes_provider=getattr(runner.executor, "quote_diagnostics", None),
         trace_provider=getattr(runner, "enable_trace", None),
         selftest_provider=getattr(runner.executor, "selftest", None),
+        backtest_provider=getattr(runner, "run_backtest", None),
         # controls
         runner_pause=getattr(runner, "pause", None),
         runner_resume=getattr(runner, "resume", None),

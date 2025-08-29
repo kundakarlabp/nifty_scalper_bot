@@ -53,6 +53,7 @@ class TelegramController:
         quotes_provider: Optional[Callable[[str], str]] = None,
         trace_provider: Optional[Callable[[int], None]] = None,
         selftest_provider: Optional[Callable[[str], str]] = None,
+        backtest_provider: Optional[Callable[[Optional[str]], str]] = None,
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
@@ -91,6 +92,7 @@ class TelegramController:
         self._quotes_provider = quotes_provider
         self._trace_provider = trace_provider
         self._selftest_provider = selftest_provider
+        self._backtest_provider = backtest_provider
 
         self._runner_pause = runner_pause
         self._runner_resume = runner_resume
@@ -349,7 +351,7 @@ class TelegramController:
                 "*Core*\n"
                 "/status [verbose] · /health · /diag · /check\n"
                 "/positions · /active [page]\n"
-                "/tick · /tickdry · /logs [n]\n"
+                "/tick · /tickdry · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
                 "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
@@ -672,6 +674,16 @@ class TelegramController:
             dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
             out = self._do_tick(dry=dry)
             return self._send(out)
+
+        if cmd == "/backtest":
+            if not self._backtest_provider:
+                return self._send("Backtest not wired.")
+            try:
+                path = args[0] if args else None
+                res = self._backtest_provider(path)
+                return self._send(res)
+            except Exception as e:
+                return self._send(f"Backtest error: {e}")
 
         # LOGS
         if cmd == "/logs":
