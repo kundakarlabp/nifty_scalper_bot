@@ -6,12 +6,12 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, Tuple, List
 
 import pandas as pd
 
 from src.config import settings
+from src.utils.time_windows import now_ist, TZ
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
 
@@ -133,6 +133,7 @@ class StrategyRunner:
         self.settings = settings
         self._last_diag_emit_ts: float = 0.0
         self._last_signal_hash: tuple | None = None
+        self._last_hb: float = 0.0
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -240,6 +241,20 @@ class StrategyRunner:
                 ",".join(plan.get("reasons", [])),
             )
 
+        if time.time() - getattr(self, "_last_hb", 0.0) >= 60.0:
+            micro = plan.get("micro") or {}
+            self.log.info(
+                "HB eval=%s regime=%s atr%%=%.2f score=%s spread%%=%s depth=%s block=%s",
+                self.eval_count,
+                plan.get("regime"),
+                float(plan.get("atr_pct") or 0.0),
+                int(plan.get("score") or 0),
+                micro.get("spread_pct"),
+                micro.get("depth_ok"),
+                plan.get("reason_block"),
+            )
+            self._last_hb = time.time()
+
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
@@ -319,6 +334,21 @@ class StrategyRunner:
             plan = self.strategy.generate_signal(df, current_tick=tick)
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             self._maybe_emit_minute_diag(plan)
+
+            last_bar_iso = plan.get("last_bar_ts")
+            if last_bar_iso:
+                try:
+                    lb = datetime.fromisoformat(str(last_bar_iso))
+                    if lb.tzinfo is None:
+                        lb = lb.replace(tzinfo=TZ)
+                    lag_sec = abs((now_ist() - lb).total_seconds())
+                    if lag_sec > 90:
+                        plan["reason_block"] = "data_stale"
+                    elif lb > now_ist() + timedelta(seconds=5):
+                        plan["reason_block"] = "clock_skew"
+                except Exception:
+                    pass
+
             if plan.get("reason_block"):
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
@@ -828,9 +858,8 @@ class StrategyRunner:
 
     @staticmethod
     def _now_ist():
-        """Current time in configured timezone as a timezone-naive ``datetime``."""
-        tz_name = getattr(settings, "tz", "Asia/Kolkata")
-        return datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
+        """Current time in configured timezone as a timezone-aware datetime."""
+        return now_ist()
 
     @staticmethod
     def _today_ist():

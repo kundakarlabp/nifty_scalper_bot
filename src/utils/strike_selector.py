@@ -157,9 +157,9 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
                 yf_symbol = yf_symbol + ".NS"
             data = yf.Ticker(yf_symbol).history(period="1d", interval="1m")
             if not data.empty:
-                px = float(data["Close"].iloc[-1])
-                _ltp_cache[symbol] = (px, now)
-                return px
+                px_val = float(data["Close"].iloc[-1])
+                _ltp_cache[symbol] = (px_val, now)
+                return px_val
         except Exception as e:  # pragma: no cover - best effort fallback
             logger.debug("yfinance LTP fallback failed for %s: %s", symbol, e)
         return None
@@ -458,3 +458,37 @@ def needs_reatm(entry_spot: float, current_spot: float, drift_pct: float = 0.35)
         return abs(curr - entry) / entry * 100.0 >= float(drift_pct)
     except Exception:
         return False
+
+
+def resolve_weekly_atm(spot: float, instruments: List[Dict[str, Any]]) -> Dict[str, tuple[str, int]]:
+    """Resolve current-week ATM option symbols from instrument dump."""
+    out: Dict[str, tuple[str, int]] = {}
+    try:
+        step = _infer_step(getattr(settings.instruments, "trade_symbol", ""))
+        atm = int(round(float(spot) / step) * step)
+        expiry = _resolve_weekly_expiry_from_dump(
+            instruments, getattr(settings.instruments, "trade_symbol", "")
+        )
+        for row in instruments or []:
+            try:
+                if row.get("segment") != "NFO-OPT":
+                    continue
+                if row.get("name") != getattr(settings.instruments, "trade_symbol", ""):
+                    continue
+                if expiry and not str(row.get("expiry", "")).startswith(expiry):
+                    continue
+                if int(row.get("strike", 0)) != atm:
+                    continue
+                tsym = row.get("tradingsymbol")
+                lot = int(row.get("lot_size", 0) or 0)
+                itype = row.get("instrument_type")
+                if tsym and lot:
+                    if itype == "CE":
+                        out["ce"] = (tsym, lot)
+                    elif itype == "PE":
+                        out["pe"] = (tsym, lot)
+            except Exception:
+                continue
+    except Exception:
+        return {}
+    return out

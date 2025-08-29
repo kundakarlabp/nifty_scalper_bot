@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple, Callable, List
 import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
+from src.utils.time_windows import TZ
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -271,6 +272,17 @@ def _coerce_interval(s: str) -> str:
 
 def _clip_window(df: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
     try:
+        idx_tz = getattr(df.index, "tz", None)
+        if idx_tz is not None:
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=idx_tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=idx_tz)
+        else:
+            if start.tzinfo is not None:
+                start = start.astimezone(TZ).replace(tzinfo=None)
+            if end.tzinfo is not None:
+                end = end.astimezone(TZ).replace(tzinfo=None)
         return df.loc[(df.index >= start) & (df.index <= end)].copy()
     except Exception:
         return df.copy()
@@ -513,8 +525,8 @@ class LiveKiteSource(DataSource):
             return None
 
         if start >= end:
-            # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
-            start = end - timedelta(minutes=10)
+            # If start >= end, roll start back one minute to maintain a valid window
+            start = end - timedelta(minutes=1)
 
         interval = _coerce_interval(str(timeframe))
 
@@ -602,6 +614,11 @@ class LiveKiteSource(DataSource):
 
             df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
             df = df[~df.index.duplicated(keep="last")]
+            if not df.empty:
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except Exception:
+                    pass
 
             if df.empty:
                 log.error(

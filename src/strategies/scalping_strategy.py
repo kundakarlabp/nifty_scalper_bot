@@ -16,6 +16,7 @@ from src.utils.indicators import (
 )
 from src.signals.regime_detector import detect_market_regime
 from src.execution.order_executor import micro_ok
+from src.utils.time_windows import TZ
 from src.utils.strike_selector import (
     get_instrument_tokens,
     select_strike,
@@ -220,10 +221,13 @@ class EnhancedScalpingStrategy:
         dbg: Dict[str, Any] = {"reason_block": None}
         try:
             if df is None or df.empty or len(df) < 14:
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+                raise ValueError("indicator_unready")
+            last_idx = pd.to_datetime(df.index[-1])
+            if last_idx.tzinfo is None:
+                last_idx = last_idx.tz_localize(TZ)
+            else:
+                last_idx = last_idx.astimezone(TZ)
+            plan["last_bar_ts"] = last_idx.isoformat()
             if spot_df is None:
                 spot_df = df
 
@@ -231,30 +235,30 @@ class EnhancedScalpingStrategy:
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
             if current_price is None or current_price <= 0:
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+                raise ValueError("indicator_unready")
 
             ema21 = self._ema(df["close"], 21)
             ema50 = self._ema(df["close"], 50)
-            vwap = calculate_vwap(spot_df)
+            vwap = calculate_vwap(df)
             macd_line, macd_signal, macd_hist = calculate_macd(df["close"])
             rsi = self._rsi(df["close"], 14)
             atr_series = compute_atr(df, period=14)
             atr_val = latest_atr_value(atr_series, default=0.0)
 
-            if vwap is None or len(vwap) == 0 or atr_val <= 0:
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+            if (
+                atr_val <= 0
+                or pd.isna(ema21.iloc[-1])
+                or pd.isna(ema50.iloc[-1])
+                or pd.isna(vwap.iloc[-1])
+            ):
+                raise ValueError("indicator_unready")
 
             if not (current_tick and current_tick.get("bid") and current_tick.get("ask")):
                 plan["reason_block"] = "no_option_quote"
                 dbg["reason_block"] = "no_option_quote"
                 self._last_debug = dbg
                 return plan
+
 
             price = float(spot_last)
             ema21_val, ema50_val = float(ema21.iloc[-1]), float(ema50.iloc[-1])

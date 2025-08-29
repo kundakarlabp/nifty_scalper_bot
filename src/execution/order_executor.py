@@ -35,7 +35,7 @@ from src.utils.strike_selector import get_instrument_tokens
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OrderExecutor", "micro_ok"]
+__all__ = ["OrderExecutor", "micro_ok", "fetch_quote_with_depth"]
 
 
 # ------------------- small helpers -------------------
@@ -102,9 +102,10 @@ def micro_ok(
     max_spread_frac = ms / 100.0 if ms > 1.0 else ms
     bid = float(getattr(quote, "bid", 0.0) or quote.get("bid", 0.0))
     ask = float(getattr(quote, "ask", 0.0) or quote.get("ask", 0.0))
-    mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
-    spread_pct = ((ask - bid) / mid * 100.0) if (mid > 0 and ask > bid) else 999.0
-    # depth: use top-5 cum quantities if available; else fallback to top-1
+    if bid <= 0 or ask <= 0:
+        return False, {"spread_pct": None, "depth_ok": False, "bid5": 0, "ask5": 0}
+    mid = (bid + ask) / 2.0
+    spread_pct = (ask - bid) / mid * 100.0
     bid5 = int(quote.get("bid_qty_top5", quote.get("bid_qty", 0)))
     ask5 = int(quote.get("ask_qty_top5", quote.get("ask_qty", 0)))
     depth_ok = min(bid5, ask5) >= depth_mult * qty_lots * lot_size
@@ -115,6 +116,37 @@ def micro_ok(
         "bid5": bid5,
         "ask5": ask5,
     }
+
+
+def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, Any]:
+    """Fetch option quote with depth using Kite REST API."""
+    if not kite or not tsym:
+        return {}
+    try:
+        data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
+        info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
+        depth = info.get("depth", {}) if isinstance(info, dict) else {}
+        bids = depth.get("buy", []) if isinstance(depth, dict) else []
+        asks = depth.get("sell", []) if isinstance(depth, dict) else []
+        bid = float(bids[0]["price"]) if bids else 0.0
+        ask = float(asks[0]["price"]) if asks else 0.0
+        bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
+        ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
+        ltp = float(info.get("last_price") or 0.0)
+        oi = info.get("oi")
+        ts = info.get("timestamp")
+        return {
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "bid5_qty": bid5,
+            "ask5_qty": ask5,
+            "oi": oi,
+            "timestamp": ts,
+        }
+    except Exception as e:
+        log.debug("fetch_quote_with_depth failed for %s: %s", tsym, e)
+        return {}
 
 
 # ------------------- in-memory order record -------------------
