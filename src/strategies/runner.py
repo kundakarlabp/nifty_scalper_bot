@@ -116,6 +116,11 @@ class StrategyRunner:
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
         self._log_signal_changes_only = os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
+        self._last_reason_block: Optional[str] = None
+        self._last_has_signal: Optional[bool] = None
+        self.eval_count: int = 0
+        self.last_eval_ts: Optional[str] = None
+        self._trace_remaining: int = 0
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -198,10 +203,9 @@ class StrategyRunner:
 
     def _record_plan(self, plan: Dict[str, Any]) -> None:
         micro = plan.get("micro") or {"spread_pct": 0.0, "depth_ok": False}
-        prev = self.last_plan or {}
         changed = (
-            plan.get("has_signal") != prev.get("has_signal")
-            or plan.get("reason_block") != prev.get("reason_block")
+            plan.get("has_signal") != self._last_has_signal
+            or plan.get("reason_block") != self._last_reason_block
         )
         if (not self._log_signal_changes_only) or changed:
             self.log.info(
@@ -212,10 +216,34 @@ class StrategyRunner:
                 float(plan.get("rr") or 0.0), plan.get("sl"), plan.get("tp1"), plan.get("tp2"),
                 plan.get("reason_block"),
             )
+        plan["eval_count"] = self.eval_count
+        plan["last_eval_ts"] = self.last_eval_ts
+        self._last_reason_block = plan.get("reason_block")
+        self._last_has_signal = plan.get("has_signal")
         self.last_plan = dict(plan)
+        if self._trace_remaining > 0:
+            self._trace_remaining -= 1
+            micro = plan.get("micro") or {}
+            self.log.info(
+                "TRACE regime=%s score=%s atr%%=%s rr=%s micro_spread=%s micro_depth=%s entry=%s sl=%s tp1=%s tp2=%s reason_block=%s reasons=%s",
+                plan.get("regime"),
+                plan.get("score"),
+                plan.get("atr_pct"),
+                plan.get("rr"),
+                micro.get("spread_pct"),
+                micro.get("depth_ok"),
+                plan.get("entry"),
+                plan.get("sl"),
+                plan.get("tp1"),
+                plan.get("tp2"),
+                plan.get("reason_block"),
+                ",".join(plan.get("reasons", [])),
+            )
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
+        self.eval_count += 1
+        self.last_eval_ts = datetime.utcnow().isoformat()
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
             "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
@@ -812,6 +840,18 @@ class StrategyRunner:
     # ---------------- Telegram helpers & diagnostics ----------------
     def get_last_signal_debug(self) -> Dict[str, Any]:
         return dict(self.last_plan or {})
+
+    def get_recent_bars(self, n: int = 5) -> str:
+        if not self.data_source:
+            return "data_source_unavailable"
+        from src.data.source import render_last_bars
+        return render_last_bars(self.data_source, n)
+
+    def enable_trace(self, n: int) -> None:
+        self._trace_remaining = int(max(0, n))
+
+    def disable_trace(self) -> None:
+        self._trace_remaining = 0
 
     # detailed bundle used by /check
     def build_diag(self) -> Dict[str, Any]:

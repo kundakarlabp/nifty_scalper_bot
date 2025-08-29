@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import os
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -48,6 +49,10 @@ class TelegramController:
         logs_provider: Optional[Callable[[int], List[str]]] = None,
         last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         compact_diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,  # NEW: compact (/diag)
+        bars_provider: Optional[Callable[[int], str]] = None,
+        quotes_provider: Optional[Callable[[str], str]] = None,
+        trace_provider: Optional[Callable[[int], None]] = None,
+        selftest_provider: Optional[Callable[[str], str]] = None,
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
@@ -82,6 +87,10 @@ class TelegramController:
         self._compact_diag_provider = compact_diag_provider  # NEW
         self._logs_provider = logs_provider
         self._last_signal_provider = last_signal_provider
+        self._bars_provider = bars_provider
+        self._quotes_provider = quotes_provider
+        self._trace_provider = trace_provider
+        self._selftest_provider = selftest_provider
 
         self._runner_pause = runner_pause
         self._runner_resume = runner_resume
@@ -428,6 +437,8 @@ class TelegramController:
                     else:
                         lines.append("• Reasons: -")
                     lines.append(f"• TS: {plan.get('ts')}")
+                    lines.append(f"• Eval Count: {plan.get('eval_count')}")
+                    lines.append(f"• Last Eval: {plan.get('last_eval_ts')}")
                 else:
                     lines.append(
                         "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
@@ -448,6 +459,123 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
+
+        if cmd == "/plan":
+            try:
+                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                text = json.dumps(plan, indent=2)
+                if len(text) > 2000:
+                    text = text[:2000] + "..."
+                return self._send("```json\n" + text + "\n```", parse_mode="Markdown")
+            except Exception as e:
+                return self._send(f"Plan error: {e}")
+
+        if cmd == "/why":
+            try:
+                status = self._status_provider() if self._status_provider else {}
+                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                now = time.time()
+                def mark(ok: bool) -> str:
+                    return "PASS" if ok else "FAIL"
+                def val(x: Any) -> str:
+                    return str(x)
+                last_ts = plan.get("last_bar_ts")
+                last_ts_sec = 0.0
+                if last_ts:
+                    try:
+                        last_ts_sec = time.mktime(datetime.fromisoformat(str(last_ts)).timetuple())
+                    except Exception:
+                        last_ts_sec = 0.0
+                gates = []
+                within = bool(status.get("within_window"))
+                gates.append(("window", within, val(status.get("within_window"))))
+                cooloff = bool(status.get("cooloff_until") and status.get("cooloff_until") != "-")
+                gates.append(("cooloff", not cooloff, status.get("cooloff_until")))
+                dd = bool(status.get("daily_dd_hit"))
+                gates.append(("daily_dd", not dd, status.get("day_realized_loss")))
+                bc = int(plan.get("bar_count") or 0) >= 20
+                gates.append(("bar_count", bc, plan.get("bar_count")))
+                data_stale = (now - last_ts_sec) <= 90 if last_ts_sec else False
+                gates.append(("data_stale", data_stale, plan.get("last_bar_ts")))
+                regime = plan.get("regime") in ("TREND", "RANGE")
+                gates.append(("regime", regime, plan.get("regime")))
+                atr = float(plan.get("atr_pct") or 0.0)
+                gates.append(("atr_pct", 0.30 <= atr <= 0.90, atr))
+                score = float(plan.get("score") or 0.0)
+                reg = str(plan.get("regime"))
+                need = 9 if reg == "TREND" else 8
+                gates.append(("score", score >= need, score))
+                micro = plan.get("micro", {})
+                sp = float(micro.get("spread_pct") or 0.0)
+                gates.append(("micro_spread", sp <= 0.35, sp))
+                gates.append(("micro_depth", bool(micro.get("depth_ok")), micro.get("depth_ok")))
+                reason_block = plan.get("reason_block") or "-"
+                reasons = plan.get("reasons") or []
+                lines = ["/why gates"]
+                for name, ok, value in gates:
+                    lines.append(f"{name}: {mark(ok)} {value}")
+                lines.append(f"reason_block: {reason_block}")
+                if reasons:
+                    lines.append("reasons: " + ", ".join(str(r) for r in reasons))
+                return self._send("\n".join(lines))
+            except Exception as e:
+                return self._send(f"Why error: {e}")
+
+        if cmd == "/bars":
+            try:
+                n = int(args[0]) if args else 5
+                if not self._bars_provider:
+                    return self._send("bars provider not wired")
+                text = self._bars_provider(max(1, min(n, 100)))
+                return self._send("```text\n" + text + "\n```", parse_mode="Markdown")
+            except Exception as e:
+                return self._send(f"Bars error: {e}")
+
+        if cmd == "/quotes":
+            try:
+                opt = args[0].lower() if args else "both"
+                if not self._quotes_provider:
+                    return self._send("quotes provider not wired")
+                text = self._quotes_provider(opt)
+                return self._send("```text\n" + text + "\n```", parse_mode="Markdown")
+            except Exception as e:
+                return self._send(f"Quotes error: {e}")
+
+        if cmd == "/trace":
+            if not self._trace_provider:
+                return self._send("trace not wired")
+            try:
+                n = int(args[0]) if args else 1
+                self._trace_provider(max(0, n))
+                return self._send(f"Tracing next {n} evals")
+            except Exception as e:
+                return self._send(f"Trace error: {e}")
+
+        if cmd == "/traceoff":
+            if not self._trace_provider:
+                return self._send("trace not wired")
+            self._trace_provider(0)
+            return self._send("Trace disabled")
+
+        if cmd == "/selftest":
+            try:
+                opt = args[0].lower() if args else "ce"
+                if not self._selftest_provider:
+                    return self._send("selftest not wired")
+                text = self._selftest_provider(opt)
+                return self._send(text)
+            except Exception as e:
+                return self._send(f"Selftest error: {e}")
+
+        if cmd == "/smoketest":
+            try:
+                opt = args[0].lower() if args else "ce"
+                if not self._selftest_provider:
+                    return self._send("smoketest not wired")
+                text = self._selftest_provider(opt)
+                return self._send(f"smoketest: {text}")
+            except Exception as e:
+                return self._send(f"Smoketest error: {e}")
 
         # CHECK (multiline, with hints)
         if cmd == "/check":

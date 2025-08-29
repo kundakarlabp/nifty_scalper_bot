@@ -200,6 +200,12 @@ class EnhancedScalpingStrategy:
             "reasons": [],
             "reason_block": None,
             "ts": datetime.utcnow().isoformat(),
+            "bar_count": int(len(df) if isinstance(df, pd.DataFrame) else 0),
+            "last_bar_ts": (
+                pd.to_datetime(df.index[-1]).to_pydatetime().isoformat()
+                if isinstance(df, pd.DataFrame) and len(df)
+                else None
+            ),
             # legacy extras for compatibility
             "entry_price": None,
             "stop_loss": None,
@@ -213,9 +219,9 @@ class EnhancedScalpingStrategy:
 
         dbg: Dict[str, Any] = {"reason_block": None}
         try:
-            if df is None or df.empty or len(df) < self.min_bars_for_signal:
-                plan["reason_block"] = "warmup"
-                dbg["reason_block"] = "warmup"
+            if df is None or df.empty or len(df) < 14:
+                plan["reason_block"] = "indicator_unready"
+                dbg["reason_block"] = "indicator_unready"
                 self._last_debug = dbg
                 return plan
             if spot_df is None:
@@ -225,8 +231,8 @@ class EnhancedScalpingStrategy:
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
             if current_price is None or current_price <= 0:
-                plan["reason_block"] = "warmup"
-                dbg["reason_block"] = "warmup"
+                plan["reason_block"] = "indicator_unready"
+                dbg["reason_block"] = "indicator_unready"
                 self._last_debug = dbg
                 return plan
 
@@ -239,8 +245,14 @@ class EnhancedScalpingStrategy:
             atr_val = latest_atr_value(atr_series, default=0.0)
 
             if vwap is None or len(vwap) == 0 or atr_val <= 0:
-                plan["reason_block"] = "warmup"
-                dbg["reason_block"] = "warmup"
+                plan["reason_block"] = "indicator_unready"
+                dbg["reason_block"] = "indicator_unready"
+                self._last_debug = dbg
+                return plan
+
+            if not (current_tick and current_tick.get("bid") and current_tick.get("ask")):
+                plan["reason_block"] = "no_option_quote"
+                dbg["reason_block"] = "no_option_quote"
                 self._last_debug = dbg
                 return plan
 
