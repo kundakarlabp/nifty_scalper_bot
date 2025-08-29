@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, Tuple, List
+from pathlib import Path
 
 import pandas as pd
 
@@ -15,6 +16,7 @@ from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
 from src.utils.time_windows import now_ist, floor_to_minute, TZ
+from src.backtesting.backtest_engine import BacktestEngine
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -526,6 +528,22 @@ class StrategyRunner:
             return dict(self._last_flow_debug)
         finally:
             setattr(settings, "allow_offhours_testing", prev)
+
+    def run_backtest(self, csv_path: Optional[str] = None) -> str:
+        """Run backtest on a CSV file and return a summary string."""
+        try:
+            path = Path(csv_path) if csv_path else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
+            df = pd.read_csv(path)
+            engine = BacktestEngine(df)
+            engine.run()
+            trades = len(engine.positions)
+            pnl = float(sum(p["pnl"] for p in engine.positions))
+            wins = sum(1 for p in engine.positions if p["pnl"] > 0)
+            win_rate = (wins / trades * 100.0) if trades else 0.0
+            return f"Backtest done: trades={trades}, win%={win_rate:.2f}, pnl={pnl:.2f}"
+        except Exception as e:
+            self.log.error("Backtest failed: %s", e, exc_info=True)
+            return f"Backtest error: {e}"
 
     def health_check(self) -> None:
         # refresh equity and executor heartbeat
