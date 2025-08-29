@@ -15,10 +15,11 @@ from src.utils.indicators import (
     calculate_macd,
 )
 from src.signals.regime_detector import detect_market_regime
-from src.execution.order_executor import micro_ok
+from src.execution.order_executor import fetch_quote_with_depth
 from src.utils.strike_selector import (
     get_instrument_tokens,
     select_strike,
+    resolve_weekly_atm,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,18 +220,19 @@ class EnhancedScalpingStrategy:
 
         dbg: Dict[str, Any] = {"reason_block": None}
         try:
-            if df is None or df.empty or len(df) < 14:
+            if df is None or df.empty:
                 plan["reason_block"] = "indicator_unready"
                 dbg["reason_block"] = "indicator_unready"
                 self._last_debug = dbg
                 return plan
             if spot_df is None:
                 spot_df = df
-
+            last_ts = pd.to_datetime(df.index[-1])
+            plan["last_bar_ts"] = last_ts.to_pydatetime().isoformat()
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            if current_price is None or current_price <= 0:
+            if current_price is None or current_price <= 0 or len(df) < 14:
                 plan["reason_block"] = "indicator_unready"
                 dbg["reason_block"] = "indicator_unready"
                 self._last_debug = dbg
@@ -238,21 +240,23 @@ class EnhancedScalpingStrategy:
 
             ema21 = self._ema(df["close"], 21)
             ema50 = self._ema(df["close"], 50)
-            vwap = calculate_vwap(spot_df)
+            vwap = calculate_vwap(df)
             macd_line, macd_signal, macd_hist = calculate_macd(df["close"])
             rsi = self._rsi(df["close"], 14)
             atr_series = compute_atr(df, period=14)
             atr_val = latest_atr_value(atr_series, default=0.0)
 
-            if vwap is None or len(vwap) == 0 or atr_val <= 0:
+            if (
+                len(df) < 14
+                or pd.isna(ema21.iloc[-1])
+                or pd.isna(ema50.iloc[-1])
+                or vwap is None
+                or len(vwap) == 0
+                or pd.isna(vwap.iloc[-1])
+                or atr_val <= 0
+            ):
                 plan["reason_block"] = "indicator_unready"
                 dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
-
-            if not (current_tick and current_tick.get("bid") and current_tick.get("ask")):
-                plan["reason_block"] = "no_option_quote"
-                dbg["reason_block"] = "no_option_quote"
                 self._last_debug = dbg
                 return plan
 
@@ -407,26 +411,33 @@ class EnhancedScalpingStrategy:
             vol_score = 1 if 0.0030 <= atr_pct <= 0.0105 else 0
 
             micro_score = 2
-            if current_tick and current_tick.get("bid") is not None and current_tick.get("ask") is not None:
-                lot_sz = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
-                ex_cfg = getattr(settings, "executor", object())
-                max_spread_pct = float(getattr(ex_cfg, "max_spread_pct", 0.35))
-                depth_mult = int(getattr(ex_cfg, "depth_multiplier", 5))
-                quote = {
-                    "bid": current_tick.get("bid"),
-                    "ask": current_tick.get("ask"),
-                    "bid_qty": current_tick.get("bid_qty"),
-                    "ask_qty": current_tick.get("ask_qty"),
-                    "bid_qty_top5": current_tick.get("bid_qty_top5"),
-                    "ask_qty_top5": current_tick.get("ask_qty_top5"),
-                }
-                ok_micro, info = micro_ok(quote, 1, lot_sz, max_spread_pct, depth_mult)
-                plan["micro"] = {
-                    "spread_pct": info.get("spread_pct", 0.0),
-                    "depth_ok": info.get("depth_ok", False),
-                }
-                if not ok_micro:
-                    micro_score = 0
+            atm = resolve_weekly_atm(price)
+            info_atm = atm.get(option_type.lower()) if atm else None
+            if not info_atm:
+                plan["reason_block"] = "no_option_quote"
+                dbg["reason_block"] = "no_option_quote"
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                self._last_debug = dbg
+                return plan
+            tsym, lot_sz = info_atm
+            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
+            bid = float(q.get("bid") or 0.0)
+            ask = float(q.get("ask") or 0.0)
+            bid5 = int(q.get("bid5_qty") or 0)
+            ask5 = int(q.get("ask5_qty") or 0)
+            if bid <= 0 or ask <= 0:
+                plan["reason_block"] = "no_option_quote"
+                dbg["reason_block"] = "no_option_quote"
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                self._last_debug = dbg
+                return plan
+            spread_pct = ((ask - bid) / ((ask + bid) / 2) * 100.0) if ask > bid else None
+            depth_ok = min(bid5, ask5) >= 5 * lot_sz
+            plan["micro"] = {"spread_pct": round(spread_pct, 2) if spread_pct is not None else None, "depth_ok": depth_ok}
+            ex_cfg = getattr(settings, "executor", object())
+            max_spread_pct = float(getattr(ex_cfg, "max_spread_pct", 0.35))
+            if spread_pct is None or spread_pct > max_spread_pct or not depth_ok:
+                micro_score = 0
 
             score = regime_score + momentum_score + structure_score + vol_score + micro_score
             plan["score"] = score

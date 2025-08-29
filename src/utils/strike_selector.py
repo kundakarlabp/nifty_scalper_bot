@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import median
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.config import settings
 
@@ -205,6 +205,50 @@ def _infer_step(trade_symbol: str) -> int:
     if "BANKNIFTY" in s:
         return 100
     return 50  # NIFTY / FINNIFTY / default
+
+
+def resolve_weekly_atm(
+    spot: float,
+    instruments: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Tuple[str, int]]:
+    """Resolve current-week ATM option trading symbols and lot size."""
+    trade_symbol = str(getattr(settings.instruments, "trade_symbol", ""))
+    step = _infer_step(trade_symbol)
+    strike = int(round(float(spot) / step) * step)
+    nfo = instruments or []
+    if not nfo:
+        try:
+            nfo = _fetch_instruments_nfo(None) or []
+        except Exception:
+            nfo = []
+    expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+    ce_sym = pe_sym = None
+    lot: Optional[int] = None
+    for row in nfo:
+        try:
+            if row.get("segment") != "NFO-OPT":
+                continue
+            if row.get("name") != trade_symbol:
+                continue
+            if expiry and not str(row.get("expiry", "")).startswith(expiry):
+                continue
+            if int(row.get("strike", 0)) != strike:
+                continue
+            lot = lot or int(row.get("lot_size", 0) or 0)
+            itype = row.get("instrument_type")
+            ts = row.get("tradingsymbol")
+            if itype == "CE":
+                ce_sym = ts
+            elif itype == "PE":
+                pe_sym = ts
+        except Exception:
+            continue
+    out: Dict[str, Tuple[str, int]] = {}
+    if ce_sym and lot:
+        out["ce"] = (str(ce_sym), int(lot))
+    if pe_sym and lot:
+        out["pe"] = (str(pe_sym), int(lot))
+    return out
 
 
 def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
