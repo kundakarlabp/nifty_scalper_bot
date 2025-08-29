@@ -14,6 +14,7 @@ import pandas as pd
 from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
+from src.utils.time_windows import now_ist, floor_to_minute, TZ
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -84,7 +85,7 @@ class StrategyRunner:
                     # Validate configured instrument token with a tiny fetch
                     token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
                     if token > 0:
-                        end = self._now_ist().replace(second=0, microsecond=0)
+                        end = floor_to_minute(self._now_ist())
                         start = end - timedelta(minutes=1)
                         df = self.data_source.fetch_ohlc(
                             token=token, start=start, end=end, timeframe="minute"
@@ -129,6 +130,7 @@ class StrategyRunner:
         self._offhours_notified: bool = False
         # track last notification to avoid spamming identical messages
         self._last_notification: Tuple[str, float] = ("", 0.0)
+        self._last_hb_ts: float = 0.0
 
         self.settings = settings
         self._last_diag_emit_ts: float = 0.0
@@ -177,6 +179,22 @@ class StrategyRunner:
         if now - self._last_diag_emit_ts >= interval:
             self._last_diag_emit_ts = now
             self._emit_diag(plan)
+
+    def _maybe_emit_heartbeat(self, plan: dict) -> None:
+        now = time.time()
+        if now - self._last_hb_ts >= 60:
+            micro = plan.get("micro") or {}
+            self.log.info(
+                "HB eval=%d regime=%s atr%%=%.2f score=%s spread%%=%s depth=%s block=%s",
+                self.eval_count,
+                plan.get("regime"),
+                float(plan.get("atr_pct") or 0.0),
+                plan.get("score"),
+                micro.get("spread_pct"),
+                micro.get("depth_ok"),
+                plan.get("reason_block"),
+            )
+            self._last_hb_ts = now
 
     def _preview_candidate(self, plan: dict, micro: dict | None):
         min_preview = float(getattr(self.settings, "MIN_PREVIEW_SCORE", 8))
@@ -239,6 +257,7 @@ class StrategyRunner:
                 plan.get("reason_block"),
                 ",".join(plan.get("reasons", [])),
             )
+        self._maybe_emit_heartbeat(plan)
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
@@ -317,6 +336,20 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
+            last_ts = plan.get("last_bar_ts")
+            if last_ts and not plan.get("reason_block"):
+                try:
+                    lb = datetime.fromisoformat(str(last_ts))
+                    if lb.tzinfo is None:
+                        lb = lb.replace(tzinfo=TZ)
+                    now_ts = now_ist()
+                    lag_sec = abs((now_ts - lb).total_seconds())
+                    if lb > now_ts + timedelta(seconds=5):
+                        plan["reason_block"] = "clock_skew"
+                    elif lag_sec > 90:
+                        plan["reason_block"] = "data_stale"
+                except Exception:
+                    pass
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
@@ -672,8 +705,11 @@ class StrategyRunner:
             )
             # Add a small buffer (10%) to account for any missing candles.
             lookback = int(lookback * 1.1)
+            if lookback <= 0:
+                self.log.warning("Adjusted OHLC window invalid; aborting")
+                return None
 
-            now = self._now_ist().replace(second=0, microsecond=0)
+            now = floor_to_minute(self._now_ist(), self._now_ist().tzinfo or TZ)
 
             # Derive session bounds using configured start/end times.
             session_start = now.replace(
@@ -708,12 +744,7 @@ class StrategyRunner:
             if start < session_start:
                 start = session_start
             if start >= end:
-                self.log.warning(
-                    "Adjusted OHLC window %s..%s collapses; aborting",
-                    start.isoformat(),
-                    end.isoformat(),
-                )
-                return None
+                start = end - timedelta(minutes=1)
 
             # Resolve token with fallbacks
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
@@ -828,13 +859,11 @@ class StrategyRunner:
 
     @staticmethod
     def _now_ist():
-        """Current time in configured timezone as a timezone-naive ``datetime``."""
-        tz_name = getattr(settings, "tz", "Asia/Kolkata")
-        return datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
+        return now_ist()
 
     @staticmethod
     def _today_ist():
-        now = StrategyRunner._now_ist()
+        now = now_ist()
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ---------------- Telegram helpers & diagnostics ----------------

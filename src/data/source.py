@@ -60,15 +60,6 @@ class DataSource:
         raise NotImplementedError
 
 
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
-def _now_ist_naive() -> datetime:
-    """Current time in IST, timezone‑naive (to match most data frames we use)."""
-    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    return ist.replace(tzinfo=None)
-
-
 # Accept a few common aliases; default to 'minute'
 _INTERVAL_MAP: Dict[str, str] = {
     "minute": "minute",
@@ -169,7 +160,9 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
         token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         if token <= 0:
             return "instrument_token missing"
-        end = _now_ist_naive().replace(second=0, microsecond=0)
+        from src.utils.time_windows import now_ist, floor_to_minute
+
+        end = floor_to_minute(now_ist(), None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         df = ds.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
@@ -213,7 +206,10 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
 
         # historical_data returns 'date' column; ensure timezone‑naive Timestamp index
         if "date" in df.columns:
+            from src.utils.time_windows import TZ
+
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = df["date"].dt.tz_convert(TZ) if df["date"].dt.tz is not None else df["date"].dt.tz_localize(TZ)
             df["date"] = df["date"].dt.tz_localize(None)
             df = df.set_index("date")
 

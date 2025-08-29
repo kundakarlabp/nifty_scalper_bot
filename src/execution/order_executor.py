@@ -35,7 +35,7 @@ from src.utils.strike_selector import get_instrument_tokens
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OrderExecutor", "micro_ok"]
+__all__ = ["OrderExecutor", "micro_ok", "fetch_quote_with_depth"]
 
 
 # ------------------- small helpers -------------------
@@ -87,6 +87,52 @@ def _chunks(total: int, chunk: int) -> List[int]:
     return out
 
 
+def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, Any]:
+    """Return quote with depth for the given trading symbol."""
+    if not kite or not tsym:
+        return {
+            "ltp": 0.0,
+            "bid": 0.0,
+            "ask": 0.0,
+            "bid5_qty": 0,
+            "ask5_qty": 0,
+            "oi": None,
+            "timestamp": None,
+        }
+    try:
+        data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
+        info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
+        depth = info.get("depth", {}) if isinstance(info, dict) else {}
+        bids = depth.get("buy", []) if isinstance(depth, dict) else []
+        asks = depth.get("sell", []) if isinstance(depth, dict) else []
+        bid = float(bids[0]["price"]) if bids else 0.0
+        ask = float(asks[0]["price"]) if asks else 0.0
+        bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
+        ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
+        ltp = float(info.get("last_price") or 0.0)
+        oi = info.get("oi")
+        ts = info.get("timestamp") or info.get("last_trade_time")
+        return {
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "bid5_qty": bid5,
+            "ask5_qty": ask5,
+            "oi": oi,
+            "timestamp": ts,
+        }
+    except Exception as e:
+        log.debug("fetch_quote_with_depth failed: %s", e)
+        return {
+            "ltp": 0.0,
+            "bid": 0.0,
+            "ask": 0.0,
+            "bid5_qty": 0,
+            "ask5_qty": 0,
+            "oi": None,
+            "timestamp": None,
+        }
+
 def micro_ok(
     quote: Dict[str, Any],
     qty_lots: int,
@@ -102,15 +148,26 @@ def micro_ok(
     max_spread_frac = ms / 100.0 if ms > 1.0 else ms
     bid = float(getattr(quote, "bid", 0.0) or quote.get("bid", 0.0))
     ask = float(getattr(quote, "ask", 0.0) or quote.get("ask", 0.0))
-    mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
-    spread_pct = ((ask - bid) / mid * 100.0) if (mid > 0 and ask > bid) else 999.0
     # depth: use top-5 cum quantities if available; else fallback to top-1
     bid5 = int(quote.get("bid_qty_top5", quote.get("bid_qty", 0)))
     ask5 = int(quote.get("ask_qty_top5", quote.get("ask_qty", 0)))
+    if bid <= 0 or ask <= 0:
+        return False, {
+            "spread_pct": None,
+            "depth_ok": False,
+            "bid5": bid5,
+            "ask5": ask5,
+        }
+    mid = (bid + ask) / 2.0
+    spread_pct = ((ask - bid) / mid * 100.0) if (ask > bid and mid > 0) else None
     depth_ok = min(bid5, ask5) >= depth_mult * qty_lots * lot_size
-    ok = (spread_pct <= max_spread_frac * 100.0) and depth_ok
+    ok = (
+        spread_pct is not None
+        and spread_pct <= max_spread_frac * 100.0
+        and depth_ok
+    )
     return ok, {
-        "spread_pct": round(spread_pct, 2),
+        "spread_pct": round(spread_pct, 2) if spread_pct is not None else None,
         "depth_ok": depth_ok,
         "bid5": bid5,
         "ask5": ask5,
@@ -370,74 +427,64 @@ class OrderExecutor:
             }
 
     def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
-        info = get_instrument_tokens(self.kite)
-        if not info:
+        from src.utils.strike_selector import _fetch_instruments_nfo, _get_spot_ltp, resolve_weekly_atm
+
+        inst_dump = _fetch_instruments_nfo(self.kite) or []
+        spot = _get_spot_ltp(self.kite, getattr(getattr(settings, "instruments", object()), "spot_symbol", ""))
+        atm = resolve_weekly_atm(spot or 0.0, inst_dump)
+        if not atm:
             return "instrument resolution failed"
-        tokens = info.get("atm_tokens") or {}
-        expiry = info.get("expiry")
-        strike = info.get("atm_strike")
         types = [opt.lower()] if opt.lower() in ("ce", "pe") else ["ce", "pe"]
-        lines = []
+        lines: List[str] = []
         for t in types:
-            token = tokens.get(t)
-            if token and self.kite:
-                q = self._fetch_quote(int(token))
-            else:
-                if strike is None or not expiry:
-                    lines.append(f"{t.upper()}: token_missing")
-                    continue
-                q = self._fetch_quote_yf(int(strike), t, str(expiry))
-                if q["ltp"] == 0.0 and token is None:
-                    lines.append(f"{t.upper()}: token_missing")
-                    continue
-            ok, meta = micro_ok(
-                q,
-                qty_lots=qty_lots,
-                lot_size=self.lot_size,
-                max_spread_pct=self.max_spread_pct,
-                depth_mult=int(self.depth_multiplier),
-            )
-            tok_disp = token if token else "yf"
+            info = atm.get(t)
+            if not info:
+                lines.append(f"{t.upper()}: tsym_missing")
+                continue
+            tsym, lot = info
+            q = fetch_quote_with_depth(self.kite, tsym)
+            bid = float(q.get("bid") or 0.0)
+            ask = float(q.get("ask") or 0.0)
+            spread_pct = ((ask - bid) / ((ask + bid) / 2) * 100.0) if bid > 0 and ask > 0 else None
+            bid5 = int(q.get("bid5_qty") or 0)
+            ask5 = int(q.get("ask5_qty") or 0)
+            depth_ok = min(bid5, ask5) >= int(self.depth_multiplier) * qty_lots * lot
+            ok = spread_pct is not None and spread_pct <= self.max_spread_pct * 100 and depth_ok
             lines.append(
-                f"{t.upper()} token={tok_disp} ltp={q['ltp']} bid={q['bid']} ask={q['ask']} "
-                f"spread%={meta.get('spread_pct')} bid5={meta.get('bid5')} ask5={meta.get('ask5')} "
+                f"{t.upper()} tsym={tsym} ltp={q.get('ltp')} bid={bid} ask={ask} "
+                f"spread%={None if spread_pct is None else round(spread_pct,2)} bid5={bid5} ask5={ask5} "
                 f"oi={q.get('oi')} micro={'OK' if ok else 'FAIL'}"
             )
         return "\n".join(lines)
 
     def selftest(self, opt: str = "ce") -> str:
-        info = get_instrument_tokens(self.kite)
-        if not info:
+        from src.utils.strike_selector import _fetch_instruments_nfo, _get_spot_ltp, resolve_weekly_atm
+
+        inst_dump = _fetch_instruments_nfo(self.kite) or []
+        spot = _get_spot_ltp(self.kite, getattr(getattr(settings, "instruments", object()), "spot_symbol", ""))
+        atm = resolve_weekly_atm(spot or 0.0, inst_dump)
+        if not atm:
             return "instrument resolution failed"
-        token = info.get("atm_tokens", {}).get(opt.lower())
-        strike = info.get("atm_strike")
-        expiry = info.get("expiry")
-        if token and self.kite:
-            q = self._fetch_quote(int(token))
-        else:
-            if strike is None or not expiry:
-                return "token missing"
-            q = self._fetch_quote_yf(int(strike), opt, str(expiry))
-            if q["ltp"] == 0.0:
-                return "token missing"
-        spread = q["ask"] - q["bid"]
-        mid = (q["ask"] + q["bid"]) / 2 if (q["ask"] and q["bid"]) else 0.0
-        ok, meta = micro_ok(
-            q,
-            qty_lots=1,
-            lot_size=self.lot_size,
-            max_spread_pct=self.max_spread_pct,
-            depth_mult=int(self.depth_multiplier),
-        )
+        info = atm.get(opt.lower())
+        if not info:
+            return "token missing"
+        tsym, lot = info
+        q = fetch_quote_with_depth(self.kite, tsym)
+        bid = float(q.get("bid") or 0.0)
+        ask = float(q.get("ask") or 0.0)
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
+        spread = ask - bid
+        ok, meta = micro_ok({
+            "bid": bid,
+            "ask": ask,
+            "bid_qty_top5": q.get("bid5_qty", 0),
+            "ask_qty_top5": q.get("ask5_qty", 0),
+        }, qty_lots=1, lot_size=lot, max_spread_pct=self.max_spread_pct, depth_mult=int(self.depth_multiplier))
         steps = []
         if mid and spread:
             steps = [round(mid + 0.25 * spread, 2), round(mid + 0.40 * spread, 2)]
-        reason = "OK" if ok else ("spread" if meta.get("spread_pct", 0) > self.max_spread_pct * 100 else "depth")
-        result = "WOULD_PLACE" if ok else f"WOULD_BLOCK({reason})"
-        return (
-            f"mid={mid:.2f} spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')} "
-            f"steps={steps} result={result}"
-        )
+        result = "WOULD_PLACE" if ok else f"WOULD_BLOCK(spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')})"
+        return f"mid={mid:.2f} spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')} steps={steps} {result}"
 
     # ----------- entry API (runner calls place_order with payload) ----------
     def place_order(self, payload: Dict[str, Any]) -> Optional[str]:
