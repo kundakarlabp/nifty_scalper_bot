@@ -25,6 +25,7 @@ try:
     from src.config import settings
 except Exception:  # pragma: no cover
     settings = None  # type: ignore
+from src.utils.strike_selector import get_instrument_tokens
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +265,108 @@ class OrderExecutor:
             self.last_error = f"positions: {e}"
             log.error("positions() failed: %s", e)
             return {}
+
+    # ----------- quotes diagnostics ----------
+    def _fetch_quote(self, token: int) -> Dict[str, Any]:
+        if not self.kite:
+            return {
+                "ltp": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "bid_qty": 0,
+                "ask_qty": 0,
+                "bid_qty_top5": 0,
+                "ask_qty_top5": 0,
+                "oi": 0,
+            }
+        try:
+            data = _retry_call(self.kite.quote, [token], tries=2)
+            info = data.get(str(token), {}) if isinstance(data, dict) else {}
+            depth = info.get("depth", {}) if isinstance(info, dict) else {}
+            bids = depth.get("buy", []) if isinstance(depth, dict) else []
+            asks = depth.get("sell", []) if isinstance(depth, dict) else []
+            bid = float(bids[0]["price"]) if bids else 0.0
+            ask = float(asks[0]["price"]) if asks else 0.0
+            bid_qty = int(bids[0]["quantity"]) if bids else 0
+            ask_qty = int(asks[0]["quantity"]) if asks else 0
+            bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
+            ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
+            ltp = float(info.get("last_price") or 0.0)
+            oi = info.get("oi")
+            return {
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "bid_qty_top5": bid5,
+                "ask_qty_top5": ask5,
+                "oi": oi,
+            }
+        except Exception as e:
+            self.last_error = f"quote: {e}"
+            return {
+                "ltp": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "bid_qty": 0,
+                "ask_qty": 0,
+                "bid_qty_top5": 0,
+                "ask_qty_top5": 0,
+                "oi": 0,
+            }
+
+    def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
+        info = get_instrument_tokens(self.kite)
+        if not info:
+            return "instrument resolution failed"
+        tokens = info.get("atm_tokens") or {}
+        types = [opt.lower()] if opt.lower() in ("ce", "pe") else ["ce", "pe"]
+        lines = []
+        for t in types:
+            token = tokens.get(t)
+            if not token:
+                lines.append(f"{t.upper()}: token_missing")
+                continue
+            q = self._fetch_quote(int(token))
+            ok, meta = micro_ok(
+                q,
+                qty_lots=qty_lots,
+                lot_size=self.lot_size,
+                max_spread_pct=self.max_spread_pct,
+                depth_mult=int(self.depth_multiplier),
+            )
+            lines.append(
+                f"{t.upper()} token={token} ltp={q['ltp']} bid={q['bid']} ask={q['ask']} spread%={meta.get('spread_pct')} bid5={meta.get('bid5')} ask5={meta.get('ask5')} oi={q.get('oi')} micro={'OK' if ok else 'FAIL'}"
+            )
+        return "\n".join(lines)
+
+    def selftest(self, opt: str = "ce") -> str:
+        info = get_instrument_tokens(self.kite)
+        if not info:
+            return "instrument resolution failed"
+        token = info.get("atm_tokens", {}).get(opt.lower())
+        if not token:
+            return "token missing"
+        q = self._fetch_quote(int(token))
+        spread = q["ask"] - q["bid"]
+        mid = (q["ask"] + q["bid"]) / 2 if (q["ask"] and q["bid"]) else 0.0
+        ok, meta = micro_ok(
+            q,
+            qty_lots=1,
+            lot_size=self.lot_size,
+            max_spread_pct=self.max_spread_pct,
+            depth_mult=int(self.depth_multiplier),
+        )
+        steps = []
+        if mid and spread:
+            steps = [round(mid + 0.25 * spread, 2), round(mid + 0.40 * spread, 2)]
+        reason = "OK" if ok else ("spread" if meta.get("spread_pct", 0) > self.max_spread_pct * 100 else "depth")
+        result = "WOULD_PLACE" if ok else f"WOULD_BLOCK({reason})"
+        return (
+            f"mid={mid:.2f} spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')} "
+            f"steps={steps} result={result}"
+        )
 
     # ----------- entry API (runner calls place_order with payload) ----------
     def place_order(self, payload: Dict[str, Any]) -> Optional[str]:

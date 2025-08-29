@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple, Callable, List
 
 import pandas as pd
+from src.utils.atr_helper import compute_atr
+from src.utils.indicators import calculate_vwap
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -103,7 +105,6 @@ _INTERVAL_TO_FREQ: Dict[str, str] = {
 
 try:  # pragma: no cover - imported lazily to avoid circular dependency during settings init
     from src.config import settings
-
     WARMUP_BARS = int(
         max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal)
     )
@@ -137,7 +138,6 @@ class _TTLCache:
         if time.time() - ent.ts > self._ttl:
             self._data.pop(key, None)
             return None
-        # If our cached expanded window fully contains the requested window, subset it
         s0, e0 = ent.fetched_window
         if s0 <= start and e0 >= end:
             try:
@@ -161,6 +161,39 @@ class _TTLCache:
             fetched_window=fetched_window,
             requested_window=requested_window,
         )
+
+
+def render_last_bars(ds: DataSource, n: int = 5) -> str:
+    """Return formatted last ``n`` 1m bars with key indicators."""
+    try:
+        token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        if token <= 0:
+            return "instrument_token missing"
+        end = _now_ist_naive().replace(second=0, microsecond=0)
+        lookback = max(60, n + 50)
+        start = end - timedelta(minutes=lookback)
+        df = ds.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        if df is None or df.empty:
+            return "no data"
+        vwap = calculate_vwap(df)
+        ema21 = df["close"].ewm(span=21, adjust=False).mean()
+        ema50 = df["close"].ewm(span=50, adjust=False).mean()
+        atr = compute_atr(df, period=14)
+        lines: List[str] = []
+        for ts, row in df.tail(n).iterrows():
+            atr_val = float(atr.loc[ts]) if ts in atr.index else float("nan")
+            ema21_val = float(ema21.loc[ts]) if ts in ema21.index else float("nan")
+            ema50_val = float(ema50.loc[ts]) if ts in ema50.index else float("nan")
+            vwap_val = float(vwap.loc[ts]) if ts in vwap.index else float("nan")
+            lines.append(
+                f"{ts:%H:%M} O={row['open']:.2f} H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} VWAP={vwap_val:.2f} ATR={atr_val:.2f} EMA21={ema21_val:.2f} EMA50={ema50_val:.2f}"
+            )
+        last_ts = df.index[-1]
+        atr_pct = (float(atr.iloc[-1]) / float(df["close"].iloc[-1]) * 100.0) if len(atr) else 0.0
+        lines.append(f"last_bar_ts={last_ts.to_pydatetime().isoformat()} ATR%={atr_pct:.2f}")
+        return "\n".join(lines)
+    except Exception as e:  # pragma: no cover - diagnostic helper
+        return f"bars error: {e}"
 
 
 def _safe_dataframe(rows: Any) -> pd.DataFrame:

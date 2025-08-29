@@ -139,6 +139,10 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         compact_diag_provider=getattr(runner, "get_compact_diag_summary", None),
         logs_provider=_tail_logs,
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
+        bars_provider=getattr(runner, "get_recent_bars", None),
+        quotes_provider=getattr(runner.executor, "quote_diagnostics", None),
+        trace_provider=getattr(runner, "enable_trace", None),
+        selftest_provider=getattr(runner.executor, "selftest", None),
         # controls
         runner_pause=getattr(runner, "pause", None),
         runner_resume=getattr(runner, "resume", None),
