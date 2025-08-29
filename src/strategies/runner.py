@@ -14,7 +14,6 @@ import pandas as pd
 from src.config import settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.execution.order_executor import OrderExecutor
-from src.utils.strike_selector import get_instrument_tokens
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -129,9 +128,6 @@ class StrategyRunner:
         self.settings = settings
         self._last_diag_emit_ts: float = 0.0
         self._last_signal_hash: tuple | None = None
-
-        self.eval_count: int = 0
-        self.last_eval_ts: Optional[datetime] = None
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -293,9 +289,6 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
-            self.eval_count += 1
-            self.last_eval_ts = self._now_ist()
-            self.log.info("eval_count=%d last_eval_ts=%s", self.eval_count, self.last_eval_ts.isoformat())
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
@@ -827,55 +820,6 @@ class StrategyRunner:
     def get_last_flow_debug(self) -> Dict[str, Any]:
         return dict(self._last_flow_debug)
 
-    def _gate_scoreboard(self) -> Dict[str, Any]:
-        plan = self.last_plan or {}
-        flow = self._last_flow_debug if isinstance(self._last_flow_debug, dict) else {}
-        micro = plan.get("micro") or {}
-        now = self._now_ist()
-        bars = int(flow.get("bars", 0) or 0)
-        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 20))
-        age = time.time() - self._last_fetch_ts if self._last_fetch_ts else 1e9
-        reg = plan.get("regime")
-        score = float(plan.get("score") or 0.0)
-        req = 9 if reg == "TREND" else 8 if reg == "RANGE" else 0
-        atr_pct = float(plan.get("atr_pct") or 0.0)
-        spread_pct = float(micro.get("spread_pct") or 0.0)
-        gates = {
-            "window": {"ok": bool(flow.get("within_window")), "val": None},
-            "cooloff": {
-                "ok": self.risk.loss_cooldown_until is None or now >= self.risk.loss_cooldown_until,
-                "val": self.risk.loss_cooldown_until.isoformat() if self.risk.loss_cooldown_until else "-",
-            },
-            "daily_dd": {
-                "ok": self.risk.day_realized_loss < self._max_daily_loss_rupees,
-                "val": f"{self.risk.day_realized_loss:.0f}/{self._max_daily_loss_rupees:.0f}",
-            },
-            "bar_count": {"ok": bars >= min_bars, "val": f"{bars}/{min_bars}"},
-            "data_stale": {"ok": age < 120, "val": f"{int(age)}s"},
-            "regime": {"ok": reg in ("TREND", "RANGE"), "val": reg},
-            "atr_pct": {"ok": 0.30 <= atr_pct <= 0.90, "val": f"{atr_pct:.2f}"},
-            "score": {"ok": score >= req if req else False, "val": f"{score}/{req or '-'}"},
-            "micro_spread": {"ok": spread_pct <= 0.35, "val": f"{spread_pct:.2f}"},
-            "micro_depth": {"ok": bool(micro.get("depth_ok")), "val": micro.get("depth_ok")},
-            "liquidity": {
-                "ok": "liquidity_fail" not in (plan.get("reasons", []) + [plan.get("reason_block")]),
-                "val": None,
-            },
-            "mtf": {
-                "ok": "mtf_block" not in (plan.get("reasons", []) + [plan.get("reason_block")]),
-                "val": None,
-            },
-            "event_guard": {
-                "ok": "event_guard" not in (plan.get("reasons", []) + [plan.get("reason_block")]),
-                "val": None,
-            },
-        }
-        return {
-            "gates": gates,
-            "reason_block": plan.get("reason_block"),
-            "reasons": plan.get("reasons", []),
-        }
-
     def _build_diag_bundle(self) -> Dict[str, Any]:
         """Health cards for /diag (compact) and /check (detailed)."""
         checks: List[Dict[str, Any]] = []
@@ -963,9 +907,6 @@ class StrategyRunner:
             "checks": checks,
             "last_signal": last_sig,
             "last_flow": dict(self._last_flow_debug),
-            "gate_scoreboard": self._gate_scoreboard(),
-            "eval_count": self.eval_count,
-            "last_eval_ts": self.last_eval_ts.isoformat() if self.last_eval_ts else None,
         }
         return bundle
 
@@ -1019,8 +960,6 @@ class StrategyRunner:
                 "rr_threshold": "ok" if rr_ok else "blocked",
                 "errors": "ok" if no_errors else "present",
             },
-            "eval_count": self.eval_count,
-            "last_eval_ts": self.last_eval_ts.isoformat() if self.last_eval_ts else None,
         }
 
     def get_equity_snapshot(self) -> Dict[str, Any]:
@@ -1053,8 +992,6 @@ class StrategyRunner:
             "day_realized_loss": round(self.risk.day_realized_loss, 2),
             "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
             "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
-            "eval_count": self.eval_count,
-            "last_eval_ts": self.last_eval_ts.isoformat() if self.last_eval_ts else None,
         }
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
@@ -1064,80 +1001,6 @@ class StrategyRunner:
             equity=self._active_equity(),
         )
         return {"qty": int(qty), "diag": diag}
-
-    def smoketest(self, option: str = "CE") -> str:
-        opt = option.upper()
-        prev_live = bool(settings.enable_live_trading)
-        prev_kite = self.executor.kite
-        try:
-            info = get_instrument_tokens(kite_instance=self.kite)
-            if not info:
-                return "smoketest failed: no instrument"
-            strike = info.get("atm_strike")
-            token = (info.get("atm_tokens", {}) or {}).get(opt.lower())
-            symbol = self.executor._infer_symbol({"strike": strike, "option_type": opt}) or ""
-            quote: Dict[str, Any] = {}
-            if self.kite and token:
-                sym = f"NFO:{symbol}"
-                data = self.kite.quote([sym]).get(sym, {})
-                depth = data.get("depth", {})
-                buy = depth.get("buy", [{}])[0]
-                sell = depth.get("sell", [{}])[0]
-                quote = {
-                    "bid": float(buy.get("price", 0.0)),
-                    "ask": float(sell.get("price", 0.0)),
-                    "bid_qty": int(buy.get("quantity", 0)),
-                    "ask_qty": int(sell.get("quantity", 0)),
-                    "bid_qty_top5": sum(int(b.get("quantity", 0)) for b in depth.get("buy", [])),
-                    "ask_qty_top5": sum(int(s.get("quantity", 0)) for s in depth.get("sell", [])),
-                }
-            spread = quote.get("ask", 0.0) - quote.get("bid", 0.0)
-            mid = (quote.get("ask", 0.0) + quote.get("bid", 0.0)) / 2.0 if spread > 0 else 0.0
-            ok, micro = self.executor.micro_ok(
-                quote=quote,
-                qty_lots=1,
-                lot_size=self.executor.lot_size,
-                max_spread_pct=self.executor.max_spread_pct,
-                depth_mult=int(self.executor.depth_multiplier),
-            )
-            if not ok:
-                return f"WOULD_BLOCK(spread%={micro.get('spread_pct')} depth_ok={micro.get('depth_ok')})"
-            entry = round(mid + 0.25 * spread, 2)
-            atr_pct = float(self.last_plan.get("atr_pct") or 0.0)
-            spot = float(info.get("spot_price") or 0.0)
-            atr = (atr_pct / 100.0) * spot
-            sl = entry - 0.8 * atr if opt == "CE" else entry + 0.8 * atr
-            r = abs(entry - sl)
-            tp = entry + 1.2 * r if opt == "CE" else entry - 1.2 * r
-            payload = {
-                "action": "BUY" if opt == "CE" else "SELL",
-                "quantity": self.executor.lot_size,
-                "entry_price": entry,
-                "stop_loss": sl,
-                "take_profit": tp,
-                "strike": strike,
-                "option_type": opt,
-            }
-            settings.enable_live_trading = False
-            self.executor.set_live_broker(None)
-            rid = self.executor.place_order(payload)
-            exit_price = entry
-            pnl_r = 0.0
-            if hasattr(self.executor, "cancel_all_orders"):
-                try:
-                    self.executor.cancel_all_orders()
-                except Exception:
-                    pass
-            return (
-                f"placed SHADOW order {symbol} exit={exit_price:.2f} pnl={pnl_r:.2f}R"
-                if rid
-                else "smoketest failed"
-            )
-        except Exception as e:
-            return f"smoketest error: {e}"
-        finally:
-            settings.enable_live_trading = prev_live
-            self.executor.set_live_broker(prev_kite)
 
     def pause(self) -> None:
         self._paused = True

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import time
-import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, Literal
 
@@ -422,8 +421,6 @@ class EnhancedScalpingStrategy:
             plan["reasons"] = reasons
 
             threshold = 9 if reg.regime == "TREND" else 8
-            if os.getenv("DEBUG_LOWER_SCORE", "").lower() == "true":
-                threshold = 6
             if score < threshold:
                 plan["reason_block"] = "score_low"
                 dbg["reason_block"] = "score_low"

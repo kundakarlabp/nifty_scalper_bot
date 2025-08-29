@@ -222,23 +222,6 @@ class OrderExecutor:
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
 
-    def micro_ok(
-        self,
-        *,
-        quote: Dict[str, Any],
-        qty_lots: int,
-        lot_size: int,
-        max_spread_pct: float,
-        depth_mult: int,
-    ) -> Tuple[bool, Dict[str, Any]]:
-        return micro_ok(
-            quote=quote,
-            qty_lots=qty_lots,
-            lot_size=lot_size,
-            max_spread_pct=max_spread_pct,
-            depth_mult=depth_mult,
-        )
-
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
         """Hot-swap Kite session (None => paper)."""
