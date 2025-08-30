@@ -26,6 +26,7 @@ from src.execution.order_executor import OrderReconciler
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # noqa: F401
 from src.utils import strike_selector
+from src.utils.events import load_calendar, EventWindow
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -77,6 +78,17 @@ class StrategyRunner:
         self.telegram_controller = telegram_controller
 
         self.settings = settings
+
+        # Event guard configuration
+        self.events_path = os.environ.get("EVENTS_CONFIG_FILE", "config/events.yaml")
+        self.event_guard_enabled = bool(int(os.environ.get("EVENT_GUARD_ENABLED", "1")))
+        if os.path.exists(self.events_path):
+            self.event_cal = load_calendar(self.events_path)
+            self._event_last_mtime = os.path.getmtime(self.events_path)
+        else:
+            self.event_cal = None
+            self._event_last_mtime = None
+        self._event_post_widen: float = 0.0
 
         # strategy configuration
         self.strategy_config_path = resolve_config_path()
@@ -308,6 +320,23 @@ class StrategyRunner:
         except Exception as e:
             self.log.warning("CFG reload failed: %s", e)
 
+    def _maybe_reload_events(self) -> None:
+        """Hot-reload event calendar if the YAML file changes."""
+        if not self.event_cal or not os.path.exists(self.events_path):
+            return
+        try:
+            m = os.path.getmtime(self.events_path)
+            if m != self._event_last_mtime:
+                self.event_cal = load_calendar(self.events_path)
+                self._event_last_mtime = m
+                self.log.info(
+                    "EVENTS reload: v%s, %s windows",
+                    self.event_cal.version,
+                    len(self.event_cal.events),
+                )
+        except Exception as e:
+            self.log.warning("EVENTS reload failed: %s", e)
+
     def _preview_candidate(self, plan: dict, micro: dict | None):
         min_preview = float(getattr(self.settings, "MIN_PREVIEW_SCORE", 8))
         score = float(plan.get("score") or 0.0)
@@ -361,6 +390,7 @@ class StrategyRunner:
         self.eval_count += 1
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
+            self._maybe_reload_events()
         self.last_eval_ts = datetime.utcnow().isoformat()
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
@@ -452,6 +482,19 @@ class StrategyRunner:
                 )
                 return
             flow["data_ok"] = True
+            # Event guard pre-check to hint strategy
+            active_events: List[EventWindow] = []
+            event_block = False
+            self._event_post_widen = 0.0
+            if self.event_guard_enabled and self.event_cal:
+                active_events = self.event_cal.active(self.now_ist)
+                if active_events:
+                    event_block = any(ev.block_trading for ev in active_events)
+                    self._event_post_widen = max(
+                        (ev.post_widen_spread_pct for ev in active_events),
+                        default=0.0,
+                    )
+            setattr(self.strategy, "_event_post_widen", self._event_post_widen)
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
@@ -479,6 +522,28 @@ class StrategyRunner:
                 return
             flow["signal_ok"] = True
             flow["plan"] = dict(plan)
+
+            if self.event_guard_enabled and self.event_cal and active_events:
+                block = event_block
+                widen = self._event_post_widen
+                plan.setdefault("reasons", []).append(
+                    f"event_guard:{','.join(ev.name for ev in active_events)}"
+                )
+                plan["event_guard"] = {
+                    "active": True,
+                    "names": [ev.name for ev in active_events],
+                    "post_widen_spread_pct": round(widen, 3),
+                    "block": block,
+                }
+                if block:
+                    plan["has_signal"] = False
+                    plan["reason_block"] = "event_guard"
+                    self.last_plan = plan
+                    self._last_flow_debug = flow
+                    self._record_plan(plan)
+                    return
+                else:
+                    plan["_event_post_widen"] = float(widen)
 
             # ---- RR minimum
             rr_min = float(getattr(settings.strategy, "rr_min", 0.0) or 0.0)
@@ -1435,6 +1500,19 @@ class StrategyRunner:
         diag["router"] = getattr(
             self.order_executor, "router_health", lambda: {}
         )()
+
+        plan = self.last_plan or {}
+        diag["event_guard"] = plan.get("event_guard", {"active": False})
+        if self.event_cal:
+            next_ev = self.event_cal.next_event(self.now_ist)
+        else:
+            next_ev = None
+        if next_ev:
+            diag["next_event"] = {
+                "name": next_ev.name,
+                "guard_start": next_ev.guard_start().isoformat(),
+                "guard_end": next_ev.guard_end().isoformat(),
+            }
         return diag
 
     def risk_snapshot(self) -> Dict[str, Any]:

@@ -231,6 +231,8 @@ class EnhancedScalpingStrategy:
             "tp1_qty_ratio": None,
         }
 
+        plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
+
         dbg: Dict[str, Any] = {"reason_block": None}
 
         def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
@@ -418,6 +420,8 @@ class EnhancedScalpingStrategy:
                 max_spread = cfg.max_spread_pct_open
             elif nowt >= dt_time(15, 10):
                 max_spread = cfg.max_spread_pct_last20m
+            event_widen = float(plan.get("_event_post_widen", 0.0))
+            max_spread = max_spread + event_widen
             ok_micro, micro = micro_ok(
                 q,
                 qty_lots=1,

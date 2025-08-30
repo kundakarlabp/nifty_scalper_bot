@@ -1,0 +1,38 @@
+version: 1
+tz: "Asia/Kolkata"   # default for naive times
+defaults:
+  guard_before_min: 5
+  guard_after_min: 5
+  post_widen_spread_pct: 0.10  # add to max spread cap for 'after' minutes
+  block_trading: true
+
+events:
+  # --- India ---
+  - name: "RBI Policy"
+    start: "2025-09-01T10:00:00+05:30"
+    end:   "2025-09-01T10:30:00+05:30"
+    guard_before_min: 10
+    guard_after_min: 10
+    block_trading: true
+  - name: "India CPI"
+    start: "2025-09-12T17:30:00+05:30"
+    end:   "2025-09-12T18:00:00+05:30"
+    block_trading: true
+
+  # --- US (impacts SGX/NIFTY overnight / opens) ---
+  - name: "US CPI"
+    start: "2025-09-11T18:00:00+05:30"
+    end:   "2025-09-11T18:30:00+05:30"
+    guard_before_min: 5
+    guard_after_min: 15
+    post_widen_spread_pct: 0.15
+    block_trading: false
+
+recurring:
+  # simple weekly example: Every Thursday 14:55–15:10 (optional)
+  - name: "Expiry Last 35m"
+    rule: "WEEKLY_THU"
+    start_local: "14:55"
+    end_local: "15:10"
+    block_trading: false
+    post_widen_spread_pct: 0.10
