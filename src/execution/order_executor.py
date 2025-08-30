@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.strategies.registry import OrderConnectorRegistry
 
 # Optional public market data fallback
 try:  # pragma: no cover
@@ -162,7 +161,6 @@ class KiteOrderConnector:
         return _retry_call(self.kite.orders)
 
 
-OrderConnectorRegistry.register("kite", KiteOrderConnector)
 
 def micro_ok(
     quote: Dict[str, Any],

@@ -12,9 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import settings
-from src.strategies import scalping_strategy  # noqa: F401  # register default strategy
-from src.execution.order_executor import OrderExecutor
-from .registry import StrategyRegistry, DataProviderRegistry
+from src.strategies.registry import init_default_registries
 from src.utils.time_windows import now_ist, floor_to_minute, TZ
 from src.backtesting.backtest_engine import BacktestEngine
 
@@ -67,32 +65,68 @@ class StrategyRunner:
         self.telegram = telegram_controller
         self.telegram_controller = telegram_controller
 
-        # Core components (hot-swappable via registries)
-        strat_name = os.getenv("ACTIVE_STRATEGY", "scalping")
-        strat_cls = StrategyRegistry.get(strat_name)
-        self.strategy = strat_cls()
-        self.strategy_name = strat_name
-        self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
+        self.settings = settings
+
+        # Factories that return your existing objects WITHOUT changing their classes
+        def _make_strategy():
+            from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+            return EnhancedScalpingStrategy()
+
+        def _make_data_kite():
+            from src.data.source import LiveKiteSource
+            return LiveKiteSource(self.kite)
+
+        def _make_data_yf():
+            try:
+                from src.data.source import YFinanceSpotSource  # type: ignore
+                return YFinanceSpotSource(self.settings)
+            except Exception:
+                from src.data.source import LiveKiteSource
+                return LiveKiteSource(self.kite)
+
+        def _make_connector_kite():
+            from src.execution.order_executor import OrderExecutor
+            return OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
+
+        def _make_connector_shadow():
+            from src.execution.order_executor import OrderExecutor
+            shadow_settings = self.settings
+            try:
+                setattr(shadow_settings, "enable_live_trading", False)
+            except Exception:
+                pass
+            return OrderExecutor(kite=None, telegram_controller=self.telegram)
+
+        self.components = init_default_registries(
+            self.settings,
+            make_strategy=_make_strategy,
+            make_data_kite=_make_data_kite,
+            make_data_yf=_make_data_yf,
+            make_connector_kite=_make_connector_kite,
+            make_connector_shadow=_make_connector_shadow,
+        )
+
+        self.strategy = self.components.strategy
+        self.data_source = self.components.data_provider
+        if hasattr(self.data_source, "connect"):
+            try:
+                self.data_source.connect()
+            except Exception as e:
+                self.log.debug("Data source connect failed: %s", e)
+        self.order_executor = self.components.order_connector
+        self.executor = self.order_executor
+        self._active_names = self.components.names
+        self.strategy_name = self._active_names.get("strategy", "")
+        self.data_provider_name = self._active_names.get("data_provider", "")
 
         # Trading window
         self._start_time = self._parse_hhmm(settings.data.time_filter_start)
         self._end_time = self._parse_hhmm(settings.data.time_filter_end)
 
-        # Data source
-        self.data_source = None
-        self.data_provider_name = ""
+        # Data warmup (best effort)
         self._last_fetch_ts: float = 0.0
-        try:
-            provider_name_env = os.getenv("ACTIVE_DATA_PROVIDER")
-            if provider_name_env:
-                provider_cls = DataProviderRegistry.get(provider_name_env)
-                self.data_provider_name = provider_name_env
-            else:
-                self.data_provider_name, provider_cls = DataProviderRegistry.best()
-            self.data_source = provider_cls(kite=self.kite)
-            if hasattr(self.data_source, "connect"):
-                self.data_source.connect()
-            if self.kite is not None and self.data_source is not None:
+        if self.kite is not None and self.data_source is not None:
+            try:
                 token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
                 if token > 0:
                     end = floor_to_minute(self._now_ist())
@@ -105,14 +139,8 @@ class StrategyRunner:
                             "instrument_token %s returned no historical data; falling back",
                             token,
                         )
-            if self.data_source is not None:
-                self.log.info("Data source initialized: %s", self.data_provider_name)
-                try:
-                    self._fetch_spot_ohlc()
-                except Exception as e:
-                    self.log.debug("Initial OHLC fetch failed: %s", e)
-        except Exception as e:
-            self.log.warning(f"Data source init failed; proceeding without: {e}")
+            except Exception as e:
+                self.log.debug("Initial OHLC fetch failed: %s", e)
 
         # Risk + equity cache
         self.risk = RiskState(trading_day=self._today_ist())
@@ -141,7 +169,6 @@ class StrategyRunner:
         self._last_notification: Tuple[str, float] = ("", 0.0)
         self._last_hb_ts: float = 0.0
 
-        self.settings = settings
         self._last_diag_emit_ts: float = 0.0
         self._last_signal_hash: tuple | None = None
 
@@ -1084,7 +1111,7 @@ class StrategyRunner:
             or market_open
             or bool(settings.allow_offhours_testing)
         )
-        return {
+        diag = {
             "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if self.kite is not None else "Paper",
@@ -1101,6 +1128,21 @@ class StrategyRunner:
             "strategy": getattr(self, "strategy_name", "unknown"),
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
+
+        diag["components"] = {
+            "strategy": self._active_names.get("strategy"),
+            "data_provider": self._active_names.get("data_provider"),
+            "order_connector": self._active_names.get("order_connector"),
+        }
+        try:
+            diag["data_provider_health"] = getattr(self.data_source, "health", lambda: {"status": "NA"})()
+        except Exception:
+            diag["data_provider_health"] = {"status": "NA"}
+        try:
+            diag["order_connector_health"] = getattr(self.order_executor, "health", lambda: {"status": "NA"})()
+        except Exception:
+            diag["order_connector_health"] = {"status": "NA"}
+        return diag
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
         qty, diag = self._calculate_quantity_diag(

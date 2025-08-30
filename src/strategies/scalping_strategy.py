@@ -21,7 +21,6 @@ from src.utils.strike_selector import (
     select_strike,
     resolve_weekly_atm,
 )
-from .registry import StrategyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -547,5 +546,3 @@ class EnhancedScalpingStrategy:
             return plan
 
 
-# Register default strategy
-StrategyRegistry.register("scalping", EnhancedScalpingStrategy)

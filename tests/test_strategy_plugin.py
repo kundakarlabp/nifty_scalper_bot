@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 from src.strategies.runner import StrategyRunner
-from src.strategies.registry import StrategyRegistry, DataProviderRegistry
-from src.data.source import DataSource
+from src.config import settings
 
 
 class DummyTelegram:
@@ -10,28 +7,18 @@ class DummyTelegram:
         pass
 
 
-class DummyStrategy:
-    pass
-
-
-class DummyProvider(DataSource):
-    def connect(self) -> None:  # pragma: no cover - simple stub
-        pass
-
-    def fetch_ohlc(self, token, start, end, timeframe):  # type: ignore[override]
-        return None
-
-    def get_last_price(self, symbol_or_token):  # type: ignore[override]
-        return None
-
-
-def test_strategy_and_data_provider_swap(monkeypatch) -> None:
-    """Active strategy and data provider can be selected via env vars."""
-    StrategyRegistry.register("dummy", DummyStrategy)
-    DataProviderRegistry.register("dummy", DummyProvider, lambda: 1.0)
-    monkeypatch.setenv("ACTIVE_STRATEGY", "dummy")
-    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "dummy")
-    runner = StrategyRunner(telegram_controller=DummyTelegram())
-    snap = runner.get_status_snapshot()
-    assert snap["strategy"] == "dummy"
-    assert snap["data_provider"] == "dummy"
+def test_component_selection_via_env(monkeypatch) -> None:
+    """Runtime components follow environment variables."""
+    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "yfinance")
+    monkeypatch.setenv("ACTIVE_CONNECTOR", "shadow")
+    object.__setattr__(settings, "ACTIVE_DATA_PROVIDER", "yfinance")
+    object.__setattr__(settings, "ACTIVE_CONNECTOR", "shadow")
+    try:
+        runner = StrategyRunner(telegram_controller=DummyTelegram())
+        snap = runner.get_status_snapshot()
+        comps = snap["components"]
+        assert comps["data_provider"] == "yfinance"
+        assert comps["order_connector"] == "shadow"
+    finally:
+        delattr(settings, "ACTIVE_DATA_PROVIDER")
+        delattr(settings, "ACTIVE_CONNECTOR")
