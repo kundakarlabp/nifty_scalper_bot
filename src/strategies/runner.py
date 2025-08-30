@@ -12,8 +12,9 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import settings
-from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.strategies import scalping_strategy  # noqa: F401  # register default strategy
 from src.execution.order_executor import OrderExecutor
+from .registry import StrategyRegistry, DataProviderRegistry
 from src.utils.time_windows import now_ist, floor_to_minute, TZ
 from src.backtesting.backtest_engine import BacktestEngine
 
@@ -66,8 +67,11 @@ class StrategyRunner:
         self.telegram = telegram_controller
         self.telegram_controller = telegram_controller
 
-        # Core components
-        self.strategy = EnhancedScalpingStrategy()
+        # Core components (hot-swappable via registries)
+        strat_name = os.getenv("ACTIVE_STRATEGY", "scalping")
+        strat_cls = StrategyRegistry.get(strat_name)
+        self.strategy = strat_cls()
+        self.strategy_name = strat_name
         self.executor = OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
 
         # Trading window
@@ -76,35 +80,39 @@ class StrategyRunner:
 
         # Data source
         self.data_source = None
+        self.data_provider_name = ""
         self._last_fetch_ts: float = 0.0
-        if LiveKiteSource is not None:
-            try:
-                self.data_source = LiveKiteSource(kite=self.kite)
+        try:
+            provider_name_env = os.getenv("ACTIVE_DATA_PROVIDER")
+            if provider_name_env:
+                provider_cls = DataProviderRegistry.get(provider_name_env)
+                self.data_provider_name = provider_name_env
+            else:
+                self.data_provider_name, provider_cls = DataProviderRegistry.best()
+            self.data_source = provider_cls(kite=self.kite)
+            if hasattr(self.data_source, "connect"):
                 self.data_source.connect()
-
-                if self.kite is not None:
-                    # Validate configured instrument token with a tiny fetch
-                    token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
-                    if token > 0:
-                        end = floor_to_minute(self._now_ist())
-                        start = end - timedelta(minutes=1)
-                        df = self.data_source.fetch_ohlc(
-                            token=token, start=start, end=end, timeframe="minute"
+            if self.kite is not None and self.data_source is not None:
+                token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+                if token > 0:
+                    end = floor_to_minute(self._now_ist())
+                    start = end - timedelta(minutes=1)
+                    df = self.data_source.fetch_ohlc(
+                        token=token, start=start, end=end, timeframe="minute"
+                    )
+                    if not isinstance(df, pd.DataFrame) or df.empty:
+                        self.log.warning(
+                            "instrument_token %s returned no historical data; falling back",
+                            token,
                         )
-                        if not isinstance(df, pd.DataFrame) or df.empty:
-                            self.log.warning(
-                                "instrument_token %s returned no historical data; "
-                                "falling back to symbol lookup if available.",
-                                token,
-                            )
-                if self.data_source is not None:
-                    self.log.info("Data source initialized: LiveKiteSource")
-                    try:
-                        self._fetch_spot_ohlc()
-                    except Exception as e:
-                        self.log.debug("Initial OHLC fetch failed: %s", e)
-            except Exception as e:
-                self.log.warning(f"Data source init failed; proceeding without: {e}")
+            if self.data_source is not None:
+                self.log.info("Data source initialized: %s", self.data_provider_name)
+                try:
+                    self._fetch_spot_ohlc()
+                except Exception as e:
+                    self.log.debug("Initial OHLC fetch failed: %s", e)
+        except Exception as e:
+            self.log.warning(f"Data source init failed; proceeding without: {e}")
 
         # Risk + equity cache
         self.risk = RiskState(trading_day=self._today_ist())
@@ -910,6 +918,18 @@ class StrategyRunner:
         """Health cards for /diag (compact) and /check (detailed)."""
         checks: List[Dict[str, Any]] = []
 
+        # Strategy and data provider info
+        checks.append({
+            "name": "Strategy",
+            "ok": self.strategy is not None,
+            "detail": getattr(self, "strategy_name", "unknown"),
+        })
+        checks.append({
+            "name": "Data provider",
+            "ok": self.data_source is not None,
+            "detail": getattr(self, "data_provider_name", "none"),
+        })
+
         # Telegram wiring
         checks.append({
             "name": "Telegram wiring",
@@ -1078,6 +1098,8 @@ class StrategyRunner:
             "day_realized_loss": round(self.risk.day_realized_loss, 2),
             "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
             "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
+            "strategy": getattr(self, "strategy_name", "unknown"),
+            "data_provider": getattr(self, "data_provider_name", "none"),
         }
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
