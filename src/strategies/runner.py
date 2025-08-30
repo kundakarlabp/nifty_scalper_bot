@@ -23,6 +23,7 @@ from src.strategies.strategy_config import (
 )
 from src.backtesting.backtest_engine import BacktestEngine
 from src.execution.order_executor import OrderReconciler
+from src.logs.journal import Journal
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # noqa: F401
 from src.utils import strike_selector
@@ -180,6 +181,18 @@ class StrategyRunner:
         self.reconciler = OrderReconciler(
             getattr(self.order_executor, "kite", None), self.order_executor, self.log
         )
+        self.journal = Journal.open(
+            getattr(self.settings, "JOURNAL_DB_PATH", "data/journal.sqlite")
+        )
+        self.order_executor.journal = self.journal
+
+        rehydrated = self.journal.rehydrate_open_legs()
+        if rehydrated:
+            self.log.info(f"Journal rehydrate: {len(rehydrated)} open legs")
+            for leg in rehydrated:
+                fsm = self.order_executor.get_or_create_fsm(leg["trade_id"])
+                self.order_executor.attach_leg_from_journal(fsm, leg)
+            self.reconciler.step(self.now_ist)
         self._active_names = self.components.names
         self.strategy_name = self._active_names.get("strategy", "")
         self.data_provider_name = self._active_names.get("data_provider", "")
@@ -391,6 +404,15 @@ class StrategyRunner:
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
             self._maybe_reload_events()
+        if (self.eval_count % 60) == 0:
+            snap = {
+                "now": self.now_ist.isoformat(),
+                "risk": self.risk_engine.snapshot() if hasattr(self, "risk_engine") else {},
+                "open_legs": getattr(self.order_executor, "open_legs_snapshot", lambda: [])(),
+                "components": self._active_names,
+                "last_plan": self.last_plan or {},
+            }
+            self.journal.save_checkpoint(snap)
         self.last_eval_ts = datetime.utcnow().isoformat()
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,

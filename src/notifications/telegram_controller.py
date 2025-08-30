@@ -869,6 +869,22 @@ class TelegramController:
             )
             return self._send(text, parse_mode="Markdown")
 
+        if cmd == "/lasttrades":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            jrnl = getattr(runner, "journal", None) if runner else None
+            if not jrnl:
+                return self._send("Journal unavailable.")
+            rows = jrnl.last_trades(10)
+            if not rows:
+                return self._send("No closed trades yet.")
+            lines = []
+            for t in rows:
+                ts = str(t.get("ts_exit", ""))[:16]
+                lines.append(
+                    f"{ts}  {t.get('side')} {t.get('symbol')}  R={t.get('R')}  pnl_R={t.get('pnl_R')}"
+                )
+            return self._send("\U0001F5DE *Last Trades*\n" + "\n".join(lines), parse_mode="Markdown")
+
         if cmd == "/hb":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
@@ -1141,10 +1157,23 @@ class TelegramController:
                 return self._send("⏸️ Entries paused.")
             return self._send("Pause not wired.")
         if cmd == "/resume":
+            resumed = 0
             if self._runner_resume:
                 self._runner_resume()
-                return self._send("▶️ Entries resumed.")
-            return self._send("Resume not wired.")
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if runner and getattr(runner, "journal", None):
+                try:
+                    rehydrated = runner.journal.rehydrate_open_legs()
+                    for leg in rehydrated:
+                        fsm = runner.order_executor.get_or_create_fsm(leg["trade_id"])
+                        runner.order_executor.attach_leg_from_journal(fsm, leg)
+                    runner.reconciler.step(runner.now_ist)
+                    resumed = len(rehydrated)
+                except Exception:
+                    resumed = 0
+            if resumed:
+                return self._send(f"▶️ Entries resumed. Rehydrated {resumed} legs.")
+            return self._send("▶️ Entries resumed.")
 
         # CANCEL ALL
         if cmd == "/cancel_all":
