@@ -61,6 +61,34 @@ class DataSource:
         """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or instrument token."""
         raise NotImplementedError
 
+    def api_health(self) -> Dict[str, Dict[str, object]]:
+        """Return circuit breaker health metrics if available."""
+        return {}
+
+    def get_last_bars(self, n: int):
+        """Return the last ``n`` 1m bars with ATR% and VWAP if available."""
+        try:
+            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        except Exception:
+            return None
+        from src.utils.time_windows import now_ist, floor_to_minute
+
+        end = floor_to_minute(now_ist(), None)
+        lookback = max(60, n + 50)
+        start = end - timedelta(minutes=lookback)
+        df = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        if df is None or df.empty:
+            return None
+        if "vwap" not in df.columns:
+            try:
+                df["vwap"] = calculate_vwap(df)
+            except Exception:
+                pass
+        if "atr_pct" not in df.columns:
+            atr = compute_atr(df, period=14)
+            df["atr_pct"] = atr / df["close"] * 100.0
+        return df.tail(n)
+
 
 # Accept a few common aliases; default to 'minute'
 _INTERVAL_MAP: Dict[str, str] = {

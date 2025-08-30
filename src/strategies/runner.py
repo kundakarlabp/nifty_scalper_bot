@@ -212,7 +212,8 @@ class StrategyRunner:
         self._last_has_signal: Optional[bool] = None
         self.eval_count: int = 0
         self.last_eval_ts: Optional[str] = None
-        self._trace_remaining: int = 0
+        self.trace_ticks_remaining: int = 0
+        self.hb_enabled: bool = True
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -272,21 +273,23 @@ class StrategyRunner:
             self._last_diag_emit_ts = now
             self._emit_diag(plan)
 
-    def _maybe_emit_heartbeat(self, plan: dict) -> None:
-        now = time.time()
-        if now - self._last_hb_ts >= 60:
-            micro = plan.get("micro") or {}
-            self.log.info(
-                "HB eval=%d regime=%s atr%%=%.2f score=%s spread%%=%s depth=%s block=%s",
-                self.eval_count,
-                plan.get("regime"),
-                float(plan.get("atr_pct") or 0.0),
-                plan.get("score"),
-                micro.get("spread_pct"),
-                micro.get("depth_ok"),
-                plan.get("reason_block"),
-            )
-            self._last_hb_ts = now
+    def emit_heartbeat(self) -> None:
+        """Emit a compact heartbeat log with current signal context."""
+        if not self.hb_enabled:
+            return
+        snap = self.telemetry_snapshot()
+        sig = snap.get("signal", {})
+        micro = sig.get("micro") or {}
+        self.log.info(
+            "HB eval=%s regime=%s atr%%=%s score=%s spread%%=%s depth=%s block=%s",
+            snap.get("eval_count"),
+            sig.get("regime"),
+            sig.get("atr_pct"),
+            sig.get("score"),
+            micro.get("spread_pct"),
+            micro.get("depth_ok"),
+            sig.get("reason_block"),
+        )
 
     def _maybe_hot_reload_cfg(self) -> None:
         """Reload strategy configuration if the underlying file changed."""
@@ -348,25 +351,10 @@ class StrategyRunner:
         self._last_reason_block = plan.get("reason_block")
         self._last_has_signal = plan.get("has_signal")
         self.last_plan = dict(plan)
-        if self._trace_remaining > 0:
-            self._trace_remaining -= 1
-            micro = plan.get("micro") or {}
-            self.log.info(
-                "TRACE regime=%s score=%s atr%%=%s rr=%s micro_spread=%s micro_depth=%s entry=%s sl=%s tp1=%s tp2=%s reason_block=%s reasons=%s",
-                plan.get("regime"),
-                plan.get("score"),
-                plan.get("atr_pct"),
-                plan.get("rr"),
-                micro.get("spread_pct"),
-                micro.get("depth_ok"),
-                plan.get("entry"),
-                plan.get("sl"),
-                plan.get("tp1"),
-                plan.get("tp2"),
-                plan.get("reason_block"),
-                ",".join(plan.get("reasons", [])),
-            )
-        self._maybe_emit_heartbeat(plan)
+        now = time.time()
+        if self.hb_enabled and (now - self._last_hb_ts) >= 60:
+            self.emit_heartbeat()
+            self._last_hb_ts = now
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
@@ -729,6 +717,26 @@ class StrategyRunner:
             self._last_error = str(e)
             self._last_flow_debug = flow
             self.log.exception("process_tick error: %s", e)
+        finally:
+            if getattr(self, "trace_ticks_remaining", 0) > 0:
+                p = self.last_plan or {}
+                m = p.get("micro") or {}
+                self.log.info(
+                    "TRACE regime=%s score=%s atr%%=%.2f spread%%=%s depth=%s rr=%s entry=%s sl=%s tp1=%s tp2=%s block=%s reasons=%s",
+                    p.get("regime"),
+                    p.get("score"),
+                    float(p.get("atr_pct") or 0.0),
+                    m.get("spread_pct"),
+                    m.get("depth_ok"),
+                    p.get("rr"),
+                    p.get("entry"),
+                    p.get("sl"),
+                    p.get("tp1"),
+                    p.get("tp2"),
+                    p.get("reason_block"),
+                    p.get("reasons"),
+                )
+                self.trace_ticks_remaining -= 1
 
     # one-shot tick used by Telegram
     def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
@@ -1102,6 +1110,53 @@ class StrategyRunner:
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ---------------- Telegram helpers & diagnostics ----------------
+    def telemetry_snapshot(self) -> dict:
+        """Return a consolidated snapshot of the runner's current state."""
+        plan = self.last_plan or {}
+        dp_health = getattr(self.data_source, "api_health", lambda: {})()
+        oc_health = getattr(self.order_executor, "api_health", lambda: {})()
+        router = getattr(self.order_executor, "router_health", lambda: {})()
+        risk = getattr(self, "risk_engine", None)
+        last_eval = getattr(self, "last_eval_ts", None)
+        if isinstance(last_eval, datetime):
+            last_eval = last_eval.isoformat()
+        ts = getattr(self, "now_ist", None)
+        ts_val = ts.isoformat() if callable(getattr(ts, "isoformat", None)) else None
+        return {
+            "ts": ts_val,
+            "eval_count": getattr(self, "eval_count", 0),
+            "last_eval_ts": last_eval,
+            "bars": {
+                "bar_count": plan.get("bar_count"),
+                "last_bar_ts": plan.get("last_bar_ts"),
+                "data_source": plan.get("data_source", "broker"),
+            },
+            "signal": {
+                "action": plan.get("action"),
+                "regime": plan.get("regime"),
+                "score": plan.get("score"),
+                "atr_pct": plan.get("atr_pct"),
+                "rr": plan.get("rr"),
+                "reason_block": plan.get("reason_block"),
+                "reasons": plan.get("reasons"),
+                "micro": plan.get("micro"),
+                "entry": plan.get("entry"),
+                "sl": plan.get("sl"),
+                "tp1": plan.get("tp1"),
+                "tp2": plan.get("tp2"),
+            },
+            "components": getattr(self, "_active_names", {}),
+            "api_health": {
+                "hist": dp_health.get("hist"),
+                "quote": dp_health.get("quote"),
+                "orders": oc_health.get("orders"),
+                "modify": oc_health.get("modify"),
+            },
+            "router": router,
+            "risk": risk.snapshot() if risk else {},
+            "portfolio": getattr(self, "portfolio_greeks", None),
+        }
+
     def get_last_signal_debug(self) -> Dict[str, Any]:
         return dict(self.last_plan or {})
 
@@ -1112,10 +1167,10 @@ class StrategyRunner:
         return render_last_bars(self.data_source, n)
 
     def enable_trace(self, n: int) -> None:
-        self._trace_remaining = int(max(0, n))
+        self.trace_ticks_remaining = int(max(0, n))
 
     def disable_trace(self) -> None:
-        self._trace_remaining = 0
+        self.trace_ticks_remaining = 0
 
     # detailed bundle used by /check
     def build_diag(self) -> Dict[str, Any]:
