@@ -176,6 +176,8 @@ class StrategyRunner:
         self._last_diag_emit_ts: float = 0.0
         self._last_signal_hash: tuple | None = None
 
+        self.within_window: bool = False
+
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
             settings.enable_live_trading, settings.risk.use_live_equity
@@ -352,6 +354,7 @@ class StrategyRunner:
                 or window_ok
                 or bool(settings.allow_offhours_testing)
             )
+            self.within_window = bool(within)
             if not within:
                 flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "outside_window"
@@ -613,10 +616,9 @@ class StrategyRunner:
             self.log.error("Backtest failed: %s", e, exc_info=True)
             return f"Backtest error: {e}"
 
-    def health_check(self) -> None:
-        # refresh equity and executor heartbeat
+    def health_check(self) -> Dict[str, Any]:
+        """Perform lightweight self-checks and return status snapshot."""
         self._refresh_equity_if_due(silent=True)
-        # try a passive data refresh so "Data feed" check gets updated
         try:
             _ = self._fetch_spot_ohlc()
         except Exception as e:
@@ -626,8 +628,11 @@ class StrategyRunner:
                 self.executor.health_check()
         except Exception as e:
             self.log.warning("Executor health check warning: %s", e)
-        # clear stale errors if health check completed
         self._last_error = None
+        status = self.get_status_snapshot()
+        status["within_window"] = bool(self.within_window)
+        status["ok"] = True
+        return status
 
     def shutdown(self) -> None:
         """Graceful shutdown used by /stop or process exit."""
@@ -1175,6 +1180,12 @@ class StrategyRunner:
             "day_realized_loss": round(self.risk.day_realized_loss, 2),
             "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
             "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
+            "open_positions": len(getattr(self.executor, "get_positions_kite", lambda: {})() or {}),
+            "last_signal_score": (
+                float(self._last_signal_debug.get("score", 0.0))
+                if isinstance(self._last_signal_debug, dict)
+                else 0.0
+            ),
             "strategy": getattr(self, "strategy_name", "unknown"),
             "data_provider": getattr(self, "data_provider_name", "none"),
         }

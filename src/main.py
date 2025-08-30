@@ -5,6 +5,8 @@ import logging
 import signal
 import sys
 import time
+import os
+import threading
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -16,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 from src.config import settings, validate_critical_settings  # noqa: E402
 from src.utils.logging_tools import RateLimitFilter  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
+from src.server import health  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -207,6 +210,16 @@ def main() -> int:
         log.error("❌ Kite session init failed: %s", e)
 
     runner = StrategyRunner(kite=kite or None, telegram_controller=_NoopTelegram())
+
+    threading.Thread(
+        target=health.run,
+        kwargs={
+            "callback": runner.health_check,
+            "host": "0.0.0.0",
+            "port": int(os.getenv("HEALTH_PORT", "8000")),
+        },
+        daemon=True,
+    ).start()
 
     try:
         runner.set_live_mode(settings.enable_live_trading)

@@ -1,0 +1,21 @@
+name: deploy-gce
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Deploy to GCE
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ secrets.GCE_HOST }}
+          username: ${{ secrets.GCE_USER }}
+          key: ${{ secrets.GCE_SSH_KEY }}
+          known_hosts: ${{ secrets.GCE_KNOWN_HOSTS }}
+          script: |
+            [ -d ~/niftybot ] || git clone https://github.com/${{ github.repository }}.git ~/niftybot
+            bash ~/ops/redeploy.sh

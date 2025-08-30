@@ -50,6 +50,10 @@ RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 # Copy application code
 COPY . .
 
+# Entrypoint
+COPY deploy/scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Create non-root user
 RUN groupadd -r app && useradd -r -g app app \
     && chown -R app:app /app
@@ -59,5 +63,4 @@ USER app
 # HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
 #   CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command: run the bot
-CMD ["python", "-m", "src.main", "start"]
+ENTRYPOINT ["/entrypoint.sh"]

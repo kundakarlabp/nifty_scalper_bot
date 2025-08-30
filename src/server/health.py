@@ -39,20 +39,37 @@ def health_head() -> Tuple[Response, int]:
 
 @app.route("/health", methods=["GET"])
 def health_get() -> Tuple[Dict[str, Any], int]:
-    """
-    GET /health returns extended status.
-    If a status callback is provided, merge its dict with defaults.
-    """
+    """Return lightweight health status."""
     try:
-        status = _status_callback() if _status_callback else {}
-        if not isinstance(status, dict):
-            status = {"detail": str(status)}
-        status.setdefault("status", "ok")
-        status.setdefault("uptime_sec", int(time.time() - _start_ts))
-        return status, 200
+        diag = _status_callback() if _status_callback else {}
+        ok = bool(diag.get("ok", True))
+        resp = {
+            "ok": ok,
+            "uptime": int(time.time() - _start_ts),
+            "window": diag.get("within_window"),
+            "diag": diag,
+        }
+        return resp, 200 if ok else 503
     except Exception as e:
         log.exception("Health GET error: %s", e)
-        return {"status": "error", "error": str(e)}, 500
+        return {"ok": False, "error": str(e)}, 500
+
+
+@app.route("/status", methods=["GET"])
+def status_get() -> Tuple[Dict[str, Any], int]:
+    """Return extended status information."""
+    try:
+        diag = _status_callback() if _status_callback else {}
+        resp = {
+            "ok": bool(diag.get("ok", True)),
+            "uptime": int(time.time() - _start_ts),
+            "window": diag.get("within_window"),
+            "diag": diag,
+        }
+        return resp, 200
+    except Exception as e:
+        log.exception("Status GET error: %s", e)
+        return {"ok": False, "error": str(e)}, 500
 
 
 def run(
@@ -74,8 +91,9 @@ def run(
       HEALTH_HOST (default "0.0.0.0")
       HEALTH_PORT (default "8000")
     """
-    global _status_callback
+    global _status_callback, _start_ts
     _status_callback = callback
+    _start_ts = time.time()
 
     bind_host = host or os.environ.get("HEALTH_HOST", "0.0.0.0")
     bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
