@@ -20,6 +20,7 @@ from .order_state import (
 )
 
 from src.utils.circuit_breaker import CircuitBreaker
+from src.logs.journal import Journal
 
 
 # Optional public market data fallback
@@ -312,6 +313,7 @@ class OrderExecutor:
         kite: Optional[KiteConnect],
         telegram_controller: Any = None,
         on_trade_closed: Optional[Callable[[float], None]] = None,
+        journal: Optional[Journal] = None,
     ) -> None:
         self._lock = threading.Lock()
         self.kite = kite
@@ -373,6 +375,7 @@ class OrderExecutor:
         self._ack_lat_ms: List[int] = []
         self.on_trade_closed = on_trade_closed
         self._closed_trades: Set[str] = set()
+        self.journal = journal
 
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
@@ -1153,6 +1156,22 @@ class OrderExecutor:
             self.enqueue_leg(leg)
 
     def enqueue_leg(self, leg: OrderLeg) -> None:
+        if self.journal:
+            try:
+                self.journal.append_event(
+                    ts=datetime.utcnow().isoformat(),
+                    trade_id=leg.trade_id,
+                    leg_id=leg.leg_id,
+                    etype="NEW",
+                    payload={
+                        "side": leg.side.name,
+                        "symbol": leg.symbol,
+                        "qty": leg.qty,
+                        "limit_price": leg.limit_price,
+                    },
+                )
+            except Exception:
+                pass
         if leg.idempotency_key in self._idemp_map:
             return
         self._idemp_map[leg.idempotency_key] = leg.leg_id
@@ -1189,6 +1208,69 @@ class OrderExecutor:
 
     def open_trades(self) -> List[TradeFSM]:
         return [fsm for fsm in self._fsms.values() if fsm.status == "OPEN"]
+
+    def get_or_create_fsm(self, trade_id: str) -> TradeFSM:
+        """Return existing FSM for ``trade_id`` or create a new one."""
+        fsm = self._fsms.get(trade_id)
+        if fsm is None:
+            fsm = TradeFSM(trade_id=trade_id, legs={})
+            self._fsms[trade_id] = fsm
+        return fsm
+
+    def attach_leg_from_journal(self, fsm: TradeFSM, leg_dict: Dict[str, Any]) -> None:
+        """Attach a leg restored from journal without placing a new order."""
+        state_str = str(leg_dict.get("state", "NEW"))
+        if state_str == "ACK":
+            state = OrderState.PENDING
+        else:
+            try:
+                state = OrderState(state_str)
+            except Exception:
+                state = OrderState.NEW
+        side = OrderSide[str(leg_dict.get("side", "BUY"))]
+        leg_type_str = str(leg_dict.get("leg_id", "")).split(":")[-1]
+        try:
+            leg_type = LegType[leg_type_str]
+        except Exception:
+            leg_type = LegType.ENTRY
+        leg = OrderLeg(
+            trade_id=leg_dict["trade_id"],
+            leg_id=leg_dict["leg_id"],
+            leg_type=leg_type,
+            side=side,
+            symbol=leg_dict.get("symbol", ""),
+            qty=int(leg_dict.get("qty", 0)),
+            limit_price=leg_dict.get("limit_price"),
+            state=state,
+            filled_qty=int(leg_dict.get("filled_qty", 0)),
+            avg_price=float(leg_dict.get("avg_price", 0.0)),
+            broker_order_id=leg_dict.get("broker_order_id"),
+            idempotency_key=leg_dict.get("idempotency_key", ""),
+            created_at=datetime.utcnow(),
+            expires_at=None,
+            reason=None,
+        )
+        fsm.legs[leg.leg_id] = leg
+        if leg.idempotency_key:
+            self._idemp_map[leg.idempotency_key] = leg.leg_id
+
+    def open_legs_snapshot(self) -> List[Dict[str, Any]]:
+        """Return a compact snapshot of open legs for checkpoints."""
+        snap: List[Dict[str, Any]] = []
+        for fsm in self._fsms.values():
+            for leg in fsm.open_legs():
+                snap.append(
+                    {
+                        "trade": leg.trade_id,
+                        "leg": leg.leg_id,
+                        "sym": leg.symbol,
+                        "state": leg.state.name,
+                        "qty": leg.qty,
+                        "filled": leg.filled_qty,
+                        "avg": leg.avg_price,
+                    }
+                )
+        return snap
 
     def _compute_pnl_R(self, fsm: TradeFSM) -> float:
         """Estimate trade PnL in R units for the given FSM."""
@@ -1229,6 +1311,24 @@ class OrderExecutor:
                 symbol=sym, qty=qi.qty, price=tgt, tag=idemp
             )
 
+            leg_obj: Optional[OrderLeg] = None
+            for fsm in self._fsms.values():
+                leg_obj = fsm.legs.get(qi.leg_id)
+                if leg_obj:
+                    break
+            if self.journal and leg_obj:
+                try:
+                    self.journal.append_event(
+                        ts=datetime.utcnow().isoformat(),
+                        trade_id=leg_obj.trade_id,
+                        leg_id=leg_obj.leg_id,
+                        etype="IDEMP",
+                        idempotency_key=idemp,
+                        payload={},
+                    )
+                except Exception:
+                    pass
+
             t0 = self._now_ms()
             res = self._place_with_cb(req)
             if not res.get("ok"):
@@ -1253,13 +1353,21 @@ class OrderExecutor:
             )
 
             # update leg state
-            leg_obj: Optional[OrderLeg] = None
-            for fsm in self._fsms.values():
-                leg_obj = fsm.legs.get(qi.leg_id)
-                if leg_obj:
-                    break
             if leg_obj and qi.placed_order_id:
                 leg_obj.mark_acked(qi.placed_order_id)
+                if self.journal:
+                    try:
+                        self.journal.append_event(
+                            ts=datetime.utcnow().isoformat(),
+                            trade_id=leg_obj.trade_id,
+                            leg_id=leg_obj.leg_id,
+                            etype="ACK",
+                            broker_order_id=qi.placed_order_id,
+                            idempotency_key=idemp,
+                            payload={"price": tgt},
+                        )
+                    except Exception:
+                        pass
 
     def on_order_acked(self, symbol: str, leg_id: str) -> None:
         q = self._queues.get(symbol)
@@ -1340,9 +1448,17 @@ class OrderExecutor:
             return
         leg.mark_acked(str(order_id))
         self._inflight_symbols[leg.symbol] = self._inflight_symbols.get(leg.symbol, 0) + 1
-        if hasattr(self, "journal"):
+        if self.journal:
             try:
-                self.journal.append(leg.trade_id, leg.to_dict())
+                self.journal.append_event(
+                    ts=datetime.utcnow().isoformat(),
+                    trade_id=leg.trade_id,
+                    leg_id=leg.leg_id,
+                    etype="ACK",
+                    broker_order_id=str(order_id),
+                    idempotency_key=leg.idempotency_key,
+                    payload={"price": leg.limit_price},
+                )
             except Exception:
                 pass
 
@@ -1561,16 +1677,39 @@ class OrderReconciler:
             if leg.state is OrderState.NEW and oid:
                 leg.mark_acked(oid)
             self.store.on_order_acked(leg.symbol, leg.leg_id)
+            event_type = None
+            payload: Dict[str, Any] = {}
             if status in {"COMPLETE", "FILLED"} or filled_qty >= leg.qty:
                 leg.on_fill(avg_price)
+                event_type = "FILLED"
+                payload = {"filled_qty": leg.filled_qty, "avg_price": leg.avg_price}
             elif status in {"PARTIALLY_FILLED"} or 0 < filled_qty < leg.qty:
                 leg.on_partial(filled_qty, avg_price)
+                event_type = "PARTIAL"
+                payload = {"filled_qty": leg.filled_qty, "avg_price": leg.avg_price}
             elif status == "REJECTED":
                 leg.on_reject(o.get("status_message", ""))
+                event_type = "REJECTED"
+                payload = {"reason": leg.reason}
             elif status == "CANCELLED":
                 leg.on_cancel(o.get("status_message", ""))
+                event_type = "CANCELLED"
+                payload = {"reason": leg.reason}
             else:
                 continue
+
+            if event_type and self.store.journal:
+                try:
+                    self.store.journal.append_event(
+                        ts=datetime.utcnow().isoformat(),
+                        trade_id=leg.trade_id,
+                        leg_id=leg.leg_id,
+                        etype=event_type,
+                        broker_order_id=leg.broker_order_id,
+                        payload=payload,
+                    )
+                except Exception:
+                    pass
 
             if leg.state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
                 q = self.store._queues.get(leg.symbol)
@@ -1589,6 +1728,40 @@ class OrderReconciler:
                     and fsm.trade_id not in self.store._closed_trades
                 ):
                     pnl_R = self.store._compute_pnl_R(fsm)
+                    entry_leg = next(
+                        (l for l in fsm.legs.values() if l.leg_type is LegType.ENTRY),
+                        None,
+                    )
+                    exit_price = leg.avg_price
+                    exit_reason = leg.reason
+                    if entry_leg and self.store.journal:
+                        try:
+                            risk = abs(
+                                getattr(fsm, "entry_price", entry_leg.avg_price)
+                                - getattr(fsm, "stop_loss", entry_leg.avg_price)
+                            ) * entry_leg.qty
+                            pnl_rupees = (
+                                (exit_price - entry_leg.avg_price) * entry_leg.qty
+                                if entry_leg.side is OrderSide.BUY
+                                else (entry_leg.avg_price - exit_price) * entry_leg.qty
+                            )
+                            trade_rec = {
+                                "ts_entry": entry_leg.created_at.isoformat(),
+                                "ts_exit": datetime.utcnow().isoformat(),
+                                "trade_id": fsm.trade_id,
+                                "side": entry_leg.side.name,
+                                "symbol": entry_leg.symbol,
+                                "qty": entry_leg.qty,
+                                "entry": entry_leg.avg_price,
+                                "exit": exit_price,
+                                "exit_reason": exit_reason,
+                                "R": round(risk, 2),
+                                "pnl_R": round(pnl_R, 2),
+                                "pnl_rupees": round(pnl_rupees, 2),
+                            }
+                            self.store.journal.append_trade(trade_rec)
+                        except Exception:
+                            pass
                     if self.store.on_trade_closed:
                         try:
                             self.store.on_trade_closed(pnl_R)
@@ -1596,11 +1769,6 @@ class OrderReconciler:
                             self.log.debug("on_trade_closed callback failed", exc_info=True)
                     self.store._closed_trades.add(fsm.trade_id)
 
-            if hasattr(self.store, "journal"):
-                try:
-                    self.store.journal.append(leg.trade_id, leg.to_dict())
-                except Exception:
-                    pass
             updated += 1
 
         return updated

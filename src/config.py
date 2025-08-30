@@ -321,6 +321,7 @@ class AppSettings(BaseSettings):
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3
     COOLOFF_MINUTES: int = 45
+    JOURNAL_DB_PATH: str = "data/journal.sqlite"
 
     zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
