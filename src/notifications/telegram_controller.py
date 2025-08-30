@@ -398,6 +398,56 @@ class TelegramController:
             )
             return self._send(text, parse_mode="Markdown")
 
+        # API HEALTH
+        if cmd == "/apihealth":
+            status = self._status_provider() if self._status_provider else {}
+            api = status.get("api_health", {})
+
+            def fmt(name: str, d: Dict[str, Any]) -> str:
+                return (
+                    f"{name}: {d.get('state')} err={d.get('err_rate', 0):.2%} "
+                    f"p95={d.get('p95_ms', 0)}ms n={d.get('n', 0)} open_until={d.get('open_until')}"
+                )
+
+            lines = [
+                fmt("Orders", api.get("orders", {})),
+                fmt("Modify", api.get("modify", {})),
+                fmt("Hist", api.get("hist", {})),
+                fmt("Quote", api.get("quote", {})),
+            ]
+            return self._send("\n".join(lines))
+
+        # Circuit breaker admin
+        if cmd == "/cb" and args:
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if args[0].lower() == "reset" and runner:
+                for cb in [
+                    getattr(getattr(runner, "order_executor", None), "cb_orders", None),
+                    getattr(getattr(runner, "order_executor", None), "cb_modify", None),
+                    getattr(getattr(runner, "data_source", None), "cb_hist", None),
+                    getattr(getattr(runner, "data_source", None), "cb_quote", None),
+                ]:
+                    if cb:
+                        cb.reset()
+                return self._send("Breakers reset.")
+            if args[0].lower() == "open" and runner and len(args) >= 3:
+                name = args[1].lower()
+                try:
+                    secs = int(args[2])
+                except Exception:
+                    secs = 30
+                cb_map = {
+                    "orders": getattr(getattr(runner, "order_executor", None), "cb_orders", None),
+                    "modify": getattr(getattr(runner, "order_executor", None), "cb_modify", None),
+                    "hist": getattr(getattr(runner, "data_source", None), "cb_hist", None),
+                    "quote": getattr(getattr(runner, "data_source", None), "cb_quote", None),
+                }
+                cb = cb_map.get(name)
+                if cb:
+                    cb.force_open(secs)
+                    return self._send(f"Breaker {name} forced OPEN {secs}s")
+                return self._send("Unknown breaker name")
+
         # DIAG – detailed status + last signal
         if cmd == "/diag":
             try:

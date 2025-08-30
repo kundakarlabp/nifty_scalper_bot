@@ -310,6 +310,15 @@ class StrategyRunner:
         }
         self._last_error = None
         now = datetime.utcnow()
+        tick_now = datetime.now(TZ)
+        for cb in [
+            getattr(self.order_executor, "cb_orders", None),
+            getattr(self.order_executor, "cb_modify", None),
+            getattr(self.data_source, "cb_hist", None),
+            getattr(self.data_source, "cb_quote", None),
+        ]:
+            if cb:
+                cb.tick(tick_now)
         try:
             if hasattr(self.order_executor, "step_queue"):
                 self.order_executor.step_queue(now)
@@ -1183,6 +1192,12 @@ class StrategyRunner:
             diag["order_connector_health"] = getattr(self.order_executor, "health", lambda: {"status": "NA"})()
         except Exception:
             diag["order_connector_health"] = {"status": "NA"}
+        diag["api_health"] = {
+            "orders": getattr(self.order_executor, "api_health", lambda: {})().get("orders", {}),
+            "modify": getattr(self.order_executor, "api_health", lambda: {})().get("modify", {}),
+            "hist": getattr(self.data_source, "api_health", lambda: {})().get("hist", {}),
+            "quote": getattr(self.data_source, "api_health", lambda: {})().get("quote", {}),
+        }
         return diag
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:

@@ -300,6 +300,15 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
 
+    cb_error_rate: float = 0.10
+    cb_p95_ms: int = 1200
+    cb_min_samples: int = 30
+    cb_open_cooldown_sec: int = 30
+    cb_half_open_probe: int = 3
+    max_place_retries: int = 2
+    max_modify_retries: int = 2
+    retry_backoff_ms: int = 200
+
     zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()

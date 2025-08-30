@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple, Callable, List
 import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
+from src.utils.circuit_breaker import CircuitBreaker
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -449,6 +450,8 @@ class LiveKiteSource(DataSource):
     def __init__(self, kite: Optional["KiteConnect"]) -> None:
         self.kite = kite
         self._cache = _TTLCache(ttl_sec=4.0)
+        self.cb_hist = CircuitBreaker("historical")
+        self.cb_quote = CircuitBreaker("quote")
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -457,10 +460,13 @@ class LiveKiteSource(DataSource):
         else:
             log.info("LiveKiteSource: connected to Kite.")
 
+    def api_health(self) -> Dict[str, Dict[str, object]]:
+        """Return circuit breaker health for broker APIs."""
+        return {"hist": self.cb_hist.health(), "quote": self.cb_quote.health()}
+
     # ---- quick LTP ----
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
-        if not self.kite:
-            # Fallback to yfinance when running without broker access
+        if not self.kite or not self.cb_quote.allow():
             if yf is None:
                 return None
             try:
@@ -473,10 +479,12 @@ class LiveKiteSource(DataSource):
             except Exception as e:  # pragma: no cover - best effort fallback
                 log.debug("yfinance LTP fallback failed for %s: %s", symbol_or_token, e)
             return None
+        t0 = time.monotonic()
         try:
-            # Accept either token int or exchange:symbol string
             sym_or_token = _kite_symbol(symbol_or_token)
             data = _retry(self.kite.ltp, [sym_or_token], tries=2)
+            lat = int((time.monotonic() - t0) * 1000)
+            self.cb_quote.record_success(lat)
             key = str(sym_or_token)
             v = (data or {}).get(key)
             if not isinstance(v, dict):
@@ -485,6 +493,8 @@ class LiveKiteSource(DataSource):
             val = v.get("last_price")
             return float(val) if isinstance(val, (int, float)) else None
         except Exception as e:
+            lat = int((time.monotonic() - t0) * 1000)
+            self.cb_quote.record_failure(lat, reason=str(e))
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
 
@@ -527,9 +537,9 @@ class LiveKiteSource(DataSource):
         if cached is not None and not cached.empty:
             return _clip_window(cached, start, end)
 
-        if not self.kite:
+        if not self.kite or not self.cb_hist.allow():
             log.warning(
-                "LiveKiteSource.fetch_ohlc: kite is None. Using yfinance fallback."
+                "LiveKiteSource.fetch_ohlc: broker unavailable. Using yfinance fallback."
             )
             sym = _yf_symbol(token)
             out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
@@ -582,19 +592,26 @@ class LiveKiteSource(DataSource):
         try:
             while cur < to:
                 cur_end = to if step is None else min(to, cur + step)
-                rows = _retry(
-                    self.kite.historical_data,
-                    token,
-                    cur,
-                    cur_end,
-                    interval,
-                    continuous=False,
-                    oi=False,
-                    tries=3,
-                )
-                part = _safe_dataframe(rows)
-                if not part.empty:
-                    frames.append(part)
+                t0 = time.monotonic()
+                try:
+                    rows = _retry(
+                        self.kite.historical_data,
+                        token,
+                        cur,
+                        cur_end,
+                        interval,
+                        continuous=False,
+                        oi=False,
+                        tries=3,
+                    )
+                    lat = int((time.monotonic() - t0) * 1000)
+                    self.cb_hist.record_success(lat)
+                    part = _safe_dataframe(rows)
+                    if not part.empty:
+                        frames.append(part)
+                except Exception as e:
+                    lat = int((time.monotonic() - t0) * 1000)
+                    self.cb_hist.record_failure(lat, reason=str(e))
                 cur = cur_end
 
             df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
