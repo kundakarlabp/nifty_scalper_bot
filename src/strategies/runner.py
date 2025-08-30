@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from src.config import settings
 from src.strategies.registry import init_default_registries
-from src.utils.time_windows import now_ist, floor_to_minute, TZ
+from src.utils.time_windows import floor_to_minute, TZ
+from src.strategies.strategy_config import (
+    resolve_config_path,
+    try_load,
+    StrategyConfig,
+)
 from src.backtesting.backtest_engine import BacktestEngine
 from src.execution.order_executor import OrderReconciler
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
@@ -71,6 +77,11 @@ class StrategyRunner:
         self.telegram_controller = telegram_controller
 
         self.settings = settings
+
+        # strategy configuration
+        self.strategy_config_path = resolve_config_path()
+        self.strategy_cfg: StrategyConfig = try_load(self.strategy_config_path, None)
+        self.tz = ZoneInfo(self.strategy_cfg.tz)
 
         self.risk_engine = RiskEngine(
             LimitConfig(
@@ -142,6 +153,10 @@ class StrategyRunner:
         )
 
         self.strategy = self.components.strategy
+        try:
+            setattr(self.strategy, "runner", self)
+        except Exception:
+            pass
         self.data_source = self.components.data_provider
         if hasattr(self.data_source, "connect"):
             try:
@@ -273,6 +288,23 @@ class StrategyRunner:
             )
             self._last_hb_ts = now
 
+    def _maybe_hot_reload_cfg(self) -> None:
+        """Reload strategy configuration if the underlying file changed."""
+        try:
+            mtime = os.path.getmtime(self.strategy_config_path)
+            if mtime != self.strategy_cfg.mtime:
+                new_cfg = try_load(self.strategy_config_path, self.strategy_cfg)
+                self.strategy_cfg = new_cfg
+                self.tz = ZoneInfo(self.strategy_cfg.tz)
+                self.log.info(
+                    "CFG reload: %s v%s @ %s",
+                    new_cfg.name,
+                    new_cfg.version,
+                    self.strategy_config_path,
+                )
+        except Exception as e:
+            self.log.warning("CFG reload failed: %s", e)
+
     def _preview_candidate(self, plan: dict, micro: dict | None):
         min_preview = float(getattr(self.settings, "MIN_PREVIEW_SCORE", 8))
         score = float(plan.get("score") or 0.0)
@@ -339,6 +371,8 @@ class StrategyRunner:
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
+        if (self.eval_count % 30) == 0:
+            self._maybe_hot_reload_cfg()
         self.last_eval_ts = datetime.utcnow().isoformat()
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
@@ -439,7 +473,7 @@ class StrategyRunner:
                     lb = datetime.fromisoformat(str(last_ts))
                     if lb.tzinfo is None:
                         lb = lb.replace(tzinfo=TZ)
-                    now_ts = now_ist()
+                    now_ts = self._now_ist()
                     lag_sec = abs((now_ts - lb).total_seconds())
                     if lb > now_ts + timedelta(seconds=5):
                         plan["reason_block"] = "clock_skew"
@@ -1055,18 +1089,16 @@ class StrategyRunner:
         from datetime import datetime as _dt
         return _dt.strptime(text, "%H:%M").time()
 
-    @staticmethod
-    def _now_ist():
-        return now_ist()
+    def _now_ist(self) -> datetime:
+        return datetime.now(self.tz)
 
     @property
     def now_ist(self) -> datetime:
         """Current time in the configured timezone."""
         return self._now_ist()
 
-    @staticmethod
-    def _today_ist():
-        now = now_ist()
+    def _today_ist(self) -> datetime:
+        now = self._now_ist()
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ---------------- Telegram helpers & diagnostics ----------------
@@ -1211,6 +1243,16 @@ class StrategyRunner:
             "exposure": {
                 "notional_rupees": round(self._notional_rupees(), 2),
                 "lots_by_symbol": self._lots_by_symbol(),
+            },
+        }
+        bundle["strategy_cfg"] = {
+            "name": self.strategy_cfg.name,
+            "version": self.strategy_cfg.version,
+            "tz": self.strategy_cfg.tz,
+            "atr_band": [self.strategy_cfg.atr_min, self.strategy_cfg.atr_max],
+            "score_gates": {
+                "trend": self.strategy_cfg.score_trend_min,
+                "range": self.strategy_cfg.score_range_min,
             },
         }
         return bundle

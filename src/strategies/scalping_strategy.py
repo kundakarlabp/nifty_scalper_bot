@@ -16,12 +16,13 @@ from src.utils.indicators import (
     calculate_macd,
 )
 from src.signals.regime_detector import detect_market_regime
-from src.execution.order_executor import fetch_quote_with_depth
+from src.execution.order_executor import fetch_quote_with_depth, micro_ok
 from src.utils.strike_selector import (
     get_instrument_tokens,
     select_strike,
     resolve_weekly_atm,
 )
+from random import uniform as rand_uniform
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,12 @@ def _log_throttled(key: str, level: int, msg: str, *args) -> None:
     if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
         _last_log_ts[key] = now
         logger.log(level, msg, *args)
+
+
+def is_thu_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
+    """Return True if current time is Thursday after ``threshold``."""
+    now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
+    return now.weekday() == 3 and now.time() >= threshold
 
 
 Side = Literal["BUY", "SELL"]
@@ -182,6 +189,11 @@ class EnhancedScalpingStrategy:
         current_price: Optional[float] = None,
         spot_df: Optional[pd.DataFrame] = None,
     ) -> SignalOutput:
+        cfg = getattr(getattr(self, "runner", None), "strategy_cfg", None)
+        if cfg is None:
+            from src.strategies.strategy_config import StrategyConfig, resolve_config_path
+            cfg = StrategyConfig.load(resolve_config_path())
+
         plan = {
             "has_signal": False,
             "action": "NONE",
@@ -220,12 +232,17 @@ class EnhancedScalpingStrategy:
         }
 
         dbg: Dict[str, Any] = {"reason_block": None}
+
+        def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
+            plan.update(extra)
+            plan["reason_block"] = reason
+            dbg["reason_block"] = reason
+            self._last_debug = dbg
+            return plan
+
         try:
             if df is None or df.empty:
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+                return plan_block("indicator_unready")
             if spot_df is None:
                 spot_df = df
             last_ts = pd.to_datetime(df.index[-1])
@@ -233,11 +250,10 @@ class EnhancedScalpingStrategy:
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            if current_price is None or current_price <= 0 or len(df) < 14:
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+            if len(df) < cfg.min_bars_required:
+                return plan_block("warmup", bar_count=len(df))
+            if current_price is None or current_price <= 0 or len(df) < cfg.indicator_min_bars:
+                return plan_block("indicator_unready", bar_count=len(df))
 
             ema21 = self._ema(df["close"], 21)
             ema50 = self._ema(df["close"], 50)
@@ -256,10 +272,7 @@ class EnhancedScalpingStrategy:
                 or pd.isna(vwap.iloc[-1])
                 or atr_val <= 0
             ):
-                plan["reason_block"] = "indicator_unready"
-                dbg["reason_block"] = "indicator_unready"
-                self._last_debug = dbg
-                return plan
+                return plan_block("indicator_unready")
 
             price = float(spot_last)
             ema21_val, ema50_val = float(ema21.iloc[-1]), float(ema50.iloc[-1])
@@ -280,10 +293,7 @@ class EnhancedScalpingStrategy:
                 reg.regime = "TREND"  # fallback when ADX not available
             plan["regime"] = reg.regime
             if reg.regime == "NO_TRADE":
-                plan["reason_block"] = "regime_no_trade"
-                dbg["reason_block"] = "regime_no_trade"
-                self._last_debug = dbg
-                return plan
+                return plan_block("regime_no_trade")
 
             # swing levels for breakout guard
             swing_high = df["high"].rolling(window=20, min_periods=2).max().iloc[-2]
@@ -319,10 +329,7 @@ class EnhancedScalpingStrategy:
                     option_type = "CE" if long_ok else "PE"
                     reasons.append("trend_playbook")
                 else:
-                    plan["reason_block"] = "score_low"
-                    dbg["reason_block"] = "score_low"
-                    self._last_debug = dbg
-                    return plan
+                    return plan_block("score_low")
             elif reg.regime == "RANGE":
                 close = float(df["close"].iloc[-1])
                 bb_mid = df["close"].rolling(20).mean()
@@ -354,28 +361,14 @@ class EnhancedScalpingStrategy:
                     option_type = "CE"
                     reasons.append("range_playbook_lower")
                 else:
-                    plan["reason_block"] = "score_low"
-                    dbg["reason_block"] = "score_low"
-                    self._last_debug = dbg
-                    return plan
+                    return plan_block("score_low")
             else:
-                plan["reason_block"] = "regime_no_trade"
-                dbg["reason_block"] = "regime_no_trade"
-                self._last_debug = dbg
-                return plan
+                return plan_block("regime_no_trade")
 
             atr_pct = (atr_val / price) * 100.0
             plan["atr_pct"] = round(atr_pct, 2)
-            if atr_pct < 0.3:
-                plan["reason_block"] = "atr_low"
-                dbg["reason_block"] = "atr_low"
-                self._last_debug = dbg
-                return plan
-            if atr_pct > 1.05:
-                plan["reason_block"] = "atr_high"
-                dbg["reason_block"] = "atr_high"
-                self._last_debug = dbg
-                return plan
+            if not (cfg.atr_min <= plan["atr_pct"] <= cfg.atr_max):
+                return plan_block("atr_out_of_band", atr_pct=plan["atr_pct"])
 
             # ----- scoring -----
             regime_score = 2
@@ -409,47 +402,42 @@ class EnhancedScalpingStrategy:
             ):
                 structure_score += 1
 
-            vol_score = 1 if 0.0030 <= atr_pct <= 0.0105 else 0
+            vol_score = 1 if cfg.atr_min <= atr_pct <= cfg.atr_max else 0
 
             micro_score = 2
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
             if not info_atm:
-                plan["reason_block"] = "no_option_quote"
-                dbg["reason_block"] = "no_option_quote"
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                self._last_debug = dbg
-                return plan
+                return plan_block("no_option_quote", micro={"spread_pct": None, "depth_ok": None})
             tsym, lot_sz = info_atm
             q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
-            bid = float(q.get("bid") or 0.0)
-            ask = float(q.get("ask") or 0.0)
-            bid5 = int(q.get("bid5_qty") or 0)
-            ask5 = int(q.get("ask5_qty") or 0)
-            if bid <= 0 or ask <= 0:
-                plan["reason_block"] = "no_option_quote"
-                dbg["reason_block"] = "no_option_quote"
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                self._last_debug = dbg
-                return plan
-            spread_pct = ((ask - bid) / ((ask + bid) / 2) * 100.0) if ask > bid else None
-            depth_ok = min(bid5, ask5) >= 5 * lot_sz
-            plan["micro"] = {"spread_pct": round(spread_pct, 2) if spread_pct is not None else None, "depth_ok": depth_ok}
-            ex_cfg = getattr(settings, "executor", object())
-            max_spread_pct = float(getattr(ex_cfg, "max_spread_pct", 0.35))
-            if spread_pct is None or spread_pct > max_spread_pct or not depth_ok:
+            runner_obj = getattr(self, "runner", None)
+            nowt = (runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))).time()
+            max_spread = cfg.max_spread_pct_regular
+            if nowt <= dt_time(10, 0):
+                max_spread = cfg.max_spread_pct_open
+            elif nowt >= dt_time(15, 10):
+                max_spread = cfg.max_spread_pct_last20m
+            ok_micro, micro = micro_ok(
+                q,
+                qty_lots=1,
+                lot_size=lot_sz,
+                max_spread_pct=max_spread,
+                depth_mult=cfg.depth_multiplier,
+            )
+            plan["micro"] = micro
+            if not ok_micro:
                 micro_score = 0
 
             score = regime_score + momentum_score + structure_score + vol_score + micro_score
             plan["score"] = score
             plan["reasons"] = reasons
 
-            threshold = 9 if reg.regime == "TREND" else 8
-            if score < threshold:
-                plan["reason_block"] = "score_low"
-                dbg["reason_block"] = "score_low"
-                self._last_debug = dbg
-                return plan
+            need = cfg.score_trend_min if reg.regime == "TREND" else cfg.score_range_min
+            if cfg.lower_score_temp:
+                need = min(need, 6)
+            if score < need:
+                return plan_block("score_low", score=score, need=need)
 
             entry_price = float(current_price)
             tick_size = float(getattr(getattr(settings, "executor", object()), "tick_size", 0.05))
@@ -470,8 +458,17 @@ class EnhancedScalpingStrategy:
                 stop_loss = entry_price + sl_dist
 
             R = abs(entry_price - stop_loss)
-            tp1_mult = 1.1
-            tp2_mult = 1.8 if reg.regime == "TREND" else 1.3
+            tp1_mult = rand_uniform(cfg.tp1_R_min, cfg.tp1_R_max)
+            tp2_mult = cfg.tp2_R_trend if reg.regime == "TREND" else cfg.tp2_R_range
+            trail_mult = cfg.trail_atr_mult
+            time_stop = cfg.time_stop_min
+            runner_obj = getattr(self, "runner", None)
+            now_dt = runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))
+            if cfg.gamma_enabled and is_thu_after(cfg.gamma_after, now=now_dt):
+                tp2_mult = min(tp2_mult, cfg.gamma_tp2_cap)
+                trail_mult = min(trail_mult, cfg.gamma_trail_mult)
+                time_stop = min(time_stop, cfg.gamma_time_stop_min)
+                reasons.append("gamma_mode")
             if side == "BUY":
                 tp1 = entry_price + tp1_mult * R
                 tp2 = entry_price + tp2_mult * R
@@ -496,10 +493,7 @@ class EnhancedScalpingStrategy:
                 except Exception:
                     liquidity_info = None
                 if liquidity_info is not None:
-                    plan["reason_block"] = "liquidity_fail"
-                    dbg["reason_block"] = "liquidity_fail"
-                    self._last_debug = dbg
-                    return plan
+                    return plan_block("liquidity_fail")
                 strike = int(round(price / 50.0) * 50)
             else:
                 strike = int(strike_info.strike)
@@ -513,22 +507,13 @@ class EnhancedScalpingStrategy:
                 "sl": stop_loss,
                 "tp1": tp1,
                 "tp2": tp2,
-                "trail_atr_mult": 0.8,
-                "time_stop_min": 12,
+                "trail_atr_mult": trail_mult,
+                "time_stop_min": time_stop,
                 "rr": round(rr, 2),
                 "regime": reg.regime,
                 "score": score,
                 "reasons": reasons,
             })
-            now = getattr(self, "now_ist", datetime.now(ZoneInfo("Asia/Kolkata")))
-            if now.weekday() == 3 and now.time() >= dt_time(14, 45):
-                plan.setdefault("reasons", []).append("gamma_mode")
-                tp2_val = plan.get("tp2")
-                tp2_num = float(tp2_val) if isinstance(tp2_val, (int, float)) else None
-                plan["tp2"] = tp2_num * 0.75 if tp2_num is not None else None
-                plan["trail_atr_mult"] = min(0.6, plan.get("trail_atr_mult", 0.8))
-                plan["time_stop_min"] = min(8, plan.get("time_stop_min", 12))
-                tp2 = plan["tp2"]
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
@@ -537,7 +522,7 @@ class EnhancedScalpingStrategy:
             plan["side"] = side
             plan["confidence"] = min(1.0, max(0.0, score / 10.0))
             plan["breakeven_ticks"] = breakeven_ticks
-            plan["tp1_qty_ratio"] = 0.5
+            plan["tp1_qty_ratio"] = cfg.tp1_partial
 
             self._last_debug = {
                 "score": score,
