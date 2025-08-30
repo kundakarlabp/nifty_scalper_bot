@@ -5,6 +5,7 @@ import logging
 import math
 import threading
 import time
+import random
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +18,8 @@ from .order_state import (
     OrderState,
     TradeFSM,
 )
+
+from src.utils.circuit_breaker import CircuitBreaker
 
 
 # Optional public market data fallback
@@ -321,7 +324,13 @@ class OrderExecutor:
         # FSM + queueing
         self.ack_timeout_ms = int(getattr(ex, "ack_timeout_ms", 1500))
         self.fill_timeout_ms = int(getattr(ex, "fill_timeout_ms", 10000))
-        self.max_place_retries = int(getattr(ex, "max_place_retries", 2))
+        self.max_place_retries = int(
+            getattr(settings, "max_place_retries", getattr(ex, "max_place_retries", 2))
+        )
+        self.max_modify_retries = int(getattr(settings, "max_modify_retries", 2))
+        self.retry_backoff_ms = int(getattr(settings, "retry_backoff_ms", 200))
+        self.cb_orders = CircuitBreaker("orders")
+        self.cb_modify = CircuitBreaker("modify")
         self._fsms: Dict[str, TradeFSM] = {}
         self._idemp_map: Dict[str, str] = {}
         self._queues: Dict[str, Deque[OrderLeg]] = {}
@@ -658,19 +667,24 @@ class OrderExecutor:
             if self.entry_order_type.upper() == "LIMIT":
                 params["price"] = _round_to_tick(price, self.tick_size)
 
-            try:
-                oid = _retry_call(self.kite.place_order, **params)
-                if not oid:
-                    continue
-                child_ids.append(oid)
-                record_id = record_id or oid
-                log.info(
-                    "Entry child placed: %s %s qty=%d price=%s -> %s",
-                    symbol, action, q, params.get("price"), oid,
-                )
-            except Exception as e:
-                self.last_error = f"place_order: {e}"
-                log.error("place_order failed: %s", e)
+            res = self._place_with_cb(params)
+            if not res.get("ok"):
+                self.last_error = f"place_order: {res.get('reason')}"
+                log.error("place_order failed: %s", res.get("reason"))
+                continue
+            oid = res.get("order_id")
+            if not oid:
+                continue
+            child_ids.append(oid)
+            record_id = record_id or oid
+            log.info(
+                "Entry child placed: %s %s qty=%d price=%s -> %s",
+                symbol,
+                action,
+                q,
+                params.get("price"),
+                oid,
+            )
 
         if not record_id:
             return None
@@ -723,10 +737,9 @@ class OrderExecutor:
         # cancel old TPs if any
         for old in (rec.tp1_order_id, rec.tp2_order_id):
             if old:
-                try:
-                    _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=old, tries=2)
-                except Exception:
-                    log.debug("Failed to cancel TP order %s", old, exc_info=True)
+                res_cancel = self._cancel_with_cb(old, variety=rec.variety)
+                if not res_cancel.get("ok"):
+                    log.debug("Failed to cancel TP order %s: %s", old, res_cancel.get("reason"))
         rec.tp1_order_id = rec.tp2_order_id = None
 
         # partial split
@@ -738,39 +751,41 @@ class OrderExecutor:
             q_tp1, q_tp2 = 0, qty
 
         if q_tp1 > 0:
-            try:
-                rec.tp1_order_id = _retry_call(
-                    self.kite.place_order,
-                    variety=rec.variety,
-                    exchange=rec.exchange,
-                    tradingsymbol=rec.symbol,
-                    transaction_type=exit_side,
-                    quantity=q_tp1,
-                    product=rec.product,
-                    order_type="LIMIT",
-                    price=tp_price,
-                    tries=2,
-                )
-            except Exception as e:
-                self.last_error = f"tp1: {e}"
-                log.error("TP1 failed: %s", e)
+            res1 = self._place_with_cb(
+                {
+                    "variety": rec.variety,
+                    "exchange": rec.exchange,
+                    "tradingsymbol": rec.symbol,
+                    "transaction_type": exit_side,
+                    "quantity": q_tp1,
+                    "product": rec.product,
+                    "order_type": "LIMIT",
+                    "price": tp_price,
+                }
+            )
+            if res1.get("ok"):
+                rec.tp1_order_id = res1.get("order_id")
+            else:
+                self.last_error = f"tp1: {res1.get('reason')}"
+                log.error("TP1 failed: %s", res1.get("reason"))
         if q_tp2 > 0:
-            try:
-                rec.tp2_order_id = _retry_call(
-                    self.kite.place_order,
-                    variety=rec.variety,
-                    exchange=rec.exchange,
-                    tradingsymbol=rec.symbol,
-                    transaction_type=exit_side,
-                    quantity=q_tp2,
-                    product=rec.product,
-                    order_type="LIMIT",
-                    price=tp_price,
-                    tries=2,
-                )
-            except Exception as e:
-                self.last_error = f"tp2: {e}"
-                log.error("TP2 failed: %s", e)
+            res2 = self._place_with_cb(
+                {
+                    "variety": rec.variety,
+                    "exchange": rec.exchange,
+                    "tradingsymbol": rec.symbol,
+                    "transaction_type": exit_side,
+                    "quantity": q_tp2,
+                    "product": rec.product,
+                    "order_type": "LIMIT",
+                    "price": tp_price,
+                }
+            )
+            if res2.get("ok"):
+                rec.tp2_order_id = res2.get("order_id")
+            else:
+                self.last_error = f"tp2: {res2.get('reason')}"
+                log.error("TP2 failed: %s", res2.get("reason"))
         rec.tp_price = tp_price
 
         self._refresh_sl_gtt(rec, sl_price=sl_price, qty=qty)
@@ -1104,6 +1119,120 @@ class OrderExecutor:
                 self.journal.append(leg.trade_id, leg.to_dict())
             except Exception:
                 pass
+
+    # ----------- circuit breaker wrapped calls ----------
+
+    @staticmethod
+    def _is_transient(reason: str) -> bool:
+        """Return True if error reason looks transient."""
+        r = reason.lower()
+        return any(x in r for x in ["timeout", "timed out", "502", "503", "504", "network"])
+
+    def _place_with_cb(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Place order via broker with circuit breaker and retries."""
+
+        def single() -> Dict[str, Any]:
+            if not self.cb_orders.allow():
+                return {
+                    "ok": False,
+                    "reason": "api_breaker_open",
+                    "cb": self.cb_orders.health(),
+                }
+            t0 = time.monotonic()
+            try:
+                oid = self.kite.place_order(**req) if self.kite else None
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_orders.record_success(lat)
+                return {"ok": True, "order_id": oid, "lat_ms": lat}
+            except Exception as e:  # pragma: no cover - broker errors
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_orders.record_failure(lat, reason=str(e))
+                return {"ok": False, "reason": str(e), "lat_ms": lat}
+
+        res = single()
+        attempt = 0
+        while (
+            not res.get("ok")
+            and self._is_transient(str(res.get("reason", "")))
+            and attempt < self.max_place_retries
+        ):
+            delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
+            time.sleep(delay + random.uniform(0, 0.025))
+            attempt += 1
+            res = single()
+        return res
+
+    def _modify_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """Modify order via broker with breaker and retries."""
+
+        def single() -> Dict[str, Any]:
+            if not self.cb_modify.allow():
+                return {
+                    "ok": False,
+                    "reason": "api_breaker_open",
+                    "cb": self.cb_modify.health(),
+                }
+            t0 = time.monotonic()
+            try:
+                resp = self.kite.modify_order(order_id, **kwargs) if self.kite else None
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_modify.record_success(lat)
+                return {"ok": True, "resp": resp, "lat_ms": lat}
+            except Exception as e:  # pragma: no cover
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_modify.record_failure(lat, reason=str(e))
+                return {"ok": False, "reason": str(e), "lat_ms": lat}
+
+        res = single()
+        attempt = 0
+        while (
+            not res.get("ok")
+            and self._is_transient(str(res.get("reason", "")))
+            and attempt < self.max_modify_retries
+        ):
+            delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
+            time.sleep(delay + random.uniform(0, 0.025))
+            attempt += 1
+            res = single()
+        return res
+
+    def _cancel_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """Cancel order via broker with breaker and retries."""
+
+        def single() -> Dict[str, Any]:
+            if not self.cb_modify.allow():
+                return {
+                    "ok": False,
+                    "reason": "api_breaker_open",
+                    "cb": self.cb_modify.health(),
+                }
+            t0 = time.monotonic()
+            try:
+                resp = self.kite.cancel_order(order_id, **kwargs) if self.kite else None
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_modify.record_success(lat)
+                return {"ok": True, "resp": resp, "lat_ms": lat}
+            except Exception as e:  # pragma: no cover
+                lat = int((time.monotonic() - t0) * 1000)
+                self.cb_modify.record_failure(lat, reason=str(e))
+                return {"ok": False, "reason": str(e), "lat_ms": lat}
+
+        res = single()
+        attempt = 0
+        while (
+            not res.get("ok")
+            and self._is_transient(str(res.get("reason", "")))
+            and attempt < self.max_modify_retries
+        ):
+            delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
+            time.sleep(delay + random.uniform(0, 0.025))
+            attempt += 1
+            res = single()
+        return res
+
+    def api_health(self) -> Dict[str, Dict[str, object]]:
+        """Return current API breaker health."""
+        return {"orders": self.cb_orders.health(), "modify": self.cb_modify.health()}
 
     # ----------- util ----------
     @staticmethod
