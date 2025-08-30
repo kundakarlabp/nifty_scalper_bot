@@ -349,7 +349,7 @@ class TelegramController:
             return self._send(
                 "🤖 Nifty Scalper Bot — commands\n"
                 "*Core*\n"
-                "/status [verbose] · /health · /diag · /check\n"
+                "/status [verbose] · /health · /diag · /check · /components\n"
                 "/positions · /active [page]\n"
                 "/tick · /tickdry · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
@@ -377,6 +377,20 @@ class TelegramController:
         # HEALTH (cards)
         if cmd == "/health":
             return self._send(self._health_cards(), parse_mode="Markdown")
+
+        # COMPONENTS
+        if cmd == "/components":
+            status = self._status_provider() if self._status_provider else {}
+            names = status.get("components", {})
+            dp_health = status.get("data_provider_health", {})
+            oc_health = status.get("order_connector_health", {})
+            text = (
+                "⚙️ *Components*\n"
+                f"Strategy: `{names.get('strategy')}`\n"
+                f"Data: `{names.get('data_provider')}`  health={dp_health.get('status')}\n"
+                f"Connector: `{names.get('order_connector')}`  health={oc_health.get('status')}\n"
+            )
+            return self._send(text, parse_mode="Markdown")
 
         # DIAG – detailed status + last signal
         if cmd == "/diag":
