@@ -545,3 +545,16 @@ class EnhancedScalpingStrategy:
             return plan
 
 
+class ScalpingStrategy(EnhancedScalpingStrategy):
+    """Alias with a helper used for backtesting."""
+
+    def evaluate_from_backtest(
+        self, ts: datetime, o: float, h: float, l: float, c: float, v: float
+    ) -> dict:
+        """Update internal buffer with a bar and reuse ``generate_signal``."""
+
+        if not hasattr(self, "_bt_df"):
+            self._bt_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        self._bt_df.loc[ts] = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+        return self.generate_signal(self._bt_df)
+
