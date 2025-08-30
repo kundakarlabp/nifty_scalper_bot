@@ -243,6 +243,9 @@ class ExecutorSettings(BaseModel):
     trailing_atr_multiplier: float = 1.4
     fee_per_lot: float = 20.0
     slippage_ticks: int = 1
+    ack_timeout_ms: int = 1500
+    fill_timeout_ms: int = 10000
+    max_place_retries: int = 2
     # microstructure execution guards
     max_spread_pct: float = 0.0035  # 0.35%
     depth_multiplier: float = 5.0   # top-5 depth >= mult * order size
@@ -255,7 +258,13 @@ class ExecutorSettings(BaseModel):
             raise ValueError("tp1_qty_ratio must be in 0..1")
         return v
 
-    @field_validator("breakeven_ticks", "slippage_ticks")
+    @field_validator(
+        "breakeven_ticks",
+        "slippage_ticks",
+        "ack_timeout_ms",
+        "fill_timeout_ms",
+        "max_place_retries",
+    )
     @classmethod
     def _v_nonneg_int(cls, v: int) -> int:
         if v < 0:
@@ -419,6 +428,12 @@ class AppSettings(BaseSettings):
     def executor_fee_per_lot(self) -> float: return self.executor.fee_per_lot
     @property
     def executor_slippage_ticks(self) -> int: return self.executor.slippage_ticks
+    @property
+    def executor_ack_timeout_ms(self) -> int: return self.executor.ack_timeout_ms
+    @property
+    def executor_fill_timeout_ms(self) -> int: return self.executor.fill_timeout_ms
+    @property
+    def executor_max_place_retries(self) -> int: return self.executor.max_place_retries
 
     # Health/System (flat)
     @property

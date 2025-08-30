@@ -15,6 +15,7 @@ from src.config import settings
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import now_ist, floor_to_minute, TZ
 from src.backtesting.backtest_engine import BacktestEngine
+from src.execution.order_executor import OrderReconciler
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -115,6 +116,9 @@ class StrategyRunner:
                 self.log.debug("Data source connect failed: %s", e)
         self.order_executor = self.components.order_connector
         self.executor = self.order_executor
+        self.reconciler = OrderReconciler(
+            getattr(self.order_executor, "kite", None), self.order_executor, self.log
+        )
         self._active_names = self.components.names
         self.strategy_name = self._active_names.get("strategy", "")
         self.data_provider_name = self._active_names.get("data_provider", "")
@@ -305,6 +309,14 @@ class StrategyRunner:
             "executed": False, "reason_block": None,
         }
         self._last_error = None
+        now = datetime.utcnow()
+        try:
+            if hasattr(self.order_executor, "step_queue"):
+                self.order_executor.step_queue(now)
+            if getattr(self, "reconciler", None):
+                self.reconciler.step(now)
+        except Exception:
+            self.log.debug("queue/reconcile step failed", exc_info=True)
         try:
             # fetch data first to allow ADX‑based window override
             df = self._fetch_spot_ohlc()
@@ -507,6 +519,12 @@ class StrategyRunner:
                     "option_type": plan["option_type"],
                 }
                 placed_ok = bool(self.executor.place_order(exec_payload))
+                if placed_ok and hasattr(self.executor, "create_trade_fsm"):
+                    try:
+                        fsm = self.executor.create_trade_fsm(plan)
+                        self.executor.place_trade(fsm)
+                    except Exception:
+                        self.log.debug("FSM enqueue failed", exc_info=True)
             elif hasattr(self.executor, "place_entry_order"):
                 side = "BUY" if str(plan["action"]).upper() == "BUY" else "SELL"
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
@@ -516,6 +534,13 @@ class StrategyRunner:
                     quantity=int(qty), price=float(plan.get("entry"))
                 )
                 placed_ok = bool(oid)
+                if placed_ok and hasattr(self.executor, "create_trade_fsm"):
+                    try:
+                        plan["trade_id"] = oid
+                        fsm = self.executor.create_trade_fsm(plan)
+                        self.executor.place_trade(fsm)
+                    except Exception:
+                        self.log.debug("FSM enqueue failed", exc_info=True)
                 if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
                     try:
                         self.executor.setup_gtt_orders(
@@ -1035,11 +1060,27 @@ class StrategyRunner:
 
         ok = all(c.get("ok", False) for c in checks)
         last_sig = (time.time() - self._last_signal_at) < 900 if self._last_signal_at else False  # 15min
+        open_legs = [
+            {
+                "trade": fsm.trade_id,
+                "leg": leg.leg_type.name,
+                "sym": leg.symbol,
+                "state": leg.state.name,
+                "filled": leg.filled_qty,
+                "qty": leg.qty,
+                "avg": leg.avg_price,
+                "age_s": int((datetime.utcnow() - leg.created_at).total_seconds()),
+                "status": fsm.status,
+            }
+            for fsm in getattr(self.order_executor, "open_trades", lambda: [])()
+            for leg in fsm.open_legs()
+        ]
         bundle = {
             "ok": ok,
             "checks": checks,
             "last_signal": last_sig,
             "last_flow": dict(self._last_flow_debug),
+            "open_legs": open_legs,
         }
         return bundle
 

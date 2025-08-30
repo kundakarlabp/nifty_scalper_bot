@@ -5,8 +5,18 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+
+from .order_state import (
+    LegType,
+    OrderLeg,
+    OrderSide,
+    OrderState,
+    TradeFSM,
+)
 
 
 # Optional public market data fallback
@@ -35,7 +45,7 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OrderExecutor", "micro_ok", "fetch_quote_with_depth"]
+__all__ = ["OrderExecutor", "OrderReconciler", "micro_ok", "fetch_quote_with_depth"]
 
 
 # ------------------- small helpers -------------------
@@ -307,6 +317,15 @@ class OrderExecutor:
 
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
+
+        # FSM + queueing
+        self.ack_timeout_ms = int(getattr(ex, "ack_timeout_ms", 1500))
+        self.fill_timeout_ms = int(getattr(ex, "fill_timeout_ms", 10000))
+        self.max_place_retries = int(getattr(ex, "max_place_retries", 2))
+        self._fsms: Dict[str, TradeFSM] = {}
+        self._idemp_map: Dict[str, str] = {}
+        self._queues: Dict[str, Deque[OrderLeg]] = {}
+        self._inflight: Set[str] = set()
 
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
@@ -1013,6 +1032,79 @@ class OrderExecutor:
             for r in self._active.values():
                 r.breakeven_ticks = self.breakeven_ticks
 
+    # ----------- FSM/queue helpers ----------
+    def create_trade_fsm(self, plan: Dict[str, Any]) -> TradeFSM:
+        """Build a TradeFSM from a strategy plan."""
+        trade_id = str(plan.get("trade_id") or int(time.time() * 1000))
+        side = OrderSide.BUY if str(plan.get("action", "BUY")).upper() == "BUY" else OrderSide.SELL
+        symbol = str(plan.get("symbol") or plan.get("tradingsymbol") or "")
+        qty = int(plan.get("qty") or plan.get("quantity") or 0)
+        price = plan.get("limit_price") or plan.get("entry")
+        leg_id = f"{trade_id}:ENTRY"
+        idemp = f"{trade_id}:ENTRY:{int(time.time() * 1000)}"
+        leg = OrderLeg(
+            trade_id=trade_id,
+            leg_id=leg_id,
+            leg_type=LegType.ENTRY,
+            side=side,
+            symbol=symbol,
+            qty=qty,
+            limit_price=price,
+            state=OrderState.NEW,
+            idempotency_key=idemp,
+            created_at=datetime.utcnow(),
+            expires_at=None,
+            reason=None,
+        )
+        fsm = TradeFSM(trade_id=trade_id, legs={leg_id: leg})
+        self._fsms[trade_id] = fsm
+        return fsm
+
+    def place_trade(self, fsm: TradeFSM) -> None:
+        for leg in fsm.open_legs():
+            self.enqueue_leg(leg)
+
+    def enqueue_leg(self, leg: OrderLeg) -> None:
+        if leg.idempotency_key in self._idemp_map:
+            return
+        self._idemp_map[leg.idempotency_key] = leg.leg_id
+        q = self._queues.setdefault(leg.symbol, deque())
+        q.append(leg)
+
+    def open_trades(self) -> List[TradeFSM]:
+        return [fsm for fsm in self._fsms.values() if fsm.status == "OPEN"]
+
+    def step_queue(self, now: datetime) -> None:
+        for sym, q in list(self._queues.items()):
+            if sym in self._inflight or not q:
+                continue
+            leg = q.popleft()
+            if leg.expired(now):
+                leg.state = OrderState.EXPIRED
+                continue
+            self._place_leg(leg)
+
+    def _place_leg(self, leg: OrderLeg) -> None:
+        order_id: Optional[str] = None
+        if self.kite and hasattr(self.kite, "create_order"):
+            try:
+                resp = self.kite.create_order(leg, idempotency_key=leg.idempotency_key)
+                order_id = getattr(resp, "order_id", None) or str(resp)
+            except Exception as e:  # pragma: no cover - broker errors
+                log.debug("place_order failed: %s", e)
+        else:
+            order_id = f"PAPER-{int(time.time() * 1000)}"
+        if not order_id:
+            leg.on_reject("place_failed")
+            return
+        leg.mark_acked(str(order_id))
+        self._inflight.add(leg.symbol)
+        if hasattr(self, "journal"):
+            try:
+                self.journal.append(leg.trade_id, leg.to_dict())
+            except Exception:
+                pass
+
     # ----------- util ----------
     @staticmethod
     def _infer_symbol(payload: Dict[str, Any]) -> Optional[str]:
@@ -1049,3 +1141,76 @@ class OrderExecutor:
                     self.telegram.notify(text)  # legacy fallback
         except Exception:
             log.debug("Failed to send notification", exc_info=True)
+
+
+class OrderReconciler:
+    """Poll broker orders and reconcile with local FSM legs."""
+
+    def __init__(self, kite: Any, fsm_store: OrderExecutor, logger: logging.Logger) -> None:
+        self.kite = kite
+        self.store = fsm_store
+        self.log = logger
+
+    def step(self, now: datetime) -> int:
+        if not self.kite:
+            return 0
+        try:
+            orders = self.kite.orders() or []
+        except Exception as e:  # pragma: no cover - network errors
+            self.log.debug("reconcile orders failed: %s", e)
+            return 0
+
+        updated = 0
+        for o in orders:
+            tag = str(o.get("tag") or "")
+            oid = o.get("order_id")
+            leg: Optional[OrderLeg] = None
+            # match by order id
+            if oid:
+                for fsm in self.store._fsms.values():
+                    for leg_obj in fsm.legs.values():
+                        if leg_obj.broker_order_id == oid:
+                            leg = leg_obj
+                            break
+                    if leg:
+                        break
+            # match by idempotency tag
+            if leg is None and tag:
+                leg_id = self.store._idemp_map.get(tag)
+                if leg_id:
+                    for fsm in self.store._fsms.values():
+                        leg = fsm.legs.get(leg_id)
+                        if leg:
+                            break
+            if leg is None:
+                continue
+
+            status = str(o.get("status") or "").upper()
+            filled_qty = int(o.get("filled_quantity") or 0)
+            avg_price = float(o.get("average_price") or 0.0)
+            if status in {"COMPLETE", "FILLED"} or filled_qty >= leg.qty:
+                leg.on_fill(avg_price)
+            elif status in {"PARTIALLY_FILLED"} or 0 < filled_qty < leg.qty:
+                leg.on_partial(filled_qty, avg_price)
+            elif status == "REJECTED":
+                leg.on_reject(o.get("status_message", ""))
+            elif status == "CANCELLED":
+                leg.on_cancel(o.get("status_message", ""))
+            else:
+                continue
+
+            if leg.state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
+                self.store._inflight.discard(leg.symbol)
+
+            fsm = self.store._fsms.get(leg.trade_id)
+            if fsm:
+                fsm.close_if_done()
+
+            if hasattr(self.store, "journal"):
+                try:
+                    self.store.journal.append(leg.trade_id, leg.to_dict())
+                except Exception:
+                    pass
+            updated += 1
+
+        return updated
