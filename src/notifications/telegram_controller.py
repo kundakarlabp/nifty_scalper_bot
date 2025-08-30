@@ -7,8 +7,12 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime, time as dt_time
+from datetime import datetime, timedelta, time as dt_time
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
+import statistics as stats
+
+from src.logs.journal import read_trades_between
 
 import requests
 
@@ -16,6 +20,41 @@ from src.config import settings
 
 log = logging.getLogger(__name__)
 
+
+def _kpis(trades: List[Dict[str, float]]) -> Dict[str, float]:
+    """Compute basic KPIs from a list of trade dicts."""
+    if not trades:
+        return {}
+    rs = [t.get("pnl_R", 0.0) for t in trades]
+    pos = [r for r in rs if r > 0]
+    neg = [-r for r in rs if r < 0]
+    pf = (sum(pos) / sum(neg)) if neg else float("inf")
+    win = (sum(1 for r in rs if r > 0) / len(rs)) * 100.0
+    avg_r = sum(rs) / len(rs)
+    med_r = stats.median(rs)
+    eq = 0.0
+    peak = 0.0
+    mdd = 0.0
+    for r in rs:
+        eq += r
+        peak = max(peak, eq)
+        mdd = min(mdd, eq - peak)
+    losses = [r for r in rs if r < 0]
+    p95_loss = 0.0
+    if losses:
+        try:
+            p95_loss = stats.quantiles(losses, n=20, method="inclusive")[0]
+        except Exception:
+            p95_loss = min(losses)
+    return {
+        "trades": len(rs),
+        "PF": round(pf, 2),
+        "Win%": round(win, 1),
+        "AvgR": round(avg_r, 2),
+        "MedianR": round(med_r, 2),
+        "MaxDD_R": round(-mdd, 2),
+        "p95_loss_R": round(abs(p95_loss), 2),
+    }
 
 class TelegramController:
     """
@@ -581,14 +620,91 @@ class TelegramController:
             return self._send(text, parse_mode="Markdown")
 
         if cmd == "/plan":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
             try:
-                plan = self._last_signal_provider() if self._last_signal_provider else {}
-                text = json.dumps(plan, indent=2)
+                snap = runner.telemetry_snapshot()
+                plan = snap.get("signal", {})
+                text = json.dumps(plan, ensure_ascii=False, indent=2)
                 if len(text) > 2000:
-                    text = text[:2000] + "..."
-                return self._send("```json\n" + text + "\n```", parse_mode="Markdown")
+                    text = text[:2000] + "\n... (truncated)"
+                return self._send("🧩 *Plan*\n```\n" + text + "\n```", parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Plan error: {e}")
+
+        if cmd == "/audit":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            try:
+                s = runner.telemetry_snapshot()
+                sig, bars = s["signal"], s["bars"]
+                def pf(ok: bool, val: Any) -> tuple[str, Any]:
+                    return ("✅ PASS ", val) if ok else ("❌ FAIL ", val)
+                window_ok = getattr(runner, "within_window", True)
+                re = getattr(runner, "risk_engine", None)
+                cool_ok = (re.state.cooloff_until is None) if re else True
+                dd_ok = (re.state.cum_R_today > -re.cfg.max_daily_dd_R) if re else True
+                bc_ok = (bars.get("bar_count") or 0) >= runner.strategy_cfg.min_bars_required
+                stale_ok = True
+                try:
+                    last = bars.get("last_bar_ts")
+                    if last:
+                        last_dt = datetime.fromisoformat(str(last))
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=ZoneInfo(runner.strategy_cfg.tz))
+                        age = (runner.now_ist - last_dt).total_seconds()
+                        stale_ok = 0 <= age <= 90
+                except Exception:
+                    stale_ok = False
+                regime_ok = sig.get("regime") in ("TREND", "RANGE")
+                atr = sig.get("atr_pct") or 0.0
+                atr_ok = runner.strategy_cfg.atr_min <= atr <= runner.strategy_cfg.atr_max
+                need = (
+                    runner.strategy_cfg.score_trend_min
+                    if sig.get("regime") == "TREND"
+                    else runner.strategy_cfg.score_range_min
+                )
+                if runner.strategy_cfg.lower_score_temp:
+                    need = min(need, 6)
+                score_ok = (sig.get("score") or 0) >= need
+                micro = sig.get("micro") or {}
+                msp = micro.get("spread_pct")
+                mdp = micro.get("depth_ok")
+                msp_ok = msp is not None and msp <= runner.strategy_cfg.max_spread_pct_regular
+                mdp_ok = bool(mdp)
+                ob_reason = sig.get("reason_block")
+                lines = []
+                for name, ok, val in [
+                    ("window", window_ok, getattr(runner, "window_tuple", "-")),
+                    ("cooloff", cool_ok, getattr(re.state, "cooloff_until", None) if re else None),
+                    ("daily_dd", dd_ok, getattr(re.state, "cum_R_today", 0.0) if re else 0.0),
+                    ("bar_count", bc_ok, bars.get("bar_count")),
+                    ("data_stale", stale_ok, bars.get("last_bar_ts")),
+                    ("regime", regime_ok, sig.get("regime")),
+                    ("atr_pct", atr_ok, atr),
+                    ("score", score_ok, f"{sig.get('score')}/{need}"),
+                    ("micro_spread", msp_ok, msp),
+                    ("micro_depth", mdp_ok, mdp),
+                ]:
+                    mark, val = pf(ok, val)
+                    lines.append(f"{name}: {mark}{val}")
+                api = s.get("api_health", {})
+                rh = s.get("router", {})
+                lines.append(
+                    f"orders_cb: {api.get('orders', {}).get('state', '?')} p95={api.get('orders', {}).get('p95_ms')}"
+                )
+                lines.append(
+                    f"quote_cb: {api.get('quote', {}).get('state', '?')} p95={api.get('quote', {}).get('p95_ms')}"
+                )
+                lines.append(
+                    f"router ack_p95: {rh.get('ack_p95_ms')} queues={rh.get('queues')}"
+                )
+                lines.append(f"reason_block: *{ob_reason}*")
+                return self._send("🧪 *Audit*\n" + "\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                return self._send(f"Audit error: {e}")
 
         if cmd == "/why":
             try:
@@ -642,12 +758,26 @@ class TelegramController:
                 return self._send(f"Why error: {e}")
 
         if cmd == "/bars":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
             try:
                 n = int(args[0]) if args else 5
-                if not self._bars_provider:
-                    return self._send("bars provider not wired")
-                text = self._bars_provider(max(1, min(n, 100)))
-                return self._send("```text\n" + text + "\n```", parse_mode="Markdown")
+            except Exception:
+                n = 5
+            try:
+                df = runner.data_source.get_last_bars(n)
+                if df is None:
+                    return self._send("No bars available.")
+                rows = []
+                for ts, r in df.iterrows():
+                    rows.append(
+                        f"{str(ts)[11:16]}  O:{r.open:.1f} H:{r.high:.1f} L:{r.low:.1f} C:{r.close:.1f}  "
+                        f"VWAP:{getattr(r, 'vwap', float('nan')):.1f}  ATR%:{getattr(r, 'atr_pct', float('nan')):.2f}"
+                    )
+                src = getattr(runner.last_plan or {}, "data_source", None) or (runner.last_plan or {}).get("data_source", "broker")
+                text = "📊 *Bars*  src=" + str(src) + "\n" + "\n".join(rows[-n:])
+                return self._send(text, parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Bars error: {e}")
 
@@ -662,20 +792,54 @@ class TelegramController:
                 return self._send(f"Quotes error: {e}")
 
         if cmd == "/trace":
-            if not self._trace_provider:
-                return self._send("trace not wired")
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
             try:
-                n = int(args[0]) if args else 1
-                self._trace_provider(max(0, n))
-                return self._send(f"Tracing next {n} evals")
-            except Exception as e:
-                return self._send(f"Trace error: {e}")
+                n = int(args[0]) if args else 5
+            except Exception:
+                n = 5
+            runner.trace_ticks_remaining = max(1, min(50, n))
+            return self._send(f"Tracing next {runner.trace_ticks_remaining} evals.")
 
         if cmd == "/traceoff":
-            if not self._trace_provider:
-                return self._send("trace not wired")
-            self._trace_provider(0)
-            return self._send("Trace disabled")
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            runner.trace_ticks_remaining = 0
+            return self._send("Trace off.")
+
+        if cmd == "/summary":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            arg = (args[0].lower() if args else "week")
+            tz = ZoneInfo(getattr(runner.settings, "TZ", "Asia/Kolkata"))
+            now = datetime.now(tz)
+            if arg == "month":
+                start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            else:
+                start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            trades = read_trades_between(start, now)
+            k = _kpis(trades)
+            rh = getattr(runner.order_executor, "router_health", lambda: {})()
+            cb = getattr(runner.order_executor, "api_health", lambda: {})()
+            text = (
+                f"📈 *Summary* ({arg}) {start.date()} → {now.date()}\n"
+                f"Trades: {k.get('trades',0)} | PF: {k.get('PF')} | Win%: {k.get('Win%')} | "
+                f"AvgR: {k.get('AvgR')} | MedR: {k.get('MedianR')} | MaxDD_R: {k.get('MaxDD_R')} | "
+                f"p95_loss_R: {k.get('p95_loss_R')}\n"
+                f"Router ack_p95: {rh.get('ack_p95_ms')} | Orders CB: {cb.get('orders',{}).get('state')}"
+            )
+            return self._send(text, parse_mode="Markdown")
+
+        if cmd == "/hb":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            arg = (args[0].lower() if args else "on")
+            runner.hb_enabled = (arg != "off")
+            return self._send(f"Heartbeat: {'ON' if runner.hb_enabled else 'OFF'}")
 
         if cmd == "/selftest":
             try:
