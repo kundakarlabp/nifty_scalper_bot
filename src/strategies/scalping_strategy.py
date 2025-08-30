@@ -21,6 +21,7 @@ from src.utils.strike_selector import (
     select_strike,
     resolve_weekly_atm,
 )
+from .registry import StrategyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -544,3 +545,7 @@ class EnhancedScalpingStrategy:
             self._last_debug = dbg
             logger.debug("generate_signal exception: %s", e, exc_info=True)
             return plan
+
+
+# Register default strategy
+StrategyRegistry.register("scalping", EnhancedScalpingStrategy)

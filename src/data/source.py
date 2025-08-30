@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple, Callable, List
 
+from src.strategies.registry import DataProviderRegistry
+
 import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
@@ -690,3 +692,11 @@ class LiveKiteSource(DataSource):
                 )
                 return syn
             return None
+
+
+def _livekite_health() -> float:
+    """Simple health score for LiveKiteSource."""
+    return 100.0
+
+
+DataProviderRegistry.register("kite", LiveKiteSource, _livekite_health)

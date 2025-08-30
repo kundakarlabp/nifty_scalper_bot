@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.strategies.registry import OrderConnectorRegistry
+
 # Optional public market data fallback
 try:  # pragma: no cover
     import yfinance as yf  # type: ignore
@@ -131,6 +133,36 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "oi": None,
             "timestamp": None,
         }
+
+
+class KiteOrderConnector:
+    """Thin wrapper exposing create/modify/cancel/reconcile operations."""
+
+    def __init__(self, kite: Optional[KiteConnect]) -> None:
+        self.kite = kite
+
+    def create_order(self, **payload: Any) -> Any:
+        if not self.kite:
+            return None
+        return _retry_call(self.kite.place_order, **payload)
+
+    def modify(self, order_id: str, **kwargs: Any) -> Any:
+        if not self.kite:
+            return None
+        return _retry_call(self.kite.modify_order, order_id, **kwargs)
+
+    def cancel(self, order_id: str) -> Any:
+        if not self.kite:
+            return None
+        return _retry_call(self.kite.cancel_order, order_id)
+
+    def reconcile(self) -> Any:
+        if not self.kite:
+            return []
+        return _retry_call(self.kite.orders)
+
+
+OrderConnectorRegistry.register("kite", KiteOrderConnector)
 
 def micro_ok(
     quote: Dict[str, Any],
