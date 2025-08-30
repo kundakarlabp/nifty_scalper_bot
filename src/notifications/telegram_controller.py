@@ -423,6 +423,36 @@ class TelegramController:
             ]
             return self._send("\n".join(lines))
 
+        if cmd == "/reload":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if runner and hasattr(runner, "_maybe_hot_reload_cfg"):
+                before = runner.strategy_cfg.version
+                runner._maybe_hot_reload_cfg()
+                after = runner.strategy_cfg.version
+                return self._send(
+                    f"🔁 Config reloaded: {runner.strategy_cfg.name} v{after} (was v{before})"
+                )
+            return self._send("⚠️ Reload failed: runner missing")
+
+        if cmd == "/config":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Config unavailable")
+            c = runner.strategy_cfg
+            text = (
+                "🧭 *Strategy Config*\n"
+                f"name: `{c.name}` v{c.version}\n"
+                f"tz: {c.tz}\n"
+                f"ATR% band: {c.atr_min}–{c.atr_max}\n"
+                f"score gates: trend {c.score_trend_min}, range {c.score_range_min}\n"
+                f"micro: spread open {c.max_spread_pct_open}, reg {c.max_spread_pct_regular}, close {c.max_spread_pct_last20m}, depth×{c.depth_multiplier}\n"
+                f"options: OI≥{c.min_oi}, Δ∈[{c.delta_min},{c.delta_max}], reATM>{c.re_atm_drift_pct}%\n"
+                f"lifecycle: tp1 {c.tp1_R_min}–{c.tp1_R_max}R, tp2(T/R) {c.tp2_R_trend}/{c.tp2_R_range}, trail {c.trail_atr_mult}, time {c.time_stop_min}m\n"
+                f"gamma: {c.gamma_enabled} after {c.gamma_after}\n"
+                f"warmup: bars {c.min_bars_required}/{c.indicator_min_bars}\n"
+            )
+            return self._send(text, parse_mode="Markdown")
+
         # Circuit breaker admin
         if cmd == "/cb" and args:
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
