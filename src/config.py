@@ -480,6 +480,12 @@ object.__setattr__(settings, "ENABLE_SIGNAL_DEBUG", str(_os.getenv("ENABLE_SIGNA
 object.__setattr__(settings, "TELEGRAM__PRETRADE_ALERTS", str(_os.getenv("TELEGRAM__PRETRADE_ALERTS", "false")).lower() in ("1","true","yes"))
 object.__setattr__(settings, "DIAG_INTERVAL_SECONDS", int(_os.getenv("DIAG_INTERVAL_SECONDS", "60")))
 object.__setattr__(settings, "MIN_PREVIEW_SCORE", float(_os.getenv("MIN_PREVIEW_SCORE", "8")))
+object.__setattr__(settings, "ACK_TIMEOUT_MS", int(_os.getenv("ACK_TIMEOUT_MS", "1500")))
+object.__setattr__(settings, "FILL_TIMEOUT_MS", int(_os.getenv("FILL_TIMEOUT_MS", "10000")))
+object.__setattr__(settings, "RETRY_BACKOFF_MS", int(_os.getenv("RETRY_BACKOFF_MS", "200")))
+object.__setattr__(settings, "MAX_PLACE_RETRIES", int(_os.getenv("MAX_PLACE_RETRIES", "2")))
+object.__setattr__(settings, "MAX_MODIFY_RETRIES", int(_os.getenv("MAX_MODIFY_RETRIES", "2")))
+object.__setattr__(settings, "PLAN_STALE_SEC", int(_os.getenv("PLAN_STALE_SEC", "20")))
 
 
 

@@ -359,6 +359,8 @@ class StrategyRunner:
         try:
             if hasattr(self.order_executor, "step_queue"):
                 self.order_executor.step_queue(now)
+                if hasattr(self.order_executor, "on_order_timeout_check"):
+                    self.order_executor.on_order_timeout_check()
             if getattr(self, "reconciler", None):
                 self.reconciler.step(now)
         except Exception:
@@ -1333,6 +1335,9 @@ class StrategyRunner:
             "hist": getattr(self.data_source, "api_health", lambda: {})().get("hist", {}),
             "quote": getattr(self.data_source, "api_health", lambda: {})().get("quote", {}),
         }
+        diag["router"] = getattr(
+            self.order_executor, "router_health", lambda: {}
+        )()
         return diag
 
     def risk_snapshot(self) -> Dict[str, Any]:

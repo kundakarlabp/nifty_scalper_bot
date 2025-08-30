@@ -863,6 +863,21 @@ class TelegramController:
                 )
             return self._send("\n".join(lines))
 
+        if cmd == "/router":
+            if self._diag_provider:
+                try:
+                    rh = self._diag_provider().get("router", {})
+                except Exception as e:
+                    return self._send(f"Router error: {e}")
+                text = (
+                    "🚦 Router\n"
+                    f"ack_p95_ms: {rh.get('ack_p95_ms')}\n"
+                    f"queues: {rh.get('queues')}\n"
+                    f"inflight: {rh.get('inflight')}\n"
+                )
+                return self._send(text)
+            return self._send("Router diag not wired.")
+
         if cmd == "/cancel":
             if not args:
                 return self._send("Usage: /cancel <trade_id|all>")
