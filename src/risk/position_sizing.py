@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Dict, Tuple
 
 
+def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
+    """Return estimated ₹ risk for the given trade parameters."""
+
+    return abs(float(entry) - float(sl)) * int(lot_size) * int(lots)
+
+
 @dataclass(frozen=True)
 class SizingInputs:
     entry_price: float

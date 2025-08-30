@@ -49,6 +49,9 @@ class TelegramController:
         logs_provider: Optional[Callable[[int], List[str]]] = None,
         last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         compact_diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,  # NEW: compact (/diag)
+        risk_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        limits_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        risk_reset_today: Optional[Callable[[], None]] = None,
         bars_provider: Optional[Callable[[int], str]] = None,
         quotes_provider: Optional[Callable[[str], str]] = None,
         trace_provider: Optional[Callable[[int], None]] = None,
@@ -89,6 +92,9 @@ class TelegramController:
         self._actives_provider = actives_provider
         self._diag_provider = diag_provider
         self._compact_diag_provider = compact_diag_provider  # NEW
+        self._risk_provider = risk_provider
+        self._limits_provider = limits_provider
+        self._risk_reset = risk_reset_today
         self._logs_provider = logs_provider
         self._last_signal_provider = last_signal_provider
         self._bars_provider = bars_provider
@@ -356,7 +362,7 @@ class TelegramController:
                 "🤖 Nifty Scalper Bot — commands\n"
                 "*Core*\n"
                 "/status [verbose] · /health · /diag · /check · /components\n"
-                "/positions · /active [page]\n"
+                "/positions · /active [page] · /risk · /limits\n"
                 "/tick · /tickdry · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
@@ -716,6 +722,50 @@ class TelegramController:
                 rid = getattr(rec, "order_id", getattr(rec, "record_id", "?"))
                 lines.append(f"• {sym} {side} qty={qty} id={rid}")
             return self._send("\n".join(lines))
+
+        if cmd == "/risk":
+            if not self._risk_provider:
+                return self._send("Risk provider not wired.")
+            snap = self._risk_provider() or {}
+            lines = [
+                "Risk",
+                (
+                    f"date: {snap.get('session_date')}  cum_R_today: {snap.get('cum_R_today')}  "
+                    f"trades_today: {snap.get('trades_today')}  consec_losses: {snap.get('consecutive_losses')}"
+                ),
+                (
+                    f"cooloff_until: {snap.get('cooloff_until') or '-'}  roll10_avgR: {snap.get('roll10_avgR')}"
+                ),
+                f"daily_caps: {snap.get('daily_caps_hit_recent', [])}",
+                f"skip_next_open_date: {snap.get('skip_next_open_date')}",
+            ]
+            expo = snap.get("exposure") or {}
+            if expo:
+                notional = expo.get("notional_rupees", 0.0)
+                lots = expo.get("lots_by_symbol", {})
+                exp_line = f"exposure: notional ₹{notional:,.0f}"
+                for sym, lot_count in lots.items():
+                    exp_line += f"  {sym}: {lot_count} lots"
+                lines.append(exp_line)
+            return self._send("\n".join(lines))
+
+        if cmd == "/limits":
+            if not self._limits_provider:
+                return self._send("Limits provider not wired.")
+            cfg = self._limits_provider() or {}
+            lines = ["Limits"]
+            for k, v in cfg.items():
+                lines.append(f"{k}: {v}")
+            return self._send("\n".join(lines))
+
+        if cmd == "/riskresettoday":
+            if not self._risk_reset:
+                return self._send("Risk reset not wired.")
+            try:
+                self._risk_reset()
+                return self._send("Risk counters reset.")
+            except Exception as e:
+                return self._send(f"Risk reset error: {e}")
 
         # MODE
         if cmd == "/mode":
