@@ -633,6 +633,42 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Plan error: {e}")
 
+        if cmd == "/events":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner or not runner.event_cal:
+                return self._send("No events calendar loaded.")
+            now = runner.now_ist
+            active = runner.event_cal.active(now)
+            lines = [f"📅 Events v{runner.event_cal.version} tz={runner.event_cal.tz.key}"]
+            for ev in active[:5]:
+                lines.append(
+                    f"ACTIVE: {ev.name}  guard: {ev.guard_start().time()}→{ev.guard_end().time()}  block={ev.block_trading} widen+{ev.post_widen_spread_pct:.2f}%"
+                )
+            if not active:
+                lines.append("No active guard window.")
+            return self._send("\n".join(lines))
+
+        if cmd == "/nextevent":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner or not runner.event_cal:
+                return self._send("No events calendar loaded.")
+            ev = runner.event_cal.next_event(runner.now_ist)
+            if not ev:
+                return self._send("No upcoming events within horizon.")
+            return self._send(
+                f"Next: {ev.name}\nGuard: {ev.guard_start().isoformat()} → {ev.guard_end().isoformat()}  block={ev.block_trading} widen+{ev.post_widen_spread_pct:.2f}%"
+            )
+
+        if cmd == "/eventguard":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            state = args[0].lower() if args else "on"
+            runner.event_guard_enabled = state != "off"
+            return self._send(
+                f"EventGuard: {'ON' if runner.event_guard_enabled else 'OFF'}"
+            )
+
         if cmd == "/audit":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
