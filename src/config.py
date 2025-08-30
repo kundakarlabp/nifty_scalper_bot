@@ -314,6 +314,9 @@ class AppSettings(BaseSettings):
     MAX_LOTS_PER_SYMBOL: int = 5
     MAX_NOTIONAL_RUPEES: float = 1_500_000.0
     MAX_GAMMA_MODE_LOTS: int = 2
+    MAX_PORTFOLIO_DELTA_UNITS: int = 100
+    MAX_PORTFOLIO_DELTA_UNITS_GAMMA: int = 60
+    RISK_FREE_RATE: float = 0.065
     ROLL10_PAUSE_R: float = -0.2
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3
