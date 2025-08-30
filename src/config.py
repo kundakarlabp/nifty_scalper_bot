@@ -309,6 +309,16 @@ class AppSettings(BaseSettings):
     max_modify_retries: int = 2
     retry_backoff_ms: int = 200
 
+    MAX_DAILY_DD_R: float = 2.5
+    MAX_TRADES_PER_SESSION: int = 40
+    MAX_LOTS_PER_SYMBOL: int = 5
+    MAX_NOTIONAL_RUPEES: float = 1_500_000.0
+    MAX_GAMMA_MODE_LOTS: int = 2
+    ROLL10_PAUSE_R: float = -0.2
+    ROLL10_PAUSE_MIN: int = 60
+    COOLOFF_LOSS_STREAK: int = 3
+    COOLOFF_MINUTES: int = 45
+
     zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()

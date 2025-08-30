@@ -9,7 +9,7 @@ import random
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from .order_state import (
     LegType,
@@ -285,7 +285,12 @@ class OrderExecutor:
       - last_error for diag
     """
 
-    def __init__(self, kite: Optional[KiteConnect], telegram_controller: Any = None) -> None:
+    def __init__(
+        self,
+        kite: Optional[KiteConnect],
+        telegram_controller: Any = None,
+        on_trade_closed: Optional[Callable[[float], None]] = None,
+    ) -> None:
         self._lock = threading.Lock()
         self.kite = kite
         self._live = kite is not None
@@ -335,6 +340,8 @@ class OrderExecutor:
         self._idemp_map: Dict[str, str] = {}
         self._queues: Dict[str, Deque[OrderLeg]] = {}
         self._inflight: Set[str] = set()
+        self.on_trade_closed = on_trade_closed
+        self._closed_trades: Set[str] = set()
 
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
@@ -1072,6 +1079,13 @@ class OrderExecutor:
             reason=None,
         )
         fsm = TradeFSM(trade_id=trade_id, legs={leg_id: leg})
+        # store basics for PnL estimation later
+        try:
+            fsm.entry_price = float(plan.get("entry") or 0.0)  # type: ignore[attr-defined]
+            fsm.stop_loss = float(plan.get("sl") or 0.0)  # type: ignore[attr-defined]
+        except Exception:
+            fsm.entry_price = float(price or 0.0)  # type: ignore[attr-defined]
+            fsm.stop_loss = 0.0  # type: ignore[attr-defined]
         self._fsms[trade_id] = fsm
         return fsm
 
@@ -1088,6 +1102,28 @@ class OrderExecutor:
 
     def open_trades(self) -> List[TradeFSM]:
         return [fsm for fsm in self._fsms.values() if fsm.status == "OPEN"]
+
+    def _compute_pnl_R(self, fsm: TradeFSM) -> float:
+        """Estimate trade PnL in R units for the given FSM."""
+
+        entry_leg = next((leg for leg in fsm.legs.values() if leg.leg_type is LegType.ENTRY), None)
+        if not entry_leg:
+            return 0.0
+        exit_legs = [leg for leg in fsm.legs.values() if leg.leg_type is not LegType.ENTRY]
+        if not exit_legs:
+            return 0.0
+        pnl_rupees = 0.0
+        for leg in exit_legs:
+            if leg.state is not OrderState.FILLED:
+                continue
+            if entry_leg.side is OrderSide.BUY:
+                pnl_rupees += (leg.avg_price - entry_leg.avg_price) * leg.qty
+            else:
+                pnl_rupees += (entry_leg.avg_price - leg.avg_price) * leg.qty
+        risk_rupees = abs(getattr(fsm, "entry_price", entry_leg.avg_price) - getattr(fsm, "stop_loss", entry_leg.avg_price)) * entry_leg.qty
+        if risk_rupees <= 0:
+            return 0.0
+        return pnl_rupees / risk_rupees
 
     def step_queue(self, now: datetime) -> None:
         for sym, q in list(self._queues.items()):
@@ -1333,7 +1369,20 @@ class OrderReconciler:
 
             fsm = self.store._fsms.get(leg.trade_id)
             if fsm:
+                before = fsm.status
                 fsm.close_if_done()
+                if (
+                    fsm.status == "CLOSED"
+                    and before != "CLOSED"
+                    and fsm.trade_id not in self.store._closed_trades
+                ):
+                    pnl_R = self.store._compute_pnl_R(fsm)
+                    if self.store.on_trade_closed:
+                        try:
+                            self.store.on_trade_closed(pnl_R)
+                        except Exception:
+                            self.log.debug("on_trade_closed callback failed", exc_info=True)
+                    self.store._closed_trades.add(fsm.trade_id)
 
             if hasattr(self.store, "journal"):
                 try:

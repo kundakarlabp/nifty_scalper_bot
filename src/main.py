@@ -7,6 +7,7 @@ import sys
 import time
 import os
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -140,6 +141,9 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         actives_provider=getattr(runner.executor, "get_active_orders", None),
         diag_provider=getattr(runner, "build_diag", None),
         compact_diag_provider=getattr(runner, "get_compact_diag_summary", None),
+        risk_provider=getattr(runner, "risk_snapshot", None),
+        limits_provider=lambda: asdict(runner.risk_engine.cfg),
+        risk_reset_today=getattr(runner, "risk_reset_today", None),
         logs_provider=_tail_logs,
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
         bars_provider=getattr(runner, "get_recent_bars", None),

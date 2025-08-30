@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple, List
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, List
 
 import pandas as pd
 
@@ -16,6 +17,7 @@ from src.strategies.registry import init_default_registries
 from src.utils.time_windows import now_ist, floor_to_minute, TZ
 from src.backtesting.backtest_engine import BacktestEngine
 from src.execution.order_executor import OrderReconciler
+from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -68,6 +70,22 @@ class StrategyRunner:
 
         self.settings = settings
 
+        self.risk_engine = RiskEngine(
+            LimitConfig(
+                tz=getattr(self.settings, "TZ", "Asia/Kolkata"),
+                max_daily_dd_R=getattr(self.settings, "MAX_DAILY_DD_R", 2.5),
+                max_trades_per_session=getattr(self.settings, "MAX_TRADES_PER_SESSION", 40),
+                max_lots_per_symbol=getattr(self.settings, "MAX_LOTS_PER_SYMBOL", 5),
+                max_notional_rupees=getattr(self.settings, "MAX_NOTIONAL_RUPEES", 1_500_000.0),
+                max_gamma_mode_lots=getattr(self.settings, "MAX_GAMMA_MODE_LOTS", 2),
+                roll10_pause_R=getattr(self.settings, "ROLL10_PAUSE_R", -0.2),
+                roll10_pause_minutes=getattr(self.settings, "ROLL10_PAUSE_MIN", 60),
+                cooloff_losses=getattr(self.settings, "COOLOFF_LOSS_STREAK", 3),
+                cooloff_minutes=getattr(self.settings, "COOLOFF_MINUTES", 45),
+                skip_next_open_after_two_daily_caps=True,
+            )
+        )
+
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
             from src.strategies.scalping_strategy import EnhancedScalpingStrategy
@@ -87,7 +105,11 @@ class StrategyRunner:
 
         def _make_connector_kite():
             from src.execution.order_executor import OrderExecutor
-            return OrderExecutor(kite=self.kite, telegram_controller=self.telegram)
+            return OrderExecutor(
+                kite=self.kite,
+                telegram_controller=self.telegram,
+                on_trade_closed=self.risk_engine.on_trade_closed,
+            )
 
         def _make_connector_shadow():
             from src.execution.order_executor import OrderExecutor
@@ -96,7 +118,11 @@ class StrategyRunner:
                 setattr(shadow_settings, "enable_live_trading", False)
             except Exception:
                 pass
-            return OrderExecutor(kite=None, telegram_controller=self.telegram)
+            return OrderExecutor(
+                kite=None,
+                telegram_controller=self.telegram,
+                on_trade_closed=self.risk_engine.on_trade_closed,
+            )
 
         self.components = init_default_registries(
             self.settings,
@@ -461,6 +487,35 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 self.log.info("Signal blocked by risk gates: %s", blocked)
+                return
+
+            # ---- limits engine
+            exposure = Exposure(
+                lots_by_symbol=self._lots_by_symbol(),
+                notional_rupees=self._notional_rupees(),
+            )
+            sym = plan.get("symbol") or plan.get("strike") or ""
+            qty_lots = int(plan.get("qty_lots") or 1)
+            lot_size = int(getattr(self.settings.instruments, "nifty_lot_size", 75))
+            entry = plan.get("entry") or plan.get("entry_price") or 0.0
+            sl = plan.get("sl") or plan.get("stop_loss") or 0.0
+            ok, reason, det = self.risk_engine.pre_trade_check(
+                equity_rupees=self._active_equity(),
+                plan=plan,
+                exposure=exposure,
+                intended_symbol=str(sym),
+                intended_lots=qty_lots,
+                lot_size=lot_size,
+                entry_price=float(entry or 0.0),
+                stop_loss_price=float(sl or 0.0),
+            )
+            if not ok:
+                plan["has_signal"] = False
+                plan["reason_block"] = reason
+                plan.setdefault("reasons", []).append(f"risk:{reason}")
+                plan.setdefault("risk_details", det)
+                self.last_plan = plan
+                self._last_flow_debug = flow
                 return
 
             # ---- sizing
@@ -1095,6 +1150,11 @@ class StrategyRunner:
             "last_signal": last_sig,
             "last_flow": dict(self._last_flow_debug),
             "open_legs": open_legs,
+            "risk": self.risk_engine.snapshot(),
+            "exposure": {
+                "notional_rupees": round(self._notional_rupees(), 2),
+                "lots_by_symbol": self._lots_by_symbol(),
+            },
         }
         return bundle
 
@@ -1210,6 +1270,38 @@ class StrategyRunner:
             "quote": getattr(self.data_source, "api_health", lambda: {})().get("quote", {}),
         }
         return diag
+
+    def risk_snapshot(self) -> Dict[str, Any]:
+        snap = self.risk_engine.snapshot()
+        snap["exposure"] = {
+            "notional_rupees": round(self._notional_rupees(), 2),
+            "lots_by_symbol": self._lots_by_symbol(),
+        }
+        return snap
+
+    def risk_reset_today(self) -> None:
+        self.risk_engine.state.cum_R_today = 0.0
+        self.risk_engine.state.trades_today = 0
+        self.risk_engine.state.consecutive_losses = 0
+        self.risk_engine.state.cooloff_until = None
+        self.risk_engine.state.roll_R_last10.clear()
+
+    def _lots_by_symbol(self) -> Dict[str, int]:
+        lots: Dict[str, int] = {}
+        for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
+            for leg in fsm.open_legs():
+                lots[leg.symbol] = lots.get(leg.symbol, 0) + math.ceil(
+                    leg.qty / int(self.settings.instruments.nifty_lot_size)
+                )
+        return lots
+
+    def _notional_rupees(self) -> float:
+        total = 0.0
+        for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
+            for leg in fsm.open_legs():
+                price = leg.limit_price or leg.avg_price or 0.0
+                total += price * leg.qty
+        return total
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
         qty, diag = self._calculate_quantity_diag(
