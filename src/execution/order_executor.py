@@ -268,6 +268,28 @@ class _OrderRecord:
 
 
 # ------------------- executor -------------------
+@dataclass
+class _QueueItem:
+    leg_id: str
+    symbol: str
+    qty: int
+    bid: float
+    ask: float
+    mid: float
+    spr: float
+    step_idx: int = 0
+    placed_order_id: Optional[str] = None
+    placed_at_ms: Optional[int] = None
+    acked_at_ms: Optional[int] = None
+    retries: int = 0
+    plan_ts_iso: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+    def ladder_prices(self) -> List[float]:
+        # Never cross; step0 = mid + 0.25*spr ; step1 = mid + 0.40*spr
+        return [self.mid + 0.25 * self.spr, self.mid + 0.40 * self.spr]
+
+
 class OrderExecutor:
     """
     Thin, robust wrapper around Kite order placement/management.
@@ -325,23 +347,60 @@ class OrderExecutor:
 
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
+        self.logger = log
 
-        # FSM + queueing
-        self.ack_timeout_ms = int(getattr(ex, "ack_timeout_ms", 1500))
-        self.fill_timeout_ms = int(getattr(ex, "fill_timeout_ms", 10000))
-        self.max_place_retries = int(
-            getattr(settings, "max_place_retries", getattr(ex, "max_place_retries", 2))
-        )
-        self.max_modify_retries = int(getattr(settings, "max_modify_retries", 2))
-        self.retry_backoff_ms = int(getattr(settings, "retry_backoff_ms", 200))
+        # FSM + router queueing
+        cfg = settings or object()
+        self.router_ack_timeout_ms = int(getattr(cfg, "ACK_TIMEOUT_MS", 1500))
+        self.router_fill_timeout_ms = int(getattr(cfg, "FILL_TIMEOUT_MS", 10000))
+        self.router_backoff_ms = int(getattr(cfg, "RETRY_BACKOFF_MS", 200))
+        self.router_max_place_retries = int(getattr(cfg, "MAX_PLACE_RETRIES", 2))
+        self.router_max_modify_retries = int(getattr(cfg, "MAX_MODIFY_RETRIES", 2))
+        self.router_max_inflight_per_symbol = 1
+        self.router_plan_stale_sec = 20
+
+        # Back-compat attributes for existing callbacks
+        self.max_place_retries = self.router_max_place_retries
+        self.max_modify_retries = self.router_max_modify_retries
+        self.retry_backoff_ms = self.router_backoff_ms
+
         self.cb_orders = CircuitBreaker("orders")
         self.cb_modify = CircuitBreaker("modify")
         self._fsms: Dict[str, TradeFSM] = {}
         self._idemp_map: Dict[str, str] = {}
-        self._queues: Dict[str, Deque[OrderLeg]] = {}
-        self._inflight: Set[str] = set()
+        self._queues: Dict[str, Deque["_QueueItem"]] = {}
+        self._inflight_symbols: Dict[str, int] = {}
+        self._ack_lat_ms: List[int] = []
         self.on_trade_closed = on_trade_closed
         self._closed_trades: Set[str] = set()
+
+    # ----------- router helpers ----------
+    def _now_ms(self) -> int:
+        return int(time.monotonic() * 1000)
+
+    def _round_to_tick(self, px: float, tick: float = 0.05) -> float:
+        return round(math.floor(px / tick + 1e-9) * tick, 2)
+
+    @staticmethod
+    def _mid_spread(bid: float, ask: float) -> Tuple[Optional[float], Optional[float]]:
+        if not bid or not ask or bid <= 0 or ask <= 0 or ask <= bid:
+            return None, None
+        mid = (bid + ask) / 2.0
+        spr = ask - bid
+        return mid, spr
+
+    def _record_ack_latency(self, ms: int) -> None:
+        self._ack_lat_ms.append(ms)
+        if len(self._ack_lat_ms) > 500:
+            self._ack_lat_ms = self._ack_lat_ms[-500:]
+
+    @staticmethod
+    def _p95(arr: List[int]) -> Optional[int]:
+        if not arr:
+            return None
+        a = sorted(arr)
+        k = int(0.95 * (len(a) - 1))
+        return a[k]
 
     # ----------- live/paper control ----------
     def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
@@ -1097,8 +1156,36 @@ class OrderExecutor:
         if leg.idempotency_key in self._idemp_map:
             return
         self._idemp_map[leg.idempotency_key] = leg.leg_id
+        fsm = self._fsms.setdefault(leg.trade_id, TradeFSM(leg.trade_id, legs={}))
+        fsm.legs[leg.leg_id] = leg
+        quote = {"bid": float(leg.limit_price or 100.0), "ask": float(leg.limit_price or 100.0) + 0.4}
+        self._enqueue_router(leg, quote, None)
+
+    def _enqueue_router(
+        self, leg: OrderLeg, quote: Dict[str, float], plan_ts_iso: Optional[str]
+    ) -> bool:
+        bid = quote.get("bid", 0.0)
+        ask = quote.get("ask", 0.0)
+        mid, spr = self._mid_spread(bid, ask)
+        if mid is None:
+            leg.on_reject("no_book")
+            return False
+        qi = _QueueItem(
+            leg_id=leg.leg_id,
+            symbol=leg.symbol,
+            qty=leg.qty,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            spr=spr,
+            plan_ts_iso=plan_ts_iso,
+        )
         q = self._queues.setdefault(leg.symbol, deque())
-        q.append(leg)
+        q.append(qi)
+        self.logger.info(
+            f"ROUTER enqueue {leg.symbol} leg={leg.leg_id} mid={mid:.2f} spr={spr:.2f}"
+        )
+        return True
 
     def open_trades(self) -> List[TradeFSM]:
         return [fsm for fsm in self._fsms.values() if fsm.status == "OPEN"]
@@ -1125,15 +1212,118 @@ class OrderExecutor:
             return 0.0
         return pnl_rupees / risk_rupees
 
-    def step_queue(self, now: datetime) -> None:
+    def step_queue(self, now: Optional[datetime] = None) -> None:
+        now_ms = self._now_ms()
         for sym, q in list(self._queues.items()):
-            if sym in self._inflight or not q:
+            if self._inflight_symbols.get(sym, 0) >= self.router_max_inflight_per_symbol:
                 continue
-            leg = q.popleft()
-            if leg.expired(now):
-                leg.state = OrderState.EXPIRED
+            if not q:
                 continue
-            self._place_leg(leg)
+            qi = q[0]
+
+            targets = qi.ladder_prices()
+            tgt = self._round_to_tick(targets[qi.step_idx])
+
+            idemp = f"{qi.leg_id}:{qi.step_idx}:{now_ms}"
+            req = self._build_place_request(
+                symbol=sym, qty=qi.qty, price=tgt, tag=idemp
+            )
+
+            t0 = self._now_ms()
+            res = self._place_with_cb(req)
+            if not res.get("ok"):
+                delay = self.router_backoff_ms * (1 + qi.retries) + random.randint(0, 25)
+                time.sleep(delay / 1000.0)
+                qi.retries += 1
+                if qi.retries > self.router_max_place_retries:
+                    self.logger.warning(
+                        f"ROUTER drop {sym} leg={qi.leg_id} reason={res.get('reason')}"
+                    )
+                    q.popleft()
+                continue
+
+            oid = res.get("order_id") or f"PAPER-{t0}"
+            qi.placed_order_id = oid
+            qi.placed_at_ms = t0
+            qi.idempotency_key = idemp
+            self._idemp_map[idemp] = qi.leg_id
+            self._inflight_symbols[sym] = self._inflight_symbols.get(sym, 0) + 1
+            self.logger.info(
+                f"ROUTER placed {sym} leg={qi.leg_id} step={qi.step_idx} px={tgt:.2f} oid={qi.placed_order_id}"
+            )
+
+            # update leg state
+            leg_obj: Optional[OrderLeg] = None
+            for fsm in self._fsms.values():
+                leg_obj = fsm.legs.get(qi.leg_id)
+                if leg_obj:
+                    break
+            if leg_obj and qi.placed_order_id:
+                leg_obj.mark_acked(qi.placed_order_id)
+
+    def on_order_acked(self, symbol: str, leg_id: str) -> None:
+        q = self._queues.get(symbol)
+        if not q:
+            return
+        qi = q[0]
+        if qi.leg_id != leg_id:
+            return
+        ack_ms = self._now_ms()
+        if qi.placed_at_ms:
+            qi.acked_at_ms = ack_ms
+            self._record_ack_latency(ack_ms - qi.placed_at_ms)
+
+    def on_order_timeout_check(self) -> None:
+        now_ms = self._now_ms()
+        for sym, q in list(self._queues.items()):
+            if not q:
+                continue
+            qi = q[0]
+
+            if (
+                qi.placed_at_ms
+                and not qi.acked_at_ms
+                and (now_ms - qi.placed_at_ms) > self.router_ack_timeout_ms
+            ):
+                if qi.step_idx == 0:
+                    targets = qi.ladder_prices()
+                    new_px = self._round_to_tick(targets[1])
+                    mod = self._modify_with_cb(qi.placed_order_id, price=new_px)
+                    self.logger.info(
+                        f"ROUTER modify {sym} leg={qi.leg_id} step=1 px={new_px:.2f} res={mod.get('ok')}"
+                    )
+                    qi.step_idx = 1
+                    qi.placed_at_ms = self._now_ms()
+                else:
+                    self._cancel_with_cb(qi.placed_order_id)
+                    self.logger.info(
+                        f"ROUTER cancel {sym} leg={qi.leg_id} reason=ack_timeout"
+                    )
+                    q.popleft()
+                    self._inflight_symbols[sym] = max(
+                        0, self._inflight_symbols.get(sym, 0) - 1
+                    )
+                    continue
+
+            if (
+                qi.acked_at_ms
+                and (now_ms - qi.acked_at_ms) > self.router_fill_timeout_ms
+            ):
+                self._cancel_with_cb(qi.placed_order_id)
+                self.logger.info(
+                    f"ROUTER cancel {sym} leg={qi.leg_id} reason=fill_timeout"
+                )
+                q.popleft()
+                self._inflight_symbols[sym] = max(
+                    0, self._inflight_symbols.get(sym, 0) - 1
+                )
+
+    def router_health(self) -> dict:
+        return {
+            "ack_p95_ms": self._p95(self._ack_lat_ms),
+            "queues": {k: len(v) for k, v in self._queues.items()},
+            "inflight": dict(self._inflight_symbols),
+        }
 
     def _place_leg(self, leg: OrderLeg) -> None:
         order_id: Optional[str] = None
@@ -1149,7 +1339,7 @@ class OrderExecutor:
             leg.on_reject("place_failed")
             return
         leg.mark_acked(str(order_id))
-        self._inflight.add(leg.symbol)
+        self._inflight_symbols[leg.symbol] = self._inflight_symbols.get(leg.symbol, 0) + 1
         if hasattr(self, "journal"):
             try:
                 self.journal.append(leg.trade_id, leg.to_dict())
@@ -1163,6 +1353,21 @@ class OrderExecutor:
         """Return True if error reason looks transient."""
         r = reason.lower()
         return any(x in r for x in ["timeout", "timed out", "502", "503", "504", "network"])
+
+    def _build_place_request(
+        self, *, symbol: str, qty: int, price: float, tag: str
+    ) -> Dict[str, Any]:
+        return {
+            "variety": self.variety,
+            "exchange": self.exchange,
+            "tradingsymbol": symbol,
+            "transaction_type": "BUY",
+            "quantity": int(qty),
+            "product": self.product,
+            "order_type": "LIMIT",
+            "price": price,
+            "tag": tag,
+        }
 
     def _place_with_cb(self, req: Dict[str, Any]) -> Dict[str, Any]:
         """Place order via broker with circuit breaker and retries."""
@@ -1353,6 +1558,9 @@ class OrderReconciler:
             status = str(o.get("status") or "").upper()
             filled_qty = int(o.get("filled_quantity") or 0)
             avg_price = float(o.get("average_price") or 0.0)
+            if leg.state is OrderState.NEW and oid:
+                leg.mark_acked(oid)
+            self.store.on_order_acked(leg.symbol, leg.leg_id)
             if status in {"COMPLETE", "FILLED"} or filled_qty >= leg.qty:
                 leg.on_fill(avg_price)
             elif status in {"PARTIALLY_FILLED"} or 0 < filled_qty < leg.qty:
@@ -1365,8 +1573,12 @@ class OrderReconciler:
                 continue
 
             if leg.state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
-                self.store._inflight.discard(leg.symbol)
-
+                q = self.store._queues.get(leg.symbol)
+                if q and q and q[0].leg_id == leg.leg_id:
+                    q.popleft()
+                self.store._inflight_symbols[leg.symbol] = max(
+                    0, self.store._inflight_symbols.get(leg.symbol, 0) - 1
+                )
             fsm = self.store._fsms.get(leg.trade_id)
             if fsm:
                 before = fsm.status
