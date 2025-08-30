@@ -59,6 +59,9 @@ class TelegramController:
         runner_resume: Optional[Callable[[], None]] = None,
         runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
         cancel_all: Optional[Callable[[], None]] = None,
+        open_trades_provider: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+        cancel_trade: Optional[Callable[[str], None]] = None,
+        reconcile_once: Optional[Callable[[], int]] = None,
         # bot/strategy mutators
         set_live_mode: Optional[Callable[[bool], None]] = None,
         set_min_score: Optional[Callable[[int], None]] = None,
@@ -98,6 +101,9 @@ class TelegramController:
         self._runner_resume = runner_resume
         self._runner_tick = runner_tick
         self._cancel_all = cancel_all
+        self._open_trades_provider = open_trades_provider
+        self._cancel_trade = cancel_trade
+        self._reconcile_once = reconcile_once
 
         self._set_live_mode = set_live_mode
         self._set_min_score = set_min_score
@@ -721,6 +727,55 @@ class TelegramController:
             val = args[0].lower() in ("on", "true", "1", "yes")
             settings.TELEGRAM__PRETRADE_ALERTS = val
             return self._send(f"Pre-trade alerts: {'ON' if val else 'OFF'}")
+
+        if cmd == "/orders":
+            if not self._open_trades_provider:
+                return self._send("Orders provider not wired.")
+            try:
+                legs = self._open_trades_provider() or []
+            except Exception as e:
+                return self._send(f"Orders error: {e}")
+            if not legs:
+                return self._send("No open trades.")
+            lines: List[str] = []
+            current: Optional[str] = None
+            for leg in legs:
+                trade = str(leg.get("trade"))
+                if trade != current:
+                    lines.append(f"Trade {trade} [{leg.get('status', '')}]")
+                    current = trade
+                lines.append(
+                    f"  {leg.get('leg')} {leg.get('sym')} {leg.get('state')} "
+                    f"filled={leg.get('filled')}/{leg.get('qty')} avg={leg.get('avg', 0)} "
+                    f"age={leg.get('age_s')}s"
+                )
+            return self._send("\n".join(lines))
+
+        if cmd == "/cancel":
+            if not args:
+                return self._send("Usage: /cancel <trade_id|all>")
+            target = args[0]
+            if target == "all":
+                if self._cancel_all:
+                    self._cancel_all()
+                    return self._send("🧹 Cancelled all open orders.")
+                return self._send("Cancel-all not wired.")
+            if self._cancel_trade:
+                try:
+                    self._cancel_trade(target)
+                    return self._send(f"Cancel requested for {target}.")
+                except Exception as e:
+                    return self._send(f"Cancel error: {e}")
+            return self._send("Cancel not wired.")
+
+        if cmd == "/reconcile":
+            if self._reconcile_once:
+                try:
+                    n = int(self._reconcile_once())
+                    return self._send(f"Reconciled {n} legs.")
+                except Exception as e:
+                    return self._send(f"Reconcile error: {e}")
+            return self._send("Reconciler not wired.")
 
         # PAUSE / RESUME
         if cmd == "/pause":
