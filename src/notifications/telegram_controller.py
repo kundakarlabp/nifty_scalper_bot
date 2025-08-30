@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -537,6 +537,18 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
+
+        if cmd == "/greeks":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            delta_units = round(runner._portfolio_delta_units(), 1)
+            gmode = runner.now_ist.weekday() == 3 and runner.now_ist.time() >= dt_time(14, 45)
+            text = (
+                "📐 *Portfolio Greeks*\n"
+                f"Δ(units): {delta_units} | gamma_mode: {gmode}"
+            )
+            return self._send(text, parse_mode="Markdown")
 
         if cmd == "/plan":
             try:

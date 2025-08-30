@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Any, Dict, Optional, Tuple, Literal
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -519,6 +520,15 @@ class EnhancedScalpingStrategy:
                 "score": score,
                 "reasons": reasons,
             })
+            now = getattr(self, "now_ist", datetime.now(ZoneInfo("Asia/Kolkata")))
+            if now.weekday() == 3 and now.time() >= dt_time(14, 45):
+                plan.setdefault("reasons", []).append("gamma_mode")
+                tp2_val = plan.get("tp2")
+                tp2_num = float(tp2_val) if isinstance(tp2_val, (int, float)) else None
+                plan["tp2"] = tp2_num * 0.75 if tp2_num is not None else None
+                plan["trail_atr_mult"] = min(0.6, plan.get("trail_atr_mult", 0.8))
+                plan["time_stop_min"] = min(8, plan.get("time_stop_min", 12))
+                tp2 = plan["tp2"]
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss

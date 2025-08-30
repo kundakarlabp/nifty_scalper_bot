@@ -18,6 +18,8 @@ class LimitConfig:
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = 1_500_000.0
     max_gamma_mode_lots: int = 2
+    max_portfolio_delta_units: int = 100
+    max_portfolio_delta_units_gamma: int = 60
     roll10_pause_R: float = -0.2
     roll10_pause_minutes: int = 60
     cooloff_losses: int = 3
@@ -87,6 +89,9 @@ class RiskEngine:
         lot_size: int,
         entry_price: float,
         stop_loss_price: float,
+        planned_delta_units: Optional[float] = None,
+        portfolio_delta_units: Optional[float] = None,
+        gamma_mode: Optional[bool] = None,
     ) -> Tuple[bool, str, Dict]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
@@ -131,11 +136,28 @@ class RiskEngine:
                 "add": intended_notional,
             }
 
-        if self._is_gamma_mode(now) and intended_lots > self.cfg.max_gamma_mode_lots:
+        gmode = gamma_mode if gamma_mode is not None else self._is_gamma_mode(now)
+
+        if gmode and intended_lots > self.cfg.max_gamma_mode_lots:
             return False, "gamma_mode_lot_cap", {
                 "intended": intended_lots,
                 "cap": self.cfg.max_gamma_mode_lots,
             }
+
+        cap = (
+            self.cfg.max_portfolio_delta_units_gamma if gmode else self.cfg.max_portfolio_delta_units
+        )
+        if portfolio_delta_units is not None and abs(portfolio_delta_units) > cap:
+            return False, "delta_cap", {
+                "portfolio_delta_units": round(portfolio_delta_units, 1),
+                "cap": cap,
+            }
+        if planned_delta_units is not None and portfolio_delta_units is not None:
+            if abs(portfolio_delta_units + planned_delta_units) > cap:
+                return False, "delta_cap_on_add", {
+                    "would_be": round(portfolio_delta_units + planned_delta_units, 1),
+                    "cap": cap,
+                }
 
         if len(self.state.roll_R_last10) >= 10:
             avg10 = sum(self.state.roll_R_last10[-10:]) / 10.0

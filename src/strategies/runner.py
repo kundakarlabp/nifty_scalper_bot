@@ -6,7 +6,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -18,6 +18,8 @@ from src.utils.time_windows import now_ist, floor_to_minute, TZ
 from src.backtesting.backtest_engine import BacktestEngine
 from src.execution.order_executor import OrderReconciler
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
+from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # noqa: F401
+from src.utils import strike_selector
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -78,6 +80,12 @@ class StrategyRunner:
                 max_lots_per_symbol=getattr(self.settings, "MAX_LOTS_PER_SYMBOL", 5),
                 max_notional_rupees=getattr(self.settings, "MAX_NOTIONAL_RUPEES", 1_500_000.0),
                 max_gamma_mode_lots=getattr(self.settings, "MAX_GAMMA_MODE_LOTS", 2),
+                max_portfolio_delta_units=getattr(
+                    self.settings, "MAX_PORTFOLIO_DELTA_UNITS", 100
+                ),
+                max_portfolio_delta_units_gamma=getattr(
+                    self.settings, "MAX_PORTFOLIO_DELTA_UNITS_GAMMA", 60
+                ),
                 roll10_pause_R=getattr(self.settings, "ROLL10_PAUSE_R", -0.2),
                 roll10_pause_minutes=getattr(self.settings, "ROLL10_PAUSE_MIN", 60),
                 cooloff_losses=getattr(self.settings, "COOLOFF_LOSS_STREAK", 3),
@@ -183,6 +191,7 @@ class StrategyRunner:
         self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
+        self.last_spot: Optional[float] = None
         self._log_signal_changes_only = os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
         self._last_reason_block: Optional[str] = None
         self._last_has_signal: Optional[bool] = None
@@ -499,6 +508,37 @@ class StrategyRunner:
             lot_size = int(getattr(self.settings.instruments, "nifty_lot_size", 75))
             entry = plan.get("entry") or plan.get("entry_price") or 0.0
             sl = plan.get("sl") or plan.get("stop_loss") or 0.0
+
+            planned_delta_units: Optional[float] = None
+            if (
+                plan.get("has_signal")
+                and plan.get("strike")
+                and plan.get("option_type")
+                and plan.get("qty_lots")
+            ):
+                parsed = strike_selector.parse_nfo_symbol(plan["strike"])
+                if parsed:
+                    s = getattr(self, "last_spot", 0.0) or 0.0
+                    k = parsed["strike"]
+                    opt = parsed["option_type"]
+                    mid = plan.get("entry") or plan.get("entry_price") or 0.0
+                    rfr = float(getattr(self.settings, "RISK_FREE_RATE", 0.065))
+                    est = estimate_greeks_from_mid(
+                        s,
+                        k,
+                        mid,
+                        opt,
+                        now=self.now_ist,
+                        r=rfr,
+                        atr_pct=plan.get("atr_pct"),
+                    )
+                    lot = getattr(self.settings, "LOT_SIZE", 50)
+                    planned_delta_units = (est.delta or 0.0) * lot * int(plan["qty_lots"])
+                    plan["planned_delta_units"] = round(planned_delta_units, 1)
+
+            portfolio_delta_units = self._portfolio_delta_units()
+            gmode = self.now_ist.weekday() == 3 and self.now_ist.time() >= dt_time(14, 45)
+
             ok, reason, det = self.risk_engine.pre_trade_check(
                 equity_rupees=self._active_equity(),
                 plan=plan,
@@ -508,7 +548,17 @@ class StrategyRunner:
                 lot_size=lot_size,
                 entry_price=float(entry or 0.0),
                 stop_loss_price=float(sl or 0.0),
+                planned_delta_units=planned_delta_units,
+                portfolio_delta_units=portfolio_delta_units,
+                gamma_mode=gmode,
             )
+            flow["portfolio_greeks"] = {
+                "delta_units": round(portfolio_delta_units, 1),
+                "gamma_mode": gmode,
+            }
+            if planned_delta_units is not None:
+                flow["planned_delta_units"] = round(planned_delta_units, 1)
+
             if not ok:
                 plan["has_signal"] = False
                 plan["reason_block"] = reason
@@ -1007,6 +1057,11 @@ class StrategyRunner:
     def _now_ist():
         return now_ist()
 
+    @property
+    def now_ist(self) -> datetime:
+        """Current time in the configured timezone."""
+        return self._now_ist()
+
     @staticmethod
     def _today_ist():
         now = now_ist()
@@ -1250,6 +1305,15 @@ class StrategyRunner:
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
 
+        portfolio_delta_units = self._portfolio_delta_units()
+        gmode = self.now_ist.weekday() == 3 and self.now_ist.time() >= dt_time(14, 45)
+        diag["portfolio_greeks"] = {
+            "delta_units": round(portfolio_delta_units, 1),
+            "gamma_mode": gmode,
+        }
+        if self.last_plan and self.last_plan.get("planned_delta_units") is not None:
+            diag["planned_delta_units"] = float(self.last_plan["planned_delta_units"])
+
         diag["components"] = {
             "strategy": self._active_names.get("strategy"),
             "data_provider": self._active_names.get("data_provider"),
@@ -1301,6 +1365,38 @@ class StrategyRunner:
             for leg in fsm.open_legs():
                 price = leg.limit_price or leg.avg_price or 0.0
                 total += price * leg.qty
+        return total
+
+    def _portfolio_delta_units(self) -> float:
+        """Return total delta exposure in units across open legs."""
+        total = 0.0
+        lot = getattr(self.settings, "LOT_SIZE", 50)
+        r = float(getattr(self.settings, "RISK_FREE_RATE", 0.065))
+        for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
+            for leg in fsm.open_legs():
+                parsed = (
+                    strike_selector.parse_nfo_symbol(leg.symbol)
+                    if hasattr(strike_selector, "parse_nfo_symbol")
+                    else None
+                )
+                if not parsed:
+                    continue
+                k = parsed["strike"]
+                opt = parsed["option_type"]
+                q = getattr(self.order_executor, "fetch_quote_with_depth", None)
+                mid = leg.avg_price or leg.limit_price or 0.0
+                if q:
+                    qt = q(self.order_executor.kite, leg.symbol)
+                    b, a = qt.get("bid"), qt.get("ask")
+                    if b and a:
+                        mid = (b + a) / 2
+                s = getattr(self, "last_spot", 0.0) or 0.0
+                atr_pct = self.last_plan.get("atr_pct", None) if self.last_plan else None
+                est = estimate_greeks_from_mid(s, k, mid, opt, now=self.now_ist, r=r, atr_pct=atr_pct)
+                delta = est.delta or 0.0
+                side = 1 if leg.side.name == "BUY" else -1
+                contracts = int(leg.qty / lot)
+                total += side * delta * lot * contracts
         return total
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:

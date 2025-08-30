@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import re
 
 from src.config import settings
 
@@ -37,6 +38,22 @@ except Exception:  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Parsers
+# -----------------------------------------------------------------------------
+def parse_nfo_symbol(tsym: str):
+    """Parse a standard NFO option trading symbol.
+
+    Expected format: ``NIFTY25AUG19850CE`` or ``NIFTY25AUG19850PE``.
+    Returns a dict with ``strike`` and ``option_type`` or ``None`` if no match.
+    """
+    m = re.search(r"([A-Z]+)\d{2}[A-Z]{3}(\d+)(CE|PE)$", tsym)
+    if not m:
+        return None
+    k = float(m.group(2))
+    opt = m.group(3)
+    return {"strike": k, "option_type": opt}
 
 # -----------------------------------------------------------------------------
 # Module-level rate limiting and small caches
