@@ -112,6 +112,7 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "ask5_qty": 0,
             "oi": None,
             "timestamp": None,
+            "source": "none",
         }
     try:
         data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
@@ -134,6 +135,7 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "ask5_qty": ask5,
             "oi": oi,
             "timestamp": ts,
+            "source": "quote",
         }
     except Exception as e:
         log.debug("fetch_quote_with_depth failed: %s", e)
@@ -151,14 +153,18 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
                     ltp = float(hist["Close"].iloc[-1])
             except Exception:
                 ltp = 0.0
+        est_spread_pct = getattr(settings.executor, "default_spread_pct_est", 0.25)
+        spr = ltp * (est_spread_pct / 100.0)
+        now_iso = datetime.utcnow().isoformat()
         return {
             "ltp": ltp,
-            "bid": 0.0,
-            "ask": 0.0,
+            "bid": ltp - spr / 2,
+            "ask": ltp + spr / 2,
             "bid5_qty": 0,
             "ask5_qty": 0,
             "oi": None,
-            "timestamp": None,
+            "timestamp": now_iso,
+            "source": "ltp_fallback",
         }
 
 
@@ -210,36 +216,36 @@ def micro_ok(
     bid5 = int(quote.get("bid5_qty", quote.get("bid_qty", 0)))
     ask5 = int(quote.get("ask5_qty", quote.get("ask_qty", 0)))
     if bid <= 0 or ask <= 0:
-        if (
-            not getattr(getattr(settings, "executor", object()), "require_depth", False)
-            and bid == 0.0
-            and ask == 0.0
-            and ltp > 0.0
-        ):
-            return True, {
-                "spread_pct": None,
-                "depth_ok": True,
-                "bid5": bid5,
-                "ask5": ask5,
-                "bid": bid,
-                "ask": ask,
-                "ltp": ltp,
-            }
-        return False, None
-
+        if ltp <= 0.0:
+            return False, None
+        spr_pct = getattr(settings.executor, "default_spread_pct_est", 0.25)
+        spr = ltp * spr_pct / 100.0
+        if bid <= 0:
+            bid = ltp - spr / 2
+        if ask <= 0:
+            ask = ltp + spr / 2
     mid = (bid + ask) / 2.0
-    spread_pct = ((ask - bid) / mid * 100.0) if (ask > bid and mid > 0) else None
+    spread_pct = ((ask - bid) / mid * 100.0) if (ask > 0 and bid > 0 and mid > 0) else getattr(
+        settings.executor,
+        "default_spread_pct_est",
+        0.25,
+    )
     qty_contracts = qty_lots * lot_size
-    depth_ok = bid5 >= depth_mult * qty_contracts and ask5 >= depth_mult * qty_contracts
-    ok = spread_pct is not None and spread_pct <= max_spread_frac * 100.0 and depth_ok
+    need = depth_mult * qty_contracts
+    if (bid5 == 0 or ask5 == 0) and ltp > 0:
+        depth_ok = True
+    else:
+        depth_ok = bid5 >= need and ask5 >= need
+    ok = spread_pct <= max_spread_frac * 100.0 and depth_ok
     return ok, {
-        "spread_pct": round(spread_pct, 2) if spread_pct is not None else None,
+        "spread_pct": round(spread_pct, 2),
         "depth_ok": depth_ok,
         "bid5": bid5,
         "ask5": ask5,
         "bid": bid,
         "ask": ask,
         "ltp": ltp,
+        "source": quote.get("source"),
     }
 
 
@@ -628,7 +634,7 @@ class OrderExecutor:
             depth_ok = min(bid5, ask5) >= int(self.depth_multiplier) * qty_lots * lot
             ok = spread_pct is not None and spread_pct <= self.max_spread_pct * 100 and depth_ok
             lines.append(
-                f"{t.upper()} tsym={tsym} ltp={q.get('ltp')} bid={bid} ask={ask} "
+                f"{t.upper()} tsym={tsym} src={q.get('source')} ltp={q.get('ltp')} bid={bid} ask={ask} "
                 f"spread%={None if spread_pct is None else round(spread_pct,2)} bid5={bid5} ask5={ask5} "
                 f"oi={q.get('oi')} micro={'OK' if ok else 'FAIL'}"
             )

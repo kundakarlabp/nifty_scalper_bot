@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from src.config import settings
 from src.risk.greeks import estimate_greeks_from_mid
 
 
@@ -25,7 +26,7 @@ class CostModel:
 class MicroModel:
     """Simple microstructure assumptions."""
 
-    base_spread_pct: float = 0.25
+    base_spread_pct: float = getattr(settings.executor, "default_spread_pct_est", 0.25)
     open_spread_pct: float = 0.35
     close_spread_pct: float = 0.45
     depth_per_lot: int = 5

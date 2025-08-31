@@ -532,6 +532,7 @@ class StrategyRunner:
                         plan["reason_block"] = "clock_skew"
                     elif lag_sec > 150:
                         plan["reason_block"] = "data_stale"
+                        plan.setdefault("reasons", []).append(f"last_bar_lag_s={int(lag_sec)}")
                 except Exception:
                     pass
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
@@ -722,9 +723,11 @@ class StrategyRunner:
             )
             plan["micro"] = micro
             self._preview_candidate(plan, micro)
-            if plan.get("reason_block") in (None, "") and ok_micro and plan.get("score", 0) >= int(settings.strategy.min_signal_score):
+            if ok_micro and plan.get("score", 0) >= int(settings.strategy.min_signal_score) and not plan.get("reason_block"):
+                plan["has_signal"] = True
                 self._emit_diag(plan, micro)
             else:
+                plan["has_signal"] = False
                 if plan.get("reason_block") in ("", None) and not ok_micro:
                     plan["reason_block"] = "microstructure"
                 flow["reason_block"] = flow.get("reason_block") or plan.get("reason_block")
@@ -1125,7 +1128,11 @@ class StrategyRunner:
                         valid = True
                         rows = len(df)
 
+                min_req = int(getattr(settings.strategy, "min_bars_required", min_bars))
                 if valid and rows >= min_bars:
+                    self._last_fetch_ts = time.time()
+                    return df.sort_index()
+                if valid and rows >= min_req:
                     self._last_fetch_ts = time.time()
                     return df.sort_index()
 

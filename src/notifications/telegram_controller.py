@@ -755,7 +755,8 @@ class TelegramController:
                 last_ts_sec = 0.0
                 if last_ts:
                     try:
-                        last_ts_sec = time.mktime(datetime.fromisoformat(str(last_ts)).timetuple())
+                        last_dt = datetime.fromisoformat(str(last_ts))
+                        last_ts_sec = last_dt.timestamp()
                     except Exception:
                         last_ts_sec = 0.0
                 gates = []
@@ -765,14 +766,16 @@ class TelegramController:
                 gates.append(("cooloff", not cooloff, status.get("cooloff_until")))
                 dd = bool(status.get("daily_dd_hit"))
                 gates.append(("daily_dd", not dd, status.get("day_realized_loss")))
-                bc = int(plan.get("bar_count") or 0) >= 20
-                gates.append(("bar_count", bc, plan.get("bar_count")))
-                data_stale = (now - last_ts_sec) <= 150 if last_ts_sec else False
-                gates.append(("data_stale", data_stale, plan.get("last_bar_ts")))
+                bar_count = int(plan.get("bar_count") or 0)
+                bc = bar_count >= 20
+                gates.append(("bar_count", bc, bar_count))
+                lag = int(now - last_ts_sec) if last_ts_sec else None
+                data_stale = (lag or 0) <= 150
+                gates.append(("data_stale", data_stale, f"lag_s={lag}" if lag is not None else "-"))
                 regime = plan.get("regime") in ("TREND", "RANGE")
                 gates.append(("regime", regime, plan.get("regime")))
                 atr = float(plan.get("atr_pct") or 0.0)
-                gates.append(("atr_pct", 0.30 <= atr <= 0.90, atr))
+                gates.append(("atr_pct", 0.20 <= atr <= 2.00, atr))
                 score = float(plan.get("score") or 0.0)
                 reg = str(plan.get("regime"))
                 need = 9 if reg == "TREND" else 8
@@ -789,9 +792,11 @@ class TelegramController:
                 sym = plan.get("strike") or plan.get("symbol") or "-"
                 micro = plan.get("micro", {})
                 lines.append(
-                    f"quote: {sym} bid={micro.get('bid')} ask={micro.get('ask')} "
-                    f"bid5={micro.get('bid5')} ask5={micro.get('ask5')} depth_ok={micro.get('depth_ok')}"
+                    f"quote: {sym} src={micro.get('source')} ltp={micro.get('ltp')} bid={micro.get('bid')} ask={micro.get('ask')} "
+                    f"spread%={micro.get('spread_pct')} bid5={micro.get('bid5')} ask5={micro.get('ask5')} depth_ok={micro.get('depth_ok')}"
                 )
+                if last_ts:
+                    lines.append(f"last_bar_ts: {last_ts}")
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))

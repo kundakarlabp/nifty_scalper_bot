@@ -1,4 +1,5 @@
 from src.execution.order_executor import micro_ok
+from src.config import settings
 
 
 def test_micro_ok_missing_bid_ask_returns_false_none():
@@ -43,3 +44,4 @@ def test_micro_ok_allows_ltp_only_when_depth_missing():
     assert ok is True
     assert meta is not None
     assert meta["depth_ok"] is True
+    assert meta["spread_pct"] == getattr(settings.executor, "default_spread_pct_est", 0.25)
