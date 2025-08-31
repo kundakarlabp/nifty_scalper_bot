@@ -16,6 +16,8 @@ import pandas as pd
 from pydantic import BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.utils.market_time import is_market_open, prev_session_last_20m
+
 # Optional external dependencies for validation
 try:
     from kiteconnect import KiteConnect  # type: ignore
@@ -538,10 +540,14 @@ def validate_critical_settings() -> None:
                 kite.set_access_token(str(settings.zerodha.access_token))
                 src = LiveKiteSource(kite=kite)
                 src.connect()
-                end = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
+                now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
                     second=0, microsecond=0
                 )
-                start = end - timedelta(minutes=1)
+                if is_market_open(now_ist):
+                    start = now_ist - timedelta(minutes=20)
+                    end = now_ist
+                else:
+                    start, end = prev_session_last_20m(now_ist)
                 df = src.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
                 if not isinstance(df, pd.DataFrame) or df.empty:
                     # Outside market hours the historical API may return no data.

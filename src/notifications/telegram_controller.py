@@ -808,6 +808,10 @@ class TelegramController:
                         plan.get("last_bar_lag_s"),
                     )
                 )
+                if plan.get("probe_window_from") and plan.get("probe_window_to"):
+                    lines.append(
+                        f"\u2022 Probe window: {plan['probe_window_from']} \u2192 {plan['probe_window_to']} (IST)"
+                    )
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))

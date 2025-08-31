@@ -16,6 +16,7 @@ import pandas as pd
 from src.config import settings
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import floor_to_minute, TZ
+from src.utils.market_time import is_market_open, prev_session_last_20m
 from src.strategies.strategy_config import (
     resolve_config_path,
     try_load,
@@ -207,11 +208,41 @@ class StrategyRunner:
             try:
                 token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
                 if token > 0:
-                    end = floor_to_minute(self._now_ist())
-                    start = end - timedelta(minutes=1)
-                    df = self.data_source.fetch_ohlc(
-                        token=token, start=start, end=end, timeframe="minute"
-                    )
+                    now_ist = floor_to_minute(self._now_ist())
+                    if is_market_open(now_ist):
+                        start = now_ist - timedelta(minutes=20)
+                        end = now_ist
+                    else:
+                        start, end = prev_session_last_20m(now_ist)
+                    self.plan_probe_window = (start.isoformat(), end.isoformat())
+                    df: pd.DataFrame | None = None
+                    try:
+                        df = self.data_source.fetch_ohlc(
+                            token=token, start=start, end=end, timeframe="minute"
+                        )
+                    except Exception as e:
+                        self.log.warning("startup: historical probe failed: %r", e)
+                    if (df is None or df.empty) and not is_market_open(now_ist):
+                        prev_start, prev_end = prev_session_last_20m(now_ist - timedelta(days=1))
+                        try:
+                            df = self.data_source.fetch_ohlc(
+                                token=token,
+                                start=prev_start,
+                                end=prev_end,
+                                timeframe="minute",
+                            )
+                            if df is not None and not df.empty:
+                                self.log.warning(
+                                    "startup: first probe empty; used holiday fallback window=%s..%s",
+                                    prev_start,
+                                    prev_end,
+                                )
+                                self.plan_probe_window = (
+                                    prev_start.isoformat(),
+                                    prev_end.isoformat(),
+                                )
+                        except Exception:
+                            pass
                     if not isinstance(df, pd.DataFrame) or df.empty:
                         self.log.warning(
                             "instrument_token %s returned no historical data; falling back",
@@ -392,6 +423,9 @@ class StrategyRunner:
         plan["last_eval_ts"] = self.last_eval_ts
         self._last_reason_block = plan.get("reason_block")
         self._last_has_signal = plan.get("has_signal")
+        pw = getattr(self, "plan_probe_window", None)
+        plan["probe_window_from"] = pw[0] if pw else None
+        plan["probe_window_to"] = pw[1] if pw else None
         self.last_plan = dict(plan)
         now = time.time()
         if self.hb_enabled and (now - self._last_hb_ts) >= 60:
