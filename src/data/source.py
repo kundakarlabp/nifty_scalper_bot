@@ -267,16 +267,32 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
 def _retry(fn: Callable, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
     """
     Simple retry with exponential backoff. Retries on common Kite exceptions and
-    any unexpected exception once or twice, then surfaces the error.
+    common request errors.  Falls back to a generic Exception catch to avoid
+    breaking the calling code, but keeps the retry window tight so failures are
+    surfaced quickly.
     """
     delay = float(base_delay)
     last: Optional[BaseException] = None
+
+    # Import lazily to avoid hard dependency on requests/urllib3 during tests
+    try:  # pragma: no cover - simple import guard
+        from requests import exceptions as req_exc  # type: ignore
+        import urllib3  # type: ignore
+        http_exc: Tuple[type[BaseException], ...] = (
+            req_exc.RequestException,
+            urllib3.exceptions.HTTPError,
+        )
+    except Exception:  # pragma: no cover
+        http_exc = ()
+
     for i in range(max(1, int(tries))):
         try:
             return fn(*args, **kwargs)
         except (NetworkException, TokenException, InputException, DataException, GeneralException) as e:  # type: ignore
             last = e
-        except Exception as e:  # other unexpected (keep very short retries)
+        except http_exc as e:  # type: ignore[misc]
+            last = e
+        except Exception as e:
             last = e
         if i == tries - 1:
             break
