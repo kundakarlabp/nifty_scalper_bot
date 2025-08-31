@@ -528,6 +528,8 @@ class StrategyRunner:
                         lb = lb.replace(tzinfo=TZ)
                     now_ts = self._now_ist()
                     lag_sec = abs((now_ts - lb).total_seconds())
+                    plan["last_bar_ts"] = lb.isoformat()
+                    plan["last_bar_lag_s"] = int(lag_sec)
                     if lb > now_ts + timedelta(seconds=5):
                         plan["reason_block"] = "clock_skew"
                     elif lag_sec > 150:
@@ -580,6 +582,26 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self.log.info("Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min)
                 return
+
+            cfg = self.strategy_cfg
+            score = plan.get("score", 0)
+            if cfg and score >= int(getattr(cfg, "delta_enable_score", 999)):
+                try:
+                    pick = strike_selector.select_strike_by_delta(
+                        spot=plan.get("spot"),
+                        opt=plan.get("option"),
+                        expiry=plan.get("expiry"),
+                        target=float(getattr(cfg, "delta_target", 0.40)),
+                        band=float(getattr(cfg, "delta_band", 0.05)),
+                        chain=plan.get("option_chain", []),
+                    )
+                    if pick:
+                        plan["strike"] = pick["strike"]
+                        plan.setdefault("reasons", []).append(
+                            f"delta_pick:{getattr(cfg, 'delta_target', 0.40)}"
+                        )
+                except Exception:
+                    pass
 
             # store some diagnostics from signal
             flow.update(

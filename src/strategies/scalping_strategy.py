@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from datetime import datetime, time as dt_time
 from typing import Any, Dict, Optional, Tuple, Literal
 from zoneinfo import ZoneInfo
@@ -131,6 +132,8 @@ class EnhancedScalpingStrategy:
 
         # Exportable debug snapshot
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
+        self._iv_window = getattr(self, "_iv_window", deque(maxlen=20))
+        self.last_atr_pct: float = 0.0
 
     # ---------- tech utils ----------
     @staticmethod
@@ -176,6 +179,39 @@ class EnhancedScalpingStrategy:
         if strict:
             return (score >= self.min_score_strict) and (conf >= self.min_conf_strict)
         return (score >= self.min_score_relaxed) and (conf >= self.min_conf_relaxed)
+
+    def _est_iv_pct(self, S: float, K: float, T: float) -> Optional[int]:
+        """Estimate rolling IV percentile."""
+        try:
+            from src.risk.greeks import implied_vol_newton
+
+            tv = max(0.5, S * (self.last_atr_pct / 100.0) * 0.25)
+            iv = implied_vol_newton(tv, S, K, T, 0.06, "CE", guess=0.20) or 0.20
+        except Exception:
+            iv = 0.20
+        self._iv_window.append(iv)
+        if len(self._iv_window) < 5:
+            return None
+        arr = sorted(self._iv_window)
+        rk = arr.index(iv)
+        return int(round(100 * rk / max(1, len(arr) - 1)))
+
+    def _iv_adx_reject_reason(
+        self, plan: Dict[str, Any], close: float
+    ) -> Optional[tuple[str, Dict[str, Any]]]:
+        cfg = getattr(getattr(self, "runner", None), "strategy_cfg", None)
+        if not cfg:
+            return None
+        adx = plan.get("adx")
+        if plan.get("regime") == "TREND" and adx is not None and adx < int(cfg.adx_min_trend):
+            return "weak_trend", {"adx": adx}
+        ivpct = self._est_iv_pct(S=close, K=plan.get("atm_strike", int(close)), T=plan.get("T", 3 / 365))
+        plan["iv_pct"] = ivpct
+        limit = int(cfg.iv_percentile_limit)
+        need = int(cfg.score_trend_min) + 1
+        if ivpct is not None and ivpct > limit and plan.get("score", 0) < need:
+            return "iv_extreme", {"iv_pct": ivpct, "need_score": need}
+        return None
 
     # ---------- debug export ----------
     def get_debug(self) -> Dict[str, Any]:
@@ -285,13 +321,15 @@ class EnhancedScalpingStrategy:
             rsi_rising = rsi_val > rsi_prev
 
             # --- regime detection ---
+            adx_series = spot_df.get("adx")
+            plan["adx"] = float(adx_series.iloc[-1]) if adx_series is not None else None
             reg = detect_market_regime(
                 df=df,
-                adx=spot_df.get("adx"),
+                adx=adx_series,
                 di_plus=spot_df.get("di_plus"),
                 di_minus=spot_df.get("di_minus"),
             )
-            if reg.regime == "RANGE" and spot_df.get("adx") is None:
+            if reg.regime == "RANGE" and adx_series is None:
                 reg.regime = "TREND"  # fallback when ADX not available
             plan["regime"] = reg.regime
             if reg.regime == "NO_TRADE":
@@ -369,6 +407,7 @@ class EnhancedScalpingStrategy:
 
             atr_pct = (atr_val / price) * 100.0
             plan["atr_pct"] = round(atr_pct, 2)
+            self.last_atr_pct = plan["atr_pct"]
             if not (cfg.atr_min <= plan["atr_pct"] <= cfg.atr_max):
                 return plan_block("atr_out_of_band", atr_pct=plan["atr_pct"])
 
@@ -442,6 +481,11 @@ class EnhancedScalpingStrategy:
                 need = min(need, 6)
             if score < need:
                 return plan_block("score_low", score=score, need=need)
+
+            rej = self._iv_adx_reject_reason(plan, price)
+            if rej:
+                reason, extra = rej
+                return plan_block(reason, **extra)
 
             entry_price = float(current_price)
             tick_size = float(getattr(getattr(settings, "executor", object()), "tick_size", 0.05))

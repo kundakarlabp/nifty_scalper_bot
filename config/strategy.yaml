@@ -18,6 +18,8 @@ gates:
   score_trend_min: 9
   score_range_min: 8
   mtf_confirm: true
+  iv_percentile_limit: 85   # block if IVpct > limit AND score below trend min+1
+  adx_min_trend: 18         # require ADX≥18 in TREND regime
 
 micro:
   max_spread_pct_regular: 0.35
@@ -26,6 +28,9 @@ micro:
   depth_multiplier: 5
 
 options:
+  delta_target: 0.40           # target absolute delta
+  delta_band: 0.05             # acceptable |delta-target|
+  delta_enable_score: 10       # only use delta-target when plan.score >= this
   min_oi: 500000
   max_median_spread_pct: 0.35
   delta_min: 0.35

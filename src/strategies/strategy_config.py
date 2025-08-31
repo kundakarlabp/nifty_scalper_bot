@@ -30,12 +30,17 @@ class StrategyConfig:
     score_trend_min: int
     score_range_min: int
     mtf_confirm: bool
+    iv_percentile_limit: int
+    adx_min_trend: int
     max_spread_pct_regular: float
     max_spread_pct_open: float
     max_spread_pct_last20m: float
     depth_multiplier: int
     min_oi: int
     max_median_spread_pct: float
+    delta_target: float
+    delta_band: float
+    delta_enable_score: int
     delta_min: float
     delta_max: float
     re_atm_drift_pct: float
@@ -87,12 +92,17 @@ class StrategyConfig:
             score_trend_min=int(gates.get("score_trend_min", 9)),
             score_range_min=int(gates.get("score_range_min", 8)),
             mtf_confirm=bool(gates.get("mtf_confirm", True)),
+            iv_percentile_limit=int(gates.get("iv_percentile_limit", 85)),
+            adx_min_trend=int(gates.get("adx_min_trend", 18)),
             max_spread_pct_regular=float(micro.get("max_spread_pct_regular", 0.35)),
             max_spread_pct_open=float(micro.get("max_spread_pct_open", 0.30)),
             max_spread_pct_last20m=float(micro.get("max_spread_pct_last20m", 0.45)),
             depth_multiplier=int(micro.get("depth_multiplier", 5)),
             min_oi=int(options.get("min_oi", 500000)),
             max_median_spread_pct=float(options.get("max_median_spread_pct", 0.35)),
+            delta_target=float(options.get("delta_target", 0.40)),
+            delta_band=float(options.get("delta_band", 0.05)),
+            delta_enable_score=int(options.get("delta_enable_score", 999)),
             delta_min=float(options.get("delta_min", 0.35)),
             delta_max=float(options.get("delta_max", 0.60)),
             re_atm_drift_pct=float(options.get("re_atm_drift_pct", 0.35)),
