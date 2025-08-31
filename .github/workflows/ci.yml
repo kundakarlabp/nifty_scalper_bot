@@ -29,6 +29,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Pre-commit (linters & formatters)
+        run: |
+          pip install pre-commit
+          pre-commit run --all-files
+
       - name: Make run_checks executable
         run: chmod +x run_checks.sh
 
