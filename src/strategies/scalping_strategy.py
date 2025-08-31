@@ -5,7 +5,7 @@ import logging
 import time
 from collections import deque
 from datetime import datetime, time as dt_time
-from typing import Any, Dict, Optional, Tuple, Literal
+from typing import Any, Dict, Optional, Tuple, Literal, Deque
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -132,7 +132,7 @@ class EnhancedScalpingStrategy:
 
         # Exportable debug snapshot
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
-        self._iv_window = getattr(self, "_iv_window", deque(maxlen=20))
+        self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
 
     # ---------- tech utils ----------
@@ -186,7 +186,7 @@ class EnhancedScalpingStrategy:
             from src.risk.greeks import implied_vol_newton
 
             tv = max(0.5, S * (self.last_atr_pct / 100.0) * 0.25)
-            iv = implied_vol_newton(tv, S, K, T, 0.06, "CE", guess=0.20) or 0.20
+            iv = implied_vol_newton(tv, S, K, T, 0.06, 0.0, "CE", guess=0.20) or 0.20
         except Exception:
             iv = 0.20
         self._iv_window.append(iv)
@@ -607,7 +607,7 @@ class ScalpingStrategy(EnhancedScalpingStrategy):
 
     def evaluate_from_backtest(
         self, ts: datetime, o: float, h: float, l: float, c: float, v: float
-    ) -> dict:
+    ) -> Dict[str, Any] | None:
         """Update internal buffer with a bar and reuse ``generate_signal``."""
 
         if not hasattr(self, "_bt_df"):
