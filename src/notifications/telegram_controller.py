@@ -767,7 +767,7 @@ class TelegramController:
                 gates.append(("daily_dd", not dd, status.get("day_realized_loss")))
                 bc = int(plan.get("bar_count") or 0) >= 20
                 gates.append(("bar_count", bc, plan.get("bar_count")))
-                data_stale = (now - last_ts_sec) <= 90 if last_ts_sec else False
+                data_stale = (now - last_ts_sec) <= 150 if last_ts_sec else False
                 gates.append(("data_stale", data_stale, plan.get("last_bar_ts")))
                 regime = plan.get("regime") in ("TREND", "RANGE")
                 gates.append(("regime", regime, plan.get("regime")))
@@ -786,6 +786,12 @@ class TelegramController:
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
+                sym = plan.get("strike") or plan.get("symbol") or "-"
+                micro = plan.get("micro", {})
+                lines.append(
+                    f"quote: {sym} bid={micro.get('bid')} ask={micro.get('ask')} "
+                    f"bid5={micro.get('bid5')} ask5={micro.get('ask5')} depth_ok={micro.get('depth_ok')}"
+                )
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))

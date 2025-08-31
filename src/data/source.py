@@ -452,16 +452,21 @@ def get_historical_data(
     attempts = 0
     df: Optional[pd.DataFrame] = None
 
-    while attempts < 3:
+    while attempts < 4:
         df = source.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
         if isinstance(df, pd.DataFrame) and len(df) >= warmup:
             return df.tail(warmup).copy()
-        start -= step
+        if attempts == 2:
+            start -= step + timedelta(days=2)
+        else:
+            start -= step
         attempts += 1
 
     # Return whatever data was fetched (may be ``None`` or short).
-    if isinstance(df, pd.DataFrame) and len(df) > warmup:
-        return df.tail(warmup).copy()
+    if isinstance(df, pd.DataFrame):
+        if len(df) > warmup:
+            return df.tail(warmup).copy()
+        return df.copy()
     return df
 
 

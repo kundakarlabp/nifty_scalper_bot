@@ -530,7 +530,7 @@ class StrategyRunner:
                     lag_sec = abs((now_ts - lb).total_seconds())
                     if lb > now_ts + timedelta(seconds=5):
                         plan["reason_block"] = "clock_skew"
-                    elif lag_sec > 90:
+                    elif lag_sec > 150:
                         plan["reason_block"] = "data_stale"
                 except Exception:
                     pass

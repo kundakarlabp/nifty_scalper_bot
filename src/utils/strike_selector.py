@@ -438,7 +438,7 @@ def get_instrument_tokens(
             except Exception:
                 continue
 
-        return {
+        result = {
             "spot_token": int(spot_token),
             "spot_price": float(px),
             "atm_strike": int(atm),
@@ -447,6 +447,10 @@ def get_instrument_tokens(
             "tokens": {"ce": ce_token, "pe": pe_token},
             "atm_tokens": {"ce": atm_ce, "pe": atm_pe},
         }
+
+        if not ce_token or not pe_token:
+            result["error"] = "no_option_token"
+        return result
 
     except Exception as e:
         logger.exception("get_instrument_tokens failed: %s", e)

@@ -250,6 +250,7 @@ class ExecutorSettings(BaseModel):
     max_spread_pct: float = 0.0035  # 0.35%
     depth_multiplier: float = 5.0   # top-5 depth >= mult * order size
     micro_retry_limit: int = 3
+    require_depth: bool = False
 
     @field_validator("tp1_qty_ratio")
     @classmethod

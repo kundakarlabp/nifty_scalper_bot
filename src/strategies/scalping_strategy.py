@@ -410,7 +410,7 @@ class EnhancedScalpingStrategy:
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
             if not info_atm:
-                return plan_block("no_option_quote", micro={"spread_pct": None, "depth_ok": None})
+                return plan_block("no_option_token", micro={"spread_pct": None, "depth_ok": None})
             tsym, lot_sz = info_atm
             q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
             runner_obj = getattr(self, "runner", None)
