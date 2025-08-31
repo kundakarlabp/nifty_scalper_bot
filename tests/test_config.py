@@ -108,6 +108,46 @@ def test_zerodha_creds_optional_when_paper():
         validate_critical_settings()
 
 
+def test_api_secret_not_required_for_live_trading(monkeypatch):
+    """API secret can be omitted once an access token is issued."""
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_, **__):
+            ts = pd.Timestamp("2024-01-01")
+            return pd.DataFrame(
+                {"open": [1], "high": [1], "low": [1], "close": [1], "volume": [0]},
+                index=[ts],
+            )
+
+    class DummyKite:
+        def __init__(self, api_key):
+            pass
+
+        def set_access_token(self, token):
+            pass
+
+    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
+        m.setattr("src.config.LiveKiteSource", DummySource)
+        m.setattr("src.config.KiteConnect", DummyKite)
+        # Should not raise even though API secret is absent
+        validate_critical_settings()
+
+
 def test_negative_chat_id_allowed():
     """Telegram chat IDs can be negative for group chats."""
     env = {

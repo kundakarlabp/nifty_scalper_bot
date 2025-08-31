@@ -497,14 +497,20 @@ object.__setattr__(settings, "PLAN_STALE_SEC", int(_os.getenv("PLAN_STALE_SEC", 
 def validate_critical_settings() -> None:
     errors = []
 
-    # Live trading requires broker creds
+    # Live trading requires broker credentials except the API secret.
+    # The secret is only needed when generating an access token and not for
+    # subsequent authenticated requests, so we intentionally do not enforce it
+    # here. This allows deployments to run with just the API key and access
+    # token which matches the runtime requirements of Kite's REST API.
     if settings.enable_live_trading:
         if not settings.zerodha.api_key:
-            errors.append("ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true")
-        if not settings.zerodha.api_secret:
-            errors.append("ZERODHA__API_SECRET is required when ENABLE_LIVE_TRADING=true")
+            errors.append(
+                "ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true"
+            )
         if not settings.zerodha.access_token:
-            errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
+            errors.append(
+                "ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true"
+            )
 
     # Telegram configuration (required only when enabled)
     if settings.telegram.enabled:
