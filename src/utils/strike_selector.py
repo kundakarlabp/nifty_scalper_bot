@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import re
 
 from src.config import settings
-from src.risk.greeks import implied_vol_newton, bs_price_delta_gamma
+from src.risk.greeks import OptionType, implied_vol_newton, bs_price_delta_gamma
 
 try:
     # Optional; only imported if installed
@@ -517,7 +517,7 @@ def select_strike(spot: float, score: int, allow_pm1_if_score_ge: int = 9) -> Op
 
 def select_strike_by_delta(
     spot: float,
-    opt: str,
+    opt: OptionType,
     expiry,
     target: float,
     band: float,

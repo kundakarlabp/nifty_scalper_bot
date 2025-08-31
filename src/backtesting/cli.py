@@ -86,12 +86,12 @@ def main() -> None:
         best = sorted(candidates, key=lambda x: (x[0]["PF"], x[0]["AvgR"]), reverse=True)[0]
 
         risk_te = RiskEngine(LimitConfig(tz=cfg.tz))
-        cfg.score_trend_min = best[1]["score_trend_min"]
+        cfg.score_trend_min = int(best[1]["score_trend_min"])
         cfg.tp2_R_trend = best[1]["tp2_R_trend"]
         bt_te = BacktestEngine(feed, cfg, risk_te, sim, outdir=os.path.join(fold_dir, "test"))
         s_te = bt_te.run(start=tr_e.isoformat(), end=te_e.isoformat())
         with open(os.path.join(fold_dir, "best_config.yaml"), "w") as f:
-            import yaml
+            import yaml  # type: ignore[import]
             yaml.safe_dump(best[1], f)
         with open(os.path.join(fold_dir, "test_summary.json"), "w") as f:
             json.dump(s_te, f, indent=2)

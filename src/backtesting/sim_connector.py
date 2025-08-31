@@ -8,7 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.risk.greeks import estimate_greeks_from_mid
+from src.risk.greeks import estimate_greeks_from_mid, OptionType
 
 
 def synth_book_from_mid(mid: float, settings) -> tuple[float, float]:
@@ -60,7 +60,7 @@ class SimConnector:
         self.costs = costs or CostModel()
         self.micro = micro or MicroModel()
 
-    def synth_option_book(self, spot: float, strike: float, opt_type: str, now: datetime, atr_pct: float) -> Dict[str, float]:
+    def synth_option_book(self, spot: float, strike: float, opt_type: OptionType, now: datetime, atr_pct: float) -> Dict[str, float]:
         """Return a synthetic top-of-book quote for an option."""
 
         now_tz = now if now.tzinfo else now.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
