@@ -67,7 +67,7 @@ class BacktestEngine:
             parsed = strike_selector.parse_nfo_symbol(tsym) if tsym else None
             if not parsed:
                 plan["has_signal"] = False
-                plan["reason_block"] = "no_option_quote"
+                plan["reason_block"] = "no_option_token"
                 continue
             K = parsed["strike"]
             opt = parsed["option_type"]

@@ -151,7 +151,7 @@ class InstrumentsSettings(BaseModel):
 
 
 class StrategySettings(BaseModel):
-    min_signal_score: int = 3
+    min_signal_score: int = 6
     confidence_threshold: float = 55.0  # 0..100
     min_bars_for_signal: int = 20
     ema_fast: int = 9
@@ -251,6 +251,7 @@ class ExecutorSettings(BaseModel):
     depth_multiplier: float = 5.0   # top-5 depth >= mult * order size
     micro_retry_limit: int = 3
     require_depth: bool = False
+    default_spread_pct_est: float = 0.25
 
     @field_validator("tp1_qty_ratio")
     @classmethod

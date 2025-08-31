@@ -45,7 +45,7 @@ class FakeRunner:
                 "score": 4,
                 "atr_pct": 1.0,
                 "micro": {},
-                "reason_block": "no_option_quote",
+                "reason_block": "no_option_token",
             },
             "bars": {
                 "bar_count": 10,
@@ -74,6 +74,6 @@ def test_audit_rootcause(monkeypatch) -> None:
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/audit"}})
     msg = sent[0]
-    assert "reason_block: *no_option_quote*" in msg
+    assert "reason_block: *no_option_token*" in msg
     assert "micro_spread: ❌ FAIL" in msg
     assert "micro_depth: ❌ FAIL" in msg
