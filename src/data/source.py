@@ -311,9 +311,28 @@ def _coerce_interval(s: str) -> str:
     return "minute"
 
 
+def _naive_ist(dt: datetime) -> datetime:
+    """Return ``dt`` converted to timezone-naive IST."""
+    ts = pd.Timestamp(dt)
+    try:
+        from src.utils.time_windows import TZ
+
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(TZ)
+        else:
+            ts = ts.tz_convert(TZ)
+        return ts.tz_localize(None).to_pydatetime()
+    except Exception:
+        return ts.tz_localize(None).to_pydatetime()
+
+
 def _clip_window(df: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
     try:
-        return df.loc[(df.index >= start) & (df.index <= end)].copy()
+        s = pd.Timestamp(start).tz_localize(None)
+        e = pd.Timestamp(end).tz_localize(None)
+        idx = pd.DatetimeIndex(df.index).tz_localize(None)
+        mask = (idx >= s) & (idx <= e)
+        return df.loc[mask].copy()
     except Exception:
         return df.copy()
 
@@ -568,6 +587,8 @@ class LiveKiteSource(DataSource):
             )
             return None
 
+        start = _naive_ist(start)
+        end = _naive_ist(end)
         if start >= end:
             # Soft auto-correct: if equal or reversed, nudge start back 10 minutes
             start = end - timedelta(minutes=10)
