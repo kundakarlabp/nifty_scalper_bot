@@ -16,7 +16,11 @@ import pandas as pd
 from src.config import settings
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import floor_to_minute, TZ
-from src.utils.market_time import is_market_open, prev_session_last_20m
+from src.utils.market_time import (
+    is_market_open,
+    prev_session_last_20m,
+    prev_session_bounds,
+)
 from src.strategies.strategy_config import (
     resolve_config_path,
     try_load,
@@ -1097,7 +1101,9 @@ class StrategyRunner:
 
             now = floor_to_minute(self._now_ist(), self._now_ist().tzinfo or TZ)
 
-            # Derive session bounds using configured start/end times.
+            tz = now.tzinfo or TZ
+
+            # Build today's session using configured start/end times
             session_start = now.replace(
                 hour=self._start_time.hour,
                 minute=self._start_time.minute,
@@ -1110,21 +1116,34 @@ class StrategyRunner:
                 second=0,
                 microsecond=0,
             )
-
             if session_end <= session_start:
                 session_end += timedelta(days=1)
 
-            if now < session_start:
-                # Before today's session start: shift to the previous session
-                session_start -= timedelta(days=1)
-                session_end -= timedelta(days=1)
-                end = session_end
-            elif now > session_end:
-                # After today's session end: anchor to today's close
-                end = session_end
-            else:
-                # Within the session: end at current time
-                end = now
+            if now < session_start or now > session_end:
+                # Outside today's session: shift to the previous trading day
+                ref = (now - timedelta(days=1)) if now < session_start else now
+                prev_start, _ = prev_session_bounds(ref.astimezone(TZ))
+                prev_day = prev_start.astimezone(tz).date()
+                session_start = datetime(
+                    prev_day.year,
+                    prev_day.month,
+                    prev_day.day,
+                    self._start_time.hour,
+                    self._start_time.minute,
+                    tzinfo=tz,
+                )
+                session_end = datetime(
+                    prev_day.year,
+                    prev_day.month,
+                    prev_day.day,
+                    self._end_time.hour,
+                    self._end_time.minute,
+                    tzinfo=tz,
+                )
+                if session_end <= session_start:
+                    session_end += timedelta(days=1)
+
+            end = session_end if now > session_end or now < session_start else now
 
             start = end - timedelta(minutes=lookback)
             if start < session_start:

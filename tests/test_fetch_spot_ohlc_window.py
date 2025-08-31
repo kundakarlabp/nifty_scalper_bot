@@ -74,7 +74,8 @@ def test_fetch_spot_ohlc_pre_session(monkeypatch):
     _, start, end, _ = ds.calls[0]
 
     lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
-    expected_end = datetime(2023, 12, 31, 15, 25, tzinfo=timezone.utc)
+    # Previous trading session should skip the weekend (Dec 30-31)
+    expected_end = datetime(2023, 12, 29, 15, 25, tzinfo=timezone.utc)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
 
