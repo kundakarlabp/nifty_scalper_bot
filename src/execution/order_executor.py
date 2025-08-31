@@ -310,11 +310,26 @@ class OrderExecutor:
 
     def __init__(
         self,
-        kite: Optional[KiteConnect],
+        kite: Optional[KiteConnect] | Any,
         telegram_controller: Any = None,
         on_trade_closed: Optional[Callable[[float], None]] = None,
         journal: Optional[Journal] = None,
     ) -> None:
+        """Create a new executor.
+
+        The first argument can either be a ``KiteConnect`` instance or a plain
+        settings object containing attributes like ``ACK_TIMEOUT_MS`` used to
+        tweak router behaviour.  This keeps the constructor lightweight for unit
+        tests which often pass a dummy object instead of a real broker client.
+        """
+
+        cfg_local = None
+        if kite is not None and not (
+            hasattr(kite, "place_order") or hasattr(kite, "orders")
+        ):
+            cfg_local = kite
+            kite = None
+
         self._lock = threading.Lock()
         self.kite = kite
         self._live = kite is not None
@@ -352,12 +367,22 @@ class OrderExecutor:
         self.logger = log
 
         # FSM + router queueing
-        cfg = settings or object()
-        self.router_ack_timeout_ms = int(getattr(cfg, "ACK_TIMEOUT_MS", 1500))
-        self.router_fill_timeout_ms = int(getattr(cfg, "FILL_TIMEOUT_MS", 10000))
-        self.router_backoff_ms = int(getattr(cfg, "RETRY_BACKOFF_MS", 200))
-        self.router_max_place_retries = int(getattr(cfg, "MAX_PLACE_RETRIES", 2))
-        self.router_max_modify_retries = int(getattr(cfg, "MAX_MODIFY_RETRIES", 2))
+        cfg = cfg_local or settings or object()
+        self.router_ack_timeout_ms = int(
+            getattr(cfg, "ACK_TIMEOUT_MS", getattr(settings, "ACK_TIMEOUT_MS", 1500))
+        )
+        self.router_fill_timeout_ms = int(
+            getattr(cfg, "FILL_TIMEOUT_MS", getattr(settings, "FILL_TIMEOUT_MS", 10000))
+        )
+        self.router_backoff_ms = int(
+            getattr(cfg, "RETRY_BACKOFF_MS", getattr(settings, "RETRY_BACKOFF_MS", 200))
+        )
+        self.router_max_place_retries = int(
+            getattr(cfg, "MAX_PLACE_RETRIES", getattr(settings, "MAX_PLACE_RETRIES", 2))
+        )
+        self.router_max_modify_retries = int(
+            getattr(cfg, "MAX_MODIFY_RETRIES", getattr(settings, "MAX_MODIFY_RETRIES", 2))
+        )
         self.router_max_inflight_per_symbol = 1
         self.router_plan_stale_sec = 20
 
