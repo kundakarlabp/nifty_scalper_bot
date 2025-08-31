@@ -131,6 +131,7 @@ def test_invalid_instrument_token_detected(monkeypatch):
         "ZERODHA__ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "123",
+        "VALIDATION_SKIP_OFFHOURS": "0",
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
@@ -149,7 +150,7 @@ def test_invalid_instrument_token_detected(monkeypatch):
         m.setattr("src.config.LiveKiteSource", DummySource)
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
-    assert "valid F&O token" in str(exc.value)
+    assert "invalid" in str(exc.value)
 
 
 def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):

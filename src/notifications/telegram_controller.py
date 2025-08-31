@@ -545,7 +545,9 @@ class TelegramController:
 
                 lines: List[str] = ["📊 Status"]
                 lines.append(f"• Market Open: {be(status.get('market_open'))}")
-                lines.append(f"• Within Window: {be(status.get('within_window'))}")
+                lines.append(
+                    f"• Within Window: {be(status.get('within_window'))}  (off_hours={plan.get('off_hours')})"
+                )
                 lines.append(f"• Daily DD Hit: {be(status.get('daily_dd_hit'))}")
                 lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
                 lines.append(f"• Trades Today: {status.get('trades_today')}")
@@ -808,6 +810,7 @@ class TelegramController:
                         plan.get("last_bar_lag_s"),
                     )
                 )
+                lines.append(f"off_hours: {plan.get('off_hours')}")
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))

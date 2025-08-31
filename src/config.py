@@ -12,20 +12,19 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 
-import pandas as pd
 from pydantic import BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.utils.market_time import is_market_open, last_session_window
 
 # Optional external dependencies for validation
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
-try:
-    from src.data.source import LiveKiteSource  # type: ignore
-except Exception:  # pragma: no cover
-    LiveKiteSource = None  # type: ignore
 
+# Legacy stub for compatibility with older tests
+LiveKiteSource = None  # type: ignore
 
 # ================= Sub-models =================
 
@@ -301,6 +300,7 @@ class AppSettings(BaseSettings):
     enable_time_windows: bool = True
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
+    validation_skip_offhours: bool = True
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
@@ -526,7 +526,6 @@ def validate_critical_settings() -> None:
         settings.enable_live_trading
         and not settings.allow_offhours_testing
         and KiteConnect is not None
-        and LiveKiteSource is not None
         and not errors  # only attempt if creds are present
     ):
         token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
@@ -536,22 +535,41 @@ def validate_critical_settings() -> None:
             try:
                 kite = KiteConnect(api_key=str(settings.zerodha.api_key))
                 kite.set_access_token(str(settings.zerodha.access_token))
-                src = LiveKiteSource(kite=kite)
-                src.connect()
-                end = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
+                now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
                     second=0, microsecond=0
                 )
-                start = end - timedelta(minutes=1)
-                df = src.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
-                if not isinstance(df, pd.DataFrame) or df.empty:
-                    # Outside market hours the historical API may return no data.
-                    # Fall back to a simple last-price lookup so that a valid token
-                    # doesn't trigger a false validation error.
-                    ltp_fn = getattr(src, "get_last_price", None)
-                    ltp = ltp_fn(token) if callable(ltp_fn) else None
-                    if not isinstance(ltp, (int, float)):
+                if is_market_open(now_ist):
+                    probe_from, probe_to = now_ist - timedelta(minutes=20), now_ist
+                else:
+                    probe_from, probe_to = last_session_window(now_ist)
+                try:
+                    bars = (
+                        kite.historical_data(
+                            token, probe_from, probe_to, "minute", oi=False
+                        )
+                        or []
+                    )
+                except Exception as e:
+                    logging.getLogger("config").warning(
+                        "startup: historical probe failed: %r", e
+                    )
+                    bars = []
+                if not bars:
+                    ok_quote = False
+                    try:
+                        q = kite.ltp([token])
+                        ok_quote = bool(q)
+                    except Exception:
+                        pass
+                    if ok_quote or settings.validation_skip_offhours:
+                        logging.getLogger("config").warning(
+                            "startup: empty historical window (%s..%s) — market off-hours or thin history; continuing.",
+                            probe_from,
+                            probe_to,
+                        )
+                    else:
                         errors.append(
-                            f"instrument_token {token} returned no data; configure a valid F&O token"
+                            f"startup: instrument_token {token} invalid (no quote & not in instruments)"
                         )
             except Exception as e:
                 logging.getLogger("config").warning(

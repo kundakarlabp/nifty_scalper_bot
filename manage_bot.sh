@@ -27,7 +27,7 @@ PY
 
 start_trader() {
   log "Starting trader (shadow mode by default)"
-  exec python -m src.main start
+  python -m src.main start
 }
 
 run_backtest() {
@@ -43,7 +43,20 @@ token_helper() {
 }
 
 case "$cmd" in
-  run)             sanity_check; start_trader ;;
+  run)
+    sanity_check
+    backoff=1
+    while true; do
+      if start_trader; then
+        backoff=1
+      else
+        log "Fatal during startup, will retry in ${backoff}s"
+        sleep "$backoff"
+        backoff=$((backoff*2))
+        if [ "$backoff" -gt 60 ]; then backoff=60; fi
+      fi
+    done
+    ;;
   backtest)        shift; run_backtest "$@" ;;
   token)           token_helper ;;
   *)

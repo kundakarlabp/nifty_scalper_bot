@@ -16,6 +16,7 @@ import pandas as pd
 from src.config import settings
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import floor_to_minute, TZ
+from src.utils.market_time import is_market_open
 from src.strategies.strategy_config import (
     resolve_config_path,
     try_load,
@@ -520,6 +521,10 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
+            plan["market_open"] = is_market_open(self.now_ist)
+            plan["off_hours"] = not plan["market_open"]
+            if plan["off_hours"]:
+                plan.setdefault("reasons", []).append("off_hours")
             last_ts = plan.get("last_bar_ts")
             if last_ts and not plan.get("reason_block"):
                 try:
@@ -1496,12 +1501,14 @@ class StrategyRunner:
             or market_open
             or bool(settings.allow_offhours_testing)
         )
+        off_hours = not market_open
         diag = {
             "time_ist": self._now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "live_trading": bool(settings.enable_live_trading),
             "broker": "Kite" if self.kite is not None else "Paper",
             "market_open": market_open,
             "within_window": within_window,
+            "off_hours": off_hours,
             "daily_dd_hit": self.risk.day_realized_loss >= self._max_daily_loss_rupees,
             "cooloff_until": self.risk.loss_cooldown_until.isoformat() if self.risk.loss_cooldown_until else "-",
             "paused": self._paused,
