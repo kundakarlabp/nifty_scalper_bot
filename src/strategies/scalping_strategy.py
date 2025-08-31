@@ -546,7 +546,20 @@ class EnhancedScalpingStrategy:
 
 
 class ScalpingStrategy(EnhancedScalpingStrategy):
-    """Alias with a helper used for backtesting."""
+    """Alias with helpers used for tests and backtesting."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Allow an optional ``settings`` kwarg for tests.
+
+        The upstream ``EnhancedScalpingStrategy`` pulls configuration from the
+        global ``settings`` object. The lightweight test harness in this kata
+        instantiates ``ScalpingStrategy(settings=None)`` to avoid importing the
+        real config. We accept and discard this keyword to keep the public API
+        stable.
+        """
+
+        kwargs.pop("settings", None)
+        super().__init__(*args, **kwargs)
 
     def evaluate_from_backtest(
         self, ts: datetime, o: float, h: float, l: float, c: float, v: float
