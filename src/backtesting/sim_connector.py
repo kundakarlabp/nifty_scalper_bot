@@ -11,6 +11,12 @@ from src.config import settings
 from src.risk.greeks import estimate_greeks_from_mid
 
 
+def synth_book_from_mid(mid: float, settings) -> tuple[float, float]:
+    est = getattr(settings.executor, "default_spread_pct_est", 0.25)
+    spr = mid * (est / 100.0)
+    return mid - spr / 2.0, mid + spr / 2.0
+
+
 @dataclass
 class CostModel:
     """Transaction cost parameters."""
@@ -68,6 +74,8 @@ class SimConnector:
         spr = mid * spr_pct / 100.0
         bid = mid - spr / 2.0
         ask = mid + spr / 2.0
+        if bid <= 0 or ask <= 0:
+            bid, ask = synth_book_from_mid(mid, settings)
         depth_units = self.micro.depth_per_lot * self.lot_size
         return {"bid": bid, "ask": ask, "bid5": depth_units * 10, "ask5": depth_units * 10, "mid": mid, "spread_pct": spr_pct}
 

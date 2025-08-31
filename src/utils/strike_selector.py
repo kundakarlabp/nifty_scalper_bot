@@ -18,11 +18,13 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import re
 
 from src.config import settings
+from src.risk.greeks import implied_vol_newton, bs_price_delta_gamma
 
 try:
     # Optional; only imported if installed
@@ -511,6 +513,35 @@ def select_strike(spot: float, score: int, allow_pm1_if_score_ge: int = 9) -> Op
         if oi >= 500_000 and spread_pct <= 0.35:
             return StrikeInfo(strike=int(st), meta={"oi": oi, "spread_pct": spread_pct})
     return None
+
+
+def select_strike_by_delta(
+    spot: float,
+    opt: str,
+    expiry,
+    target: float,
+    band: float,
+    chain: list[dict],
+) -> dict | None:
+    """Pick a strike near ``target`` absolute delta from ``chain``."""
+
+    cand: list[tuple[float, dict]] = []
+    for row in chain:
+        K = row["strike"]
+        T = max(1 / 365, (expiry - datetime.now(ZoneInfo("Asia/Kolkata"))).days / 365)
+        px_est = max(1.0, spot * 0.005)
+        iv = implied_vol_newton(px_est, spot, K, T, 0.06, 0.0, opt, guess=0.20) or 0.20
+        _, d, _ = bs_price_delta_gamma(spot, K, T, 0.06, 0.0, iv, opt)
+        if (
+            d is not None
+            and abs(abs(d) - target) <= band
+            and row.get("oi", 0) >= 500_000
+            and row.get("median_spread_pct", 1.0) <= 0.35
+        ):
+            cand.append((abs(abs(d) - target), row))
+    if not cand:
+        return None
+    return sorted(cand, key=lambda x: x[0])[0][1]
 
 
 def needs_reatm(entry_spot: float, current_spot: float, drift_pct: float = 0.35) -> bool:

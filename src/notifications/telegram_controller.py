@@ -56,6 +56,16 @@ def _kpis(trades: List[Dict[str, float]]) -> Dict[str, float]:
         "p95_loss_R": round(abs(p95_loss), 2),
     }
 
+
+def _fmt_micro(sym: str, micro: dict, last_bar_ts: str | None, lag_s: int | None) -> str:
+    m = micro or {}
+    return (
+        f"quote: {sym} src={m.get('source')} "
+        f"ltp={m.get('ltp')} bid={m.get('bid')} ask={m.get('ask')} "
+        f"spread%={m.get('spread_pct')} bid5={m.get('bid5')} ask5={m.get('ask5')} "
+        f"depth_ok={m.get('depth_ok')} last_bar_ts={last_bar_ts} lag_s={lag_s}"
+    )
+
 class TelegramController:
     """
     Production-safe Telegram controller:
@@ -790,17 +800,18 @@ class TelegramController:
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
                 sym = plan.get("strike") or plan.get("symbol") or "-"
-                micro = plan.get("micro", {})
                 lines.append(
-                    f"quote: {sym} src={micro.get('source')} ltp={micro.get('ltp')} bid={micro.get('bid')} ask={micro.get('ask')} "
-                    f"spread%={micro.get('spread_pct')} bid5={micro.get('bid5')} ask5={micro.get('ask5')} depth_ok={micro.get('depth_ok')}"
+                    _fmt_micro(
+                        sym,
+                        plan.get("micro"),
+                        plan.get("last_bar_ts"),
+                        plan.get("last_bar_lag_s"),
+                    )
                 )
-                if last_ts:
-                    lines.append(f"last_bar_ts: {last_ts}")
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))
-                return self._send("\n".join(lines))
+                return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Why error: {e}")
 
@@ -830,11 +841,15 @@ class TelegramController:
 
         if cmd == "/quotes":
             try:
-                opt = args[0].lower() if args else "both"
-                if not self._quotes_provider:
-                    return self._send("quotes provider not wired")
-                text = self._quotes_provider(opt)
-                return self._send("```text\n" + text + "\n```", parse_mode="Markdown")
+                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                sym = plan.get("strike") or plan.get("symbol") or "-"
+                text = "📈 *Quotes*\n" + _fmt_micro(
+                    sym,
+                    plan.get("micro"),
+                    plan.get("last_bar_ts"),
+                    plan.get("last_bar_lag_s"),
+                )
+                return self._send(text, parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Quotes error: {e}")
 

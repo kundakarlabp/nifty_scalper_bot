@@ -45,6 +45,8 @@ class BacktestEngine:
         self.outdir = outdir
         os.makedirs(outdir, exist_ok=True)
         self.trades: List[Dict[str, object]] = []
+        self.equity = 100_000.0
+        self.equity_curve: list[tuple[str, float]] = []
 
     def run(self, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, float]:
         """Execute the backtest between ``start`` and ``end`` timestamps."""
@@ -53,7 +55,6 @@ class BacktestEngine:
         from src.strategies.scalping_strategy import ScalpingStrategy
 
         strategy = ScalpingStrategy()
-        equity = 100_000.0
 
         for ts, o, h, l, c, v in bars.iter_bars():
             plan = strategy.evaluate_from_backtest(ts, o, h, l, c, v)
@@ -77,7 +78,7 @@ class BacktestEngine:
             ladd0, ladd1 = self.sim.ladder_prices(mid, spread)
 
             ok, _, _ = self.risk.pre_trade_check(
-                equity_rupees=equity,
+                equity_rupees=self.equity,
                 plan=plan,
                 exposure=self._exposure_snapshot(),
                 intended_symbol=tsym,
@@ -145,6 +146,9 @@ class BacktestEngine:
             net = gross - (costs_in + costs_out)
             pnl_R = ((exit_px - entry_px) * (1 if side == "BUY" else -1)) / max(1e-6, R)
 
+            self.equity += net
+            self.equity_curve.append((exit_ts.isoformat(), round(self.equity, 2)))
+
             self.trades.append(
                 {
                     "ts_entry": ts.isoformat(),
@@ -158,6 +162,7 @@ class BacktestEngine:
                     "R": round(R, 2),
                     "pnl_R": round(pnl_R, 2),
                     "pnl_rupees": round(net, 2),
+                    "regime": plan.get("regime", "TREND"),
                 }
             )
             self.risk.on_trade_closed(pnl_R=pnl_R)
@@ -185,8 +190,31 @@ class BacktestEngine:
             writer.writeheader()
             for t in self.trades:
                 writer.writerow(t)
+        eq_path = os.path.join(self.outdir, "equity_curve.csv")
+        with open(eq_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ts", "equity"])
+            w.writerows(self.equity_curve)
 
         summary = self._summary_metrics(self.trades)
+        by_regime = {"TREND": [], "RANGE": []}
+        for t in self.trades:
+            reg = t.get("regime", "TREND")
+            by_regime.setdefault(reg, []).append(float(t.get("pnl_R", 0)))
+
+        def pf(rs: List[float]) -> float:
+            pos = [r for r in rs if r > 0]
+            neg = [-r for r in rs if r < 0]
+            return (sum(pos) / sum(neg)) if neg else float("inf")
+
+        summary.update(
+            {
+                "PF_trend": round(pf(by_regime.get("TREND", [])), 2),
+                "PF_range": round(pf(by_regime.get("RANGE", [])), 2),
+                "trades_trend": len(by_regime.get("TREND", [])),
+                "trades_range": len(by_regime.get("RANGE", [])),
+            }
+        )
         with open(os.path.join(self.outdir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
         return summary
