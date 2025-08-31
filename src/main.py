@@ -190,6 +190,8 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
         global _stop_flag
         logging.getLogger("main").info("Signal %s received — shutting down…", signum)
         _stop_flag = True
+        # Ensure the main loop exits promptly even if blocked in sleep or I/O
+        raise SystemExit(0)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
