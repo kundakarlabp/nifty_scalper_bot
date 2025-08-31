@@ -49,10 +49,42 @@ def mock_kite():
 
     # Mock for get_next_expiry_date
     kite.instruments.return_value = [
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "CE", "strike": 19500, "tradingsymbol": "NIFTY2480819500CE", "instrument_token": 1},
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "PE", "strike": 19500, "tradingsymbol": "NIFTY2480819500PE", "instrument_token": 2},
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "CE", "strike": 19550, "tradingsymbol": "NIFTY2480819550CE", "instrument_token": 3},
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 8).date(), "instrument_type": "PE", "strike": 19550, "tradingsymbol": "NIFTY2480819550PE", "instrument_token": 4},
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 8).date(),
+            "instrument_type": "CE",
+            "strike": 19500,
+            "tradingsymbol": "NIFTY2480819500CE",
+            "instrument_token": 1,
+        },
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 8).date(),
+            "instrument_type": "PE",
+            "strike": 19500,
+            "tradingsymbol": "NIFTY2480819500PE",
+            "instrument_token": 2,
+        },
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 8).date(),
+            "instrument_type": "CE",
+            "strike": 19550,
+            "tradingsymbol": "NIFTY2480819550CE",
+            "instrument_token": 3,
+        },
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 8).date(),
+            "instrument_type": "PE",
+            "strike": 19550,
+            "tradingsymbol": "NIFTY2480819550PE",
+            "instrument_token": 4,
+        },
     ]
     return kite
 
@@ -71,8 +103,24 @@ def test_get_instrument_tokens_weekly_expiry(mock_kite):
 def test_get_instrument_tokens_monthly_expiry(mock_kite):
     """Tests instrument selection for a monthly expiry."""
     mock_kite.instruments.return_value = [
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 29).date(), "instrument_type": "CE", "strike": 19500, "tradingsymbol": "NIFTY24AUG19500CE", "instrument_token": 5},
-        {"name": "NIFTY", "segment": "NFO-OPT", "expiry": datetime(2024, 8, 29).date(), "instrument_type": "PE", "strike": 19500, "tradingsymbol": "NIFTY24AUG19500PE", "instrument_token": 6},
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 29).date(),
+            "instrument_type": "CE",
+            "strike": 19500,
+            "tradingsymbol": "NIFTY24AUG19500CE",
+            "instrument_token": 5,
+        },
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 29).date(),
+            "instrument_type": "PE",
+            "strike": 19500,
+            "tradingsymbol": "NIFTY24AUG19500PE",
+            "instrument_token": 6,
+        },
     ]
     tokens = get_instrument_tokens(
         kite_instance=mock_kite,
@@ -87,3 +135,21 @@ def test_get_instrument_tokens_missing_trade_symbol(mock_kite, monkeypatch):
     monkeypatch.setattr(settings.instruments, "trade_symbol", "FAKE", raising=False)
     tokens = get_instrument_tokens(kite_instance=mock_kite)
     assert tokens is None
+
+
+@freeze_time("2024-08-05 10:00:00+05:30")
+def test_get_instrument_tokens_reports_missing_option_tokens(mock_kite):
+    mock_kite.instruments.return_value = [
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 8).date(),
+            "instrument_type": "CE",
+            "strike": 19500,
+            "tradingsymbol": "NIFTY2480819500CE",
+            "instrument_token": 1,
+        },
+    ]
+    tokens = get_instrument_tokens(kite_instance=mock_kite)
+    assert tokens is not None
+    assert tokens.get("error") == "no_option_token"

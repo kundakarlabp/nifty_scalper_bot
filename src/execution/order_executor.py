@@ -137,8 +137,22 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
         }
     except Exception as e:
         log.debug("fetch_quote_with_depth failed: %s", e)
+        ltp = 0.0
+        try:
+            data = _retry_call(kite.ltp, [f"NFO:{tsym}"], tries=2)
+            ltp = float((data or {}).get(f"NFO:{tsym}", {}).get("last_price", 0.0))
+        except Exception:
+            pass
+        if ltp <= 0.0 and yf is not None:  # pragma: no cover - best effort
+            try:
+                tkr = yf.Ticker(f"{tsym}.NS")
+                hist = tkr.history(period="1d", interval="1m")
+                if not hist.empty:
+                    ltp = float(hist["Close"].iloc[-1])
+            except Exception:
+                ltp = 0.0
         return {
-            "ltp": 0.0,
+            "ltp": ltp,
             "bid": 0.0,
             "ask": 0.0,
             "bid5_qty": 0,
@@ -191,22 +205,41 @@ def micro_ok(
     max_spread_frac = ms / 100.0 if ms > 1.0 else ms
     bid = float(getattr(quote, "bid", 0.0) or quote.get("bid", 0.0))
     ask = float(getattr(quote, "ask", 0.0) or quote.get("ask", 0.0))
+    ltp = float(getattr(quote, "ltp", 0.0) or quote.get("ltp", 0.0))
     # depth: use top-5 cumulative quantities if available; fall back to top-1
     bid5 = int(quote.get("bid5_qty", quote.get("bid_qty", 0)))
     ask5 = int(quote.get("ask5_qty", quote.get("ask_qty", 0)))
     if bid <= 0 or ask <= 0:
+        if (
+            not getattr(getattr(settings, "executor", object()), "require_depth", False)
+            and bid == 0.0
+            and ask == 0.0
+            and ltp > 0.0
+        ):
+            return True, {
+                "spread_pct": None,
+                "depth_ok": True,
+                "bid5": bid5,
+                "ask5": ask5,
+                "bid": bid,
+                "ask": ask,
+                "ltp": ltp,
+            }
         return False, None
 
     mid = (bid + ask) / 2.0
     spread_pct = ((ask - bid) / mid * 100.0) if (ask > bid and mid > 0) else None
     qty_contracts = qty_lots * lot_size
-    depth_ok = min(bid5, ask5) >= depth_mult * qty_contracts
+    depth_ok = bid5 >= depth_mult * qty_contracts and ask5 >= depth_mult * qty_contracts
     ok = spread_pct is not None and spread_pct <= max_spread_frac * 100.0 and depth_ok
     return ok, {
         "spread_pct": round(spread_pct, 2) if spread_pct is not None else None,
         "depth_ok": depth_ok,
         "bid5": bid5,
         "ask5": ask5,
+        "bid": bid,
+        "ask": ask,
+        "ltp": ltp,
     }
 
 

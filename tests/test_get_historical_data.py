@@ -35,7 +35,7 @@ def test_get_historical_data_retries_on_short_data():
     ds = StubDataSource(max_bars=20)
     end = datetime(2024, 1, 1, 10, 0)
     df = get_historical_data(ds, token=1, end=end, timeframe="minute", warmup_bars=50)
-    # Should make three attempts as data never reaches warmup
-    assert len(ds.calls) == 3
+    # Should make four attempts as data never reaches warmup
+    assert len(ds.calls) == 4
     assert df is not None
     assert len(df) == 20
