@@ -69,6 +69,6 @@ class InMemoryLogHandler(logging.Handler):
 log_buffer_handler = InMemoryLogHandler()
 
 
-def get_recent_logs(n: int = 60, min_level: Optional[int] = None) -> str:
-    """Return the last N log lines as one string."""
-    return "\n".join(log_buffer_handler.tail(n=n, min_level=min_level))
+def get_recent_logs(n: int = 60, min_level: Optional[int] = None) -> List[str]:
+    """Return the last ``n`` log lines as a list of strings."""
+    return log_buffer_handler.tail(n=n, min_level=min_level)
