@@ -29,9 +29,9 @@ events:
     block_trading: false
 
 recurring:
-  # simple weekly example: Every Thursday 14:55–15:10 (optional)
+  # simple weekly example: Every Tuesday 14:55–15:10 (optional)
   - name: "Expiry Last 35m"
-    rule: "WEEKLY_THU"
+    rule: "WEEKLY_TUE"
     start_local: "14:55"
     end_local: "15:10"
     block_trading: false

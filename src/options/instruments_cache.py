@@ -44,8 +44,8 @@ class InstrumentsCache:
 
 
 def nearest_weekly_expiry(now_ist: datetime) -> str:
-    """Return the nearest weekly expiry date (Thursday) as YYYY-MM-DD."""
+    """Return the nearest weekly expiry date (Tuesday) as YYYY-MM-DD."""
     d = now_ist.date()
-    while d.weekday() != 3:  # Thursday
+    while d.weekday() != 1:  # Tuesday
         d += timedelta(days=1)
     return d.isoformat()

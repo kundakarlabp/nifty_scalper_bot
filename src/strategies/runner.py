@@ -521,18 +521,19 @@ class StrategyRunner:
             if not within:
                 flow["risk_gates"] = {"skipped": True}
                 flow["reason_block"] = "outside_window"
+                flow["within_window"] = False
                 self._last_flow_debug = flow
                 if not self._offhours_notified:
                     now = self._now_ist().strftime("%H:%M:%S")
                     tz_name = getattr(settings, "tz", "IST")
                     self._notify(
-                        f"⏰ Tick blocked outside trading window at {now} {tz_name}"
+                        f"⏰ Tick received outside trading window at {now} {tz_name}"
                     )
                     self._offhours_notified = True
-                self.log.debug("Skipping tick: outside trading window")
-                return
-            flow["within_window"] = True
-            self._offhours_notified = False
+                self.log.debug("Continuing tick: outside trading window")
+            else:
+                flow["within_window"] = True
+                self._offhours_notified = False
 
             # pause
             if self._paused:
@@ -813,7 +814,7 @@ class StrategyRunner:
                     plan["planned_delta_units"] = round(planned_delta_units, 1)
 
             portfolio_delta_units = self._portfolio_delta_units()
-            gmode = self.now_ist.weekday() == 3 and self.now_ist.time() >= dt_time(14, 45)
+            gmode = self.now_ist.weekday() == 1 and self.now_ist.time() >= dt_time(14, 45)
 
             ok, reason, det = self.risk_engine.pre_trade_check(
                 equity_rupees=self._active_equity(),
@@ -1726,7 +1727,7 @@ class StrategyRunner:
         }
 
         portfolio_delta_units = self._portfolio_delta_units()
-        gmode = self.now_ist.weekday() == 3 and self.now_ist.time() >= dt_time(14, 45)
+        gmode = self.now_ist.weekday() == 1 and self.now_ist.time() >= dt_time(14, 45)
         diag["portfolio_greeks"] = {
             "delta_units": round(portfolio_delta_units, 1),
             "gamma_mode": gmode,

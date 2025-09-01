@@ -74,8 +74,8 @@ class RiskEngine:
         return datetime.now(self.tz)
 
     def _is_gamma_mode(self, now: datetime) -> bool:
-        # Thursday (3) at or after 14:45 IST
-        return now.weekday() == 3 and (now.time() >= time(14, 45))
+        # Tuesday (1) at or after 14:45 IST
+        return now.weekday() == 1 and (now.time() >= time(14, 45))
 
     # -------- PRE-TRADE CHECK --------
     def pre_trade_check(

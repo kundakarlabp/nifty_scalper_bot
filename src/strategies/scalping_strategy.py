@@ -44,10 +44,10 @@ def _log_throttled(key: str, level: int, msg: str, *args) -> None:
         logger.log(level, msg, *args)
 
 
-def is_thu_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
-    """Return True if current time is Thursday after ``threshold``."""
+def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
+    """Return True if current time is Tuesday after ``threshold``."""
     now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
-    return now.weekday() == 3 and now.time() >= threshold
+    return now.weekday() == 1 and now.time() >= threshold
 
 
 Side = Literal["BUY", "SELL"]
@@ -519,7 +519,7 @@ class EnhancedScalpingStrategy:
             time_stop = cfg.time_stop_min
             runner_obj = getattr(self, "runner", None)
             now_dt = runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))
-            if cfg.gamma_enabled and is_thu_after(cfg.gamma_after, now=now_dt):
+            if cfg.gamma_enabled and is_tue_after(cfg.gamma_after, now=now_dt):
                 tp2_mult = min(tp2_mult, cfg.gamma_tp2_cap)
                 trail_mult = min(trail_mult, cfg.gamma_trail_mult)
                 time_stop = min(time_stop, cfg.gamma_time_stop_min)

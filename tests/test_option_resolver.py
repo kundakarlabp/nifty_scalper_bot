@@ -9,14 +9,14 @@ from src.execution.micro_filters import micro_from_quote
 
 def test_nearest_weekly_expiry():
     dt = datetime(2024, 5, 27, tzinfo=timezone.utc)  # Monday
-    assert nearest_weekly_expiry(dt) == "2024-05-30"
+    assert nearest_weekly_expiry(dt) == "2024-05-28"
 
 
 def test_option_resolver_and_micro():
     instruments = [
         {
             "name": "NIFTY",
-            "expiry": datetime(2024, 5, 30),
+            "expiry": datetime(2024, 5, 28),
             "strike": 22500,
             "instrument_type": "CE",
             "instrument_token": 123,
@@ -25,7 +25,7 @@ def test_option_resolver_and_micro():
         },
         {
             "name": "NIFTY",
-            "expiry": datetime(2024, 5, 30),
+            "expiry": datetime(2024, 5, 28),
             "strike": 22500,
             "instrument_type": "PE",
             "instrument_token": 456,
