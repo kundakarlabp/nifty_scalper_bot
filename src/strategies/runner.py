@@ -38,7 +38,9 @@ from src.features.health import check as feat_check
 from src.features.indicators import atr_pct
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
-from src.execution.micro_filters import micro_from_l1
+from src.execution.micro_filters import micro_from_l1, micro_from_quote
+from src.data import ohlc_builder
+from src.risk import risk_gates
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -576,10 +578,19 @@ class StrategyRunner:
                 if isinstance(df.index, pd.DatetimeIndex) and len(df)
                 else None
             )
-            fh = feat_check(df, last_bar_ts_obj, atr_period=atr_period)
             plan["reasons"] = plan.get("reasons", [])
-            plan["feature_ok"] = fh.bars_ok and fh.fresh_ok
-            plan["reasons"].extend(fh.reasons)
+            plan["feature_ok"] = True
+            plan["bar_count"] = int(len(df)) if isinstance(df, pd.DataFrame) else 0
+            plan["last_bar_ts"] = last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
+            lag_s = ohlc_builder.calc_bar_lag_s(df, self._now_ist())
+            plan["lag_s"] = lag_s
+            if lag_s is None or lag_s > 90:
+                plan["reason_block"] = "data_stale"
+                plan.setdefault("reasons", []).append("data_stale")
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                return
             plan["atr_pct"] = atr_pct(df, period=atr_period)
             sym = self.under_symbol.upper()
             atr_min = (
@@ -590,46 +601,18 @@ class StrategyRunner:
             plan["atr_min"] = atr_min
             if plan["atr_pct"] is None:
                 plan["reasons"].append("atr_na")
-                plan["reason_block"] = plan.get("reason_block") or "features"
+                plan["reason_block"] = "features"
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
             if plan["atr_pct"] < atr_min:
                 plan["reasons"].append("atr_low")
-                plan["reason_block"] = plan.get("reason_block") or "atr_low"
+                plan["reason_block"] = "atr_low"
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            if last_bar_ts_obj and "last_bar_ts" not in plan:
-                plan["last_bar_ts"] = last_bar_ts_obj.isoformat()
-            if not plan["feature_ok"]:
-                plan["regime"] = "NO_TRADE"
-                plan["score"] = 0
-                plan["reason_block"] = plan.get("reason_block") or "features"
-                self._record_plan(plan)
-                flow["reason_block"] = plan["reason_block"]
-                self._last_flow_debug = flow
-                return
-
-            last_ts = plan.get("last_bar_ts")
-            if last_ts and not plan.get("reason_block"):
-                try:
-                    lb = datetime.fromisoformat(str(last_ts))
-                    if lb.tzinfo is None:
-                        lb = lb.replace(tzinfo=TZ)
-                    now_ts = self._now_ist()
-                    lag_sec = abs((now_ts - lb).total_seconds())
-                    plan["last_bar_ts"] = lb.isoformat()
-                    plan["last_bar_lag_s"] = int(lag_sec)
-                    if lb > now_ts + timedelta(seconds=5):
-                        plan["reason_block"] = "clock_skew"
-                    elif lag_sec > 150:
-                        plan["reason_block"] = "data_stale"
-                        plan.setdefault("reasons", []).append(f"last_bar_lag_s={int(lag_sec)}")
-                except Exception:
-                    pass
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
@@ -728,16 +711,16 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
-            l1 = None
-            if self.kite is not None:
+            q = None
+            if self.kite is not None and opt.get("tradingsymbol"):
                 try:
-                    token = opt["token"]
-                    l1 = self.kite.quote([token]).get(str(token))  # type: ignore[attr-defined]
+                    ts = opt["tradingsymbol"]
+                    q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
                 except Exception:
-                    l1 = None
-            spread, depth_ok, extra = micro_from_l1(
-                l1,
-                lot_size=self.lot_size,
+                    q = None
+            spread, depth_ok = micro_from_quote(
+                q,
+                lot_size=opt.get("lot_size", self.lot_size),
                 depth_min_lots=self.strategy_cfg.depth_min_lots,
             )
             if spread is None:
@@ -752,8 +735,27 @@ class StrategyRunner:
                 return
             plan["spread_pct"] = spread
             plan["depth_ok"] = depth_ok
-            plan["micro"] = {"spread_pct": spread, "depth_ok": depth_ok, **(extra or {})}
+            plan["micro"] = {"spread_pct": spread, "depth_ok": depth_ok}
             plan["quote_src"] = "kite"
+
+            acct = risk_gates.AccountState(
+                equity_rupees=self._active_equity(),
+                dd_rupees=self.risk.day_realized_loss,
+                max_daily_loss=self._max_daily_loss_rupees,
+                loss_streak=self.risk.consecutive_losses,
+            )
+            ok, gate_reasons = risk_gates.evaluate(plan, acct, self.strategy_cfg)
+            plan["risk_ok"] = ok
+            plan.setdefault("reasons", []).extend(gate_reasons)
+            if not ok:
+                if "daily_dd" in gate_reasons:
+                    plan["reason_block"] = "daily_dd"
+                if not plan.get("reason_block"):
+                    plan["reason_block"] = "risk"
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
 
             # ---- risk gates
             gates = self._risk_gates_for(plan)
@@ -1012,23 +1014,28 @@ class StrategyRunner:
         }
 
     def get_current_l1(self) -> Optional[Dict[str, Any]]:
-        if not self.kite or not self._last_option or not self._last_option.get("token"):
+        if not self.kite:
+            return None
+        atm = self.get_current_atm().get("CE")
+        ts = atm.get("tradingsymbol") if atm else None
+        if not ts:
             return None
         try:
-            token = self._last_option["token"]
-            l1 = self.kite.quote([token]).get(str(token))  # type: ignore[attr-defined]
+            return self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
         except Exception:
             return None
-        spread, depth_ok, extra = micro_from_l1(
-            l1,
-            lot_size=self.lot_size,
-            depth_min_lots=self.strategy_cfg.depth_min_lots,
-        )
-        if spread is None or extra is None:
-            return None
-        extra["spread_pct"] = spread
-        extra["depth_ok"] = depth_ok
-        return extra
+
+    def get_probe_info(self) -> Dict[str, Any]:
+        plan = self.last_plan or {}
+        return {
+            "start": plan.get("probe_window_from"),
+            "end": plan.get("probe_window_to"),
+            "bars": plan.get("bar_count") or plan.get("bars"),
+            "last_bar_ts": plan.get("last_bar_ts"),
+            "bar_age_s": plan.get("lag_s") or plan.get("last_bar_lag_s"),
+            "tick_age_s": None,
+            "source": plan.get("data_source"),
+        }
 
     def run_backtest(self, csv_path: Optional[str] = None) -> str:
         """Run backtest on a CSV file and return a summary string."""

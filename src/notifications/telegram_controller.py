@@ -103,6 +103,7 @@ class TelegramController:
         risk_reset_today: Optional[Callable[[], None]] = None,
         bars_provider: Optional[Callable[[int], str]] = None,
         quotes_provider: Optional[Callable[[str], str]] = None,
+        probe_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         trace_provider: Optional[Callable[[int], None]] = None,
         selftest_provider: Optional[Callable[[str], str]] = None,
         backtest_provider: Optional[Callable[[Optional[str]], str]] = None,
@@ -150,6 +151,7 @@ class TelegramController:
         self._last_signal_provider = last_signal_provider
         self._bars_provider = bars_provider
         self._quotes_provider = quotes_provider
+        self._probe_provider = probe_provider
         self._trace_provider = trace_provider
         self._selftest_provider = selftest_provider
         self._backtest_provider = backtest_provider
@@ -737,15 +739,14 @@ class TelegramController:
                     mark, val = pf(ok, val)
                     lines.append(f"{name}: {mark}{val}")
                 if msp is None or mdp is None:
-                    lines.append("micro_spread: ℹ️ N/A (no_quote)")
-                    lines.append("micro_depth: ℹ️ N/A (no_quote)")
+                    sp_line = "N/A (no_quote)"
+                    dp_line = "N/A (no_quote)"
                 else:
-                    msp_ok = msp <= runner.strategy_cfg.max_spread_pct_regular
-                    mdp_ok = bool(mdp)
-                    mark, val = pf(msp_ok, msp)
-                    lines.append(f"micro_spread: {mark}{val}")
-                    mark, val = pf(mdp_ok, mdp)
-                    lines.append(f"micro_depth: {mark}{val}")
+                    sp_line = msp
+                    dp_line = "✅" if mdp else "❌"
+                lines.append(
+                    f"micro: spread%={sp_line} depth={dp_line} src={sig.get('quote_src','-')}"
+                )
                 api = s.get("api_health", {})
                 rh = s.get("router", {})
                 lines.append(
@@ -810,7 +811,9 @@ class TelegramController:
                     lines.append(f"{name}: {mark(ok)} {value}")
                 sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
                 dp_line = "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
-                lines.append(f"micro_spread: {sp_line} | micro_depth: {dp_line}")
+                lines.append(
+                    f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
+                )
                 if plan.get("option"):
                     o = plan["option"]
                     lines.append(
@@ -836,6 +839,15 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Why error: {e}")
+
+        if cmd == "/probe":
+            if not self._probe_provider:
+                return self._send("Probe provider unavailable.")
+            try:
+                info = self._probe_provider()
+                return self._send(f"Probe: {info}")
+            except Exception as e:
+                return self._send(f"Probe error: {e}")
 
         if cmd == "/atm":
             if not self._atm_provider:
