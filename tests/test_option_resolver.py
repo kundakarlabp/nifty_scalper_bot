@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 
+from datetime import datetime, timezone
+
 from src.options.instruments_cache import InstrumentsCache, nearest_weekly_expiry
 from src.options.resolver import OptionResolver
-from src.execution.micro_filters import micro_from_l1
+from src.execution.micro_filters import micro_from_quote
 
 
 def test_nearest_weekly_expiry():
@@ -18,6 +20,7 @@ def test_option_resolver_and_micro():
             "strike": 22500,
             "instrument_type": "CE",
             "instrument_token": 123,
+            "tradingsymbol": "NIFTY24MAY22500CE",
             "lot_size": 50,
         },
         {
@@ -26,6 +29,7 @@ def test_option_resolver_and_micro():
             "strike": 22500,
             "instrument_type": "PE",
             "instrument_token": 456,
+            "tradingsymbol": "NIFTY24MAY22500PE",
             "lot_size": 50,
         },
     ]
@@ -33,7 +37,7 @@ def test_option_resolver_and_micro():
     resolver = OptionResolver(cache)
     now = datetime(2024, 5, 27)
     opt = resolver.resolve_atm("NIFTY", 22510, "CE", now)
-    assert opt["token"] == 123 and opt["strike"] == 22500
-    l1 = {"depth": {"buy": [{"price": 100.0, "quantity": 100}], "sell": [{"price": 100.5, "quantity": 100}]}}
-    sp, ok, extra = micro_from_l1(l1, lot_size=50, depth_min_lots=1)
-    assert ok is True and sp is not None and extra["bid"] == 100.0
+    assert opt["token"] == 123 and opt["strike"] == 22500 and opt["tradingsymbol"]
+    q = {"depth": {"buy": [{"price": 100.0, "quantity": 100}], "sell": [{"price": 100.5, "quantity": 100}]}}
+    sp, ok = micro_from_quote(q, lot_size=50, depth_min_lots=1)
+    assert ok is True and sp is not None
