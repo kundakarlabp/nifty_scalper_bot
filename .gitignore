@@ -22,6 +22,8 @@ venv/
 htmlcov/
 .hypothesis/
 data/
+!src/data/
+!src/data/*.py
 
 # IDE / OS
 .vscode/
