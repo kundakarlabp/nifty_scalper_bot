@@ -33,6 +33,7 @@ from src.risk.limits import Exposure, LimitConfig, RiskEngine
 from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # noqa: F401
 from src.utils import strike_selector
 from src.utils.events import load_calendar, EventWindow
+from src.utils.env import env_flag
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -87,7 +88,7 @@ class StrategyRunner:
 
         # Event guard configuration
         self.events_path = os.environ.get("EVENTS_CONFIG_FILE", "config/events.yaml")
-        self.event_guard_enabled = bool(int(os.environ.get("EVENT_GUARD_ENABLED", "1")))
+        self.event_guard_enabled = env_flag("EVENT_GUARD_ENABLED")
         if os.path.exists(self.events_path):
             self.event_cal = load_calendar(self.events_path)
             self._event_last_mtime = os.path.getmtime(self.events_path)
