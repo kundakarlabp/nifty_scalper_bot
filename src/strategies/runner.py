@@ -26,7 +26,11 @@ from src.strategies.strategy_config import (
     try_load,
     StrategyConfig,
 )
+import tempfile
+
 from src.backtesting.backtest_engine import BacktestEngine
+from src.backtesting.data_feed import SpotFeed
+from src.backtesting.sim_connector import SimConnector
 from src.execution.order_executor import OrderReconciler
 from src.logs.journal import Journal
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
@@ -1042,13 +1046,26 @@ class StrategyRunner:
     def run_backtest(self, csv_path: Optional[str] = None) -> str:
         """Run backtest on a CSV file and return a summary string."""
         try:
-            path = Path(csv_path) if csv_path else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
-            df = pd.read_csv(path)
-            engine = BacktestEngine(df)
-            engine.run()
-            trades = len(engine.positions)
-            pnl = float(sum(p["pnl"] for p in engine.positions))
-            wins = sum(1 for p in engine.positions if p["pnl"] > 0)
+            path = (
+                Path(csv_path)
+                if csv_path
+                else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
+            )
+            feed = SpotFeed.from_csv(str(path))
+            cfg = try_load(resolve_config_path(), None)
+            risk = RiskEngine(LimitConfig(tz=cfg.tz))
+            sim = SimConnector()
+            engine = BacktestEngine(
+                feed,
+                cfg,
+                risk,
+                sim,
+                outdir=tempfile.mkdtemp(prefix="bt_"),
+            )
+            summary = engine.run()
+            trades = summary.get("trades", 0)
+            pnl = float(sum(t.get("pnl_rupees", 0.0) for t in engine.trades))
+            wins = sum(1 for t in engine.trades if t.get("pnl_rupees", 0.0) > 0)
             win_rate = (wins / trades * 100.0) if trades else 0.0
             return f"Backtest done: trades={trades}, win%={win_rate:.2f}, pnl={pnl:.2f}"
         except Exception as e:
