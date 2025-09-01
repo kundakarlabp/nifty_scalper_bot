@@ -39,7 +39,7 @@ from src.config import settings, validate_critical_settings
 
 # Backtests run in paper mode; skip live trading validations
 settings.enable_live_trading = False
-from src.backtesting.data_source import BacktestCsvSource
+from src.backtesting.data_source import BacktestCsvSource, load_and_prepare_data
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
@@ -274,11 +274,9 @@ class BacktestRunner:
 def main():
     """Entry point for the backtest script."""
     validate_critical_settings()
-    # Use the nifty_ohlc.csv file provided in the repo
+    # Use the nifty_ohlc.csv file provided in the repo; generate synthetic data if missing
     csv_file = project_root / "src" / "data" / "nifty_ohlc.csv"
-    if not csv_file.exists():
-        logger.error(f"Data file not found: {csv_file}")
-        sys.exit(1)
+    load_and_prepare_data(csv_file)
 
     runner = BacktestRunner(csv_filepath=csv_file)
     runner.run()
