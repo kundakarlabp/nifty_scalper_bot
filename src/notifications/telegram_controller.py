@@ -57,13 +57,24 @@ def _kpis(trades: List[Dict[str, float]]) -> Dict[str, float]:
     }
 
 
-def _fmt_micro(sym: str, micro: dict, last_bar_ts: str | None, lag_s: int | None) -> str:
+def _fmt_micro(
+    sym: str,
+    micro: dict | None,
+    last_bar_ts: str | None,
+    lag_s: int | None,
+) -> str:
+    """Format microstructure diagnostics for Telegram output."""
+
     m = micro or {}
+    spread = m.get("spread_pct")
+    depth_ok = m.get("depth_ok")
     return (
-        f"quote: {sym} src={m.get('source')} "
+        f"quote: {sym} src={m.get('source', '-')} "
         f"ltp={m.get('ltp')} bid={m.get('bid')} ask={m.get('ask')} "
-        f"spread%={m.get('spread_pct')} bid5={m.get('bid5')} ask5={m.get('ask5')} "
-        f"depth_ok={m.get('depth_ok')} last_bar_ts={last_bar_ts} lag_s={lag_s}"
+        f"spread%={spread if spread is not None else 'N/A'} "
+        f"bid5={m.get('bid5')} ask5={m.get('ask5')} "
+        f"depth={depth_ok if depth_ok is not None else 'N/A'} "
+        f"last_bar_ts={last_bar_ts} lag_s={lag_s}"
     )
 
 class TelegramController:
