@@ -530,7 +530,8 @@ class StrategyRunner:
                         f"⏰ Tick received outside trading window at {now} {tz_name}"
                     )
                     self._offhours_notified = True
-                self.log.debug("Continuing tick: outside trading window")
+                self.log.debug("Skipping tick: outside trading window")
+                return
             else:
                 flow["within_window"] = True
                 self._offhours_notified = False
