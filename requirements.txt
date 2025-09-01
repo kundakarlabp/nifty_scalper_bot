@@ -6,10 +6,10 @@ schedule==1.2.1
 python-dotenv==1.0.1
 
 # Data & indicators
-pandas==2.2.2
+yfinance>=0.2.43
+pandas>=2.2
 numpy==1.26.4
 ta==0.11.0
-yfinance==0.2.40
 
 # ML (optional)
 scikit-learn==1.5.0
