@@ -37,6 +37,8 @@ logs/
 !src/logs/**
 *.log
 bot.pid
+# Reports from test backtests
+reports/
 
 # Docker
 *.tar
