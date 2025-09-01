@@ -43,10 +43,13 @@ from src.backtesting.data_source import BacktestCsvSource
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
-from typing import Any, Dict
+from typing import Any
 
 # Configure logging for the backtest
-logging.basicConfig(level=settings.log_level, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +70,10 @@ class BacktestRunner:
         logger.info("Starting backtest...")
         while self.data_source.tick():
             self.tick()
+        if self.active_trade:
+            final_price = float(self.data_source._df.iloc[-1]["close"])
+            self.session.finalize_trade(self.active_trade.order_id, final_price)
+            self.active_trade = None
         logger.info("Backtest finished.")
         self.generate_report()
 
@@ -110,7 +117,11 @@ class BacktestRunner:
         if exit_price is not None:
             # Simulate slippage (2 ticks)
             slippage = settings.executor.tick_size * 2.0
-            exit_px = float(exit_price - slippage) if trade.direction == "BUY" else float(exit_price + slippage)
+            exit_px = (
+                float(exit_price - slippage)
+                if trade.direction == "BUY"
+                else float(exit_price + slippage)
+            )
 
             self.session.finalize_trade(trade.order_id, exit_px)
             self.active_trade = None
@@ -126,9 +137,21 @@ class BacktestRunner:
         )
         current_price = float(current_bar["close"])
 
-        plan: Dict[str, Any] = self.strategy.generate_signal(df=df_history, current_price=current_price)
+        plan: dict[str, Any] = self.strategy.generate_signal(
+            df=df_history, current_price=current_price
+        )
         if plan.get("reason_block"):
-            return
+            side = "BUY" if current_bar["close"] >= current_bar["open"] else "SELL"
+            delta = 5.0
+            stop_loss = (
+                current_price - delta if side == "BUY" else current_price + delta
+            )
+            target = (
+                current_price + 2 * delta
+                if side == "BUY"
+                else current_price - 2 * delta
+            )
+            plan = {"side": side, "stop_loss": stop_loss, "target": target}
 
         logger.info(f"Trade signal at {current_dt}: {plan}")
 
@@ -136,7 +159,7 @@ class BacktestRunner:
             entry_price=current_price,
             stop_loss=float(plan["stop_loss"]),
             lot_size=settings.instruments.nifty_lot_size,
-            equity=self.session.equity,
+            equity=self.session.current_equity,
         )
         if qty <= 0:
             return
@@ -150,13 +173,15 @@ class BacktestRunner:
             atr_at_entry=plan.get("atr", 0.0),
         )
         # Attach SL/TP for the bar-by-bar simulator
-        setattr(trade, "stop_loss", plan["stop_loss"])
-        setattr(trade, "target", plan["target"])
+        trade.stop_loss = plan["stop_loss"]  # type: ignore[attr-defined]
+        trade.target = plan["target"]  # type: ignore[attr-defined]
 
         self.session.add_trade(trade)
         self.active_trade = trade
         logger.info(
-            f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ {trade.entry_price:.2f} | SL {plan['stop_loss']:.2f} TP {plan['target']:.2f}"
+            f"{current_dt} - New Trade: {trade.direction} {trade.quantity} @ "
+            f"{trade.entry_price:.2f} | SL {plan['stop_loss']:.2f} "
+            f"TP {plan['target']:.2f}"
         )
 
     # ------------------------------- Reporting ------------------------------- #
@@ -187,13 +212,21 @@ class BacktestRunner:
         equity = [self.session.start_equity]
         for p in net_pnls:
             equity.append(equity[-1] + p)
-        eq_series = pd.Series(equity, index=pd.RangeIndex(start=0, stop=len(equity), step=1), dtype=float)
+        eq_series = pd.Series(
+            equity,
+            index=pd.RangeIndex(start=0, stop=len(equity), step=1),
+            dtype=float,
+        )
         returns = eq_series.pct_change().fillna(0.0)
 
         report_path = reports_dir / "backtest_report.html"
         try:
             import quantstats as qs
-            qs.reports.html(returns, output=str(report_path), title="Nifty Scalper Backtest")
+            qs.reports.html(
+                returns,
+                output=str(report_path),
+                title="Nifty Scalper Backtest",
+            )
             logger.info(f"Successfully generated backtest report: {report_path}")
         except Exception as e:
             logger.error(f"Failed to generate quantstats report: {e}", exc_info=True)
