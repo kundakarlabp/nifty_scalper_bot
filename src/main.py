@@ -17,7 +17,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.config import settings, validate_critical_settings  # noqa: E402
-from src.utils.logging_tools import RateLimitFilter  # noqa: E402
+from src.utils.logging_tools import (
+    RateLimitFilter,
+    get_recent_logs,
+    log_buffer_handler,
+)  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 
@@ -40,6 +44,8 @@ def _setup_logging() -> None:
     )
     root = logging.getLogger()
     root.addFilter(RateLimitFilter(interval=120.0))
+    if log_buffer_handler not in root.handlers:
+        root.addHandler(log_buffer_handler)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
@@ -144,7 +150,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         risk_provider=getattr(runner, "risk_snapshot", None),
         limits_provider=lambda: asdict(runner.risk_engine.cfg),
         risk_reset_today=getattr(runner, "risk_reset_today", None),
-        logs_provider=_tail_logs,
+        logs_provider=get_recent_logs,
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
         bars_provider=getattr(runner, "get_recent_bars", None),
         quotes_provider=getattr(runner.executor, "quote_diagnostics", None),
