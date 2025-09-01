@@ -471,9 +471,13 @@ class EnhancedScalpingStrategy:
                 max_spread_pct=max_spread,
                 depth_mult=cfg.depth_multiplier,
             )
-            plan["micro"] = micro
-            if not ok_micro:
-                micro_score = 0
+            if micro is None:
+                plan["micro"] = {"spread_pct": None, "depth_ok": None, "missing": True}
+                micro_score = 1
+            else:
+                plan["micro"] = micro
+                if not ok_micro:
+                    micro_score = 0
 
             score = regime_score + momentum_score + structure_score + vol_score + micro_score
             plan["score"] = score

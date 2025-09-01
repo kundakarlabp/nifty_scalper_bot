@@ -138,3 +138,39 @@ def test_no_trade_when_indecisive(strategy_config: StrategySettings):
     df = create_low_vol_dataframe()
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
     assert plan.get("reason_block")
+
+
+def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch):
+    """Absence of micro quotes should not zero out the score."""
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = create_test_dataframe(trending_up=True)
+
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.fetch_quote_with_depth",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.micro_ok",
+        lambda *args, **kwargs: (False, None),
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.resolve_weekly_atm",
+        lambda price: {"ce": ("TESTCE", 50), "pe": ("TESTPE", 50)},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.select_strike",
+        lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
+    )
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    assert plan["micro"]["spread_pct"] is None
+    assert plan["micro"]["depth_ok"] is None
+    assert plan["micro"]["missing"] is True
+    assert plan["score"] > 0
