@@ -319,7 +319,7 @@ class StrategyRunner:
         self.log.info(msg)
         if getattr(self.settings, "TELEGRAM__PRETRADE_ALERTS", False):
             try:
-                self.telegram.send(msg)
+                self.telegram.send_message(msg)
             except Exception:
                 pass
 
@@ -404,7 +404,7 @@ class StrategyRunner:
         self.log.info(text)
         if getattr(self.settings, "TELEGRAM__PRETRADE_ALERTS", False):
             try:
-                self.telegram.send(text)
+                self.telegram.send_message(text)
             except Exception:
                 pass
 
