@@ -422,13 +422,16 @@ class EnhancedScalpingStrategy:
             if (side == "BUY" and rsi_rising) or (side == "SELL" and not rsi_rising):
                 momentum_score += 1
             obv = spot_df.get("obv") or df.get("obv")
-            try:
-                if obv is not None and len(obv) >= 2:
-                    obv_rising = float(obv.iloc[-1]) > float(obv.iloc[-2])
-                    if (side == "BUY" and obv_rising) or (side == "SELL" and not obv_rising):
-                        momentum_score += 1
-            except Exception:
-                pass
+            if (
+                isinstance(obv, pd.Series)
+                and pd.api.types.is_numeric_dtype(obv)
+                and len(obv) >= 2
+            ):
+                obv_rising = float(obv.iloc[-1]) > float(obv.iloc[-2])
+                if (side == "BUY" and obv_rising) or (side == "SELL" and not obv_rising):
+                    momentum_score += 1
+            else:
+                logger.debug("Invalid OBV series for momentum scoring: %r", obv)
             momentum_score = min(3, momentum_score)
 
             structure_score = 0
