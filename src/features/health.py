@@ -42,14 +42,15 @@ def check(
     """
 
     reasons: List[str] = []
-    bars_ok = bool(ohlc is not None) and len(ohlc) >= atr_period + 1
+    bars_ok = isinstance(ohlc, pd.DataFrame) and len(ohlc) >= atr_period + 1
     if not bars_ok:
         reasons.append("bars_short")
 
-    now = dt.datetime.now(last_bar_ts.tzinfo) if last_bar_ts else dt.datetime.now(dt.timezone.utc)
-    age_ok = (
-        (now - last_bar_ts).total_seconds() <= max_age_s if last_bar_ts else False
-    )
+    tz = last_bar_ts.tzinfo if last_bar_ts and last_bar_ts.tzinfo else dt.timezone.utc
+    if last_bar_ts and last_bar_ts.tzinfo is None:
+        last_bar_ts = last_bar_ts.replace(tzinfo=tz)
+    now = dt.datetime.now(tz)
+    age_ok = (now - last_bar_ts).total_seconds() <= max_age_s if last_bar_ts else False
     if not age_ok:
         reasons.append("data_stale")
 

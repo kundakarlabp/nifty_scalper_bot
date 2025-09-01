@@ -40,3 +40,10 @@ def test_feature_health_flags_stale_data():
     assert not fh.fresh_ok
     assert "data_stale" in fh.reasons
 
+
+def test_feature_health_accepts_timezone_aware_ts():
+    df = _sample_df(20)
+    last_ts = df.index[-1]
+    fh = check(df, last_ts, atr_period=14, max_age_s=120)
+    assert fh.fresh_ok
+
