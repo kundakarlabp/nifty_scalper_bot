@@ -75,5 +75,5 @@ def test_audit_rootcause(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/audit"}})
     msg = sent[0]
     assert "reason_block: *no_option_token*" in msg
-    assert "micro_spread: ❌ FAIL" in msg
-    assert "micro_depth: ❌ FAIL" in msg
+    assert "micro_spread: ℹ️ N/A" in msg
+    assert "micro_depth: ℹ️ N/A" in msg
