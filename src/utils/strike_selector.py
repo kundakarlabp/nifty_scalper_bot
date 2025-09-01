@@ -310,14 +310,14 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
 
 
 def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
-    """Return upcoming Thursday in IST as ``YYYY-MM-DD``.
+    """Return upcoming Tuesday in IST as ``YYYY-MM-DD``.
 
     Used as a lightweight fallback when the full instrument dump is unavailable.
     """
     if now is None:
         now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    # weekday(): Monday=0 … Sunday=6; Thursday is 3
-    days_ahead = (3 - now.weekday()) % 7
+    # weekday(): Monday=0 … Sunday=6; Tuesday is 1
+    days_ahead = (1 - now.weekday()) % 7
     expiry = (now + timedelta(days=days_ahead)).date()
     return expiry.isoformat()
 

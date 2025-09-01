@@ -639,7 +639,7 @@ class TelegramController:
             if not runner:
                 return self._send("Runner unavailable.")
             delta_units = round(runner._portfolio_delta_units(), 1)
-            gmode = runner.now_ist.weekday() == 3 and runner.now_ist.time() >= dt_time(14, 45)
+            gmode = runner.now_ist.weekday() == 1 and runner.now_ist.time() >= dt_time(14, 45)
             text = (
                 "📐 *Portfolio Greeks*\n"
                 f"Δ(units): {delta_units} | gamma_mode: {gmode}"

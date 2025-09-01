@@ -95,7 +95,7 @@ def next_weekly_expiry_ist(now: datetime, tz: str = "Asia/Kolkata") -> datetime:
     """Return the next NSE weekly index expiry in IST."""
     z = ZoneInfo(tz)
     now = now.astimezone(z)
-    target_wd, target_t = 3, time(15, 30)  # Thursday 15:30 IST
+    target_wd, target_t = 1, time(15, 30)  # Tuesday 15:30 IST
     days_ahead = (target_wd - now.weekday()) % 7
     expiry = (now + timedelta(days=days_ahead)).replace(
         hour=target_t.hour, minute=target_t.minute, second=0, microsecond=0

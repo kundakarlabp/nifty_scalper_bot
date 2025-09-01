@@ -7,7 +7,7 @@ windows:
   trading:
     - { days: [1,2,3,4,5], start: "09:25", end: "15:05" }
   no_trade:
-    expiry_thu_late:
+    expiry_tue_late:
       enabled: true
       start: "14:45"
       end:   "15:30"
@@ -52,7 +52,7 @@ lifecycle:
   time_stop_min: 12
   gamma_mode:
     enabled: true
-    thu_after: "14:45"
+    tue_after: "14:45"
     tp2_R_cap: 1.40
     trail_atr_mult: 0.60
     time_stop_min: 8

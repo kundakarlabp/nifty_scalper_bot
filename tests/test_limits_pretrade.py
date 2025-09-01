@@ -49,7 +49,7 @@ def test_max_notional():
 def test_gamma_mode_cap(monkeypatch):
     cfg = LimitConfig(max_gamma_mode_lots=1)
     eng = RiskEngine(cfg)
-    dt = datetime(2024, 1, 4, 15, 0, tzinfo=ZoneInfo(cfg.tz))  # Thursday
+    dt = datetime(2024, 1, 2, 15, 0, tzinfo=ZoneInfo(cfg.tz))  # Tuesday
     monkeypatch.setattr(eng, "_now", lambda: dt)
     ok, reason, _ = eng.pre_trade_check(
         **{**_basic_args(), "intended_lots": 2}

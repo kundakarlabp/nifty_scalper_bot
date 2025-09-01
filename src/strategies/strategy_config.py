@@ -119,7 +119,7 @@ class StrategyConfig:
             trail_atr_mult=float(lc.get("trail_atr_mult", 0.80)),
             time_stop_min=int(lc.get("time_stop_min", 12)),
             gamma_enabled=bool(lc.get("gamma_mode", {}).get("enabled", True)),
-            gamma_after=_parse_time(lc.get("gamma_mode", {}).get("thu_after", "14:45")),
+            gamma_after=_parse_time(lc.get("gamma_mode", {}).get("tue_after", "14:45")),
             gamma_tp2_cap=float(lc.get("gamma_mode", {}).get("tp2_R_cap", 1.40)),
             gamma_trail_mult=float(lc.get("gamma_mode", {}).get("trail_atr_mult", 0.60)),
             gamma_time_stop_min=int(lc.get("gamma_mode", {}).get("time_stop_min", 8)),

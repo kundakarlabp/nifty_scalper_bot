@@ -52,7 +52,7 @@ def mock_kite():
         {
             "name": "NIFTY",
             "segment": "NFO-OPT",
-            "expiry": datetime(2024, 8, 8).date(),
+            "expiry": datetime(2024, 8, 6).date(),
             "instrument_type": "CE",
             "strike": 19500,
             "tradingsymbol": "NIFTY2480819500CE",
@@ -61,7 +61,7 @@ def mock_kite():
         {
             "name": "NIFTY",
             "segment": "NFO-OPT",
-            "expiry": datetime(2024, 8, 8).date(),
+            "expiry": datetime(2024, 8, 6).date(),
             "instrument_type": "PE",
             "strike": 19500,
             "tradingsymbol": "NIFTY2480819500PE",
@@ -70,7 +70,7 @@ def mock_kite():
         {
             "name": "NIFTY",
             "segment": "NFO-OPT",
-            "expiry": datetime(2024, 8, 8).date(),
+            "expiry": datetime(2024, 8, 6).date(),
             "instrument_type": "CE",
             "strike": 19550,
             "tradingsymbol": "NIFTY2480819550CE",
@@ -79,7 +79,7 @@ def mock_kite():
         {
             "name": "NIFTY",
             "segment": "NFO-OPT",
-            "expiry": datetime(2024, 8, 8).date(),
+            "expiry": datetime(2024, 8, 6).date(),
             "instrument_type": "PE",
             "strike": 19550,
             "tradingsymbol": "NIFTY2480819550PE",
@@ -96,7 +96,7 @@ def test_get_instrument_tokens_weekly_expiry(mock_kite):
         kite_instance=mock_kite,
     )
     assert tokens is not None
-    assert tokens["expiry"] == "2024-08-08"
+    assert tokens["expiry"] == "2024-08-06"
 
 
 @freeze_time("2024-08-26 10:00:00+05:30")  # A Monday before monthly expiry
@@ -143,7 +143,7 @@ def test_get_instrument_tokens_reports_missing_option_tokens(mock_kite):
         {
             "name": "NIFTY",
             "segment": "NFO-OPT",
-            "expiry": datetime(2024, 8, 8).date(),
+            "expiry": datetime(2024, 8, 6).date(),
             "instrument_type": "CE",
             "strike": 19500,
             "tradingsymbol": "NIFTY2480819500CE",
