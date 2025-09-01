@@ -13,9 +13,11 @@ include_trailing_comma = true
 target-version = "py311"
 line-length = 88
 # Keep Ruff focused on correctness & modernization (leave import ordering to isort)
+exclude = ["data", "build", "dist", ".venv", ".git"]
+
+[tool.ruff.lint]
 select = ["E", "F", "B", "UP", "SIM", "RUF"]
 ignore = []
-exclude = ["data", "build", "dist", ".venv", ".git"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests often use asserts and looser patterns—treat them gently
