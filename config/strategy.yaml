@@ -26,6 +26,11 @@ micro:
   max_spread_pct_open: 0.45
   max_spread_pct_last20m: 0.45
   depth_multiplier: 5
+  depth_min_lots: 1
+
+thresholds:
+  min_atr_pct_nifty: 0.04
+  min_atr_pct_banknifty: 0.06
 
 options:
   delta_target: 0.40           # target absolute delta

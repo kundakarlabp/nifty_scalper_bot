@@ -36,6 +36,7 @@ class StrategyConfig:
     max_spread_pct_open: float
     max_spread_pct_last20m: float
     depth_multiplier: int
+    depth_min_lots: int
     min_oi: int
     max_median_spread_pct: float
     delta_target: float
@@ -56,6 +57,8 @@ class StrategyConfig:
     gamma_tp2_cap: float
     gamma_trail_mult: float
     gamma_time_stop_min: int
+    min_atr_pct_nifty: float
+    min_atr_pct_banknifty: float
     min_bars_required: int
     indicator_min_bars: int
     mtf_min_bars: int
@@ -72,6 +75,7 @@ class StrategyConfig:
         windows = data.get("windows", {})
         gates = data.get("gates", {})
         micro = data.get("micro", {})
+        thresholds = data.get("thresholds", {})
         options = data.get("options", {})
         lc = data.get("lifecycle", {})
         warm = data.get("warmup", {})
@@ -98,6 +102,7 @@ class StrategyConfig:
             max_spread_pct_open=float(micro.get("max_spread_pct_open", 0.30)),
             max_spread_pct_last20m=float(micro.get("max_spread_pct_last20m", 0.45)),
             depth_multiplier=int(micro.get("depth_multiplier", 5)),
+            depth_min_lots=int(micro.get("depth_min_lots", 1)),
             min_oi=int(options.get("min_oi", 500000)),
             max_median_spread_pct=float(options.get("max_median_spread_pct", 0.35)),
             delta_target=float(options.get("delta_target", 0.40)),
@@ -118,6 +123,8 @@ class StrategyConfig:
             gamma_tp2_cap=float(lc.get("gamma_mode", {}).get("tp2_R_cap", 1.40)),
             gamma_trail_mult=float(lc.get("gamma_mode", {}).get("trail_atr_mult", 0.60)),
             gamma_time_stop_min=int(lc.get("gamma_mode", {}).get("time_stop_min", 8)),
+            min_atr_pct_nifty=float(thresholds.get("min_atr_pct_nifty", 0.04)),
+            min_atr_pct_banknifty=float(thresholds.get("min_atr_pct_banknifty", 0.06)),
             min_bars_required=int(warm.get("min_bars_required", 20)),
             indicator_min_bars=int(warm.get("indicator_min_bars", 14)),
             mtf_min_bars=int(warm.get("mtf_min_bars", 21)),

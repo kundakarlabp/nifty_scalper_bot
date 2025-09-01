@@ -106,6 +106,8 @@ class TelegramController:
         trace_provider: Optional[Callable[[int], None]] = None,
         selftest_provider: Optional[Callable[[str], str]] = None,
         backtest_provider: Optional[Callable[[Optional[str]], str]] = None,
+        atm_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        l1_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         # controls
         runner_pause: Optional[Callable[[], None]] = None,
         runner_resume: Optional[Callable[[], None]] = None,
@@ -151,6 +153,8 @@ class TelegramController:
         self._trace_provider = trace_provider
         self._selftest_provider = selftest_provider
         self._backtest_provider = backtest_provider
+        self._atm_provider = atm_provider
+        self._l1_provider = l1_provider
 
         self._runner_pause = runner_pause
         self._runner_resume = runner_resume
@@ -784,35 +788,40 @@ class TelegramController:
                 gates.append(("data_stale", data_stale, f"lag_s={lag}" if lag is not None else "-"))
                 regime = plan.get("regime") in ("TREND", "RANGE")
                 gates.append(("regime", regime, plan.get("regime")))
-                atr = float(plan.get("atr_pct") or 0.0)
-                gates.append(("atr_pct", 0.20 <= atr <= 2.00, atr))
+                atr = plan.get("atr_pct")
+                atr_min = plan.get("atr_min")
+                gates.append(("atr_pct", atr is not None and atr_min is not None and atr >= atr_min, atr))
                 score = float(plan.get("score") or 0.0)
                 reg = str(plan.get("regime"))
                 need = 9 if reg == "TREND" else 8
                 gates.append(("score", score >= need, score))
-                micro = plan.get("micro", {})
-                sp = float(micro.get("spread_pct") or 0.0)
-                gates.append(("micro_spread", sp <= 0.35, sp))
-                gates.append(("micro_depth", bool(micro.get("depth_ok")), micro.get("depth_ok")))
+                sp = plan.get("spread_pct")
+                dp = plan.get("depth_ok")
+                gates.append(("micro_spread", sp is not None and sp <= 0.35, sp))
+                gates.append(("micro_depth", bool(dp) if dp is not None else False, dp))
                 reason_block = plan.get("reason_block") or "-"
                 reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                sym = plan.get("strike") or plan.get("symbol") or "-"
-                lines.append(
-                    _fmt_micro(
-                        sym,
-                        plan.get("micro"),
-                        plan.get("last_bar_ts"),
-                        plan.get("last_bar_lag_s"),
+                sp_line = "N/A" if sp is None else round(sp, 3)
+                dp_line = "N/A" if dp is None else ("✅" if dp else "❌")
+                lines.append(f"micro_spread: {sp_line} | micro_depth: {dp_line}")
+                if plan.get("option"):
+                    o = plan["option"]
+                    lines.append(
+                        f"option: {o['kind']} {o['strike']} {o['expiry']} token={o['token']} src={plan.get('quote_src','-')}"
                     )
-                )
                 lines.append(
                     f"features: {'PASS' if plan.get('feature_ok') else 'FAIL'} "
                     f"reasons={','.join(plan.get('reasons', [])) or '-'}"
                 )
-                lines.append(f"ATR%: {plan.get('atr_pct', 'N/A')}")
+                if atr is not None and atr_min is not None:
+                    lines.append(
+                        f"ATR%: {round(atr,4)} (min {atr_min}) → {'PASS' if 'atr_low' not in plan.get('reasons', []) else 'FAIL'}"
+                    )
+                else:
+                    lines.append("ATR%: N/A")
                 if plan.get("probe_window_from") and plan.get("probe_window_to"):
                     lines.append(
                         f"\u2022 Probe window: {plan['probe_window_from']} \u2192 {plan['probe_window_to']} (IST)"
@@ -823,6 +832,24 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Why error: {e}")
+
+        if cmd == "/atm":
+            if not self._atm_provider:
+                return self._send("ATM provider unavailable.")
+            try:
+                info = self._atm_provider()
+                return self._send(f"ATM: {info}")
+            except Exception as e:
+                return self._send(f"ATM error: {e}")
+
+        if cmd == "/tick":
+            if not self._l1_provider:
+                return self._send("L1 provider unavailable.")
+            try:
+                t = self._l1_provider()
+                return self._send(f"L1: {t if t else 'n/a'}")
+            except Exception as e:
+                return self._send(f"L1 error: {e}")
 
         if cmd == "/bars":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)

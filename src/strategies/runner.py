@@ -36,6 +36,9 @@ from src.utils.events import load_calendar, EventWindow
 from src.utils.env import env_flag
 from src.features.health import check as feat_check
 from src.features.indicators import atr_pct
+from src.options.instruments_cache import InstrumentsCache
+from src.options.resolver import OptionResolver
+from src.execution.micro_filters import micro_from_l1
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -103,6 +106,12 @@ class StrategyRunner:
         self.strategy_config_path = resolve_config_path()
         self.strategy_cfg: StrategyConfig = try_load(self.strategy_config_path, None)
         self.tz = ZoneInfo(self.strategy_cfg.tz)
+
+        self.under_symbol = str(getattr(settings.instruments, "trade_symbol", "NIFTY"))
+        self.lot_size = int(getattr(settings.instruments, "nifty_lot_size", 50))
+        self.instruments = InstrumentsCache(self.kite)
+        self.option_resolver = OptionResolver(self.instruments)
+        self._last_option: Optional[dict] = None
 
         self.risk_engine = RiskEngine(
             LimitConfig(
@@ -572,8 +581,27 @@ class StrategyRunner:
             plan["feature_ok"] = fh.bars_ok and fh.fresh_ok
             plan["reasons"].extend(fh.reasons)
             plan["atr_pct"] = atr_pct(df, period=atr_period)
-            if plan.get("atr_pct") is None:
+            sym = self.under_symbol.upper()
+            atr_min = (
+                self.strategy_cfg.min_atr_pct_banknifty
+                if "BANK" in sym
+                else self.strategy_cfg.min_atr_pct_nifty
+            )
+            plan["atr_min"] = atr_min
+            if plan["atr_pct"] is None:
                 plan["reasons"].append("atr_na")
+                plan["reason_block"] = plan.get("reason_block") or "features"
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                return
+            if plan["atr_pct"] < atr_min:
+                plan["reasons"].append("atr_low")
+                plan["reason_block"] = plan.get("reason_block") or "atr_low"
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                return
             if last_bar_ts_obj and "last_bar_ts" not in plan:
                 plan["last_bar_ts"] = last_bar_ts_obj.isoformat()
             if not plan["feature_ok"]:
@@ -679,6 +707,52 @@ class StrategyRunner:
                     "tp2": plan.get("tp2"),
                 }
             )
+            under_ltp = 0.0
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                try:
+                    under_ltp = float(df["close"].iloc[-1])
+                except Exception:
+                    under_ltp = 0.0
+            opt = self.option_resolver.resolve_atm(
+                self.under_symbol, under_ltp, plan.get("side_hint", "CE"), self._now_ist()
+            )
+            plan["option"] = opt
+            self._last_option = opt
+            if not opt.get("token"):
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
+            l1 = None
+            if self.kite is not None:
+                try:
+                    l1 = self.kite.ltp([opt["token"]]).get(opt["token"])  # type: ignore[attr-defined]
+                except Exception:
+                    l1 = None
+            spread, depth_ok, extra = micro_from_l1(
+                l1,
+                lot_size=self.lot_size,
+                depth_min_lots=self.strategy_cfg.depth_min_lots,
+            )
+            if spread is None:
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
+            plan["spread_pct"] = spread
+            plan["depth_ok"] = depth_ok
+            plan["micro"] = {"spread_pct": spread, "depth_ok": depth_ok, **(extra or {})}
+            plan["quote_src"] = "kite"
 
             # ---- risk gates
             gates = self._risk_gates_for(plan)
@@ -925,6 +999,34 @@ class StrategyRunner:
             return dict(self._last_flow_debug)
         finally:
             setattr(settings, "allow_offhours_testing", prev)
+
+    def get_current_atm(self) -> Dict[str, dict]:
+        under = self.last_spot or 0.0
+        if under <= 0 or not self.option_resolver:
+            return {}
+        now = self._now_ist()
+        return {
+            k: self.option_resolver.resolve_atm(self.under_symbol, under, k, now)
+            for k in ("CE", "PE")
+        }
+
+    def get_current_l1(self) -> Optional[Dict[str, Any]]:
+        if not self.kite or not self._last_option or not self._last_option.get("token"):
+            return None
+        try:
+            l1 = self.kite.ltp([self._last_option["token"]]).get(self._last_option["token"])  # type: ignore[attr-defined]
+        except Exception:
+            return None
+        spread, depth_ok, extra = micro_from_l1(
+            l1,
+            lot_size=self.lot_size,
+            depth_min_lots=self.strategy_cfg.depth_min_lots,
+        )
+        if spread is None or extra is None:
+            return None
+        extra["spread_pct"] = spread
+        extra["depth_ok"] = depth_ok
+        return extra
 
     def run_backtest(self, csv_path: Optional[str] = None) -> str:
         """Run backtest on a CSV file and return a summary string."""
@@ -1233,10 +1335,20 @@ class StrategyRunner:
                 min_req = int(getattr(settings.strategy, "min_bars_required", min_bars))
                 if valid and rows >= min_bars:
                     self._last_fetch_ts = time.time()
-                    return df.sort_index()
+                    df = df.sort_index()
+                    try:
+                        self.last_spot = float(df["close"].iloc[-1])
+                    except Exception:
+                        pass
+                    return df
                 if valid and rows >= min_req:
                     self._last_fetch_ts = time.time()
-                    return df.sort_index()
+                    df = df.sort_index()
+                    try:
+                        self.last_spot = float(df["close"].iloc[-1])
+                    except Exception:
+                        pass
+                    return df
 
                 self.log.error(
                     "Insufficient historical_data (%s<%s) after expanded fetch.",
@@ -1259,6 +1371,10 @@ class StrategyRunner:
                     index=[ts],
                 )
                 self._last_fetch_ts = time.time()
+                try:
+                    self.last_spot = float(ltp)
+                except Exception:
+                    pass
                 return df
 
             # If we get here, we truly have nothing
