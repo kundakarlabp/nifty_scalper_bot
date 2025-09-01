@@ -731,7 +731,8 @@ class StrategyRunner:
             l1 = None
             if self.kite is not None:
                 try:
-                    l1 = self.kite.ltp([opt["token"]]).get(opt["token"])  # type: ignore[attr-defined]
+                    token = opt["token"]
+                    l1 = self.kite.quote([token]).get(token)  # type: ignore[attr-defined]
                 except Exception:
                     l1 = None
             spread, depth_ok, extra = micro_from_l1(
@@ -1014,7 +1015,8 @@ class StrategyRunner:
         if not self.kite or not self._last_option or not self._last_option.get("token"):
             return None
         try:
-            l1 = self.kite.ltp([self._last_option["token"]]).get(self._last_option["token"])  # type: ignore[attr-defined]
+            token = self._last_option["token"]
+            l1 = self.kite.quote([token]).get(token)  # type: ignore[attr-defined]
         except Exception:
             return None
         spread, depth_ok, extra = micro_from_l1(
