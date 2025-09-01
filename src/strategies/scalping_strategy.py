@@ -252,7 +252,7 @@ class EnhancedScalpingStrategy:
             "ts": datetime.utcnow().isoformat(),
             "bar_count": int(len(df) if isinstance(df, pd.DataFrame) else 0),
             "last_bar_ts": (
-                pd.to_datetime(df.index[-1]).to_pydatetime(warn=False).isoformat()
+                pd.to_datetime(df.index[-1]).to_pydatetime().isoformat()
                 if isinstance(df, pd.DataFrame) and len(df)
                 else None
             ),
@@ -284,7 +284,7 @@ class EnhancedScalpingStrategy:
             if spot_df is None:
                 spot_df = df
             last_ts = pd.to_datetime(df.index[-1])
-            plan["last_bar_ts"] = last_ts.to_pydatetime(warn=False).isoformat()
+            plan["last_bar_ts"] = last_ts.to_pydatetime().isoformat()
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
