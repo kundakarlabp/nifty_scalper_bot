@@ -101,6 +101,10 @@ def _chunks(total: int, chunk: int) -> List[int]:
     return out
 
 
+_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
 def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, Any]:
     """Return quote with depth for the given trading symbol."""
     if not kite or not tsym:
@@ -127,7 +131,7 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
         ltp = float(info.get("last_price") or 0.0)
         oi = info.get("oi")
         ts = info.get("timestamp") or info.get("last_trade_time")
-        return {
+        quote = {
             "ltp": ltp,
             "bid": bid,
             "ask": ask,
@@ -137,8 +141,19 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "timestamp": ts,
             "source": "quote",
         }
+        if ltp > 0:
+            with _CACHE_LOCK:
+                _QUOTE_CACHE[tsym] = quote
+        return quote
     except Exception as e:
         log.debug("fetch_quote_with_depth failed: %s", e)
+        with _CACHE_LOCK:
+            cached = _QUOTE_CACHE.get(tsym)
+        if cached:
+            out = cached.copy()
+            out["source"] = "cache"
+            out.setdefault("timestamp", datetime.utcnow().isoformat())
+            return out
         ltp = 0.0
         try:
             data = _retry_call(kite.ltp, [f"NFO:{tsym}"], tries=2)
@@ -153,10 +168,14 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
                     ltp = float(hist["Close"].iloc[-1])
             except Exception:
                 ltp = 0.0
+        if ltp <= 0.0:
+            ltp = 1.0
         est_spread_pct = getattr(settings.executor, "default_spread_pct_est", 0.25)
         spr = ltp * (est_spread_pct / 100.0)
+        if spr <= 0:
+            spr = max(ltp * 0.001, 0.05)
         now_iso = datetime.utcnow().isoformat()
-        return {
+        quote = {
             "ltp": ltp,
             "bid": ltp - spr / 2,
             "ask": ltp + spr / 2,
@@ -166,6 +185,9 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "timestamp": now_iso,
             "source": "ltp_fallback",
         }
+        with _CACHE_LOCK:
+            _QUOTE_CACHE[tsym] = quote
+        return quote
 
 
 class KiteOrderConnector:
