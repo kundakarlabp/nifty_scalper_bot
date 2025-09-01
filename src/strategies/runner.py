@@ -34,6 +34,8 @@ from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # 
 from src.utils import strike_selector
 from src.utils.events import load_calendar, EventWindow
 from src.utils.env import env_flag
+from src.features.health import check as feat_check
+from src.features.indicators import atr_pct
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -559,6 +561,30 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
+            atr_period = int(getattr(settings.strategy, "atr_period", 14))
+            last_bar_ts_obj = (
+                df.index[-1].to_pydatetime()
+                if isinstance(df.index, pd.DatetimeIndex) and len(df)
+                else None
+            )
+            fh = feat_check(df, last_bar_ts_obj, atr_period=atr_period)
+            plan["reasons"] = plan.get("reasons", [])
+            plan["feature_ok"] = fh.bars_ok and fh.fresh_ok
+            plan["reasons"].extend(fh.reasons)
+            plan["atr_pct"] = atr_pct(df, period=atr_period)
+            if plan.get("atr_pct") is None:
+                plan["reasons"].append("atr_na")
+            if last_bar_ts_obj and "last_bar_ts" not in plan:
+                plan["last_bar_ts"] = last_bar_ts_obj.isoformat()
+            if not plan["feature_ok"]:
+                plan["regime"] = "NO_TRADE"
+                plan["score"] = 0
+                plan["reason_block"] = plan.get("reason_block") or "features"
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                return
+
             last_ts = plan.get("last_bar_ts")
             if last_ts and not plan.get("reason_block"):
                 try:
