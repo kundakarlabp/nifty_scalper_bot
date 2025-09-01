@@ -82,7 +82,7 @@ class TelegramController:
     Production-safe Telegram controller:
 
     - Pulls token/chat_id from settings.telegram
-    - Provides /status /health /diag /check /logs /tick /tickdry /mode /pause /resume
+    - Provides /status /health /diag /check /logs /tick /tickdry /l1 /mode /pause /resume
       plus /positions, /active and strategy tuning commands
     - Health Cards message for /health (also used by /check-like detail)
     - Dedup + rate limiting + backoff on send
@@ -429,7 +429,7 @@ class TelegramController:
                 "*Core*\n"
                 "/status [verbose] · /health · /diag · /check · /components\n"
                 "/positions · /active [page] · /risk · /limits\n"
-                "/tick · /tickdry · /backtest [csv] · /logs [n]\n"
+                "/tick · /tickdry · /l1 · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
                 "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
@@ -869,7 +869,7 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"ATM error: {e}")
 
-        if cmd == "/tick":
+        if cmd == "/l1":
             if not self._l1_provider:
                 return self._send("L1 provider unavailable.")
             try:
