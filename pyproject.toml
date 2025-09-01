@@ -16,6 +16,9 @@ exclude = ["data", "build", "dist", ".venv", ".git"]
 
 [tool.ruff.lint]
 # Keep Ruff focused on correctness & modernization (leave import ordering to isort)
+exclude = ["data", "build", "dist", ".venv", ".git"]
+
+[tool.ruff.lint]
 select = ["E", "F", "B", "UP", "SIM", "RUF"]
 ignore = []
 
