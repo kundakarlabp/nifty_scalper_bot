@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 
@@ -22,6 +22,11 @@ def build_window(now: datetime, lookback_min: int) -> Tuple[datetime, datetime]:
 def calc_bar_lag_s(ohlc: Optional[pd.DataFrame], now: datetime) -> Optional[int]:
     """Return age in seconds of the last bar in ``ohlc`` relative to ``now``.
 
+    The function is tolerant to mismatched timezone awareness between ``now`` and
+    the timestamp in ``ohlc``. If one datetime is timezone aware and the other is
+    naive, the naive one is assumed to be in the other's timezone so that a
+    meaningful subtraction can occur.
+
     If ``ohlc`` is ``None`` or empty, ``None`` is returned.
     """
     if ohlc is None or len(ohlc) == 0:
@@ -30,4 +35,13 @@ def calc_bar_lag_s(ohlc: Optional[pd.DataFrame], now: datetime) -> Optional[int]
         ts = ohlc.index[-1].to_pydatetime()
     except Exception:
         return None
-    return max(0, int((now - ts).total_seconds()))
+
+    now_dt = now
+    if ts.tzinfo is None and now_dt.tzinfo is not None:
+        ts = ts.replace(tzinfo=now_dt.tzinfo)
+    elif ts.tzinfo is not None and now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=ts.tzinfo)
+    elif ts.tzinfo is not None and now_dt.tzinfo is not None:
+        ts = ts.astimezone(now_dt.tzinfo)
+
+    return max(0, int((now_dt - ts).total_seconds()))
