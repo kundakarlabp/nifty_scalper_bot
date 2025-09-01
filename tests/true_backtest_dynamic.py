@@ -140,18 +140,14 @@ class BacktestRunner:
         plan: dict[str, Any] = self.strategy.generate_signal(
             df=df_history, current_price=current_price
         )
+        # Respect blocking signals from the strategy. Previously we forced a
+        # synthetic trade whenever the strategy returned ``reason_block`` which
+        # meant a backtest would always record at least one trade.  Tests expect
+        # that when the strategy declines to trade we simply skip the entry,
+        # allowing the reporting logic to emit a placeholder file.
         if plan.get("reason_block"):
-            side = "BUY" if current_bar["close"] >= current_bar["open"] else "SELL"
-            delta = 5.0
-            stop_loss = (
-                current_price - delta if side == "BUY" else current_price + delta
-            )
-            target = (
-                current_price + 2 * delta
-                if side == "BUY"
-                else current_price - 2 * delta
-            )
-            plan = {"side": side, "stop_loss": stop_loss, "target": target}
+            logger.info("Trade blocked: %s", plan["reason_block"])
+            return
 
         logger.info(f"Trade signal at {current_dt}: {plan}")
 
