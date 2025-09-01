@@ -530,8 +530,8 @@ class EnhancedScalpingStrategy:
             # strike selection & liquidity
             try:
                 _ = get_instrument_tokens(spot_price=price)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("instrument token lookup failed: %s", e)
             strike_info = select_strike(price, score)
             if not strike_info:
                 liquidity_info: Optional[Dict[str, Any]] = None
