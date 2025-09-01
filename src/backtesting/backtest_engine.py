@@ -1,13 +1,13 @@
-from __future__ import annotations
-
 """Event-driven backtest engine."""
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, cast
-from datetime import datetime, timedelta
+from __future__ import annotations
+
 import csv
 import json
 import os
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any, cast
 
 from .data_feed import SpotFeed
 from .sim_connector import SimConnector
@@ -45,11 +45,15 @@ class BacktestEngine:
         self.sim = sim
         self.outdir = outdir
         os.makedirs(outdir, exist_ok=True)
-        self.trades: List[Dict[str, object]] = []
+        self.trades: list[dict[str, object]] = []
         self.equity = 100_000.0
         self.equity_curve: list[tuple[str, float]] = []
 
-    def run(self, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, float]:
+    def run(
+        self,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> dict[str, float]:
         """Execute the backtest between ``start`` and ``end`` timestamps."""
 
         bars = self.feed.window(start, end)
@@ -57,8 +61,8 @@ class BacktestEngine:
 
         strategy = ScalpingStrategy()
 
-        for ts, o, h, l, c, v in bars.iter_bars():
-            plan = strategy.evaluate_from_backtest(ts, o, h, l, c, v)
+        for ts, o, h, low, c, v in bars.iter_bars():
+            plan = strategy.evaluate_from_backtest(ts, o, h, low, c, v)
             if plan is None:
                 continue
             plan["bar_count"] = max(plan.get("bar_count", 0), 20)
@@ -76,7 +80,13 @@ class BacktestEngine:
             tsym = str(tsym)
             K = parsed["strike"]
             opt = cast(OptionType, parsed["option_type"])
-            ob = self.sim.synth_option_book(spot=c, strike=K, opt_type=opt, now=ts, atr_pct=plan["atr_pct"])
+            ob = self.sim.synth_option_book(
+                spot=c,
+                strike=K,
+                opt_type=opt,
+                now=ts,
+                atr_pct=plan["atr_pct"],
+            )
             spread = ob["ask"] - ob["bid"]
             mid = ob["mid"]
             ladd0, ladd1 = self.sim.ladder_prices(mid, spread)
@@ -117,16 +127,18 @@ class BacktestEngine:
                     entry_px = px0
 
             qty = self.sim.lot_size * plan.get("qty_lots", 1)
-            costs_in = self.sim.apply_costs("BUY" if side == "BUY" else "SELL", entry_px, qty)
+            costs_in = self.sim.apply_costs(
+                "BUY" if side == "BUY" else "SELL", entry_px, qty
+            )
             R = abs((plan.get("sl") or (entry_px - spread)) - entry_px)
             tp1 = entry_px + plan.get("tp1_R", 1.0) * R * (1 if side == "BUY" else -1)
-            tp2 = entry_px + plan.get("tp2_R", 1.6) * R * (1 if side == "BUY" else -1)
+            _tp2 = entry_px + plan.get("tp2_R", 1.6) * R * (1 if side == "BUY" else -1)
             time_stop_ts = ts + timedelta(minutes=plan.get("time_stop_min", 12))
 
             exit_px = None
             exit_ts = None
             exit_reason = "time"
-            for fts, fo, fh, fl, fc, fv in self.feed.iter_bars():
+            for fts, _fo, fh, fl, fc, _fv in self.feed.iter_bars():
                 if fts <= ts:
                     continue
                 hi, lo = (fh, fl) if side == "BUY" else (fl, fh)
@@ -145,7 +157,9 @@ class BacktestEngine:
             if exit_px is None or exit_ts is None:
                 continue
 
-            costs_out = self.sim.apply_costs("SELL" if side == "BUY" else "BUY", exit_px, qty)
+            costs_out = self.sim.apply_costs(
+                "SELL" if side == "BUY" else "BUY", exit_px, qty
+            )
             gross = (exit_px - entry_px) * (1 if side == "BUY" else -1) * qty
             net = gross - (costs_in + costs_out)
             pnl_R = ((exit_px - entry_px) * (1 if side == "BUY" else -1)) / max(1e-6, R)
@@ -204,9 +218,11 @@ class BacktestEngine:
         by_regime: dict[str, list[float]] = {"TREND": [], "RANGE": []}
         for t in self.trades:
             reg = str(t.get("regime", "TREND"))
-            by_regime.setdefault(reg, []).append(float(cast(float, t.get("pnl_R", 0.0))))
+            by_regime.setdefault(reg, []).append(
+                float(cast(float, t.get("pnl_R", 0.0)))
+            )
 
-        def pf(rs: List[float]) -> float:
+        def pf(rs: list[float]) -> float:
             pos = [r for r in rs if r > 0]
             neg = [-r for r in rs if r < 0]
             return (sum(pos) / sum(neg)) if neg else float("inf")
@@ -223,7 +239,7 @@ class BacktestEngine:
             json.dump(summary, f, indent=2)
         return summary
 
-    def _summary_metrics(self, trades: List[Dict[str, Any]]) -> Dict[str, float]:
+    def _summary_metrics(self, trades: list[dict[str, Any]]) -> dict[str, float]:
         """Compute a few aggregate performance metrics."""
 
         if not trades:
