@@ -170,6 +170,13 @@ class BacktestRunner:
 
         if not self.session.trade_history:
             logger.warning("No trades were executed. Cannot generate report.")
+            # Write a placeholder text file so callers know why no report exists
+            placeholder = reports_dir / "backtest_report.txt"
+            placeholder.write_text(
+                "No trades were executed. Cannot generate report.\n",
+                encoding="utf-8",
+            )
+            logger.info(f"Wrote placeholder report: {placeholder}")
             # Still provide a minimal summary so callers have consistent output
             self._generate_simple_report()
             return
