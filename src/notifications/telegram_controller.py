@@ -722,8 +722,6 @@ class TelegramController:
                 micro = sig.get("micro") or {}
                 msp = micro.get("spread_pct")
                 mdp = micro.get("depth_ok")
-                msp_ok = msp is not None and msp <= runner.strategy_cfg.max_spread_pct_regular
-                mdp_ok = bool(mdp)
                 ob_reason = sig.get("reason_block")
                 lines = []
                 for name, ok, val in [
@@ -735,11 +733,19 @@ class TelegramController:
                     ("regime", regime_ok, sig.get("regime")),
                     ("atr_pct", atr_ok, atr),
                     ("score", score_ok, f"{sig.get('score')}/{need}"),
-                    ("micro_spread", msp_ok, msp),
-                    ("micro_depth", mdp_ok, mdp),
                 ]:
                     mark, val = pf(ok, val)
                     lines.append(f"{name}: {mark}{val}")
+                if msp is None or mdp is None:
+                    lines.append("micro_spread: ℹ️ N/A (no_quote)")
+                    lines.append("micro_depth: ℹ️ N/A (no_quote)")
+                else:
+                    msp_ok = msp <= runner.strategy_cfg.max_spread_pct_regular
+                    mdp_ok = bool(mdp)
+                    mark, val = pf(msp_ok, msp)
+                    lines.append(f"micro_spread: {mark}{val}")
+                    mark, val = pf(mdp_ok, mdp)
+                    lines.append(f"micro_depth: {mark}{val}")
                 api = s.get("api_health", {})
                 rh = s.get("router", {})
                 lines.append(
@@ -797,15 +803,13 @@ class TelegramController:
                 gates.append(("score", score >= need, score))
                 sp = plan.get("spread_pct")
                 dp = plan.get("depth_ok")
-                gates.append(("micro_spread", sp is not None and sp <= 0.35, sp))
-                gates.append(("micro_depth", bool(dp) if dp is not None else False, dp))
                 reason_block = plan.get("reason_block") or "-"
                 reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                sp_line = "N/A" if sp is None else round(sp, 3)
-                dp_line = "N/A" if dp is None else ("✅" if dp else "❌")
+                sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
+                dp_line = "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
                 lines.append(f"micro_spread: {sp_line} | micro_depth: {dp_line}")
                 if plan.get("option"):
                     o = plan["option"]

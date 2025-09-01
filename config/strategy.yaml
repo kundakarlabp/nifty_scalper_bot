@@ -13,7 +13,7 @@ windows:
       end:   "15:30"
 
 gates:
-  atr_pct_min: 0.20
+  atr_pct_min: 0.025
   atr_pct_max: 2.00
   score_trend_min: 9
   score_range_min: 8

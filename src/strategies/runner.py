@@ -732,7 +732,7 @@ class StrategyRunner:
             if self.kite is not None:
                 try:
                     token = opt["token"]
-                    l1 = self.kite.quote([token]).get(token)  # type: ignore[attr-defined]
+                    l1 = self.kite.quote([token]).get(str(token))  # type: ignore[attr-defined]
                 except Exception:
                     l1 = None
             spread, depth_ok, extra = micro_from_l1(
@@ -1016,7 +1016,7 @@ class StrategyRunner:
             return None
         try:
             token = self._last_option["token"]
-            l1 = self.kite.quote([token]).get(token)  # type: ignore[attr-defined]
+            l1 = self.kite.quote([token]).get(str(token))  # type: ignore[attr-defined]
         except Exception:
             return None
         spread, depth_ok, extra = micro_from_l1(
