@@ -1439,5 +1439,54 @@ class TelegramController:
                     return self._send("Invalid numbers.")
             return self._send("Range tighten not wired.")
 
+        if cmd == "/microcap":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            try:
+                v = float(args[0])
+                cfg = runner.strategy_cfg.raw.setdefault("micro", {})
+                cfg["max_spread_pct"] = v
+                cfg["dynamic"] = False
+                return self._send(f"micro max_spread_pct set to {v}% (dynamic=off)")
+            except Exception:
+                return self._send("usage: /microcap <percent>  e.g. /microcap 1.0")
+
+        if cmd == "/depthmin":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            try:
+                v = int(args[0])
+                cfg = runner.strategy_cfg.raw.setdefault("micro", {})
+                cfg["depth_min_lots"] = v
+                return self._send(f"micro depth_min_lots set to {v}")
+            except Exception:
+                return self._send("usage: /depthmin <lots>")
+
+        if cmd == "/micromode":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            try:
+                v = str(args[0]).upper()
+                assert v in ("HARD", "SOFT")
+                cfg = runner.strategy_cfg.raw.setdefault("micro", {})
+                cfg["mode"] = v
+                return self._send(f"micro mode = {v}")
+            except Exception:
+                return self._send("usage: /micromode HARD|SOFT")
+
+        if cmd == "/micro":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            m = (runner.last_plan or {}).get("micro") or {}
+            return self._send(
+                f"micro: mid={m.get('mid')} spread%={m.get('spread_pct')} cap%={m.get('cap_pct')} "
+                f"depth_ok={m.get('depth_ok')} need_lots={m.get('need_lots')} mode={m.get('mode')} "
+                f"would_block={m.get('would_block')}"
+            )
+
         # Unknown
         return self._send("Unknown command. Try /help.")
