@@ -118,6 +118,7 @@ class TelegramController:
         trace_provider: Optional[Callable[[int], None]] = None,
         selftest_provider: Optional[Callable[[str], str]] = None,
         backtest_provider: Optional[Callable[[Optional[str]], str]] = None,
+        filecheck_provider: Optional[Callable[[str], str]] = None,
         atm_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         l1_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         # controls
@@ -166,6 +167,7 @@ class TelegramController:
         self._trace_provider = trace_provider
         self._selftest_provider = selftest_provider
         self._backtest_provider = backtest_provider
+        self._filecheck_provider = filecheck_provider
         self._atm_provider = atm_provider
         self._l1_provider = l1_provider
 
@@ -1001,6 +1003,17 @@ class TelegramController:
                 return self._send(f"smoketest: {text}")
             except Exception as e:
                 return self._send(f"Smoketest error: {e}")
+
+        if cmd == "/filecheck":
+            try:
+                if not self._filecheck_provider:
+                    return self._send("filecheck not wired")
+                if not args:
+                    return self._send("Usage: /filecheck <path>")
+                text = self._filecheck_provider(args[0])
+                return self._send(text)
+            except Exception as e:
+                return self._send(f"filecheck error: {e}")
 
         # CHECK (multiline, with hints)
         if cmd == "/check":
