@@ -88,7 +88,7 @@ class TelegramController:
     Production-safe Telegram controller:
 
     - Pulls token/chat_id from settings.telegram
-    - Provides /status /health /diag /check /logs /tick /tickdry /l1 /mode /pause /resume
+    - Provides /status /health /diag /check /logs /tick /force_eval /mode /pause /resume
       plus /positions, /active and strategy tuning commands
     - Health Cards message for /health (also used by /check-like detail)
     - Dedup + rate limiting + backoff on send
@@ -437,7 +437,7 @@ class TelegramController:
                 "*Core*\n"
                 "/status [verbose] · /health · /diag · /check · /components\n"
                 "/positions · /active [page] · /risk · /limits\n"
-                "/tick · /tickdry · /l1 · /backtest [csv] · /logs [n]\n"
+                "/tick · /force_eval · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
                 "/score · /shadow · /lastplan\n"
@@ -497,6 +497,20 @@ class TelegramController:
                 fmt("Quote", api.get("quote", {})),
             ]
             return self._send("\n".join(lines))
+
+        if cmd == "/state":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            status = runner.get_status_snapshot()
+            eq = getattr(runner, "_equity_cached_value", 0.0)
+            msg = (
+                f"eq={round(float(eq),2)} trades={status.get('trades_today')} "
+                f"cooloff={status.get('cooloff_until', '-')} "
+                f"losses={status.get('consecutive_losses')} "
+                f"evals={getattr(runner, 'eval_count', 0)}"
+            )
+            return self._send(msg)
 
         if cmd == "/selftest":
             if args:
@@ -1000,7 +1014,7 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"ATM error: {e}")
 
-        if cmd == "/l1":
+        if cmd in ("/tick", "/l1"):
             if not self._l1_provider:
                 return self._send("L1 provider unavailable.")
             try:
@@ -1268,9 +1282,9 @@ class TelegramController:
                 self._send("⚠️ Broker session missing.")
             return
 
-        # TICK / TICKDRY
-        if cmd in ("/tick", "/tickdry"):
-            dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
+        # FORCE EVAL
+        if cmd == "/force_eval":
+            dry = bool(args and args[0].lower().startswith("dry"))
             out = self._do_tick(dry=dry)
             return self._send(out)
 
@@ -1396,6 +1410,18 @@ class TelegramController:
                 return self._send(f"▶️ Entries resumed. Rehydrated {resumed} legs.")
             return self._send("▶️ Entries resumed.")
 
+        if cmd == "/emergency_stop":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            try:
+                if self._cancel_all:
+                    self._cancel_all()
+                runner.shutdown()
+                return self._send("Emergency stop executed.")
+            except Exception as e:
+                return self._send(f"Emergency stop failed: {e}")
+
         # CANCEL ALL
         if cmd == "/cancel_all":
             return self._send_inline(
@@ -1434,6 +1460,18 @@ class TelegramController:
                 except Exception:
                     return self._send("Invalid integer.")
             return self._send("ATR period not wired.")
+
+        if cmd == "/atrmin":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            try:
+                v = float(args[0])
+                runner.strategy_cfg.raw["atr_min"] = v
+                runner.strategy_cfg.atr_min = v
+                return self._send(f"atr_min set to {v}")
+            except Exception:
+                return self._send("usage: /atrmin <percent>")
 
         if cmd == "/slmult":
             if self._set_sl_mult:

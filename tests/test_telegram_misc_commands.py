@@ -53,15 +53,25 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "micro:" in msg
 
 
-def test_emergency_stop_unknown(monkeypatch) -> None:
+def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
     _prep_settings(monkeypatch)
-    tc = TelegramController(status_provider=lambda: {})
+    called: list[str] = []
+
+    def cancel_all() -> None:
+        called.append("cancel")
+
+    runner = SimpleNamespace(shutdown=lambda: called.append("shutdown"))
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {}, cancel_all=cancel_all)
     sent: list[str] = []
     tc._send = lambda text, parse_mode=None: sent.append(text)
-    tc._handle_update(
-        {"message": {"chat": {"id": 1}, "text": "/emergency_stop"}}
-    )
-    assert sent[0] == "Unknown command. Try /help."
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/emergency_stop"}})
+    assert called == ["cancel", "shutdown"]
+    assert sent[0] == "Emergency stop executed."
 
 
 def test_probe_returns_snapshot(monkeypatch) -> None:
@@ -200,13 +210,45 @@ def test_config_outputs_strategy_config(monkeypatch) -> None:
     assert "Strategy Config" in msg and "name: `strat` v1" in msg
 
 
-def test_atrmin_unknown_command(monkeypatch) -> None:
+def test_state_outputs_metrics(monkeypatch) -> None:
     _prep_settings(monkeypatch)
+    runner = SimpleNamespace(
+        _equity_cached_value=1000.0,
+        eval_count=7,
+        get_status_snapshot=lambda: {
+            "trades_today": 2,
+            "cooloff_until": "-",
+            "consecutive_losses": 1,
+        },
+    )
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
     tc = TelegramController(status_provider=lambda: {})
     sent: list[str] = []
     tc._send = lambda text, parse_mode=None: sent.append(text)
-    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/atrmin"}})
-    assert sent[0] == "Unknown command. Try /help."
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/state"}})
+    msg = sent[0]
+    assert "eq=1000.0" in msg and "trades=2" in msg and "losses=1" in msg and "evals=7" in msg
+
+
+def test_atrmin_updates_config(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    cfg = SimpleNamespace(raw={}, atr_min=0.1)
+    runner = SimpleNamespace(strategy_cfg=cfg)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/atrmin 0.2"}})
+    assert cfg.raw["atr_min"] == 0.2 and cfg.atr_min == 0.2
+    assert sent[0] == "atr_min set to 0.2"
 
 
 def test_depthmin_updates_config(monkeypatch) -> None:
