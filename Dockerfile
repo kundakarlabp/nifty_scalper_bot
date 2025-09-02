@@ -1,66 +1,16 @@
-# syntax=docker/dockerfile:1
-
-############################
-# Stage 1: Builder
-############################
-FROM python:3.11-slim AS builder
-
-ENV PIP_NO_CACHE_DIR=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-WORKDIR /app
-
-# System build deps (removed later)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip
-RUN python -m pip install --upgrade pip
-
-# Copy requirements and build wheels
-COPY requirements.txt .
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
-
-
-############################
-# Stage 2: Final runtime
-############################
 FROM python:3.11-slim
-
-ENV PIP_NO_CACHE_DIR=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    TZ=Asia/Kolkata
-
+ENV PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Asia/Kolkata
 WORKDIR /app
 
-# Runtime libs only (minimal)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgomp1 tzdata \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone
+    build-essential gcc g++ \
+  && rm -rf /var/lib/apt/lists/*
 
-# Install wheels built in builder
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+COPY requirements.txt .
+RUN python -m pip install --upgrade pip && pip install -r requirements.txt
 
-# Copy application code
-COPY . .
+COPY src ./src
+COPY manage_bot.sh run.sh ./
+RUN chmod +x manage_bot.sh run.sh
 
-# Entrypoint
-COPY deploy/scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Create non-root user
-RUN groupadd -r app && useradd -r -g app app \
-    && chown -R app:app /app
-USER app
-
-# Optional healthcheck if you expose Flask/FastAPI health endpoint
-# HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
-#   CMD curl -f http://localhost:8000/health || exit 1
-
-ENTRYPOINT ["/entrypoint.sh"]
+CMD ["./run.sh"]
