@@ -42,6 +42,8 @@ def test_why_handles_missing_atr_and_score(monkeypatch):
         "last_bar_ts": "2025-08-29T09:40:00",
         "regime": "TREND",
         "atr_min": 0.2,
+        "score": None,
+        "micro": {"spread_pct": None, "depth_ok": None},
     }
     tc = TelegramController(
         status_provider=lambda: status,

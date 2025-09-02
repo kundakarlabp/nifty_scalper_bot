@@ -246,9 +246,12 @@ class EnhancedScalpingStrategy:
             "strike": None,
             "qty_lots": None,
             "regime": "NO_TRADE",
-            "score": 0,
+            # Score and microstructure metrics are unknown until later stages.
+            # Use ``None`` so diagnostics can report "N/A" rather than misleading
+            # zero values when signal generation exits early.
+            "score": None,
             "atr_pct": 0.0,
-            "micro": {"spread_pct": 0.0, "depth_ok": False},
+            "micro": {"spread_pct": None, "depth_ok": None},
             "rr": 0.0,
             "entry": None,
             "sl": None,
