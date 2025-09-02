@@ -882,11 +882,13 @@ class TelegramController:
                 gates.append(("regime", regime, plan.get("regime")))
                 atr = plan.get("atr_pct")
                 atr_min = plan.get("atr_min")
-                gates.append(("atr_pct", atr is not None and atr_min is not None and atr >= atr_min, atr))
-                score = float(plan.get("score") or 0.0)
+                atr_ok = atr is not None and atr_min is not None and atr >= atr_min
+                gates.append(("atr_pct", atr_ok, atr if atr is not None else "N/A"))
+                score_val = plan.get("score")
+                score = float(score_val) if score_val is not None else None
                 reg = str(plan.get("regime"))
                 need = 9 if reg == "TREND" else 8
-                gates.append(("score", score >= need, score))
+                gates.append(("score", score is not None and score >= need, score if score is not None else "N/A"))
                 sp = plan.get("spread_pct")
                 dp = plan.get("depth_ok")
                 reason_block = plan.get("reason_block") or "-"
