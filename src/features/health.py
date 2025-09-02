@@ -24,7 +24,7 @@ def check(
     last_bar_ts: Optional[dt.datetime],
     *,
     atr_period: int = 14,
-    max_age_s: int = 90,
+    max_age_s: int = 150,
 ) -> FeatureHealth:
     """Validate OHLC data for feature computation.
 

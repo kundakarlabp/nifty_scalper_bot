@@ -68,17 +68,17 @@ def main() -> None:
         os.makedirs(fold_dir, exist_ok=True)
 
         candidates = []
-        for score_trend_min in [8, 9, 10]:
+        for min_score in [0.3, 0.35, 0.4]:
             for tp2R in [1.6, 1.8, 2.0]:
                 local_cfg = cfg
-                local_cfg.score_trend_min = score_trend_min
+                local_cfg.raw.setdefault("strategy", {})["min_score"] = min_score
                 local_cfg.tp2_R_trend = tp2R
                 risk_tr = RiskEngine(LimitConfig(tz=cfg.tz))
                 bt_tr = BacktestEngine(feed, local_cfg, risk_tr, sim, outdir=os.path.join(fold_dir, "train"))
                 s_tr = bt_tr.run(start=tr_s.isoformat(), end=tr_e.isoformat())
                 if reject(s_tr):
                     continue
-                candidates.append((s_tr, {"score_trend_min": score_trend_min, "tp2_R_trend": tp2R}))
+                candidates.append((s_tr, {"min_score": min_score, "tp2_R_trend": tp2R}))
 
         if not candidates:
             open(os.path.join(fold_dir, "NO_CANDIDATES"), "w").write("all rejected")
@@ -86,7 +86,7 @@ def main() -> None:
         best = sorted(candidates, key=lambda x: (x[0]["PF"], x[0]["AvgR"]), reverse=True)[0]
 
         risk_te = RiskEngine(LimitConfig(tz=cfg.tz))
-        cfg.score_trend_min = int(best[1]["score_trend_min"])
+        cfg.raw.setdefault("strategy", {})["min_score"] = best[1]["min_score"]
         cfg.tp2_R_trend = best[1]["tp2_R_trend"]
         bt_te = BacktestEngine(feed, cfg, risk_te, sim, outdir=os.path.join(fold_dir, "test"))
         s_te = bt_te.run(start=tr_e.isoformat(), end=te_e.isoformat())

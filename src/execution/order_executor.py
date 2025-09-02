@@ -728,6 +728,16 @@ class OrderExecutor:
             self.last_error = "qty_rounded_to_zero"
             return None
 
+        if self.kite:
+            try:
+                qd = fetch_quote_with_depth(self.kite, symbol)
+                bid5 = int(qd.get("bid5_qty") or qd.get("bid_qty") or 0)
+                ask5 = int(qd.get("ask5_qty") or qd.get("ask_qty") or 0)
+                avail = int(min(bid5, ask5) * 0.8)
+                qty = min(qty, _round_to_step(avail, self.lot_size))
+            except Exception:
+                pass
+
         # prevent duplicate symbol entries (case-insensitive)
         norm_symbol = str(symbol).upper()
         with self._lock:
