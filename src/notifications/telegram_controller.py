@@ -88,7 +88,7 @@ class TelegramController:
     Production-safe Telegram controller:
 
     - Pulls token/chat_id from settings.telegram
-    - Provides /status /health /diag /check /logs /tick /tickdry /l1 /mode /pause /resume
+    - Provides /status /health /diag /check /logs /tick /force_eval /mode /pause /resume
       plus /positions, /active and strategy tuning commands
     - Health Cards message for /health (also used by /check-like detail)
     - Dedup + rate limiting + backoff on send
@@ -435,9 +435,9 @@ class TelegramController:
             return self._send(
                 "🤖 Nifty Scalper Bot — commands\n"
                 "*Core*\n"
-                "/status [verbose] · /health · /diag · /check · /components\n"
+                "/status [verbose] · /state · /health · /diag · /check · /components\n"
                 "/positions · /active [page] · /risk · /limits\n"
-                "/tick · /tickdry · /l1 · /backtest [csv] · /logs [n]\n"
+                "/tick · /force_eval · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
                 "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
@@ -459,6 +459,17 @@ class TelegramController:
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
                 f"📦 Active: {s.get('active_orders', 0)}"
             )
+
+        if cmd == "/state":
+            s = self._status_provider() if self._status_provider else {}
+            text = (
+                f"Equity: {s.get('equity')}\n"
+                f"Trades Today: {s.get('trades_today')}\n"
+                f"Cooloff: {s.get('cooloff_until')}\n"
+                f"Day Loss: {s.get('day_realized_loss')}\n"
+                f"Eval Count: {s.get('eval_count')}"
+            )
+            return self._send(text)
 
         # HEALTH (cards)
         if cmd == "/health":
@@ -960,7 +971,7 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"ATM error: {e}")
 
-        if cmd == "/l1":
+        if cmd in ("/tick", "/l1"):
             if not self._l1_provider:
                 return self._send("L1 provider unavailable.")
             try:
@@ -1006,6 +1017,31 @@ class TelegramController:
                 return self._send(text, parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Quotes error: {e}")
+
+        if cmd == "/micro":
+            try:
+                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                sym = plan.get("strike") or plan.get("symbol") or "-"
+                text = _fmt_micro(
+                    sym,
+                    plan.get("micro"),
+                    plan.get("last_bar_ts"),
+                    plan.get("last_bar_lag_s"),
+                )
+                cap = getattr(settings.executor, "max_spread_pct", None)
+                depth = getattr(settings.executor, "depth_multiplier", None)
+                mode = "HARD" if getattr(settings.executor, "require_depth", False) else "SOFT"
+                extras: list[str] = []
+                if cap is not None:
+                    extras.append(f"cap={cap*100:.2f}%")
+                if depth is not None:
+                    extras.append(f"depth×{depth}")
+                extras.append(f"mode={mode}")
+                if extras:
+                    text += "\n" + " ".join(extras)
+                return self._send(text, parse_mode="Markdown")
+            except Exception as e:
+                return self._send(f"Micro error: {e}")
 
         if cmd == "/trace":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
@@ -1228,8 +1264,8 @@ class TelegramController:
                 self._send("⚠️ Broker session missing.")
             return
 
-        # TICK / TICKDRY
-        if cmd in ("/tick", "/tickdry"):
+        # FORCE EVAL / TICKDRY
+        if cmd in ("/force_eval", "/tickdry"):
             dry = (cmd == "/tickdry") or (args and args[0].lower().startswith("dry"))
             out = self._do_tick(dry=dry)
             return self._send(out)
@@ -1364,6 +1400,32 @@ class TelegramController:
                   {"text": "❌ Abort", "callback_data": "abort"}]],
             )
 
+        if cmd == "/emergency_stop":
+            if self._runner_pause:
+                try:
+                    self._runner_pause()
+                except Exception:
+                    pass
+            if self._cancel_all:
+                try:
+                    self._cancel_all()
+                except Exception:
+                    pass
+            closed = 0
+            if self._open_trades_provider and self._cancel_trade:
+                try:
+                    for t in self._open_trades_provider() or []:
+                        tid = t.get("trade_id") or t.get("id")
+                        if tid:
+                            try:
+                                self._cancel_trade(str(tid))
+                                closed += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            return self._send(f"🛑 Emergency stop activated. Closed {closed} trades.")
+
         # --- Strategy tuning ---
         if cmd == "/minscore":
             if self._set_min_score:
@@ -1438,6 +1500,41 @@ class TelegramController:
                 except Exception:
                     return self._send("Invalid numbers.")
             return self._send("Range tighten not wired.")
+
+        if cmd == "/atrmin":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if not runner:
+                return self._send("Runner unavailable.")
+            try:
+                val = float(args[0])
+            except Exception:
+                return self._send("Usage: /atrmin <pct>")
+            runner.strategy_cfg.atr_min = val
+            return self._send(f"ATR% min set to {val}.")
+
+        if cmd == "/microcap":
+            try:
+                cap = float(args[0]) / 100.0
+            except Exception:
+                return self._send("Usage: /microcap <pct>")
+            setattr(settings.executor, "max_spread_pct", cap)
+            return self._send(f"Max spread cap set to {cap*100:.2f}%.")
+
+        if cmd == "/depthmin":
+            try:
+                val = float(args[0])
+            except Exception:
+                return self._send("Usage: /depthmin <mult>")
+            setattr(settings.executor, "depth_multiplier", val)
+            return self._send(f"Depth multiplier set to {val}.")
+
+        if cmd == "/micromode":
+            if not args:
+                return self._send("Usage: /micromode HARD|SOFT")
+            mode = str(args[0]).upper()
+            hard = mode == "HARD"
+            setattr(settings.executor, "require_depth", hard)
+            return self._send(f"Micro mode set to {mode}.")
 
         # Unknown
         return self._send("Unknown command. Try /help.")

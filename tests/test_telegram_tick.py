@@ -4,7 +4,7 @@ from src.notifications.telegram_controller import TelegramController
 from src.config import settings
 
 
-def test_tick_runs_runner_and_l1(monkeypatch) -> None:
+def test_force_eval_and_tick(monkeypatch) -> None:
     monkeypatch.setattr(
         settings,
         "telegram",
@@ -23,10 +23,10 @@ def test_tick_runs_runner_and_l1(monkeypatch) -> None:
     sent: list[str] = []
     tc._send = lambda text, parse_mode=None: sent.append(text)
 
-    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/tick"}})
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/force_eval"}})
     assert called["tick"] is True
     assert sent and "Tick executed" in sent[0]
 
     sent.clear()
-    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/l1"}})
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/tick"}})
     assert sent and sent[0].startswith("L1: ")
