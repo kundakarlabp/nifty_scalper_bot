@@ -851,7 +851,24 @@ class TelegramController:
                 lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))
-                return self._send("\n".join(lines), parse_mode="Markdown")
+                try:
+                    from src.diagnostics.registry import run as diag_run
+
+                    checks = [
+                        "data_window",
+                        "atr",
+                        "regime",
+                        "micro",
+                        "risk_gates",
+                    ]
+                    for r in (diag_run(c) for c in checks):
+                        mark = "✅" if r.ok else "❌"
+                        lines.append(f"{mark} {r.name}: {r.msg}")
+                        if not r.ok and r.fix:
+                            lines.append(f"• fix: {r.fix}")
+                except Exception:
+                    pass
+                return self._send("\n".join(lines)[:3500], parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Why error: {e}")
 
