@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import pandas as pd
+
 from src.config import settings
 from src.diagnostics.registry import CheckResult, register
 from src.features.indicators import atr_pct
@@ -147,6 +149,8 @@ def check_strategy() -> CheckResult:
     if r is None:
         return _bad("runner not ready", name="strategy", fix="start the bot")
     df = r.ohlc_window()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return _bad("no data", name="strategy", fix="wait for bars")
     st = EnhancedScalpingStrategy()
     plan: Dict[str, Any] = st.generate_signal(df, current_price=float(df["close"].iloc[-1])) or {}
     need = {"action", "rr", "score", "reasons"}
