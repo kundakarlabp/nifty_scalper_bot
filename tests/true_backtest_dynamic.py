@@ -141,17 +141,10 @@ class BacktestRunner:
             df=df_history, current_price=current_price
         )
         if plan.get("reason_block"):
-            side = "BUY" if current_bar["close"] >= current_bar["open"] else "SELL"
-            delta = 5.0
-            stop_loss = (
-                current_price - delta if side == "BUY" else current_price + delta
+            logger.info(
+                f"Entry blocked at {current_dt}: {plan.get('reason_block')}"
             )
-            target = (
-                current_price + 2 * delta
-                if side == "BUY"
-                else current_price - 2 * delta
-            )
-            plan = {"side": side, "stop_loss": stop_loss, "target": target}
+            return
 
         logger.info(f"Trade signal at {current_dt}: {plan}")
 
