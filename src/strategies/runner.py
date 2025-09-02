@@ -706,6 +706,7 @@ class StrategyRunner:
                 self.under_symbol, under_ltp, plan.get("side_hint", "CE"), self._now_ist()
             )
             plan["option"] = opt
+            plan["expiry"] = opt.get("expiry")
             self._last_option = opt
             if not opt.get("token"):
                 plan["reason_block"] = "no_option_quote"

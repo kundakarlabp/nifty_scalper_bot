@@ -580,6 +580,7 @@ class TelegramController:
                             q=plan.get("qty_lots"),
                         )
                     )
+                    lines.append(f"• Expiry: {plan.get('expiry')}")
                     lines.append(
                         "• Regime: {r} | Score: {sc} | RR: {rr}".format(
                             r=plan.get("regime"),
@@ -622,6 +623,7 @@ class TelegramController:
                             q=plan.get("qty_lots"),
                         )
                     )
+                    lines.append(f"• Expiry: {plan.get('expiry')}")
                     lines.append(
                         "• Regime: {r} | Score: {sc} | RR: {rr}".format(
                             r=plan.get("regime"),

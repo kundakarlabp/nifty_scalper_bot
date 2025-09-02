@@ -12,6 +12,11 @@ def test_nearest_weekly_expiry():
     assert nearest_weekly_expiry(dt) == "2024-05-28"
 
 
+def test_nearest_weekly_expiry_after_close():
+    dt = datetime(2024, 5, 28, 10, 30, tzinfo=timezone.utc)  # Tuesday 16:00 IST
+    assert nearest_weekly_expiry(dt) == "2024-06-04"
+
+
 def test_option_resolver_and_micro():
     instruments = [
         {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Dict, Iterable, Optional, Tuple
+
+from src.utils.expiry import next_tuesday_expiry
 
 try:
     from kiteconnect import KiteConnect  # type: ignore
@@ -44,8 +46,8 @@ class InstrumentsCache:
 
 
 def nearest_weekly_expiry(now_ist: datetime) -> str:
-    """Return the nearest weekly expiry date (Tuesday) as YYYY-MM-DD."""
-    d = now_ist.date()
-    while d.weekday() != 1:  # Tuesday
-        d += timedelta(days=1)
-    return d.isoformat()
+    """Return the next Tuesday expiry as ``YYYY-MM-DD``.
+
+    Rolls over to the following week if ``now_ist`` is past Tuesday 15:30 IST.
+    """
+    return next_tuesday_expiry(now_ist).date().isoformat()
