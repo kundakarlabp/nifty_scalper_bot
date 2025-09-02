@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+
+from src.config import settings
+from src.notifications.telegram_controller import TelegramController
+from src.strategies.runner import StrategyRunner
+
+
+def _prep_settings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings,
+        "telegram",
+        SimpleNamespace(bot_token="t", chat_id=1, enabled=True, extra_admin_ids=[]),
+    )
+
+
+def test_why_reports_gates_and_micro(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    now = datetime.now()
+    plan = {
+        "last_bar_ts": (now - timedelta(seconds=60)).isoformat(),
+        "bar_count": 25,
+        "regime": "TREND",
+        "atr_pct": 0.6,
+        "atr_min": 0.5,
+        "score": 10,
+        "spread_pct": 0.1,
+        "depth_ok": True,
+        "quote_src": "test",
+        "feature_ok": True,
+    }
+    status = {"within_window": True, "cooloff_until": "-", "daily_dd_hit": False}
+    import src.diagnostics.registry as diag_registry
+
+    monkeypatch.setattr(
+        diag_registry,
+        "run",
+        lambda name: SimpleNamespace(ok=True, name=name, msg="ok", fix=None),
+    )
+    tc = TelegramController(
+        status_provider=lambda: status,
+        last_signal_provider=lambda: plan,
+    )
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/why"}})
+    msg = sent[0]
+    assert "/why gates" in msg
+    assert "window: PASS" in msg
+    assert "micro:" in msg
+
+
+def test_emergency_stop_unknown(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update(
+        {"message": {"chat": {"id": 1}, "text": "/emergency_stop"}}
+    )
+    assert sent[0] == "Unknown command. Try /help."
+
+
+def test_probe_returns_snapshot(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = SimpleNamespace(
+        debug_snapshot=lambda: {
+            "bars": 10,
+            "last_bar_ts": "ts",
+            "lag_s": 5,
+            "rr_threshold": 2,
+            "risk_pct": 1.0,
+        }
+    )
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/probe"}})
+    msg = sent[0]
+    assert "bars=10" in msg and "rr=2" in msg
+
+
+def test_bars_returns_snapshot(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = SimpleNamespace(
+        debug_snapshot=lambda: {
+            "bars": 7,
+            "last_bar_ts": "ts",
+            "lag_s": 4,
+            "gates": {"a": 1},
+        }
+    )
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/bars"}})
+    msg = sent[0]
+    assert "bars=7" in msg and "gates={'a': 1}" in msg
+
+
+def test_quotes_formats_micro(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    plan = {
+        "strike": "SYM",
+        "micro": {
+            "source": "src",
+            "ltp": 100,
+            "bid": 99,
+            "ask": 101,
+            "spread_pct": 0.5,
+            "bid5": 5,
+            "ask5": 6,
+            "depth_ok": True,
+        },
+        "last_bar_ts": "2024-01-01T00:00:00",
+        "last_bar_lag_s": 3,
+    }
+    tc = TelegramController(last_signal_provider=lambda: plan, status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/quotes"}})
+    msg = sent[0]
+    assert "📈 *Quotes*" in msg and "quote: SYM" in msg
+
+
+def test_expiry_shows_dates(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    monkeypatch.setattr(
+        "src.notifications.telegram_controller.next_tuesday_expiry",
+        lambda: "2024-07-02",
+    )
+    monkeypatch.setattr(
+        "src.notifications.telegram_controller.last_tuesday_of_month",
+        lambda: "2024-07-30",
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/expiry"}})
+    assert sent[0] == "weekly=2024-07-02 | monthly=2024-07-30"
+
+
+def test_config_outputs_strategy_config(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    cfg = SimpleNamespace(
+        name="strat",
+        version=1,
+        tz="UTC",
+        atr_min=0.1,
+        atr_max=1.0,
+        score_trend_min=5,
+        score_range_min=4,
+        max_spread_pct_open=1.0,
+        max_spread_pct_regular=0.5,
+        max_spread_pct_last20m=0.2,
+        depth_multiplier=2,
+        min_oi=1000,
+        delta_min=0.2,
+        delta_max=0.8,
+        re_atm_drift_pct=2.0,
+        tp1_R_min=1,
+        tp1_R_max=2,
+        tp2_R_trend=3,
+        tp2_R_range=2,
+        trail_atr_mult=1.5,
+        time_stop_min=30,
+        gamma_enabled=True,
+        gamma_after=10,
+        min_bars_required=20,
+        indicator_min_bars=40,
+    )
+
+    class Runner:
+        def __init__(self, cfg: SimpleNamespace) -> None:
+            self.strategy_cfg = cfg
+
+        def tick(self) -> None:  # pragma: no cover - not used
+            pass
+
+    runner = Runner(cfg)
+    tc = TelegramController(status_provider=lambda: {})
+    tc._runner_tick = runner.tick
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/config"}})
+    msg = sent[0]
+    assert "Strategy Config" in msg and "name: `strat` v1" in msg
+
+
+def test_atrmin_unknown_command(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/atrmin"}})
+    assert sent[0] == "Unknown command. Try /help."
+
+
+def test_depthmin_updates_config(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = SimpleNamespace(strategy_cfg=SimpleNamespace(raw={}))
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/depthmin 5"}})
+    assert runner.strategy_cfg.raw["micro"]["depth_min_lots"] == 5
+    assert sent[0] == "micro depth_min_lots set to 5"
+
+
+def test_micromode_updates_config(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = SimpleNamespace(strategy_cfg=SimpleNamespace(raw={"micro": {}}))
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/micromode HARD"}})
+    assert runner.strategy_cfg.raw["micro"]["mode"] == "HARD"
+    assert sent[0] == "micro mode = HARD"
+
+
+def test_logtail_returns_tail(monkeypatch, tmp_path) -> None:
+    _prep_settings(monkeypatch)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "bot.log").write_text("a\nb\nc\n")
+    monkeypatch.chdir(tmp_path)
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/logtail 2"}})
+    msg = sent[0]
+    assert msg.startswith("```") and "b\nc" in msg and msg.endswith("```")
+
+
+def test_healthjson_outputs_json(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    import src.notifications.telegram_controller as tc_mod
+
+    monkeypatch.setattr(
+        tc_mod,
+        "run_all",
+        lambda: [SimpleNamespace(name="check", ok=True)],
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/healthjson"}})
+    data = json.loads(sent[0])
+    assert data[0]["name"] == "check"
