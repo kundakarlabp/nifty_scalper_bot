@@ -3,7 +3,8 @@ meta:
   name: "nifty_scalper_default"
 
 strategy:
-  min_score: 0.35
+  # Accepts 0..1 or 0..100 (e.g. 70 == 0.70)
+  min_score: 0.30
   atr_period: 14
   weights:
     trend: 0.4

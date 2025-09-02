@@ -181,6 +181,11 @@ class EnhancedScalpingStrategy:
             return (score >= self.min_score_strict) and (conf >= self.min_conf_strict)
         return (score >= self.min_score_relaxed) and (conf >= self.min_conf_relaxed)
 
+    @staticmethod
+    def _normalize_min_score(val: float) -> float:
+        """Return ``val`` on a 0..1 scale, accepting percentages."""
+        return val / 100.0 if val > 1 else val
+
     def _est_iv_pct(self, S: float, K: float, T: float) -> Optional[int]:
         """Estimate rolling IV percentile."""
         try:
@@ -209,7 +214,9 @@ class EnhancedScalpingStrategy:
         ivpct = self._est_iv_pct(S=close, K=plan.get("atm_strike", int(close)), T=plan.get("T", 3 / 365))
         plan["iv_pct"] = ivpct
         limit = int(cfg.iv_percentile_limit)
-        min_score = float(cfg.raw.get("strategy", {}).get("min_score", 0.35))
+        min_score = self._normalize_min_score(
+            float(cfg.raw.get("strategy", {}).get("min_score", 0.35))
+        )
         need = min_score + 0.1
         if ivpct is not None and ivpct > limit and plan.get("score", 0) < need:
             return "iv_extreme", {"iv_pct": ivpct, "need_score": need}
@@ -502,11 +509,15 @@ class EnhancedScalpingStrategy:
                 "raw": round(raw_score, 4),
                 "penalties": penalties,
                 "final": round(final_score, 4),
-                "threshold": strat_cfg.get("min_score", 0.35),
+                "threshold": self._normalize_min_score(
+                    float(strat_cfg.get("min_score", 0.35))
+                ),
             }
             plan["reasons"] = reasons
 
-            min_score_cfg = float(strat_cfg.get("min_score", 0.35))
+            min_score_cfg = self._normalize_min_score(
+                float(strat_cfg.get("min_score", 0.35))
+            )
             if final_score < min_score_cfg:
                 return plan_block("score_low", score=final_score, need=min_score_cfg)
 
