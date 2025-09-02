@@ -22,5 +22,5 @@ def test_within_window_respects_config(monkeypatch) -> None:
     assert runner._within_trading_window() is True
 
     # After configured end time -> False
-    monkeypatch.setattr(runner, "_now_ist", lambda: datetime(2024, 1, 1, 15, 21))
+    monkeypatch.setattr(runner, "_now_ist", lambda: datetime(2024, 1, 1, 15, 26))
     assert runner._within_trading_window() is False

@@ -120,23 +120,23 @@ def load_calendar(path: str) -> EventCalendar:
         block_trading=bool(y.get("defaults", {}).get("block_trading", True)),
     )
     evs: List[EventWindow] = []
-    for e in y.get("events") or []:
+    for ev in y.get("events") or []:
         evs.append(
             EventWindow(
-                name=str(e["name"]),
-                start=_parse_dt(e["start"], tz),
-                end=_parse_dt(e["end"], tz),
-                before_min=int(e.get("guard_before_min", defaults.guard_before_min)),
-                after_min=int(e.get("guard_after_min", defaults.guard_after_min)),
-                post_widen_spread_pct=float(e.get("post_widen_spread_pct", defaults.post_widen_spread_pct)),
-                block_trading=bool(e.get("block_trading", defaults.block_trading)),
+                name=str(ev["name"]),
+                start=_parse_dt(ev["start"], tz),
+                end=_parse_dt(ev["end"], tz),
+                before_min=int(ev.get("guard_before_min", defaults.guard_before_min)),
+                after_min=int(ev.get("guard_after_min", defaults.guard_after_min)),
+                post_widen_spread_pct=float(ev.get("post_widen_spread_pct", defaults.post_widen_spread_pct)),
+                block_trading=bool(ev.get("block_trading", defaults.block_trading)),
             )
         )
     for r in y.get("recurring") or []:
         rule = r.get("rule")
         s = r.get("start_local")
-        e = r.get("end_local")
-        for sdt, edt in _weekly_recurring(rule, s, e, tz):
+        end_local = r.get("end_local")
+        for sdt, edt in _weekly_recurring(rule, s, end_local, tz):
             evs.append(
                 EventWindow(
                     name=str(r.get("name", rule)),
