@@ -24,6 +24,7 @@ from src.utils.logging_tools import (
 )  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
+from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -158,6 +159,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         trace_provider=getattr(runner, "enable_trace", None),
         selftest_provider=getattr(runner.executor, "selftest", None),
         backtest_provider=getattr(runner, "run_backtest", None),
+        filecheck_provider=run_file_diagnostics,
         atm_provider=getattr(runner, "get_current_atm", None),
         l1_provider=getattr(runner, "get_current_l1", None),
         # controls
