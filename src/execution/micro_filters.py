@@ -50,3 +50,104 @@ def micro_from_quote(q: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lo
     spread = (ask - bid) / mid * 100.0
     depth_ok = min(bq, sq) >= depth_min_lots * lot_size
     return spread, depth_ok
+
+
+def _micro_cfg(cfg: Any) -> Dict[str, Any]:
+    """Extract the ``micro`` configuration section from ``cfg``.
+
+    Accepts either a mapping containing ``micro`` or an object with a
+    ``micro`` attribute. Missing values yield an empty dict.
+    """
+
+    if hasattr(cfg, "micro"):
+        return getattr(cfg, "micro") or {}
+    if isinstance(cfg, dict):
+        return cfg.get("micro", {})
+    return {}
+
+
+def cap_for_mid(mid: float, cfg: Any) -> float:
+    """Return the spread cap (%) for a given mid price using ``cfg``."""
+
+    micro = _micro_cfg(cfg)
+    if not micro.get("dynamic", True):
+        return float(micro.get("max_spread_pct", 1.0))
+    cap = float(micro.get("max_spread_pct", 1.0))
+    for row in micro.get("table", []):
+        try:
+            if mid >= float(row.get("min_mid")):
+                cap = float(row.get("cap_pct"))
+        except Exception:
+            continue
+    return cap
+
+
+def depth_required_lots(atr_pct: float, cfg: Any) -> int:
+    """Determine minimum depth (in lots) required based on ATR% and config."""
+
+    micro = _micro_cfg(cfg)
+    base = int(micro.get("depth_min_lots", 1))
+    return base if atr_pct >= 0.02 else max(base, 2)
+
+
+def evaluate_micro(
+    q: Optional[Dict[str, Any]],
+    *,
+    lot_size: int,
+    atr_pct: Optional[float],
+    cfg: Any,
+) -> Dict[str, Any]:
+    """Evaluate microstructure metrics and gating conditions.
+
+    Returns a dictionary with spread %, depth flag and gating decision.
+    """
+
+    micro_cfg = _micro_cfg(cfg)
+    mode = str(micro_cfg.get("mode", "HARD")).upper()
+    hard = mode == "HARD"
+
+    if not q or "bid" not in q or "ask" not in q:
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": hard,
+        }
+
+    try:
+        bid = float(q.get("bid", 0.0))
+        ask = float(q.get("ask", 0.0))
+    except Exception:
+        bid = ask = 0.0
+    if bid <= 0 or ask <= 0:
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "bad_quote",
+            "would_block": hard,
+        }
+
+    mid = (bid + ask) / 2.0
+    spread_pct = (ask - bid) / mid * 100.0
+    cap = cap_for_mid(mid, cfg)
+    bq = int(q.get("bid_qty") or q.get("bid5_qty") or 0)
+    sq = int(q.get("ask_qty") or q.get("ask5_qty") or 0)
+    need_lots = depth_required_lots(float(atr_pct or 0.0), cfg)
+    depth_ok = min(bq, sq) >= need_lots * lot_size
+    would_block = (spread_pct > cap) or (not depth_ok)
+    return {
+        "mid": mid,
+        "spread_pct": spread_pct,
+        "cap_pct": cap,
+        "depth_ok": depth_ok,
+        "need_lots": need_lots,
+        "lot_size": lot_size,
+        "bid_qty": bq,
+        "ask_qty": sq,
+        "bid": bid,
+        "ask": ask,
+        "mode": mode,
+        "would_block": would_block if hard else False,
+    }

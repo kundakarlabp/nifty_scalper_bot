@@ -42,7 +42,7 @@ from src.features.health import check as feat_check
 from src.features.indicators import atr_pct
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
-from src.execution.micro_filters import micro_from_l1, micro_from_quote
+from src.execution.micro_filters import micro_from_l1, evaluate_micro
 from src.data import ohlc_builder
 from src.risk import risk_gates
 
@@ -730,25 +730,44 @@ class StrategyRunner:
                     q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
                 except Exception:
                     q = None
-            spread, depth_ok = micro_from_quote(
-                q,
+            quote_dict: Dict[str, Any] = {}
+            if q and "depth" in q:
+                try:
+                    b = q["depth"]["buy"][0]
+                    s = q["depth"]["sell"][0]
+                    quote_dict = {
+                        "bid": float(b.get("price", 0.0)),
+                        "ask": float(s.get("price", 0.0)),
+                        "bid_qty": int(b.get("quantity", 0)),
+                        "ask_qty": int(s.get("quantity", 0)),
+                        "bid5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])),
+                        "ask5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])),
+                    }
+                except Exception:
+                    quote_dict = {}
+            micro = evaluate_micro(
+                q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
-                depth_min_lots=self.strategy_cfg.depth_min_lots,
+                atr_pct=plan.get("atr_pct"),
+                cfg=self.strategy_cfg.raw,
             )
-            if spread is None:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+            plan["spread_pct"] = micro.get("spread_pct")
+            plan["depth_ok"] = micro.get("depth_ok")
+            plan["micro"] = micro
+            plan["quote_src"] = "kite"
+            if micro.get("would_block"):
+                plan.setdefault("reasons", []).append("micro")
+                plan["reason_block"] = "micro"
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                self.last_plan = plan
                 return
-            plan["spread_pct"] = spread
-            plan["depth_ok"] = depth_ok
-            plan["micro"] = {"spread_pct": spread, "depth_ok": depth_ok}
-            plan["quote_src"] = "kite"
+            if micro.get("mode") == "SOFT":
+                penalty = 0.5 if (
+                    micro.get("spread_pct") and micro.get("spread_pct") > micro.get("cap_pct")
+                ) else 0.0
+                plan["score"] = max(0.0, (plan.get("score", 0.0) - penalty))
 
             acct = risk_gates.AccountState(
                 equity_rupees=self._active_equity(),
