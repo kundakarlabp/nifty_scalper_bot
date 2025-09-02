@@ -120,3 +120,26 @@ def test_yf_symbol_numeric_token_returns_none():
         assert _yf_symbol(123456) is None
     finally:
         monkeypatch.undo()
+
+
+def test_fetch_ohlc_yfinance_handles_naive_index(monkeypatch):
+    """yfinance data with naive index should be normalized correctly."""
+    start = datetime(2024, 1, 1, 9, 15)
+    end = start + timedelta(minutes=1)
+
+    def fake_download(symbol, start, end, interval, progress=False):
+        idx = pd.date_range(start.tz_localize(None), periods=WARMUP_BARS, freq="1min")
+        data = {
+            "Open": [1] * WARMUP_BARS,
+            "High": [1] * WARMUP_BARS,
+            "Low": [1] * WARMUP_BARS,
+            "Close": [1] * WARMUP_BARS,
+            "Volume": [0] * WARMUP_BARS,
+        }
+        return pd.DataFrame(data, index=idx)
+
+    monkeypatch.setattr("yfinance.download", fake_download)
+
+    df = _fetch_ohlc_yf("FOO", start, end, "minute")
+    assert df is not None
+    assert df.index.tz is None

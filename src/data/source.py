@@ -420,7 +420,12 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
         # yfinance returns timestamps in the exchange's local timezone
         # (Asia/Kolkata for NSE symbols).  Strip the timezone information so the
         # rest of the codebase operates on naive IST datetimes.
-        df.index = pd.to_datetime(df.index).tz_convert(ist).tz_localize(None)
+        idx = pd.to_datetime(df.index)
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize(ist)
+        else:
+            idx = idx.tz_convert(ist)
+        df.index = idx.tz_localize(None)
         df = df.rename(columns={c: c.lower() for c in df.columns})
         if "volume" not in df.columns:
             df["volume"] = 0
