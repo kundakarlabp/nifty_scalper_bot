@@ -152,6 +152,19 @@ def test_invalid_instrument_token_detected(monkeypatch):
     assert "valid F&O token" in str(exc.value)
 
 
+def test_decimal_instrument_token_coerced():
+    """Decimal strings for instrument tokens are coerced to integers."""
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": "33712.5",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.instruments.instrument_token == 33712
+
+
 def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
     """A valid token with empty OHLC data should pass via LTP fallback."""
 
