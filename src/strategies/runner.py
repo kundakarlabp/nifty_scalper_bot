@@ -356,6 +356,26 @@ class StrategyRunner:
             self._last_diag_emit_ts = now
             self._emit_diag(plan)
 
+    def _shadow_blockers(self, plan: Dict[str, Any]) -> list[str]:
+        """Non-fatal conditions that would block if score passed."""
+
+        shadows: list[str] = []
+        m = plan.get("micro") or {}
+        if m.get("mode") == "SOFT":
+            sp = m.get("spread_pct")
+            cap = m.get("cap_pct")
+            if sp is not None and cap is not None and sp > cap:
+                shadows.append(f"micro_spread {sp:.2f}%>{cap:.2f}%")
+            if m.get("depth_ok") is False:
+                shadows.append("micro_depth")
+        rr_thresh = getattr(self.strategy_cfg, "rr_threshold", None)
+        if rr_thresh is None:
+            rr_thresh = (self.strategy_cfg.raw or {}).get("rr_threshold")
+        rr_thresh = float(rr_thresh or 0.0)
+        if rr_thresh and plan.get("rr", 0.0) < rr_thresh:
+            shadows.append(f"rr_low {plan.get('rr')}")
+        return shadows
+
     def emit_heartbeat(self) -> None:
         """Emit a compact heartbeat log with current signal context."""
         if not self.hb_enabled:
@@ -453,6 +473,7 @@ class StrategyRunner:
         pw = getattr(self, "plan_probe_window", None)
         plan["probe_window_from"] = pw[0] if pw else None
         plan["probe_window_to"] = pw[1] if pw else None
+        plan["shadow_blockers"] = self._shadow_blockers(plan)
         self.last_plan = dict(plan)
         now = time.time()
         if self.hb_enabled and (now - self._last_hb_ts) >= 60:
@@ -871,8 +892,9 @@ class StrategyRunner:
                 plan["reason_block"] = reason
                 plan.setdefault("reasons", []).append(f"risk:{reason}")
                 plan.setdefault("risk_details", det)
-                self.last_plan = plan
+                self._record_plan(plan)
                 self._last_flow_debug = flow
+                self.last_plan = plan
                 return
 
             # ---- sizing

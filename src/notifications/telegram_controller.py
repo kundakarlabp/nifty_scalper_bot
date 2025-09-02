@@ -440,6 +440,7 @@ class TelegramController:
                 "/tick · /tickdry · /l1 · /backtest [csv] · /logs [n]\n"
                 "/pause · /resume · /mode live|dry · /cancel_all\n"
                 "*Strategy*\n"
+                "/score · /shadow · /lastplan\n"
                 "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
                 "/trend tp_boost sl_relax · /range tp_tighten sl_tighten\n",
                 parse_mode="Markdown",
@@ -518,6 +519,43 @@ class TelegramController:
             return self._send(
                 f"bars={ds['bars']} last={ds['last_bar_ts']} lag_s={ds['lag_s']} rr={ds['rr_threshold']} risk%={ds['risk_pct']}"
             )
+
+        if cmd == "/score":
+            runner = StrategyRunner.get_singleton()
+            p = runner.last_plan if runner else {}
+            dbg = (p or {}).get("score_dbg") or {}
+            if not dbg:
+                return self._send("no score breakdown yet")
+            lines = [
+                f"score={dbg.get('final')} (thr={dbg.get('threshold')}) raw={dbg.get('raw')}"
+            ]
+            comps = dbg.get("components", {})
+            w = dbg.get("weights", {})
+            for k, v in comps.items():
+                lines.append(f"• {k}: {float(v):.3f} × {w.get(k, 0.0)}")
+            pens = dbg.get("penalties", {})
+            if pens:
+                lines.append("penalties:")
+                for k, v in pens.items():
+                    lines.append(f"  - {k}: {v}")
+            sb = (p or {}).get("shadow_blockers") or []
+            if sb:
+                lines.append("shadow_blockers: " + ", ".join(sb))
+            return self._send("\n".join(lines)[:3500])
+
+        if cmd == "/shadow":
+            runner = StrategyRunner.get_singleton()
+            p = runner.last_plan if runner else {}
+            sb = p.get("shadow_blockers") or []
+            if not sb:
+                return self._send("no shadow blockers")
+            return self._send("would_block: " + ", ".join(sb))
+
+        if cmd == "/lastplan":
+            runner = StrategyRunner.get_singleton()
+            p = runner.last_plan if runner else {}
+            txt = json.dumps(p, default=str)[:3500]
+            return self._send(f"<pre>{txt}</pre>", parse_mode="HTML")
 
         if cmd == "/bars":
             runner = StrategyRunner.get_singleton()

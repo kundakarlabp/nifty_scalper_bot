@@ -2,6 +2,15 @@ meta:
   version: 1
   name: "nifty_scalper_default"
 
+strategy:
+  min_score: 0.0
+  weights:
+    regime: 1.0
+    momentum: 1.0
+    structure: 1.0
+    vol: 1.0
+    micro: 1.0
+
 windows:
   timezone: "Asia/Kolkata"
   trading:

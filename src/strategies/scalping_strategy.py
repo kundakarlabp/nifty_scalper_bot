@@ -471,23 +471,61 @@ class EnhancedScalpingStrategy:
                 max_spread_pct=max_spread,
                 depth_mult=cfg.depth_multiplier,
             )
+            micro_cfg = getattr(cfg, "raw", {}).get("micro", {})  # type: ignore[arg-type]
             if micro is None:
-                plan["micro"] = {"spread_pct": None, "depth_ok": None, "missing": True}
+                plan["micro"] = {
+                    "spread_pct": None,
+                    "depth_ok": None,
+                    "missing": True,
+                    "mode": micro_cfg.get("mode"),
+                    "cap_pct": max_spread,
+                }
                 micro_score = 1
             else:
+                micro["mode"] = micro_cfg.get("mode")
+                micro["cap_pct"] = max_spread
                 plan["micro"] = micro
                 if not ok_micro:
                     micro_score = 0
 
-            score = regime_score + momentum_score + structure_score + vol_score + micro_score
-            plan["score"] = score
+            comps = {
+                "regime": float(regime_score),
+                "momentum": float(momentum_score),
+                "structure": float(structure_score),
+                "vol": float(vol_score),
+                "micro": float(micro_score),
+            }
+            strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+            weights = strat_cfg.get(
+                "weights",
+                {"regime": 1.0, "momentum": 1.0, "structure": 1.0, "vol": 1.0, "micro": 1.0},
+            )
+            raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
+            penalties: Dict[str, float] = {}
+            m = plan.get("micro") or {}
+            if m.get("mode") == "SOFT":
+                sp = m.get("spread_pct")
+                cap = m.get("cap_pct")
+                if sp is not None and cap is not None and sp > cap:
+                    penalties["micro_spread"] = 0.5
+            final_score = max(0.0, raw_score - sum(penalties.values()))
+            plan["score"] = final_score
+            score = final_score  # backward-compat for downstream code
+            plan["score_dbg"] = {
+                "components": comps,
+                "weights": weights,
+                "raw": round(raw_score, 4),
+                "penalties": penalties,
+                "final": round(final_score, 4),
+                "threshold": strat_cfg.get("min_score", 0.0),
+            }
             plan["reasons"] = reasons
 
             need = cfg.score_trend_min if reg.regime == "TREND" else cfg.score_range_min
             if cfg.lower_score_temp:
                 need = min(need, 6)
-            if score < need:
-                return plan_block("score_low", score=score, need=need)
+            if final_score < need:
+                return plan_block("score_low", score=final_score, need=need)
 
             rej = self._iv_adx_reject_reason(plan, price)
             if rej:
