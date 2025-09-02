@@ -39,6 +39,7 @@ from src.config import settings, validate_critical_settings
 
 # Backtests run in paper mode; skip live trading validations
 settings.enable_live_trading = False
+settings.telegram.enabled = False
 from src.backtesting.data_source import BacktestCsvSource, load_and_prepare_data
 from src.risk.position_sizing import PositionSizer
 from src.risk.session import TradingSession, Trade

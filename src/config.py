@@ -88,7 +88,7 @@ class DataSettings(BaseModel):
     lookback_minutes: int = 20
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
-    time_filter_end: str = "15:25"
+    time_filter_end: str = "15:20"
 
     # Cache
     cache_enabled: bool = True
@@ -504,14 +504,14 @@ object.__setattr__(settings, "PLAN_STALE_SEC", int(_os.getenv("PLAN_STALE_SEC", 
 
 
 def validate_critical_settings() -> None:
+    """Validate runtime settings and raise ``ValueError`` on problems."""
+
     errors = []
 
     # Live trading requires broker creds
     if settings.enable_live_trading:
         if not settings.zerodha.api_key:
             errors.append("ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true")
-        if not settings.zerodha.api_secret:
-            errors.append("ZERODHA__API_SECRET is required when ENABLE_LIVE_TRADING=true")
         if not settings.zerodha.access_token:
             errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
 

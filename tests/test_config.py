@@ -94,6 +94,23 @@ def test_zerodha_creds_required_when_live():
     assert "ZERODHA__API_KEY is required" in str(exc.value)
 
 
+def test_api_secret_optional_when_live_with_access_token():
+    """Live trading works with API key and access token even without a secret."""
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+        "ALLOW_OFFHOURS_TESTING": "true",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    with mock.patch("src.config.settings", settings):
+        # Should not raise despite missing API secret
+        validate_critical_settings()
+
+
 def test_zerodha_creds_optional_when_paper():
     """Zerodha credentials are not required in paper trading mode."""
     env = {
