@@ -107,11 +107,8 @@ def _weekly_recurring(
 
 def load_calendar(path: str) -> EventCalendar:
     """Load an :class:`EventCalendar` from a YAML file located at ``path``."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            y = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:  # pragma: no cover - yaml gives detailed msg
-        raise ValueError(f"YAML parse error in {path}") from e
+    with open(path, "r", encoding="utf-8") as f:
+        y = yaml.safe_load(f) or {}
     tz = ZoneInfo(y.get("tz", "Asia/Kolkata"))
     defaults = GuardDefaults(
         guard_before_min=int(y.get("defaults", {}).get("guard_before_min", 5)),
