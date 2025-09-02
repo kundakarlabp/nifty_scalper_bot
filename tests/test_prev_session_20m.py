@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from utils.market_time import prev_session_last_20m
+from src.utils.market_time import prev_session_last_20m
 
 IST = ZoneInfo("Asia/Kolkata")
 
