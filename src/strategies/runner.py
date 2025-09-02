@@ -692,7 +692,7 @@ class StrategyRunner:
                 return
 
             cfg = self.strategy_cfg
-            score = plan.get("score", 0)
+            score = plan.get("score") or 0
             if cfg and score >= int(getattr(cfg, "delta_enable_score", 999)):
                 try:
                     pick = strike_selector.select_strike_by_delta(
@@ -940,7 +940,14 @@ class StrategyRunner:
             )
             plan["micro"] = micro
             self._preview_candidate(plan, micro)
-            if ok_micro and plan.get("score", 0) >= int(settings.strategy.min_signal_score) and not plan.get("reason_block"):
+            score_val = plan.get("score")
+            if score_val is None:
+                plan["reason_block"] = "score_uncomputed"
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                self._record_plan(plan)
+                return
+            if ok_micro and score_val >= int(settings.strategy.min_signal_score) and not plan.get("reason_block"):
                 plan["has_signal"] = True
                 self._emit_diag(plan, micro)
             else:
