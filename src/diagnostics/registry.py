@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-"""Simple registry for diagnostic self-tests.
+"""Registry and helpers for diagnostic self-tests.
 
-This module exposes a :func:`run` helper returning a :class:`CheckResult` for a
-named diagnostic. The current implementation provides placeholder checks so the
-/why command can surface structured results along with optional fix hints.
+This module provides a lightweight registration system so individual
+components can expose health checks.  Results are represented by
+:class:`CheckResult` dataclasses and can be serialized to JSON for
+Telegram or log consumption.
 """
 
-from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, ClassVar, Dict, List, Optional
+import json
+import time
 
 
 @dataclass
@@ -18,26 +21,58 @@ class CheckResult:
     name: str
     ok: bool
     msg: str
+    details: Dict[str, Any]
     fix: Optional[str] = None
+    took_ms: int = 0
 
 
-def _stub(name: str) -> CheckResult:
-    return CheckResult(name=name, ok=True, msg="ok")
+_registry: Dict[str, Callable[[], CheckResult]] = {}
 
 
-_CHECKS: Dict[str, Callable[[], CheckResult]] = {
-    "data_window": lambda: _stub("data_window"),
-    "atr": lambda: _stub("atr"),
-    "regime": lambda: _stub("regime"),
-    "micro": lambda: _stub("micro"),
-    "risk_gates": lambda: _stub("risk_gates"),
-}
+def register(name: str) -> Callable[[Callable[[], CheckResult]], Callable[[], CheckResult]]:
+    """Decorator to register a diagnostic check under ``name``."""
+
+    def deco(fn: Callable[[], CheckResult]) -> Callable[[], CheckResult]:
+        _registry[name] = fn
+        return fn
+
+    return deco
 
 
 def run(name: str) -> CheckResult:
     """Run a diagnostic check by name."""
 
-    func = _CHECKS.get(name)
-    if not func:
-        return CheckResult(name=name, ok=False, msg="unknown check")
-    return func()
+    fn = _registry.get(name)
+    if not fn:
+        return CheckResult(
+            name=name,
+            ok=False,
+            msg="unknown check",
+            details={},
+            fix="use /selftest to list",
+        )
+    t0 = time.time()
+    result = fn()
+    result.took_ms = int((time.time() - t0) * 1000)
+    return result
+
+
+def run_all() -> List[CheckResult]:
+    """Run all registered diagnostic checks and return their results."""
+
+    return [run(n) for n in sorted(_registry)]
+
+
+def to_json(results: List[CheckResult]) -> str:
+    """Serialize a list of :class:`CheckResult` objects to JSON."""
+
+    return json.dumps([asdict(r) for r in results], default=str, ensure_ascii=False)
+
+
+__all__: ClassVar[List[str]] = [
+    "CheckResult",
+    "register",
+    "run",
+    "run_all",
+    "to_json",
+]

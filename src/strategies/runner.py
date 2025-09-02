@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List, ClassVar
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -84,6 +84,8 @@ class StrategyRunner:
     TelegramController is provided by main.py; here we only consume it.
     """
 
+    _SINGLETON: ClassVar["StrategyRunner" | None] = None
+
     # ---------------- init ----------------
     def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
@@ -94,6 +96,9 @@ class StrategyRunner:
         # keep both names for old controllers
         self.telegram = telegram_controller
         self.telegram_controller = telegram_controller
+
+        StrategyRunner._SINGLETON = self
+        self._ohlc_cache: Optional[pd.DataFrame] = None
 
         self.settings = settings
 
@@ -1369,6 +1374,7 @@ class StrategyRunner:
                         self.last_spot = float(df["close"].iloc[-1])
                     except Exception:
                         pass
+                    self._ohlc_cache = df
                     return df
                 if valid and rows >= min_req:
                     self._last_fetch_ts = time.time()
@@ -1377,6 +1383,7 @@ class StrategyRunner:
                         self.last_spot = float(df["close"].iloc[-1])
                     except Exception:
                         pass
+                    self._ohlc_cache = df
                     return df
 
                 self.log.error(
@@ -1404,13 +1411,16 @@ class StrategyRunner:
                     self.last_spot = float(ltp)
                 except Exception:
                     pass
+                self._ohlc_cache = df
                 return df
 
             # If we get here, we truly have nothing
+            self._ohlc_cache = None
             return None
 
         except Exception as e:
             self.log.warning("OHLC fetch failed: %s", e)
+            self._ohlc_cache = None
             return None
 
     # ---------------- session/window ----------------
@@ -1519,6 +1529,34 @@ class StrategyRunner:
 
     def get_last_flow_debug(self) -> Dict[str, Any]:
         return dict(self._last_flow_debug)
+
+    def ohlc_window(self) -> Optional[pd.DataFrame]:
+        """Return the cached OHLC window, if any."""
+
+        return self._ohlc_cache
+
+    @classmethod
+    def get_singleton(cls) -> Optional["StrategyRunner"]:
+        """Return the most recently created runner instance, if any."""
+
+        return cls._SINGLETON
+
+    def debug_snapshot(self) -> Dict[str, Any]:
+        """Return a lightweight state snapshot for diagnostics."""
+
+        df = self._ohlc_cache
+        last_ts = None if df is None or df.empty else df.index[-1]
+        gates = self._last_flow_debug.get("risk_gates", {})
+        return {
+            "now": str(self.now_ist),
+            "bars": None if df is None else len(df),
+            "last_bar_ts": str(last_ts),
+            "lag_s": None if last_ts is None else (self.now_ist - last_ts).total_seconds(),
+            "eval_count": getattr(self, "eval_count", None),
+            "gates": gates,
+            "risk_pct": getattr(self.settings.risk, "risk_per_trade", None),
+            "rr_threshold": getattr(self.strategy_cfg, "rr_threshold", None),
+        }
 
     def _build_diag_bundle(self) -> Dict[str, Any]:
         """Health cards for /diag (compact) and /check (detailed)."""

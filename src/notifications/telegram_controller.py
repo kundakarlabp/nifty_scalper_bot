@@ -11,12 +11,18 @@ from datetime import datetime, timedelta, time as dt_time
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 import statistics as stats
+from pathlib import Path
 
 from src.logs.journal import read_trades_between
 
 import requests
 
 from src.config import settings
+from src.diagnostics import checks  # noqa: F401
+from src.diagnostics.registry import run_all, run
+from src.strategies.runner import StrategyRunner
+from src.risk.position_sizing import PositionSizer
+from src.utils.expiry import next_tuesday_expiry, last_tuesday_of_month
 
 log = logging.getLogger(__name__)
 
@@ -490,6 +496,70 @@ class TelegramController:
                 fmt("Quote", api.get("quote", {})),
             ]
             return self._send("\n".join(lines))
+
+        if cmd == "/selftest":
+            if args:
+                results = [run(args[0])]
+            else:
+                results = run_all()
+            lines = [
+                f"{'✅' if r.ok else '❌'} {r.name} — {r.msg} ({r.took_ms}ms)" for r in results
+            ]
+            for r in results:
+                if not r.ok and r.fix:
+                    lines.append(f"• fix: {r.fix}")
+            return self._send("\n".join(lines)[:3500])
+
+        if cmd == "/probe":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            ds = runner.debug_snapshot()
+            return self._send(
+                f"bars={ds['bars']} last={ds['last_bar_ts']} lag_s={ds['lag_s']} rr={ds['rr_threshold']} risk%={ds['risk_pct']}"
+            )
+
+        if cmd == "/bars":
+            runner = StrategyRunner.get_singleton()
+            if not runner:
+                return self._send("runner not ready")
+            ds = runner.debug_snapshot()
+            return self._send(
+                f"bars={ds['bars']} last={ds['last_bar_ts']} lag_s={ds['lag_s']} gates={ds['gates']}"
+            )
+
+        if cmd == "/expiry":
+            return self._send(
+                f"weekly={next_tuesday_expiry()} | monthly={last_tuesday_of_month()}"
+            )
+
+        if cmd == "/sizer":
+            ps = PositionSizer.from_settings(
+                risk_per_trade=settings.risk.risk_per_trade,
+                min_lots=settings.risk.min_lots,
+                max_lots=settings.risk.max_lots,
+                max_position_size_pct=settings.risk.max_position_size_pct,
+            )
+            qty, lots, diag = ps.size_from_signal(
+                entry_price=200, stop_loss=190, lot_size=50, equity=100_000
+            )
+            return self._send(
+                f"risk%={settings.risk.risk_per_trade} rupees={diag['risk_rupees']} lots={lots} qty={qty}"
+            )
+
+        if cmd == "/healthjson":
+            js = json.dumps([r.__dict__ for r in run_all()], ensure_ascii=False)
+            return self._send(js[:3500])
+
+        if cmd == "/logtail":
+            n = 200
+            if args and args[0].isdigit():
+                n = int(args[0])
+            p = Path("logs/bot.log")
+            if not p.exists():
+                return self._send("no log")
+            lines = p.read_text(errors="ignore").splitlines()[-n:]
+            return self._send("```" + "\n".join(lines)[-3500:] + "```", parse_mode="Markdown")
 
         if cmd == "/reload":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
@@ -1002,16 +1072,6 @@ class TelegramController:
             arg = (args[0].lower() if args else "on")
             runner.hb_enabled = (arg != "off")
             return self._send(f"Heartbeat: {'ON' if runner.hb_enabled else 'OFF'}")
-
-        if cmd == "/selftest":
-            try:
-                opt = args[0].lower() if args else "ce"
-                if not self._selftest_provider:
-                    return self._send("selftest not wired")
-                text = self._selftest_provider(opt)
-                return self._send(text)
-            except Exception as e:
-                return self._send(f"Selftest error: {e}")
 
         if cmd == "/smoketest":
             try:
