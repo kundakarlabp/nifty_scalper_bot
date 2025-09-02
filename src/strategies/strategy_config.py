@@ -58,8 +58,11 @@ class StrategyConfig:
     @classmethod
     def load(cls, path: str) -> "StrategyConfig":
         """Load configuration from ``path``."""
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:  # pragma: no cover - yaml gives detailed msg
+            raise ValueError(f"YAML parse error in {path}") from e
         meta = data.get("meta", {})
         windows = data.get("windows", {})
         gates = data.get("gates", {})
