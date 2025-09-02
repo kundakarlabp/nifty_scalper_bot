@@ -510,24 +510,6 @@ class TelegramController:
                     lines.append(f"• fix: {r.fix}")
             return self._send("\n".join(lines)[:3500])
 
-        if cmd == "/probe":
-            runner = StrategyRunner.get_singleton()
-            if not runner:
-                return self._send("runner not ready")
-            ds = runner.debug_snapshot()
-            return self._send(
-                f"bars={ds['bars']} last={ds['last_bar_ts']} lag_s={ds['lag_s']} rr={ds['rr_threshold']} risk%={ds['risk_pct']}"
-            )
-
-        if cmd == "/bars":
-            runner = StrategyRunner.get_singleton()
-            if not runner:
-                return self._send("runner not ready")
-            ds = runner.debug_snapshot()
-            return self._send(
-                f"bars={ds['bars']} last={ds['last_bar_ts']} lag_s={ds['lag_s']} gates={ds['gates']}"
-            )
-
         if cmd == "/expiry":
             return self._send(
                 f"weekly={next_tuesday_expiry()} | monthly={last_tuesday_of_month()}"
@@ -949,7 +931,16 @@ class TelegramController:
                 return self._send("Probe provider unavailable.")
             try:
                 info = self._probe_provider()
-                return self._send(f"Probe: {info}")
+                text = (
+                    "Probe: "
+                    f"bars={info.get('bars')} "
+                    f"bar_s={info.get('bar_age_s')} "
+                    f"tick_s={info.get('tick_age_s')} "
+                    f"regime={info.get('regime')} "
+                    f"ATR%={info.get('atr_pct')} "
+                    f"score={info.get('score')}"
+                )
+                return self._send(text)
             except Exception as e:
                 return self._send(f"Probe error: {e}")
 

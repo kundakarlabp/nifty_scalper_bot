@@ -1058,14 +1058,24 @@ class StrategyRunner:
 
     def get_probe_info(self) -> Dict[str, Any]:
         plan = self.last_plan or {}
+        tick_age_s = None
+        try:
+            if self.last_eval_ts:
+                last = datetime.fromisoformat(self.last_eval_ts)
+                tick_age_s = (datetime.utcnow() - last).total_seconds()
+        except Exception:
+            tick_age_s = None
         return {
             "start": plan.get("probe_window_from"),
             "end": plan.get("probe_window_to"),
             "bars": plan.get("bar_count") or plan.get("bars"),
             "last_bar_ts": plan.get("last_bar_ts"),
             "bar_age_s": plan.get("lag_s") or plan.get("last_bar_lag_s"),
-            "tick_age_s": None,
+            "tick_age_s": tick_age_s,
             "source": plan.get("data_source"),
+            "regime": plan.get("regime"),
+            "atr_pct": plan.get("atr_pct"),
+            "score": plan.get("score"),
         }
 
     def run_backtest(self, csv_path: Optional[str] = None) -> str:
