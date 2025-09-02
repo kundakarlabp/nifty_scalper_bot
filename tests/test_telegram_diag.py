@@ -23,6 +23,7 @@ def test_diag_shows_status_and_signal(monkeypatch):
         "option_type": "CE",
         "strike": "100",
         "qty_lots": 1,
+        "expiry": "2024-08-06",
         "regime": "TREND",
         "score": 5,
         "rr": 2.0,
@@ -47,3 +48,4 @@ def test_diag_shows_status_and_signal(monkeypatch):
     assert "📊 Status" in msg and "📈 Signal" in msg
     assert "Market Open: ✅" in msg
     assert "Action: BUY" in msg
+    assert "Expiry: 2024-08-06" in msg

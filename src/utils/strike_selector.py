@@ -25,6 +25,7 @@ import re
 
 from src.config import settings
 from src.risk.greeks import OptionType, implied_vol_newton, bs_price_delta_gamma
+from src.utils.expiry import next_tuesday_expiry
 
 try:
     # Optional; only imported if installed
@@ -278,7 +279,8 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
     if not nfo_instruments:
         return None
 
-    ist_today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target = next_tuesday_expiry(now).date()
     expiries: set[str] = set()
 
     for row in nfo_instruments:
@@ -303,7 +305,7 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
             d = datetime.strptime(exp, "%Y-%m-%d").date()
         except Exception:
             continue
-        if d >= ist_today:
+        if d >= target:
             return exp
     # else, all past—return last known (unexpected but better than None)
     return sorted_exp[-1]
@@ -314,12 +316,7 @@ def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
 
     Used as a lightweight fallback when the full instrument dump is unavailable.
     """
-    if now is None:
-        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    # weekday(): Monday=0 … Sunday=6; Tuesday is 1
-    days_ahead = (1 - now.weekday()) % 7
-    expiry = (now + timedelta(days=days_ahead)).date()
-    return expiry.isoformat()
+    return next_tuesday_expiry(now).date().isoformat()
 
 
 # -----------------------------------------------------------------------------
