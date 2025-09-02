@@ -616,7 +616,7 @@ class StrategyRunner:
             plan["last_bar_ts"] = last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
             lag_s = ohlc_builder.calc_bar_lag_s(df, self._now_ist())
             plan["lag_s"] = lag_s
-            if lag_s is None or lag_s > 90:
+            if lag_s is None or lag_s > 150:
                 plan["reason_block"] = "data_stale"
                 plan.setdefault("reasons", []).append("data_stale")
                 self._record_plan(plan)
@@ -1725,10 +1725,7 @@ class StrategyRunner:
             "version": self.strategy_cfg.version,
             "tz": self.strategy_cfg.tz,
             "atr_band": [self.strategy_cfg.atr_min, self.strategy_cfg.atr_max],
-            "score_gates": {
-                "trend": self.strategy_cfg.score_trend_min,
-                "range": self.strategy_cfg.score_range_min,
-            },
+            "min_score": self.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35),
         }
         return bundle
 

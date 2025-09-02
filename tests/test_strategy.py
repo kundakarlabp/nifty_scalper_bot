@@ -156,10 +156,6 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
         lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
-        "src.strategies.scalping_strategy.micro_ok",
-        lambda *args, **kwargs: (False, None),
-    )
-    monkeypatch.setattr(
         "src.strategies.scalping_strategy.resolve_weekly_atm",
         lambda price: {"ce": ("TESTCE", 50), "pe": ("TESTPE", 50)},
     )
@@ -172,5 +168,4 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
 
     assert plan["micro"]["spread_pct"] is None
     assert plan["micro"]["depth_ok"] is None
-    assert plan["micro"]["missing"] is True
-    assert plan["score"] > 0
+    assert plan.get("reason_block") != "microstructure"

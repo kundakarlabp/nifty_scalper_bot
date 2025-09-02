@@ -82,12 +82,10 @@ def cap_for_mid(mid: float, cfg: Any) -> float:
     return cap
 
 
-def depth_required_lots(atr_pct: float, cfg: Any) -> int:
-    """Determine minimum depth (in lots) required based on ATR% and config."""
+def depth_required_lots(atr_pct: float) -> int:
+    """Determine minimum depth (in lots) required based on ATR%."""
 
-    micro = _micro_cfg(cfg)
-    base = int(micro.get("depth_min_lots", 1))
-    return base if atr_pct >= 0.02 else max(base, 2)
+    return 1 if atr_pct >= 0.02 else 2
 
 
 def evaluate_micro(
@@ -134,7 +132,7 @@ def evaluate_micro(
     cap = cap_for_mid(mid, cfg)
     bq = int(q.get("bid_qty") or q.get("bid5_qty") or 0)
     sq = int(q.get("ask_qty") or q.get("ask5_qty") or 0)
-    need_lots = depth_required_lots(float(atr_pct or 0.0), cfg)
+    need_lots = depth_required_lots(float(atr_pct or 0.0))
     depth_ok = min(bq, sq) >= need_lots * lot_size
     would_block = (spread_pct > cap) or (not depth_ok)
     return {

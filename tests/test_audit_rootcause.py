@@ -25,10 +25,9 @@ class FakeRunner:
             tz="Asia/Kolkata",
             atr_min=0.0,
             atr_max=5.0,
-            score_trend_min=5,
-            score_range_min=5,
+            depth_min_lots=1,
             lower_score_temp=False,
-            max_spread_pct_regular=1.0,
+            raw={"strategy": {"min_score": 0.35}, "micro": {"mode": "SOFT", "max_spread_pct": 1.0}},
         )
         self.risk_engine = DummyRiskEngine()
         self.window_tuple = "-"

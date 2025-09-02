@@ -171,16 +171,10 @@ def test_config_outputs_strategy_config(monkeypatch) -> None:
         tz="UTC",
         atr_min=0.1,
         atr_max=1.0,
-        score_trend_min=5,
-        score_range_min=4,
-        max_spread_pct_open=1.0,
-        max_spread_pct_regular=0.5,
-        max_spread_pct_last20m=0.2,
-        depth_multiplier=2,
+        depth_min_lots=1,
         min_oi=1000,
         delta_min=0.2,
         delta_max=0.8,
-        re_atm_drift_pct=2.0,
         tp1_R_min=1,
         tp1_R_max=2,
         tp2_R_trend=3,
@@ -190,7 +184,7 @@ def test_config_outputs_strategy_config(monkeypatch) -> None:
         gamma_enabled=True,
         gamma_after=10,
         min_bars_required=20,
-        indicator_min_bars=40,
+        raw={"strategy": {"min_score": 0.35}, "micro": {"mode": "SOFT", "max_spread_pct": 1.0}},
     )
 
     class Runner:

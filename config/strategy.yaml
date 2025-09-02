@@ -3,13 +3,13 @@ meta:
   name: "nifty_scalper_default"
 
 strategy:
-  min_score: 0.0
+  min_score: 0.35
+  atr_period: 14
   weights:
-    regime: 1.0
-    momentum: 1.0
-    structure: 1.0
-    vol: 1.0
-    micro: 1.0
+    trend: 0.4
+    momentum: 0.3
+    pullback: 0.2
+    breakout: 0.1
 
 windows:
   timezone: "Asia/Kolkata"
@@ -24,21 +24,15 @@ windows:
 gates:
   atr_pct_min: 0.025
   atr_pct_max: 2.00
-  score_trend_min: 9
-  score_range_min: 8
   mtf_confirm: true
   iv_percentile_limit: 85   # block if IVpct > limit AND score below trend min+1
   adx_min_trend: 18         # require ADX≥18 in TREND regime
 
 micro:
-  max_spread_pct_regular: 0.35
-  max_spread_pct_open: 0.45
-  max_spread_pct_last20m: 0.45
-  depth_multiplier: 5
-  depth_min_lots: 1
-  mode: "HARD"            # HARD | SOFT
-  max_spread_pct: 1.0     # static fallback cap
+  mode: "SOFT"            # HARD | SOFT
   dynamic: true
+  max_spread_pct: 1.0     # static fallback cap
+  depth_min_lots: 1
   table:
     - {min_mid: 0,   cap_pct: 2.0}
     - {min_mid: 50,  cap_pct: 1.5}
@@ -50,14 +44,10 @@ thresholds:
   min_atr_pct_banknifty: 0.04
 
 options:
-  delta_target: 0.40           # target absolute delta
-  delta_band: 0.05             # acceptable |delta-target|
-  delta_enable_score: 10       # only use delta-target when plan.score >= this
   min_oi: 500000
   max_median_spread_pct: 0.35
   delta_min: 0.35
   delta_max: 0.60
-  re_atm_drift_pct: 0.35
 
 lifecycle:
   tp1_R_min: 1.00
@@ -82,9 +72,7 @@ risk:
 rr_threshold: 1.5            # set to null to disable
 
 warmup:
-  min_bars_required: 20
-  indicator_min_bars: 14
-  mtf_min_bars: 21
+  min_bars: 20
 
 debug:
   lower_score_temp: false

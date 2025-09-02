@@ -634,12 +634,12 @@ class TelegramController:
                 f"name: `{c.name}` v{c.version}\n"
                 f"tz: {c.tz}\n"
                 f"ATR% band: {c.atr_min}–{c.atr_max}\n"
-                f"score gates: trend {c.score_trend_min}, range {c.score_range_min}\n"
-                f"micro: spread open {c.max_spread_pct_open}, reg {c.max_spread_pct_regular}, close {c.max_spread_pct_last20m}, depth×{c.depth_multiplier}\n"
-                f"options: OI≥{c.min_oi}, Δ∈[{c.delta_min},{c.delta_max}], reATM>{c.re_atm_drift_pct}%\n"
+                f"score gate: ≥{c.raw.get('strategy', {}).get('min_score', 0.0)}\n"
+                f"micro: mode {c.raw.get('micro', {}).get('mode')}, cap {c.raw.get('micro', {}).get('max_spread_pct')}, depth_min_lots {c.depth_min_lots}\n"
+                f"options: OI≥{c.min_oi}, Δ∈[{c.delta_min},{c.delta_max}]\n"
                 f"lifecycle: tp1 {c.tp1_R_min}–{c.tp1_R_max}R, tp2(T/R) {c.tp2_R_trend}/{c.tp2_R_range}, trail {c.trail_atr_mult}, time {c.time_stop_min}m\n"
                 f"gamma: {c.gamma_enabled} after {c.gamma_after}\n"
-                f"warmup: bars {c.min_bars_required}/{c.indicator_min_bars}\n"
+                f"warmup: bars {c.min_bars_required}\n"
             )
             return self._send(text, parse_mode="Markdown")
 
@@ -844,19 +844,13 @@ class TelegramController:
                         if last_dt.tzinfo is None:
                             last_dt = last_dt.replace(tzinfo=ZoneInfo(runner.strategy_cfg.tz))
                         age = (runner.now_ist - last_dt).total_seconds()
-                        stale_ok = 0 <= age <= 90
+                        stale_ok = 0 <= age <= 150
                 except Exception:
                     stale_ok = False
                 regime_ok = sig.get("regime") in ("TREND", "RANGE")
                 atr = sig.get("atr_pct") or 0.0
                 atr_ok = runner.strategy_cfg.atr_min <= atr <= runner.strategy_cfg.atr_max
-                need = (
-                    runner.strategy_cfg.score_trend_min
-                    if sig.get("regime") == "TREND"
-                    else runner.strategy_cfg.score_range_min
-                )
-                if runner.strategy_cfg.lower_score_temp:
-                    need = min(need, 6)
+                need = float(runner.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35))
                 score_ok = (sig.get("score") or 0) >= need
                 micro = sig.get("micro") or {}
                 msp = micro.get("spread_pct")

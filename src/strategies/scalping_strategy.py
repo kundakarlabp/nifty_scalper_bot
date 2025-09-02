@@ -17,7 +17,8 @@ from src.utils.indicators import (
     calculate_macd,
 )
 from src.signals.regime_detector import detect_market_regime
-from src.execution.order_executor import fetch_quote_with_depth, micro_ok
+from src.execution.order_executor import fetch_quote_with_depth
+from src.execution.micro_filters import evaluate_micro, cap_for_mid
 from src.utils.strike_selector import (
     get_instrument_tokens,
     select_strike,
@@ -208,7 +209,8 @@ class EnhancedScalpingStrategy:
         ivpct = self._est_iv_pct(S=close, K=plan.get("atm_strike", int(close)), T=plan.get("T", 3 / 365))
         plan["iv_pct"] = ivpct
         limit = int(cfg.iv_percentile_limit)
-        need = int(cfg.score_trend_min) + 1
+        min_score = float(cfg.raw.get("strategy", {}).get("min_score", 0.35))
+        need = min_score + 0.1
         if ivpct is not None and ivpct > limit and plan.get("score", 0) < need:
             return "iv_extreme", {"iv_pct": ivpct, "need_score": need}
         return None
@@ -290,7 +292,7 @@ class EnhancedScalpingStrategy:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
             if len(df) < cfg.min_bars_required:
                 return plan_block("insufficient_bars", bar_count=len(df))
-            if current_price is None or current_price <= 0 or len(df) < cfg.indicator_min_bars:
+            if current_price is None or current_price <= 0:
                 return plan_block("indicator_unready", bar_count=len(df))
 
             ema21 = self._ema(df["close"], 21)
@@ -448,84 +450,65 @@ class EnhancedScalpingStrategy:
 
             vol_score = 1 if cfg.atr_min <= atr_pct <= cfg.atr_max else 0
 
-            micro_score = 2
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
             if not info_atm:
                 return plan_block("no_option_token", micro={"spread_pct": None, "depth_ok": None})
             tsym, lot_sz = info_atm
             q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
-            runner_obj = getattr(self, "runner", None)
-            nowt = (runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))).time()
-            max_spread = cfg.max_spread_pct_regular
-            if nowt <= dt_time(10, 0):
-                max_spread = cfg.max_spread_pct_open
-            elif nowt >= dt_time(15, 10):
-                max_spread = cfg.max_spread_pct_last20m
-            event_widen = float(plan.get("_event_post_widen", 0.0))
-            max_spread = max_spread + event_widen
-            ok_micro, micro = micro_ok(
-                q,
-                qty_lots=1,
-                lot_size=lot_sz,
-                max_spread_pct=max_spread,
-                depth_mult=cfg.depth_multiplier,
-            )
-            micro_cfg = getattr(cfg, "raw", {}).get("micro", {})  # type: ignore[arg-type]
-            if micro is None:
-                plan["micro"] = {
-                    "spread_pct": None,
-                    "depth_ok": None,
-                    "missing": True,
-                    "mode": micro_cfg.get("mode"),
-                    "cap_pct": max_spread,
-                }
-                micro_score = 1
-            else:
-                micro["mode"] = micro_cfg.get("mode")
-                micro["cap_pct"] = max_spread
-                plan["micro"] = micro
-                if not ok_micro:
-                    micro_score = 0
+            mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
+            cap_pct = cap_for_mid(mid, cfg)
+            micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=plan["atr_pct"], cfg=cfg)
+            micro["cap_pct"] = cap_pct
+            plan["micro"] = micro
+            sp = micro.get("spread_pct")
+            cap = micro.get("cap_pct")
+            depth_ok = bool(micro.get("depth_ok"))
+            over_spread = bool(sp is not None and cap is not None and sp > cap)
+            ok_micro = not (over_spread or not depth_ok)
+            if micro.get("mode") == "HARD" and not ok_micro:
+                return plan_block("microstructure", micro=micro)
 
             comps = {
-                "regime": float(regime_score),
+                "trend": float(regime_score),
                 "momentum": float(momentum_score),
-                "structure": float(structure_score),
-                "vol": float(vol_score),
-                "micro": float(micro_score),
+                "pullback": float(structure_score),
+                "breakout": float(vol_score),
             }
             strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
             weights = strat_cfg.get(
                 "weights",
-                {"regime": 1.0, "momentum": 1.0, "structure": 1.0, "vol": 1.0, "micro": 1.0},
+                {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1},
             )
             raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
+            max_score = sum(float(weights.get(k, 0.0)) for k in comps)
             penalties: Dict[str, float] = {}
             m = plan.get("micro") or {}
             if m.get("mode") == "SOFT":
-                sp = m.get("spread_pct")
-                cap = m.get("cap_pct")
-                if sp is not None and cap is not None and sp > cap:
-                    penalties["micro_spread"] = 0.5
-            final_score = max(0.0, raw_score - sum(penalties.values()))
+                sp2 = m.get("spread_pct")
+                cap2 = m.get("cap_pct")
+                if sp2 is not None and cap2 is not None and sp2 > cap2:
+                    penalties["micro_spread"] = 0.1
+                if m.get("depth_ok") is False:
+                    penalties["micro_depth"] = 0.1
+            final_score = 0.0
+            if max_score > 0:
+                final_score = max(0.0, raw_score - sum(penalties.values())) / max_score
             plan["score"] = final_score
-            score = final_score  # backward-compat for downstream code
+            score = final_score
             plan["score_dbg"] = {
                 "components": comps,
                 "weights": weights,
                 "raw": round(raw_score, 4),
                 "penalties": penalties,
                 "final": round(final_score, 4),
-                "threshold": strat_cfg.get("min_score", 0.0),
+                "threshold": strat_cfg.get("min_score", 0.35),
             }
             plan["reasons"] = reasons
 
-            need = cfg.score_trend_min if reg.regime == "TREND" else cfg.score_range_min
-            if cfg.lower_score_temp:
-                need = min(need, 6)
-            if final_score < need:
-                return plan_block("score_low", score=final_score, need=need)
+            min_score_cfg = float(strat_cfg.get("min_score", 0.35))
+            if final_score < min_score_cfg:
+                return plan_block("score_low", score=final_score, need=min_score_cfg)
 
             rej = self._iv_adx_reject_reason(plan, price)
             if rej:
@@ -577,7 +560,7 @@ class EnhancedScalpingStrategy:
                 _ = get_instrument_tokens(spot_price=price)
             except Exception as e:
                 logger.debug("instrument token lookup failed: %s", e)
-            strike_info = select_strike(price, score)
+            strike_info = select_strike(price, int(score))
             if not strike_info:
                 liquidity_info: Optional[Dict[str, Any]] = None
                 try:

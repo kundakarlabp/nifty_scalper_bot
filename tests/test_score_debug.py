@@ -47,11 +47,7 @@ def test_score_breakdown_present(monkeypatch: pytest.MonkeyPatch, strategy_confi
     df = _create_df()
     monkeypatch.setattr(
         "src.strategies.scalping_strategy.fetch_quote_with_depth",
-        lambda *_, **__: {},
-    )
-    monkeypatch.setattr(
-        "src.strategies.scalping_strategy.micro_ok",
-        lambda *_, **__: (True, {"spread_pct": 0.1, "depth_ok": True}),
+        lambda *_, **__: {"bid": 100.0, "ask": 100.2, "bid_qty": 1000, "ask_qty": 1000},
     )
     monkeypatch.setattr(
         "src.strategies.scalping_strategy.resolve_weekly_atm",

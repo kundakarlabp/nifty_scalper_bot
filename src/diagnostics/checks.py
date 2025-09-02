@@ -148,7 +148,7 @@ def check_strategy() -> CheckResult:
         return _bad("runner not ready", name="strategy", fix="start the bot")
     df = r.ohlc_window()
     st = EnhancedScalpingStrategy()
-    plan = st.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    plan: Dict[str, Any] = st.generate_signal(df, current_price=float(df["close"].iloc[-1])) or {}
     need = {"action", "rr", "score", "reasons"}
     missing = [k for k in need if k not in plan]
     if missing:
