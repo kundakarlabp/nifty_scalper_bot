@@ -94,9 +94,15 @@ def check_atr() -> CheckResult:
     if r is None:
         return _bad("runner not ready", name="atr", fix="start the bot")
     df = r.ohlc_window()
-    if df is None or len(df) < max(10, int(r.strategy_cfg.atr_period)):
-        return _bad("insufficient bars for ATR", name="atr", fix="increase lookback/min_bars", bars=0)
-    atrp = atr_pct(df, period=int(r.strategy_cfg.atr_period)) or 0.0
+    atr_period = int(getattr(settings.strategy, "atr_period", 14))
+    if df is None or len(df) < max(10, atr_period):
+        return _bad(
+            "insufficient bars for ATR",
+            name="atr",
+            fix="increase lookback/min_bars",
+            bars=0,
+        )
+    atrp = atr_pct(df, period=atr_period) or 0.0
     minp = (
         r.strategy_cfg.min_atr_pct_banknifty
         if r.under_symbol == "BANKNIFTY"
@@ -141,8 +147,8 @@ def check_strategy() -> CheckResult:
     if r is None:
         return _bad("runner not ready", name="strategy", fix="start the bot")
     df = r.ohlc_window()
-    st = EnhancedScalpingStrategy(r.strategy_cfg)
-    plan = st.build_plan(df=df, now=r.now_ist)
+    st = EnhancedScalpingStrategy()
+    plan = st.generate_signal(df, current_price=float(df["close"].iloc[-1]))
     need = {"action", "rr", "score", "reasons"}
     missing = [k for k in need if k not in plan]
     if missing:
@@ -167,8 +173,8 @@ def check_sizing() -> CheckResult:
 
     ps = PositionSizer.from_settings(
         risk_per_trade=settings.risk.risk_per_trade,
-        min_lots=settings.risk.min_lots,
-        max_lots=settings.risk.max_lots,
+        min_lots=settings.instruments.min_lots,
+        max_lots=settings.instruments.max_lots,
         max_position_size_pct=settings.risk.max_position_size_pct,
     )
     qty, lots, diag = ps.size_from_signal(
@@ -198,7 +204,9 @@ def check_micro() -> CheckResult:
     q = r.get_current_l1()
     if not q:
         return _ok("micro N/A (soft-pass)", name="micro", reason="no_quote")
-    spread, depth_ok = micro_from_l1(q, lot_size=r.lot_size, depth_min_lots=r.strategy_cfg.depth_min_lots)
+    spread, depth_ok, _ = micro_from_l1(
+        q, lot_size=r.lot_size, depth_min_lots=r.strategy_cfg.depth_min_lots
+    )
     return _ok("micro", name="micro", spread_pct=spread, depth_ok=depth_ok)
 
 

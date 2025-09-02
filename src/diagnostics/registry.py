@@ -9,7 +9,7 @@ Telegram or log consumption.
 """
 
 from dataclasses import dataclass, asdict
-from typing import Any, Callable, ClassVar, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import json
 import time
 
@@ -69,7 +69,7 @@ def to_json(results: List[CheckResult]) -> str:
     return json.dumps([asdict(r) for r in results], default=str, ensure_ascii=False)
 
 
-__all__: ClassVar[List[str]] = [
+__all__ = [
     "CheckResult",
     "register",
     "run",
