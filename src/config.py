@@ -137,6 +137,15 @@ class InstrumentsSettings(BaseModel):
     min_lots: int = 1
     max_lots: int = 10
 
+    @field_validator("instrument_token", mode="before")
+    @classmethod
+    def _v_token(cls, v: object) -> int:
+        """Coerce instrument token strings or floats to int."""
+        try:
+            return int(float(str(v)))
+        except (TypeError, ValueError) as e:
+            raise ValueError("instrument_token must be numeric") from e
+
     @field_validator("min_lots", "max_lots", "nifty_lot_size")
     @classmethod
     def _v_lots_pos(cls, v: int) -> int:
