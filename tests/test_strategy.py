@@ -7,6 +7,8 @@ import numpy as np
 
 from src.config import StrategySettings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.strategies.warmup import compute_required_bars
+from src.strategies.strategy_config import StrategyConfig, resolve_config_path
 from src.utils.indicators import calculate_adx
 
 
@@ -171,8 +173,9 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
     assert plan.get("reason_block") != "microstructure"
 
 
-def test_respects_min_bars_for_signal(strategy_config: StrategySettings):
-    """Ensure strategy uses ``min_bars_for_signal`` threshold."""
+def test_respects_min_bars_for_signal(strategy_config: StrategySettings) -> None:
+    """Strategy should require the max of internal and config min bars."""
+
     strategy = EnhancedScalpingStrategy(
         min_signal_score=strategy_config.min_signal_score,
         confidence_threshold=strategy_config.confidence_threshold,
@@ -180,8 +183,23 @@ def test_respects_min_bars_for_signal(strategy_config: StrategySettings):
         atr_sl_multiplier=strategy_config.atr_sl_multiplier,
         atr_tp_multiplier=strategy_config.atr_tp_multiplier,
     )
-    # Need enough bars for indicators (ADX window=14) yet below config min_bars_required=30
-    length = strategy.min_bars_for_signal + 9
-    df = create_test_dataframe(length=length, trending_up=True)
+
+    cfg_obj = StrategyConfig.load(resolve_config_path())
+    cfg_obj.min_bars_required = strategy.min_bars_for_signal
+    strategy.runner = type("R", (), {"strategy_cfg": cfg_obj})()
+
+    need = compute_required_bars(
+        cfg_obj, default_min=strategy.min_bars_for_signal, atr_period=strategy_config.atr_period
+    )
+
+    full_df = create_test_dataframe(length=need + 20, trending_up=True)
+
+    # Below requirement -> should block
+    df = full_df.tail(need - 1)
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert plan.get("reason_block") == "insufficient_bars"
+
+    # At requirement -> should pass
+    df = full_df.tail(need)
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
     assert plan.get("reason_block") != "insufficient_bars"

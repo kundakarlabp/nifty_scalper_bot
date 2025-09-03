@@ -1,13 +1,14 @@
+"""Utilities for strategy warm-up checks."""
+
 from __future__ import annotations
 
-"""Warm-up bar calculations and checks."""
-
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class WarmupInfo:
-    """Outcome of the warm-up bar check."""
+    """Outcome of a warm-up evaluation."""
 
     required_bars: int
     have_bars: int
@@ -15,28 +16,48 @@ class WarmupInfo:
     reasons: list[str]
 
 
-def _cfg_int(cfg: object, name: str, default: int) -> int:
-    """Return ``cfg.name`` as ``int`` with ``default`` fallback."""
+def compute_required_bars(
+    cfg: Any, *, default_min: int, atr_period: int | None = None
+) -> int:
+    """Return the number of bars needed before signals are valid."""
 
-    return int(getattr(cfg, name, default))
+    floors = [int(default_min)]
+    floors.append(int(getattr(cfg, "min_bars_required", default_min)))
+    if atr_period is not None:
+        floors.append(int(atr_period) + 5)
+    if hasattr(cfg, "warmup_bars"):
+        try:
+            floors.append(int(getattr(cfg, "warmup_bars")))
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return max(floors)
 
 
-def required_bars(cfg: object) -> int:
-    """Compute the number of bars required for strategy warm-up."""
+def warmup_status(have: int, need: int) -> WarmupInfo:
+    """Return a ``WarmupInfo`` describing whether warm-up is satisfied."""
 
-    pad = _cfg_int(cfg, "warmup_pad", 2)
-    warm_min = _cfg_int(cfg, "warmup_bars_min", 20)
-    atr_period = _cfg_int(cfg, "atr_period", 14)
-    ema_slow = _cfg_int(cfg, "ema_slow", 21)
-    regime_min = _cfg_int(cfg, "regime_min_bars", warm_min)
-    feat_min = _cfg_int(cfg, "features_min_bars", warm_min)
-    return max(warm_min, atr_period + pad, ema_slow + pad, regime_min, feat_min)
+    ok = have >= need
+    reasons: list[str] = []
+    if not ok:
+        reasons.append(f"need_bars>={need},have_bars={have}")
+    return WarmupInfo(required_bars=need, have_bars=have, ok=ok, reasons=reasons)
 
 
-def check(cfg: object, have_bars: int) -> WarmupInfo:
-    """Check if ``have_bars`` satisfies warm-up requirements."""
+# ---------------------------------------------------------------------------
+# Backwards-compatible helpers used by existing code/tests
+# ---------------------------------------------------------------------------
+
+def required_bars(cfg: Any) -> int:
+    """Compatibility wrapper returning ``compute_required_bars`` value."""
+
+    default_min = int(getattr(cfg, "min_bars_required", 0))
+    atr_p = int(getattr(cfg, "atr_period", 0)) if hasattr(cfg, "atr_period") else None
+    return compute_required_bars(cfg, default_min=default_min, atr_period=atr_p)
+
+
+def check(cfg: Any, have_bars: int) -> WarmupInfo:
+    """Compatibility wrapper returning ``warmup_status`` for ``have_bars``."""
 
     need = required_bars(cfg)
-    ok = have_bars >= need
-    reasons: list[str] = [] if ok else [f"need_bars>={need}", f"have_bars={have_bars}"]
-    return WarmupInfo(required_bars=need, have_bars=have_bars, ok=ok, reasons=reasons)
+    return warmup_status(have_bars, need)
+
