@@ -21,6 +21,11 @@ def _compute_sleep(
     max_delay: Optional[float],
     jitter: Optional[float | Tuple[float, float] | Callable[[], float]],
 ) -> float:
+    """Calculate delay for a retry attempt with optional jitter.
+
+    The delay grows exponentially with ``backoff`` while respecting
+    ``max_delay`` and optionally adding ``jitter`` noise.
+    """
     # exponential backoff: delay * (backoff ** (attempt_idx-1))
     delay = base_delay * (backoff ** max(0, attempt_idx - 1))
     if max_delay is not None:
@@ -33,7 +38,10 @@ def _compute_sleep(
         return max(0.0, delay + float(jitter()))
     if isinstance(jitter, tuple):
         lo, hi = jitter
-        return max(0.0, delay + random.uniform(float(lo), float(hi)))
+        lo_f, hi_f = float(lo), float(hi)
+        if hi_f < lo_f:
+            lo_f, hi_f = hi_f, lo_f
+        return max(0.0, delay + random.uniform(lo_f, hi_f))
     # numeric => uniform [0, jitter]
     return max(0.0, delay + random.uniform(0.0, float(jitter)))
 
@@ -70,8 +78,17 @@ def retry(
       @retry(tries=3, delay=1, backoff=2)
       def fn(...): ...
     """
+    if tries < 1:
+        raise ValueError("tries must be >= 1")
+    if delay < 0:
+        raise ValueError("delay must be >= 0")
+    if backoff <= 0:
+        raise ValueError("backoff must be > 0")
+    if max_delay is not None and max_delay < 0:
+        raise ValueError("max_delay must be >= 0")
+
     lg = log or logger
-    tries = max(1, int(tries))
+    tries = int(tries)
     delay = float(delay)
     backoff = float(backoff)
 
@@ -146,3 +163,6 @@ def retry(
         return sync_wrapper  # type: ignore[return-value]
 
     return deco_retry
+
+
+__all__ = ["retry"]
