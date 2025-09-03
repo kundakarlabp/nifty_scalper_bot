@@ -11,8 +11,8 @@ class DummyTelegram:
         pass
 
 
-def test_skipped_gates_consistency(monkeypatch) -> None:
-    """Skipped risk gates appear as skipped in both summary endpoints."""
+def test_offhours_risk_gates_no_eval(monkeypatch) -> None:
+    """Risk gates are not evaluated outside trading hours."""
 
     runner = StrategyRunner(telegram_controller=DummyTelegram())
     monkeypatch.setattr(runner, "_within_trading_window", lambda: False)
@@ -25,8 +25,8 @@ def test_skipped_gates_consistency(monkeypatch) -> None:
 
     risk_check = next(c for c in bundle["checks"] if c["name"] == "Risk gates")
     assert risk_check["ok"] is True
-    assert risk_check["detail"] == "skipped"
-    assert summary["status_messages"]["risk_gates"] == "skipped"
+    assert risk_check["detail"] == "no-eval"
+    assert summary["status_messages"]["risk_gates"] == "no-eval"
 
 
 def test_non_dict_risk_gates_handled() -> None:

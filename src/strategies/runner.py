@@ -571,23 +571,17 @@ class StrategyRunner:
                 or window_ok
                 or bool(settings.allow_offhours_testing)
             )
-            self.within_window = bool(within)
-            if not within:
-                flow["risk_gates"] = {"skipped": True}
-                flow["reason_block"] = "outside_window"
-                flow["within_window"] = False
-                self._last_flow_debug = flow
-                if not self._offhours_notified:
-                    now = self._now_ist().strftime("%H:%M:%S")
-                    tz_name = getattr(settings, "tz", "IST")
-                    self._notify(
-                        f"⏰ Tick received outside trading window at {now} {tz_name}"
-                    )
-                    self._offhours_notified = True
-                self.log.debug("Skipping tick: outside trading window")
-                return
-            else:
-                flow["within_window"] = True
+            # Always process ticks regardless of trading window
+            self.within_window = True
+            flow["within_window"] = True
+            if not within and not self._offhours_notified:
+                now = self._now_ist().strftime("%H:%M:%S")
+                tz_name = getattr(settings, "tz", "IST")
+                self._notify(
+                    f"⏰ Tick received outside trading window at {now} {tz_name}"
+                )
+                self._offhours_notified = True
+            elif within:
                 self._offhours_notified = False
 
             # pause
