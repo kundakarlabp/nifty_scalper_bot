@@ -918,6 +918,9 @@ class TelegramController:
             try:
                 status = self._status_provider() if self._status_provider else {}
                 plan = self._last_signal_provider() if self._last_signal_provider else {}
+                runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+                warm = getattr(runner, "_warm", None)
+                fresh = getattr(runner, "_fresh", None)
                 now = time.time()
                 def mark(ok: bool) -> str:
                     return "PASS" if ok else "FAIL"
@@ -939,11 +942,30 @@ class TelegramController:
                 dd = bool(status.get("daily_dd_hit"))
                 gates.append(("daily_dd", not dd, status.get("day_realized_loss")))
                 bar_count = int(plan.get("bar_count") or 0)
-                bc = bar_count >= 20
-                gates.append(("bar_count", bc, bar_count))
-                lag = int(now - last_ts_sec) if last_ts_sec else None
-                data_stale = (lag or 0) <= 150
-                gates.append(("data_stale", data_stale, f"lag_s={lag}" if lag is not None else "-"))
+                if warm:
+                    gates.append(
+                        (
+                            "bar_count",
+                            bool(getattr(warm, "ok", False)),
+                            f"have={getattr(warm, 'have_bars', bar_count)} need={getattr(warm, 'required_bars', '-')}",
+                        )
+                    )
+                else:
+                    gates.append(("bar_count", bar_count >= 20, bar_count))
+                if fresh:
+                    gates.append(
+                        (
+                            "data_stale",
+                            bool(getattr(fresh, "ok", False)),
+                            f"tick_lag={getattr(fresh, 'tick_lag_s', None)} bar_lag={getattr(fresh, 'bar_lag_s', None)}",
+                        )
+                    )
+                else:
+                    lag = int(now - last_ts_sec) if last_ts_sec else None
+                    data_stale = (lag or 0) <= 150
+                    gates.append(
+                        ("data_stale", data_stale, f"lag_s={lag}" if lag is not None else "-")
+                    )
                 regime = plan.get("regime") in ("TREND", "RANGE")
                 gates.append(("regime", regime, plan.get("regime")))
                 atr = plan.get("atr_pct")
@@ -962,11 +984,16 @@ class TelegramController:
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
-                dp_line = "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
-                lines.append(
-                    f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
-                )
+                if reason_block == "no_option_quote":
+                    lines.append("micro: N/A (no_quote)")
+                else:
+                    sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
+                    dp_line = (
+                        "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
+                    )
+                    lines.append(
+                        f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
+                    )
                 if plan.get("option"):
                     o = plan["option"]
                     lines.append(

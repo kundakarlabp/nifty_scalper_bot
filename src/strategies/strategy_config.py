@@ -57,6 +57,8 @@ class StrategyConfig:
     gamma_time_stop_min: int
     min_atr_pct_nifty: float
     min_atr_pct_banknifty: float
+    max_tick_lag_s: int
+    max_bar_lag_s: int
     min_bars_required: int
     lower_score_temp: bool
     source_path: str
@@ -124,6 +126,8 @@ class StrategyConfig:
             gamma_time_stop_min=int(lc.get("gamma_mode", {}).get("time_stop_min", 8)),
             min_atr_pct_nifty=float(thresholds.get("min_atr_pct_nifty", 0.04)),
             min_atr_pct_banknifty=float(thresholds.get("min_atr_pct_banknifty", 0.06)),
+            max_tick_lag_s=int(thresholds.get("max_tick_lag_s", 8)),
+            max_bar_lag_s=int(thresholds.get("max_bar_lag_s", 75)),
             min_bars_required=int(warm.get("min_bars", warm.get("min_bars_required", 20))),
             lower_score_temp=bool(dbg.get("lower_score_temp", False)),
             source_path=path,
