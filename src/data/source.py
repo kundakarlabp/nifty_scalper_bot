@@ -554,10 +554,38 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
     # ---- lifecycle ----
     def connect(self) -> None:
+        """Connect to broker, subscribe to SPOT token and warm up cache."""
+        token = 0
+        try:
+            token = int(
+                getattr(settings.instruments, "spot_token", 0)
+                or getattr(settings.instruments, "instrument_token", 0)
+            )
+        except Exception:
+            token = 0
+
         if not self.kite:
             log.info("LiveKiteSource: kite is None (shadow mode).")
         else:
             log.info("LiveKiteSource: connected to Kite.")
+            if token > 0:
+                try:
+                    sub_fn = getattr(self.kite, "subscribe", None)
+                    mode_fn = getattr(self.kite, "set_mode", None)
+                    full_mode = getattr(self.kite, "MODE_FULL", "full")
+                    if callable(sub_fn) and callable(mode_fn):
+                        sub_fn([token])
+                        mode_fn(full_mode, [token])
+                except Exception as e:
+                    log.warning("LiveKiteSource connect: subscribe failed: %s", e)
+
+        if token > 0:
+            try:
+                self.ensure_backfill(
+                    required_bars=WARMUP_BARS, token=token, timeframe="minute"
+                )
+            except Exception as e:
+                log.warning("LiveKiteSource connect: backfill failed: %s", e)
 
     def disconnect(self) -> None:
         """Close the underlying Kite session if available."""
