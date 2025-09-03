@@ -17,8 +17,8 @@ class DummyTelegram:
         self.messages.append(msg)
 
 
-def test_offhours_skips_risk_gates(monkeypatch) -> None:
-    """Risk gates are marked as skipped when outside trading hours."""
+def test_offhours_no_blocking(monkeypatch) -> None:
+    """Ticks proceed even outside trading hours."""
 
     telegram = DummyTelegram()
     runner = StrategyRunner(telegram_controller=telegram)
@@ -31,8 +31,8 @@ def test_offhours_skips_risk_gates(monkeypatch) -> None:
     summary = runner.get_compact_diag_summary()
     flow = runner.get_last_flow_debug()
 
-    assert summary["status_messages"]["risk_gates"] == "skipped"
-    assert flow["reason_block"] == "outside_window"
+    assert summary["status_messages"]["risk_gates"] == "no-eval"
+    assert flow.get("reason_block") != "outside_window"
     assert any("outside trading window" in m for m in telegram.messages)
 
 
