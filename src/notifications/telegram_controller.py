@@ -23,6 +23,11 @@ from src.diagnostics.registry import run_all, run
 from src.strategies.runner import StrategyRunner
 from src.risk.position_sizing import PositionSizer
 from src.utils.expiry import next_tuesday_expiry, last_tuesday_of_month
+from src.strategies.warmup import check as warmup_check
+from src.utils.freshness import compute as compute_freshness
+from src.execution.order_executor import fetch_quote_with_depth
+from src.execution.micro_filters import micro_from_quote
+from src.utils import strike_selector
 
 log = logging.getLogger(__name__)
 
@@ -1558,6 +1563,41 @@ class TelegramController:
                     return self._send("Invalid numbers.")
             return self._send("Range tighten not wired.")
 
+        if cmd == "/warmup":
+            runner = StrategyRunner.get_singleton()
+            if not runner or not getattr(runner, "data_source", None):
+                return self._send("runner not ready")
+            try:
+                bars_df = runner.data_source.get_last_bars(runner.strategy_cfg.min_bars_required)
+                have = int(len(bars_df)) if hasattr(bars_df, "__len__") else 0
+            except Exception:
+                have = 0
+            w = warmup_check(runner.strategy_cfg, have)
+            label = "PASS ✅" if w.ok else "FAIL ❌"
+            reasons = ", ".join(w.reasons) if w.reasons else "-"
+            return self._send(
+                f"🧊 Warmup {label}\n• have={w.have_bars} need={w.required_bars}\n• reasons: {reasons}"
+            )
+
+        if cmd == "/fresh":
+            runner = StrategyRunner.get_singleton()
+            if not runner or not getattr(runner, "data_source", None):
+                return self._send("runner not ready")
+            now = datetime.utcnow()
+            ds = runner.data_source
+            fr = compute_freshness(
+                now=now,
+                last_tick_ts=ds.last_tick_ts(),
+                last_bar_open_ts=ds.last_bar_open_ts(),
+                tf_seconds=ds.timeframe_seconds,
+                max_tick_lag_s=runner.strategy_cfg.max_tick_lag_s,
+                max_bar_lag_s=runner.strategy_cfg.max_bar_lag_s,
+            )
+            label = "PASS ✅" if fr.ok else "FAIL ❌"
+            return self._send(
+                f"⏱ Freshness {label}\n• tick_lag={fr.tick_lag_s}s\n• bar_lag={fr.bar_lag_s}s"
+            )
+
         if cmd == "/microcap":
             runner = StrategyRunner.get_singleton()
             if not runner:
@@ -1600,12 +1640,29 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner:
                 return self._send("runner not ready")
-            m = (runner.last_plan or {}).get("micro") or {}
-            return self._send(
-                f"micro: mid={m.get('mid')} spread%={m.get('spread_pct')} cap%={m.get('cap_pct')} "
-                f"depth_ok={m.get('depth_ok')} need_lots={m.get('need_lots')} mode={m.get('mode')} "
-                f"would_block={m.get('would_block')}"
-            )
+            try:
+                inst_dump = strike_selector._fetch_instruments_nfo(runner.kite) or []
+                spot = strike_selector._get_spot_ltp(
+                    runner.kite, getattr(settings.instruments, "spot_symbol", "")
+                )
+                atm = strike_selector.resolve_weekly_atm(spot or 0.0, inst_dump)
+                info = atm.get("ce") if atm else None
+                if not info:
+                    return self._send("📉 Micro: N/A (no_option_token)")
+                tsym, lot = info
+                q = fetch_quote_with_depth(runner.kite, tsym)
+                spread_pct, depth_ok = micro_from_quote(
+                    q, lot_size=lot, depth_min_lots=runner.strategy_cfg.depth_min_lots
+                )
+                if spread_pct is None or depth_ok is None:
+                    return self._send("📉 Micro: N/A (no_quote)")
+                src = q.get("source", "-")
+                return self._send(
+                    f"📉 Micro\n• spread%={round(spread_pct,2)}\n• depth_ok={depth_ok}\n• src={src}"
+                )
+            except Exception:
+                log.exception("/micro failed")
+                return self._send("📉 Micro: N/A (error)")
 
         # Unknown
         return self._send("Unknown command. Try /help.")

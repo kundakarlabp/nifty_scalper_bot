@@ -13,6 +13,7 @@ from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
 from src.data.yf_fallback import _map_symbol
+from src.data.base_source import BaseDataSource
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -524,7 +525,7 @@ def get_historical_data(
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
-class LiveKiteSource(DataSource):
+class LiveKiteSource(DataSource, BaseDataSource):
     """
     Reads candles via Kite's historical API + LTP for quick checks.
     Adds a tiny TTL cache to stay under rate limits during frequent ticks/diags.
@@ -536,6 +537,9 @@ class LiveKiteSource(DataSource):
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
+        self._last_tick_ts = None
+        self._last_bar_open_ts = None
+        self._tf_seconds = 60
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -587,7 +591,10 @@ class LiveKiteSource(DataSource):
                 log.warning("get_last_price: %s not found in LTP response", sym_or_token)
                 return None
             val = v.get("last_price")
-            return float(val) if isinstance(val, (int, float)) else None
+            price = float(val) if isinstance(val, (int, float)) else None
+            if price is not None:
+                self._last_tick_ts = datetime.utcnow()
+            return price
         except Exception as e:
             lat = int((time.monotonic() - t0) * 1000)
             self.cb_quote.record_failure(lat, reason=str(e))
@@ -622,6 +629,7 @@ class LiveKiteSource(DataSource):
             start = end - timedelta(minutes=10)
 
         interval = _coerce_interval(str(timeframe))
+        self._tf_seconds = _INTERVAL_TO_MINUTES.get(interval, 1) * 60
 
         # Ensure warmup window
         needed = timedelta(
@@ -633,7 +641,10 @@ class LiveKiteSource(DataSource):
         # Try cache first
         cached = self._cache.get(token, interval, start, end)
         if cached is not None and not cached.empty:
-            return _clip_window(cached, start, end)
+            bars = _clip_window(cached, start, end)
+            if not bars.empty:
+                self._last_bar_open_ts = pd.to_datetime(bars.index[-1]).to_pydatetime()
+            return bars
 
         if not self.kite or not self.cb_hist.allow():
             log.warning(
@@ -657,7 +668,10 @@ class LiveKiteSource(DataSource):
                     fetched_window,
                     (start, end),
                 )
-                return _clip_window(out, start, end)
+                bars = _clip_window(out, start, end)
+                if not bars.empty:
+                    self._last_bar_open_ts = pd.to_datetime(bars.index[-1]).to_pydatetime()
+                return bars
             ltp = self.get_last_price(sym or token)
             if isinstance(ltp, (int, float)):
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
@@ -672,6 +686,8 @@ class LiveKiteSource(DataSource):
                     fetched_window,
                     (start, end),
                 )
+                if not syn.empty:
+                    self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
                 return syn
             return None
 
@@ -777,6 +793,7 @@ class LiveKiteSource(DataSource):
             )
             need = {"open", "high", "low", "close"}
             if not clipped.empty and need.issubset(clipped.columns):
+                self._last_bar_open_ts = pd.to_datetime(clipped.index[-1]).to_pydatetime()
                 return clipped
 
             return None
@@ -801,7 +818,10 @@ class LiveKiteSource(DataSource):
                     fetched_window,
                     (start, end),
                 )
-                return _clip_window(out, start, end)
+                bars = _clip_window(out, start, end)
+                if not bars.empty:
+                    self._last_bar_open_ts = pd.to_datetime(bars.index[-1]).to_pydatetime()
+                return bars
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
@@ -816,6 +836,8 @@ class LiveKiteSource(DataSource):
                     fetched_window,
                     (start, end),
                 )
+                if not syn.empty:
+                    self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
                 return syn
             return None
 
