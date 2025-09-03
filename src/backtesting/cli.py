@@ -3,6 +3,7 @@ from __future__ import annotations
 """CLI entrypoint for running walk-forward backtests."""
 
 import argparse
+import copy
 import json
 import os
 from datetime import datetime, timedelta
@@ -70,7 +71,7 @@ def main() -> None:
         candidates = []
         for min_score in [0.3, 0.35, 0.4]:
             for tp2R in [1.6, 1.8, 2.0]:
-                local_cfg = cfg
+                local_cfg = copy.deepcopy(cfg)
                 local_cfg.raw.setdefault("strategy", {})["min_score"] = min_score
                 local_cfg.tp2_R_trend = tp2R
                 risk_tr = RiskEngine(LimitConfig(tz=cfg.tz))
@@ -81,7 +82,8 @@ def main() -> None:
                 candidates.append((s_tr, {"min_score": min_score, "tp2_R_trend": tp2R}))
 
         if not candidates:
-            open(os.path.join(fold_dir, "NO_CANDIDATES"), "w").write("all rejected")
+            with open(os.path.join(fold_dir, "NO_CANDIDATES"), "w") as f:
+                f.write("all rejected")
             continue
         best = sorted(candidates, key=lambda x: (x[0]["PF"], x[0]["AvgR"]), reverse=True)[0]
 
