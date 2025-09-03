@@ -73,7 +73,7 @@ risk:
 rr_threshold: 1.5            # set to null to disable
 
 warmup:
-  min_bars: 20
+  min_bars: 30
 
 debug:
   lower_score_temp: false

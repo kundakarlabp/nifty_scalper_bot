@@ -56,8 +56,9 @@ def test_default_values():
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True  # Default value
         assert settings.system.log_buffer_capacity == 4000  # Default value
-        assert settings.data.lookback_minutes == 20  # Updated default
-        assert settings.strategy.min_bars_for_signal == 20  # Updated default
+        assert settings.data.lookback_minutes == 30  # Updated default
+        assert settings.strategy.min_bars_for_signal == 30  # Updated default
+        assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
 
 
 def test_legacy_env_names_supported():
