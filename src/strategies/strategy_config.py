@@ -113,9 +113,37 @@ class StrategyConfig:
         return cfg
 
 
-def resolve_config_path(env_key: str = "STRATEGY_CONFIG_FILE", default_path: str = "config/strategy.yaml") -> str:
-    """Resolve the config file path from environment or fallback to default."""
-    return os.environ.get(env_key, default_path)
+def resolve_config_path(
+    env_key: str = "STRATEGY_CONFIG_FILE", default_path: str = "config/strategy.yaml"
+) -> str:
+    """Resolve the config file path from environment or fallback to default.
+
+    If the environment variable is set but points to a non‑existent file,
+    fall back to ``default_path``. This guards against typos like using the
+    ``.yml`` extension when only ``.yaml`` exists or providing an absolute
+    path in the wrong location.
+    """
+
+    env_path = os.environ.get(env_key)
+    if env_path:
+        # Use the path if it exists as‑is
+        if os.path.exists(env_path):
+            return env_path
+
+        # Try swapping common YAML extensions (.yml <-> .yaml)
+        base, ext = os.path.splitext(env_path)
+        if ext in {".yml", ".yaml"}:
+            alt_path = base + (".yaml" if ext == ".yml" else ".yml")
+            if os.path.exists(alt_path):
+                return alt_path
+
+        # If an absolute path was provided, also check a relative variant
+        if os.path.isabs(env_path):
+            rel_path = env_path.lstrip("/")
+            if os.path.exists(rel_path):
+                return rel_path
+
+    return default_path
 
 
 def try_load(path: str, current: Optional[StrategyConfig]) -> StrategyConfig:
