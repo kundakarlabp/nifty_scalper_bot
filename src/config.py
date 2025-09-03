@@ -357,6 +357,9 @@ class AppSettings(BaseSettings):
     max_modify_retries: int = 2
     retry_backoff_ms: int = 200
 
+    # Data warmup
+    warmup_bars: int = 30
+
     MAX_DAILY_DD_R: float = 2.5
     MAX_TRADES_PER_SESSION: int = 40
     MAX_LOTS_PER_SYMBOL: int = 5
@@ -380,6 +383,24 @@ class AppSettings(BaseSettings):
     executor: ExecutorSettings = ExecutorSettings()
     health: HealthSettings = HealthSettings()
     system: SystemSettings = SystemSettings()
+
+    @field_validator("warmup_bars")
+    @classmethod
+    def _v_warmup(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("warmup_bars must be >= 0")
+        return v
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def _v_data_aliases(cls, v: object) -> object:
+        ht = os.getenv("HISTORICAL_TIMEFRAME")
+        if ht:
+            if isinstance(v, dict):
+                v.setdefault("timeframe", ht)
+            elif isinstance(v, DataSettings):
+                v.timeframe = ht
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",             # used locally; Railway uses real env vars
