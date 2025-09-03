@@ -75,13 +75,17 @@ class DataSource:
         except Exception:
             return None
         from src.utils.time_windows import now_ist, floor_to_minute
+        from src.data.ohlc_builder import prepare_ohlc
 
-        end = floor_to_minute(now_ist(), None)
+        now = now_ist()
+        cutoff = now - timedelta(seconds=5)
+        end = floor_to_minute(cutoff, None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         df = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
         if df is None or df.empty:
             return None
+        df = prepare_ohlc(df, now)
         if "vwap" not in df.columns:
             try:
                 df["vwap"] = calculate_vwap(df)
@@ -198,13 +202,17 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
         if token <= 0:
             return "instrument_token missing"
         from src.utils.time_windows import now_ist, floor_to_minute
+        from src.data.ohlc_builder import prepare_ohlc
 
-        end = floor_to_minute(now_ist(), None)
+        now = now_ist()
+        cutoff = now - timedelta(seconds=5)
+        end = floor_to_minute(cutoff, None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         df = ds.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
         if df is None or df.empty:
             return "no data"
+        df = prepare_ohlc(df, now)
         vwap = calculate_vwap(df)
         ema21 = df["close"].ewm(span=21, adjust=False).mean()
         ema50 = df["close"].ewm(span=50, adjust=False).mean()
@@ -538,7 +546,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
-        self._last_tick_ts = None
+        self._last_tick_ts: Optional[datetime] = None
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
