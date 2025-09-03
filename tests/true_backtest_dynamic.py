@@ -247,6 +247,7 @@ class BacktestRunner:
     def _generate_csv_report(self) -> None:
         """Saves the trade history to a CSV file."""
         reports_dir = project_root / "reports"
+        reports_dir.mkdir(exist_ok=True)
         csv_path = reports_dir / "trade_history.csv"
 
         if not self.session.trade_history:
