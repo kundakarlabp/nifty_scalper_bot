@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 import os
 import yaml  # type: ignore[import-untyped]
@@ -154,6 +155,18 @@ def resolve_config_path(
             rel_path = env_path.lstrip("/")
             if os.path.exists(rel_path):
                 return rel_path
+
+    # If the default path exists relative to the current working directory,
+    # return it verbatim to preserve existing behaviour and tests.
+    if os.path.exists(default_path):
+        return default_path
+
+    # As a final fallback, resolve the path relative to the project root
+    # (two levels up from this file). This helps when the working directory is
+    # different, such as when the package is installed elsewhere.
+    repo_default = Path(__file__).resolve().parents[2] / default_path
+    if repo_default.exists():
+        return str(repo_default)
 
     return default_path
 
