@@ -6,8 +6,14 @@ from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from pathlib import Path
+import logging
 import os
+import shutil
 import yaml  # type: ignore[import-untyped]
+
+
+log = logging.getLogger(__name__)
 
 
 def _parse_time(s: str) -> time:
@@ -125,6 +131,33 @@ class StrategyConfig:
         )
         return cfg
 
+    @classmethod
+    def try_load(cls, path: str | None) -> "StrategyConfig":
+        """Locate and load a strategy config, seeding defaults if missing."""
+        candidates: list[str | None] = [
+            path,
+            os.getenv("STRATEGY_CFG"),
+            os.getenv("STRATEGY_CONFIG_FILE"),
+            "config/strategy.yaml",
+            "/app/config/strategy.yaml",
+        ]
+        for p in candidates:
+            if p and Path(p).is_file():
+                return cls.load(p)
+
+        repo_default = Path("config/strategy.yaml")
+        if repo_default.is_file():
+            target = Path("config") / "strategy.yaml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.resolve() != repo_default.resolve():
+                shutil.copy2(repo_default, target)
+            log.warning("No external strategy config found. Seeded default at %s", target)
+            return cls.load(str(target))
+
+        raise FileNotFoundError(
+            "strategy config not found. Create config/strategy.yaml or set STRATEGY_CFG env var."
+        )
+
 
 def resolve_config_path(
     env_key: str = "STRATEGY_CONFIG_FILE", default_path: str = "config/strategy.yaml"
@@ -171,10 +204,10 @@ def resolve_config_path(
     return default_path
 
 
-def try_load(path: str, current: Optional[StrategyConfig]) -> StrategyConfig:
+def try_load(path: str | None, current: Optional[StrategyConfig]) -> StrategyConfig:
     """Attempt to load config; fall back to ``current`` on failure."""
     try:
-        cfg = StrategyConfig.load(path)
+        cfg = StrategyConfig.try_load(path)
         return cfg
     except Exception:
         if current:

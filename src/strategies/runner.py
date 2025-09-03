@@ -87,7 +87,12 @@ class StrategyRunner:
     _SINGLETON: ClassVar["StrategyRunner" | None] = None
 
     # ---------------- init ----------------
-    def __init__(self, kite: Optional[KiteConnect] = None, telegram_controller: Any = None) -> None:
+    def __init__(
+        self,
+        kite: Optional[KiteConnect] = None,
+        telegram_controller: Any = None,
+        strategy_cfg_path: str | None = None,
+    ) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
         self.kite = kite
 
@@ -116,8 +121,8 @@ class StrategyRunner:
         self._event_post_widen: float = 0.0
 
         # strategy configuration
-        self.strategy_config_path = resolve_config_path()
-        self.strategy_cfg: StrategyConfig = try_load(self.strategy_config_path, None)
+        self.strategy_cfg: StrategyConfig = try_load(strategy_cfg_path, None)
+        self.strategy_config_path = self.strategy_cfg.source_path
         self.tz = ZoneInfo(self.strategy_cfg.tz)
 
         self.under_symbol = str(getattr(settings.instruments, "trade_symbol", "NIFTY"))

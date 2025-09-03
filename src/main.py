@@ -226,7 +226,12 @@ def main() -> int:
     except Exception as e:
         log.error("❌ Kite session init failed: %s", e)
 
-    runner = StrategyRunner(kite=kite or None, telegram_controller=_NoopTelegram())
+    cfg_path = os.environ.get("STRATEGY_CFG")
+    runner = StrategyRunner(
+        kite=kite or None,
+        telegram_controller=_NoopTelegram(),
+        strategy_cfg_path=cfg_path,
+    )
 
     threading.Thread(
         target=health.run,
