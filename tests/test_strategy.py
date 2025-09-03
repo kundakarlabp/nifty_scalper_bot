@@ -169,3 +169,19 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
     assert plan["micro"]["spread_pct"] is None
     assert plan["micro"]["depth_ok"] is None
     assert plan.get("reason_block") != "microstructure"
+
+
+def test_respects_min_bars_for_signal(strategy_config: StrategySettings):
+    """Ensure strategy uses ``min_bars_for_signal`` threshold."""
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    # Need enough bars for indicators (ADX window=14) yet below config min_bars_required=30
+    length = strategy.min_bars_for_signal + 9
+    df = create_test_dataframe(length=length, trending_up=True)
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert plan.get("reason_block") != "insufficient_bars"
