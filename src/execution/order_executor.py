@@ -112,6 +112,8 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "ltp": 0.0,
             "bid": 0.0,
             "ask": 0.0,
+            "bid_qty": 0,
+            "ask_qty": 0,
             "bid5_qty": 0,
             "ask5_qty": 0,
             "oi": None,
@@ -119,22 +121,38 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "source": "none",
         }
     try:
-        data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
-        info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
-        depth = info.get("depth", {}) if isinstance(info, dict) else {}
-        bids = depth.get("buy", []) if isinstance(depth, dict) else []
-        asks = depth.get("sell", []) if isinstance(depth, dict) else []
-        bid = float(bids[0]["price"]) if bids else 0.0
-        ask = float(asks[0]["price"]) if asks else 0.0
-        bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
-        ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
-        ltp = float(info.get("last_price") or 0.0)
-        oi = info.get("oi")
-        ts = info.get("timestamp") or info.get("last_trade_time")
+        bid = ask = 0.0
+        bid_qty = ask_qty = 0
+        bid5 = ask5 = 0
+        ltp = 0.0
+        oi = ts = None
+        # Attempt twice if depth is missing even without an exception
+        for _ in range(2):
+            data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
+            info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
+            depth = info.get("depth", {}) if isinstance(info, dict) else {}
+            bids = depth.get("buy", []) if isinstance(depth, dict) else []
+            asks = depth.get("sell", []) if isinstance(depth, dict) else []
+            bid = float(bids[0]["price"]) if bids else 0.0
+            ask = float(asks[0]["price"]) if asks else 0.0
+            bid_qty = int(bids[0].get("quantity", 0)) if bids else 0
+            ask_qty = int(asks[0].get("quantity", 0)) if asks else 0
+            bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
+            ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
+            ltp = float(info.get("last_price") or 0.0)
+            oi = info.get("oi")
+            ts = info.get("timestamp") or info.get("last_trade_time")
+            if bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0:
+                break
+            time.sleep(0.25)
+        if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
+            raise ValueError("bad_depth")
         quote = {
             "ltp": ltp,
             "bid": bid,
             "ask": ask,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
             "bid5_qty": bid5,
             "ask5_qty": ask5,
             "oi": oi,
@@ -153,6 +171,8 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             out = cached.copy()
             out["source"] = "cache"
             out.setdefault("timestamp", datetime.utcnow().isoformat())
+            out.setdefault("bid_qty", out.get("bid5_qty", 0))
+            out.setdefault("ask_qty", out.get("ask5_qty", 0))
             return out
         ltp = 0.0
         try:
@@ -179,6 +199,8 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "ltp": ltp,
             "bid": ltp - spr / 2,
             "ask": ltp + spr / 2,
+            "bid_qty": 0,
+            "ask_qty": 0,
             "bid5_qty": 0,
             "ask5_qty": 0,
             "oi": None,
@@ -682,8 +704,8 @@ class OrderExecutor:
         ok, meta = micro_ok({
             "bid": bid,
             "ask": ask,
-            "bid_qty_top5": q.get("bid5_qty", 0),
-            "ask_qty_top5": q.get("ask5_qty", 0),
+            "bid5_qty": q.get("bid5_qty", 0),
+            "ask5_qty": q.get("ask5_qty", 0),
         }, qty_lots=1, lot_size=lot, max_spread_pct=self.max_spread_pct, depth_mult=int(self.depth_multiplier))
         steps = []
         if mid and spread:

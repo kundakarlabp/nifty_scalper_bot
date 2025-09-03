@@ -16,6 +16,8 @@ def test_fetch_quote_with_depth_uses_ltp_on_failure():
     assert q["ltp"] == 123.0
     assert q["source"] == "ltp_fallback"
     assert q["bid"] < q["ltp"] < q["ask"]
+    assert q["bid_qty"] == 0
+    assert q["ask_qty"] == 0
 
 
 class DummyKiteQuote:
@@ -45,10 +47,14 @@ def test_fetch_quote_with_depth_uses_cache_when_quote_missing():
     good = DummyKiteQuote()
     first = oe.fetch_quote_with_depth(good, tsym)
     assert first["ltp"] == 101.0
+    assert first["bid_qty"] == 1
+    assert first["ask_qty"] == 1
     bad = DummyKiteFail()
     cached = oe.fetch_quote_with_depth(bad, tsym)
     assert cached["ltp"] == 101.0
     assert cached["bid"] == 100.0
     assert cached["ask"] == 102.0
+    assert cached["bid_qty"] == 1
+    assert cached["ask_qty"] == 1
     assert cached["source"] == "cache"
 
