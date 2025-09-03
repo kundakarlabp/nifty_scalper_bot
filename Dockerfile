@@ -9,8 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip && pip install -r requirements.txt
 
-COPY src ./src
-COPY manage_bot.sh run.sh ./
+COPY . /app
+# make sure default config is inside the image
+RUN mkdir -p /app/config && cp -n /app/config/strategy.yaml /app/config/strategy.yaml || true
 RUN chmod +x manage_bot.sh run.sh
 
 CMD ["./run.sh"]
