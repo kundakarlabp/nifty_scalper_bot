@@ -23,32 +23,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          # install package for editable imports, if you have a setup/pyproject
-          pip install -e . || true
-
-      - name: Pre-commit (linters & formatters)
-        run: |
-          if [ -f .pre-commit-config.yaml ]; then
-            pre-commit run --all-files
-          else
-            echo "No .pre-commit-config.yaml; skipping."
-          fi
-
-      - name: Pytest
-        run: |
-          pytest -q
-
-      # Optional: include slow backtest smoke if you want (kept non-fatal)
-      - name: Pytest (slow)
-        run: |
-          pytest -q -m slow || echo "slow tests skipped/failed (non-fatal)"
+      - name: Run project checks
+        run: ./run_checks.sh
   
   ai-review:
     name: AI Code Review (PRs only)
