@@ -1,5 +1,5 @@
 strategy:
   rr_threshold: 1.5
-  min_bars_for_signal: 30
+  min_bars_for_signal: 20
 data:
-  lookback_minutes: 30
+  lookback_minutes: 20
