@@ -119,7 +119,7 @@ class TelegramSettings(BaseModel):
 
 class DataSettings(BaseModel):
     # Live loop consumption
-    lookback_minutes: int = 20
+    lookback_minutes: int = 240
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:25"
@@ -340,6 +340,8 @@ class AppSettings(BaseSettings):
     app_env: str = "production"
     ai_provider: str = ""
     openai_api_key: str = ""
+    warmup_bars: int = 30
+    historical_timeframe: str = "minute"
 
     # Live trading is enabled by default; set to False to run in paper mode.
     enable_live_trading: bool = True
@@ -388,6 +390,18 @@ class AppSettings(BaseSettings):
         env_nested_delimiter="__",  # e.g., TELEGRAM__BOT_TOKEN
         extra="ignore",
     )
+
+    @field_validator("warmup_bars")
+    @classmethod
+    def _v_warmup(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("warmup_bars must be > 0")
+        return v
+
+    @field_validator("historical_timeframe")
+    @classmethod
+    def _v_hist_tf(cls, v: str) -> str:
+        return DataSettings._v_tf(v)
 
     # -------- Flat alias properties (read-only) --------
     # Strategy (flat)

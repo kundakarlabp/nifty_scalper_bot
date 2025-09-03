@@ -46,7 +46,11 @@ def test_fetch_spot_ohlc_in_session(monkeypatch):
 
     lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
     assert end == now_dt
-    assert start == end - timedelta(minutes=lookback)
+    expected_start = end - timedelta(minutes=lookback)
+    session_start = datetime(2024, 1, 1, 9, 20, tzinfo=timezone.utc)
+    if expected_start < session_start:
+        expected_start = session_start
+    assert start == expected_start
 
 
 def test_fetch_spot_ohlc_post_session(monkeypatch):

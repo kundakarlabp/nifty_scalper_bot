@@ -2,4 +2,6 @@ strategy:
   rr_threshold: 1.5
   min_bars_for_signal: 20
 data:
-  lookback_minutes: 20
+  lookback_minutes: 240
+warmup_bars: 30
+historical_timeframe: minute
