@@ -11,3 +11,6 @@ freezegun>=1.5
 pre-commit>=3.8
 black>=24.8.0
 isort>=5.13.2
+
+# Config / validation
+pyyaml==6.0.2
