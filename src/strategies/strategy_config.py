@@ -57,9 +57,21 @@ class StrategyConfig:
 
     @classmethod
     def load(cls, path: str) -> "StrategyConfig":
-        """Load configuration from ``path``."""
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        """Load configuration from ``path``.
+
+        If ``path`` does not exist, gracefully fall back to the default
+        configuration resolved by :func:`resolve_config_path`. This mirrors the
+        behaviour used elsewhere in the application and prevents a missing file
+        from crashing startup when an environment variable is misconfigured.
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            fallback = resolve_config_path()
+            if fallback != path:
+                return cls.load(fallback)
+            raise
         meta = data.get("meta", {})
         windows = data.get("windows", {})
         gates = data.get("gates", {})
