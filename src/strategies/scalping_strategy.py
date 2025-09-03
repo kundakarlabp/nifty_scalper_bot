@@ -27,6 +27,7 @@ from src.utils.strike_selector import (
     resolve_weekly_atm,
 )
 from src.strategies.strategy_config import StrategyConfig
+from src.strategies.warmup import required_bars as warmup_required
 from random import uniform as rand_uniform
 
 logger = logging.getLogger(__name__)
@@ -307,11 +308,25 @@ class EnhancedScalpingStrategy:
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            required_bars = min(self.min_bars_for_signal, int(getattr(cfg, "min_bars_required", self.min_bars_for_signal)))
-            if len(df) < required_bars:
-                return plan_block("insufficient_bars", bar_count=len(df))
+
+            have_bars = len(df)
+            pad = int(getattr(cfg, "warmup_pad", 2))
+            warm_need = warmup_required(cfg)
+            required_bars = max(
+                self.min_bars_for_signal,
+                int(getattr(cfg, "min_bars_required", self.min_bars_for_signal)),
+                self.atr_period + pad,
+                warm_need,
+            )
+            if have_bars < required_bars:
+                reason_msgs = [f"need_bars>={required_bars}", f"have_bars={have_bars}"]
+                plan.setdefault("reasons", []).extend(reason_msgs)
+                plan.setdefault("features", {}).setdefault("reasons", []).extend(reason_msgs)
+                return plan_block(
+                    "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                )
             if current_price is None or current_price <= 0:
-                return plan_block("indicator_unready", bar_count=len(df))
+                return plan_block("indicator_unready", bar_count=have_bars)
 
             ema21 = self._ema(df["close"], 21)
             ema50 = self._ema(df["close"], 50)
