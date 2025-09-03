@@ -522,6 +522,31 @@ def get_historical_data(
     return df
 
 
+def ensure_backfill(
+    source: DataSource,
+    *,
+    required_bars: int,
+    token: int,
+    timeframe: str = "minute",
+) -> None:
+    """Ensure the local cache has at least ``required_bars`` bars."""
+
+    from src.utils.time_windows import now_ist
+
+    try:
+        end = now_ist()
+        df = get_historical_data(
+            source, token=token, end=end, timeframe=timeframe, warmup_bars=required_bars
+        )
+        if df is None or len(df) < required_bars:
+            have = 0 if df is None else len(df)
+            log.warning(
+                "backfill short: required=%s have=%s token=%s", required_bars, have, token
+            )
+    except Exception:
+        log.debug("ensure_backfill failed", exc_info=True)
+
+
 # --------------------------------------------------------------------------------------
 # LiveKiteSource
 # --------------------------------------------------------------------------------------
@@ -537,16 +562,43 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
-        self._last_tick_ts = None
-        self._last_bar_open_ts = None
+        self._last_tick_ts: Optional[datetime] = None
+        self._last_bar_open_ts: Optional[datetime] = None
         self._tf_seconds = 60
 
     # ---- lifecycle ----
     def connect(self) -> None:
+        token = 0
+        try:
+            token = int(
+                getattr(settings.instruments, "spot_token", 0)
+                or getattr(settings.instruments, "instrument_token", 0)
+            )
+        except Exception:
+            token = 0
+
         if not self.kite:
             log.info("LiveKiteSource: kite is None (shadow mode).")
         else:
             log.info("LiveKiteSource: connected to Kite.")
+            if token > 0:
+                try:
+                    self.kite.subscribe([token])  # type: ignore[attr-defined]
+                    mode = getattr(self.kite, "MODE_FULL", "full")
+                    self.kite.set_mode(mode, [token])  # type: ignore[attr-defined]
+                except Exception:
+                    log.debug("LiveKiteSource: subscribe failed", exc_info=True)
+
+        try:
+            if token > 0:
+                ensure_backfill(
+                    self,
+                    required_bars=WARMUP_BARS,
+                    token=token,
+                    timeframe=getattr(settings.data, "timeframe", "minute"),
+                )
+        except Exception:
+            log.debug("LiveKiteSource: backfill failed", exc_info=True)
 
     def disconnect(self) -> None:
         """Close the underlying Kite session if available."""
