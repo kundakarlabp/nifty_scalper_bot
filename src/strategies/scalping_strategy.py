@@ -15,6 +15,8 @@ from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_vwap,
     calculate_macd,
+    calculate_bb_width,
+    calculate_adx,
 )
 from src.signals.regime_detector import detect_market_regime
 from src.execution.order_executor import fetch_quote_with_depth
@@ -338,13 +340,25 @@ class EnhancedScalpingStrategy:
             rsi_rising = rsi_val > rsi_prev
 
             # --- regime detection ---
-            adx_series = spot_df.get("adx")
+            adx_series, di_plus, di_minus = self._extract_adx_columns(spot_df)
+            if adx_series is None or di_plus is None or di_minus is None:
+                try:
+                    adx_series, di_plus, di_minus = calculate_adx(spot_df)
+                except Exception:
+                    adx_series = di_plus = di_minus = None
+            bb_width = spot_df.get("bb_width")
+            if bb_width is None:
+                try:
+                    bb_width = calculate_bb_width(spot_df["close"], use_percentage=True)
+                except Exception:
+                    bb_width = None
             plan["adx"] = float(adx_series.iloc[-1]) if adx_series is not None else None
             reg = detect_market_regime(
                 df=df,
                 adx=adx_series,
-                di_plus=spot_df.get("di_plus"),
-                di_minus=spot_df.get("di_minus"),
+                di_plus=di_plus,
+                di_minus=di_minus,
+                bb_width=bb_width,
             )
             if reg.regime == "RANGE" and adx_series is None:
                 reg.regime = "TREND"  # fallback when ADX not available
