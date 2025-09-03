@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Union
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pandas.errors import EmptyDataError
@@ -63,8 +64,12 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
     needs_synth = (not p.exists()) or (p.stat().st_size < 200)
     if needs_synth:
         df = make_synth_1m(
-            start=datetime.now().astimezone().replace(second=0, microsecond=0)
-            - timedelta(minutes=600),
+            start=(
+                datetime.now(ZoneInfo("Asia/Kolkata"))
+                .replace(second=0, microsecond=0)
+                .replace(tzinfo=None)
+                - timedelta(minutes=600)
+            ),
             minutes=600,
         )
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -74,16 +79,25 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
             df = pd.read_csv(p)
         except EmptyDataError:
             df = make_synth_1m(
-                start=datetime.now().astimezone().replace(second=0, microsecond=0)
-                - timedelta(minutes=600),
+                start=(
+                    datetime.now(ZoneInfo("Asia/Kolkata"))
+                    .replace(second=0, microsecond=0)
+                    .replace(tzinfo=None)
+                    - timedelta(minutes=600)
+                ),
                 minutes=600,
             )
             df.to_csv(p)
         else:
-            if df.empty or len(df.columns) < 4:
+            min_rows = int(getattr(settings.strategy, "min_bars_for_signal", 20))
+            if df.empty or len(df.columns) < 4 or len(df) < min_rows:
                 df = make_synth_1m(
-                    start=datetime.now().astimezone().replace(second=0, microsecond=0)
-                    - timedelta(minutes=600),
+                    start=(
+                        datetime.now(ZoneInfo("Asia/Kolkata"))
+                        .replace(second=0, microsecond=0)
+                        .replace(tzinfo=None)
+                        - timedelta(minutes=600)
+                    ),
                     minutes=600,
                 )
                 df.to_csv(p)
