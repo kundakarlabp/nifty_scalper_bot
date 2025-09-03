@@ -119,7 +119,7 @@ class TelegramSettings(BaseModel):
 
 class DataSettings(BaseModel):
     # Live loop consumption
-    lookback_minutes: int = 30
+    lookback_minutes: int = 20
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:25"
@@ -198,7 +198,7 @@ class InstrumentsSettings(BaseModel):
 class StrategySettings(BaseModel):
     min_signal_score: int = 4
     confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 30
+    min_bars_for_signal: int = 20
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14

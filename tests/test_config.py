@@ -56,8 +56,8 @@ def test_default_values():
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True  # Default value
         assert settings.system.log_buffer_capacity == 4000  # Default value
-        assert settings.data.lookback_minutes == 30  # Updated default
-        assert settings.strategy.min_bars_for_signal == 30  # Updated default
+        assert settings.data.lookback_minutes == 20  # Updated default
+        assert settings.strategy.min_bars_for_signal == 20  # Updated default
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
 
 
@@ -212,7 +212,7 @@ def test_lookback_less_than_min_bars():
     env = {
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "12345",
-        "DATA__LOOKBACK_MINUTES": "30",
+        "DATA__LOOKBACK_MINUTES": "20",
         "STRATEGY__MIN_BARS_FOR_SIGNAL": "50",
         "ENABLE_LIVE_TRADING": "false",
     }
