@@ -653,6 +653,23 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 return
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
+            if plan.get("score") is None:
+                bar_count = int(plan.get("bar_count") or 0)
+                regime = plan.get("regime")
+                min_bars = int(getattr(settings.strategy, "min_bars_for_signal"))
+                if bar_count < min_bars or regime == "NO_TRADE":
+                    self.log.debug(
+                        "Scoring skipped: bar_count=%s regime=%s",
+                        bar_count,
+                        regime,
+                    )
+                else:
+                    self.log.warning(
+                        "Missing score with bar_count=%s regime=%s",
+                        bar_count,
+                        regime,
+                    )
+                    plan["reason_block"] = "score_uncomputed"
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
                 self._record_plan(plan)
