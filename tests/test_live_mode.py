@@ -9,6 +9,7 @@ def _prep_live_env(monkeypatch):
     monkeypatch.setattr(settings, "enable_live_trading", True)
     monkeypatch.setattr(settings.zerodha, "api_key", "k")
     monkeypatch.setattr(settings.zerodha, "access_token", "t")
+    monkeypatch.setattr(settings.zerodha, "api_secret", "s")
     monkeypatch.setattr(settings.telegram, "bot_token", "x")
     monkeypatch.setattr(settings.telegram, "chat_id", 1)
 

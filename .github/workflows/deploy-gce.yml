@@ -1,21 +1,32 @@
 name: deploy-gce
 
-on:
-  push:
-    branches: [main]
+on: [workflow_dispatch, push]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 22 ${{ secrets.GCE_HOST }} >> ~/.ssh/known_hosts
+
       - name: Deploy to GCE
-        uses: appleboy/ssh-action@v0.1.8
+        uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.GCE_HOST }}
           username: ${{ secrets.GCE_USER }}
           key: ${{ secrets.GCE_SSH_KEY }}
-          known_hosts: ${{ secrets.GCE_KNOWN_HOSTS }}
+          passphrase: ${{ secrets.GCE_KEY_PASSPHRASE }}
+          port: 22
+          script_stop: true
+          timeout: 60s
+          command_timeout: 30m
+          debug: true
           script: |
+            set -euo pipefail
+            echo "Connected to $(hostname)"; whoami; uname -a
             [ -d ~/niftybot ] || git clone https://github.com/${{ github.repository }}.git ~/niftybot
             bash ~/ops/redeploy.sh
