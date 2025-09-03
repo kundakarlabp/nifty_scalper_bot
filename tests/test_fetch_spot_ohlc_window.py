@@ -124,3 +124,12 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
     assert telegram.msgs == []
     # Internal error state should still be set for on-demand inspection
     assert getattr(runner, "_last_error", None) == "no_historical_data"
+
+
+def test_fetch_spot_ohlc_populates_indicators(monkeypatch):
+    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+    runner, _ = _setup_runner(monkeypatch, now_dt)
+
+    df = runner._fetch_spot_ohlc()
+    assert df is not None
+    assert {"adx", "di_plus", "di_minus", "bb_width"}.issubset(df.columns)

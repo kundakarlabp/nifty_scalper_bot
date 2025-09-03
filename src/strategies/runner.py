@@ -40,6 +40,7 @@ from src.utils.events import load_calendar, EventWindow
 from src.utils.env import env_flag
 from src.features.health import check as feat_check
 from src.features.indicators import atr_pct
+from src.utils.indicators import calculate_adx, calculate_bb_width
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.execution.micro_filters import micro_from_l1, evaluate_micro
@@ -531,7 +532,16 @@ class StrategyRunner:
         try:
             # fetch data first to allow ADX‑based window override
             df = self._fetch_spot_ohlc()
-            flow["bars"] = int(len(df) if isinstance(df, pd.DataFrame) else 0)
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                self.log.warning("OHLC fetch returned no data; retrying")
+                df = self._fetch_spot_ohlc()
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    if isinstance(getattr(self, "_ohlc_cache", None), pd.DataFrame) and not self._ohlc_cache.empty:
+                        self.log.warning("Using cached OHLC data due to empty fetch")
+                        df = self._ohlc_cache
+                    else:
+                        df = pd.DataFrame()
+            flow["bars"] = int(len(df))
             adx_val = None
             try:
                 adx_series = df.get("adx")
@@ -1305,6 +1315,26 @@ class StrategyRunner:
         if self.data_source is None:
             return None
 
+        def _attach_indicators(df: pd.DataFrame) -> pd.DataFrame:
+            if "bb_width" not in df.columns:
+                try:
+                    df["bb_width"] = calculate_bb_width(df["close"], use_percentage=True)
+                except Exception:
+                    df["bb_width"] = pd.Series([float("nan")] * len(df), index=df.index)
+            if "adx" not in df.columns and not any(
+                c.startswith("adx_") for c in df.columns
+            ):
+                try:
+                    if len(df) >= 14:
+                        adx, dip, dim = calculate_adx(df)
+                        df["adx"], df["di_plus"], df["di_minus"] = adx, dip, dim
+                    else:
+                        raise ValueError("insufficient")
+                except Exception:
+                    na = pd.Series([float("nan")] * len(df), index=df.index)
+                    df["adx"], df["di_plus"], df["di_minus"] = na, na, na
+            return df
+
         try:
             # Use the larger of configured lookback or required bars for signal.
             lookback = max(
@@ -1424,7 +1454,7 @@ class StrategyRunner:
                 min_req = int(getattr(settings.strategy, "min_bars_required", min_bars))
                 if valid and rows >= min_bars:
                     self._last_fetch_ts = time.time()
-                    df = df.sort_index()
+                    df = _attach_indicators(df.sort_index())
                     try:
                         self.last_spot = float(df["close"].iloc[-1])
                     except Exception:
@@ -1433,7 +1463,7 @@ class StrategyRunner:
                     return df
                 if valid and rows >= min_req:
                     self._last_fetch_ts = time.time()
-                    df = df.sort_index()
+                    df = _attach_indicators(df.sort_index())
                     try:
                         self.last_spot = float(df["close"].iloc[-1])
                     except Exception:
@@ -1466,6 +1496,7 @@ class StrategyRunner:
                     self.last_spot = float(ltp)
                 except Exception:
                     pass
+                df = _attach_indicators(df)
                 self._ohlc_cache = df
                 return df
 
