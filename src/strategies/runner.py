@@ -44,7 +44,8 @@ from src.utils.indicators import calculate_adx, calculate_bb_width
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.execution.micro_filters import micro_from_l1, evaluate_micro
-from src.data import ohlc_builder
+from .warmup import check as warmup_check
+from src.utils.freshness import compute as compute_freshness
 from src.risk import risk_gates
 
 # Optional broker SDK (graceful if not installed)
@@ -105,6 +106,9 @@ class StrategyRunner:
 
         StrategyRunner._SINGLETON = self
         self._ohlc_cache: Optional[pd.DataFrame] = None
+        self.ready = False
+        self._warm = None
+        self._fresh = None
 
         self.settings = settings
 
@@ -631,11 +635,36 @@ class StrategyRunner:
             plan["feature_ok"] = True
             plan["bar_count"] = int(len(df)) if isinstance(df, pd.DataFrame) else 0
             plan["last_bar_ts"] = last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
-            lag_s = ohlc_builder.calc_bar_lag_s(df, self._now_ist())
-            plan["lag_s"] = lag_s
-            if lag_s is None or lag_s > 150:
+            bar_count = int(plan["bar_count"])
+            self._warm = warmup_check(self.strategy_cfg, bar_count)
+            self.ready = self._warm.ok
+            if not self._warm.ok:
+                plan["reason_block"] = "insufficient_bars"
+                plan.setdefault("reasons", []).extend(self._warm.reasons)
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                return
+            now = self._now_ist()
+            self._fresh = compute_freshness(
+                now=now,
+                last_tick_ts=None,
+                last_bar_open_ts=last_bar_ts_obj,
+                tf_seconds=60,
+                max_tick_lag_s=int(getattr(self.strategy_cfg, "max_tick_lag_s", 8)),
+                max_bar_lag_s=int(getattr(self.strategy_cfg, "max_bar_lag_s", 75)),
+            )
+            plan["tick_lag_s"] = self._fresh.tick_lag_s
+            plan["bar_lag_s"] = self._fresh.bar_lag_s
+            plan["lag_s"] = self._fresh.bar_lag_s
+            if not self._fresh.ok:
                 plan["reason_block"] = "data_stale"
-                plan.setdefault("reasons", []).append("data_stale")
+                plan.setdefault("reasons", []).append(
+                    f"tick_lag={self._fresh.tick_lag_s}"
+                )
+                plan.setdefault("reasons", []).append(
+                    f"bar_lag={self._fresh.bar_lag_s}"
+                )
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
@@ -785,21 +814,41 @@ class StrategyRunner:
                     q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
                 except Exception:
                     q = None
-            quote_dict: Dict[str, Any] = {}
-            if q and "depth" in q:
-                try:
-                    b = q["depth"]["buy"][0]
-                    s = q["depth"]["sell"][0]
-                    quote_dict = {
-                        "bid": float(b.get("price", 0.0)),
-                        "ask": float(s.get("price", 0.0)),
-                        "bid_qty": int(b.get("quantity", 0)),
-                        "ask_qty": int(s.get("quantity", 0)),
-                        "bid5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])),
-                        "ask5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])),
-                    }
-                except Exception:
-                    quote_dict = {}
+            if not q or "depth" not in q:
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
+            try:
+                b = q["depth"]["buy"][0]
+                s = q["depth"]["sell"][0]
+                quote_dict = {
+                    "bid": float(b.get("price", 0.0)),
+                    "ask": float(s.get("price", 0.0)),
+                    "bid_qty": int(b.get("quantity", 0)),
+                    "ask_qty": int(s.get("quantity", 0)),
+                    "bid5_qty": int(
+                        sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])
+                    ),
+                    "ask5_qty": int(
+                        sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])
+                    ),
+                }
+            except Exception:
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -810,6 +859,14 @@ class StrategyRunner:
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
             plan["quote_src"] = "kite"
+            if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.last_plan = plan
+                return
             if micro.get("would_block"):
                 plan.setdefault("reasons", []).append("micro")
                 plan["reason_block"] = "micro"
