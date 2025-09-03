@@ -83,7 +83,8 @@ if [[ -d "tests" ]]; then
   echo "--- Running pytest ---"
   # -q quiet; -x fail fast; add --maxfail=1 to bail on first failure
   if $PYTHON_BIN -m pip show pytest >/dev/null 2>&1; then
-    pytest -q -x
+    # run with coverage since pytest.ini no longer forces it
+    pytest --cov=src --cov-report=term-missing:skip-covered
   else
     echo "❌ pytest not installed but tests/ exists. Install pytest or remove tests/"; exit 1
   fi
