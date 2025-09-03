@@ -556,26 +556,20 @@ class TelegramController:
 
         if cmd == "/score":
             runner = StrategyRunner.get_singleton()
-            p = runner.last_plan if runner else {}
-            dbg = (p or {}).get("score_dbg") or {}
-            if not dbg:
-                return self._send("no score breakdown yet")
+            items = getattr(runner, "_score_items", None) if runner else None
+            total = getattr(runner, "_score_total", None) if runner else None
+            thr = getattr(getattr(runner, "strategy_cfg", object()), "min_signal_score", 0.0)
+            if not items:
+                return self._send("📊 no score breakdown yet")
+            top = sorted(items.items(), key=lambda kv: abs(kv[1]), reverse=True)[:12]
             lines = [
-                f"score={dbg.get('final')} (thr={dbg.get('threshold')}) raw={dbg.get('raw')}"
+                f"📊 Score breakdown (thr={thr})",
+                f"• total={total}  {'✅ PASS' if total is not None and total >= thr else '❌ FAIL'}",
             ]
-            comps = dbg.get("components", {})
-            w = dbg.get("weights", {})
-            for k, v in comps.items():
-                lines.append(f"• {k}: {float(v):.3f} × {w.get(k, 0.0)}")
-            pens = dbg.get("penalties", {})
-            if pens:
-                lines.append("penalties:")
-                for k, v in pens.items():
-                    lines.append(f"  - {k}: {v}")
-            sb = (p or {}).get("shadow_blockers") or []
-            if sb:
-                lines.append("shadow_blockers: " + ", ".join(sb))
-            return self._send("\n".join(lines)[:3500])
+            for k, v in top:
+                sign = "➕" if v >= 0 else "➖"
+                lines.append(f"{sign} {k}: {v}")
+            return self._send("\n".join(lines))
 
         if cmd == "/shadow":
             runner = StrategyRunner.get_singleton()
