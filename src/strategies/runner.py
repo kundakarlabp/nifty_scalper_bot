@@ -103,7 +103,9 @@ class StrategyRunner:
         self.settings = settings
 
         # Event guard configuration
-        self.events_path = os.environ.get("EVENTS_CONFIG_FILE", "config/events.yaml")
+        self.events_path = resolve_config_path(
+            "EVENTS_CONFIG_FILE", "config/events.yaml"
+        )
         self.event_guard_enabled = env_flag("EVENT_GUARD_ENABLED")
         if os.path.exists(self.events_path):
             self.event_cal = load_calendar(self.events_path)
