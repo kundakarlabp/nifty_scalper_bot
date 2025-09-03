@@ -28,7 +28,7 @@ from src.utils.strike_selector import (
 )
 from src.strategies.strategy_config import StrategyConfig
 from random import uniform as rand_uniform
-from src.strategies.warmup import compute_required_bars, warmup_status
+from src.strategies.warmup import warmup_status
 
 logger = logging.getLogger(__name__)
 
@@ -309,13 +309,22 @@ class EnhancedScalpingStrategy:
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
             atr_p = int(getattr(cfg, "atr_period", 14)) if hasattr(cfg, "atr_period") else 14
-            required_bars = compute_required_bars(
-                cfg, default_min=self.min_bars_for_signal, atr_period=atr_p
+            config_min = int(getattr(cfg, "min_bars_required", self.min_bars_for_signal))
+            warmup_bars = int(getattr(cfg, "warmup_bars", 0)) if hasattr(cfg, "warmup_bars") else 0
+            required_bars = max(
+                self.min_bars_for_signal,
+                config_min,
+                atr_p + 5,
+                warmup_bars,
             )
             have_bars = len(df)
             w = warmup_status(have_bars, required_bars)
             try:
-                plan["features"] = {"reasons": w.reasons}
+                plan["features"] = {
+                    "reasons": w.reasons,
+                    "have_bars": have_bars,
+                    "need_bars": required_bars,
+                }
             except Exception:
                 pass
             if not w.ok:
@@ -325,7 +334,11 @@ class EnhancedScalpingStrategy:
                         have_bars = len(df)
                         if have_bars >= required_bars:
                             w = warmup_status(have_bars, required_bars)
-                            plan["features"] = {"reasons": w.reasons}
+                            plan["features"] = {
+                                "reasons": w.reasons,
+                                "have_bars": have_bars,
+                                "need_bars": required_bars,
+                            }
                         else:
                             return plan_block(
                                 "insufficient_bars", bar_count=have_bars, need_bars=required_bars
