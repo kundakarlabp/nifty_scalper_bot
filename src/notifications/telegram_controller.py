@@ -305,17 +305,26 @@ class TelegramController:
         if not self._started:
             return
         self._stop.set()
+        try:
+            self._session.close()
+        except Exception:
+            pass
         if self._poll_thread:
             self._poll_thread.join(timeout=5)
         self._started = False
 
     def _poll_loop(self) -> None:
+        backoff = 1.0
         while not self._stop.is_set():
             try:
                 params = {"timeout": 25}
                 if self._last_update_id is not None:
                     params["offset"] = self._last_update_id + 1
-                r = self._session.get(f"{self._base}/getUpdates", params=params, timeout=self._timeout + 10)
+                r = self._session.get(
+                    f"{self._base}/getUpdates",
+                    params=params,
+                    timeout=self._timeout + 10,
+                )
                 data = r.json()
                 if not data.get("ok"):
                     time.sleep(1.0)
@@ -323,6 +332,17 @@ class TelegramController:
                 for upd in data.get("result", []):
                     self._last_update_id = int(upd.get("update_id", 0))
                     self._handle_update(upd)
+                backoff = 1.0
+            except (OSError, requests.exceptions.ConnectionError) as e:
+                log.warning("Telegram poll network error: %s", e)
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = requests.Session()
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
             except Exception as e:
                 log.debug("Telegram poll error: %s", e)
                 time.sleep(1.0)
