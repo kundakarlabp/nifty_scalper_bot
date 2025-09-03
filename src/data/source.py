@@ -138,7 +138,11 @@ try:  # pragma: no cover - imported lazily to avoid circular dependency during s
 
     settings = cast(Any, getattr(_cfg, "settings"))
     WARMUP_BARS = int(
-        max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal)
+        max(
+            getattr(settings, "warmup_bars", 0),
+            settings.data.lookback_minutes,
+            settings.strategy.min_bars_for_signal,
+        )
     )
 except Exception:  # pragma: no cover
     # Fallback for early imports or missing settings

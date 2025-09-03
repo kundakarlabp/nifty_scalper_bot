@@ -80,6 +80,28 @@ def test_legacy_env_names_supported():
         assert settings.telegram.chat_id == 12345
 
 
+def test_warmup_bars_env():
+    env = {
+        "TELEGRAM__ENABLED": "false",
+        "ENABLE_LIVE_TRADING": "false",
+        "WARMUP_BARS": "40",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.warmup_bars == 40
+
+
+def test_historical_timeframe_alias():
+    env = {
+        "TELEGRAM__ENABLED": "false",
+        "ENABLE_LIVE_TRADING": "false",
+        "HISTORICAL_TIMEFRAME": "5minute",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.data.timeframe == "5minute"
+
+
 def test_zerodha_creds_required_when_live():
     """Zerodha credentials must be present when live trading is enabled."""
     env = {
