@@ -1569,6 +1569,19 @@ class StrategyRunner:
     def get_recent_bars(self, n: int = 5) -> str:
         if not self.data_source:
             return "data_source_unavailable"
+
+        try:
+            df = self.data_source.get_last_bars(n)
+        except Exception as e:  # pragma: no cover - defensive log
+            self.log.warning("get_last_bars failed: %s", e)
+            return "no data"
+
+        if df is None or df.empty:
+            self.log.warning("No bars fetched for lookback=%s", n)
+            return "no data"
+        if len(df) < n:
+            self.log.warning("Fetched %s bars (<%s) from data source", len(df), n)
+
         from src.data.source import render_last_bars
         return render_last_bars(self.data_source, n)
 
