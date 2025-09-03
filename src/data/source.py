@@ -12,6 +12,7 @@ import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
+from src.data.yf_fallback import _map_symbol
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -360,8 +361,10 @@ def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
         pass
 
     if isinstance(token_or_symbol, str):
-        # Accept 'NSE:FOO' or plain 'FOO'; strip exchange prefix and spaces
-        return token_or_symbol.split(":")[-1].replace(" ", "").strip()
+        # Accept 'NSE:FOO' or plain 'FOO'; strip exchange prefix then map
+        sym = token_or_symbol.split(":")[-1].strip()
+        sym = _map_symbol(sym)
+        return sym.replace(" ", "")
     # Instrument tokens do not map cleanly to yfinance tickers.  Returning
     # ``None`` avoids pointless lookup attempts that spam logs with
     # ``YFTzMissingError`` when a numeric token is passed.
@@ -420,7 +423,9 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
             progress=False,
         )
         if df.empty:
-            return None
+            raise ValueError(
+                f"yfinance returned no data for symbol '{symbol}'"
+            )
         # yfinance returns timestamps in the exchange's local timezone
         # (Asia/Kolkata for NSE symbols).  Strip the timezone information so the
         # rest of the codebase operates on naive IST datetimes.
@@ -436,6 +441,8 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
         need = {"open", "high", "low", "close"}
         if need.issubset(df.columns):
             return df[["open", "high", "low", "close", "volume"]].copy()
+    except ValueError:
+        raise
     except Exception as e:  # pragma: no cover - best effort fallback
         log.debug("yfinance fetch_ohlc failed: %s", e)
     return None
@@ -633,7 +640,11 @@ class LiveKiteSource(DataSource):
                 "LiveKiteSource.fetch_ohlc: broker unavailable. Using yfinance fallback."
             )
             sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            try:
+                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            except ValueError as e:
+                log.warning("yfinance fallback empty: %s", e)
+                out = None
             if out is not None and len(out) >= WARMUP_BARS:
                 fetched_window = (
                     pd.to_datetime(out.index.min()).to_pydatetime(),
@@ -717,7 +728,11 @@ class LiveKiteSource(DataSource):
                     end,
                 )
                 sym = _yf_symbol(token)
-                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+                try:
+                    out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+                except ValueError as e:
+                    log.warning("yfinance fallback empty: %s", e)
+                    out = None
                 if out is not None and len(out) >= WARMUP_BARS:
                     fetched_window = (
                         pd.to_datetime(out.index.min()).to_pydatetime(),
@@ -769,7 +784,11 @@ class LiveKiteSource(DataSource):
         except Exception as e:
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
             sym = _yf_symbol(token)
-            out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            try:
+                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
+            except ValueError as e2:
+                log.warning("yfinance fallback empty: %s", e2)
+                out = None
             if out is not None and len(out) >= WARMUP_BARS:
                 fetched_window = (
                     pd.to_datetime(out.index.min()).to_pydatetime(),
