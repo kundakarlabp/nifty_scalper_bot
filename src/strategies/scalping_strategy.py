@@ -307,7 +307,8 @@ class EnhancedScalpingStrategy:
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            if len(df) < cfg.min_bars_required:
+            required_bars = min(self.min_bars_for_signal, int(getattr(cfg, "min_bars_required", self.min_bars_for_signal)))
+            if len(df) < required_bars:
                 return plan_block("insufficient_bars", bar_count=len(df))
             if current_price is None or current_price <= 0:
                 return plan_block("indicator_unready", bar_count=len(df))
