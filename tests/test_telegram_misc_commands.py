@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from src.config import settings
 from src.notifications.telegram_controller import TelegramController
 from src.strategies.runner import StrategyRunner
+from src.utils import strike_selector
 
 
 def _prep_settings(monkeypatch) -> None:
@@ -275,6 +276,95 @@ def test_micromode_updates_config(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/micromode HARD"}})
     assert runner.strategy_cfg.raw["micro"]["mode"] == "HARD"
     assert sent[0] == "micro mode = HARD"
+
+
+def test_warmup_command(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    import pandas as pd
+
+    cfg = SimpleNamespace(
+        warmup_pad=2,
+        warmup_bars_min=20,
+        atr_period=14,
+        ema_slow=21,
+        regime_min_bars=20,
+        features_min_bars=20,
+        min_bars_required=20,
+    )
+
+    ds = SimpleNamespace(get_last_bars=lambda n: pd.DataFrame({"open": [1] * 22}))
+    runner = SimpleNamespace(strategy_cfg=cfg, data_source=ds)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/warmup"}})
+    msg = sent[0]
+    assert "Warmup" in msg and "have=22" in msg
+
+
+def test_fresh_command(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    now = datetime.utcnow()
+    ds = SimpleNamespace(
+        last_tick_ts=lambda: now - timedelta(seconds=10),
+        last_bar_open_ts=lambda: now - timedelta(seconds=60),
+        timeframe_seconds=60,
+    )
+    cfg = SimpleNamespace(max_tick_lag_s=8, max_bar_lag_s=75)
+    runner = SimpleNamespace(strategy_cfg=cfg, data_source=ds)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/fresh"}})
+    msg = sent[0]
+    assert "Freshness" in msg and "tick_lag=" in msg
+
+
+def test_micro_command(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    cfg = SimpleNamespace(depth_min_lots=1)
+    runner = SimpleNamespace(kite=None, strategy_cfg=cfg)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    monkeypatch.setattr(strike_selector, "_fetch_instruments_nfo", lambda kite: [])
+    monkeypatch.setattr(strike_selector, "_get_spot_ltp", lambda kite, sym: 100.0)
+    monkeypatch.setattr(
+        strike_selector,
+        "resolve_weekly_atm",
+        lambda spot, inst: {"ce": ("TSYM", 50)},
+    )
+    import src.notifications.telegram_controller as tc_mod
+
+    monkeypatch.setattr(
+        tc_mod,
+        "fetch_quote_with_depth",
+        lambda kite, tsym: {"bid": 99, "ask": 101, "bid5_qty": 50, "ask5_qty": 60, "source": "t"},
+    )
+    monkeypatch.setattr(
+        tc_mod,
+        "micro_from_quote",
+        lambda q, lot_size, depth_min_lots: (0.5, True),
+    )
+
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/micro"}})
+    msg = sent[0]
+    assert "spread%=0.5" in msg and "depth_ok=True" in msg
 
 
 def test_logtail_returns_tail(monkeypatch, tmp_path) -> None:
