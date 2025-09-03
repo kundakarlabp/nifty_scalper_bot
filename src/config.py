@@ -11,8 +11,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+from pathlib import Path
 
 import pandas as pd
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,6 +29,38 @@ try:
     from src.data.source import LiveKiteSource  # type: ignore
 except Exception:  # pragma: no cover
     LiveKiteSource = None  # type: ignore
+
+
+def _seed_env_from_defaults() -> None:
+    """Populate ``os.environ`` with values from ``config/defaults.yaml``.
+
+    Existing environment variables take precedence and are not overridden.
+    Nested keys in the YAML are flattened using ``__`` as the delimiter to
+    mirror Pydantic's ``env_nested_delimiter`` behaviour.
+    """
+
+    path = Path("config/defaults.yaml")
+    if not path.is_file():
+        return
+
+    try:
+        data = yaml.safe_load(path.read_text("utf-8")) or {}
+    except Exception:  # pragma: no cover - defensive
+        logging.getLogger("config").exception("Failed loading %s", path)
+        return
+
+    def _flatten(prefix: str, obj: dict[str, object]) -> None:
+        for k, v in obj.items():
+            key = f"{prefix}{k}".upper()
+            if isinstance(v, dict):
+                _flatten(f"{key}__", v)
+            else:
+                os.environ.setdefault(key, str(v))
+
+    _flatten("", data)
+
+
+_seed_env_from_defaults()
 
 
 # ================= Sub-models =================
@@ -85,7 +119,7 @@ class TelegramSettings(BaseModel):
 
 class DataSettings(BaseModel):
     # Live loop consumption
-    lookback_minutes: int = 20
+    lookback_minutes: int = 30
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:25"
@@ -164,7 +198,7 @@ class InstrumentsSettings(BaseModel):
 class StrategySettings(BaseModel):
     min_signal_score: int = 4
     confidence_threshold: float = 55.0  # 0..100
-    min_bars_for_signal: int = 20
+    min_bars_for_signal: int = 30
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_period: int = 14
@@ -174,6 +208,7 @@ class StrategySettings(BaseModel):
     atr_sl_multiplier: float = 1.3
     atr_tp_multiplier: float = 2.2
     rr_min: float = 1.30
+    rr_threshold: float | None = 1.5
 
     @field_validator("confidence_threshold")
     @classmethod
@@ -380,6 +415,8 @@ class AppSettings(BaseSettings):
     def strategy_atr_tp_multiplier(self) -> float: return self.strategy.atr_tp_multiplier
     @property
     def strategy_rr_min(self) -> float: return self.strategy.rr_min
+    @property
+    def strategy_rr_threshold(self) -> float | None: return self.strategy.rr_threshold
 
     # Risk (flat)
     @property

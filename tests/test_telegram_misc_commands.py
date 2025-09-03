@@ -183,7 +183,7 @@ def test_config_outputs_strategy_config(monkeypatch) -> None:
         time_stop_min=30,
         gamma_enabled=True,
         gamma_after=10,
-        min_bars_required=20,
+        min_bars_required=30,
         raw={"strategy": {"min_score": 0.35}, "micro": {"mode": "SOFT", "max_spread_pct": 1.0}},
     )
 
