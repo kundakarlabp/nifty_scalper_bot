@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import datetime as dt
 from typing import Any, Dict, Optional, Tuple, Callable, List
 
 
@@ -540,6 +541,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts = None
         self._last_bar_open_ts = None
         self._tf_seconds = 60
+        self._last_backfill: Optional[dt.datetime] = None
+        self._backfill_cooldown_s = 60
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -600,6 +603,70 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.cb_quote.record_failure(lat, reason=str(e))
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
+
+    def ensure_backfill(
+        self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
+    ) -> None:
+        """Best-effort backfill to reach ``required_bars`` bars."""
+
+        now = dt.datetime.now()
+        if (
+            self._last_backfill
+            and (now - self._last_backfill).total_seconds() < self._backfill_cooldown_s
+        ):
+            return
+        self._last_backfill = now
+        try:
+            if self.kite:
+                to_dt = now
+                from_dt = to_dt - dt.timedelta(minutes=max(required_bars + 5, 60))
+                hist = self.kite.historical_data(token, from_dt, to_dt, timeframe)
+                if hist:
+                    df = pd.DataFrame(hist)
+                    if not df.empty and "date" in df.columns:
+                        df["date"] = pd.to_datetime(df["date"])
+                        df.set_index("date", inplace=True)
+                        df.sort_index(inplace=True)
+                        if hasattr(self, "seed_ohlc"):
+                            try:
+                                self.seed_ohlc(df[["open", "high", "low", "close", "volume"]])
+                            except Exception:
+                                pass
+                    return
+        except Exception as e:
+            log.warning("kite historical backfill failed: %s", e)
+        try:
+            if yf is None:
+                return
+            to_dt = now
+            from_dt = to_dt - dt.timedelta(minutes=max(required_bars + 5, 60))
+            yf_df = yf.download(
+                "^NSEI",
+                start=from_dt.date(),
+                end=(to_dt + dt.timedelta(days=1)).date(),
+                interval="1m",
+                progress=False,
+            )
+            if isinstance(yf_df, pd.DataFrame) and not yf_df.empty:
+                yf_df.index = pd.to_datetime(yf_df.index)
+                yf_df = yf_df.tz_localize(None)
+                yf_df.rename(
+                    columns={
+                        "Open": "open",
+                        "High": "high",
+                        "Low": "low",
+                        "Close": "close",
+                        "Volume": "volume",
+                    },
+                    inplace=True,
+                )
+                if hasattr(self, "seed_ohlc"):
+                    try:
+                        self.seed_ohlc(yf_df[["open", "high", "low", "close", "volume"]])
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning("yfinance backfill failed: %s", e)
 
     # ---- main candle fetch ----
     def fetch_ohlc(

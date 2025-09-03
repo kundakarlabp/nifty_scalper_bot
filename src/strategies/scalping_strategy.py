@@ -28,6 +28,7 @@ from src.utils.strike_selector import (
 )
 from src.strategies.strategy_config import StrategyConfig
 from random import uniform as rand_uniform
+from src.strategies.warmup import compute_required_bars, warmup_status
 
 logger = logging.getLogger(__name__)
 
@@ -307,9 +308,36 @@ class EnhancedScalpingStrategy:
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
                 current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            required_bars = min(self.min_bars_for_signal, int(getattr(cfg, "min_bars_required", self.min_bars_for_signal)))
-            if len(df) < required_bars:
-                return plan_block("insufficient_bars", bar_count=len(df))
+            atr_p = int(getattr(cfg, "atr_period", 14)) if hasattr(cfg, "atr_period") else 14
+            required_bars = compute_required_bars(
+                cfg, default_min=self.min_bars_for_signal, atr_period=atr_p
+            )
+            have_bars = len(df)
+            w = warmup_status(have_bars, required_bars)
+            try:
+                plan["features"] = {"reasons": w.reasons}
+            except Exception:
+                pass
+            if not w.ok:
+                try:
+                    if hasattr(self, "data_source") and hasattr(self.data_source, "ensure_backfill"):
+                        self.data_source.ensure_backfill(required_bars=required_bars)
+                        have_bars = len(df)
+                        if have_bars >= required_bars:
+                            w = warmup_status(have_bars, required_bars)
+                            plan["features"] = {"reasons": w.reasons}
+                        else:
+                            return plan_block(
+                                "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                            )
+                    else:
+                        return plan_block(
+                            "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                        )
+                except Exception:
+                    return plan_block(
+                        "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                    )
             if current_price is None or current_price <= 0:
                 return plan_block("indicator_unready", bar_count=len(df))
 
