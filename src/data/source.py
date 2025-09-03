@@ -537,6 +537,18 @@ class LiveKiteSource(DataSource):
         else:
             log.info("LiveKiteSource: connected to Kite.")
 
+    def disconnect(self) -> None:
+        """Close the underlying Kite session if available."""
+        if not self.kite:
+            return
+        close_fn = getattr(self.kite, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                log.debug("LiveKiteSource: kite close failed", exc_info=True)
+        log.info("LiveKiteSource: disconnected from Kite.")
+
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health for broker APIs."""
         return {"hist": self.cb_hist.health(), "quote": self.cb_quote.health()}
