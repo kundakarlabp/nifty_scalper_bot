@@ -24,6 +24,7 @@ from src.utils.strike_selector import (
     select_strike,
     resolve_weekly_atm,
 )
+from src.strategies.strategy_config import StrategyConfig
 from random import uniform as rand_uniform
 
 logger = logging.getLogger(__name__)
@@ -205,8 +206,10 @@ class EnhancedScalpingStrategy:
     def _iv_adx_reject_reason(
         self, plan: Dict[str, Any], close: float
     ) -> Optional[tuple[str, Dict[str, Any]]]:
-        cfg = getattr(getattr(self, "runner", None), "strategy_cfg", None)
-        if not cfg:
+        cfg: StrategyConfig | None = getattr(
+            getattr(self, "runner", None), "strategy_cfg", None
+        )
+        if not isinstance(cfg, StrategyConfig):
             return None
         adx = plan.get("adx")
         if plan.get("regime") == "TREND" and adx is not None and adx < int(cfg.adx_min_trend):
@@ -234,12 +237,14 @@ class EnhancedScalpingStrategy:
         current_price: Optional[float] = None,
         spot_df: Optional[pd.DataFrame] = None,
     ) -> SignalOutput:
-        cfg = getattr(getattr(self, "runner", None), "strategy_cfg", None)
-        if cfg is None:
-            from src.strategies.strategy_config import StrategyConfig, resolve_config_path
+        cfg: StrategyConfig | None = getattr(
+            getattr(self, "runner", None), "strategy_cfg", None
+        )
+        if not isinstance(cfg, StrategyConfig):
+            from src.strategies.strategy_config import resolve_config_path
             cfg = StrategyConfig.load(resolve_config_path())
 
-        plan = {
+        plan: Dict[str, Any] = {
             "has_signal": False,
             "action": "NONE",
             "option_type": None,
@@ -417,10 +422,13 @@ class EnhancedScalpingStrategy:
             else:
                 return plan_block("regime_no_trade")
 
-            atr_pct = (atr_val / price) * 100.0
+            atr_pct = float((atr_val / price) * 100.0)
             plan["atr_pct"] = round(atr_pct, 2)
-            self.last_atr_pct = plan["atr_pct"]
-            if not (cfg.atr_min <= plan["atr_pct"] <= cfg.atr_max):
+            self.last_atr_pct = float(plan["atr_pct"])
+            atr_min = float(cfg.atr_min)
+            atr_max = float(cfg.atr_max)
+            atr_pct_val = float(plan["atr_pct"])
+            if not (atr_min <= atr_pct_val <= atr_max):
                 return plan_block("atr_out_of_band", atr_pct=plan["atr_pct"])
 
             # ----- scoring -----
@@ -458,7 +466,7 @@ class EnhancedScalpingStrategy:
             ):
                 structure_score += 1
 
-            vol_score = 1 if cfg.atr_min <= atr_pct <= cfg.atr_max else 0
+            vol_score = 1 if atr_min <= atr_pct_val <= atr_max else 0
 
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
@@ -468,12 +476,16 @@ class EnhancedScalpingStrategy:
             q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
-            micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=plan["atr_pct"], cfg=cfg)
+            micro = evaluate_micro(
+                q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg
+            )
+            if not isinstance(micro, dict):
+                micro = {}
             micro["cap_pct"] = cap_pct
             plan["micro"] = micro
-            sp = micro.get("spread_pct")
-            cap = micro.get("cap_pct")
-            depth_ok = bool(micro.get("depth_ok"))
+            sp = micro.get("spread_pct") if isinstance(micro, dict) else None
+            cap = micro.get("cap_pct") if isinstance(micro, dict) else None
+            depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
             over_spread = bool(sp is not None and cap is not None and sp > cap)
             ok_micro = not (over_spread or not depth_ok)
             if micro.get("mode") == "HARD" and not ok_micro:
@@ -493,7 +505,8 @@ class EnhancedScalpingStrategy:
             raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
             max_score = sum(float(weights.get(k, 0.0)) for k in comps)
             penalties: Dict[str, float] = {}
-            m = plan.get("micro") or {}
+            m_val = plan.get("micro")
+            m = m_val if isinstance(m_val, dict) else {}
             if m.get("mode") == "SOFT":
                 sp2 = m.get("spread_pct")
                 cap2 = m.get("cap_pct")

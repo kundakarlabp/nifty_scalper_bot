@@ -124,8 +124,12 @@ _INTERVAL_TO_FREQ: Dict[str, str] = {
     "day": "1D",
 }
 
+from typing import Any, cast
+
 try:  # pragma: no cover - imported lazily to avoid circular dependency during settings init
-    from src.config import settings
+    import src.config as _cfg  # type: ignore[import]
+
+    settings = cast(Any, getattr(_cfg, "settings"))
     WARMUP_BARS = int(
         max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal)
     )
