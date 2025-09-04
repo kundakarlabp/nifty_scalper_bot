@@ -97,12 +97,12 @@ def check_atr() -> CheckResult:
         return _bad("runner not ready", name="atr", fix="start the bot")
     df = r.ohlc_window()
     atr_period = int(getattr(settings.strategy, "atr_period", 14))
-    if df is None or len(df) < max(10, atr_period):
+    if df is None or len(df) < max(10, atr_period + 1):
         return _bad(
             "insufficient bars for ATR",
             name="atr",
             fix="increase lookback/min_bars",
-            bars=0,
+            bars=len(df) if df is not None else 0,
         )
     atrp = atr_pct(df, period=atr_period) or 0.0
     minp = (
