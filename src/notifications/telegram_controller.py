@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import threading
 import time
 import os
@@ -356,6 +357,24 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
+    def _list_commands(self) -> List[str]:
+        """Return all supported Telegram command strings."""
+        source = inspect.getsource(self._handle_update)
+        cmds = set(re.findall(r"cmd == \"(\/[\w_]+)\"", source))
+        for group in re.findall(r"cmd in \(([^)]*)\)", source):
+            for part in group.split(","):
+                part = part.strip().strip("'\"")
+                if part.startswith("/"):
+                    cmds.add(part)
+        return sorted(cmds)
+
+    def _help_text(self) -> str:
+        cmds = self._list_commands()
+        lines = ["🤖 Nifty Scalper Bot — commands", ""]
+        for i in range(0, len(cmds), 6):
+            lines.append(" · ".join(cmds[i : i + 6]))
+        return "\n".join(lines)
+
     def _do_tick(self, *, dry: bool) -> str:
         if not self._runner_tick:
             return "Tick not wired."
@@ -457,19 +476,7 @@ class TelegramController:
 
         # HELP
         if cmd in ("/start", "/help"):
-            return self._send(
-                "🤖 Nifty Scalper Bot — commands\n"
-                "*Core*\n"
-                "/status [verbose] · /health · /diag · /check · /components\n"
-                "/positions · /active [page] · /risk · /limits\n"
-                "/tick · /force_eval · /backtest [csv] · /logs [n]\n"
-                "/pause · /resume · /mode live|dry · /cancel_all\n"
-                "*Strategy*\n"
-                "/score · /shadow · /lastplan\n"
-                "/minscore n · /conf x · /atrp n · /slmult x · /tpmult x\n"
-                "/trend tp_boost sl_relax · /range tp_tighten sl_tighten\n",
-                parse_mode="Markdown",
-            )
+            return self._send(self._help_text(), parse_mode="Markdown")
 
         # STATUS
         if cmd == "/status":
