@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import os
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 import statistics as stats
@@ -1563,12 +1563,18 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner or not getattr(runner, "data_source", None):
                 return self._send("runner not ready")
-            try:
-                bars_df = runner.data_source.get_last_bars(runner.strategy_cfg.min_bars_required)
-                have = int(len(bars_df)) if hasattr(bars_df, "__len__") else 0
-            except Exception:
-                have = 0
-            w = warmup_check(runner.strategy_cfg, have)
+            w = getattr(runner, "_warm", None)
+            have = getattr(runner, "_last_bar_count", None)
+            if w is None:
+                if have is None:
+                    try:
+                        bars_df = runner.data_source.get_last_bars(
+                            runner.strategy_cfg.min_bars_required
+                        )
+                        have = int(len(bars_df)) if hasattr(bars_df, "__len__") else 0
+                    except Exception:
+                        have = 0
+                w = warmup_check(runner.strategy_cfg, int(have))
             label = "PASS ✅" if w.ok else "FAIL ❌"
             reasons = ", ".join(w.reasons) if w.reasons else "-"
             return self._send(
@@ -1579,7 +1585,7 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner or not getattr(runner, "data_source", None):
                 return self._send("runner not ready")
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             ds = runner.data_source
             fr = compute_freshness(
                 now=now,
