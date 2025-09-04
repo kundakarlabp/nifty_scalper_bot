@@ -63,6 +63,11 @@ class StrategyConfig:
     lower_score_temp: bool
     source_path: str
     mtime: float
+    enable_range_scoring: bool = True
+    ema_fast: int = 9
+    ema_slow: int = 21
+    bb_period: int = 20
+    score_gate: float = 0.30
 
     @classmethod
     def load(cls, path: str) -> "StrategyConfig":
