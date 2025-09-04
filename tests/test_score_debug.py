@@ -64,6 +64,111 @@ def test_score_breakdown_present(monkeypatch: pytest.MonkeyPatch, strategy_confi
     assert pytest.approx(plan["score"]) == dbg["final"]
 
 
+def test_score_breakdown_present_on_early_block(
+    monkeypatch: pytest.MonkeyPatch, strategy_config: StrategySettings
+) -> None:
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = _create_df()
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.fetch_quote_with_depth",
+        lambda *_, **__: {"bid": 100.0, "ask": 100.2, "bid_qty": 1000, "ask_qty": 1000},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.resolve_weekly_atm",
+        lambda price: {"ce": ("TCE", 50), "pe": ("TPE", 50)},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.select_strike",
+        lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
+    )
+    from src.signals.regime_detector import RegimeResult
+
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.detect_market_regime",
+        lambda **_: RegimeResult("RANGE", 0.0, 0.0, 0.0, 0.0, "test"),
+    )
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert plan["reason_block"] == "score_low"
+    dbg = plan.get("score_dbg")
+    assert dbg is not None
+    assert dbg["components"] == {}
+    assert dbg["weights"] == {}
+    assert dbg["penalties"] == {}
+    assert dbg["raw"] == 0.0
+    assert dbg["final"] == 0.0
+    assert isinstance(dbg["threshold"], float)
+
+
+def test_last_debug_has_score_info_on_early_block(
+    monkeypatch: pytest.MonkeyPatch, strategy_config: StrategySettings
+) -> None:
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = _create_df()
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.fetch_quote_with_depth",
+        lambda *_, **__: {"bid": 100.0, "ask": 100.2, "bid_qty": 1000, "ask_qty": 1000},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.resolve_weekly_atm",
+        lambda price: {"ce": ("TCE", 50), "pe": ("TPE", 50)},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.select_strike",
+        lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
+    )
+    from src.signals.regime_detector import RegimeResult
+
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.detect_market_regime",
+        lambda **_: RegimeResult("RANGE", 0.0, 0.0, 0.0, 0.0, "test"),
+    )
+
+    strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    assert strategy._last_debug.get("score") == 0.0
+    assert "score_dbg" in strategy._last_debug
+
+
+def test_score_command_reports_when_breakdown_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from src.notifications.telegram_controller import TelegramController
+
+    runner = SimpleNamespace(
+        _score_items={},
+        _score_total=0.0,
+        strategy_cfg=SimpleNamespace(min_signal_score=0.3),
+    )
+    monkeypatch.setattr(
+        "src.notifications.telegram_controller.StrategyRunner.get_singleton",
+        lambda: runner,
+    )
+    sent: list[str] = []
+    tc = TelegramController.__new__(TelegramController)
+    tc._allowlist = {1}
+    tc._send = lambda text, **_: sent.append(text)
+    tc._status_provider = None
+    tc._runner_tick = None
+    tc._cancel_all = None
+    tc._base = ""
+    tc._session = SimpleNamespace(post=lambda *a, **k: None)
+    tc._timeout = 0
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/score"}})
+    assert sent and "total=0.0" in sent[0]
+
+
 def test_shadow_blockers_detects_issues() -> None:
     runner = StrategyRunner(telegram_controller=DummyTelegram())
     plan = {
