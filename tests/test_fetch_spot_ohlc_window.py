@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.strategies.runner import StrategyRunner
 from src.config import settings
+from src.strategies.warmup import required_bars
 
 
 class StubDataSource:
@@ -44,7 +45,11 @@ def test_fetch_spot_ohlc_in_session(monkeypatch):
     assert len(ds.calls) == 1
     _, start, end, _ = ds.calls[0]
 
-    lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
+    need = required_bars(runner.strategy_cfg)
+    lookback = max(
+        int(settings.data.lookback_minutes),
+        need + int(getattr(settings.data, "lookback_padding_bars", 5)),
+    )
     assert end == now_dt
     assert start == end - timedelta(minutes=lookback)
 
@@ -58,7 +63,11 @@ def test_fetch_spot_ohlc_post_session(monkeypatch):
     assert len(ds.calls) == 1
     _, start, end, _ = ds.calls[0]
 
-    lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
+    need = required_bars(runner.strategy_cfg)
+    lookback = max(
+        int(settings.data.lookback_minutes),
+        need + int(getattr(settings.data, "lookback_padding_bars", 5)),
+    )
     expected_end = datetime(2024, 1, 1, 15, 25, tzinfo=timezone.utc)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
@@ -73,7 +82,11 @@ def test_fetch_spot_ohlc_pre_session(monkeypatch):
     assert len(ds.calls) == 1
     _, start, end, _ = ds.calls[0]
 
-    lookback = int(max(settings.data.lookback_minutes, settings.strategy.min_bars_for_signal) * 1.1)
+    need = required_bars(runner.strategy_cfg)
+    lookback = max(
+        int(settings.data.lookback_minutes),
+        need + int(getattr(settings.data, "lookback_padding_bars", 5)),
+    )
     # Previous trading session should skip the weekend (Dec 30-31)
     expected_end = datetime(2023, 12, 29, 15, 25, tzinfo=timezone.utc)
     assert end == expected_end
@@ -85,6 +98,9 @@ def test_fetch_spot_ohlc_invalid_window(monkeypatch):
     runner, ds = _setup_runner(monkeypatch, now_dt)
     monkeypatch.setattr(settings.data, "lookback_minutes", 0, raising=False)
     monkeypatch.setattr(settings.strategy, "min_bars_for_signal", 0, raising=False)
+    monkeypatch.setattr(settings, "warmup_bars", 0, raising=False)
+    monkeypatch.setattr(runner.strategy_cfg, "min_bars_required", 0, raising=False)
+    monkeypatch.setattr(settings.data, "lookback_padding_bars", 0, raising=False)
 
     df = runner._fetch_spot_ohlc()
     assert df is None
