@@ -686,7 +686,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                                 self.seed_ohlc(df[["open", "high", "low", "close", "volume"]])
                             except Exception:
                                 pass
-                    return
+                    if len(df) >= required_bars:
+                        return
         except Exception as e:
             log.warning("kite historical backfill failed: %s", e)
         try:
@@ -719,6 +720,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         self.seed_ohlc(yf_df[["open", "high", "low", "close", "volume"]])
                     except Exception:
                         pass
+                if len(yf_df) >= required_bars:
+                    return
         except Exception as e:
             log.warning("yfinance backfill failed: %s", e)
 
