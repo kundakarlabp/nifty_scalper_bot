@@ -71,8 +71,12 @@ def compute_score(features: Any, regime: str) -> float:
         if regime == "TREND":
             return float(getattr(features, "trend_score", lambda: 0.0)())
         if regime == "RANGE":
-            if callable(getattr(features, "range_score", None)):
-                return float(features.range_score())
+            rs_fn = getattr(features, "range_score", None)
+            if callable(rs_fn):
+                try:
+                    return float(rs_fn(features))
+                except TypeError:
+                    return float(rs_fn())
             mom = float(getattr(features, "mom_norm", 0.0))
             atrp = float(getattr(features, "atr_pct", 0.0))
             band_ok = 0.02 <= atrp <= 0.20
