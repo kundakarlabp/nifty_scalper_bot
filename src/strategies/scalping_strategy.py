@@ -336,6 +336,26 @@ class EnhancedScalpingStrategy:
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
+            if reason == "score_low" and plan.get("score") is None:
+                plan["score"] = float(extra.get("score", 0.0))
+            if "score_dbg" not in plan:
+                min_score_cfg = 0.0
+                if isinstance(cfg, StrategyConfig):
+                    strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+                    min_score_cfg = self._normalize_min_score(
+                        float(strat_cfg.get("min_score", 0.35))
+                    )
+                final = float(plan.get("score") or 0.0)
+                plan["score_dbg"] = {
+                    "components": {},
+                    "weights": {},
+                    "penalties": {},
+                    "raw": 0.0,
+                    "final": round(final, 4),
+                    "threshold": min_score_cfg,
+                }
+            dbg["score"] = plan.get("score")
+            dbg["score_dbg"] = plan.get("score_dbg")
             self._last_debug = dbg
             return plan
 

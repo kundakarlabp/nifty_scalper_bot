@@ -563,10 +563,10 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner:
                 return self._send("runner not ready")
-            items = getattr(runner, "_score_items", None) or {}
+            items = getattr(runner, "_score_items", None)
             total = getattr(runner, "_score_total", None)
             thr = getattr(runner.strategy_cfg, "min_signal_score", 0.0)
-            if not items:
+            if items is None:
                 return self._send("📊 no score breakdown yet")
             top = sorted(items.items(), key=lambda kv: abs(kv[1]), reverse=True)[:12]
             lines = [
