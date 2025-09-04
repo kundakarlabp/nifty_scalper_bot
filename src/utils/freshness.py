@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import overload
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,16 @@ class Freshness:
     tick_lag_s: float | None
     bar_lag_s: float | None
     ok: bool
+
+
+@overload
+def _to_aware_utc(dt: None) -> None:
+    ...
+
+
+@overload
+def _to_aware_utc(dt: datetime) -> datetime:
+    ...
 
 
 def _to_aware_utc(dt: datetime | None) -> datetime | None:
