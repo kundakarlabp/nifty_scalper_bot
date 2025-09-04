@@ -542,25 +542,27 @@ class EnhancedScalpingStrategy:
                     and ema21_val > ema50_val
                     and ema21_slope > 0
                     and macd_val > 0
-                    and rsi_val >= 48
+                    and rsi_val >= 45
                     and rsi_rising
-                    and breakout_dist_long >= 0.15
+                    and breakout_dist_long >= 0.10
                 )
                 short_ok = (
                     price < float(vwap.iloc[-1])
                     and ema21_val < ema50_val
                     and ema21_slope < 0
                     and macd_val < 0
-                    and rsi_val <= 52
+                    and rsi_val <= 55
                     and not rsi_rising
-                    and breakout_dist_short >= 0.15
+                    and breakout_dist_short >= 0.10
                 )
                 if long_ok or short_ok:
                     side = "BUY" if long_ok else "SELL"
                     option_type = "CE" if long_ok else "PE"
                     reasons.append("trend_playbook")
                 else:
-                    return plan_block("score_low")
+                    side = "BUY" if price >= float(vwap.iloc[-1]) else "SELL"
+                    option_type = "CE" if side == "BUY" else "PE"
+                    reasons.append("trend_fallback")
             elif reg.regime == "RANGE":
                 close = float(df["close"].iloc[-1])
                 bb_mid = df["close"].rolling(20).mean()
@@ -572,13 +574,13 @@ class EnhancedScalpingStrategy:
 
                 upper_fade = (
                     (close >= upper or close >= vwap_val + 1.9 * std_val)
-                    and rsi_val > 65
+                    and rsi_val > 60
                     and rsi_val < rsi_prev
                     and float(df["close"].iloc[-1]) < float(df["open"].iloc[-1])
                 )
                 lower_fade = (
                     (close <= lower or close <= vwap_val - 1.9 * std_val)
-                    and rsi_val < 35
+                    and rsi_val < 40
                     and rsi_val > rsi_prev
                     and float(df["close"].iloc[-1]) > float(df["open"].iloc[-1])
                 )
@@ -592,11 +594,9 @@ class EnhancedScalpingStrategy:
                     option_type = "CE"
                     reasons.append("range_playbook_lower")
                 else:
-                    plan["score_dbg"] = plan.get(
-                        "score_dbg",
-                        {"components": {}, "weights": {}, "penalties": {}, "raw": 0.0, "final": 0.0, "threshold": 0.0},
-                    )
-                    return plan_block("score_low")
+                    side = "SELL" if close >= vwap_val else "BUY"
+                    option_type = "PE" if side == "SELL" else "CE"
+                    reasons.append("range_fallback")
             else:
                 return plan_block("regime_no_trade")
 
@@ -811,6 +811,7 @@ class EnhancedScalpingStrategy:
                 "rr": rr,
                 "reason_block": None,
                 "atr_pct": plan["atr_pct"],
+                "score_dbg": plan.get("score_dbg"),
             }
             return plan
 
