@@ -83,6 +83,20 @@ class DataSource:
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         df = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+
+        # If no bars were fetched, attempt a backfill and retry once.  This helps
+        # recover when the bot starts with an empty cache or the broker API drops
+        # a request, which previously resulted in a permanent warmup failure.
+        if df is None or df.empty:
+            try:
+                ensure = getattr(self, "ensure_backfill", None)
+                if callable(ensure):
+                    ensure(required_bars=n, token=token, timeframe="minute")
+                    df = self.fetch_ohlc(
+                        token=token, start=start, end=end, timeframe="minute"
+                    )
+            except Exception:
+                df = None
         if df is None or df.empty:
             return None
         df = prepare_ohlc(df, now)
