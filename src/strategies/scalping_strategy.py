@@ -76,8 +76,8 @@ class ScoreDetails:
 def _trend_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
     """Compute trend-following score using EMA slope."""
 
-    ema_fast = df["close"].ewm(span=cfg.ema_fast, adjust=False).mean()
-    ema_slow = df["close"].ewm(span=cfg.ema_slow, adjust=False).mean()
+    ema_fast = df["close"].ewm(span=getattr(cfg, "ema_fast", 9), adjust=False).mean()
+    ema_slow = df["close"].ewm(span=getattr(cfg, "ema_slow", 21), adjust=False).mean()
     slope = (ema_fast.iloc[-1] - ema_slow.iloc[-1]) / (df["atr"].iloc[-1] or 1e-9)
     s = _clamp(abs(slope))
     det = ScoreDetails("TREND", {"ema_slope": s}, s)
@@ -87,8 +87,9 @@ def _trend_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
 def _range_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
     """Compute mean‑reversion score for range‑bound markets."""
 
-    mid = df["close"].rolling(cfg.bb_period).mean()
-    dev = df["close"].rolling(cfg.bb_period).std(ddof=0)
+    period = getattr(cfg, "bb_period", 20)
+    mid = df["close"].rolling(period).mean()
+    dev = df["close"].rolling(period).std(ddof=0)
     bandw = (dev.iloc[-1] * 2.0) or 1e-9
     dist = abs(df["close"].iloc[-1] - mid.iloc[-1]) / (df["atr"].iloc[-1] or 1e-9)
     raw = dist / (bandw / (df["atr"].iloc[-1] or 1e-9))
@@ -116,6 +117,10 @@ def compute_score(
 
     if df is None or len(df) < getattr(cfg, "warmup_bars_min", 20):
         return 0.0, None
+    if "atr" not in df.columns:
+        period = getattr(cfg, "atr_period", 14)
+        df = df.copy()
+        df.loc[:, "atr"] = compute_atr(df, period=period)
     if regime == "TREND":
         return _trend_score(df, cfg)
     if regime == "RANGE" and getattr(cfg, "enable_range_scoring", True):
