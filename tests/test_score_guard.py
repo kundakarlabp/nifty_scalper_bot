@@ -89,4 +89,5 @@ def test_score_none_blocks_and_reports(monkeypatch):
 
     runner.process_tick({})
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "score_uncomputed"
+    assert flow["reason_block"] == "score_low"
+    assert getattr(runner, "last_plan", {}).get("score") == 0.0

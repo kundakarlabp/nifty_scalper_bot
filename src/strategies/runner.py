@@ -717,7 +717,9 @@ class StrategyRunner:
                 self._score_items = None
                 self._score_total = None
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
-            if plan.get("score") is None:
+            score_val = float(plan.get("score") or 0.0)
+            plan["score"] = score_val
+            if score_val == 0.0:
                 bar_count = int(plan.get("bar_count") or 0)
                 regime = plan.get("regime")
                 min_bars = int(getattr(settings.strategy, "min_bars_for_signal"))
@@ -733,7 +735,12 @@ class StrategyRunner:
                         bar_count,
                         regime,
                     )
-                    plan["reason_block"] = "score_uncomputed"
+            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
+            if score_val < min_score and not plan.get("reason_block"):
+                plan["reason_block"] = "score_low"
+                plan.setdefault("reasons", []).extend(
+                    [f"score={score_val:.2f}", f"min={min_score:.2f}"]
+                )
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
                 self._record_plan(plan)
@@ -1056,10 +1063,15 @@ class StrategyRunner:
             )
             plan["micro"] = micro
             self._preview_candidate(plan, micro)
-            score_val = plan.get("score")
-            if score_val is None:
-                plan["reason_block"] = "score_uncomputed"
+            score_val = float(plan.get("score") or 0.0)
+            plan["score"] = score_val
+            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
+            if score_val < min_score and not plan.get("reason_block"):
+                plan["reason_block"] = "score_low"
                 flow["reason_block"] = plan["reason_block"]
+                plan.setdefault("reasons", []).extend(
+                    [f"score={score_val:.2f}", f"min={min_score:.2f}"]
+                )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 return
