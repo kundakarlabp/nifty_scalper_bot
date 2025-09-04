@@ -6,7 +6,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, ClassVar
 from zoneinfo import ZoneInfo
@@ -112,6 +112,7 @@ class StrategyRunner:
         self._fresh = None
         self._score_items: dict[str, float] | None = None
         self._score_total: float | None = None
+        self._last_bar_count: int = 0
 
         self.settings = settings
 
@@ -346,6 +347,23 @@ class StrategyRunner:
             self.log.warning("Initial data fetch failed: %s", e)
             self._last_flow_debug["bars"] = 0
 
+        # Make sure we have enough bars before first eval
+        need = 0
+        try:
+            need = required_bars(self.strategy_cfg)
+        except Exception:
+            need = getattr(self.strategy_cfg, "min_bars", 20)
+        if hasattr(self.data_source, "ensure_history"):
+            lookback_min = max(
+                getattr(self.strategy_cfg, "lookback_minutes", 20), int(need)
+            )
+            try:
+                self.data_source.ensure_history(minutes=lookback_min)
+            except Exception as e:
+                self.log.warning(
+                    f"ensure_history({lookback_min}m) skipped: {e}"
+                )
+
     def _emit_diag(self, plan: dict, micro: dict | None = None):
         msg = (f"diag | within_window={getattr(self, 'within_window', None)} "
                f"regime={plan.get('regime')} score={plan.get('score')} atr%={plan.get('atr_pct')} "
@@ -510,14 +528,14 @@ class StrategyRunner:
                 "last_plan": self.last_plan or {},
             }
             self.journal.save_checkpoint(snap)
-        self.last_eval_ts = datetime.utcnow().isoformat()
+        self.last_eval_ts = datetime.now(timezone.utc).isoformat()
         flow: Dict[str, Any] = {
             "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
             "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
             "executed": False, "reason_block": None,
         }
         self._last_error = None
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
         for cb in [
             getattr(self.order_executor, "cb_orders", None),
@@ -633,6 +651,7 @@ class StrategyRunner:
             plan["bar_count"] = int(len(df)) if isinstance(df, pd.DataFrame) else 0
             plan["last_bar_ts"] = last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
             bar_count = int(plan["bar_count"])
+            self._last_bar_count = int(bar_count)
             self._warm = warmup_check(self.strategy_cfg, bar_count)
             self.ready = self._warm.ok
             if not self._warm.ok:
@@ -1836,7 +1855,7 @@ class StrategyRunner:
                 "filled": leg.filled_qty,
                 "qty": leg.qty,
                 "avg": leg.avg_price,
-                "age_s": int((datetime.utcnow() - leg.created_at).total_seconds()),
+                "age_s": int((datetime.now(timezone.utc) - leg.created_at).total_seconds()),
                 "status": fsm.status,
             }
             for fsm in getattr(self.order_executor, "open_trades", lambda: [])()
