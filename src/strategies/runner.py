@@ -43,11 +43,11 @@ from src.features.indicators import atr_pct
 from src.utils.indicators import calculate_adx, calculate_bb_width
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
-from src.execution.micro_filters import micro_from_l1, evaluate_micro
+from src.execution.micro_filters import evaluate_micro
 from .warmup import check as warmup_check, required_bars
 from src.utils.freshness import compute as compute_freshness
 from src.risk import risk_gates
-from src.strategies.scoring import compute_score as _compute_score
+from src.strategies.scalping_strategy import compute_score
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -707,19 +707,61 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            # capture per-feature score breakdown for diagnostics
-            try:
-                dbg = plan.get("score_dbg", {})
-                si = _compute_score(dbg.get("weights", {}), dbg.get("components", {}))
-                self._score_items = si.items
-                self._score_total = si.total
-            except Exception:
-                self._score_items = None
-                self._score_total = None
+            # pre-select ATM option and compute micro diagnostics
+            under_ltp = 0.0
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                try:
+                    under_ltp = float(df["close"].iloc[-1])
+                except Exception:
+                    under_ltp = 0.0
+            opt = self.option_resolver.resolve_atm(
+                self.under_symbol, under_ltp, plan.get("side_hint", "CE"), self._now_ist()
+            )
+            plan["option"] = opt
+            plan["expiry"] = opt.get("expiry")
+            self._last_option = opt
+            q = None
+            if opt.get("token") and self.kite is not None and opt.get("tradingsymbol"):
+                try:
+                    ts = opt["tradingsymbol"]
+                    q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
+                except Exception:
+                    q = None
+            if not q or "depth" not in q:
+                micro = {"src": "no_quote", "spread_pct": None, "depth_ok": None}
+            else:
+                try:
+                    b = q["depth"]["buy"][0]
+                    s = q["depth"]["sell"][0]
+                    quote_dict = {
+                        "bid": float(b.get("price", 0.0)),
+                        "ask": float(s.get("price", 0.0)),
+                        "bid_qty": int(b.get("quantity", 0)),
+                        "ask_qty": int(s.get("quantity", 0)),
+                        "bid5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])),
+                        "ask5_qty": int(sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])),
+                    }
+                    micro = evaluate_micro(
+                        q=quote_dict,
+                        lot_size=opt.get("lot_size", self.lot_size),
+                        atr_pct=plan.get("atr_pct"),
+                        cfg=self.strategy_cfg.raw,
+                    )
+                    micro["src"] = "kite"
+                except Exception:
+                    micro = {"src": "no_quote", "spread_pct": None, "depth_ok": None}
+            plan["micro"] = micro
+            plan["spread_pct"] = micro.get("spread_pct")
+            plan["depth_ok"] = micro.get("depth_ok")
+            plan["quote_src"] = micro.get("src")
+
+            # compute score and capture breakdown
+            score_val, details = compute_score(df, plan.get("regime"), self.strategy_cfg)
+            plan["score"] = float(score_val or 0.0)
+            self._score_items = details.parts if details else None
+            self._score_total = score_val
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
-            score_val = float(plan.get("score") or 0.0)
-            plan["score"] = score_val
-            if score_val == 0.0:
+            if plan["score"] == 0.0:
                 bar_count = int(plan.get("bar_count") or 0)
                 regime = plan.get("regime")
                 min_bars = int(getattr(settings.strategy, "min_bars_for_signal"))
@@ -735,12 +777,28 @@ class StrategyRunner:
                         bar_count,
                         regime,
                     )
-            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
-            if score_val < min_score and not plan.get("reason_block"):
+            gate = float(getattr(self.strategy_cfg, "score_gate", 0.3))
+            if plan["score"] < gate and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"
                 plan.setdefault("reasons", []).extend(
-                    [f"score={score_val:.2f}", f"min={min_score:.2f}"]
+                    [f"score={plan['score']:.2f}", f"min={gate:.2f}"]
                 )
+            micro = plan.get("micro") or {}
+            if (
+                (micro.get("spread_pct") is None or micro.get("depth_ok") is None)
+                and not plan.get("reason_block")
+            ):
+                plan["reason_block"] = "no_option_quote"
+                plan.setdefault("reasons", []).append("no_option_quote")
+            elif micro.get("would_block") and not plan.get("reason_block"):
+                plan.setdefault("reasons", []).append("micro")
+                plan["reason_block"] = "micro"
+            elif micro.get("mode") == "SOFT":
+                plan.setdefault("reasons", []).append("micro_soft")
+                penalty = 0.5 if (
+                    micro.get("spread_pct") and micro.get("spread_pct") > micro.get("cap_pct")
+                ) else 0.0
+                plan["score"] = max(0.0, (plan.get("score", 0.0) - penalty))
             self._maybe_emit_minute_diag(plan)
             if plan.get("reason_block"):
                 self._record_plan(plan)
@@ -817,102 +875,6 @@ class StrategyRunner:
                     "tp2": plan.get("tp2"),
                 }
             )
-            under_ltp = 0.0
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                try:
-                    under_ltp = float(df["close"].iloc[-1])
-                except Exception:
-                    under_ltp = 0.0
-            opt = self.option_resolver.resolve_atm(
-                self.under_symbol, under_ltp, plan.get("side_hint", "CE"), self._now_ist()
-            )
-            plan["option"] = opt
-            plan["expiry"] = opt.get("expiry")
-            self._last_option = opt
-            if not opt.get("token"):
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                return
-            q = None
-            if self.kite is not None and opt.get("tradingsymbol"):
-                try:
-                    ts = opt["tradingsymbol"]
-                    q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
-                except Exception:
-                    q = None
-            if not q or "depth" not in q:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                return
-            try:
-                b = q["depth"]["buy"][0]
-                s = q["depth"]["sell"][0]
-                quote_dict = {
-                    "bid": float(b.get("price", 0.0)),
-                    "ask": float(s.get("price", 0.0)),
-                    "bid_qty": int(b.get("quantity", 0)),
-                    "ask_qty": int(s.get("quantity", 0)),
-                    "bid5_qty": int(
-                        sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])
-                    ),
-                    "ask5_qty": int(
-                        sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])
-                    ),
-                }
-            except Exception:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                return
-            micro = evaluate_micro(
-                q=quote_dict,
-                lot_size=opt.get("lot_size", self.lot_size),
-                atr_pct=plan.get("atr_pct"),
-                cfg=self.strategy_cfg.raw,
-            )
-            plan["spread_pct"] = micro.get("spread_pct")
-            plan["depth_ok"] = micro.get("depth_ok")
-            plan["micro"] = micro
-            plan["quote_src"] = "kite"
-            if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.last_plan = plan
-                return
-            if micro.get("would_block"):
-                plan.setdefault("reasons", []).append("micro")
-                plan["reason_block"] = "micro"
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.last_plan = plan
-                return
-            if micro.get("mode") == "SOFT":
-                penalty = 0.5 if (
-                    micro.get("spread_pct") and micro.get("spread_pct") > micro.get("cap_pct")
-                ) else 0.0
-                plan["score"] = max(0.0, (plan.get("score", 0.0) - penalty))
-
             acct = risk_gates.AccountState(
                 equity_rupees=self._active_equity(),
                 dd_rupees=self.risk.day_realized_loss,
@@ -1065,12 +1027,12 @@ class StrategyRunner:
             self._preview_candidate(plan, micro)
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
-            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
-            if score_val < min_score and not plan.get("reason_block"):
+            gate = float(getattr(self.strategy_cfg, "score_gate", 0.3))
+            if score_val < gate and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"
                 flow["reason_block"] = plan["reason_block"]
                 plan.setdefault("reasons", []).extend(
-                    [f"score={score_val:.2f}", f"min={min_score:.2f}"]
+                    [f"score={score_val:.2f}", f"min={gate:.2f}"]
                 )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
@@ -1890,7 +1852,7 @@ class StrategyRunner:
             "version": self.strategy_cfg.version,
             "tz": self.strategy_cfg.tz,
             "atr_band": [self.strategy_cfg.atr_min, self.strategy_cfg.atr_max],
-            "min_score": self.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35),
+            "score_gate": getattr(self.strategy_cfg, "score_gate", 0.3),
         }
         return bundle
 

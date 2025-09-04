@@ -1,20 +1,16 @@
-"""Tests for numeric score attributes in compute_score."""
+"""Basic tests for compute_score helpers."""
 
-from types import SimpleNamespace
+import pandas as pd
 
 from src.strategies.scalping_strategy import compute_score
+from src.strategies.strategy_config import StrategyConfig
 
 
-def test_compute_score_accepts_numeric_trend_score() -> None:
-    """Numeric ``trend_score`` should be returned as-is."""
-
-    feats = SimpleNamespace(trend_score=0.7)
-    assert compute_score(feats, "TREND") == 0.7
-
-
-def test_compute_score_accepts_numeric_range_score() -> None:
-    """Numeric ``range_score`` should be returned as-is."""
-
-    feats = SimpleNamespace(range_score=0.5)
-    assert compute_score(feats, "RANGE") == 0.5
+def test_compute_score_trend_returns_breakdown() -> None:
+    df = pd.DataFrame({"close": [i for i in range(30)], "atr": [1.0] * 30})
+    cfg = StrategyConfig.load("config/strategy.yaml")
+    score, details = compute_score(df, "TREND", cfg)
+    assert 0.0 <= score <= 1.0
+    assert details is not None
+    assert "ema_slope" in details.parts
 

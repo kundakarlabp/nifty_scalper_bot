@@ -60,6 +60,11 @@ class StrategyConfig:
     max_tick_lag_s: int
     max_bar_lag_s: int
     min_bars_required: int
+    enable_range_scoring: bool
+    ema_fast: int
+    ema_slow: int
+    bb_period: int
+    score_gate: float
     lower_score_temp: bool
     source_path: str
     mtime: float
@@ -129,6 +134,11 @@ class StrategyConfig:
             max_tick_lag_s=int(thresholds.get("max_tick_lag_s", 8)),
             max_bar_lag_s=int(thresholds.get("max_bar_lag_s", 75)),
             min_bars_required=int(warm.get("min_bars", warm.get("min_bars_required", 20))),
+            enable_range_scoring=bool(thresholds.get("enable_range_scoring", True)),
+            ema_fast=int(thresholds.get("ema_fast", 9)),
+            ema_slow=int(thresholds.get("ema_slow", 21)),
+            bb_period=int(thresholds.get("bb_period", 20)),
+            score_gate=float(thresholds.get("score_gate", 0.30)),
             lower_score_temp=bool(dbg.get("lower_score_temp", False)),
             source_path=path,
             mtime=os.path.getmtime(path),

@@ -6,6 +6,7 @@ import time
 from collections import deque
 from datetime import datetime, time as dt_time
 from typing import Any, Dict, Optional, Tuple, Literal, Deque
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -55,45 +56,52 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
     return now.weekday() == 1 and now.time() >= threshold
 
 
-def compute_score(features: Any, regime: str) -> float:
-    """Return a safe, bounded score for the given ``regime``.
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
 
-    The score is always a float in ``[0, 1]``. ``TREND`` regimes use
-    ``features.trend_score`` when available. ``RANGE`` regimes prefer
-    ``features.range_score`` but fall back to a simple heuristic using
-    normalized momentum and ATR percentage. Any failure or missing data
-    returns ``0.0``.
-    """
 
-    if not features:
-        return 0.0
-    try:
-        if regime == "TREND":
-            ts = getattr(features, "trend_score", None)
-            if callable(ts):
-                try:
-                    return float(ts(features))
-                except TypeError:
-                    return float(ts())
-            if ts is not None:
-                return float(ts)
-            return 0.0
-        if regime == "RANGE":
-            rs = getattr(features, "range_score", None)
-            if callable(rs):
-                try:
-                    return float(rs(features))
-                except TypeError:
-                    return float(rs())
-            if rs is not None:
-                return float(rs)
-            mom = float(getattr(features, "mom_norm", 0.0))
-            atrp = float(getattr(features, "atr_pct", 0.0))
-            band_ok = 0.02 <= atrp <= 0.20
-            return max(0.0, min(1.0, (1.0 - abs(mom)) * (1.0 if band_ok else 0.5)))
-        return 0.0
-    except Exception:
-        return 0.0
+@dataclass
+class ScoreDetails:
+    regime: str
+    parts: Dict[str, float]
+    total: float
+
+
+def _trend_score(df: pd.DataFrame, cfg: StrategyConfig) -> Tuple[float, ScoreDetails]:
+    ema_fast = df["close"].ewm(span=getattr(cfg, "ema_fast", 9), adjust=False).mean()
+    ema_slow = df["close"].ewm(span=getattr(cfg, "ema_slow", 21), adjust=False).mean()
+    atr_series = df.get("atr")
+    atr_last = float(atr_series.iloc[-1]) if atr_series is not None else 0.0
+    slope = (ema_fast.iloc[-1] - ema_slow.iloc[-1]) / (atr_last or 1e-9)
+    s = _clamp(abs(slope))
+    det = ScoreDetails("TREND", {"ema_slope": s}, s)
+    return s, det
+
+
+def _range_score(df: pd.DataFrame, cfg: StrategyConfig) -> Tuple[float, ScoreDetails]:
+    period = getattr(cfg, "bb_period", 20)
+    mid = df["close"].rolling(period).mean()
+    dev = df["close"].rolling(period).std(ddof=0)
+    bandw = (dev.iloc[-1] * 2.0) or 1e-9
+    atr_series = df.get("atr")
+    atr_last = float(atr_series.iloc[-1]) if atr_series is not None else 1e-9
+    dist = abs(df["close"].iloc[-1] - mid.iloc[-1]) / (atr_last or 1e-9)
+    raw = dist / (bandw / (atr_last or 1e-9))
+    s = _clamp(raw)
+    wide_pen = _clamp((dev.iloc[-1] / (mid.iloc[-1] or 1e-9)) * 4.0)
+    s = _clamp(s * (1.0 - 0.5 * wide_pen))
+    det = ScoreDetails("RANGE", {"mr_dist": s, "wide_pen": wide_pen}, s)
+    return s, det
+
+
+def compute_score(df: Optional[pd.DataFrame], regime: str, cfg: StrategyConfig) -> Tuple[float, Optional[ScoreDetails]]:
+    if df is None or len(df) < getattr(cfg, "warmup_bars_min", 20):
+        return 0.0, None
+    if regime == "TREND":
+        return _trend_score(df, cfg)
+    if regime == "RANGE" and getattr(cfg, "enable_range_scoring", True):
+        return _range_score(df, cfg)
+    return 0.0, None
 
 
 Side = Literal["BUY", "SELL"]

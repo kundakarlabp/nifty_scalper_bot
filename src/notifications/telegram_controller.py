@@ -565,17 +565,11 @@ class TelegramController:
                 return self._send("runner not ready")
             items = getattr(runner, "_score_items", None) or {}
             total = getattr(runner, "_score_total", None)
-            thr = getattr(runner.strategy_cfg, "min_signal_score", 0.0)
             if not items:
-                return self._send("📊 no score breakdown yet")
-            top = sorted(items.items(), key=lambda kv: abs(kv[1]), reverse=True)[:12]
-            lines = [
-                f"📊 Score breakdown (thr={thr})",
-                f"• total={total}  {'✅ PASS' if total is not None and total >= thr else '❌ FAIL'}",
-            ]
-            for name, val in top:
-                sign = "➕" if val >= 0 else "➖"
-                lines.append(f"{sign} {name}: {val}")
+                return self._send("no score breakdown yet")
+            lines = [f"📊 Score: {total:.3f}" if total is not None else "📊 Score: N/A"]
+            for k, v in items.items():
+                lines.append(f"• {k}: {v:.3f}")
             return self._send("\n".join(lines))
 
         if cmd == "/shadow":
@@ -876,6 +870,7 @@ class TelegramController:
                 micro = sig.get("micro") or {}
                 msp = micro.get("spread_pct")
                 mdp = micro.get("depth_ok")
+                src = micro.get("src", "-")
                 ob_reason = sig.get("reason_block")
                 lines = []
                 for name, ok, val in [
@@ -894,10 +889,10 @@ class TelegramController:
                     sp_line = "N/A (no_quote)"
                     dp_line = "N/A (no_quote)"
                 else:
-                    sp_line = msp
+                    sp_line = round(msp, 3)
                     dp_line = "✅" if mdp else "❌"
                 lines.append(
-                    f"micro: spread%={sp_line} depth={dp_line} src={sig.get('quote_src','-')}"
+                    f"micro: spread%={sp_line} depth={dp_line} src={src}"
                 )
                 api = s.get("api_health", {})
                 rh = s.get("router", {})
@@ -978,22 +973,21 @@ class TelegramController:
                 reg = str(plan.get("regime"))
                 need = 9 if reg == "TREND" else 8
                 gates.append(("score", score is not None and score >= need, score if score is not None else "N/A"))
-                sp = plan.get("spread_pct")
-                dp = plan.get("depth_ok")
+                micro = plan.get("micro") or {}
+                sp = micro.get("spread_pct")
+                dp = micro.get("depth_ok")
+                src = micro.get("src", "-")
                 reason_block = plan.get("reason_block") or "-"
                 reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                if reason_block == "no_option_quote":
+                if sp is None:
                     lines.append("micro: N/A (no_quote)")
                 else:
-                    sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
-                    dp_line = (
-                        "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
-                    )
+                    dp_line = "✅" if dp else "❌"
                     lines.append(
-                        f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
+                        f"micro: spread%={round(sp,3)} depth={dp_line} src={src}"
                     )
                 if plan.get("option"):
                     o = plan["option"]
