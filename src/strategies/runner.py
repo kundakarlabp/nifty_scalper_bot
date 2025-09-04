@@ -47,7 +47,7 @@ from src.execution.micro_filters import micro_from_l1, evaluate_micro
 from .warmup import check as warmup_check, required_bars
 from src.utils.freshness import compute as compute_freshness
 from src.risk import risk_gates
-from src.strategies.scoring import compute_score as _compute_score
+from src.strategies.scalping_strategy import compute_score
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -707,18 +707,16 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            # capture per-feature score breakdown for diagnostics
-            try:
-                dbg = plan.get("score_dbg", {})
-                si = _compute_score(dbg.get("weights", {}), dbg.get("components", {}))
-                self._score_items = si.items
-                self._score_total = si.total
-            except Exception:
+            score_val, details = compute_score(df, plan.get("regime"), self.strategy_cfg)
+            plan["score"] = float(score_val or 0.0)
+            if details:
+                self._score_items = details.parts
+                self._score_total = details.total
+            else:
                 self._score_items = None
                 self._score_total = None
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             score_val = float(plan.get("score") or 0.0)
-            plan["score"] = score_val
             if score_val == 0.0:
                 bar_count = int(plan.get("bar_count") or 0)
                 regime = plan.get("regime")
