@@ -22,7 +22,7 @@ def test_atr_pct_returns_value():
 
 
 def test_atr_pct_insufficient_bars_returns_none():
-    df = _sample_df(5)
+    df = _sample_df(14)
     assert atr_pct(df, period=14) is None
 
 
