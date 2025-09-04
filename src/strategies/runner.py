@@ -44,7 +44,7 @@ from src.utils.indicators import calculate_adx, calculate_bb_width
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.execution.micro_filters import micro_from_l1, evaluate_micro
-from .warmup import check as warmup_check
+from .warmup import check as warmup_check, required_bars
 from src.utils.freshness import compute as compute_freshness
 from src.risk import risk_gates
 from src.strategies.scoring import compute_score as _compute_score
@@ -1416,13 +1416,9 @@ class StrategyRunner:
             return df
 
         try:
-            # Use the larger of configured lookback or required bars for signal.
-            lookback = max(
-                int(settings.data.lookback_minutes),
-                int(settings.strategy.min_bars_for_signal),
-            )
-            # Add a small buffer (10%) to account for any missing candles.
-            lookback = int(lookback * 1.1)
+            need = required_bars(self.strategy_cfg)
+            pad = int(getattr(settings.data, "lookback_padding_bars", 5))
+            lookback = max(int(settings.data.lookback_minutes), need + pad)
             if lookback <= 0:
                 self.log.warning("Adjusted OHLC window invalid; aborting")
                 return None

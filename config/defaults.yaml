@@ -3,3 +3,4 @@ strategy:
   min_bars_for_signal: 20
 data:
   lookback_minutes: 20
+  lookback_padding_bars: 5

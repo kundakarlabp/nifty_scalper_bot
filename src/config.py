@@ -120,6 +120,7 @@ class TelegramSettings(BaseModel):
 class DataSettings(BaseModel):
     # Live loop consumption
     lookback_minutes: int = 20
+    lookback_padding_bars: int = 5
     timeframe: str = "minute"  # 'minute' recommended
     time_filter_start: str = "09:20"
     time_filter_end: str = "15:25"
@@ -152,7 +153,13 @@ class DataSettings(BaseModel):
             return "minute"
         return v
 
-    @field_validator("lookback_minutes", "cache_ttl_seconds", "history_days", "history_max_candles")
+    @field_validator(
+        "lookback_minutes",
+        "lookback_padding_bars",
+        "cache_ttl_seconds",
+        "history_days",
+        "history_max_candles",
+    )
     @classmethod
     def _v_nonneg(cls, v: int) -> int:
         if v < 0:
