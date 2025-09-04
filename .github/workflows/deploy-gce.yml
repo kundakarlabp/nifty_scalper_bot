@@ -1,3 +1,4 @@
+---  # yamllint disable rule:truthy rule:line-length
 name: deploy-gce
 
 on: [workflow_dispatch, push]
@@ -21,7 +22,7 @@ jobs:
           host: ${{ secrets.GCE_HOST }}           # e.g. 34.x.x.x or your DNS
           username: ${{ secrets.GCE_USER }}       # e.g. ubuntu, debian, or your user
           key: ${{ secrets.GCE_SSH_KEY }}         # PRIVATE key (ed25519), single line, no quotes
-          passphrase: ${{ secrets.GCE_KEY_PASSPHRASE }} # only if your key is encrypted
+          passphrase: ${{ secrets.GCE_KEY_PASSPHRASE }}  # only if your key is encrypted
           port: 22
           script_stop: true
           timeout: 60s

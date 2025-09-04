@@ -1,3 +1,4 @@
+---  # yamllint disable rule:truthy rule:line-length
 name: CI
 
 on:
@@ -26,7 +27,7 @@ jobs:
 
       - name: Run project checks
         run: ./run_checks.sh
-  
+
   ai-review:
     name: AI Code Review (PRs only)
     # Skip for non-PRs and for PRs from forks (no write perms/secrets)
@@ -54,8 +55,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REPO:     ${{ github.repository }}
-          PR_NUMBER:${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_API_URL: https://api.github.com
         run: |
           python - <<'PY'
@@ -119,4 +120,3 @@ jobs:
             ok_skip(f"ℹ Could not post comment ({e}); skipping AI review.")
           print("✅ AI review posted.")
           PY
-
