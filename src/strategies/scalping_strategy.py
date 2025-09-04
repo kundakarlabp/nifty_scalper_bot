@@ -57,11 +57,14 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Clamp ``x`` to the inclusive range [``lo``, ``hi``]."""
     return max(lo, min(hi, x))
 
 
 @dataclass
 class ScoreDetails:
+    """Breakdown of a computed score for debugging/telemetry."""
+
     regime: str
     parts: Dict[str, float]
     total: float
@@ -94,7 +97,15 @@ def _range_score(df: pd.DataFrame, cfg: StrategyConfig) -> Tuple[float, ScoreDet
     return s, det
 
 
-def compute_score(df: Optional[pd.DataFrame], regime: str, cfg: StrategyConfig) -> Tuple[float, Optional[ScoreDetails]]:
+def compute_score(
+    df: Optional[pd.DataFrame], regime: str, cfg: StrategyConfig
+) -> Tuple[float, Optional[ScoreDetails]]:
+    """Return total score and detailed parts for the given market ``regime``.
+
+    When data is insufficient or scoring is disabled the total will be ``0.0``
+    and the details will be ``None``.
+    """
+
     if df is None or len(df) < getattr(cfg, "warmup_bars_min", 20):
         return 0.0, None
     if regime == "TREND":

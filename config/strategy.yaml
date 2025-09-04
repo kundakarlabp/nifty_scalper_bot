@@ -41,6 +41,11 @@ micro:
     - {min_mid: 150, cap_pct: 1.0}
 
 thresholds:
+  enable_range_scoring: true
+  ema_fast: 9
+  ema_slow: 21
+  bb_period: 20
+  score_gate: 0.30
   min_atr_pct_nifty: 0.02
   min_atr_pct_banknifty: 0.04
 
