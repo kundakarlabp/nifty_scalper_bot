@@ -55,6 +55,33 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
     return now.weekday() == 1 and now.time() >= threshold
 
 
+def compute_score(features: Any, regime: str) -> float:
+    """Return a safe, bounded score for the given ``regime``.
+
+    The score is always a float in ``[0, 1]``. ``TREND`` regimes use
+    ``features.trend_score`` when available. ``RANGE`` regimes prefer
+    ``features.range_score`` but fall back to a simple heuristic using
+    normalized momentum and ATR percentage. Any failure or missing data
+    returns ``0.0``.
+    """
+
+    if not features:
+        return 0.0
+    try:
+        if regime == "TREND":
+            return float(getattr(features, "trend_score", lambda: 0.0)())
+        if regime == "RANGE":
+            if callable(getattr(features, "range_score", None)):
+                return float(features.range_score())
+            mom = float(getattr(features, "mom_norm", 0.0))
+            atrp = float(getattr(features, "atr_pct", 0.0))
+            band_ok = 0.02 <= atrp <= 0.20
+            return max(0.0, min(1.0, (1.0 - abs(mom)) * (1.0 if band_ok else 0.5)))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 Side = Literal["BUY", "SELL"]
 SignalOutput = Optional[Dict[str, Any]]
 
