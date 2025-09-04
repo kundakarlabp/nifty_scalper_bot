@@ -328,11 +328,30 @@ class EnhancedScalpingStrategy:
             "tp1_qty_ratio": None,
         }
 
+        plan["score_dbg"] = {
+            "components": {},
+            "weights": {},
+            "penalties": {},
+            "raw": 0.0,
+            "final": 0.0,
+            "threshold": 0.0,
+        }
+
         plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
 
         dbg: Dict[str, Any] = {"reason_block": None}
 
         def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
+            sd = plan.setdefault(
+                "score_dbg",
+                {"components": {}, "weights": {}, "penalties": {}, "raw": 0.0, "final": 0.0, "threshold": 0.0},
+            )
+            sd.setdefault("components", {})
+            sd.setdefault("weights", {})
+            sd.setdefault("penalties", {})
+            sd.setdefault("raw", 0.0)
+            sd.setdefault("final", 0.0)
+            sd.setdefault("threshold", 0.0)
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
@@ -521,6 +540,10 @@ class EnhancedScalpingStrategy:
                     option_type = "CE"
                     reasons.append("range_playbook_lower")
                 else:
+                    plan["score_dbg"] = plan.get(
+                        "score_dbg",
+                        {"components": {}, "weights": {}, "penalties": {}, "raw": 0.0, "final": 0.0, "threshold": 0.0},
+                    )
                     return plan_block("score_low")
             else:
                 return plan_block("regime_no_trade")
