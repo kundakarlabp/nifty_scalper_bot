@@ -331,7 +331,13 @@ class EnhancedScalpingStrategy:
                 try:
                     if hasattr(self, "data_source") and hasattr(self.data_source, "ensure_backfill"):
                         self.data_source.ensure_backfill(required_bars=required_bars)
-                        have_bars = len(df)
+                        # refresh bars after backfill attempt
+                        if hasattr(self.data_source, "get_last_bars"):
+                            try:
+                                df = self.data_source.get_last_bars(required_bars)
+                            except Exception:
+                                df = None
+                        have_bars = len(df) if isinstance(df, pd.DataFrame) else 0
                         if have_bars >= required_bars:
                             w = warmup_status(have_bars, required_bars)
                             plan["features"] = {
