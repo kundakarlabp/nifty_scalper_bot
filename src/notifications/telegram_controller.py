@@ -992,7 +992,7 @@ class TelegramController:
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                if reason_block == "no_option_quote":
+                if reason_block in {"no_option_quote", "no_option_token"}:
                     lines.append("micro: N/A (no_quote)")
                 else:
                     sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)

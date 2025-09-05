@@ -241,7 +241,11 @@ def resolve_weekly_atm(
             nfo = _fetch_instruments_nfo(None) or []
         except Exception:
             nfo = []
-    expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+    expiry = _pick_expiry(
+        datetime.now(timezone(timedelta(hours=5, minutes=30))),
+        nfo,
+        trade_symbol,
+    )
     ce_sym = pe_sym = None
     lot: Optional[int] = None
     for row in nfo:
@@ -317,6 +321,37 @@ def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
     Used as a lightweight fallback when the full instrument dump is unavailable.
     """
     return next_tuesday_expiry(now).date().isoformat()
+
+
+def _same_day_expiry(now: datetime) -> Optional[str]:
+    """Return today's expiry if we are on an expiry day before cutoff."""
+    exp = next_tuesday_expiry(now)
+    if exp.date() == now.date():
+        return now.date().isoformat()
+    return None
+
+
+def _nearest_expiry(now: datetime, dump: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
+    """Resolve the nearest expiry from the instrument dump or fallback."""
+    exp = _resolve_weekly_expiry_from_dump(dump, trade_symbol)
+    if exp is not None:
+        return exp
+    return _next_weekly_expiry(now)
+
+
+def _pick_expiry(now: datetime, dump: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
+    """Choose an expiry according to configuration with safe fallbacks."""
+    mode = getattr(getattr(settings, "strategy", object()), "option_expiry_mode", "nearest")
+    if mode == "today":
+        exp = _same_day_expiry(now)
+        if exp is None:
+            exp = _nearest_expiry(now, dump, trade_symbol)
+        return exp
+    if mode == "nearest":
+        return _nearest_expiry(now, dump, trade_symbol)
+    if mode == "next":
+        return _next_weekly_expiry(now)
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -405,7 +440,11 @@ def get_instrument_tokens(
                 "atm_tokens": {"ce": None, "pe": None},
             }
 
-        expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+        expiry = _pick_expiry(
+            datetime.now(timezone(timedelta(hours=5, minutes=30))),
+            nfo,
+            trade_symbol,
+        )
 
         def _scan(
             dump: List[Dict[str, Any]],
@@ -444,7 +483,11 @@ def get_instrument_tokens(
             global _instruments_cache, _instruments_cache_ts
             _instruments_cache, _instruments_cache_ts = None, 0.0
             nfo = _fetch_instruments_nfo(kite_instance) or []
-            expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+            expiry = _pick_expiry(
+                datetime.now(timezone(timedelta(hours=5, minutes=30))),
+                nfo,
+                trade_symbol,
+            )
             ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
 
         result = {
