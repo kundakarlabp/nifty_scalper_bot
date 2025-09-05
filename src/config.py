@@ -88,8 +88,13 @@ class TelegramSettings(BaseModel):
 
     @classmethod
     def from_env(cls) -> "TelegramSettings":
-        """Support legacy flat env vars such as TELEGRAM_CHAT_ID."""
+        """Support legacy flat env vars such as ``TELEGRAM_CHAT_ID``.
+
+        If no bot token or chat ID is provided, Telegram alerts are disabled
+        unless ``TELEGRAM_ENABLED`` is explicitly set to ``true``.
+        """
         raw_chat = os.getenv("TELEGRAM_CHAT_ID")
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         try:
             chat = int(raw_chat) if raw_chat is not None else 0
         except ValueError:
@@ -98,11 +103,14 @@ class TelegramSettings(BaseModel):
         enabled = (
             str(enabled_env).lower() not in {"0", "false"}
             if enabled_env is not None
-            else True
+            else bool(token and chat)
         )
+        if not token or chat == 0:
+            if enabled_env is None:
+                enabled = False
         return cls.model_construct(
             enabled=enabled,
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            bot_token=token,
             chat_id=chat,
         )
 

@@ -62,6 +62,18 @@ def test_default_values():
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
 
 
+def test_telegram_disabled_without_creds():
+    """Telegram should auto-disable when credentials are missing."""
+    env = {
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.telegram.enabled is False
+
+
 def test_legacy_env_names_supported():
     """Old flat env var names should still be recognized."""
     env = {
