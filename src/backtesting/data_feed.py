@@ -33,7 +33,11 @@ class SpotFeed:
 
         parse_dates = parse_dates or ["timestamp"]
         df = pd.read_csv(path)
-        ts = pd.to_datetime(df[parse_dates[0]], utc=False, infer_datetime_format=True)
+        ts_col = df[parse_dates[0]]
+        if pd.api.types.is_numeric_dtype(ts_col):
+            ts = pd.to_datetime(ts_col, unit="s", utc=False)
+        else:
+            ts = pd.to_datetime(ts_col, utc=False, infer_datetime_format=True)
         df.index = ts.dt.tz_localize(None)
         df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]].sort_index()
         return cls(df=df, tz=ZoneInfo(tz))

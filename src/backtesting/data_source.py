@@ -106,7 +106,11 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
     df.rename(columns=rename_map, inplace=True)
 
     if "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"])
+        ts_col = df["datetime"]
+        if pd.api.types.is_numeric_dtype(ts_col):
+            df["datetime"] = pd.to_datetime(ts_col, unit="s")
+        else:
+            df["datetime"] = pd.to_datetime(ts_col)
         df.set_index("datetime", inplace=True)
 
     if df.index.tz is None:
