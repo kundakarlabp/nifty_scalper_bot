@@ -31,6 +31,7 @@ import tempfile
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.data_feed import SpotFeed
 from src.backtesting.sim_connector import SimConnector
+from src.backtesting.synth import make_synth_1m
 from src.execution.order_executor import OrderReconciler
 from src.logs.journal import Journal
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
@@ -1237,7 +1238,11 @@ class StrategyRunner:
                 if csv_path
                 else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
             )
-            feed = SpotFeed.from_csv(str(path))
+            if path.exists():
+                feed = SpotFeed.from_csv(str(path))
+            else:
+                df = make_synth_1m(start=datetime.now())
+                feed = SpotFeed(df=df, tz=ZoneInfo("Asia/Kolkata"))
             cfg = try_load(resolve_config_path(), None)
             risk = RiskEngine(LimitConfig(tz=cfg.tz))
             sim = SimConnector()
