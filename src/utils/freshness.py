@@ -26,10 +26,20 @@ def _to_aware_utc(dt: datetime) -> datetime:
     ...
 
 
-def _to_aware_utc(dt: datetime | None) -> datetime | None:
+@overload
+def _to_aware_utc(dt: str) -> datetime | None:
+    ...
+
+
+def _to_aware_utc(dt: datetime | str | None) -> datetime | None:
     """Return tz-aware UTC; assume naive inputs are UTC."""
     if dt is None:
         return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return None
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)

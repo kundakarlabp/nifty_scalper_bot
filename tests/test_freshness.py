@@ -36,3 +36,18 @@ def test_freshness_handles_naive_and_aware() -> None:
         max_bar_lag_s=75,
     )
     assert f.tick_lag_s is not None and f.bar_lag_s is not None
+
+
+def test_freshness_accepts_iso_strings() -> None:
+    now = datetime.utcnow()
+    tick_ts = now.isoformat()
+    bar_ts = (now - timedelta(minutes=1)).isoformat()
+    f = compute(
+        now=now,
+        last_tick_ts=tick_ts,
+        last_bar_open_ts=bar_ts,
+        tf_seconds=60,
+        max_tick_lag_s=8,
+        max_bar_lag_s=75,
+    )
+    assert f.tick_lag_s is not None and f.bar_lag_s is not None
