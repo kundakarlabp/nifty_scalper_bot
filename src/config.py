@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 import yaml  # type: ignore[import-untyped]
@@ -224,6 +225,8 @@ class StrategySettings(BaseModel):
     atr_tp_multiplier: float = 2.2
     rr_min: float = 1.30
     rr_threshold: float | None = 1.5
+    # Pick a tradable contract by default (prevents no_option_token on non-expiry days)
+    option_expiry_mode: Literal["today", "nearest", "next"] = "nearest"
 
     @field_validator("confidence_threshold")
     @classmethod

@@ -185,3 +185,12 @@ def test_get_instrument_tokens_refreshes_dump(mock_kite, monkeypatch):
     assert tokens["tokens"] == {"ce": 10, "pe": 11}
     assert "error" not in tokens
     assert fetch.call_count == 2
+
+
+@freeze_time("2024-08-05 10:00:00+05:30")
+def test_today_mode_falls_back_to_next_expiry(mock_kite, monkeypatch):
+    """When option_expiry_mode='today' on a non-expiry day, picks next weekly."""
+    monkeypatch.setattr(settings.strategy, "option_expiry_mode", "today", raising=False)
+    tokens = get_instrument_tokens(kite_instance=mock_kite)
+    assert tokens is not None
+    assert tokens["expiry"] == "2024-08-06"
