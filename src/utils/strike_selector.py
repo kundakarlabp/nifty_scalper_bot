@@ -406,36 +406,46 @@ def get_instrument_tokens(
             }
 
         expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
-        ce_token = None
-        pe_token = None
-        atm_ce = None
-        atm_pe = None
 
-        for row in nfo:
-            try:
-                if row.get("segment") != "NFO-OPT":
+        def _scan(
+            dump: List[Dict[str, Any]],
+        ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+            ce_tok = pe_tok = atm_ce_tok = atm_pe_tok = None
+            for row in dump:
+                try:
+                    if row.get("segment") != "NFO-OPT":
+                        continue
+                    if row.get("name") != trade_symbol:
+                        continue
+                    if expiry and not str(row.get("expiry", "")).startswith(expiry):
+                        continue
+                    strike_val = row.get("strike")
+                    if strike_val is None:
+                        continue
+                    strike = int(strike_val)
+                    itype = row.get("instrument_type")
+                    if strike == target:
+                        if itype == "CE":
+                            ce_tok = row.get("instrument_token")
+                        elif itype == "PE":
+                            pe_tok = row.get("instrument_token")
+                    if strike == atm:
+                        if itype == "CE":
+                            atm_ce_tok = row.get("instrument_token")
+                        elif itype == "PE":
+                            atm_pe_tok = row.get("instrument_token")
+                except Exception:
                     continue
-                if row.get("name") != trade_symbol:
-                    continue
-                if expiry and not str(row.get("expiry", "")).startswith(expiry):
-                    continue
-                strike_val = row.get("strike")
-                if strike_val is None:
-                    continue
-                strike = int(strike_val)
-                itype = row.get("instrument_type")
-                if strike == target:
-                    if itype == "CE":
-                        ce_token = row.get("instrument_token")
-                    elif itype == "PE":
-                        pe_token = row.get("instrument_token")
-                if strike == atm:
-                    if itype == "CE":
-                        atm_ce = row.get("instrument_token")
-                    elif itype == "PE":
-                        atm_pe = row.get("instrument_token")
-            except Exception:
-                continue
+            return ce_tok, pe_tok, atm_ce_tok, atm_pe_tok
+
+        ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
+
+        if not ce_token or not pe_token:
+            global _instruments_cache, _instruments_cache_ts
+            _instruments_cache, _instruments_cache_ts = None, 0.0
+            nfo = _fetch_instruments_nfo(kite_instance) or []
+            expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+            ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
 
         result = {
             "spot_token": int(spot_token),
@@ -448,6 +458,12 @@ def get_instrument_tokens(
         }
 
         if not ce_token or not pe_token:
+            logger.warning(
+                "Missing option token for strike %s, expiry %s, trade symbol %s",
+                target,
+                expiry,
+                trade_symbol,
+            )
             result["error"] = "no_option_token"
         return result
 

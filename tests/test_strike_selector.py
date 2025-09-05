@@ -10,6 +10,7 @@ import pytest
 from freezegun import freeze_time
 
 from src.utils.strike_selector import is_market_open, get_instrument_tokens
+import src.utils.strike_selector as strike_selector
 from src.config import settings
 
 
@@ -153,3 +154,34 @@ def test_get_instrument_tokens_reports_missing_option_tokens(mock_kite):
     tokens = get_instrument_tokens(kite_instance=mock_kite)
     assert tokens is not None
     assert tokens.get("error") == "no_option_token"
+
+
+@freeze_time("2024-08-05 10:00:00+05:30")
+def test_get_instrument_tokens_refreshes_dump(mock_kite, monkeypatch):
+    monkeypatch.setattr(settings.instruments, "strike_range", 0, raising=False)
+    dump1 = [
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 6).date(),
+            "instrument_type": "CE",
+            "strike": 19550,
+            "instrument_token": 10,
+        }
+    ]
+    dump2 = dump1 + [
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 8, 6).date(),
+            "instrument_type": "PE",
+            "strike": 19550,
+            "instrument_token": 11,
+        }
+    ]
+    fetch = MagicMock(side_effect=[dump1, dump2])
+    monkeypatch.setattr(strike_selector, "_fetch_instruments_nfo", fetch)
+    tokens = get_instrument_tokens(kite_instance=mock_kite)
+    assert tokens["tokens"] == {"ce": 10, "pe": 11}
+    assert "error" not in tokens
+    assert fetch.call_count == 2
