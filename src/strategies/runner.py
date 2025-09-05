@@ -1976,7 +1976,7 @@ class StrategyRunner:
             "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
             "open_positions": len(getattr(self.executor, "get_positions_kite", lambda: {})() or {}),
             "last_signal_score": (
-                float(self._last_signal_debug.get("score", 0.0))
+                float(self._last_signal_debug.get("score") or 0.0)
                 if isinstance(self._last_signal_debug, dict)
                 else 0.0
             ),
