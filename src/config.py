@@ -17,6 +17,7 @@ import pandas as pd
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
 from src.utils.market_time import is_market_open, prev_session_last_20m
 
@@ -224,6 +225,8 @@ class StrategySettings(BaseModel):
     atr_tp_multiplier: float = 2.2
     rr_min: float = 1.30
     rr_threshold: float | None = 1.5
+    # Pick a tradable contract by default (prevents no_option_token on non-expiry days)
+    option_expiry_mode: Literal["today", "nearest", "next"] = "nearest"
 
     @field_validator("confidence_threshold")
     @classmethod

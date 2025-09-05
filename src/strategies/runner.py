@@ -828,8 +828,14 @@ class StrategyRunner:
             plan["expiry"] = opt.get("expiry")
             self._last_option = opt
             if not opt.get("token"):
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
+                plan["reason_block"] = "no_option_token"
+                plan.setdefault("reasons", []).append("no_option_token")
+                self.log.warning(
+                    "No option token: expiry=%s strike=%s ce_pe=%s (check expiry mode and instruments cache)",
+                    opt.get("expiry"),
+                    opt.get("strike"),
+                    plan.get("side_hint"),
+                )
                 plan["spread_pct"] = None
                 plan["depth_ok"] = None
                 plan["micro"] = {"spread_pct": None, "depth_ok": None}

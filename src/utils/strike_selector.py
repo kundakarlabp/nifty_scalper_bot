@@ -241,7 +241,7 @@ def resolve_weekly_atm(
             nfo = _fetch_instruments_nfo(None) or []
         except Exception:
             nfo = []
-    expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+    expiry = _pick_expiry()
     ce_sym = pe_sym = None
     lot: Optional[int] = None
     for row in nfo:
@@ -311,12 +311,43 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
     return sorted_exp[-1]
 
 
-def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
+def _nearest_expiry(now: Optional[datetime] = None) -> str:
     """Return upcoming Tuesday in IST as ``YYYY-MM-DD``.
 
     Used as a lightweight fallback when the full instrument dump is unavailable.
     """
     return next_tuesday_expiry(now).date().isoformat()
+
+
+def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
+    """Return Tuesday of the following week in IST as ``YYYY-MM-DD``."""
+    base = next_tuesday_expiry(now).to_pydatetime()
+    return next_tuesday_expiry(base + timedelta(days=7)).date().isoformat()
+
+
+def _same_day_expiry(now: Optional[datetime] = None) -> Optional[str]:
+    """Return today's expiry if the market expires today, else ``None``."""
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target = next_tuesday_expiry(now).to_pydatetime()
+    if now.date() == target.date() and now < target:
+        return target.date().isoformat()
+    return None
+
+
+def _pick_expiry(now: Optional[datetime] = None) -> str:
+    """Select an expiry date based on configuration with safe fallbacks."""
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    mode = str(getattr(getattr(settings, "strategy", object()), "option_expiry_mode", "nearest"))
+    if mode == "today":
+        exp = _same_day_expiry(now)
+        if exp is None:
+            exp = _nearest_expiry(now)
+        return exp
+    if mode == "next":
+        return _next_weekly_expiry(now)
+    return _nearest_expiry(now)
 
 
 # -----------------------------------------------------------------------------
@@ -400,12 +431,12 @@ def get_instrument_tokens(
                 "spot_price": float(px),
                 "atm_strike": atm,
                 "target_strike": target,
-                "expiry": _next_weekly_expiry(),
+                "expiry": _nearest_expiry(),
                 "tokens": {"ce": None, "pe": None},
                 "atm_tokens": {"ce": None, "pe": None},
             }
 
-        expiry = _resolve_weekly_expiry_from_dump(nfo, trade_symbol)
+        expiry = _pick_expiry()
         ce_token = None
         pe_token = None
         atm_ce = None
