@@ -10,6 +10,7 @@ import datetime as dt
 from typing import Any, Dict, Optional, Tuple, Callable, List
 
 
+import numpy as np
 import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
@@ -267,44 +268,61 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
 
 
 def _safe_dataframe(rows: Any) -> pd.DataFrame:
-    """
-    Normalize Kite historical rows to a canonical OHLCV frame.
-    - lowercases columns
-    - parses 'date' to naive datetime index
-    - guarantees presence/order of: open, high, low, close, volume
+    """Return a sanitized OHLC frame.
+
+    The input is copied, column names are lowercased and required OHLC columns
+    are verified. Numeric columns are coerced, infinite values are replaced with
+    ``pd.NA`` and rows with ``NaN`` values are dropped. Only rows with positive
+    prices and logical relationships (``low`` ≤ ``open``/``close`` ≤ ``high``)
+    are kept. The index is sorted and duplicate timestamps are removed keeping
+    the latest occurrence.
     """
     try:
-        df = pd.DataFrame(rows or [])
+        df = pd.DataFrame(rows or []).copy()
         if df.empty:
             return pd.DataFrame()
 
-        # Normalize column names
-        df = df.rename(columns={c: str(c).lower() for c in df.columns})
+        df = df.rename(columns=lambda c: str(c).lower())
+        df = df.T.groupby(level=0).sum(min_count=1).T
 
-        # historical_data returns 'date' column; ensure timezone‑naive Timestamp index
         if "date" in df.columns:
             from src.utils.time_windows import TZ
 
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df["date"] = df["date"].dt.tz_convert(TZ) if df["date"].dt.tz is not None else df["date"].dt.tz_localize(TZ)
+            df["date"] = (
+                df["date"].dt.tz_convert(TZ)
+                if df["date"].dt.tz is not None
+                else df["date"].dt.tz_localize(TZ)
+            )
             df["date"] = df["date"].dt.tz_localize(None)
             df = df.set_index("date")
 
-        # Required columns
-        need = {"open", "high", "low", "close"}
-        if not need.issubset(df.columns):
+        need = ["open", "high", "low", "close"]
+        if not set(need).issubset(df.columns):
             return pd.DataFrame()
 
-        # Volume may not be present; default to 0 (int)
         if "volume" not in df.columns:
             df["volume"] = 0
 
-        # Ensure column order and numeric types
-        out = df[["open", "high", "low", "close", "volume"]].copy()
-        for col in ["open", "high", "low", "close", "volume"]:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-        out = out.dropna()
-        return out
+        cols = ["open", "high", "low", "close", "volume"]
+        df = df[cols].copy()
+        for col in cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.replace([np.inf, -np.inf], pd.NA)
+        df = df.dropna()
+
+        mask = (
+            df[need].gt(0).all(axis=1)
+            & df["low"].le(df[["open", "close", "high"]].min(axis=1))
+            & df[["open", "close"]].max(axis=1).le(df["high"])
+        )
+        df = df[mask]
+
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+
+        return df
 
     except Exception as e:
         log.warning("Failed to normalize OHLC frame: %s", e)
