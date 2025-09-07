@@ -21,7 +21,8 @@ venv/
 .coverage
 htmlcov/
 .hypothesis/
-data/
+data/*
+!data/instruments_sample.csv
 !src/data/
 !src/data/*.py
 
