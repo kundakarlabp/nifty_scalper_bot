@@ -3,8 +3,10 @@ from __future__ import annotations
 """Order executor backed by a :class:`Broker`."""
 
 import os
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
+from uuid import uuid4
 
 from src.broker.interface import Broker, OrderRequest, OrderType, Side, TimeInForce
 from src.utils.env import env_flag
@@ -20,6 +22,7 @@ class BrokerOrderExecutor:
     ) -> None:
         self.broker = broker
         self.instrument_id_mapper = instrument_id_mapper
+        self._id_cache: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     def place_order(
@@ -33,7 +36,17 @@ class BrokerOrderExecutor:
         )
         if self._kill_switch_engaged():
             raise RuntimeError("kill switch active")
-        return self.broker.place_order(order)
+
+        order = self._ensure_client_order_id(order)
+        cid = order.client_order_id
+        assert cid is not None
+        cached = self._id_cache.get(cid)
+        if cached:
+            return cached
+
+        oid = self.broker.place_order(order)
+        self._id_cache[cid] = oid
+        return oid
 
     # ------------------------------------------------------------------
     def buy(self, symbol_or_token: str | int, qty: int, **kwargs: Any) -> str:
@@ -125,3 +138,9 @@ class BrokerOrderExecutor:
             client_order_id=data.get("client_order_id"),
             metadata=data.get("metadata"),
         )
+
+    # ------------------------------------------------------------------
+    def _ensure_client_order_id(self, order: OrderRequest) -> OrderRequest:
+        """Return a copy of ``order`` with a client-side idempotency tag."""
+        cid = order.client_order_id or uuid4().hex
+        return replace(order, client_order_id=cid)

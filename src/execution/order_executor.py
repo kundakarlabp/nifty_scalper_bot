@@ -1071,7 +1071,13 @@ class OrderExecutor:
 
     # ----------- polling / OCO enforcement ----------
     def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
-        """Refresh local records from broker; return fills as [(record_id, px), ...]."""
+        """Refresh order state and enforce OCO-style exits.
+
+        If the broker lacks native one-cancels-other support, this method
+        acts as a watcher: it polls open orders and cancels siblings when one
+        leg fills. It returns a list of newly filled legs as ``[(record_id, px)]``
+        tuples.
+        """
         if not self.kite:
             return []
         fills: List[Tuple[str, float]] = []
@@ -1194,11 +1200,21 @@ class OrderExecutor:
             log.warning("OrderExecutor health warning: %s", e)
 
     def shutdown(self) -> None:
-        """Graceful teardown."""
+        """Graceful teardown: cancel orders and journal shutdown."""
         try:
             self.cancel_all_orders()
         except Exception:
             log.debug("Error during executor shutdown", exc_info=True)
+        if self.journal:
+            try:
+                self.journal.append_event(
+                    ts=datetime.utcnow().isoformat(),
+                    trade_id="SYSTEM",
+                    leg_id="SHUTDOWN",
+                    etype="SHUTDOWN",
+                )
+            except Exception:
+                log.debug("Error journalling shutdown", exc_info=True)
 
     # ----------- telegram-wired mutators ----------
     def set_trailing_enabled(self, on: bool) -> None:
