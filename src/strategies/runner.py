@@ -124,7 +124,11 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def _enqueue_tick(self, tick: Tick) -> None:
-        self._last_tick = time.time()
+        now = time.time()
+        self._last_tick = now
+        from src.utils.health import STATE  # local import to avoid circular
+
+        STATE.last_tick_ts = now
         self._paused = False
         self._tick_queue.append(tick)
         metrics.inc_ticks()
