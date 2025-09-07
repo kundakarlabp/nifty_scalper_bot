@@ -28,6 +28,8 @@ from src.utils.logging_tools import (
     get_recent_logs,
     log_buffer_handler,
 )  # noqa: E402
+from src.utils.logger_setup import setup_logging  # noqa: E402
+from src.diagnostics.metrics import metrics  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
@@ -43,12 +45,7 @@ except Exception:
 # Logging
 # -----------------------------
 def _setup_logging() -> None:
-    level = getattr(logging, (settings.log_level or "INFO").upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    setup_logging(level=settings.log_level, json=settings.log_json)
     root = logging.getLogger()
     root.addFilter(RateLimitFilter(interval=120.0))
     if log_buffer_handler not in root.handlers:
@@ -232,7 +229,7 @@ def main() -> int:
     try:
         validate_critical_settings()
     except Exception as e:
-        logging.getLogger("main").error("\u274c Config validation failed: %s", e)
+        logging.getLogger("main").error("\u274c Config validation failed: %s", e, exc_info=True)
         return 1
     log = logging.getLogger("main")
     rcfg = settings.risk
@@ -253,7 +250,7 @@ def main() -> int:
     try:
         kite = _build_kite_session()
     except Exception as e:
-        log.error("❌ Kite session init failed: %s", e)
+        log.error("❌ Kite session init failed: %s", e, exc_info=True)
 
     cfg_path = os.environ.get("STRATEGY_CFG")
     runner = StrategyRunner(
@@ -275,7 +272,7 @@ def main() -> int:
     try:
         runner.set_live_mode(settings.enable_live_trading)
     except Exception as e:
-        log.error("⚠️ Live mode setup failed: %s", e)
+        log.error("⚠️ Live mode setup failed: %s", e, exc_info=True)
 
     _install_signal_handlers(runner)
 
@@ -286,8 +283,8 @@ def main() -> int:
     try:
         mode = "LIVE" if settings.enable_live_trading else "DRY"
         runner.telegram_controller.send_message(f"🚀 Bot starting ({mode})")
-    except Exception:
-        log.warning("Telegram startup message failed")
+    except Exception as e:
+        log.warning("Telegram startup message failed: %s", e, exc_info=True)
 
     try:
         if hasattr(runner, "start"):
@@ -296,24 +293,45 @@ def main() -> int:
         log.exception("Runner start failed: %s", e)
         return 1
 
+    last_hb = time.time()
     try:
         while not _stop_flag:
+            start_ts = time.perf_counter()
             try:
                 runner.process_tick(tick=None)
-                flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
-                if isinstance(flow, dict):
-                    if flow.get("signal_ok"):
-                        log.info("Signal generated: %s", flow.get("signal"))
-                    else:
-                        log.debug(
-                            "No signal generated: %s", flow.get("reason_block")
-                        )
-                runner.health_check()
-                time.sleep(5)
             except Exception as e:
                 log.exception("Main loop error: %s", e)
                 time.sleep(1)
                 continue
+            latency_ms = (time.perf_counter() - start_ts) * 1000.0
+            metrics.observe_latency(latency_ms)
+            metrics.inc_ticks()
+            qd = sum(len(q) for q in getattr(getattr(runner, "executor", None), "_queues", {}).values())
+            metrics.set_queue_depth(qd)
+            flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
+            if isinstance(flow, dict):
+                if flow.get("signal_ok"):
+                    log.info("Signal generated: %s", flow.get("signal"))
+                else:
+                    log.debug("No signal generated: %s", flow.get("reason_block"))
+            runner.health_check()
+            now = time.time()
+            if (now - last_hb) >= 30:
+                snap = metrics.snapshot()
+                cb = getattr(getattr(runner, "executor", None), "cb_orders", None)
+                cb_state = getattr(cb, "state", "unknown")
+                hb = (
+                    f"HB last_tick_age={snap['last_tick_age']:.1f}s "
+                    f"queue={snap['queue_depth']} cb={cb_state}"
+                )
+                log.info(hb)
+                try:
+                    if settings.telegram.enabled:
+                        runner.telegram_controller.send_message(hb)
+                except Exception as e:
+                    log.debug("Heartbeat telegram failed: %s", e, exc_info=True)
+                last_hb = now
+            time.sleep(5)
     finally:
         try:
             runner.shutdown()
@@ -321,12 +339,12 @@ def main() -> int:
             log.exception("Runner shutdown failed")
         try:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
-        except Exception:
-            log.warning("Failed to send shutdown message to Telegram")
+        except Exception as e:
+            log.warning("Failed to send shutdown message to Telegram: %s", e, exc_info=True)
         try:
             runner.telegram_controller.stop_polling()
-        except Exception:
-            log.warning("Failed to stop Telegram polling")
+        except Exception as e:
+            log.warning("Failed to stop Telegram polling: %s", e, exc_info=True)
 
     return 0
 
