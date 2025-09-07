@@ -55,7 +55,7 @@ def test_default_values():
         settings = AppSettings(_env_file=None)
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
-        assert settings.enable_live_trading is True  # Default value
+        assert settings.enable_live_trading is False  # Default now
         assert settings.system.log_buffer_capacity == 4000  # Default value
         assert settings.data.lookback_minutes == 20  # Updated default
         assert settings.data.lookback_padding_bars == 5  # Default padding
@@ -116,6 +116,36 @@ def test_historical_timeframe_alias():
     assert settings.data.timeframe == "5minute"
 
 
+def test_enable_trading_alias():
+    env = {
+        "ENABLE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.enable_live_trading is True
+
+
+def test_skip_broker_validation_allows_missing_creds(caplog):
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "SKIP_BROKER_VALIDATION": "true",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+        with mock.patch("src.config.settings", settings), mock.patch(
+            "src.boot.validate_env.settings", settings
+        ), caplog.at_level(logging.WARNING):
+            validate_critical_settings()
+    assert any("SKIP_BROKER_VALIDATION" in r.message for r in caplog.records)
+
+
 def test_zerodha_creds_required_when_live():
     """Zerodha credentials must be present when live trading is enabled."""
     env = {
@@ -130,7 +160,8 @@ def test_zerodha_creds_required_when_live():
     ):
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
-    assert "ZERODHA__API_KEY is required" in str(exc.value)
+    msg = str(exc.value)
+    assert "ZERODHA__API_KEY" in msg and "KITE_API_KEY" in msg
 
 
 def test_zerodha_creds_optional_when_paper():

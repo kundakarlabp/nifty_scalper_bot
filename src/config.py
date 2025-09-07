@@ -13,7 +13,7 @@ import logging
 import os
 from typing import Literal
 
-from pydantic import BaseModel, ValidationInfo, field_validator, Field
+from pydantic import AliasChoices, BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -339,8 +339,11 @@ class AppSettings(BaseSettings):
     ai_provider: str = ""
     openai_api_key: str = ""
 
-    # Live trading is enabled by default; set to False to run in paper mode.
-    enable_live_trading: bool = True
+    # Live trading is disabled by default; set to True to run in live mode.
+    enable_live_trading: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ENABLE_LIVE_TRADING", "ENABLE_TRADING"),
+    )
     allow_offhours_testing: bool = False
     enable_time_windows: bool = True
     tz: str = "Asia/Kolkata"
