@@ -67,7 +67,7 @@ def retry(
     only: Optional[Iterable[Type[BaseException]]] = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Retry decorator with exponential backoff."""
-    only_tuple = tuple(only) if only else (Exception,)
+    only_tuple: tuple[Type[BaseException], ...] = tuple(only or (Exception,))
 
     def deco(fn: Callable[..., T]) -> Callable[..., T]:
         def wrap(*a: object, **k: object) -> T:

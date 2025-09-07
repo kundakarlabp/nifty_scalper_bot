@@ -6,6 +6,7 @@ pytest>=8.2
 pytest-cov>=5.0
 hypothesis>=6.112
 freezegun>=1.5
+types-requests>=2.32
 
 # Developer tools
 pre-commit>=3.8
