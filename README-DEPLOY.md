@@ -1,5 +1,7 @@
 # Nifty Scalper Bot – Deployment (Railway)
 
+**Flags:** `ENABLE_LIVE_TRADING=true|false`, `BROKER_CONNECT_FOR_DATA=true` (connect broker for WS/data in paper mode), `DATA__WARMUP_DISABLE=true` (skip yfinance warmup), `YFINANCE_TICKER_OVERRIDE=^NSEI|^NSEBANK|NSEI.NS`.
+
 ## One-time
 1. Add repository secrets or Railway variables for:
    - `ZERODHA__API_KEY`, `ZERODHA__ACCESS_TOKEN`

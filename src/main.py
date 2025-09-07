@@ -20,6 +20,7 @@ from src.boot.validate_env import (
     seed_env_from_defaults,
     validate_critical_settings,
     _log_cred_presence,
+    BROKER_CONNECT_FOR_DATA,
 )  # noqa: E402
 
 seed_env_from_defaults()
@@ -90,8 +91,10 @@ class _NoopTelegram:
 def _build_kite_session() -> Optional["KiteConnect"]:
     log = logging.getLogger("main")
     if not settings.enable_live_trading:
-        log.info("Live trading disabled → paper mode.")
-        return None
+        if not BROKER_CONNECT_FOR_DATA:
+            log.info("Live trading disabled → paper mode.")
+            return None
+        log.info("Paper mode with broker data enabled.")
 
     if KiteConnect is None:
         raise RuntimeError("ENABLE_LIVE_TRADING=true but kiteconnect not installed.")
@@ -99,7 +102,7 @@ def _build_kite_session() -> Optional["KiteConnect"]:
     api_key = settings.zerodha.api_key
     access_token = settings.zerodha.access_token
     if not api_key or not access_token:
-        raise RuntimeError("Missing Zerodha credentials for live mode.")
+        raise RuntimeError("Missing Zerodha credentials for broker data.")
 
     kite = KiteConnect(api_key=str(api_key))
     kite.set_access_token(str(access_token))
