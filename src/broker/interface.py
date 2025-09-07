@@ -77,6 +77,8 @@ class Order:
     status: OrderStatus
     filled_qty: int
     avg_fill_price: Optional[Decimal] = None
+    client_order_id: Optional[str] = None
+    tif: Optional[TimeInForce] = None
     raw: Optional[Dict[str, Any]] = None
 
 

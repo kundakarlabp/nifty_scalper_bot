@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, cast
+from decimal import Decimal
 
 import pandas as pd
 import yaml  # type: ignore[import-untyped]
@@ -148,4 +149,46 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
+
+
+def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
+    """Light-weight runtime checks for critical dependencies.
+
+    This verifies that mandatory environment variables are present, the
+    instruments CSV exists, and that the broker SDK can be instantiated with the
+    provided tokens.  The checks intentionally avoid any network calls so they
+    remain fast and side‑effect free.
+    """
+
+    cfg = cast(AppSettings, cfg or settings)
+    errors: list[str] = []
+
+    # --- required environment variables ---
+    required = [
+        "ZERODHA__API_KEY",
+        "ZERODHA__API_SECRET",
+        "ZERODHA__ACCESS_TOKEN",
+    ]
+    if cfg.enable_live_trading:
+        for key in required:
+            if not os.environ.get(key):
+                errors.append(f"{key} must be set in the environment")
+
+    # --- instrument CSV path ---
+    csv_path = Path(os.environ.get("INSTRUMENTS_CSV", "data/nifty_ohlc.csv"))
+    if not csv_path.exists():
+        errors.append(f"Instrument CSV not found: {csv_path}")
+
+    # --- broker connectivity & tokens ---
+    if cfg.enable_live_trading and KiteConnect is not None:
+        try:
+            kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
+            kite.set_access_token(str(cfg.zerodha.access_token))
+            # avoid network calls; simply ensure object creation succeeded
+            _ = Decimal("0")  # exercise Decimal import for mypy
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(f"Broker SDK initialisation failed: {exc}")
+
+    if errors:
+        raise RuntimeError("Runtime validation failed:\n" + "\n".join(errors))
 

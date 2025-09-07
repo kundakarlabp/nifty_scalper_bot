@@ -32,14 +32,21 @@ class BrokerDataSource:
         if self._tick_cb is None:
             raise RuntimeError("tick callback not set")
         self._subscriptions = list(instruments)
-        self.broker.subscribe_ticks(self._subscriptions, self._tick_cb)
+        self.broker.subscribe_ticks(self._subscriptions, self._handle_tick)
 
     def start(self) -> None:
         """Connect to the broker and resubscribe if needed."""
         if not self.broker.is_connected():
             self.broker.connect()
         if self._subscriptions and self._tick_cb is not None:
-            self.broker.subscribe_ticks(self._subscriptions, self._tick_cb)
+            self.broker.subscribe_ticks(self._subscriptions, self._handle_tick)
+        # Register reconnect hooks if the broker exposes them
+        on_reconnect = getattr(self.broker, "on_reconnect", None)
+        if callable(on_reconnect):
+            on_reconnect(lambda: self.subscribe(self._subscriptions))
+        on_disconnect = getattr(self.broker, "on_disconnect", None)
+        if callable(on_disconnect):
+            on_disconnect(self.broker.connect)
 
     def stop(self) -> None:
         """Disconnect from the broker if it exposes ``disconnect``."""
@@ -49,3 +56,14 @@ class BrokerDataSource:
                 disconnect()
             except Exception:  # pragma: no cover - defensive
                 pass
+
+    # ------------------------------------------------------------------
+    def _handle_tick(self, tick: Tick) -> None:
+        cb = self._tick_cb
+        if cb is None:
+            return
+        try:
+            cb(tick)
+        except Exception:
+            # Swallow exceptions to avoid blocking broker threads
+            pass
