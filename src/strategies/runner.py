@@ -9,6 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dt_time, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, ClassVar, Deque, Iterable, Callable, Mapping
 from zoneinfo import ZoneInfo
@@ -295,6 +296,7 @@ class StrategyRunner:
                 skip_next_open_after_two_daily_caps=True,
             )
         )
+        self._risk_state = guards.GuardState()
 
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
@@ -318,7 +320,7 @@ class StrategyRunner:
             return OrderExecutor(
                 kite=self.kite,
                 telegram_controller=self.telegram,
-                on_trade_closed=self.risk_engine.on_trade_closed,
+                on_trade_closed=self._on_trade_closed,
             )
 
         def _make_connector_shadow():
@@ -331,7 +333,7 @@ class StrategyRunner:
             return OrderExecutor(
                 kite=None,
                 telegram_controller=self.telegram,
-                on_trade_closed=self.risk_engine.on_trade_closed,
+                on_trade_closed=self._on_trade_closed,
             )
 
         self.components = init_default_registries(
@@ -474,6 +476,15 @@ class StrategyRunner:
         )
         # Log initial equity snapshot
         self._refresh_equity_if_due(silent=False)
+
+    def _on_trade_closed(self, pnl_R: float) -> None:
+        """Handle trade closure updates.
+
+        Args:
+            pnl_R: Realised P&L for the trade in R units.
+        """
+        self._risk_state.realised_loss += Decimal(str(pnl_R))
+        self.risk_engine.on_trade_closed(pnl_R=pnl_R)
 
     # Optional start hook (main calls it if present)
     def start(self) -> None:
