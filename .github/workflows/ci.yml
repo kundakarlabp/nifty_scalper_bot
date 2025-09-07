@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  packages: write
 
 jobs:
   build-test:
@@ -27,6 +28,29 @@ jobs:
 
       - name: Run project checks
         run: ./run_checks.sh
+
+  docker-image:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t nifty-scalper:${{ github.ref_name }} .
+      - name: Push image
+        if: ${{ secrets.REGISTRY && secrets.REGISTRY_USER && secrets.REGISTRY_PASSWORD }}
+        env:
+          REGISTRY: ${{ secrets.REGISTRY }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+          docker tag nifty-scalper:${{ github.ref_name }} "$REGISTRY/nifty-scalper:${{ github.ref_name }}"
+          docker push "$REGISTRY/nifty-scalper:${{ github.ref_name }}"
+      - name: TODO add registry credentials
+        if: ${{ !(secrets.REGISTRY && secrets.REGISTRY_USER && secrets.REGISTRY_PASSWORD) }}
+        run: echo 'TODO: Configure REGISTRY, REGISTRY_USER and REGISTRY_PASSWORD secrets to enable image push.'
 
   ai-review:
     name: AI Code Review (PRs only)
