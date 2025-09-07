@@ -4,25 +4,50 @@ from __future__ import annotations
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Tuple
+import time
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, Optional
+
+
+@dataclass
+class HealthState:
+    """Tracks runtime health information for readiness probes."""
+
+    started_ts: float = field(default_factory=time.time)
+    last_tick_ts: float = 0.0
+    broker_connected: bool = False
+    max_tick_age_s: float = 3.0
+
+
+STATE: HealthState = HealthState()
+_srv: Optional[HTTPServer] = None
+_thr: Optional[threading.Thread] = None
 
 
 class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # pragma: no cover - simple I/O
-        if self.path == "/live":
-            self._send(200, {"live": True})
-        elif self.path == "/ready":
-            ready = getattr(self.server, "ready", False)  # type: ignore[attr-defined]
-            self._send(200 if ready else 503, {"ready": bool(ready)})
-        else:
-            self._send(404, {"error": "not found"})
+    """Simple handler serving `/live` and `/ready` endpoints."""
 
-    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover
+    def do_GET(self) -> None:  # pragma: no cover - I/O bound
+        if self.path.startswith("/live"):
+            self._json({"status": "live"}, 200)
+            return
+        if self.path.startswith("/ready"):
+            age = time.time() - STATE.last_tick_ts if STATE.last_tick_ts else 9e9
+            ready = STATE.broker_connected and age <= STATE.max_tick_age_s
+            self._json(
+                {"status": "ready" if ready else "not_ready", "tick_age_s": age},
+                200 if ready else 503,
+            )
+            return
+        self._json({"status": "ok"}, 200)
+
+    def log_message(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover
+        """Silence default request logging."""
         return
 
-    def _send(self, code: int, payload: dict) -> None:
-        body = json.dumps(payload).encode()
+    def _json(self, payload: Dict[str, Any], code: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -30,20 +55,26 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class HealthServer:
-    """Tiny HTTP server exposing ``/live`` and ``/ready`` endpoints."""
+def start_health_server(host: str = "0.0.0.0", port: int = 8080) -> None:
+    """Start the health server in a background thread."""
+    global _srv, _thr
+    if _srv:
+        return
+    _srv = HTTPServer((host, int(port)), _Handler)
+    _thr = threading.Thread(target=_srv.serve_forever, daemon=True)
+    _thr.start()
 
-    def __init__(self, addr: Tuple[str, int] = ("0.0.0.0", 8000)) -> None:
-        self._srv = ThreadingHTTPServer(addr, _Handler)
-        self._srv.ready = False  # type: ignore[attr-defined]
-        self._thread = threading.Thread(target=self._srv.serve_forever, daemon=True)
 
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._srv.shutdown()
-
-    def set_ready(self, ready: bool) -> None:
-        self._srv.ready = bool(ready)  # type: ignore[attr-defined]
-
+def stop_health_server() -> None:
+    """Stop the health server if running."""
+    global _srv, _thr
+    if not _srv:
+        return
+    try:
+        _srv.shutdown()
+    finally:
+        _srv.server_close()
+    if _thr:
+        _thr.join(timeout=1)
+    _srv = None
+    _thr = None
