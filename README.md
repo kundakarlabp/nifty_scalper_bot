@@ -122,7 +122,7 @@ Risk checks guard every trade.  The runner tracks:
 - daily drawdown percentage
 - equity floor
 
-Use the Telegram `/risk` command to inspect current limits.  Trading can be halted via `/stop` or by setting `ENABLE_LIVE_TRADING=false` before starting the bot (acts as a kill switch).
+Use the Telegram `/risk` command to inspect current limits.  Live trading is disabled unless `ENABLE_LIVE_TRADING=true` (alias `ENABLE_TRADING=true`); setting the flag to false acts as a kill switch.
 
 ## Telegram commands
 

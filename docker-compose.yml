@@ -14,7 +14,7 @@ services:
       # Ensure IST inside container (also set in Dockerfile)
       - TZ=Asia/Kolkata
       # Optional: override mode at runtime
-      # - ENABLE_LIVE_TRADING=false  # default is true
+      # - ENABLE_LIVE_TRADING=true  # default is false
       # - ENABLE_TELEGRAM=true
     volumes:
       # Persist logs locally (optional)

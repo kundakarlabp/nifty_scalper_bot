@@ -26,6 +26,25 @@ except Exception:  # pragma: no cover
     LiveKiteSource = None  # type: ignore
 
 
+def env_any(*names: str, default: str | None = None) -> str | None:
+    """Return the first non-empty environment variable from ``names``."""
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            return val
+    return default
+
+def _skip_validation() -> bool:
+    return (
+        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
+        in {"1", "true", "yes"}
+    )
+
+API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
+API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
+ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+
+
 def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
     """Populate ``os.environ`` with values from a defaults YAML file.
 
@@ -62,13 +81,19 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     errors: list[str] = []
 
     # Live trading requires broker credentials
-    if cfg.enable_live_trading:
+    if cfg.enable_live_trading and not _skip_validation():
         if not cfg.zerodha.api_key:
-            errors.append("ZERODHA__API_KEY is required when ENABLE_LIVE_TRADING=true")
+            errors.append(
+                "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true"
+            )
         if not cfg.zerodha.api_secret:
-            errors.append("ZERODHA__API_SECRET is required when ENABLE_LIVE_TRADING=true")
+            errors.append(
+                "ZERODHA__API_SECRET (or KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true"
+            )
         if not cfg.zerodha.access_token:
-            errors.append("ZERODHA__ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true")
+            errors.append(
+                "ZERODHA__ACCESS_TOKEN (or KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true"
+            )
 
     # Telegram configuration (required only when enabled)
     if cfg.telegram.enabled:
@@ -148,6 +173,11 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                             )
 
     if errors:
+        if _skip_validation():
+            logging.getLogger(__name__).warning(
+                "SKIP_BROKER_VALIDATION=true: proceeding without live creds",
+            )
+            return
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
@@ -165,14 +195,14 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 
     # --- required environment variables ---
     required = [
-        "ZERODHA__API_KEY",
-        "ZERODHA__API_SECRET",
-        "ZERODHA__ACCESS_TOKEN",
+        ("ZERODHA__API_KEY", "KITE_API_KEY"),
+        ("ZERODHA__API_SECRET", "KITE_API_SECRET"),
+        ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN"),
     ]
-    if cfg.enable_live_trading:
-        for key in required:
-            if not os.environ.get(key):
-                errors.append(f"{key} must be set in the environment")
+    if cfg.enable_live_trading and not _skip_validation():
+        for keys in required:
+            if not env_any(*keys):
+                errors.append("/".join(keys) + " must be set in the environment")
 
     # --- instrument CSV path ---
     csv_path = Path(os.environ.get("INSTRUMENTS_CSV", "data/nifty_ohlc.csv"))
@@ -180,7 +210,7 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
         errors.append(f"Instrument CSV not found: {csv_path}")
 
     # --- broker connectivity & tokens ---
-    if cfg.enable_live_trading and KiteConnect is not None:
+    if cfg.enable_live_trading and KiteConnect is not None and not _skip_validation():
         try:
             kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
             kite.set_access_token(str(cfg.zerodha.access_token))
@@ -190,5 +220,23 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
             errors.append(f"Broker SDK initialisation failed: {exc}")
 
     if errors:
+        if _skip_validation():
+            logging.getLogger(__name__).warning(
+                "SKIP_BROKER_VALIDATION=true: proceeding without live creds",
+            )
+            return
         raise RuntimeError("Runtime validation failed:\n" + "\n".join(errors))
+
+
+def _log_cred_presence() -> None:
+    """Log the presence of live trading credentials without revealing them."""
+    log = logging.getLogger(__name__)
+    mask = lambda v: bool(v and v.strip())
+    log.info(
+        "live=%s, api_key=%s, secret=%s, access=%s",
+        settings.enable_live_trading,
+        mask(API_KEY),
+        mask(API_SECRET),
+        mask(ACCESS_TOKEN),
+    )
 

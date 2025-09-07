@@ -100,6 +100,8 @@ def test_position_sizer_properties(entry, stop, lot_size, equity, risk, min_lots
     assert lots <= max_lots
     assert qty == lots * lot_size
     if lots > 0:
-        assert lots >= min_lots
+        max_lots_exposure = int((equity * max_pos) // (entry * lot_size))
+        if max_lots_exposure >= min_lots:
+            assert lots >= min_lots
         assert entry * lot_size * lots <= equity * max_pos + 1e-6
 

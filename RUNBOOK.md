@@ -7,8 +7,8 @@
 4. Restart the bot.
 
 ## Kill switch
+- Live trading is off by default. Set `ENABLE_LIVE_TRADING=true` (or `ENABLE_TRADING=true`) before launch to place real orders.
 - Send `/stop` via Telegram for an immediate halt.
-- Or set `ENABLE_LIVE_TRADING=false` before launch to disable order placement.
 
 ## Restart procedure
 1. Ensure environment variables are set in `.env`.

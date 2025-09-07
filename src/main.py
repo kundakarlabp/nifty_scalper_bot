@@ -19,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 from src.boot.validate_env import (
     seed_env_from_defaults,
     validate_critical_settings,
+    _log_cred_presence,
 )  # noqa: E402
 
 seed_env_from_defaults()
@@ -60,6 +61,10 @@ def _setup_logging() -> None:
             )
         )
         root.addHandler(fh)
+    try:
+        _log_cred_presence()
+    except Exception:
+        pass
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
