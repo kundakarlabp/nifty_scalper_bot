@@ -39,7 +39,7 @@ nifty_scalper_bot/
 ├── render.yaml
 ├── requirements.txt
 └── ...
-## Quick start
+## Setup & Run
 
 1. **Clone the repository**
 
@@ -61,10 +61,11 @@ nifty_scalper_bot/
 4. **Run the bot locally**
 
    ```bash
-   python3 -m src.main
+   # sanity + start
+   ./manage_bot.sh run
    ```
 
-   The bot will log to both the console and a rotating file under `logs/`.  Use the Telegram commands documented below to control the session.
+   The wrapper validates dependencies then launches `python -m src.main start`.  Logs stream to the console and rotate under `logs/`.  Use the Telegram commands documented below to control the session.
 
 5. **Deploy to Railway/Render**
 
@@ -78,6 +79,21 @@ The runtime wiring is broker‑agnostic:
 instruments → KiteBroker → BrokerDataSource → Orchestrator → BrokerOrderExecutor
 ```
 
+```
+                 +----------------+
+Market data ---> | BrokerDataSource| --+
+                 +----------------+   |
+                                       v
+                               +---------------+
+                               | StrategyRunner| --+--> OrderExecutor --> Broker API
+                               +---------------+   |
+                                       ^            |
+                                       |            v
+                                  Health server  Telegram
+                                       ^            |
+                                       +------------+
+```
+
 `src/main.py` assembles these pieces and optionally attaches a Telegram notifier if credentials are provided.  A minimal Docker setup is provided for local runs:
 
 ```bash
@@ -86,12 +102,41 @@ docker compose up --build bot      # run the bot
 docker compose up --build test     # run the test suite
 ```
 
+## Health endpoints
+
+A lightweight Flask app exposes health probes on port `8000` by default:
+
+```
+GET  /health  → JSON status bundle
+HEAD /health  → cheap probe for platforms
+```
+
+Disable the server by setting `HEALTH__ENABLE_SERVER=false` in the environment.
+
+## Risk flags & kill switch
+
+Risk checks guard every trade.  The runner tracks:
+
+- max trades per day
+- consecutive loss limit
+- daily drawdown percentage
+- equity floor
+
+Use the Telegram `/risk` command to inspect current limits.  Trading can be halted via `/stop` or by setting `ENABLE_LIVE_TRADING=false` before starting the bot (acts as a kill switch).
+
 ## Telegram commands
 
 * `/start` – begin a real‑time trading session.  The bot will connect to Kite, subscribe to market data and start evaluating signals.
 * `/stop` – halt streaming and cancel any open subscriptions.  Existing positions will continue to be managed by the execution layer.
 * `/status` – return a summary of the current trading state including uptime, streaming status, active positions, instruments and risk metrics.
 * `/summary` – report realised P&L for the day, the number of trades taken and the current drawdown.
+
+## Troubleshooting
+
+- **Health check failing** – ensure port `8000` is free and the process has started.  `curl localhost:8000/health` should return JSON.
+- **Risk block** – `/status` or `/risk` will show which gate triggered.  Reset with `/riskresettoday` if appropriate.
+- **Network down or stale ticks** – check connectivity to the broker and restart `manage_bot.sh run` once connectivity is restored.
+- **Broker order rejected** – review logs and `/apihealth`; common causes are invalid parameters or rate limits.
 
 ## Testing
 
