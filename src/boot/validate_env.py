@@ -26,6 +26,17 @@ except Exception:  # pragma: no cover
     LiveKiteSource = None  # type: ignore
 
 
+ENABLE_LIVE_TRADING = str(
+    os.getenv("ENABLE_LIVE_TRADING")
+    or os.getenv("ENABLE_TRADING")
+    or "false"
+).lower() in {"1", "true", "yes"}
+
+SKIP_BROKER_VALIDATION = str(
+    os.getenv("SKIP_BROKER_VALIDATION", "false")
+).lower() in {"1", "true", "yes"}
+
+
 def env_any(*names: str, default: str | None = None) -> str | None:
     """Return the first non-empty environment variable from ``names``."""
     for name in names:
@@ -35,10 +46,7 @@ def env_any(*names: str, default: str | None = None) -> str | None:
     return default
 
 def _skip_validation() -> bool:
-    return (
-        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
-        in {"1", "true", "yes"}
-    )
+    return SKIP_BROKER_VALIDATION
 
 API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
 API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
@@ -245,8 +253,10 @@ def _log_cred_presence() -> None:
     log = logging.getLogger(__name__)
     mask = lambda v: bool(v and v.strip())
     log.info(
-        "live=%s, api_key=%s, secret=%s, access=%s",
+        "live=%s (env=%s), skip_validation=%s, api_key=%s, secret=%s, access=%s",
         settings.enable_live_trading,
+        ENABLE_LIVE_TRADING,
+        SKIP_BROKER_VALIDATION,
         mask(API_KEY),
         mask(API_SECRET),
         mask(ACCESS_TOKEN),
