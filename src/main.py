@@ -16,7 +16,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.config import settings, validate_critical_settings  # noqa: E402
+from src.boot.validate_env import (
+    seed_env_from_defaults,
+    validate_critical_settings,
+)  # noqa: E402
+
+seed_env_from_defaults()
+from src.config import settings  # noqa: E402
 from src.utils.logging_tools import (
     RateLimitFilter,
     get_recent_logs,
