@@ -52,18 +52,32 @@ API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
 API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
 ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
 
+# Deployment environment flags
+# True when running on Railway (detected via known env vars)
+IS_HOSTED_RAILWAY = bool(env_any("RAILWAY_PROJECT_ID", "RAILWAY_STATIC_URL"))
+
 # Optional runtime flags
 BROKER_CONNECT_FOR_DATA = (
     str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower()
     in {"1", "true", "yes"}
 )
 DATA_WARMUP_DISABLE = (
-    str(os.getenv("DATA__WARMUP_DISABLE", "false")).lower()
+    str(
+        os.getenv(
+            "DATA__WARMUP_DISABLE",
+            "true" if IS_HOSTED_RAILWAY else "false",
+        )
+    ).lower()
     in {"1", "true", "yes"}
 )
 YFINANCE_TICKER_OVERRIDE = os.getenv("YFINANCE_TICKER_OVERRIDE")
 YFINANCE_DISABLE = (
-    str(os.getenv("YFINANCE_DISABLE", "false")).lower() in {"1", "true", "yes"}
+    str(
+        os.getenv(
+            "YFINANCE_DISABLE", "true" if IS_HOSTED_RAILWAY else "false"
+        )
+    ).lower()
+    in {"1", "true", "yes"}
 )
 
 
