@@ -95,7 +95,8 @@ fi
 # ---------------------------
 # Backtest (integration smoke)
 # ---------------------------
-BACKTEST="tests/true_backtest_dynamic.py"
+# The high fidelity backtester lives under scripts/; run it if available.
+BACKTEST="scripts/true_backtest_dynamic.py"
 if [[ -f "$BACKTEST" ]]; then
   echo "--- Running backtester: $BACKTEST ---"
   # Provide sane defaults for time filters if your script reads them
