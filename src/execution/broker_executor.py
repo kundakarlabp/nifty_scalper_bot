@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Order executor backed by a :class:`Broker`."""
 
-from typing import Any, Callable, Mapping, Optional
+from dataclasses import replace
+from typing import Any, Callable, Dict, Mapping, Optional
+from uuid import uuid4
 
 from src.broker.interface import Broker, OrderRequest, OrderType, Side, TimeInForce
 
@@ -17,18 +19,35 @@ class BrokerOrderExecutor:
     ) -> None:
         self.broker = broker
         self.instrument_id_mapper = instrument_id_mapper
+        self._id_map: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     def place_order(
         self,
         req: OrderRequest | Mapping[str, Any],
         instrument_id_mapper: Optional[Callable[[str], int]] = None,
-    ) -> str:
-        """Place an order and return the broker order ID."""
+        ) -> str:
+        """Place an order and return the broker order ID.
+
+        Generates a ``client_order_id`` when missing and deduplicates repeated
+        submissions so that retried calls with the same ``client_order_id`` do
+        not result in duplicate broker orders.
+        """
         order = req if isinstance(req, OrderRequest) else self._coerce_request(
             req, instrument_id_mapper
         )
-        return self.broker.place_order(order)
+
+        cid = order.client_order_id or uuid4().hex[:16]
+        if order.client_order_id is None:
+            order = replace(order, client_order_id=cid)
+
+        existing = self._id_map.get(cid)
+        if existing is not None:
+            return existing
+
+        broker_id = self.broker.place_order(order)
+        self._id_map[cid] = broker_id
+        return broker_id
 
     # ------------------------------------------------------------------
     def buy(self, symbol_or_token: str | int, qty: int, **kwargs: Any) -> str:
