@@ -31,6 +31,7 @@ from src.broker.interface import (
     TimeInForce,
 )
 from src.broker.instruments import InstrumentStore
+from src.execution import broker_retry
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class KiteBroker(Broker):
     def ltp(self, instrument_id: int) -> Decimal:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
-        data = self._kite.ltp([instrument_id])  # type: ignore[operator]
+        data = broker_retry.call(self._kite.ltp, [instrument_id])  # type: ignore[operator]
         first = next(iter(data.values()))
         return Decimal(str(first.get("last_price")))
 
@@ -101,14 +102,14 @@ class KiteBroker(Broker):
     def get_order(self, order_id: str) -> Order:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
-        hist = self._kite.order_history(order_id=order_id)  # type: ignore[call-arg]
+        hist = broker_retry.call(self._kite.order_history, order_id=order_id)  # type: ignore[call-arg]
         payload = hist[-1] if hist else {"order_id": order_id, "status": "UNKNOWN"}
         return self._map_order(payload)
 
     def get_positions(self) -> List[Dict[str, Any]]:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
-        pos = self._kite.positions()  # type: ignore[call-arg]
+        pos = broker_retry.call(self._kite.positions)  # type: ignore[call-arg]
         return pos.get("net", []) if isinstance(pos, dict) else pos
 
     # Mapping helpers -----------------------------------------------------------
