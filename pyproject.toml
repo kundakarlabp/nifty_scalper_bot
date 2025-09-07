@@ -3,12 +3,6 @@ line-length = 88
 target-version = ["py311"]
 skip-string-normalization = false
 
-[tool.isort]
-profile = "black"
-line_length = 88
-combine_as_imports = true
-include_trailing_comma = true
-
 [tool.ruff]
 target-version = "py311"
 line-length = 88
@@ -26,3 +20,4 @@ ignore = []
 
 [tool.pytest.ini_options]
 pythonpath = "."
+addopts = "--cov=src --cov-report=term-missing"

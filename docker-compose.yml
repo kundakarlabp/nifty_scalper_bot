@@ -20,15 +20,14 @@ services:
       # Persist logs locally (optional)
       - ./logs:/app/logs
     command: ["python", "-m", "src.main"]
-    # If you expose a health endpoint (Flask/FastAPI), map it:
-    # ports:
-    #   - "8000:8000"
-    # healthcheck:
-    #   test: ["CMD", "python", "-c", "import socket; import sys; sys.exit(0)"]
-    #   interval: 30s
-    #   timeout: 5s
-    #   retries: 5
-    #   start_period: 20s
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # Run the test suite inside a container
   test:

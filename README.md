@@ -55,10 +55,15 @@ nifty_scalper_bot/
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
+3. **Install pre-commit hooks**
 
-3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.
+   ```bash
+   pre-commit install --install-hooks
+   ```
 
-4. **Run the bot locally**
+4. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.
+
+5. **Run the bot locally**
 
    ```bash
    python3 -m src.main
@@ -66,7 +71,7 @@ nifty_scalper_bot/
 
    The bot will log to both the console and a rotating file under `logs/`.  Use the Telegram commands documented below to control the session.
 
-5. **Deploy to Railway/Render**
+6. **Deploy to Railway/Render**
 
    The provided `Dockerfile` and `render.yaml` work with Render or Railway.  Create a new Web Service in your chosen platform, point it at this repository and add the environment variables specified in `.env.example` via the dashboard.  The default command will start the bot and begin listening for Telegram commands.
 

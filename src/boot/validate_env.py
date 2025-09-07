@@ -82,6 +82,15 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
             "DATA__LOOKBACK_MINUTES must be >= STRATEGY__MIN_BARS_FOR_SIGNAL",
         )
 
+    # Instrument CSV path check
+    csv_path = (
+        getattr(cfg, "instruments_csv", None)
+        or getattr(cfg, "INSTRUMENTS_CSV", None)
+        or os.getenv("INSTRUMENTS_CSV")
+    )
+    if csv_path and not Path(csv_path).is_file():
+        errors.append(f"INSTRUMENTS_CSV not found at {csv_path}")
+
     # Instrument token sanity check (only in live mode with deps available)
     if (
         cfg.enable_live_trading
