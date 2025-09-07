@@ -552,29 +552,59 @@ class AppSettings(BaseSettings):
     @property
     def system_position_sync_interval(self) -> int: return self.system.position_sync_interval
 
+def _apply_env_overrides(cfg: AppSettings) -> None:
+    """Apply environment-based overrides to the loaded settings."""
+    cfg.data.timeframe = os.getenv("HISTORICAL_TIMEFRAME", cfg.data.timeframe)
+    object.__setattr__(
+        cfg,
+        "ENABLE_SIGNAL_DEBUG",
+        str(os.getenv("ENABLE_SIGNAL_DEBUG", "false")).lower() in ("1", "true", "yes"),
+    )
+    object.__setattr__(
+        cfg,
+        "TELEGRAM__PRETRADE_ALERTS",
+        str(os.getenv("TELEGRAM__PRETRADE_ALERTS", "false")).lower()
+        in ("1", "true", "yes"),
+    )
+    object.__setattr__(
+        cfg, "DIAG_INTERVAL_SECONDS", int(os.getenv("DIAG_INTERVAL_SECONDS", "60"))
+    )
+    object.__setattr__(
+        cfg, "MIN_PREVIEW_SCORE", float(os.getenv("MIN_PREVIEW_SCORE", "8"))
+    )
+    object.__setattr__(cfg, "ACK_TIMEOUT_MS", int(os.getenv("ACK_TIMEOUT_MS", "1500")))
+    object.__setattr__(cfg, "FILL_TIMEOUT_MS", int(os.getenv("FILL_TIMEOUT_MS", "10000")))
+    object.__setattr__(cfg, "RETRY_BACKOFF_MS", int(os.getenv("RETRY_BACKOFF_MS", "200")))
+    object.__setattr__(cfg, "MAX_PLACE_RETRIES", int(os.getenv("MAX_PLACE_RETRIES", "2")))
+    object.__setattr__(
+        cfg, "MAX_MODIFY_RETRIES", int(os.getenv("MAX_MODIFY_RETRIES", "2"))
+    )
+    object.__setattr__(cfg, "PLAN_STALE_SEC", int(os.getenv("PLAN_STALE_SEC", "20")))
 
-# Instantiate settings
-settings = AppSettings()
 
-# Apply environment-based overrides
-import os as _os  # noqa: E402
-object.__setattr__(settings, "ENABLE_SIGNAL_DEBUG", str(_os.getenv("ENABLE_SIGNAL_DEBUG", "false")).lower() in ("1","true","yes"))
-object.__setattr__(settings, "TELEGRAM__PRETRADE_ALERTS", str(_os.getenv("TELEGRAM__PRETRADE_ALERTS", "false")).lower() in ("1","true","yes"))
-object.__setattr__(settings, "DIAG_INTERVAL_SECONDS", int(_os.getenv("DIAG_INTERVAL_SECONDS", "60")))
-object.__setattr__(settings, "MIN_PREVIEW_SCORE", float(_os.getenv("MIN_PREVIEW_SCORE", "8")))
-object.__setattr__(settings, "ACK_TIMEOUT_MS", int(_os.getenv("ACK_TIMEOUT_MS", "1500")))
-object.__setattr__(settings, "FILL_TIMEOUT_MS", int(_os.getenv("FILL_TIMEOUT_MS", "10000")))
-object.__setattr__(settings, "RETRY_BACKOFF_MS", int(_os.getenv("RETRY_BACKOFF_MS", "200")))
-object.__setattr__(settings, "MAX_PLACE_RETRIES", int(_os.getenv("MAX_PLACE_RETRIES", "2")))
-object.__setattr__(settings, "MAX_MODIFY_RETRIES", int(_os.getenv("MAX_MODIFY_RETRIES", "2")))
-object.__setattr__(settings, "PLAN_STALE_SEC", int(_os.getenv("PLAN_STALE_SEC", "20")))
+def load_settings() -> AppSettings:
+    """Return application settings loaded from the environment."""
+    cfg = AppSettings(
+        zerodha=ZerodhaSettings.from_env(),
+        telegram=TelegramSettings.from_env(),
+    )
+    _apply_env_overrides(cfg)
+    return cfg
 
 
+class _SettingsProxy:
+    """Lazily load settings on first attribute access."""
 
-# -------- Back-compat convenience aliases (read-only) --------
-# (These mirror the flat properties as plain module-level names if other modules import them.)
-risk_default_equity = settings.risk_default_equity
-risk_risk_per_trade = settings.risk_risk_per_trade
-instruments_nifty_lot_size = settings.instruments_nifty_lot_size
-time_filter_start = settings.data_time_filter_start
-time_filter_end = settings.data_time_filter_end
+    _settings: AppSettings | None = None
+
+    def _load(self) -> AppSettings:
+        if self._settings is None:
+            self._settings = load_settings()
+        return self._settings
+
+    def __getattr__(self, item: str):  # pragma: no cover - passthrough
+        return getattr(self._load(), item)
+
+
+# Public singleton used by the rest of the application
+settings = _SettingsProxy()
