@@ -236,9 +236,9 @@ class StrategyRunner:
             LimitConfig(
                 tz=getattr(self.settings, "TZ", "Asia/Kolkata"),
                 max_daily_dd_R=getattr(self.settings, "MAX_DAILY_DD_R", 2.5),
-                max_trades_per_session=getattr(self.settings, "MAX_TRADES_PER_SESSION", 40),
-                max_lots_per_symbol=getattr(self.settings, "MAX_LOTS_PER_SYMBOL", 5),
-                max_notional_rupees=getattr(self.settings, "MAX_NOTIONAL_RUPEES", 1_500_000.0),
+                max_trades_per_session=settings.risk.max_trades_per_day,
+                max_lots_per_symbol=settings.risk.max_lots_per_symbol,
+                max_notional_rupees=settings.risk.max_notional_rupees,
                 max_gamma_mode_lots=getattr(self.settings, "MAX_GAMMA_MODE_LOTS", 2),
                 max_portfolio_delta_units=getattr(
                     self.settings, "MAX_PORTFOLIO_DELTA_UNITS", 100
@@ -248,7 +248,7 @@ class StrategyRunner:
                 ),
                 roll10_pause_R=getattr(self.settings, "ROLL10_PAUSE_R", -0.2),
                 roll10_pause_minutes=getattr(self.settings, "ROLL10_PAUSE_MIN", 60),
-                cooloff_losses=getattr(self.settings, "COOLOFF_LOSS_STREAK", 3),
+                cooloff_losses=settings.risk.consecutive_loss_limit,
                 cooloff_minutes=getattr(self.settings, "COOLOFF_MINUTES", 45),
                 skip_next_open_after_two_daily_caps=True,
             )
@@ -334,8 +334,8 @@ class StrategyRunner:
         self.data_provider_name = self._active_names.get("data_provider", "")
 
         # Trading window
-        self._start_time = self._parse_hhmm(settings.data.time_filter_start)
-        self._end_time = self._parse_hhmm(settings.data.time_filter_end)
+        self._start_time = self._parse_hhmm(settings.risk.trading_window_start)
+        self._end_time = self._parse_hhmm(settings.risk.trading_window_end)
 
         # Data warmup (best effort)
         self._last_fetch_ts: float = 0.0
@@ -390,7 +390,13 @@ class StrategyRunner:
         self.risk = RiskState(trading_day=self._today_ist())
         self._equity_last_refresh_ts: float = 0.0
         self._equity_cached_value: float = float(settings.risk.default_equity)
-        self._max_daily_loss_rupees: float = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+        loss_cap = getattr(settings.risk, "max_daily_loss_rupees", None)
+        if loss_cap is not None:
+            self._max_daily_loss_rupees = float(loss_cap)
+        else:
+            self._max_daily_loss_rupees = (
+                self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+            )
 
         # State + debug
         self._paused: bool = False
@@ -1037,6 +1043,8 @@ class StrategyRunner:
                     plan["reason_block"] = "daily_dd_hit"
                 elif "loss_streak" in blocked:
                     plan["reason_block"] = "loss_cooloff"
+                elif "market_hours" in blocked:
+                    plan["reason_block"] = "market_closed"
                 else:
                     plan["reason_block"] = "risk_gate_block"
                 flow["reason_block"] = plan["reason_block"]
@@ -1436,8 +1444,16 @@ class StrategyRunner:
         return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
 
     def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
-        gates = {"equity_floor": True, "daily_drawdown": True, "loss_streak": True,
-                 "trades_per_day": True, "sl_valid": True}
+        gates = {
+            "market_hours": True,
+            "equity_floor": True,
+            "daily_drawdown": True,
+            "loss_streak": True,
+            "trades_per_day": True,
+            "sl_valid": True,
+        }
+        if not self._within_trading_window():
+            gates["market_hours"] = False
         if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
             gates["equity_floor"] = False
         if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
@@ -1451,15 +1467,11 @@ class StrategyRunner:
                 # Cool-off finished; reset counters
                 self.risk.loss_cooldown_until = None
                 self.risk.consecutive_losses = 0
-        if gates.get("loss_streak", True) and self.risk.consecutive_losses >= 3:
+        limit = int(settings.risk.consecutive_loss_limit)
+        if gates.get("loss_streak", True) and self.risk.consecutive_losses >= limit:
             gates["loss_streak"] = False
-            cutoff = self._parse_hhmm("14:30")
-            if now.time() >= cutoff:
-                # stop for the rest of the day
-                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                self.risk.loss_cooldown_until = tomorrow
-            else:
-                self.risk.loss_cooldown_until = now + timedelta(minutes=45)
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            self.risk.loss_cooldown_until = tomorrow
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
         entry = signal.get("entry") or signal.get("entry_price")
@@ -1732,8 +1744,8 @@ class StrategyRunner:
 
         _ = adx_val  # legacy arg ignored; window no longer depends on ADX
         now = self._now_ist().time()
-        start = getattr(self, "_start_time", self._parse_hhmm(settings.data.time_filter_start))
-        end = getattr(self, "_end_time", self._parse_hhmm(settings.data.time_filter_end))
+        start = getattr(self, "_start_time", self._parse_hhmm(settings.risk.trading_window_start))
+        end = getattr(self, "_end_time", self._parse_hhmm(settings.risk.trading_window_end))
         return start <= now <= end
 
     @staticmethod

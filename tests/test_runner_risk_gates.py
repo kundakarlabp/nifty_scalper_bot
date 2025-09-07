@@ -30,3 +30,10 @@ def test_health_check_clears_last_error():
     runner._last_error = "some error"
     runner.health_check()
     assert runner._last_error is None
+
+
+def test_market_hours_gate(monkeypatch):
+    runner = StrategyRunner(kite=None, telegram_controller=DummyTelegram())
+    monkeypatch.setattr(runner, "_within_trading_window", lambda: False)
+    gates = runner._risk_gates_for({"entry_price": 100, "stop_loss": 90})
+    assert gates["market_hours"] is False
