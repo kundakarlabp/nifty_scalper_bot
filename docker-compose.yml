@@ -22,12 +22,12 @@ services:
     command: ["python", "-m", "src.main"]
     ports:
       - "8000:8000"
+      - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ready"]
-      interval: 30s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 4
 
   # Run the test suite inside a container
   test:
