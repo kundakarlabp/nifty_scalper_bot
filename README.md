@@ -124,12 +124,16 @@ Risk checks guard every trade.  The runner tracks:
 
 Use the Telegram `/risk` command to inspect current limits.  Live trading is disabled unless `ENABLE_LIVE_TRADING=true` (alias `ENABLE_TRADING=true`); setting the flag to false acts as a kill switch.
 
-## Telegram commands
+## Telegram control
+
+The bot can react to simple commands sent to the configured chat:
 
 * `/start` – begin a real‑time trading session.  The bot will connect to Kite, subscribe to market data and start evaluating signals.
 * `/stop` – halt streaming and cancel any open subscriptions.  Existing positions will continue to be managed by the execution layer.
 * `/status` – return a summary of the current trading state including uptime, streaming status, active positions, instruments and risk metrics.
 * `/summary` – report realised P&L for the day, the number of trades taken and the current drawdown.
+* `/pause` – temporarily stop processing ticks and generating new orders.
+* `/resume` – resume processing after a pause.
 
 ## Troubleshooting
 

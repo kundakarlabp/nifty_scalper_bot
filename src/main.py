@@ -9,7 +9,7 @@ import os
 import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +35,7 @@ from src.diagnostics.metrics import metrics  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
+from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -214,6 +215,25 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
 
 
 # -----------------------------
+# Telegram command handler
+# -----------------------------
+def _make_cmd_handler(runner: StrategyRunner) -> Callable[[str, str], None]:
+    """Create a handler that maps Telegram commands to runner actions."""
+
+    commands: dict[str, Callable[[], None]] = {
+        "/pause": runner.pause,
+        "/resume": runner.resume,
+    }
+
+    def handle(cmd: str, _arg: str) -> None:
+        action = commands.get(cmd)
+        if action:
+            action()
+
+    return handle
+
+
+# -----------------------------
 # Lifecycle
 # -----------------------------
 _stop_flag = False
@@ -289,6 +309,16 @@ def main() -> int:
     # Wire Telegram
     _wire_real_telegram(runner)
 
+    # Telegram commands
+    cmd_listener: Optional[TelegramCommands] = None  # pragma: no cover
+    if settings.telegram.bot_token and settings.telegram.chat_id:  # pragma: no cover
+        cmd_listener = TelegramCommands(  # pragma: no cover
+            settings.telegram.bot_token,  # pragma: no cover
+            str(settings.telegram.chat_id),  # pragma: no cover
+            on_cmd=_make_cmd_handler(runner),  # pragma: no cover
+        )
+        cmd_listener.start()  # pragma: no cover
+
     # Announce
     try:
         mode = "LIVE" if settings.enable_live_trading else "DRY"
@@ -355,6 +385,11 @@ def main() -> int:
             runner.telegram_controller.stop_polling()
         except Exception as e:
             log.warning("Failed to stop Telegram polling: %s", e, exc_info=True)
+        if cmd_listener:  # pragma: no cover
+            try:  # pragma: no cover
+                cmd_listener.stop()  # pragma: no cover
+            except Exception as e:  # pragma: no cover
+                log.warning("Failed to stop Telegram commands: %s", e, exc_info=True)  # pragma: no cover
 
     return 0
 
