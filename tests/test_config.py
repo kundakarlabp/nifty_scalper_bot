@@ -138,11 +138,18 @@ def test_skip_broker_validation_allows_missing_creds(caplog):
         "TELEGRAM__CHAT_ID": "1",
     }
     with mock.patch.dict(os.environ, env, clear=True):
+        import importlib
+        import src.boot.validate_env as validate_env
+
+        validate_env = importlib.reload(validate_env)
         settings = AppSettings(_env_file=None)
         with mock.patch("src.config.settings", settings), mock.patch(
             "src.boot.validate_env.settings", settings
         ), caplog.at_level(logging.WARNING):
-            validate_critical_settings()
+            validate_env.validate_critical_settings()
+    import importlib
+    import src.boot.validate_env as validate_env
+    importlib.reload(validate_env)
     assert any("SKIP_BROKER_VALIDATION" in r.message for r in caplog.records)
 
 
