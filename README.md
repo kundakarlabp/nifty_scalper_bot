@@ -113,6 +113,15 @@ HEAD /health  → cheap probe for platforms
 
 Disable the server by setting `HEALTH__ENABLE_SERVER=false` in the environment.
 
+## Data warmup and Yahoo Finance
+
+By default the bot pulls a small slice of historical candles from Yahoo Finance to "warm up" indicators before live ticks arrive.
+
+- `DATA__WARMUP_DISABLE` – set to `true` to skip the warmup phase. Default `false`.
+- `YFINANCE_DISABLE` – set to `true` to avoid all Yahoo Finance requests. Default `false`.
+
+Override either flag in your environment or `.env` file. On Railway deployments these variables are set to `true` by default to speed up startup; set them to `false` there if you want warmup data.
+
 ## Risk flags & kill switch
 
 Risk checks guard every trade.  The runner tracks:
