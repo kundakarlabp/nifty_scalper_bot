@@ -199,6 +199,8 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         set_range_tighten=getattr(runner, "set_range_tighten", None),
     )
     if tg is None:
+        runner.telegram_controller = _NoopTelegram()
+        runner.telegram = runner.telegram_controller
         return
 
     runner.telegram_controller = tg  # back-compat
