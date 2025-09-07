@@ -39,8 +39,11 @@ class TelegramCommands:
         logger.info("TelegramCommands started")
 
     def stop(self) -> None:
-        """Stop polling for commands."""
+        """Stop polling and wait for the worker thread to exit."""
         self._running = False
+        if self._th:
+            self._th.join(timeout=1)
+            self._th = None
 
     def _loop(self) -> None:
         import requests
