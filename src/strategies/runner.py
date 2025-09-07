@@ -4,11 +4,13 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dt_time, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List, ClassVar
+from typing import Any, Dict, Optional, Tuple, List, ClassVar, Deque, Iterable, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -49,6 +51,9 @@ from .warmup import check as warmup_check, required_bars
 from src.utils.freshness import compute as compute_freshness
 from src.risk import risk_gates
 from src.strategies.scalping_strategy import compute_score
+from src.data.broker_source import BrokerDataSource
+from src.execution.broker_executor import BrokerOrderExecutor
+from src.broker.interface import Tick, OrderRequest
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -62,6 +67,92 @@ try:
 except Exception:
     LiveKiteSource = None  # type: ignore
 
+
+# ============================== Orchestrator ==============================
+
+
+class Orchestrator:
+    """Route ticks to a strategy and execute resulting orders."""
+
+    def __init__(
+        self,
+        data_source: BrokerDataSource,
+        executor: BrokerOrderExecutor,
+        on_tick: Callable[[Tick], Iterable[OrderRequest | Mapping[str, Any]] | None],
+        *,
+        max_ticks: int = 1000,
+        min_eval_interval_s: float = 0.0,
+        stale_tick_timeout_s: float = 3.0,
+        on_stale: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.data_source = data_source
+        self.executor = executor
+        self.on_tick = on_tick
+        self.min_eval_interval_s = float(min_eval_interval_s)
+        self.stale_tick_timeout_s = float(stale_tick_timeout_s)
+        self.on_stale = on_stale
+        self._tick_queue: Deque[Tick] = deque(maxlen=max_ticks)
+        self._last_eval = 0.0
+        self._last_tick = time.time()
+        self._paused = False
+        self._running = False
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
+
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        """Start processing ticks from the data source."""
+        if self._running:
+            return
+        self._running = True
+        self.data_source.set_tick_callback(self._enqueue_tick)
+        self.data_source.start()
+        self._worker.start()
+        self._watchdog.start()
+
+    def stop(self) -> None:
+        """Stop processing ticks."""
+        self._running = False
+        self.data_source.stop()
+        self._worker.join(timeout=1)
+        self._watchdog.join(timeout=1)
+
+    # ------------------------------------------------------------------
+    def _enqueue_tick(self, tick: Tick) -> None:
+        self._last_tick = time.time()
+        self._paused = False
+        self._tick_queue.append(tick)
+
+    def _run(self) -> None:
+        while self._running:
+            try:
+                tick = self._tick_queue.popleft()
+            except IndexError:
+                time.sleep(0.01)
+                continue
+            if self._paused:
+                continue
+            now = time.time()
+            if now - self._last_eval < self.min_eval_interval_s:
+                continue
+            self._last_eval = now
+            result = self.on_tick(tick)
+            if not result:
+                continue
+            orders = result if isinstance(result, Iterable) and not isinstance(
+                result, (dict, OrderRequest)
+            ) else [result]
+            for order in orders:
+                self.executor.place_order(order)
+
+    def _watchdog_loop(self) -> None:
+        while self._running:
+            time.sleep(self.stale_tick_timeout_s)
+            if time.time() - self._last_tick > self.stale_tick_timeout_s:
+                if not self._paused:
+                    self._paused = True
+                    if self.on_stale:
+                        self.on_stale()
 
 # ================================ Models ================================
 
