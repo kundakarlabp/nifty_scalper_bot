@@ -1,0 +1,13 @@
+[run]
+source = src
+omit =
+    src/main.py
+    src/notifications/*
+    src/execution/*
+    src/strategies/*
+    src/diagnostics/*
+    src/utils/*
+    scripts/*
+
+[report]
+show_missing = true
