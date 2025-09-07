@@ -61,6 +61,9 @@ DATA_WARMUP_DISABLE = (
     str(os.getenv("DATA__WARMUP_DISABLE", "false")).lower()
     in {"1", "true", "yes"}
 )
+YFINANCE_DISABLE = (
+    str(os.getenv("YFINANCE_DISABLE", "false")).lower() in {"1", "true", "yes"}
+)
 YFINANCE_TICKER_OVERRIDE = os.getenv("YFINANCE_TICKER_OVERRIDE")
 
 
