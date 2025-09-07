@@ -3,6 +3,7 @@
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
 from src.risk.position_sizing import PositionSizer
+from hypothesis import given, settings, strategies as st, assume
 
 
 def _sizer(
@@ -68,4 +69,37 @@ def test_min_lots_only_enforced_when_affordable():
     )
     assert qty == 150
     assert lots == 3
+
+
+@given(
+    entry=st.floats(min_value=50.0, max_value=500.0),
+    stop=st.floats(min_value=1.0, max_value=500.0),
+    lot_size=st.integers(min_value=1, max_value=200),
+    equity=st.floats(min_value=1_000.0, max_value=1_000_000.0),
+    risk=st.floats(min_value=0.001, max_value=0.05),
+    min_lots=st.integers(min_value=1, max_value=5),
+    max_lots=st.integers(min_value=5, max_value=20),
+    max_pos=st.floats(min_value=0.05, max_value=0.5),
+)
+@settings(max_examples=25, deadline=None)
+def test_position_sizer_properties(entry, stop, lot_size, equity, risk, min_lots, max_lots, max_pos):
+    assume(max_lots >= min_lots)
+    sizer = PositionSizer(
+        risk_per_trade=risk,
+        min_lots=min_lots,
+        max_lots=max_lots,
+        max_position_size_pct=max_pos,
+    )
+    qty, lots, _ = sizer.size_from_signal(
+        entry_price=entry,
+        stop_loss=stop,
+        lot_size=lot_size,
+        equity=equity,
+    )
+    assert lots >= 0
+    assert lots <= max_lots
+    assert qty == lots * lot_size
+    if lots > 0:
+        assert lots >= min_lots
+        assert entry * lot_size * lots <= equity * max_pos + 1e-6
 
