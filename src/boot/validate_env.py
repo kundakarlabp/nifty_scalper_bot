@@ -44,6 +44,17 @@ API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
 API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
 ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
 
+# Optional runtime flags
+BROKER_CONNECT_FOR_DATA = (
+    str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower()
+    in {"1", "true", "yes"}
+)
+DATA_WARMUP_DISABLE = (
+    str(os.getenv("DATA__WARMUP_DISABLE", "false")).lower()
+    in {"1", "true", "yes"}
+)
+YFINANCE_TICKER_OVERRIDE = os.getenv("YFINANCE_TICKER_OVERRIDE")
+
 
 def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
     """Populate ``os.environ`` with values from a defaults YAML file.
@@ -80,8 +91,14 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     cfg = cast(AppSettings, cfg or settings)
     errors: list[str] = []
 
+    if _skip_validation():
+        logging.getLogger(__name__).warning(
+            "SKIP_BROKER_VALIDATION=true: proceeding without live creds",
+        )
+        return
+
     # Live trading requires broker credentials
-    if cfg.enable_live_trading and not _skip_validation():
+    if cfg.enable_live_trading:
         if not cfg.zerodha.api_key:
             errors.append(
                 "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true"
@@ -173,11 +190,6 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                             )
 
     if errors:
-        if _skip_validation():
-            logging.getLogger(__name__).warning(
-                "SKIP_BROKER_VALIDATION=true: proceeding without live creds",
-            )
-            return
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
