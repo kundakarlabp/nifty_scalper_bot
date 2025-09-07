@@ -54,7 +54,8 @@ from src.risk import risk_gates
 from src.strategies.scalping_strategy import compute_score
 from src.data.broker_source import BrokerDataSource
 from src.execution.broker_executor import BrokerOrderExecutor
-from src.broker.interface import Tick, OrderRequest
+from src.broker.interface import Tick, OrderRequest, Side
+from src.risk import guards
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -85,6 +86,7 @@ class Orchestrator:
         min_eval_interval_s: float = 0.0,
         stale_tick_timeout_s: float = 3.0,
         on_stale: Optional[Callable[[], None]] = None,
+        risk_config: Optional[guards.GuardConfig] = None,
     ) -> None:
         self.data_source = data_source
         self.executor = executor
@@ -99,6 +101,8 @@ class Orchestrator:
         self._running = False
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._risk_cfg = risk_config or guards.GuardConfig()
+        self._risk_state = guards.GuardState()
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -123,6 +127,8 @@ class Orchestrator:
         self._last_tick = time.time()
         self._paused = False
         self._tick_queue.append(tick)
+        metrics.inc_ticks()
+        metrics.set_queue_depth(len(self._tick_queue))
 
     def _run(self) -> None:
         while self._running:
@@ -137,14 +143,7 @@ class Orchestrator:
             if now - self._last_eval < self.min_eval_interval_s:
                 continue
             self._last_eval = now
-            result = self.on_tick(tick)
-            if not result:
-                continue
-            orders = result if isinstance(result, Iterable) and not isinstance(
-                result, (dict, OrderRequest)
-            ) else [result]
-            for order in orders:
-                self.executor.place_order(order)
+            self.step(tick)
 
     def _watchdog_loop(self) -> None:
         while self._running:
@@ -154,6 +153,48 @@ class Orchestrator:
                     self._paused = True
                     if self.on_stale:
                         self.on_stale()
+
+    # ------------------------------------------------------------------
+    def step(self, tick: Tick, budget_s: float | None = None) -> None:
+        """Process a single tick within an optional time budget."""
+        start = time.time()
+        result = self.on_tick(tick)
+        if not result:
+            return
+        metrics.inc_signal()
+        elapsed = time.time() - start
+        metrics.observe_latency(elapsed * 1000)
+        if budget_s is not None and elapsed > budget_s:
+            logging.getLogger(self.__class__.__name__).warning(
+                "step exceeded budget %.3fs > %.3fs", elapsed, budget_s
+            )
+        orders = result if isinstance(result, Iterable) and not isinstance(
+            result, (dict, OrderRequest)
+        ) else [result]
+        for order in orders:
+            if not isinstance(order, OrderRequest):
+                continue
+            if not self._risk_ok(order):
+                metrics.inc_orders(rejected=1)
+                continue
+            if BrokerOrderExecutor._kill_switch_engaged():  # type: ignore[attr-defined]
+                self._running = False
+                break
+            self.executor.place_order(order)
+            metrics.inc_orders(placed=1)
+            self._update_risk_state(order)
+
+    def _risk_ok(self, order: OrderRequest) -> bool:
+        return guards.risk_check(order, self._risk_state, self._risk_cfg)
+
+    def _update_risk_state(self, order: OrderRequest) -> None:
+        price = order.price or 0
+        if order.side is Side.BUY:
+            self._risk_state.position += order.qty
+            self._risk_state.exposure += price * order.qty
+        else:
+            self._risk_state.position -= order.qty
+            self._risk_state.exposure -= price * order.qty
 
 # ================================ Models ================================
 

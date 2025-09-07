@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """Order executor backed by a :class:`Broker`."""
 
+import logging
 import os
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 from uuid import uuid4
@@ -23,6 +25,7 @@ class BrokerOrderExecutor:
         self.broker = broker
         self.instrument_id_mapper = instrument_id_mapper
         self._id_cache: Dict[str, str] = {}
+        self.log = logging.getLogger(self.__class__.__name__)
 
     # ------------------------------------------------------------------
     def place_order(
@@ -36,14 +39,14 @@ class BrokerOrderExecutor:
         )
         if self._kill_switch_engaged():
             raise RuntimeError("kill switch active")
-
         order = self._ensure_client_order_id(order)
         cid = order.client_order_id
         assert cid is not None
         cached = self._id_cache.get(cid)
         if cached:
             return cached
-
+        # Log sanitized order details to avoid leaking sensitive metadata
+        self.log.info("placing order: %s", replace(order, metadata=None))
         oid = self.broker.place_order(order)
         self._id_cache[cid] = oid
         return oid
@@ -67,9 +70,9 @@ class BrokerOrderExecutor:
             side=side,
             qty=qty,
             order_type=kwargs.get("order_type", OrderType.MARKET),
-            price=kwargs.get("price"),
-            stop_loss=kwargs.get("stop_loss"),
-            target=kwargs.get("target"),
+            price=Decimal(str(kwargs.get("price"))) if kwargs.get("price") is not None else None,
+            stop_loss=Decimal(str(kwargs.get("stop_loss"))) if kwargs.get("stop_loss") is not None else None,
+            target=Decimal(str(kwargs.get("target"))) if kwargs.get("target") is not None else None,
             tif=kwargs.get("tif", TimeInForce.DAY),
             client_order_id=kwargs.get("client_order_id"),
             metadata=kwargs.get("metadata"),
@@ -131,9 +134,9 @@ class BrokerOrderExecutor:
             side=side,
             qty=int(qty_val),
             order_type=order_type,
-            price=data.get("price"),
-            stop_loss=data.get("stop_loss"),
-            target=data.get("target"),
+            price=Decimal(str(data.get("price"))) if data.get("price") is not None else None,
+            stop_loss=Decimal(str(data.get("stop_loss"))) if data.get("stop_loss") is not None else None,
+            target=Decimal(str(data.get("target"))) if data.get("target") is not None else None,
             tif=tif,
             client_order_id=data.get("client_order_id"),
             metadata=data.get("metadata"),

@@ -149,6 +149,7 @@ pytest -q
 To run the same checks as CI, install and execute the pre-commit hooks:
 
 ```bash
+pip install pre-commit
 pre-commit install
 pre-commit run --all-files
 ```

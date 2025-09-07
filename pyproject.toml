@@ -26,3 +26,5 @@ ignore = []
 
 [tool.pytest.ini_options]
 pythonpath = "."
+addopts = "-q --maxfail=1 --disable-warnings --cov=src --cov-report=term-missing"
+testpaths = ["tests"]
