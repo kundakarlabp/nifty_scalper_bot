@@ -1,0 +1,3 @@
+token,symbol,exchange,product,variety,lot_size,tick_size
+101,NIFTY24SEP18000CE,NFO,MIS,regular,50,0.05
+102,NIFTY24SEP18000PE,NFO,MIS,regular,50,0.05
