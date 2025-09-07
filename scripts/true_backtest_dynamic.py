@@ -254,9 +254,6 @@ class BacktestRunner:
         reports_dir.mkdir(exist_ok=True)
         csv_path = reports_dir / "trade_history.csv"
 
-        if not self.session.trade_history:
-            return
-
         trade_data = [
             {
                 "entry_time": t.entry_time,
@@ -273,7 +270,19 @@ class BacktestRunner:
             for t in self.session.trade_history
         ]
 
-        df = pd.DataFrame(trade_data)
+        columns = [
+            "entry_time",
+            "exit_time",
+            "symbol",
+            "direction",
+            "quantity",
+            "entry_price",
+            "exit_price",
+            "pnl",
+            "fees",
+            "net_pnl",
+        ]
+        df = pd.DataFrame(trade_data, columns=columns)
         df.to_csv(csv_path, index=False)
         logger.info(f"Trade history saved to {csv_path}")
 
