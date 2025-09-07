@@ -221,6 +221,11 @@ class RiskSettings(BaseModel):
     consecutive_loss_limit: int = 3
     max_daily_drawdown_pct: float = 0.04
     max_position_size_pct: float = 0.10
+    trading_window_start: str = "09:15"
+    trading_window_end: str = "15:30"
+    max_daily_loss_rupees: float | None = None
+    max_lots_per_symbol: int = 5
+    max_notional_rupees: float = 1_500_000.0
 
     @field_validator("risk_per_trade")
     @classmethod
@@ -235,6 +240,28 @@ class RiskSettings(BaseModel):
         if not 0.01 <= v <= 0.20:
             raise ValueError("max_daily_drawdown_pct must be between 1% and 20%")
         return v
+
+    @field_validator("trading_window_start", "trading_window_end")
+    @classmethod
+    def _v_time(cls, v: str) -> str:
+        datetime.strptime(v, "%H:%M")
+        return v
+
+    @field_validator("max_daily_loss_rupees", "max_notional_rupees", mode="before")
+    @classmethod
+    def _v_positive_float(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        if float(v) <= 0:
+            raise ValueError("value must be > 0")
+        return float(v)
+
+    @field_validator("max_lots_per_symbol")
+    @classmethod
+    def _v_positive_int(cls, v: int) -> int:
+        if int(v) <= 0:
+            raise ValueError("value must be > 0")
+        return int(v)
 
     @field_validator("min_equity_floor", "default_equity")
     @classmethod
@@ -429,6 +456,16 @@ class AppSettings(BaseSettings):
     def risk_max_daily_drawdown_pct(self) -> float: return self.risk.max_daily_drawdown_pct
     @property
     def risk_max_position_size_pct(self) -> float: return self.risk.max_position_size_pct
+    @property
+    def risk_trading_window_start(self) -> str: return self.risk.trading_window_start
+    @property
+    def risk_trading_window_end(self) -> str: return self.risk.trading_window_end
+    @property
+    def risk_max_daily_loss_rupees(self) -> float | None: return self.risk.max_daily_loss_rupees
+    @property
+    def risk_max_lots_per_symbol(self) -> int: return self.risk.max_lots_per_symbol
+    @property
+    def risk_max_notional_rupees(self) -> float: return self.risk.max_notional_rupees
 
     # Instruments (flat)
     @property

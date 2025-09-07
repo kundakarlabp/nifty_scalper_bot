@@ -225,6 +225,19 @@ def main() -> int:
         logging.getLogger("main").error("\u274c Config validation failed: %s", e)
         return 1
     log = logging.getLogger("main")
+    rcfg = settings.risk
+    loss_cap = (
+        f"{rcfg.max_daily_loss_rupees:.0f}" if rcfg.max_daily_loss_rupees is not None else f"{rcfg.max_daily_drawdown_pct:.2%} equity"
+    )
+    log.info(
+        "Risk guardrails → window %s-%s | loss_cap=%s | max_lots=%d | exposure_cap=%.0f | max_consec_losses=%d",
+        rcfg.trading_window_start,
+        rcfg.trading_window_end,
+        loss_cap,
+        rcfg.max_lots_per_symbol,
+        rcfg.max_notional_rupees,
+        rcfg.consecutive_loss_limit,
+    )
 
     kite = None
     try:
