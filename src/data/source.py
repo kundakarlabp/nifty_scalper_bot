@@ -274,12 +274,13 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
     - guarantees presence/order of: open, high, low, close, volume
     """
     try:
-        df = pd.DataFrame(rows or [])
+        # Normalize rows to lowercase keys *before* DataFrame construction to
+        # avoid duplicate columns like "Date"/"date" causing assembly errors.
+        df = pd.DataFrame(
+            [{str(k).lower(): v for k, v in (row or {}).items()} for row in (rows or [])]
+        )
         if df.empty:
             return pd.DataFrame()
-
-        # Normalize column names
-        df = df.rename(columns={c: str(c).lower() for c in df.columns})
 
         # historical_data returns 'date' column; ensure timezone‑naive Timestamp index
         if "date" in df.columns:
@@ -436,7 +437,9 @@ def _kite_symbol(symbol_or_token: Any) -> Any:
     return f"NSE:{sym}"
 
 
-def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) -> Optional[pd.DataFrame]:
+def _fetch_ohlc_yf(
+    symbol: str, start: datetime, end: datetime, timeframe: str
+) -> pd.DataFrame | list[Any] | None:
     """Fetch OHLC data from yfinance for the given symbol/timeframe."""
     if yf is None or not symbol:
         return None
@@ -494,6 +497,7 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
     except Exception as e:  # pragma: no cover - best effort fallback
         _yf_mark_fail(sym)
         log.debug("yfinance fetch_ohlc failed: %s", e)
+        return []
     return None
 
 
@@ -815,7 +819,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except ValueError as e:
                 log.warning("yfinance fallback empty: %s", e)
                 out = None
-            if out is not None and len(out) >= WARMUP_BARS:
+            if isinstance(out, pd.DataFrame) and len(out) >= WARMUP_BARS:
                 fetched_window = (
                     pd.to_datetime(out.index.min()).to_pydatetime(),
                     pd.to_datetime(out.index.max()).to_pydatetime(),
@@ -908,7 +912,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 except ValueError as e:
                     log.warning("yfinance fallback empty: %s", e)
                     out = None
-                if out is not None and len(out) >= WARMUP_BARS:
+                if isinstance(out, pd.DataFrame) and len(out) >= WARMUP_BARS:
                     fetched_window = (
                         pd.to_datetime(out.index.min()).to_pydatetime(),
                         pd.to_datetime(out.index.max()).to_pydatetime(),
@@ -965,7 +969,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except ValueError as e2:
                 log.warning("yfinance fallback empty: %s", e2)
                 out = None
-            if out is not None and len(out) >= WARMUP_BARS:
+            if isinstance(out, pd.DataFrame) and len(out) >= WARMUP_BARS:
                 fetched_window = (
                     pd.to_datetime(out.index.min()).to_pydatetime(),
                     pd.to_datetime(out.index.max()).to_pydatetime(),
