@@ -36,7 +36,10 @@ import pandas as pd
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.config import settings, validate_critical_settings
+from src.boot.validate_env import seed_env_from_defaults, validate_critical_settings
+
+seed_env_from_defaults()
+from src.config import settings
 
 # Backtests run in paper mode; provide dummy telegram credentials
 settings.enable_live_trading = False

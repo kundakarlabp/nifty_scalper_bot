@@ -12,7 +12,8 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings, validate_critical_settings
+from src.config import AppSettings, DataSettings, RiskSettings
+from src.boot.validate_env import validate_critical_settings
 
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
@@ -124,7 +125,9 @@ def test_zerodha_creds_required_when_live():
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings):
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ):
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     assert "ZERODHA__API_KEY is required" in str(exc.value)
@@ -139,7 +142,9 @@ def test_zerodha_creds_optional_when_paper():
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings):
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ):
         # Should not raise
         validate_critical_settings()
 
@@ -153,7 +158,9 @@ def test_negative_chat_id_allowed():
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings):
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ):
         # Should not raise for negative IDs
         validate_critical_settings()
         assert settings.telegram.chat_id == -12345
@@ -181,8 +188,10 @@ def test_invalid_instrument_token_detected(monkeypatch):
         def fetch_ohlc(self, *_, **__):
             return pd.DataFrame()
 
-    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
-        m.setattr("src.config.LiveKiteSource", DummySource)
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ), monkeypatch.context() as m:
+        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     assert "valid F&O token" in str(exc.value)
@@ -236,9 +245,11 @@ def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
         def set_access_token(self, token):
             pass
 
-    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
-        m.setattr("src.config.LiveKiteSource", DummySource)
-        m.setattr("src.config.KiteConnect", DummyKite)
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ), monkeypatch.context() as m:
+        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+        m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         # Should not raise
         validate_critical_settings()
 
@@ -253,7 +264,9 @@ def test_lookback_less_than_min_bars():
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings):
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ):
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     assert "LOOKBACK_MINUTES" in str(exc.value)
@@ -289,9 +302,11 @@ def test_instrument_token_validation_skips_on_network_error(monkeypatch):
         def set_access_token(self, token):
             pass
 
-    with mock.patch("src.config.settings", settings), monkeypatch.context() as m:
-        m.setattr("src.config.LiveKiteSource", DummySource)
-        m.setattr("src.config.KiteConnect", DummyKite)
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ), monkeypatch.context() as m:
+        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+        m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         # Should not raise even though fetch_ohlc errors
         validate_critical_settings()
 
