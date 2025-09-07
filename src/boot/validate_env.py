@@ -243,7 +243,8 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 def _log_cred_presence() -> None:
     """Log the presence of live trading credentials without revealing them."""
     log = logging.getLogger(__name__)
-    mask = lambda v: bool(v and v.strip())
+    def mask(v: str | None) -> bool:
+        return bool(v and v.strip())
     log.info(
         "live=%s, api_key=%s, secret=%s, access=%s",
         settings.enable_live_trading,
