@@ -69,7 +69,7 @@ def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
                 tries,
                 e,
             )
-            time.sleep(delay)
+            time.sleep(delay + random.uniform(0, 0.05))
             delay *= 2.0
 
 
@@ -481,6 +481,10 @@ class OrderExecutor:
         self._queues: Dict[str, Deque["_QueueItem"]] = {}
         self._inflight_symbols: Dict[str, int] = {}
         self._ack_lat_ms: List[int] = []
+        self._order_ts: Deque[float] = deque()
+        self.max_orders_per_min = int(
+            getattr(cfg, "MAX_ORDERS_PER_MIN", getattr(settings, "MAX_ORDERS_PER_MIN", 20))
+        )
         self.on_trade_closed = on_trade_closed
         self._closed_trades: Set[str] = set()
         self.journal = journal
@@ -1586,7 +1590,10 @@ class OrderExecutor:
     def _is_transient(reason: str) -> bool:
         """Return True if error reason looks transient."""
         r = reason.lower()
-        return any(x in r for x in ["timeout", "timed out", "502", "503", "504", "network"])
+        return any(
+            x in r
+            for x in ["timeout", "timed out", "502", "503", "504", "network", "429", "rate", "throttle"]
+        )
 
     def _build_place_request(
         self, *, symbol: str, qty: int, price: float, tag: str
@@ -1613,6 +1620,12 @@ class OrderExecutor:
                     "reason": "api_breaker_open",
                     "cb": self.cb_orders.health(),
                 }
+            now = time.monotonic()
+            while self._order_ts and now - self._order_ts[0] > 60:
+                self._order_ts.popleft()
+            if len(self._order_ts) >= self.max_orders_per_min:
+                return {"ok": False, "reason": "rate_limited"}
+            self._order_ts.append(now)
             t0 = time.monotonic()
             try:
                 oid = self.kite.place_order(**req) if self.kite else None

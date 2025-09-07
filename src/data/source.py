@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import datetime as dt
@@ -329,7 +330,7 @@ def _retry(fn: Callable, *args, tries: int = 3, base_delay: float = 0.25, **kwar
             last = e
         if i == tries - 1:
             break
-        time.sleep(delay)
+        time.sleep(delay + random.uniform(0, 0.05))
         delay = min(8.0, delay * 2.0)
     if last:
         raise last
