@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.config import settings
+from src.diagnostics.metrics import metrics
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import floor_to_minute, TZ
 from src.utils.market_time import (
@@ -748,6 +749,7 @@ class StrategyRunner:
                 self.log.debug("No tradable plan: %s", flow["reason_block"])
                 return
             flow["signal_ok"] = True
+            metrics.inc_signal()
             flow["plan"] = dict(plan)
 
             if self.event_guard_enabled and self.event_cal and active_events:
@@ -1142,7 +1144,10 @@ class StrategyRunner:
                 self.log.error("No known execution method found on OrderExecutor")
 
             flow["executed"] = placed_ok
-            if not placed_ok:
+            if placed_ok:
+                metrics.inc_orders(placed=1)
+            else:
+                metrics.inc_orders(rejected=1)
                 flow["reason_block"] = getattr(self.executor, "last_error", "exec_fail")
                 err = getattr(self.executor, "last_error", None)
                 if err:
