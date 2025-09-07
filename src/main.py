@@ -53,6 +53,16 @@ def _setup_logging() -> None:
     root.addFilter(RateLimitFilter(interval=120.0))
     if log_buffer_handler not in root.handlers:
         root.addHandler(log_buffer_handler)
+    log_file = os.environ.get("LOG_FILE")
+    if log_file:
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
+        root.addHandler(fh)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 

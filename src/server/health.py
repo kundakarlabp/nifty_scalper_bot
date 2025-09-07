@@ -6,9 +6,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from flask import Flask, Response
+
+from src.strategies.runner import StrategyRunner
+from src.utils.freshness import compute as compute_freshness
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
@@ -26,7 +30,36 @@ def live() -> Tuple[Dict[str, Any], int]:
 
 @app.route("/ready", methods=["GET"])
 def ready() -> Tuple[Dict[str, Any], int]:
-    """Readiness probe: lightweight 200; customize if you need deeper checks."""
+    """Readiness probe requiring broker session and fresh tick data."""
+
+    runner = StrategyRunner.get_singleton()
+    if runner is None:
+        return {"status": "starting"}, 503
+
+    kite = getattr(runner, "kite", None)
+    is_conn = getattr(kite, "is_connected", None)
+    broker_ok = bool(kite) and (is_conn() if callable(is_conn) else True)
+    if not broker_ok:
+        return {"status": "down", "reason": "broker"}, 503
+
+    ds = getattr(runner, "data_source", None)
+    if ds is None:
+        return {"status": "down", "reason": "data"}, 503
+
+    fresh = compute_freshness(
+        now=datetime.utcnow(),
+        last_tick_ts=ds.last_tick_ts(),
+        last_bar_open_ts=ds.last_bar_open_ts(),
+        tf_seconds=ds.timeframe_seconds,
+        max_tick_lag_s=int(getattr(runner.strategy_cfg, "max_tick_lag_s", 8)),
+        max_bar_lag_s=int(getattr(runner.strategy_cfg, "max_bar_lag_s", 75)),
+    )
+    if not fresh.ok:
+        return {
+            "status": "down",
+            "reason": "stale",
+            "tick_lag_s": fresh.tick_lag_s,
+        }, 503
     return {"status": "ready"}, 200
 
 
