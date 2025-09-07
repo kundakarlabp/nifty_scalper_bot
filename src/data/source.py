@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import random
 from dataclasses import dataclass
@@ -17,7 +18,11 @@ from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
 from src.data.yf_fallback import _map_symbol
 from src.data.base_source import BaseDataSource
-from src.boot.validate_env import DATA_WARMUP_DISABLE, YFINANCE_TICKER_OVERRIDE
+from src.boot.validate_env import (
+    DATA_WARMUP_DISABLE,
+    YFINANCE_DISABLE,
+    YFINANCE_TICKER_OVERRIDE,
+)
 
 # Optional lightweight market data fallback (e.g., when kite is unavailable)
 try:
@@ -27,17 +32,35 @@ except Exception:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-_yf_last_fail_ts: Dict[str, float] = {}
+class _ThrottleState:
+    ts: float = 0.0
 
-def _yf_should_skip(symbol: str) -> bool:
-    ts = _yf_last_fail_ts.get(symbol, 0.0)
-    return (time.time() - ts) < 600
+    def clear(self) -> None:
+        self.ts = 0.0
+        global _warmup_next_try_ts, _warmup_backoff
+        _warmup_next_try_ts = 0.0
+        _warmup_backoff = _WARMUP_BACKOFF_BASE
 
-def _yf_mark_fail(symbol: str) -> None:
-    _yf_last_fail_ts[symbol] = time.time()
 
-def _yf_mark_success(symbol: str) -> None:
-    _yf_last_fail_ts.pop(symbol, None)
+_yf_last_fail_ts = _ThrottleState()
+_warmup_next_try_ts: float = 0.0
+_WARMUP_BACKOFF_BASE = float(os.getenv("DATA_WARMUP_BACKOFF_S", "300"))
+_warmup_backoff: float = _WARMUP_BACKOFF_BASE
+
+
+def _yf_throttle(interval: float = 600) -> bool:
+    now = time.time()
+    if now - _yf_last_fail_ts.ts < interval:
+        return False
+    _yf_last_fail_ts.ts = now
+    return True
+
+
+def _warmup_backoff_s() -> float:
+    global _warmup_backoff
+    delay = _warmup_backoff
+    _warmup_backoff = min(_warmup_backoff * 2, 3600.0)
+    return delay
 
 # Optional broker SDK (keep imports tolerant so paper mode works)
 try:
@@ -454,12 +477,17 @@ def _kite_symbol(symbol_or_token: Any) -> Any:
     return f"NSE:{sym}"
 
 
-def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) -> Optional[pd.DataFrame]:
+def _fetch_ohlc_yf(
+    symbol: str, start: datetime, end: datetime, timeframe: str
+) -> Optional[pd.DataFrame]:
     """Fetch OHLC data from yfinance for the given symbol/timeframe."""
-    if yf is None or not symbol:
+    global _warmup_next_try_ts, _warmup_backoff
+    if yf is None or not symbol or DATA_WARMUP_DISABLE or YFINANCE_DISABLE:
         return None
-    if hasattr(yf, "__version__") and _yf_should_skip(symbol):
-        log.warning("yfinance throttled after recent failures")
+    now = time.time()
+    if now < _warmup_next_try_ts:
+        if _yf_throttle():
+            log.warning("yfinance backoff active; skipping fetch")
         return None
     try:
         interval_map = {
@@ -472,7 +500,7 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
         }
         yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
         # ``yfinance`` expects UTC datetimes; our callers usually supply
-        # timezone‑naive IST.  Convert the requested window to UTC to avoid a
+        # timezone-naive IST. Convert the requested window to UTC to avoid a
         # 5h30 offset in the downloaded data.
         ist = timezone(timedelta(hours=5, minutes=30))
         start_utc = pd.Timestamp(start, tz=ist).tz_convert(timezone.utc)
@@ -487,13 +515,18 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
             progress=False,
         )
         if df.empty:
-            _yf_mark_fail(sym)
+            _warmup_next_try_ts = time.time() + _warmup_backoff_s()
+            if _yf_throttle():
+                log.warning("yfinance returned no data for %s", symbol)
             raise ValueError(
                 f"yfinance returned no data for symbol '{symbol}'"
             )
-        _yf_mark_success(sym)
+        if len(df) < WARMUP_BARS:
+            _warmup_next_try_ts = time.time() + _warmup_backoff_s()
+            if _yf_throttle():
+                log.warning("yfinance returned short data for %s", symbol)
         # yfinance returns timestamps in the exchange's local timezone
-        # (Asia/Kolkata for NSE symbols).  Strip the timezone information so the
+        # (Asia/Kolkata for NSE symbols). Strip the timezone information so the
         # rest of the codebase operates on naive IST datetimes.
         idx = pd.to_datetime(df.index)
         if getattr(idx, "tz", None) is None:
@@ -506,14 +539,17 @@ def _fetch_ohlc_yf(symbol: str, start: datetime, end: datetime, timeframe: str) 
             df["volume"] = 0
         need = {"open", "high", "low", "close"}
         if need.issubset(df.columns):
+            _warmup_next_try_ts = 0.0
+            _warmup_backoff = _WARMUP_BACKOFF_BASE
             return df[["open", "high", "low", "close", "volume"]].copy()
     except ValueError:
+        _warmup_next_try_ts = time.time() + _warmup_backoff_s()
         raise
     except Exception as e:  # pragma: no cover - best effort fallback
-        _yf_mark_fail(sym)
-        log.debug("yfinance fetch_ohlc failed: %s", e)
+        _warmup_next_try_ts = time.time() + _warmup_backoff_s()
+        if _yf_throttle():
+            log.debug("yfinance fetch_ohlc failed: %s", e)
     return None
-
 
 def _synthetic_ohlc(
     price: float, end: datetime, interval: str, bars: int = WARMUP_BARS
@@ -737,46 +773,23 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.warning("kite historical backfill failed: %s", e)
         try:
             sym = YFINANCE_TICKER_OVERRIDE or "^NSEI"
-            if yf is None:
-                return
-            if hasattr(yf, "__version__") and _yf_should_skip(sym):
-                log.warning("yfinance throttled after recent failures")
-                return
             to_dt = now
             from_dt = to_dt - dt.timedelta(minutes=max(required_bars + 5, 60))
-            yf_df = yf.download(
-                sym,
-                start=from_dt.date(),
-                end=(to_dt + dt.timedelta(days=1)).date(),
-                interval="1m",
-                progress=False,
-            )
+            yf_df = _fetch_ohlc_yf(sym, from_dt, to_dt, "minute")
             if isinstance(yf_df, pd.DataFrame) and not yf_df.empty:
-                yf_df.index = pd.to_datetime(yf_df.index)
-                yf_df = yf_df.tz_localize(None)
-                yf_df.rename(
-                    columns={
-                        "Open": "open",
-                        "High": "high",
-                        "Low": "low",
-                        "Close": "close",
-                        "Volume": "volume",
-                    },
-                    inplace=True,
-                )
                 if hasattr(self, "seed_ohlc"):
                     try:
                         self.seed_ohlc(yf_df[["open", "high", "low", "close", "volume"]])
                     except Exception:
                         pass
                 if len(yf_df) >= required_bars:
-                    _yf_mark_success(sym)
                     return
-            else:
-                _yf_mark_fail(sym)
+        except ValueError as e:
+            if _yf_throttle():
+                log.warning("yfinance backfill failed: %s", e)
         except Exception as e:
-            _yf_mark_fail(sym)
-            log.warning("yfinance backfill failed: %s", e)
+            if _yf_throttle():
+                log.warning("yfinance backfill failed: %s", e)
 
     # ---- main candle fetch ----
     def fetch_ohlc(
@@ -831,7 +844,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             try:
                 out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
             except ValueError as e:
-                log.warning("yfinance fallback empty: %s", e)
+                if _yf_throttle():
+                    log.warning("yfinance fallback empty: %s", e)
                 out = None
             if out is not None and len(out) >= WARMUP_BARS:
                 fetched_window = (
@@ -924,7 +938,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 try:
                     out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
                 except ValueError as e:
-                    log.warning("yfinance fallback empty: %s", e)
+                    if _yf_throttle():
+                        log.warning("yfinance fallback empty: %s", e)
                     out = None
                 if out is not None and len(out) >= WARMUP_BARS:
                     fetched_window = (
@@ -981,7 +996,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             try:
                 out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
             except ValueError as e2:
-                log.warning("yfinance fallback empty: %s", e2)
+                if _yf_throttle():
+                    log.warning("yfinance fallback empty: %s", e2)
                 out = None
             if out is not None and len(out) >= WARMUP_BARS:
                 fetched_window = (
