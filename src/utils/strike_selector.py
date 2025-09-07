@@ -17,13 +17,13 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from statistics import median
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import re
 
 from src.config import settings
+from src.utils.market_time import IST, is_market_open as _market_is_open
 from src.risk.greeks import OptionType, implied_vol_newton, bs_price_delta_gamma
 from src.utils.expiry import next_tuesday_expiry
 
@@ -96,18 +96,8 @@ def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
 # Pure time gate (IST)
 # -----------------------------------------------------------------------------
 def is_market_open() -> bool:
-    """Return ``True`` if current IST time falls within the configured window."""
-    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if now.weekday() > 4:  # Saturday or Sunday
-        return False
-    try:
-        start_h, start_m = map(int, str(settings.data.time_filter_start).split(":"))
-        end_h, end_m = map(int, str(settings.data.time_filter_end).split(":"))
-    except Exception:
-        start_h, start_m, end_h, end_m = 9, 15, 15, 30
-    start_time = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-    end_time = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
-    return start_time <= now < end_time
+    """Return ``True`` if current time falls within market hours."""
+    return _market_is_open(datetime.now(tz=IST))
 
 
 # -----------------------------------------------------------------------------
@@ -242,7 +232,7 @@ def resolve_weekly_atm(
         except Exception:
             nfo = []
     expiry = _pick_expiry(
-        datetime.now(timezone(timedelta(hours=5, minutes=30))),
+        datetime.now(IST),
         nfo,
         trade_symbol,
     )
@@ -283,7 +273,7 @@ def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trad
     if not nfo_instruments:
         return None
 
-    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    now = datetime.now(IST)
     target = next_tuesday_expiry(now).date()
     expiries: set[str] = set()
 
@@ -441,7 +431,7 @@ def get_instrument_tokens(
             }
 
         expiry = _pick_expiry(
-            datetime.now(timezone(timedelta(hours=5, minutes=30))),
+            datetime.now(IST),
             nfo,
             trade_symbol,
         )
@@ -484,7 +474,7 @@ def get_instrument_tokens(
             _instruments_cache, _instruments_cache_ts = None, 0.0
             nfo = _fetch_instruments_nfo(kite_instance) or []
             expiry = _pick_expiry(
-                datetime.now(timezone(timedelta(hours=5, minutes=30))),
+                datetime.now(IST),
                 nfo,
                 trade_symbol,
             )
@@ -584,7 +574,7 @@ def select_strike_by_delta(
     cand: list[tuple[float, dict]] = []
     for row in chain:
         K = row["strike"]
-        T = max(1 / 365, (expiry - datetime.now(ZoneInfo("Asia/Kolkata"))).days / 365)
+        T = max(1 / 365, (expiry - datetime.now(IST)).days / 365)
         px_est = max(1.0, spot * 0.005)
         iv = implied_vol_newton(px_est, spot, K, T, 0.06, 0.0, opt, guess=0.20) or 0.20
         _, d, _ = bs_price_delta_gamma(spot, K, T, 0.06, 0.0, iv, opt)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Runtime environment validation and setup helpers."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import logging
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ import pandas as pd
 import yaml  # type: ignore[import-untyped]
 
 from src.config import AppSettings, settings
-from src.utils.market_time import is_market_open, prev_session_last_20m
+from src.utils.market_time import IST, is_market_open, prev_session_last_20m
 
 try:  # Optional broker SDK
     from kiteconnect import KiteConnect  # type: ignore
@@ -101,7 +101,7 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                 src = LiveKiteSource(kite=kite)
                 try:
                     src.connect()
-                    now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(
+                    now_ist = datetime.now(IST).replace(
                         second=0, microsecond=0,
                     )
                     if is_market_open(now_ist):
