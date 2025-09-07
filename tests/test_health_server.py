@@ -37,3 +37,9 @@ def test_ready_endpoint_stale(monkeypatch) -> None:
     client = app.test_client()
     resp = client.get("/ready")
     assert resp.status_code == 503
+
+
+def test_live_endpoint() -> None:
+    client = app.test_client()
+    resp = client.get("/live")
+    assert resp.status_code == 200
