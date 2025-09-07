@@ -79,6 +79,12 @@ def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
     with _last_api_lock:
         now = time.time()
         last = _last_api_call.get(call_key, 0.0)
+        # When tests freeze time (e.g., via freezegun) ``now`` may stop
+        # advancing. In that case waiting for the interval would loop
+        # forever, so treat it as if the rate limit has elapsed.
+        if now <= last:
+            _last_api_call[call_key] = now
+            return False
         if now - last < min_interval_sec:
             return True
         _last_api_call[call_key] = now
