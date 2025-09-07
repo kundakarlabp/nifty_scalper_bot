@@ -101,6 +101,13 @@ Basic unit tests live under `tests/`.  They exercise the strategy scoring logic 
 pytest -q
 ```
 
+To run the same checks as CI, install and execute the pre-commit hooks:
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
 ## Contributing
 
 Pull requests are welcome.  Please open an issue to discuss major changes before submitting a patch.  When updating the strategy or risk modules, include corresponding tests demonstrating the new behaviour.
