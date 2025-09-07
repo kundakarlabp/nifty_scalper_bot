@@ -251,7 +251,8 @@ class BacktestRunner:
     def _generate_csv_report(self) -> None:
         """Saves the trade history to a CSV file."""
         reports_dir = project_root / "reports"
-        reports_dir.mkdir(exist_ok=True)
+        # Ensure the reports directory exists even if parent dirs were removed
+        reports_dir.mkdir(parents=True, exist_ok=True)
         csv_path = reports_dir / "trade_history.csv"
 
         if not self.session.trade_history:
@@ -272,9 +273,9 @@ class BacktestRunner:
             }
             for t in self.session.trade_history
         ]
-
         df = pd.DataFrame(trade_data)
-        df.to_csv(csv_path, index=False)
+        # Write the CSV using UTF-8 for consistent cross-platform encoding
+        df.to_csv(csv_path, index=False, encoding="utf-8")
         logger.info(f"Trade history saved to {csv_path}")
 
 
