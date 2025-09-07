@@ -26,8 +26,10 @@ def live() -> Tuple[Dict[str, Any], int]:
 
 @app.route("/ready", methods=["GET"])
 def ready() -> Tuple[Dict[str, Any], int]:
-    """Readiness probe: lightweight 200; customize if you need deeper checks."""
-    return {"status": "ready"}, 200
+    """Readiness probe using optional status callback."""
+    diag = _status_callback() if _status_callback else {}
+    ok = bool(diag.get("ok", True))
+    return {"status": "ready", "diag": diag}, 200 if ok else 503
 
 
 # Explicit HEAD route to avoid framework quirks on some platforms
