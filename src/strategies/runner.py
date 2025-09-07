@@ -203,6 +203,13 @@ class RiskState:
     loss_cooldown_until: Optional[datetime] = None
 
 
+@dataclass
+class _RiskCheckState:
+    """Internal state for lightweight risk guards."""
+
+    realised_loss: float = 0.0
+
+
 # Sentinel used when risk gates are intentionally skipped
 RISK_GATES_SKIPPED = object()
 
@@ -290,6 +297,8 @@ class StrategyRunner:
             )
         )
 
+        self._risk_state = _RiskCheckState()
+
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
             from src.strategies.scalping_strategy import EnhancedScalpingStrategy
@@ -312,7 +321,7 @@ class StrategyRunner:
             return OrderExecutor(
                 kite=self.kite,
                 telegram_controller=self.telegram,
-                on_trade_closed=self.risk_engine.on_trade_closed,
+                on_trade_closed=self._on_trade_closed,
             )
 
         def _make_connector_shadow():
@@ -325,7 +334,7 @@ class StrategyRunner:
             return OrderExecutor(
                 kite=None,
                 telegram_controller=self.telegram,
-                on_trade_closed=self.risk_engine.on_trade_closed,
+                on_trade_closed=self._on_trade_closed,
             )
 
         self.components = init_default_registries(
@@ -1568,6 +1577,23 @@ class StrategyRunner:
             "exposure_notional_est": round(notional, 2), "max_notional_cap": round(max_notional, 2),
         }
         return int(qty), diag
+
+    def _on_trade_closed(self, pnl: float) -> None:
+        """Update risk state and forward realised PnL to risk engine."""
+
+        if pnl < 0:
+            loss = abs(pnl)
+            self._risk_state.realised_loss += loss
+            self.risk.day_realized_loss += loss
+            self.risk.consecutive_losses += 1
+        else:
+            self.risk.consecutive_losses = 0
+        self.risk.day_realized_pnl += pnl
+        self.risk.trades_today += 1
+        try:
+            self.risk_engine.on_trade_closed(pnl_R=pnl)
+        except Exception:
+            self.log.debug("risk_engine on_trade_closed failed", exc_info=True)
 
     # ---------------- data helpers ----------------
     def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
