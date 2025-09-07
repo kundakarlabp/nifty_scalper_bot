@@ -1,68 +1,77 @@
-"""Simple pre-trade risk guard helpers."""
+"""Runtime trading guardrails."""
 
 from __future__ import annotations
 
+import os
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from decimal import Decimal
-from typing import Deque
+from dataclasses import dataclass
+from typing import Optional
 
-from src.broker.interface import OrderRequest, Side
+from src.utils.reliability import RateLimiter
 
 
 @dataclass
-class GuardConfig:
-    """Configuration for :mod:`risk.guards`.  Zero values disable checks."""
+class RiskConfig:
+    """Configuration for :class:`RiskGuards`.
 
-    max_loss: Decimal = Decimal("0")
-    max_position: int = 0
-    max_exposure: Decimal = Decimal("0")
-    max_orders_per_minute: int = 0
-
-
-@dataclass
-class GuardState:
-    """Mutable risk state shared across guard evaluations."""
-
-    realised_loss: Decimal = Decimal("0")
-    position: int = 0
-    exposure: Decimal = Decimal("0")
-    order_ts: Deque[float] = field(default_factory=lambda: deque(maxlen=100))
-
-
-def risk_check(order: OrderRequest, state: GuardState, cfg: GuardConfig) -> bool:
-    """Return ``True`` if all configured guards pass for ``order``.
-
-    The checks are intentionally lightweight and in‑memory, making them suitable
-    for use inside tight event loops.
+    Environment variables provide defaults so behaviour can be tuned without
+    code changes. Passing zero or empty values disables the corresponding
+    checks.
     """
 
-    now = time.time()
-    # --- order rate cap ---
-    state.order_ts.append(now)
-    while state.order_ts and now - state.order_ts[0] > 60:
-        state.order_ts.popleft()
-    if cfg.max_orders_per_minute and len(state.order_ts) > cfg.max_orders_per_minute:
-        return False
+    max_orders_per_min: int = int(os.getenv("MAX_ORDERS_PER_MIN", "30"))
+    daily_loss_cap: float = float(os.getenv("DAILY_LOSS_CAP", "9999999"))
+    trading_start_hm: str = os.getenv("TRADING_WINDOW_START", "09:20")
+    trading_end_hm: str = os.getenv("TRADING_WINDOW_END", "15:25")
+    kill_env: str = os.getenv("KILL_SWITCH_ENV", "ENABLE_TRADING")
+    kill_file: str = os.getenv("KILL_SWITCH_FILE", "")
 
-    # --- daily loss cap ---
-    if cfg.max_loss and state.realised_loss <= -abs(cfg.max_loss):
-        return False
 
-    # --- position & exposure caps ---
-    new_pos = state.position + (order.qty if order.side is Side.BUY else -order.qty)
-    if cfg.max_position and abs(new_pos) > cfg.max_position:
-        return False
-    notional = (order.price or Decimal("0")) * Decimal(order.qty)
-    new_exposure = state.exposure + (
-        notional if order.side is Side.BUY else -notional
-    )
-    if cfg.max_exposure and abs(new_exposure) > cfg.max_exposure:
-        return False
+class RiskGuards:
+    """Lightweight pre-trade checks for live trading."""
 
-    # Guards passed – update provisional state
-    state.position = new_pos
-    state.exposure = new_exposure
-    return True
+    def __init__(self, config: Optional[RiskConfig] = None) -> None:
+        self.cfg = config or RiskConfig()
+        self.rate = RateLimiter(self.cfg.max_orders_per_min)
+        self._pnl_today = 0.0
 
+    # ------------------------------------------------------------------
+    def set_pnl_today(self, value: float) -> None:
+        """Record realised PnL for the current trading day."""
+
+        self._pnl_today = float(value)
+
+    # ------------------------------------------------------------------
+    def _kill_switch(self) -> bool:
+        """Return ``True`` if trading should be halted."""
+
+        env_block = os.getenv(self.cfg.kill_env, "true").lower() in {
+            "false",
+            "0",
+            "no",
+        }
+        file_block = bool(self.cfg.kill_file and os.path.exists(self.cfg.kill_file))
+        return env_block or file_block
+
+    def _within_window(self) -> bool:
+        """Return ``True`` if current time is inside the trading window."""
+
+        hms = time.strftime("%H:%M", time.localtime())
+        return self.cfg.trading_start_hm <= hms <= self.cfg.trading_end_hm
+
+    # ------------------------------------------------------------------
+    def ok_to_trade(self, decision: object | None = None) -> bool:
+        """Return ``True`` if a new order may be placed."""
+
+        if self._kill_switch():
+            return False
+        if not self._within_window():
+            return False
+        if self._pnl_today <= -abs(self.cfg.daily_loss_cap):
+            return False
+        if not self.rate.allow():
+            return False
+        return True
+
+
+__all__ = ["RiskConfig", "RiskGuards"]
