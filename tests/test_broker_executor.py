@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.brokers.mock import MockBroker
 from src.broker.interface import OrderRequest, Side
@@ -33,3 +37,25 @@ def test_executor_buy_sell_helpers() -> None:
     buy_id = executor.buy("XYZ", 1)
     sell_id = executor.sell("XYZ", 1)
     assert buy_id != sell_id
+
+
+def test_kill_switch_env_blocks_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = MockBroker()
+    broker.connect()
+    executor = BrokerOrderExecutor(broker)
+    monkeypatch.setenv("KILL_SWITCH", "1")
+    with pytest.raises(RuntimeError):
+        executor.place_order(OrderRequest(instrument_id=1, side=Side.BUY, qty=1))
+
+
+def test_kill_switch_file_blocks_orders(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = MockBroker()
+    broker.connect()
+    executor = BrokerOrderExecutor(broker)
+    flag = tmp_path / "ks"
+    flag.write_text("1")
+    monkeypatch.setenv("KILL_SWITCH_FILE", str(flag))
+    with pytest.raises(RuntimeError):
+        executor.place_order(OrderRequest(instrument_id=1, side=Side.BUY, qty=1))
+    monkeypatch.delenv("KILL_SWITCH_FILE")
+    os.remove(flag)

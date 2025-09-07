@@ -2,9 +2,12 @@ from __future__ import annotations
 
 """Order executor backed by a :class:`Broker`."""
 
+import os
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from src.broker.interface import Broker, OrderRequest, OrderType, Side, TimeInForce
+from src.utils.env import env_flag
 
 
 class BrokerOrderExecutor:
@@ -28,6 +31,8 @@ class BrokerOrderExecutor:
         order = req if isinstance(req, OrderRequest) else self._coerce_request(
             req, instrument_id_mapper
         )
+        if self._kill_switch_engaged():
+            raise RuntimeError("kill switch active")
         return self.broker.place_order(order)
 
     # ------------------------------------------------------------------
@@ -57,6 +62,16 @@ class BrokerOrderExecutor:
             metadata=kwargs.get("metadata"),
         )
         return self.place_order(req)
+
+    @staticmethod
+    def _kill_switch_engaged() -> bool:
+        """Return ``True`` when global trading should be halted."""
+        if env_flag("KILL_SWITCH", False):
+            return True
+        path_val = os.environ.get("KILL_SWITCH_FILE")
+        if path_val and Path(path_val).exists():
+            return True
+        return False
 
     def _resolve_token(self, symbol_or_token: str | int) -> int:
         if isinstance(symbol_or_token, int):
