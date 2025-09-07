@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import pandas as pd
 import yaml  # type: ignore[import-untyped]
@@ -57,7 +57,7 @@ def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
-    cfg = cfg or settings
+    cfg = cast(AppSettings, cfg or settings)
     errors: list[str] = []
 
     # Live trading requires broker credentials
