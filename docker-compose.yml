@@ -1,7 +1,7 @@
 version: "3.9"
 
 services:
-  scalper:
+  bot:
     build:
       context: .
       dockerfile: Dockerfile
@@ -19,7 +19,7 @@ services:
     volumes:
       # Persist logs locally (optional)
       - ./logs:/app/logs
-    command: ["python", "-m", "src.main", "start"]
+    command: ["python", "-m", "src.main"]
     # If you expose a health endpoint (Flask/FastAPI), map it:
     # ports:
     #   - "8000:8000"
@@ -30,13 +30,14 @@ services:
     #   retries: 5
     #   start_period: 20s
 
-  # Optional one-off backtest job (run with: `docker compose run --rm backtest`)
-  backtest:
+  # Run the test suite inside a container
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: nifty-scalper:latest
     profiles: ["test"]
     env_file:
       - .env
     working_dir: /app
-    command: ["python", "tests/true_backtest_dynamic.py"]
-    depends_on:
-      - scalper
+    command: ["pytest"]

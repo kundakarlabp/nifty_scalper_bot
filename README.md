@@ -70,6 +70,22 @@ nifty_scalper_bot/
 
    The provided `Dockerfile` and `render.yaml` work with Render or Railway.  Create a new Web Service in your chosen platform, point it at this repository and add the environment variables specified in `.env.example` via the dashboard.  The default command will start the bot and begin listening for Telegram commands.
 
+## Architecture & Docker
+
+The runtime wiring is broker‑agnostic:
+
+```
+instruments → KiteBroker → BrokerDataSource → Orchestrator → BrokerOrderExecutor
+```
+
+`src/main.py` assembles these pieces and optionally attaches a Telegram notifier if credentials are provided.  A minimal Docker setup is provided for local runs:
+
+```bash
+cp .env.example .env  # fill in KITE_* and SYMBOL
+docker compose up --build bot      # run the bot
+docker compose up --build test     # run the test suite
+```
+
 ## Telegram commands
 
 * `/start` – begin a real‑time trading session.  The bot will connect to Kite, subscribe to market data and start evaluating signals.
