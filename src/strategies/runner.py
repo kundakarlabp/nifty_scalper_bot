@@ -54,7 +54,7 @@ from src.risk import risk_gates
 from src.strategies.scalping_strategy import compute_score
 from src.data.broker_source import BrokerDataSource
 from src.execution.broker_executor import BrokerOrderExecutor
-from src.broker.interface import Tick, OrderRequest, Side
+from src.broker.interface import Tick, OrderRequest
 from src.risk import guards
 
 # Optional broker SDK (graceful if not installed)
@@ -86,7 +86,7 @@ class Orchestrator:
         min_eval_interval_s: float = 0.0,
         stale_tick_timeout_s: float = 3.0,
         on_stale: Optional[Callable[[], None]] = None,
-        risk_config: Optional[guards.GuardConfig] = None,
+        risk_config: Optional[guards.RiskConfig] = None,
     ) -> None:
         self.data_source = data_source
         self.executor = executor
@@ -101,8 +101,7 @@ class Orchestrator:
         self._running = False
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
-        self._risk_cfg = risk_config or guards.GuardConfig()
-        self._risk_state = guards.GuardState()
+        self._risk = guards.RiskGuards(risk_config)
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -185,16 +184,10 @@ class Orchestrator:
             self._update_risk_state(order)
 
     def _risk_ok(self, order: OrderRequest) -> bool:
-        return guards.risk_check(order, self._risk_state, self._risk_cfg)
+        return self._risk.ok_to_trade(order)
 
     def _update_risk_state(self, order: OrderRequest) -> None:
-        price = order.price or 0
-        if order.side is Side.BUY:
-            self._risk_state.position += order.qty
-            self._risk_state.exposure += price * order.qty
-        else:
-            self._risk_state.position -= order.qty
-            self._risk_state.exposure -= price * order.qty
+        pass
 
 # ================================ Models ================================
 
