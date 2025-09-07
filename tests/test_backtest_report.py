@@ -1,7 +1,7 @@
 import shutil
 
 from src.risk.session import Trade
-from tests.true_backtest_dynamic import BacktestRunner, project_root
+from scripts.true_backtest_dynamic import BacktestRunner, project_root
 
 
 def test_placeholder_report_created(tmp_path):
