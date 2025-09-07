@@ -26,8 +26,8 @@ def live() -> Tuple[Dict[str, Any], int]:
 
 @app.route("/ready", methods=["GET"])
 def ready() -> Tuple[Dict[str, Any], int]:
-    """Readiness probe: lightweight 200; customize if you need deeper checks."""
-    return {"status": "ready"}, 200
+    """Readiness probe with uptime information."""
+    return {"status": "ready", "uptime_sec": int(time.time() - _start_ts)}, 200
 
 
 # Explicit HEAD route to avoid framework quirks on some platforms
