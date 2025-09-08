@@ -733,6 +733,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         from src.utils.time_windows import TZ
 
                         prev_start, prev_end = prev_session_bounds(dt.datetime.now(TZ))
+                        prev_start = _naive_ist(prev_start)
+                        prev_end = _naive_ist(prev_end)
                         try:
                             rows = _retry(
                                 self.kite.historical_data,
