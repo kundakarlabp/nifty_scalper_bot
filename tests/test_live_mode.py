@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from src import main as main_mod
 from src.config import settings
 from src.strategies.runner import StrategyRunner
+from src.boot import validate_env
 
 
 def _prep_live_env(monkeypatch):
@@ -18,6 +19,7 @@ def _prep_live_env(monkeypatch):
     monkeypatch.setattr(settings, "enable_live_trading", True)
     monkeypatch.setattr(settings.telegram, "bot_token", "x")
     monkeypatch.setattr(settings.telegram, "chat_id", 1)
+    monkeypatch.setattr(validate_env, "SKIP_BROKER_VALIDATION", True)
 
 
 def test_build_kite_session_success(monkeypatch):

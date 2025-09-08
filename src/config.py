@@ -19,6 +19,15 @@ from pydantic import AliasChoices, BaseModel, ValidationInfo, field_validator, F
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def env_any(*names: str, default: str | None = None) -> str | None:
+    """Return the first non-empty environment variable from ``names``."""
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            return val
+    return default
+
+
 # ================= Sub-models =================
 
 class ZerodhaSettings(BaseModel):
@@ -30,9 +39,30 @@ class ZerodhaSettings(BaseModel):
     def from_env(cls) -> "ZerodhaSettings":
         """Load legacy flat env vars if present."""
         return cls(
-            api_key=os.getenv("KITE_API_KEY", ""),
-            api_secret=os.getenv("KITE_API_SECRET", ""),
-            access_token=os.getenv("KITE_ACCESS_TOKEN", ""),
+            api_key=(
+                env_any(
+                    "ZERODHA__API_KEY",
+                    "ZERODHA_API_KEY",
+                    "KITE_API_KEY",
+                )
+                or ""
+            ),
+            api_secret=(
+                env_any(
+                    "ZERODHA__API_SECRET",
+                    "ZERODHA_API_SECRET",
+                    "KITE_API_SECRET",
+                )
+                or ""
+            ),
+            access_token=(
+                env_any(
+                    "ZERODHA__ACCESS_TOKEN",
+                    "ZERODHA_ACCESS_TOKEN",
+                    "KITE_ACCESS_TOKEN",
+                )
+                or ""
+            ),
         )
 
 
