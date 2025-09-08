@@ -20,7 +20,7 @@ from src.boot.validate_env import (
     seed_env_from_defaults,
     validate_critical_settings,
     _log_cred_presence,
-    BROKER_CONNECT_FOR_DATA,
+    broker_connect_for_data,
 )  # noqa: E402
 
 seed_env_from_defaults()
@@ -97,7 +97,7 @@ class _NoopTelegram:
 def _build_kite_session() -> Optional["KiteConnect"]:
     log = logging.getLogger("main")
     if not settings.enable_live_trading:
-        if not BROKER_CONNECT_FOR_DATA:
+        if not broker_connect_for_data():
             log.info("Live trading disabled → paper mode.")
             return None
         log.info("Paper mode with broker data enabled.")
