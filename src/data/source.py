@@ -840,3 +840,109 @@ def _livekite_health() -> float:
     return 100.0
 
 
+_auto_atm_last_check_ts = 0.0
+
+
+def auto_resubscribe_atm(self: Any) -> None:
+    """
+    Periodically ensure the current ATM option tokens are subscribed for L1.
+    Works with common method/attr names; no-ops if nothing is detectable.
+    Controlled by: AUTO_ATM_RESUB_INTERVAL_S (default 30s)
+    """
+    global _auto_atm_last_check_ts
+    try:
+        interval = int(os.getenv("AUTO_ATM_RESUB_INTERVAL_S", "30"))
+    except Exception:
+        interval = 30
+    now = time.time()
+    if now - _auto_atm_last_check_ts < interval:
+        return
+    _auto_atm_last_check_ts = now
+
+    lg = logging.getLogger(__name__)
+
+    # 1) Discover ATM tokens
+    tokens = None
+    for name in ("atm_tokens", "current_atm_tokens", "_atm_tokens"):
+        if hasattr(self, name):
+            v = getattr(self, name)
+            if isinstance(v, (list, tuple, set)) and v:
+                tokens = list(v)
+                break
+    if tokens is None:
+        for meth in ("get_atm_tokens", "compute_atm_tokens", "atm_tokens"):
+            fn = getattr(self, meth, None)
+            if callable(fn):
+                try:
+                    v = fn()
+                    if isinstance(v, (list, tuple, set)) and v:
+                        tokens = list(v)
+                        break
+                except Exception:
+                    pass
+    if not tokens:
+        return  # can't infer ATM tokens; nothing to do
+
+    # 2) Check if we have fresh L1 for each token
+    stale: list[int] = []
+    for t in tokens:
+        ok = False
+        # try self-level getters
+        for get in ("get_l1", "ltp", "get_quote", "quote"):
+            fn = getattr(self, get, None)
+            if callable(fn):
+                try:
+                    q = fn([t]) if get in ("get_quote", "quote") else fn(t)
+                    ok = bool(q)
+                    break
+                except Exception:
+                    pass
+        # try broker-level as fallback
+        if not ok and hasattr(self, "broker"):
+            for bget in ("ltp", "quote", "get_ltp"):
+                fn = getattr(self.broker, bget, None)
+                if callable(fn):
+                    try:
+                        q = fn([t]) if bget in ("quote",) else fn(t)
+                        ok = bool(q)
+                        break
+                    except Exception:
+                        pass
+        if not ok:
+            stale.append(t)
+
+    if not stale:
+        return
+
+    # 3) Resubscribe missing tokens
+    resubbed = False
+    for sub in ("subscribe_tokens", "subscribe", "subscribe_l1"):
+        fn = getattr(self, sub, None)
+        if callable(fn):
+            try:
+                fn(stale)
+                resubbed = True
+                break
+            except Exception:
+                pass
+    if not resubbed and hasattr(self, "broker"):
+        for bsub in ("subscribe_tokens", "subscribe"):
+            fn = getattr(self.broker, bsub, None)
+            if callable(fn):
+                try:
+                    fn(stale)
+                    resubbed = True
+                    break
+                except Exception:
+                    pass
+
+    if resubbed:
+        lg.info("auto_resubscribe_atm: resubscribed tokens=%s", stale)
+    else:
+        lg.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", stale)
+
+
+# Bind helper to DataSource for easy access
+DataSource.auto_resubscribe_atm = auto_resubscribe_atm  # type: ignore[attr-defined]
+
+
