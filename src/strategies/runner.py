@@ -272,7 +272,7 @@ class StrategyRunner:
         self.under_symbol = str(getattr(settings.instruments, "trade_symbol", "NIFTY"))
         self.lot_size = int(getattr(settings.instruments, "nifty_lot_size", 50))
         self.instruments = InstrumentsCache(self.kite)
-        self.option_resolver = OptionResolver(self.instruments)
+        self.option_resolver = OptionResolver(self.instruments, self.kite)
         self._last_option: Optional[dict] = None
 
         self.risk_engine = RiskEngine(

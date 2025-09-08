@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
-
-from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 from src.options.instruments_cache import InstrumentsCache, nearest_weekly_expiry
 from src.options.resolver import OptionResolver
@@ -46,3 +45,15 @@ def test_option_resolver_and_micro():
     q = {"depth": {"buy": [{"price": 100.0, "quantity": 100}], "sell": [{"price": 100.5, "quantity": 100}]}}
     sp, ok = micro_from_quote(q, lot_size=50, depth_min_lots=1)
     assert ok is True and sp is not None
+
+
+def test_option_resolver_fetches_missing_token():
+    """Falls back to Kite LTP when cache lacks the option token."""
+    cache = InstrumentsCache(instruments=[])
+    kite = MagicMock()
+    kite.ltp.return_value = {"NFO:NIFTY24MAY22500CE": {"instrument_token": 789}}
+    with patch("src.options.resolver.resolve_weekly_atm") as r:
+        r.return_value = {"ce": ("NIFTY24MAY22500CE", 50)}
+        resolver = OptionResolver(cache, kite)
+        opt = resolver.resolve_atm("NIFTY", 22510, "CE", datetime(2024, 5, 27))
+    assert opt["token"] == 789
