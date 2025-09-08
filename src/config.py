@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import AliasChoices, BaseModel, ValidationInfo, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -339,9 +340,9 @@ class AppSettings(BaseSettings):
     ai_provider: str = ""
     openai_api_key: str = ""
 
-    # Live trading is disabled by default; set to True to run in live mode.
+    # Live trading runs by default; set to ``false`` for paper trading.
     enable_live_trading: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("ENABLE_LIVE_TRADING", "ENABLE_TRADING"),
     )
     allow_offhours_testing: bool = False
@@ -587,6 +588,7 @@ def _apply_env_overrides(cfg: AppSettings) -> None:
 
 def load_settings() -> AppSettings:
     """Return application settings loaded from the environment."""
+    load_dotenv(override=False)
     cfg = AppSettings(
         zerodha=ZerodhaSettings.from_env(),
         telegram=TelegramSettings.from_env(),

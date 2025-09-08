@@ -55,7 +55,7 @@ def test_default_values():
         settings = AppSettings(_env_file=None)
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
-        assert settings.enable_live_trading is False  # Default now
+        assert settings.enable_live_trading is True
         assert settings.system.log_buffer_capacity == 4000  # Default value
         assert settings.data.lookback_minutes == 20  # Updated default
         assert settings.data.lookback_padding_bars == 5  # Default padding
