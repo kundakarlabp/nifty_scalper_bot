@@ -31,6 +31,7 @@ from src.utils.logging_tools import (
     log_buffer_handler,
 )  # noqa: E402
 from src.utils.logger_setup import setup_logging  # noqa: E402
+from src.utils.log_filters import install_warmup_filters  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
@@ -49,6 +50,10 @@ except Exception:
 # -----------------------------
 def _setup_logging() -> None:
     setup_logging(level=settings.log_level, json=settings.log_json)
+    try:
+        install_warmup_filters()
+    except Exception:
+        pass
     root = logging.getLogger()
     root.addFilter(RateLimitFilter(interval=120.0))
     if log_buffer_handler not in root.handlers:
