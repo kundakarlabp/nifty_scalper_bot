@@ -13,7 +13,13 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings, load_settings
+from src.config import (
+    AppSettings,
+    DataSettings,
+    InstrumentsSettings,
+    RiskSettings,
+    load_settings,
+)
 from src.boot.validate_env import validate_critical_settings
 
 def test_load_from_env():
@@ -41,6 +47,14 @@ def test_validation_error_on_invalid_data():
     with pytest.raises(ValidationError):
         # Direct instantiation to trigger validation errors
         RiskSettings(max_daily_drawdown_pct=2.0)  # Invalid (must be < 0.2)
+
+
+def test_instrument_token_must_be_positive():
+    """``instrument_token`` must be a positive integer."""
+    with pytest.raises(ValidationError, match="instrument_token must be a positive integer"):
+        InstrumentsSettings(instrument_token=0)
+    with pytest.raises(ValidationError, match="instrument_token must be a positive integer"):
+        InstrumentsSettings(instrument_token=-1)
 
 def test_default_values():
     """Tests that default values are used when environment variables are not set."""

@@ -99,10 +99,17 @@ def enable_live_trading() -> bool:
     )
 
 
+## Backward-compatible module-level flag for tests and legacy code
+SKIP_BROKER_VALIDATION: bool = (
+    str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower() in {"1", "true", "yes"}
+)
+
+
 def skip_broker_validation() -> bool:
     _ensure_env_seeded()
     return (
-        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
+        SKIP_BROKER_VALIDATION
+        or str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
         in {"1", "true", "yes"}
     )
 
