@@ -8,13 +8,12 @@ from __future__ import annotations
 import logging
 import platform
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from PIL import Image
 
 log = logging.getLogger(__name__)
-log.info("machine: %s", platform.platform())
+_machine_logged = False
 
 _TORCH_AVAILABLE = False
 _read_image = None  # type: ignore
@@ -37,6 +36,11 @@ def load_image(path: str | Path) -> np.ndarray:
     path is used instead so the caller does not need to care about optional
     dependencies.
     """
+    global _machine_logged
+    if not _machine_logged:
+        log.info("machine: %s", platform.platform())
+        _machine_logged = True
+
     p = Path(path)
     if _TORCH_AVAILABLE and _read_image is not None:
         try:
