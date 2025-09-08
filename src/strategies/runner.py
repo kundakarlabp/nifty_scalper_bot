@@ -819,7 +819,8 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            plan["atr_pct"] = atr_pct(df, period=atr_period)
+            atr_val = atr_pct(df, period=atr_period)
+            plan["atr_pct"] = round(atr_val, 2) if atr_val is not None else None
             sym = self.under_symbol.upper()
             atr_min = (
                 self.strategy_cfg.min_atr_pct_banknifty
