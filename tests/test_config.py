@@ -253,13 +253,62 @@ def test_invalid_instrument_token_detected(monkeypatch):
         def fetch_ohlc(self, *_, **__):
             return pd.DataFrame()
 
+    class DummyKite:
+        def __init__(self, api_key):
+            pass
+
+        def set_access_token(self, token):
+            pass
+
     with mock.patch("src.config.settings", settings), mock.patch(
         "src.boot.validate_env.settings", settings
     ), monkeypatch.context() as m:
         m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+        m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
-    assert "valid F&O token" in str(exc.value)
+    msg = str(exc.value)
+    assert "instrument list" in msg
+    assert "tokens are typically >10000" in msg
+
+
+def test_non_positive_instrument_token_rejected(monkeypatch):
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": "0",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+    class DummyKite:
+        def __init__(self, api_key):
+            pass
+
+        def set_access_token(self, token):
+            pass
+
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ), monkeypatch.context() as m:
+        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+        m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
+        with pytest.raises(ValueError) as exc:
+            validate_critical_settings()
+    msg = str(exc.value)
+    assert "positive integer" in msg
+    assert "instrument list" in msg
 
 
 def test_decimal_instrument_token_coerced():

@@ -21,6 +21,8 @@ try:
 except Exception:  # pragma: no cover
     LiveKiteSource = None  # type: ignore
 
+SKIP_BROKER_VALIDATION = False
+
 
 def env_any(*names: str, default: str | None = None) -> str | None:
     """Return the first non-empty environment variable from ``names``."""
@@ -102,7 +104,8 @@ def enable_live_trading() -> bool:
 def skip_broker_validation() -> bool:
     _ensure_env_seeded()
     return (
-        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
+        SKIP_BROKER_VALIDATION
+        or str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
         in {"1", "true", "yes"}
     )
 
@@ -174,7 +177,13 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     ):
         token = int(getattr(cfg.instruments, "instrument_token", 0) or 0)
         if token <= 0:
-            errors.append("INSTRUMENTS__INSTRUMENT_TOKEN must be a positive integer")
+            errors.append(
+                (
+                    "INSTRUMENTS__INSTRUMENT_TOKEN must be a positive integer "
+                    "(typically >10000). Download your broker's instrument "
+                    "list to obtain a valid token."
+                )
+            )
         else:
             src = None
             try:
@@ -202,7 +211,12 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                         ltp = ltp_fn(token) if callable(ltp_fn) else None
                         if not isinstance(ltp, (int, float)):
                             errors.append(
-                                f"instrument_token {token} returned no data; configure a valid F&O token",
+                                (
+                                    f"instrument_token {token} returned no data; "
+                                    "tokens are typically >10000. Download your "
+                                    "broker's instrument list to obtain a valid "
+                                    "F&O token."
+                                )
                             )
                 finally:
                     disconnect = getattr(src, "disconnect", None)
