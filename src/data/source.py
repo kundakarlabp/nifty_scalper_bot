@@ -483,6 +483,7 @@ def _fetch_ohlc_yf(
     """Fetch OHLC data from yfinance for the given symbol/timeframe."""
     global _warmup_next_try_ts, _warmup_backoff
     if yf is None or not symbol or DATA_WARMUP_DISABLE or YFINANCE_DISABLE:
+        _warmup_next_try_ts = time.time() + _warmup_backoff_s()
         return None
     now = time.time()
     if now < _warmup_next_try_ts:

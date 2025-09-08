@@ -19,9 +19,10 @@ def test_fetch_ohlc_warmup(monkeypatch):
         "Volume": [0] * WARMUP_BARS,
     }
     df = pd.DataFrame(data, index=index)
+    df = df.rename(columns=str.lower)
+    df.index = df.index.tz_localize(None)
 
-    monkeypatch.setattr("src.data.source._yf_symbol", lambda token: "TEST")
-    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: df)
+    monkeypatch.setattr("src.data.source._fetch_ohlc_yf", lambda *args, **kwargs: df)
 
     src = LiveKiteSource(kite=None)
     out = src.fetch_ohlc(123, start, end, "minute")
@@ -46,9 +47,10 @@ def test_fetch_ohlc_timezone_aware_inputs(monkeypatch):
         "Volume": [0] * WARMUP_BARS,
     }
     df = pd.DataFrame(data, index=index)
+    df = df.rename(columns=str.lower)
+    df.index = df.index.tz_localize(None)
 
-    monkeypatch.setattr("src.data.source._yf_symbol", lambda token: "TEST")
-    monkeypatch.setattr("yfinance.download", lambda *args, **kwargs: df)
+    monkeypatch.setattr("src.data.source._fetch_ohlc_yf", lambda *args, **kwargs: df)
 
     src = LiveKiteSource(kite=None)
     out = src.fetch_ohlc(123, start, end, "minute")

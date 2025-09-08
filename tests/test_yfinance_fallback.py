@@ -9,6 +9,15 @@ from src.data.source import (
     _fetch_ohlc_yf,
     _yf_symbol,
 )
+import pytest
+from src.data import source
+
+
+@pytest.fixture(autouse=True)
+def _reset_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(source, "_warmup_next_try_ts", 0.0)
+    monkeypatch.setattr(source, "DATA_WARMUP_DISABLE", False)
+    monkeypatch.setattr(source, "YFINANCE_DISABLE", False)
 
 
 def test_fetch_ohlc_yfinance_fallback(monkeypatch):

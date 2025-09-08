@@ -15,6 +15,9 @@ def test_fetch_ohlc_yf_raises_on_empty(monkeypatch: pytest.MonkeyPatch) -> None:
         return pd.DataFrame()
 
     monkeypatch.setattr(source, "yf", type("T", (), {"download": fake_download}))
+    monkeypatch.setattr(source, "DATA_WARMUP_DISABLE", False)
+    monkeypatch.setattr(source, "YFINANCE_DISABLE", False)
+    monkeypatch.setattr(source, "_warmup_next_try_ts", 0.0)
     start = datetime(2024, 1, 1)
     end = start + timedelta(minutes=1)
     with pytest.raises(ValueError):
@@ -35,6 +38,9 @@ def test_fetch_ohlc_yf_returns_minute_volume(monkeypatch: pytest.MonkeyPatch) ->
         return pd.DataFrame(data, index=idx)
 
     monkeypatch.setattr(source, "yf", type("T", (), {"download": fake_download}))
+    monkeypatch.setattr(source, "DATA_WARMUP_DISABLE", False)
+    monkeypatch.setattr(source, "YFINANCE_DISABLE", False)
+    monkeypatch.setattr(source, "_warmup_next_try_ts", 0.0)
     start = datetime(2024, 1, 1, 9, 15)
     end = start + timedelta(minutes=2)
     df = source._fetch_ohlc_yf("^NSEI", start, end, "minute")
