@@ -72,6 +72,8 @@ class TelegramCommands:
                             self.on_cmd(cmd, arg)
                         except Exception:
                             logger.exception("cmd handler failed")
+            except requests.exceptions.ReadTimeout:
+                continue
             except Exception:
                 logger.exception("telegram polling error")
                 time.sleep(1)
