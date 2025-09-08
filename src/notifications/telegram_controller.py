@@ -558,6 +558,12 @@ class TelegramController:
             return self._send("\n".join(lines)[:3500])
 
         if cmd == "/probe":
+            if self._probe_provider:
+                try:
+                    info = self._probe_provider()
+                    return self._send(f"Probe: {info}")
+                except Exception as e:
+                    return self._send(f"Probe error: {e}")
             runner = StrategyRunner.get_singleton()
             if not runner:
                 return self._send("runner not ready")
@@ -600,6 +606,16 @@ class TelegramController:
             return self._send(f"<pre>{txt}</pre>", parse_mode="HTML")
 
         if cmd == "/bars":
+            if self._bars_provider:
+                try:
+                    n = int(args[0]) if args else 5
+                except Exception:
+                    n = 5
+                try:
+                    text = self._bars_provider(n)
+                    return self._send(text)
+                except Exception as e:
+                    return self._send(f"Bars error: {e}")
             runner = StrategyRunner.get_singleton()
             if not runner:
                 return self._send("runner not ready")
@@ -1045,15 +1061,6 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Why error: {e}")
 
-        if cmd == "/probe":
-            if not self._probe_provider:
-                return self._send("Probe provider unavailable.")
-            try:
-                info = self._probe_provider()
-                return self._send(f"Probe: {info}")
-            except Exception as e:
-                return self._send(f"Probe error: {e}")
-
         if cmd == "/atm":
             if not self._atm_provider:
                 return self._send("ATM provider unavailable.")
@@ -1072,32 +1079,11 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"L1 error: {e}")
 
-        if cmd == "/bars":
-            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
-            if not runner:
-                return self._send("Runner unavailable.")
-            try:
-                n = int(args[0]) if args else 5
-            except Exception:
-                n = 5
-            try:
-                df = runner.data_source.get_last_bars(n)
-                if df is None:
-                    return self._send("No bars available.")
-                rows = []
-                for ts, r in df.iterrows():
-                    rows.append(
-                        f"{str(ts)[11:16]}  O:{r.open:.1f} H:{r.high:.1f} L:{r.low:.1f} C:{r.close:.1f}  "
-                        f"VWAP:{getattr(r, 'vwap', float('nan')):.1f}  ATR%:{getattr(r, 'atr_pct', float('nan')):.2f}"
-                    )
-                src = getattr(runner.last_plan or {}, "data_source", None) or (runner.last_plan or {}).get("data_source", "broker")
-                text = "📊 *Bars*  src=" + str(src) + "\n" + "\n".join(rows[-n:])
-                return self._send(text, parse_mode="Markdown")
-            except Exception as e:
-                return self._send(f"Bars error: {e}")
-
         if cmd == "/quotes":
             try:
+                if self._quotes_provider:
+                    sym = args[0] if args else ""
+                    return self._send(self._quotes_provider(sym))
                 plan = self._last_signal_provider() if self._last_signal_provider else {}
                 sym = plan.get("strike") or plan.get("symbol") or "-"
                 text = "📈 *Quotes*\n" + _fmt_micro(
