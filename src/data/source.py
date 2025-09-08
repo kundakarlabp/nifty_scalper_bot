@@ -20,6 +20,7 @@ from src.data.base_source import BaseDataSource
 from src.boot.validate_env import (
     DATA_WARMUP_DISABLE,
 )
+from src.utils.market_time import IST, prev_session_bounds
 
 log = logging.getLogger(__name__)
 
@@ -505,6 +506,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
         self._backfill_cooldown_s = 60
+        self._premkt_warned = False
+        self._premkt_retry = False
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -724,6 +727,28 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 except Exception as e:
                     lat = int((time.monotonic() - t0) * 1000)
                     self.cb_hist.record_failure(lat, reason=str(e))
+                    msg = str(e)
+                    if (
+                        "Historical fetch API call should not be made before the market opens"
+                        in msg
+                    ):
+                        if not self._premkt_warned:
+                            log.info(
+                                "fetch_ohlc: awaiting market open; using previous session"
+                            )
+                            self._premkt_warned = True
+                        if self._premkt_retry:
+                            return None
+                        self._premkt_retry = True
+                        try:
+                            prev_start, prev_end = prev_session_bounds(
+                                datetime.now(tz=IST)
+                            )
+                            return self.fetch_ohlc(
+                                token, prev_start, prev_end, timeframe
+                            )
+                        finally:
+                            self._premkt_retry = False
                 cur = cur_end
 
             df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
