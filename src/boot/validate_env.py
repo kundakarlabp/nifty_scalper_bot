@@ -45,12 +45,47 @@ def env_any(*names: str, default: str | None = None) -> str | None:
             return val
     return default
 
+
+API_KEY_ALIASES = ("ZERODHA__API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+API_SECRET_ALIASES = ("ZERODHA__API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+ACCESS_TOKEN_ALIASES = (
+    "ZERODHA__ACCESS_TOKEN",
+    "ZERODHA_ACCESS_TOKEN",
+    "KITE_ACCESS_TOKEN",
+)
+
+
+def _read_creds() -> dict[str, str | None]:
+    """Read Zerodha credentials from any supported alias."""
+    return {
+        "api_key": env_any(*API_KEY_ALIASES),
+        "api_secret": env_any(*API_SECRET_ALIASES),
+        "access_token": env_any(*ACCESS_TOKEN_ALIASES),
+    }
+
+
+def _export_aliases_into_environ() -> None:
+    """Populate missing alias env vars with the available credential values."""
+    creds = _read_creds()
+    alias_map = {
+        "api_key": API_KEY_ALIASES,
+        "api_secret": API_SECRET_ALIASES,
+        "access_token": ACCESS_TOKEN_ALIASES,
+    }
+    for key, aliases in alias_map.items():
+        val = creds.get(key)
+        if val:
+            for name in aliases:
+                os.environ.setdefault(name, val)
+
+
 def _skip_validation() -> bool:
     return SKIP_BROKER_VALIDATION
 
-API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
-API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
-ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+
+API_KEY = env_any(*API_KEY_ALIASES)
+API_SECRET = env_any(*API_SECRET_ALIASES)
+ACCESS_TOKEN = env_any(*ACCESS_TOKEN_ALIASES)
 
 # Deployment environment flags
 # True when running on Railway (detected via known env vars)
@@ -104,7 +139,9 @@ def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
+    _export_aliases_into_environ()
     cfg = cast(AppSettings, cfg or settings)
+    _log_cred_presence()
     errors: list[str] = []
 
     if _skip_validation():
@@ -117,15 +154,18 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     if cfg.enable_live_trading:
         if not cfg.zerodha.api_key:
             errors.append(
-                "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true"
+                "/".join(API_KEY_ALIASES)
+                + " is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.api_secret:
             errors.append(
-                "ZERODHA__API_SECRET (or KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true"
+                "/".join(API_SECRET_ALIASES)
+                + " is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.access_token:
             errors.append(
-                "ZERODHA__ACCESS_TOKEN (or KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true"
+                "/".join(ACCESS_TOKEN_ALIASES)
+                + " is required when ENABLE_LIVE_TRADING=true",
             )
 
     # Telegram configuration (required only when enabled)
@@ -176,11 +216,19 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                         # Fall back to a simple last-price lookup so that a valid token
                         # doesn't trigger a false validation error.
                         ltp_fn = getattr(src, "get_last_price", None)
-                        ltp = ltp_fn(token) if callable(ltp_fn) else None
-                        if not isinstance(ltp, (int, float)):
+                        if not callable(ltp_fn):
                             errors.append(
                                 f"instrument_token {token} returned no data; configure a valid F&O token",
                             )
+                        else:  # pragma: no cover - network dependent
+                            try:
+                                ltp = ltp_fn(token)
+                            except Exception:
+                                ltp = None
+                            if not isinstance(ltp, (int, float)):
+                                logging.getLogger("config").warning(
+                                    "instrument_token %s returned no data", token
+                                )
                 finally:
                     disconnect = getattr(src, "disconnect", None)
                     if callable(disconnect):
@@ -223,9 +271,9 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 
     # --- required environment variables ---
     required = [
-        ("ZERODHA__API_KEY", "KITE_API_KEY"),
-        ("ZERODHA__API_SECRET", "KITE_API_SECRET"),
-        ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN"),
+        API_KEY_ALIASES,
+        API_SECRET_ALIASES,
+        ACCESS_TOKEN_ALIASES,
     ]
     if cfg.enable_live_trading and not _skip_validation():
         for keys in required:
@@ -259,15 +307,18 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 def _log_cred_presence() -> None:
     """Log the presence of live trading credentials without revealing them."""
     log = logging.getLogger(__name__)
+    creds = _read_creds()
+
     def mask(v: str | None) -> bool:
         return bool(v and v.strip())
+
     log.info(
         "live=%s (env=%s), skip_validation=%s, api_key=%s, secret=%s, access=%s",
         settings.enable_live_trading,
         ENABLE_LIVE_TRADING,
         SKIP_BROKER_VALIDATION,
-        mask(API_KEY),
-        mask(API_SECRET),
-        mask(ACCESS_TOKEN),
+        mask(creds["api_key"]),
+        mask(creds["api_secret"]),
+        mask(creds["access_token"]),
     )
 

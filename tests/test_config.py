@@ -121,6 +121,23 @@ def test_legacy_env_names_supported():
         assert settings.telegram.chat_id == 12345
 
 
+def test_zerodha_alias_env_names_supported():
+    """Zerodha flat alias env var names should be recognized."""
+    env = {
+        "ZERODHA_API_KEY": "alias_key",
+        "ZERODHA_API_SECRET": "alias_secret",
+        "ZERODHA_ACCESS_TOKEN": "alias_token",
+        "TELEGRAM_BOT_TOKEN": "bot",
+        "TELEGRAM_CHAT_ID": "12345",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+        assert settings.zerodha.api_key == "alias_key"
+        assert settings.zerodha.api_secret == "alias_secret"
+        assert settings.zerodha.access_token == "alias_token"
+
+
 def test_warmup_bars_env():
     env = {
         "TELEGRAM__ENABLED": "false",
@@ -195,7 +212,11 @@ def test_zerodha_creds_required_when_live():
         with pytest.raises(ValueError) as exc:
             validate_critical_settings()
     msg = str(exc.value)
-    assert "ZERODHA__API_KEY" in msg and "KITE_API_KEY" in msg
+    assert (
+        "ZERODHA__API_KEY" in msg
+        and "ZERODHA_API_KEY" in msg
+        and "KITE_API_KEY" in msg
+    )
 
 
 def test_zerodha_creds_optional_when_paper():
