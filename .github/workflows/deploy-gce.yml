@@ -1,10 +1,14 @@
 ---  # yamllint disable rule:truthy rule:line-length
 name: deploy-gce
 
-on: [workflow_dispatch, push]
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
+    if: ${{ secrets.GCE_HOST && secrets.GCE_USER && secrets.GCE_SSH_KEY }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
