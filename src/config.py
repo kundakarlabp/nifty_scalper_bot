@@ -79,13 +79,13 @@ class TelegramSettings(BaseModel):
         If no bot token or chat ID is provided, Telegram alerts are disabled
         unless ``TELEGRAM_ENABLED`` is explicitly set to ``true``.
         """
-        raw_chat = os.getenv("TELEGRAM_CHAT_ID")
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        raw_chat = env_any("TELEGRAM__CHAT_ID", "TELEGRAM_CHAT_ID")
+        token = env_any("TELEGRAM__BOT_TOKEN", "TELEGRAM_BOT_TOKEN", default="")
         try:
             chat = int(raw_chat) if raw_chat is not None else 0
         except ValueError:
             chat = 0
-        enabled_env = os.getenv("TELEGRAM_ENABLED")
+        enabled_env = env_any("TELEGRAM__ENABLED", "TELEGRAM_ENABLED")
         enabled = (
             str(enabled_env).lower() not in {"0", "false"}
             if enabled_env is not None

@@ -35,6 +35,12 @@ def _skip_validation() -> bool:
     return skip_broker_validation()
 
 
+# Exposed flag so tests can monkeypatch and skip broker checks
+SKIP_BROKER_VALIDATION: bool = (
+    str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower() in {"1", "true", "yes"}
+)
+
+
 ZERODHA_API_KEY_ALIASES: tuple[str, ...] = ("ZERODHA__API_KEY", "KITE_API_KEY")
 ZERODHA_API_SECRET_ALIASES: tuple[str, ...] = ("ZERODHA__API_SECRET", "KITE_API_SECRET")
 ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
@@ -100,11 +106,19 @@ def enable_live_trading() -> bool:
 
 
 def skip_broker_validation() -> bool:
+    """Return True when broker validation should be skipped.
+
+    Respects the module-level ``SKIP_BROKER_VALIDATION`` flag so tests can
+    monkeypatch it without relying on environment variables.
+    """
     _ensure_env_seeded()
-    return (
-        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
-        in {"1", "true", "yes"}
-    )
+    if SKIP_BROKER_VALIDATION:
+        return True
+    return str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def broker_connect_for_data() -> bool:
