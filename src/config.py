@@ -181,6 +181,18 @@ class InstrumentsSettings(BaseModel):
         except (TypeError, ValueError) as e:
             raise ValueError("instrument_token must be numeric") from e
 
+    @field_validator("spot_token", mode="before")
+    @classmethod
+    def _v_spot_token(cls, v: object) -> int:
+        """Coerce spot token strings or floats to a positive int."""
+        try:
+            token = int(float(str(v)))
+        except (TypeError, ValueError) as e:
+            raise ValueError("spot_token must be numeric") from e
+        if token <= 0:
+            raise ValueError("spot_token must be > 0")
+        return token
+
     @field_validator("min_lots", "max_lots", "nifty_lot_size")
     @classmethod
     def _v_lots_pos(cls, v: int) -> int:

@@ -99,12 +99,15 @@ def enable_live_trading() -> bool:
     )
 
 
+_ensure_env_seeded()
+SKIP_BROKER_VALIDATION: bool = (
+    str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
+    in {"1", "true", "yes"}
+)
+
+
 def skip_broker_validation() -> bool:
-    _ensure_env_seeded()
-    return (
-        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
-        in {"1", "true", "yes"}
-    )
+    return SKIP_BROKER_VALIDATION
 
 
 def broker_connect_for_data() -> bool:
