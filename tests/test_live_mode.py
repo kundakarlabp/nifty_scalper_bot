@@ -19,7 +19,7 @@ def _prep_live_env(monkeypatch):
     monkeypatch.setattr(settings, "enable_live_trading", True)
     monkeypatch.setattr(settings.telegram, "bot_token", "x")
     monkeypatch.setattr(settings.telegram, "chat_id", 1)
-    monkeypatch.setattr(validate_env, "SKIP_BROKER_VALIDATION", True)
+    monkeypatch.setenv("SKIP_BROKER_VALIDATION", "true")
 
 
 def test_build_kite_session_success(monkeypatch):

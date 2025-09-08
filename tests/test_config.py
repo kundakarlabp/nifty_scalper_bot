@@ -13,7 +13,13 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings, load_settings
+from src.config import (
+    AppSettings,
+    DataSettings,
+    RiskSettings,
+    TelegramSettings,
+    load_settings,
+)
 from src.boot.validate_env import validate_critical_settings
 
 def test_load_from_env():
@@ -100,6 +106,17 @@ def test_telegram_disabled_without_creds():
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
     assert settings.telegram.enabled is False
+
+
+def test_warn_when_enabled_but_incomplete(caplog):
+    """Explicit warning when enabled but missing token or chat ID."""
+    env = {"TELEGRAM__ENABLED": "true"}
+    with mock.patch.dict(os.environ, env, clear=True), caplog.at_level(
+        logging.WARNING, logger="config"
+    ):
+        settings = AppSettings(_env_file=None)
+    assert settings.telegram.enabled is False
+    assert any("TELEGRAM__ENABLED=true" in r.message for r in caplog.records)
 
 
 def test_legacy_env_names_supported():
@@ -229,6 +246,13 @@ def test_negative_chat_id_allowed():
         # Should not raise for negative IDs
         validate_critical_settings()
         assert settings.telegram.chat_id == -12345
+
+
+def test_chat_id_validator_respects_enabled():
+    """chat_id=0 is only invalid when enabled."""
+    with pytest.raises(ValidationError):
+        TelegramSettings(enabled=True, chat_id=0)
+    TelegramSettings(enabled=False, chat_id=0)  # should not raise
 
 
 def test_invalid_instrument_token_detected(monkeypatch):

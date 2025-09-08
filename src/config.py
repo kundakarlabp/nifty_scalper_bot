@@ -15,7 +15,14 @@ from typing import Literal
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import AliasChoices, BaseModel, ValidationInfo, field_validator, Field
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,32 +86,42 @@ class TelegramSettings(BaseModel):
         If no bot token or chat ID is provided, Telegram alerts are disabled
         unless ``TELEGRAM_ENABLED`` is explicitly set to ``true``.
         """
-        raw_chat = os.getenv("TELEGRAM_CHAT_ID")
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        raw_chat = env_any("TELEGRAM__CHAT_ID", "TELEGRAM_CHAT_ID")
+        token = env_any("TELEGRAM__BOT_TOKEN", "TELEGRAM_BOT_TOKEN", default="")
         try:
             chat = int(raw_chat) if raw_chat is not None else 0
         except ValueError:
             chat = 0
-        enabled_env = os.getenv("TELEGRAM_ENABLED")
-        enabled = (
-            str(enabled_env).lower() not in {"0", "false"}
-            if enabled_env is not None
-            else bool(token and chat)
-        )
-        if not token or chat == 0:
-            if enabled_env is None:
-                enabled = False
-        return cls.model_construct(
+        enabled_env = env_any("TELEGRAM__ENABLED", "TELEGRAM_ENABLED")
+        if enabled_env is not None:
+            enabled = str(enabled_env).lower() not in {"0", "false"}
+        else:
+            enabled = bool(token and chat)
+        if enabled and (not token or chat == 0):
+            logging.getLogger("config").warning(
+                "TELEGRAM__ENABLED=true but TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID is missing; disabling Telegram notifications",
+            )
+            enabled = False
+        return cls(
             enabled=enabled,
-            bot_token=token,
+            bot_token=token or "",
             chat_id=chat,
         )
 
-    @field_validator("chat_id")
+    @model_validator(mode="after")
+    def _post_init(self) -> "TelegramSettings":
+        if self.enabled and (not self.bot_token or self.chat_id == 0):
+            logging.getLogger("config").warning(
+                "TELEGRAM__ENABLED=true but TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID is missing; disabling Telegram notifications",
+            )
+            self.enabled = False
+        return self
+
+    @field_validator("chat_id", mode="after")
     @classmethod
     def _v_chat_id(cls, v: int, info: ValidationInfo) -> int:
         """Ensure chat_id is provided when Telegram is enabled."""
-        if info.data.get("enabled", True) and v == 0:
+        if info.data.get("enabled") and v == 0:
             raise ValueError(
                 "TELEGRAM__CHAT_ID must be a non-zero integer when TELEGRAM__ENABLED is true"
             )
