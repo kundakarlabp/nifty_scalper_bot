@@ -716,14 +716,52 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         oi=False,
                         tries=3,
                     )
+                except Exception as e:
+                    lat = int((time.monotonic() - t0) * 1000)
+                    msg = str(e)
+                    if (
+                        "Historical fetch API call should not be made before the market opens"
+                        in msg
+                    ):
+                        self.cb_hist.record_failure(lat, reason="pre_open")
+                        if not getattr(self, "_preopen_logged", False):
+                            log.info(
+                                "historical_data before market open; using previous session"
+                            )
+                            self._preopen_logged = True
+                        from src.utils.market_time import prev_session_bounds
+                        from src.utils.time_windows import TZ
+
+                        prev_start, prev_end = prev_session_bounds(dt.datetime.now(TZ))
+                        try:
+                            rows = _retry(
+                                self.kite.historical_data,
+                                token,
+                                prev_start,
+                                prev_end,
+                                interval,
+                                continuous=False,
+                                oi=False,
+                                tries=3,
+                            )
+                        except Exception:
+                            return None
+                        part = _safe_dataframe(rows)
+                        if not part.empty:
+                            frames.append(part)
+                            start, end = prev_start, prev_end
+                            break
+                        return None
+                    else:
+                        self.cb_hist.record_failure(lat, reason=msg)
+                        cur = cur_end
+                        continue
+                else:
                     lat = int((time.monotonic() - t0) * 1000)
                     self.cb_hist.record_success(lat)
                     part = _safe_dataframe(rows)
                     if not part.empty:
                         frames.append(part)
-                except Exception as e:
-                    lat = int((time.monotonic() - t0) * 1000)
-                    self.cb_hist.record_failure(lat, reason=str(e))
                 cur = cur_end
 
             df = pd.concat(frames).sort_index() if frames else pd.DataFrame()
