@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """Monkey patches for runtime tweaks.
 
-This module adjusts ATR band checks and ensures ATM option upkeep is
-invoked during strategy evaluation even if callers forget to do so.
+This module clamps the lower ATR band to ``atr_min_pct`` to avoid false
+``atr_out_of_band`` blocks when ATR hovers around the minimum, and it
+ensures ATM option upkeep is invoked during strategy evaluation even if
+callers forget to do so.
 """
 
 import logging
@@ -30,8 +32,9 @@ def _patch_atr_band() -> None:
         if "BANK" not in str(sym).upper():
             atr_min_pct = getattr(cfg, "min_atr_pct_nifty", cfg.atr_min)
         orig_band = float(cfg.atr_min)
+        band_low = min(orig_band, float(atr_min_pct))
         try:
-            cfg.atr_min = min(orig_band, float(atr_min_pct))
+            cfg.atr_min = band_low
             return orig(self, df, current_tick=current_tick, current_price=current_price, spot_df=spot_df)
         finally:
             cfg.atr_min = orig_band

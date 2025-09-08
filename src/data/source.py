@@ -1019,7 +1019,12 @@ _auto_atm_last_check_ts = 0.0
 
 
 def auto_resubscribe_atm(self: Any) -> None:
-    """Ensure current ATM tokens remain subscribed and have quotes."""
+    """Ensure current ATM tokens remain subscribed and have quotes.
+
+    Respects ``AUTO_ATM_RESUB_INTERVAL_S`` (default ``30``) to avoid
+    spamming the broker with subscription requests.
+    """
+
     global _auto_atm_last_check_ts
     try:
         interval = int(os.getenv("AUTO_ATM_RESUB_INTERVAL_S", "30"))
@@ -1029,7 +1034,6 @@ def auto_resubscribe_atm(self: Any) -> None:
     if now - _auto_atm_last_check_ts < interval:
         return
     _auto_atm_last_check_ts = now
-    lg = logging.getLogger(__name__)
     tokens = list(getattr(self, "atm_tokens", []) or [])
     if not tokens:
         return
@@ -1037,9 +1041,9 @@ def auto_resubscribe_atm(self: Any) -> None:
     if not missing:
         return
     if _subscribe_tokens(self, missing):
-        lg.info("auto_resubscribe_atm: resubscribed tokens=%s", missing)
+        log.info("auto_resubscribe_atm: resubscribed tokens=%s", missing)
     else:
-        lg.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", missing)
+        log.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", missing)
 
 
 # Bind helpers to DataSource for easy access
