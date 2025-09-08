@@ -1644,8 +1644,8 @@ class StrategyRunner:
                 session_end += timedelta(days=1)
 
             if now < session_start or now > session_end:
-                # Outside today's session: shift to the previous trading day
-                ref = (now - timedelta(days=1)) if now < session_start else now
+                # Outside today's session: shift to the previous trading session
+                ref = now
                 prev_start, _ = prev_session_bounds(ref.astimezone(TZ))
                 prev_day = prev_start.astimezone(tz).date()
                 session_start = datetime(

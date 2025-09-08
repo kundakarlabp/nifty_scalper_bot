@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import List
 
 import pandas as pd
@@ -6,6 +6,7 @@ import pandas as pd
 from src.strategies.runner import StrategyRunner
 from src.config import settings
 from src.strategies.warmup import required_bars
+from src.utils.time_windows import TZ
 
 
 class StubDataSource:
@@ -38,7 +39,7 @@ def _setup_runner(monkeypatch, now_dt: datetime) -> tuple[StrategyRunner, StubDa
 
 
 def test_fetch_spot_ohlc_in_session(monkeypatch):
-    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=TZ)
     runner, ds = _setup_runner(monkeypatch, now_dt)
 
     df = runner._fetch_spot_ohlc()
@@ -56,7 +57,7 @@ def test_fetch_spot_ohlc_in_session(monkeypatch):
 
 
 def test_fetch_spot_ohlc_post_session(monkeypatch):
-    now_dt = datetime(2024, 1, 1, 16, 0, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 16, 0, tzinfo=TZ)
     runner, ds = _setup_runner(monkeypatch, now_dt)
 
     df = runner._fetch_spot_ohlc()
@@ -69,13 +70,13 @@ def test_fetch_spot_ohlc_post_session(monkeypatch):
         int(settings.data.lookback_minutes),
         need + int(getattr(settings.data, "lookback_padding_bars", 5)),
     )
-    expected_end = datetime(2024, 1, 1, 15, 25, tzinfo=timezone.utc)
+    expected_end = datetime(2024, 1, 1, 15, 25, tzinfo=TZ)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
 
 
 def test_fetch_spot_ohlc_pre_session(monkeypatch):
-    now_dt = datetime(2024, 1, 1, 8, 0, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 8, 0, tzinfo=TZ)
     runner, ds = _setup_runner(monkeypatch, now_dt)
 
     df = runner._fetch_spot_ohlc()
@@ -89,13 +90,13 @@ def test_fetch_spot_ohlc_pre_session(monkeypatch):
         need + int(getattr(settings.data, "lookback_padding_bars", 5)),
     )
     # Previous trading session should skip the weekend (Dec 30-31)
-    expected_end = datetime(2023, 12, 29, 15, 25, tzinfo=timezone.utc)
+    expected_end = datetime(2023, 12, 29, 15, 25, tzinfo=TZ)
     assert end == expected_end
     assert start == expected_end - timedelta(minutes=lookback)
 
 
 def test_fetch_spot_ohlc_invalid_window(monkeypatch):
-    now_dt = datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 10, 0, tzinfo=TZ)
     runner, ds = _setup_runner(monkeypatch, now_dt)
     monkeypatch.setattr(settings.data, "lookback_minutes", 0, raising=False)
     monkeypatch.setattr(settings.strategy, "min_bars_for_signal", 0, raising=False)
@@ -111,7 +112,7 @@ def test_fetch_spot_ohlc_invalid_window(monkeypatch):
 def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
     """If the data source returns None, the runner should alert the user."""
 
-    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=TZ)
 
     class _Telegram:
         def __init__(self) -> None:
@@ -144,7 +145,7 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
 
 
 def test_fetch_spot_ohlc_populates_indicators(monkeypatch):
-    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=timezone.utc)
+    now_dt = datetime(2024, 1, 1, 10, 30, tzinfo=TZ)
     runner, _ = _setup_runner(monkeypatch, now_dt)
 
     df = runner._fetch_spot_ohlc()
