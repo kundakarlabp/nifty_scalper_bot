@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
-
-from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 from src.options.instruments_cache import InstrumentsCache, nearest_weekly_expiry
 from src.options.resolver import OptionResolver
@@ -46,3 +45,34 @@ def test_option_resolver_and_micro():
     q = {"depth": {"buy": [{"price": 100.0, "quantity": 100}], "sell": [{"price": 100.5, "quantity": 100}]}}
     sp, ok = micro_from_quote(q, lot_size=50, depth_min_lots=1)
     assert ok is True and sp is not None
+
+
+def test_instruments_cache_refreshes_from_kite():
+    dump1 = [
+        {
+            "name": "NIFTY",
+            "expiry": datetime(2024, 5, 28),
+            "strike": 22500,
+            "instrument_type": "CE",
+            "instrument_token": 123,
+            "tradingsymbol": "NIFTY24MAY22500CE",
+            "lot_size": 50,
+        }
+    ]
+    dump2 = dump1 + [
+        {
+            "name": "NIFTY",
+            "expiry": datetime(2024, 5, 28),
+            "strike": 22500,
+            "instrument_type": "PE",
+            "instrument_token": 456,
+            "tradingsymbol": "NIFTY24MAY22500PE",
+            "lot_size": 50,
+        }
+    ]
+    kite = MagicMock()
+    kite.instruments.side_effect = [dump1, dump2]
+    cache = InstrumentsCache(kite=kite)
+    assert cache.get("NIFTY", "2024-05-28", 22500, "CE")["token"] == 123
+    assert cache.get("NIFTY", "2024-05-28", 22500, "PE")["token"] == 456
+    assert kite.instruments.call_count == 2
