@@ -95,6 +95,7 @@ class DataSource:
                         token=token, start=start, end=end, timeframe="minute"
                     )
             except Exception:
+                log.warning("ensure_backfill failed", exc_info=True)
                 df = None
         if df is None or df.empty:
             return None
@@ -103,7 +104,7 @@ class DataSource:
             try:
                 df["vwap"] = calculate_vwap(df)
             except Exception:
-                pass
+                log.debug("calculate_vwap failed", exc_info=True)
         if "atr_pct" not in df.columns:
             atr = compute_atr(df, period=14)
             df["atr_pct"] = atr / df["close"] * 100.0
