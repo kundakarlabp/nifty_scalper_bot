@@ -275,17 +275,18 @@ def test_decimal_instrument_token_coerced():
     assert settings.instruments.instrument_token == 33712
 
 
-def test_non_positive_instrument_token_rejected():
+@pytest.mark.parametrize("token", [0, -1])
+def test_non_positive_instrument_token_rejected(token: int) -> None:
     env = {
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "12345",
         "ENABLE_LIVE_TRADING": "false",
-        "INSTRUMENTS__INSTRUMENT_TOKEN": "0",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": str(token),
     }
     with mock.patch.dict(os.environ, env, clear=True):
         with pytest.raises(ValueError) as exc:
             AppSettings(_env_file=None)
-    assert "instrument_token must be positive" in str(exc.value)
+    assert "instrument_token must be a positive integer" in str(exc.value)
 
 
 def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
