@@ -6,7 +6,6 @@ schedule==1.2.1
 python-dotenv==1.0.1
 
 # Data & indicators
-yfinance==0.2.43
 pandas==2.2.2
 numpy==1.26.4
 ta==0.11.0

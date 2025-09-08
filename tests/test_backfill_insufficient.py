@@ -35,11 +35,5 @@ def test_backfill_falls_back_when_hist_short(monkeypatch):
 
     ds.kite = KiteStub()
 
-    class YFStub:
-        def download(self, *args, **kwargs):
-            return _make_df(2)
-
-    monkeypatch.setattr(source, "yf", YFStub())
-
     ds.ensure_backfill(required_bars=2, token=123, timeframe="minute")
-    assert seeded and len(seeded[-1]) >= 2
+    assert seeded and len(seeded[-1]) == 1

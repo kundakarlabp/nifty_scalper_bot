@@ -6,7 +6,7 @@ import os
 import time
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import datetime as dt
 from typing import Any, Dict, Optional, Tuple, Callable, List
 
@@ -16,51 +16,12 @@ import pandas as pd
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
-from src.data.yf_fallback import _map_symbol
 from src.data.base_source import BaseDataSource
 from src.boot.validate_env import (
     DATA_WARMUP_DISABLE,
-    YFINANCE_DISABLE,
-    YFINANCE_TICKER_OVERRIDE,
 )
 
-# Optional lightweight market data fallback (e.g., when kite is unavailable)
-try:
-    import yfinance as yf  # type: ignore
-except Exception:  # pragma: no cover
-    yf = None  # type: ignore
-
 log = logging.getLogger(__name__)
-
-class _ThrottleState:
-    ts: float = 0.0
-
-    def clear(self) -> None:
-        self.ts = 0.0
-        global _warmup_next_try_ts, _warmup_backoff
-        _warmup_next_try_ts = 0.0
-        _warmup_backoff = _WARMUP_BACKOFF_BASE
-
-
-_yf_last_fail_ts = _ThrottleState()
-_warmup_next_try_ts: float = 0.0
-_WARMUP_BACKOFF_BASE = float(os.getenv("DATA_WARMUP_BACKOFF_S", "300"))
-_warmup_backoff: float = _WARMUP_BACKOFF_BASE
-
-
-def _yf_throttle(interval: float = 600) -> bool:
-    now = time.time()
-    if now - _yf_last_fail_ts.ts < interval:
-        return False
-    _yf_last_fail_ts.ts = now
-    return True
-
-
-def _warmup_backoff_s() -> float:
-    global _warmup_backoff
-    delay = _warmup_backoff
-    _warmup_backoff = min(_warmup_backoff * 2, 3600.0)
-    return delay
 
 # Optional broker SDK (keep imports tolerant so paper mode works)
 try:
@@ -425,35 +386,6 @@ def _clip_window(df: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFra
         return df.copy()
 
 
-def _yf_symbol(token_or_symbol: Any) -> Optional[str]:
-    """Best-effort mapping to a yfinance symbol.
-
-    Prefer configured instrument symbols; otherwise fall back to the provided
-    token/str.  Returns ``None`` if no reasonable guess can be made.
-    """
-    # Try to pull symbol from settings (avoids importing at module level)
-    try:  # pragma: no cover - executed in runtime, hard to trigger circular import in tests
-        from src.config import settings
-
-        sym = getattr(settings.instruments, "spot_symbol", None) or getattr(
-            settings.instruments, "trade_symbol", None
-        )
-        if isinstance(sym, str) and sym:
-            token_or_symbol = sym
-    except Exception:
-        pass
-
-    if isinstance(token_or_symbol, str):
-        # Accept 'NSE:FOO' or plain 'FOO'; strip exchange prefix then map
-        sym = token_or_symbol.split(":")[-1].strip()
-        sym = _map_symbol(sym)
-        return sym.replace(" ", "")
-    # Instrument tokens do not map cleanly to yfinance tickers.  Returning
-    # ``None`` avoids pointless lookup attempts that spam logs with
-    # ``YFTzMissingError`` when a numeric token is passed.
-    return None
-
-
 def _kite_symbol(symbol_or_token: Any) -> Any:
     """Best effort normalization for symbols passed to Kite LTP.
 
@@ -476,80 +408,6 @@ def _kite_symbol(symbol_or_token: Any) -> Any:
 
     return f"NSE:{sym}"
 
-
-def _fetch_ohlc_yf(
-    symbol: str, start: datetime, end: datetime, timeframe: str
-) -> Optional[pd.DataFrame]:
-    """Fetch OHLC data from yfinance for the given symbol/timeframe."""
-    global _warmup_next_try_ts, _warmup_backoff
-    if yf is None or not symbol or DATA_WARMUP_DISABLE or YFINANCE_DISABLE:
-        return None
-    now = time.time()
-    if now < _warmup_next_try_ts:
-        if _yf_throttle():
-            log.warning("yfinance backoff active; skipping fetch")
-        return None
-    try:
-        interval_map = {
-            "minute": "1m",
-            "3minute": "3m",
-            "5minute": "5m",
-            "10minute": "10m",
-            "15minute": "15m",
-            "day": "1d",
-        }
-        yf_interval = interval_map.get(_coerce_interval(timeframe), "1m")
-        # ``yfinance`` expects UTC datetimes; our callers usually supply
-        # timezone-naive IST. Convert the requested window to UTC to avoid a
-        # 5h30 offset in the downloaded data.
-        ist = timezone(timedelta(hours=5, minutes=30))
-        start_utc = pd.Timestamp(start, tz=ist).tz_convert(timezone.utc)
-        end_utc = pd.Timestamp(end, tz=ist).tz_convert(timezone.utc)
-
-        sym = YFINANCE_TICKER_OVERRIDE or symbol
-        df = yf.download(
-            sym,
-            start=start_utc,
-            end=end_utc,
-            interval=yf_interval,
-            progress=False,
-        )
-        if df.empty:
-            _warmup_next_try_ts = time.time() + _warmup_backoff_s()
-            if _yf_throttle():
-                log.warning("yfinance returned no data for %s", symbol)
-            raise ValueError(
-                f"yfinance returned no data for symbol '{symbol}'"
-            )
-        if len(df) < WARMUP_BARS:
-            _warmup_next_try_ts = time.time() + _warmup_backoff_s()
-            if _yf_throttle():
-                log.warning("yfinance returned short data for %s", symbol)
-        # yfinance returns timestamps in the exchange's local timezone
-        # (Asia/Kolkata for NSE symbols). Strip the timezone information so the
-        # rest of the codebase operates on naive IST datetimes.
-        idx = pd.to_datetime(df.index)
-        if getattr(idx, "tz", None) is None:
-            idx = idx.tz_localize(ist)
-        else:
-            idx = idx.tz_convert(ist)
-        df.index = idx.tz_localize(None)
-        df = df.rename(columns={c: c.lower() for c in df.columns})
-        if "volume" not in df.columns:
-            df["volume"] = 0
-        need = {"open", "high", "low", "close"}
-        if need.issubset(df.columns):
-            _warmup_next_try_ts = 0.0
-            _warmup_backoff = _WARMUP_BACKOFF_BASE
-            return df[["open", "high", "low", "close", "volume"]].copy()
-    except ValueError:
-        _warmup_next_try_ts = time.time() + _warmup_backoff_s()
-        raise
-    except Exception as e:  # pragma: no cover - best effort fallback
-        _warmup_next_try_ts = time.time() + _warmup_backoff_s()
-        if _yf_throttle():
-            log.debug("yfinance fetch_ohlc failed: %s", e)
-    return None
 
 def _synthetic_ohlc(
     price: float, end: datetime, interval: str, bars: int = WARMUP_BARS
@@ -702,17 +560,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
     # ---- quick LTP ----
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
         if not self.kite or not self.cb_quote.allow():
-            if yf is None:
-                return None
-            try:
-                sym = _yf_symbol(symbol_or_token)
-                if not sym:
-                    return None
-                data = yf.Ticker(sym).history(period="1d", interval="1m")
-                if not data.empty:
-                    return float(data["Close"].iloc[-1])
-            except Exception as e:  # pragma: no cover - best effort fallback
-                log.debug("yfinance LTP fallback failed for %s: %s", symbol_or_token, e)
             return None
         t0 = time.monotonic()
         try:
@@ -771,25 +618,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         return
         except Exception as e:
             log.warning("kite historical backfill failed: %s", e)
-        try:
-            sym = YFINANCE_TICKER_OVERRIDE or "^NSEI"
-            to_dt = now
-            from_dt = to_dt - dt.timedelta(minutes=max(required_bars + 5, 60))
-            yf_df = _fetch_ohlc_yf(sym, from_dt, to_dt, "minute")
-            if isinstance(yf_df, pd.DataFrame) and not yf_df.empty:
-                if hasattr(self, "seed_ohlc"):
-                    try:
-                        self.seed_ohlc(yf_df[["open", "high", "low", "close", "volume"]])
-                    except Exception:
-                        pass
-                if len(yf_df) >= required_bars:
-                    return
-        except ValueError as e:
-            if _yf_throttle():
-                log.warning("yfinance backfill failed: %s", e)
-        except Exception as e:
-            if _yf_throttle():
-                log.warning("yfinance backfill failed: %s", e)
 
     # ---- main candle fetch ----
     def fetch_ohlc(
@@ -837,33 +665,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return bars
 
         if not self.kite or not self.cb_hist.allow():
-            log.warning(
-                "LiveKiteSource.fetch_ohlc: broker unavailable. Using yfinance fallback."
-            )
-            sym = _yf_symbol(token)
-            try:
-                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-            except ValueError as e:
-                if _yf_throttle():
-                    log.warning("yfinance fallback empty: %s", e)
-                out = None
-            if out is not None and len(out) >= WARMUP_BARS:
-                fetched_window = (
-                    pd.to_datetime(out.index.min()).to_pydatetime(),
-                    pd.to_datetime(out.index.max()).to_pydatetime(),
-                )
-                self._cache.set(
-                    int(token),
-                    interval,
-                    out,
-                    fetched_window,
-                    (start, end),
-                )
-                bars = _clip_window(out, start, end)
-                if not bars.empty:
-                    self._last_bar_open_ts = pd.to_datetime(bars.index[-1]).to_pydatetime()
-                return bars
-            ltp = self.get_last_price(sym or token)
+            log.warning("LiveKiteSource.fetch_ohlc: broker unavailable.")
+            ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
                 fetched_window = (
@@ -934,27 +737,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     start,
                     end,
                 )
-                sym = _yf_symbol(token)
-                try:
-                    out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-                except ValueError as e:
-                    if _yf_throttle():
-                        log.warning("yfinance fallback empty: %s", e)
-                    out = None
-                if out is not None and len(out) >= WARMUP_BARS:
-                    fetched_window = (
-                        pd.to_datetime(out.index.min()).to_pydatetime(),
-                        pd.to_datetime(out.index.max()).to_pydatetime(),
-                    )
-                    self._cache.set(
-                        token,
-                        interval,
-                        out,
-                        fetched_window,
-                        (start, end),
-                    )
-                    return _clip_window(out, start, end)
-                ltp = self.get_last_price(sym or token)
+                ltp = self.get_last_price(token)
                 if isinstance(ltp, (int, float)):
                     syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
                     fetched_window = (
@@ -992,29 +775,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         except Exception as e:
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
-            sym = _yf_symbol(token)
-            try:
-                out = _fetch_ohlc_yf(sym or "", start, end, timeframe)
-            except ValueError as e2:
-                if _yf_throttle():
-                    log.warning("yfinance fallback empty: %s", e2)
-                out = None
-            if out is not None and len(out) >= WARMUP_BARS:
-                fetched_window = (
-                    pd.to_datetime(out.index.min()).to_pydatetime(),
-                    pd.to_datetime(out.index.max()).to_pydatetime(),
-                )
-                self._cache.set(
-                    token,
-                    interval,
-                    out,
-                    fetched_window,
-                    (start, end),
-                )
-                bars = _clip_window(out, start, end)
-                if not bars.empty:
-                    self._last_bar_open_ts = pd.to_datetime(bars.index[-1]).to_pydatetime()
-                return bars
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)

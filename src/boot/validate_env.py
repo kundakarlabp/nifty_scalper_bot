@@ -70,15 +70,6 @@ DATA_WARMUP_DISABLE = (
     ).lower()
     in {"1", "true", "yes"}
 )
-YFINANCE_TICKER_OVERRIDE = os.getenv("YFINANCE_TICKER_OVERRIDE")
-YFINANCE_DISABLE = (
-    str(
-        os.getenv(
-            "YFINANCE_DISABLE", "true" if IS_HOSTED_RAILWAY else "false"
-        )
-    ).lower()
-    in {"1", "true", "yes"}
-)
 
 
 def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:

@@ -33,11 +33,6 @@ try:
 except Exception:  # pragma: no cover
     KiteConnect = object  # type: ignore
 
-# Lightweight market data fallback used when no broker session is available
-try:  # pragma: no cover
-    import yfinance as yf  # type: ignore
-except Exception:  # pragma: no cover
-    yf = None  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -160,24 +155,6 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
         return float(cached[0])
 
     if not kite or kite is object:
-        # Fallback to yfinance when running without a live broker session.  This
-        # keeps strike selection and diagnostics functional in paper/shadow mode
-        # where only public market data is available.
-        if yf is None:
-            return None
-        try:
-            yf_symbol = symbol.split(":")[-1].replace(" ", "")
-            # For NSE symbols yfinance expects the ".NS" suffix (indices like
-            # NIFTY 50 are handled without a suffix).
-            if yf_symbol and not yf_symbol.endswith(".NS") and yf_symbol.isalpha():
-                yf_symbol = yf_symbol + ".NS"
-            data = yf.Ticker(yf_symbol).history(period="1d", interval="1m")
-            if not data.empty:
-                yf_px = float(data["Close"].iloc[-1])
-                _ltp_cache[symbol] = (yf_px, now)
-                return yf_px
-        except Exception as e:  # pragma: no cover - best effort fallback
-            logger.debug("yfinance LTP fallback failed for %s: %s", symbol, e)
         return None
 
     try:
