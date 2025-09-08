@@ -275,6 +275,32 @@ def test_decimal_instrument_token_coerced():
     assert settings.instruments.instrument_token == 33712
 
 
+def test_invalid_spot_token_non_numeric():
+    """Non-numeric spot tokens should raise a validation error."""
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+        "INSTRUMENTS__SPOT_TOKEN": "abc",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValidationError):
+            AppSettings(_env_file=None)
+
+
+def test_invalid_spot_token_non_positive():
+    """Spot tokens <= 0 should raise a validation error."""
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+        "INSTRUMENTS__SPOT_TOKEN": "0",
+        "ENABLE_LIVE_TRADING": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValidationError):
+            AppSettings(_env_file=None)
+
+
 def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
     """A valid token with empty OHLC data should pass via LTP fallback."""
 
