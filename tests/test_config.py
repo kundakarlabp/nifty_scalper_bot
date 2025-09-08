@@ -262,6 +262,40 @@ def test_invalid_instrument_token_detected(monkeypatch):
     assert "valid F&O token" in str(exc.value)
 
 
+def test_instrument_token_requires_positive_integer(monkeypatch):
+    env = {
+        "ENABLE_LIVE_TRADING": "true",
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "123",
+        "INSTRUMENTS__INSTRUMENT_TOKEN": "0",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+
+    class DummySource:
+        def __init__(self, kite):
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def fetch_ohlc(self, *_: object, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    with mock.patch("src.config.settings", settings), mock.patch(
+        "src.boot.validate_env.settings", settings
+    ), monkeypatch.context() as m:
+        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+        with pytest.raises(ValueError) as exc:
+            validate_critical_settings()
+    msg = str(exc.value)
+    assert "positive 32-bit integer" in msg
+    assert "instruments list" in msg
+
+
 def test_decimal_instrument_token_coerced():
     """Decimal strings for instrument tokens are coerced to integers."""
     env = {

@@ -188,7 +188,10 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     ):
         token = int(getattr(cfg.instruments, "instrument_token", 0) or 0)
         if token <= 0:
-            errors.append("INSTRUMENTS__INSTRUMENT_TOKEN must be a positive integer")
+            errors.append(
+                "INSTRUMENTS__INSTRUMENT_TOKEN must be a positive 32-bit integer; "
+                "obtain a valid token from your broker's instruments list (e.g. Zerodha instruments.csv)"
+            )
         else:
             src = None
             try:
