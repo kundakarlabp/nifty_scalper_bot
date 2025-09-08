@@ -58,6 +58,10 @@ nifty_scalper_bot/
 
 3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.
 
+   Pydantic stores validation artifacts under
+   `~/.config/pydantic/settings/nifty_scalper_bot` by default.  Ensure this
+   directory is writable or set `PYDANTIC_SETTINGS_DIR` to a custom location.
+
 4. **Run the bot locally**
 
    ```bash

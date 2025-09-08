@@ -12,6 +12,7 @@ from datetime import datetime
 import logging
 import os
 from typing import Literal
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import AliasChoices, BaseModel, ValidationInfo, field_validator, Field
@@ -587,7 +588,20 @@ def _apply_env_overrides(cfg: AppSettings) -> None:
 
 
 def load_settings() -> AppSettings:
-    """Return application settings loaded from the environment."""
+    """Return application settings loaded from the environment.
+
+    Ensures Pydantic's settings validation directory exists under
+    ``~/.config/pydantic/settings/nifty_scalper_bot``.
+    """
+    validation_dir = (
+        Path.home()
+        / ".config"
+        / "pydantic"
+        / "settings"
+        / "nifty_scalper_bot"
+    )
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("PYDANTIC_SETTINGS_DIR", str(validation_dir))
     load_dotenv(override=False)
     cfg = AppSettings(
         zerodha=ZerodhaSettings.from_env(),
