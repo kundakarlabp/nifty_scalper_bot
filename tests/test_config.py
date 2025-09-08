@@ -6,13 +6,14 @@ Tests for the Pydantic configuration system.
 
 import logging
 import os
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings
+from src.config import AppSettings, DataSettings, RiskSettings, load_settings
 from src.boot.validate_env import validate_critical_settings
 
 def test_load_from_env():
@@ -61,6 +62,32 @@ def test_default_values():
         assert settings.data.lookback_padding_bars == 5  # Default padding
         assert settings.strategy.min_bars_for_signal == 20  # Updated default
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
+
+
+def test_load_settings_creates_validation_dir(tmp_path, monkeypatch):
+    """``load_settings`` ensures the validation dir exists and is configurable."""
+    env = {
+        "KITE_API_KEY": "test_key",
+        "KITE_API_SECRET": "test_secret",
+        "KITE_ACCESS_TOKEN": "test_token",
+        "TELEGRAM_BOT_TOKEN": "bot",
+        "TELEGRAM_CHAT_ID": "12345",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr("src.config.load_dotenv", lambda override=False: False)
+        cfg = load_settings()
+        expected = (
+            tmp_path
+            / ".config"
+            / "pydantic"
+            / "settings"
+            / "nifty_scalper_bot"
+        )
+        assert expected.is_dir()
+        assert os.environ["PYDANTIC_SETTINGS_DIR"] == str(expected)
+        # sanity to ensure settings loaded
+        assert cfg.telegram.chat_id == 12345
 
 
 def test_telegram_disabled_without_creds():
