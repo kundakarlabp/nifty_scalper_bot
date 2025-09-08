@@ -361,7 +361,7 @@ def main() -> int:
                     log.debug("No signal generated: %s", flow.get("reason_block"))
             runner.health_check()
             now = time.time()
-            if (now - last_hb) >= 30:
+            if (now - last_hb) >= 15 * 60:
                 snap = metrics.snapshot()
                 cb = getattr(getattr(runner, "executor", None), "cb_orders", None)
                 cb_state = getattr(cb, "state", "unknown")

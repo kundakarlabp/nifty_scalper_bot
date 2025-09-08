@@ -643,7 +643,7 @@ class StrategyRunner:
         plan["shadow_blockers"] = self._shadow_blockers(plan)
         self.last_plan = dict(plan)
         now = time.time()
-        if self.hb_enabled and (now - self._last_hb_ts) >= 60:
+        if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
             self._last_hb_ts = now
 
