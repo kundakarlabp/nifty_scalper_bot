@@ -187,60 +187,57 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         and not errors  # only attempt if creds are present
     ):
         token = int(getattr(cfg.instruments, "instrument_token", 0) or 0)
-        if token <= 0:
-            errors.append("INSTRUMENTS__INSTRUMENT_TOKEN must be a positive integer")
-        else:
-            src = None
+        src = None
+        try:
+            kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
+            kite.set_access_token(str(cfg.zerodha.access_token))
+            src = LiveKiteSource(kite=kite)
             try:
-                kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
-                kite.set_access_token(str(cfg.zerodha.access_token))
-                src = LiveKiteSource(kite=kite)
-                try:
-                    src.connect()
-                    now_ist = datetime.now(IST).replace(
-                        second=0, microsecond=0,
-                    )
-                    if is_market_open(now_ist):
-                        start = now_ist - timedelta(minutes=20)
-                        end = now_ist
-                    else:
-                        start, end = prev_session_last_20m(now_ist)
-                    df = src.fetch_ohlc(
-                        token=token, start=start, end=end, timeframe="minute",
-                    )
-                    if not isinstance(df, pd.DataFrame) or df.empty:
-                        # Outside market hours the historical API may return no data.
-                        # Fall back to a simple last-price lookup so that a valid token
-                        # doesn't trigger a false validation error.
-                        ltp_fn = getattr(src, "get_last_price", None)
-                        ltp = ltp_fn(token) if callable(ltp_fn) else None
-                        if not isinstance(ltp, (int, float)):
-                            errors.append(
-                                f"instrument_token {token} returned no data; configure a valid F&O token",
-                            )
-                finally:
-                    disconnect = getattr(src, "disconnect", None)
-                    if callable(disconnect):
-                        try:
-                            disconnect()
-                        except Exception:
-                            logging.getLogger("config").debug(
-                                "LiveKiteSource disconnect failed", exc_info=True,
-                            )
-            except Exception as e:
-                logging.getLogger("config").warning(
-                    "instrument_token validation skipped: %s", e,
+                src.connect()
+                now_ist = datetime.now(IST).replace(
+                    second=0, microsecond=0,
                 )
+                if is_market_open(now_ist):
+                    start = now_ist - timedelta(minutes=20)
+                    end = now_ist
+                else:
+                    start, end = prev_session_last_20m(now_ist)
+                df = src.fetch_ohlc(
+                    token=token, start=start, end=end, timeframe="minute",
+                )
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    # Outside market hours the historical API may return no data.
+                    # Fall back to a simple last-price lookup so that a valid token
+                    # doesn't trigger a false validation error.
+                    ltp_fn = getattr(src, "get_last_price", None)
+                    ltp = ltp_fn(token) if callable(ltp_fn) else None
+                    if not isinstance(ltp, (int, float)):
+                        errors.append(
+                            f"instrument_token {token} returned no data; configure a valid F&O token",
+                        )
             finally:
-                if src is not None:
-                    disconnect_fn = getattr(src, "disconnect", None)
-                    if callable(disconnect_fn):
-                        try:
-                            disconnect_fn()
-                        except Exception:
-                            logging.getLogger("config").debug(
-                                "instrument_token validation disconnect failed", exc_info=True,
-                            )
+                disconnect = getattr(src, "disconnect", None)
+                if callable(disconnect):
+                    try:
+                        disconnect()
+                    except Exception:
+                        logging.getLogger("config").debug(
+                            "LiveKiteSource disconnect failed", exc_info=True,
+                        )
+        except Exception as e:
+            logging.getLogger("config").warning(
+                "instrument_token validation skipped: %s", e,
+            )
+        finally:
+            if src is not None:
+                disconnect_fn = getattr(src, "disconnect", None)
+                if callable(disconnect_fn):
+                    try:
+                        disconnect_fn()
+                    except Exception:
+                        logging.getLogger("config").debug(
+                            "instrument_token validation disconnect failed", exc_info=True,
+                        )
 
     if errors:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))

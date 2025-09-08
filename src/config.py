@@ -175,11 +175,14 @@ class InstrumentsSettings(BaseModel):
     @field_validator("instrument_token", mode="before")
     @classmethod
     def _v_token(cls, v: object) -> int:
-        """Coerce instrument token strings or floats to int."""
+        """Coerce instrument token strings or floats to int and ensure positivity."""
         try:
-            return int(float(str(v)))
+            token = int(float(str(v)))
         except (TypeError, ValueError) as e:
             raise ValueError("instrument_token must be numeric") from e
+        if token <= 0:
+            raise ValueError("instrument_token must be positive")
+        return token
 
     @field_validator("min_lots", "max_lots", "nifty_lot_size")
     @classmethod
