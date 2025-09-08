@@ -97,7 +97,7 @@ class ActiveComponents:
     order_connector: OrderConnectorLike
     names: dict  # {"strategy": "...", "data_provider": "...", "order_connector": "..."}
 
-def init_default_registries(settings, *, make_strategy, make_data_kite, make_data_yf, make_connector_kite, make_connector_shadow) -> ActiveComponents:
+def init_default_registries(settings, *, make_strategy, make_data_kite, make_connector_kite, make_connector_shadow) -> ActiveComponents:
     """
     settings: your config object (must expose ACTIVE_STRATEGY/ACTIVE_DATA_PROVIDER/ACTIVE_CONNECTOR or env-backed).
     make_*: callables returning your existing instances. We wrap them with adapters.
@@ -112,7 +112,6 @@ def init_default_registries(settings, *, make_strategy, make_data_kite, make_dat
 
     # Register data providers
     dreg.register("kite", lambda: make_data_provider_adapter(make_data_kite(), "kite"), "Broker minute OHLC (primary)")
-    dreg.register("yfinance", lambda: make_data_provider_adapter(make_data_yf(), "yfinance"), "Spot OHLC via yfinance (fallback)")
     dreg.register("auto", lambda: make_data_provider_adapter(make_data_kite(), "auto"), "Auto-select (currently kite)")
 
     # Register order connectors

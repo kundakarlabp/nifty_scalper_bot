@@ -9,15 +9,15 @@ class DummyTelegram:
 
 def test_component_selection_via_env(monkeypatch) -> None:
     """Runtime components follow environment variables."""
-    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "yfinance")
+    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "kite")
     monkeypatch.setenv("ACTIVE_CONNECTOR", "shadow")
-    object.__setattr__(settings, "ACTIVE_DATA_PROVIDER", "yfinance")
+    object.__setattr__(settings, "ACTIVE_DATA_PROVIDER", "kite")
     object.__setattr__(settings, "ACTIVE_CONNECTOR", "shadow")
     try:
         runner = StrategyRunner(telegram_controller=DummyTelegram())
         snap = runner.get_status_snapshot()
         comps = snap["components"]
-        assert comps["data_provider"] == "yfinance"
+        assert comps["data_provider"] == "kite"
         assert comps["order_connector"] == "shadow"
     finally:
         delattr(settings, "ACTIVE_DATA_PROVIDER")

@@ -9,10 +9,10 @@ class DummyTelegram:
 
 def test_events_config_fallback(monkeypatch) -> None:
     monkeypatch.setenv("EVENTS_CONFIG_FILE", "config/missing.yaml")
-    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "yfinance")
+    monkeypatch.setenv("ACTIVE_DATA_PROVIDER", "kite")
     monkeypatch.setenv("ACTIVE_CONNECTOR", "shadow")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
-    object.__setattr__(settings, "ACTIVE_DATA_PROVIDER", "yfinance")
+    object.__setattr__(settings, "ACTIVE_DATA_PROVIDER", "kite")
     object.__setattr__(settings, "ACTIVE_CONNECTOR", "shadow")
     orig_live = settings.enable_live_trading
     object.__setattr__(settings, "enable_live_trading", False)

@@ -23,11 +23,6 @@ from src.utils.circuit_breaker import CircuitBreaker
 from src.logs.journal import Journal
 
 
-# Optional public market data fallback
-try:  # pragma: no cover
-    import yfinance as yf  # type: ignore
-except Exception:  # pragma: no cover
-    yf = None  # type: ignore
 
 # --- Optional broker SDK (graceful fallback in paper mode) ---
 try:
@@ -610,52 +605,6 @@ class OrderExecutor:
                 "oi": 0,
             }
 
-    def _fetch_quote_yf(self, strike: int, opt_type: str, expiry: str) -> Dict[str, Any]:
-        """Fetch option quote via yfinance when broker access is unavailable."""
-        if yf is None:
-            return {
-                "ltp": 0.0,
-                "bid": 0.0,
-                "ask": 0.0,
-                "bid_qty": 0,
-                "ask_qty": 0,
-                "bid_qty_top5": 0,
-                "ask_qty_top5": 0,
-                "oi": 0,
-            }
-        try:
-            ticker = yf.Ticker("^NSEI")
-            chain = ticker.option_chain(expiry)
-            df = chain.calls if opt_type.lower() == "ce" else chain.puts
-            row = df[df["strike"] == strike]
-            if row.empty:
-                raise ValueError("strike not found")
-            bid = float(row["bid"].iloc[0] or 0.0)
-            ask = float(row["ask"].iloc[0] or 0.0)
-            ltp = float(row["lastPrice"].iloc[0] or 0.0)
-            oi = float(row.get("openInterest", 0.0).iloc[0])
-            return {
-                "ltp": ltp,
-                "bid": bid,
-                "ask": ask,
-                "bid_qty": 0,
-                "ask_qty": 0,
-                "bid_qty_top5": 0,
-                "ask_qty_top5": 0,
-                "oi": oi,
-            }
-        except Exception as e:
-            log.debug("yfinance quote fetch failed: %s", e)
-            return {
-                "ltp": 0.0,
-                "bid": 0.0,
-                "ask": 0.0,
-                "bid_qty": 0,
-                "ask_qty": 0,
-                "bid_qty_top5": 0,
-                "ask_qty_top5": 0,
-                "oi": 0,
-            }
 
     def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
         from src.utils.strike_selector import _fetch_instruments_nfo, _get_spot_ltp, resolve_weekly_atm

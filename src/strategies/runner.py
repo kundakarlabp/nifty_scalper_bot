@@ -308,14 +308,6 @@ class StrategyRunner:
             from src.data.source import LiveKiteSource
             return LiveKiteSource(self.kite)
 
-        def _make_data_yf():
-            try:
-                from src.data.source import YFinanceSpotSource  # type: ignore
-                return YFinanceSpotSource(self.settings)
-            except Exception:
-                from src.data.source import LiveKiteSource
-                return LiveKiteSource(self.kite)
-
         def _make_connector_kite():
             from src.execution.order_executor import OrderExecutor
             return OrderExecutor(
@@ -341,7 +333,6 @@ class StrategyRunner:
             self.settings,
             make_strategy=_make_strategy,
             make_data_kite=_make_data_kite,
-            make_data_yf=_make_data_yf,
             make_connector_kite=_make_connector_kite,
             make_connector_shadow=_make_connector_shadow,
         )
