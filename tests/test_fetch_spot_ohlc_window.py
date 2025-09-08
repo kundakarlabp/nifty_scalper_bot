@@ -33,6 +33,7 @@ def _setup_runner(monkeypatch, now_dt: datetime) -> tuple[StrategyRunner, StubDa
     ds = StubDataSource()
     runner.data_source = ds
     monkeypatch.setattr(runner, "_now_ist", lambda: now_dt)
+    monkeypatch.setattr(settings.data, "lookback_minutes", 20, raising=False)
     return runner, ds
 
 
