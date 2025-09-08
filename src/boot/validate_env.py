@@ -48,9 +48,13 @@ def env_any(*names: str, default: str | None = None) -> str | None:
 def _skip_validation() -> bool:
     return SKIP_BROKER_VALIDATION
 
-API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
-API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
-ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+ZERODHA_API_KEY_ALIASES: tuple[str, ...] = ("ZERODHA__API_KEY", "KITE_API_KEY")
+ZERODHA_API_SECRET_ALIASES: tuple[str, ...] = ("ZERODHA__API_SECRET", "KITE_API_SECRET")
+ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+
+API_KEY = env_any(*ZERODHA_API_KEY_ALIASES)
+API_SECRET = env_any(*ZERODHA_API_SECRET_ALIASES)
+ACCESS_TOKEN = env_any(*ZERODHA_ACCESS_TOKEN_ALIASES)
 
 # Deployment environment flags
 # True when running on Railway (detected via known env vars)
@@ -223,9 +227,9 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 
     # --- required environment variables ---
     required = [
-        ("ZERODHA__API_KEY", "KITE_API_KEY"),
-        ("ZERODHA__API_SECRET", "KITE_API_SECRET"),
-        ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN"),
+        ZERODHA_API_KEY_ALIASES,
+        ZERODHA_API_SECRET_ALIASES,
+        ZERODHA_ACCESS_TOKEN_ALIASES,
     ]
     if cfg.enable_live_trading and not _skip_validation():
         for keys in required:
