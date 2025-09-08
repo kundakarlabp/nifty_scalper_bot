@@ -841,15 +841,185 @@ def _livekite_health() -> float:
     return 100.0
 
 
+_instruments_cache: Dict[str, Any] = {"ts": 0.0, "items": []}
+
+
+def _refresh_instruments_nfo(broker: Any) -> list[dict]:
+    """Return cached NFO instruments, refreshing periodically."""
+    global _instruments_cache
+    now = time.time()
+    try:
+        mins = int(os.getenv("INSTRUMENTS_REFRESH_MINUTES", "15"))
+    except Exception:
+        mins = 15
+    if (_instruments_cache["items"] and now - _instruments_cache["ts"] < mins * 60) or not broker:
+        return list(_instruments_cache["items"])
+    items: list[dict] = []
+    fn = getattr(broker, "instruments", None)
+    if callable(fn):
+        try:
+            items = fn("NFO") or []
+        except Exception:
+            items = []
+    _instruments_cache = {"ts": now, "items": items}
+    return list(items)
+
+
+def _pick_expiry(items: list[dict], underlying: str, today: dt.date) -> Optional[dt.date]:
+    """Pick weekly expiry for ``underlying`` on/after ``today``."""
+    week_wd = int(os.getenv("WEEKLY_EXPIRY_WEEKDAY", "2")) - 1
+    prefer_monthly = os.getenv("PREFER_MONTHLY_EXPIRY", "false").lower() == "true"
+
+    dates: list[dt.date] = []
+    for it in items:
+        if it.get("name") != underlying:
+            continue
+        exp = it.get("expiry")
+        if isinstance(exp, dt.datetime):
+            d = exp.date()
+        elif isinstance(exp, dt.date):
+            d = exp
+        else:
+            try:
+                d = dt.datetime.strptime(str(exp), "%Y-%m-%d").date()
+            except Exception:
+                continue
+        dates.append(d)
+    dates = sorted(set(d for d in dates if d >= today))
+    if not dates:
+        return None
+
+    def _last_weekday(d: dt.date, wd: int) -> dt.date:
+        n = d.replace(day=28) + dt.timedelta(days=4)
+        last = n - dt.timedelta(days=n.day)
+        return last - dt.timedelta(days=(last.weekday() - wd) % 7)
+
+    if prefer_monthly:
+        for d in dates:
+            if d.weekday() == week_wd and d == _last_weekday(d, week_wd):
+                return d
+    for d in dates:
+        if d.weekday() == week_wd:
+            return d
+    return dates[0]
+
+
+def _strike_step(underlying: str) -> int:
+    return 100 if "BANK" in underlying.upper() else 50
+
+
+def _round_strike(x: float, step: int) -> int:
+    return int(round(x / step) * step)
+
+
+def _match_token(
+    items: list[dict],
+    underlying: str,
+    expiry: dt.date,
+    strike: int,
+    opt: str,
+) -> Optional[int]:
+    for it in items:
+        try:
+            if (
+                it.get("name") == underlying
+                and _to_date(it.get("expiry")) == expiry
+                and int(float(it.get("strike", 0))) == int(strike)
+                and it.get("instrument_type") == opt
+            ):
+                return int(it.get("instrument_token"))
+        except Exception:
+            continue
+    return None
+
+
+def _to_date(val: Any) -> dt.date:
+    if isinstance(val, dt.datetime):
+        return val.date()
+    if isinstance(val, dt.date):
+        return val
+    return dt.datetime.strptime(str(val), "%Y-%m-%d").date()
+
+
+def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
+    for name in ("subscribe_tokens", "subscribe", "subscribe_l1"):
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            try:
+                fn(tokens)
+                return True
+            except Exception:
+                pass
+    broker = getattr(obj, "broker", None)
+    if broker:
+        return _subscribe_tokens(broker, tokens)
+    return False
+
+
+def _have_quote(obj: Any, token: int) -> bool:
+    for name in ("get_l1", "ltp", "get_quote", "quote"):
+        fn = getattr(obj, name, None)
+        if callable(fn):
+            try:
+                q = fn([token]) if name in ("get_quote", "quote") else fn(token)
+                if q:
+                    return True
+            except Exception:
+                continue
+    broker = getattr(obj, "broker", None)
+    if broker:
+        return _have_quote(broker, token)
+    return False
+
+
+def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
+    """Resolve and subscribe current ATM option tokens."""
+    broker = getattr(self, "kite", None) or getattr(self, "broker", None)
+    items = _refresh_instruments_nfo(broker)
+    if not items:
+        return
+    under = underlying or getattr(settings.instruments, "trade_symbol", "NIFTY")
+    today = dt.date.today()
+    expiry = _pick_expiry(items, under, today)
+    if not expiry:
+        return
+    spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
+    if spot is None:
+        return
+    step = _strike_step(under)
+    base = _round_strike(float(spot), step)
+    ce = pe = None
+    strike = base
+    for widen in range(0, 7):
+        for sign in (0, 1, -1) if widen else (0,):
+            s = base + sign * widen * step
+            ce = _match_token(items, under, expiry, s, "CE")
+            pe = _match_token(items, under, expiry, s, "PE")
+            if ce and pe:
+                strike = s
+                break
+        if ce and pe:
+            break
+    if not (ce and pe):
+        return
+    tokens = [int(ce), int(pe)]
+    self.atm_tokens = tuple(tokens)
+    self.current_atm_strike = strike
+    self.current_atm_expiry = expiry
+    _subscribe_tokens(self, tokens)
+    for _ in range(2):
+        missing = [t for t in tokens if not _have_quote(self, t)]
+        if not missing:
+            break
+        _subscribe_tokens(self, missing)
+        time.sleep(0.1)
+
+
 _auto_atm_last_check_ts = 0.0
 
 
 def auto_resubscribe_atm(self: Any) -> None:
-    """
-    Periodically ensure the current ATM option tokens are subscribed for L1.
-    Works with common method/attr names; no-ops if nothing is detectable.
-    Controlled by: AUTO_ATM_RESUB_INTERVAL_S (default 30s)
-    """
+    """Ensure current ATM tokens remain subscribed and have quotes."""
     global _auto_atm_last_check_ts
     try:
         interval = int(os.getenv("AUTO_ATM_RESUB_INTERVAL_S", "30"))
@@ -859,91 +1029,21 @@ def auto_resubscribe_atm(self: Any) -> None:
     if now - _auto_atm_last_check_ts < interval:
         return
     _auto_atm_last_check_ts = now
-
     lg = logging.getLogger(__name__)
-
-    # 1) Discover ATM tokens
-    tokens = None
-    for name in ("atm_tokens", "current_atm_tokens", "_atm_tokens"):
-        if hasattr(self, name):
-            v = getattr(self, name)
-            if isinstance(v, (list, tuple, set)) and v:
-                tokens = list(v)
-                break
-    if tokens is None:
-        for meth in ("get_atm_tokens", "compute_atm_tokens", "atm_tokens"):
-            fn = getattr(self, meth, None)
-            if callable(fn):
-                try:
-                    v = fn()
-                    if isinstance(v, (list, tuple, set)) and v:
-                        tokens = list(v)
-                        break
-                except Exception:
-                    pass
+    tokens = list(getattr(self, "atm_tokens", []) or [])
     if not tokens:
-        return  # can't infer ATM tokens; nothing to do
-
-    # 2) Check if we have fresh L1 for each token
-    stale: list[int] = []
-    for t in tokens:
-        ok = False
-        # try self-level getters
-        for get in ("get_l1", "ltp", "get_quote", "quote"):
-            fn = getattr(self, get, None)
-            if callable(fn):
-                try:
-                    q = fn([t]) if get in ("get_quote", "quote") else fn(t)
-                    ok = bool(q)
-                    break
-                except Exception:
-                    pass
-        # try broker-level as fallback
-        if not ok and hasattr(self, "broker"):
-            for bget in ("ltp", "quote", "get_ltp"):
-                fn = getattr(self.broker, bget, None)
-                if callable(fn):
-                    try:
-                        q = fn([t]) if bget in ("quote",) else fn(t)
-                        ok = bool(q)
-                        break
-                    except Exception:
-                        pass
-        if not ok:
-            stale.append(t)
-
-    if not stale:
         return
-
-    # 3) Resubscribe missing tokens
-    resubbed = False
-    for sub in ("subscribe_tokens", "subscribe", "subscribe_l1"):
-        fn = getattr(self, sub, None)
-        if callable(fn):
-            try:
-                fn(stale)
-                resubbed = True
-                break
-            except Exception:
-                pass
-    if not resubbed and hasattr(self, "broker"):
-        for bsub in ("subscribe_tokens", "subscribe"):
-            fn = getattr(self.broker, bsub, None)
-            if callable(fn):
-                try:
-                    fn(stale)
-                    resubbed = True
-                    break
-                except Exception:
-                    pass
-
-    if resubbed:
-        lg.info("auto_resubscribe_atm: resubscribed tokens=%s", stale)
+    missing = [t for t in tokens if not _have_quote(self, t)]
+    if not missing:
+        return
+    if _subscribe_tokens(self, missing):
+        lg.info("auto_resubscribe_atm: resubscribed tokens=%s", missing)
     else:
-        lg.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", stale)
+        lg.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", missing)
 
 
-# Bind helper to DataSource for easy access
+# Bind helpers to DataSource for easy access
 DataSource.auto_resubscribe_atm = auto_resubscribe_atm  # type: ignore[attr-defined]
+DataSource.ensure_atm_tokens = ensure_atm_tokens  # type: ignore[attr-defined]
 
 
