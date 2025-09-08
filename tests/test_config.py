@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings
+from src.config import AppSettings, DataSettings, RiskSettings, TelegramSettings
 from src.boot.validate_env import validate_critical_settings
 
 def test_load_from_env():
@@ -73,6 +73,34 @@ def test_telegram_disabled_without_creds():
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
     assert settings.telegram.enabled is False
+
+
+def test_telegram_enabled_with_creds():
+    """Providing both credentials should enable Telegram by default."""
+    env = {
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "12345",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.telegram.enabled is True
+    assert settings.telegram.chat_id == 12345
+
+
+def test_telegram_warns_when_enabled_without_ids(caplog):
+    """Explicit enable without credentials logs a warning and disables."""
+    env = {"TELEGRAM__ENABLED": "true"}
+    with mock.patch.dict(os.environ, env, clear=True), caplog.at_level(
+        logging.WARNING
+    ):
+        settings = AppSettings(
+            telegram=TelegramSettings.from_env(), _env_file=None
+        )
+    assert settings.telegram.enabled is False
+    assert any(
+        "TELEGRAM__ENABLED=true requires" in record.message
+        for record in caplog.records
+    )
 
 
 def test_legacy_env_names_supported():
