@@ -96,15 +96,19 @@ fi
 # Backtest (integration smoke)
 # ---------------------------
 # The high fidelity backtester lives under scripts/; run it if available.
-BACKTEST="scripts/true_backtest_dynamic.py"
-if [[ -f "$BACKTEST" ]]; then
-  echo "--- Running backtester: $BACKTEST ---"
-  # Provide sane defaults for time filters if your script reads them
-  export DATA__TIME_FILTER_START="${DATA__TIME_FILTER_START:-09:20}"
-  export DATA__TIME_FILTER_END="${DATA__TIME_FILTER_END:-15:25}"
-  $PYTHON_BIN "$BACKTEST"
+if [[ "${RUN_BACKTEST:-1}" == "1" ]]; then
+  BACKTEST="scripts/true_backtest_dynamic.py"
+  if [[ -f "$BACKTEST" ]]; then
+    echo "--- Running backtester: $BACKTEST ---"
+    # Provide sane defaults for time filters if your script reads them
+    export DATA__TIME_FILTER_START="${DATA__TIME_FILTER_START:-09:20}"
+    export DATA__TIME_FILTER_END="${DATA__TIME_FILTER_END:-15:25}"
+    $PYTHON_BIN "$BACKTEST"
+  else
+    echo "ℹ $BACKTEST not found; skipping backtest run."
+  fi
 else
-  echo "ℹ $BACKTEST not found; skipping backtest run."
+  echo "ℹ Skipping backtest run because RUN_BACKTEST=${RUN_BACKTEST:-0}."
 fi
 
 echo "✅ All checks completed successfully."
