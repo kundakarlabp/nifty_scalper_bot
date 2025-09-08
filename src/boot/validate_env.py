@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-"""Runtime environment validation and setup helpers."""
-
 from datetime import datetime, timedelta
 import logging
 import os
@@ -26,17 +22,6 @@ except Exception:  # pragma: no cover
     LiveKiteSource = None  # type: ignore
 
 
-ENABLE_LIVE_TRADING = str(
-    os.getenv("ENABLE_LIVE_TRADING")
-    or os.getenv("ENABLE_TRADING")
-    or "false"
-).lower() in {"1", "true", "yes"}
-
-SKIP_BROKER_VALIDATION = str(
-    os.getenv("SKIP_BROKER_VALIDATION", "false")
-).lower() in {"1", "true", "yes"}
-
-
 def env_any(*names: str, default: str | None = None) -> str | None:
     """Return the first non-empty environment variable from ``names``."""
     for name in names:
@@ -45,8 +30,10 @@ def env_any(*names: str, default: str | None = None) -> str | None:
             return val
     return default
 
+
 def _skip_validation() -> bool:
-    return SKIP_BROKER_VALIDATION
+    return skip_broker_validation()
+
 
 API_KEY = env_any("ZERODHA__API_KEY", "KITE_API_KEY")
 API_SECRET = env_any("ZERODHA__API_SECRET", "KITE_API_SECRET")
@@ -55,21 +42,6 @@ ACCESS_TOKEN = env_any("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
 # Deployment environment flags
 # True when running on Railway (detected via known env vars)
 IS_HOSTED_RAILWAY = bool(env_any("RAILWAY_PROJECT_ID", "RAILWAY_STATIC_URL"))
-
-# Optional runtime flags
-BROKER_CONNECT_FOR_DATA = (
-    str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower()
-    in {"1", "true", "yes"}
-)
-DATA_WARMUP_DISABLE = (
-    str(
-        os.getenv(
-            "DATA__WARMUP_DISABLE",
-            "true" if IS_HOSTED_RAILWAY else "false",
-        )
-    ).lower()
-    in {"1", "true", "yes"}
-)
 
 
 def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
@@ -101,6 +73,53 @@ def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
     _flatten("", data)
 
 
+_ENV_SEEDED = False
+
+
+def _ensure_env_seeded() -> None:
+    global _ENV_SEEDED
+    if not _ENV_SEEDED:
+        seed_env_from_defaults()
+        _ENV_SEEDED = True
+
+
+def enable_live_trading() -> bool:
+    _ensure_env_seeded()
+    return (
+        str(
+            os.getenv("ENABLE_LIVE_TRADING")
+            or os.getenv("ENABLE_TRADING")
+            or "false"
+        ).lower()
+        in {"1", "true", "yes"}
+    )
+
+
+def skip_broker_validation() -> bool:
+    _ensure_env_seeded()
+    return (
+        str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower()
+        in {"1", "true", "yes"}
+    )
+
+
+def broker_connect_for_data() -> bool:
+    _ensure_env_seeded()
+    return (
+        str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower()
+        in {"1", "true", "yes"}
+    )
+
+
+def data_warmup_disable() -> bool:
+    _ensure_env_seeded()
+    default = "true" if IS_HOSTED_RAILWAY else "false"
+    return (
+        str(os.getenv("DATA__WARMUP_DISABLE", default)).lower()
+        in {"1", "true", "yes"}
+    )
+
+
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
@@ -117,15 +136,15 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     if cfg.enable_live_trading:
         if not cfg.zerodha.api_key:
             errors.append(
-                "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true"
+                "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.api_secret:
             errors.append(
-                "ZERODHA__API_SECRET (or KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true"
+                "ZERODHA__API_SECRET (or KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.access_token:
             errors.append(
-                "ZERODHA__ACCESS_TOKEN (or KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true"
+                "ZERODHA__ACCESS_TOKEN (or KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true",
             )
 
     # Telegram configuration (required only when enabled)
@@ -264,8 +283,8 @@ def _log_cred_presence() -> None:
     log.info(
         "live=%s (env=%s), skip_validation=%s, api_key=%s, secret=%s, access=%s",
         settings.enable_live_trading,
-        ENABLE_LIVE_TRADING,
-        SKIP_BROKER_VALIDATION,
+        enable_live_trading(),
+        skip_broker_validation(),
         mask(API_KEY),
         mask(API_SECRET),
         mask(ACCESS_TOKEN),

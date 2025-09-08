@@ -19,16 +19,16 @@ def test_railway_defaults(monkeypatch):
     monkeypatch.delenv("DATA__WARMUP_DISABLE", raising=False)
     ve = _reload_validate_env()
     assert ve.IS_HOSTED_RAILWAY is False
-    assert ve.DATA_WARMUP_DISABLE is False
+    assert ve.data_warmup_disable() is False
 
     monkeypatch.setenv("RAILWAY_PROJECT_ID", "123")
     ve = _reload_validate_env()
     assert ve.IS_HOSTED_RAILWAY is True
-    assert ve.DATA_WARMUP_DISABLE is True
+    assert ve.data_warmup_disable() is True
 
     monkeypatch.setenv("DATA__WARMUP_DISABLE", "false")
     ve = _reload_validate_env()
-    assert ve.DATA_WARMUP_DISABLE is False
+    assert ve.data_warmup_disable() is False
 
     monkeypatch.delenv("RAILWAY_PROJECT_ID", raising=False)
     monkeypatch.delenv("DATA__WARMUP_DISABLE", raising=False)

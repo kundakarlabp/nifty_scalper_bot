@@ -18,7 +18,7 @@ from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
 from src.data.base_source import BaseDataSource
 from src.boot.validate_env import (
-    DATA_WARMUP_DISABLE,
+    data_warmup_disable,
 )
 
 log = logging.getLogger(__name__)
@@ -448,7 +448,7 @@ def get_historical_data(
     after a few attempts. Returned data is capped to the most recent
     ``warmup_bars`` rows.
     """
-    if DATA_WARMUP_DISABLE:
+    if data_warmup_disable():
         log.info("Warmup disabled via DATA__WARMUP_DISABLE=true")
         return pd.DataFrame()
 
@@ -587,7 +587,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
     ) -> None:
         """Best-effort backfill to reach ``required_bars`` bars."""
-        if DATA_WARMUP_DISABLE:
+        if data_warmup_disable():
             log.info("ensure_backfill skipped via DATA__WARMUP_DISABLE=true")
             return
 
