@@ -160,6 +160,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
     def step(self, tick: Tick, budget_s: float | None = None) -> None:
         """Process a single tick within an optional time budget."""
+        # Light upkeep to ensure ATM option tokens stay subscribed
         try:
             ds = getattr(self, "data_source", None)
             if ds:

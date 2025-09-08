@@ -25,7 +25,7 @@ from src.boot.validate_env import (
 
 seed_env_from_defaults()
 from src.config import settings  # noqa: E402
-import src.strategies.patches  # noqa: E402,F401
+import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
 from src.utils.logging_tools import (
     RateLimitFilter,
     get_recent_logs,
