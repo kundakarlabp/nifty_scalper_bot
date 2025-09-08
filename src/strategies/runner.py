@@ -1670,7 +1670,8 @@ class StrategyRunner:
             end = session_end if now > session_end or now < session_start else now
 
             start = end - timedelta(minutes=lookback)
-            if start < session_start:
+            # Only clamp to session bounds when fetching for a completed session.
+            if (now < session_start or now > session_end) and start < session_start:
                 start = session_start
             if start >= end:
                 start = end - timedelta(minutes=1)
