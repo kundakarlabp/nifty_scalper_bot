@@ -160,6 +160,14 @@ class Orchestrator:
     # ------------------------------------------------------------------
     def step(self, tick: Tick, budget_s: float | None = None) -> None:
         """Process a single tick within an optional time budget."""
+        # ensure ATM L1 is live
+        try:
+            ds = getattr(self, "data_source", None)
+            if ds and hasattr(ds, "auto_resubscribe_atm"):
+                ds.auto_resubscribe_atm()
+        except Exception:
+            logging.getLogger(__name__).exception("auto_resubscribe_atm failed")
+
         start = time.time()
         result = self.on_tick(tick)
         if not result:
