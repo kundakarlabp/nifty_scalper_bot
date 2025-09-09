@@ -1478,7 +1478,13 @@ class StrategyRunner:
                     new_eq = float(settings.risk.default_equity)
             except Exception as e:
                 if not silent:
-                    self.log.warning("Equity refresh failed; using fallback: %s", e)
+                    msg = str(e)
+                    if "Incorrect 'api_key' or 'access_token'" in msg:
+                        self.log.info(
+                            "Equity refresh returned placeholder response; using fallback"
+                        )
+                    else:
+                        self.log.warning("Equity refresh failed; using fallback: %s", e)
 
         self._equity_cached_value = float(new_eq) if (isinstance(new_eq, (int, float)) and new_eq > 0) \
             else float(settings.risk.default_equity)
