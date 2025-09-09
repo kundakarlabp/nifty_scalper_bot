@@ -131,7 +131,15 @@ def run(
     bind_host = host or os.environ.get("HEALTH_HOST", "0.0.0.0")
     bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
 
-    # No reloader, multi-threaded to avoid blocking the trading loop
-    app.run(
-        host=bind_host, port=bind_port, debug=False, use_reloader=False, threaded=True
-    )
+    try:
+        from waitress import serve  # type: ignore
+
+        serve(app, host=bind_host, port=bind_port)
+    except Exception:
+        app.run(
+            host=bind_host,
+            port=bind_port,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )

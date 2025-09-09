@@ -34,7 +34,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.data.types import HistStatus
+from src.data.types import HistResult, HistStatus
 from src.diagnostics.metrics import metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -744,6 +744,22 @@ class StrategyRunner:
         self._last_error = None
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
+        if tick and self.data_source and hasattr(self.data_source, "on_tick"):
+            try:
+                self.data_source.on_tick(tick)
+            except Exception:
+                self.log.debug("data_source.on_tick failed", exc_info=True)
+        warm_min = int(getattr(settings, "warmup_min_bars", 0))
+        if warm_min > 0 and self.data_source is not None:
+            res = self.data_source.have_min_bars(warm_min)
+            ready = False
+            if isinstance(res, HistResult):
+                ready = len(res.df) >= warm_min
+            else:
+                ready = bool(res)
+            if not ready:
+                self.log.info(f"Waiting for warmup: {warm_min} bars required")
+                return
         for cb in [
             getattr(self.order_executor, "cb_orders", None),
             getattr(self.order_executor, "cb_modify", None),

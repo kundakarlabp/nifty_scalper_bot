@@ -661,6 +661,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
         self._backfill_cooldown_s = 60
+        self.hist_mode = "live_warmup" if data_warmup_disable() else "broker"
+        self.bar_builder = MinuteBarBuilder(max_bars=120)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -741,6 +743,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
 
+    def on_tick(self, tick: Dict[str, Any]) -> None:
+        """Handle live ticks to build warmup bars when needed."""
+        self._last_tick_ts = datetime.utcnow()
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            try:
+                self.bar_builder.on_tick(tick)
+            except Exception:
+                log.debug("bar_builder.on_tick failed", exc_info=True)
+
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
     ) -> None:
@@ -784,6 +795,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self, token: int, start: datetime, end: datetime, timeframe: str
     ) -> pd.DataFrame:
         self._last_hist_reason = ""
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            bars = self.bar_builder.get_recent_bars(WARMUP_BARS)
+            if not bars:
+                self._last_hist_reason = "live_warmup_no_bars"
+                return pd.DataFrame()
+            df = pd.DataFrame(bars)
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df.set_index("timestamp", inplace=True)
+                df.sort_index(inplace=True)
+                self._last_bar_open_ts = pd.to_datetime(df.index[-1]).to_pydatetime()
+            return df
         # Guard inputs
         try:
             token = int(token)
@@ -1009,6 +1032,20 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 return syn
             self._last_hist_reason = str(e)
             return pd.DataFrame()
+
+    def have_min_bars(self, n: int) -> HistResult:
+        """Return recent bars or NO_DATA when warming up from live ticks."""
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            if self.bar_builder.have_min_bars(n):
+                bars = self.bar_builder.get_recent_bars(n)
+                df = pd.DataFrame(bars)
+                if "timestamp" in df.columns:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df.set_index("timestamp", inplace=True)
+                    df.sort_index(inplace=True)
+                return HistResult(HistStatus.OK, df, "")
+            return HistResult(HistStatus.NO_DATA, pd.DataFrame(), "live_warmup")
+        return super().have_min_bars(n)
 
     def fetch_ohlc(
         self, token: int, start: datetime, end: datetime, timeframe: str
