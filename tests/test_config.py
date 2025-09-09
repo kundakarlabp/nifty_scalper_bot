@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from src.config import AppSettings, DataSettings, RiskSettings, load_settings
 from src.boot.validate_env import validate_critical_settings
+from src.data.types import HistResult, HistStatus
 
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
@@ -251,7 +252,7 @@ def test_invalid_instrument_token_detected(monkeypatch):
             pass
 
         def fetch_ohlc(self, *_, **__):
-            return pd.DataFrame()
+            return HistResult(status=HistStatus.OK, df=pd.DataFrame())
 
     with mock.patch("src.config.settings", settings), mock.patch(
         "src.boot.validate_env.settings", settings
@@ -312,7 +313,7 @@ def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
             pass
 
         def fetch_ohlc(self, *_, **__):
-            return pd.DataFrame()
+            return HistResult(status=HistStatus.OK, df=pd.DataFrame())
 
         def get_last_price(self, token):
             return 1.0

@@ -21,6 +21,7 @@ from pandas.errors import EmptyDataError
 
 from src.config import settings
 from src.data.source import DataSource
+from src.data.types import HistResult, HistStatus
 from src.utils.logging_tools import RateLimitFilter
 from src.backtesting.synth import make_synth_1m
 
@@ -184,18 +185,13 @@ class BacktestCsvSource(DataSource):
         start: datetime,
         end: datetime,
         timeframe: str,
-    ) -> pd.DataFrame:
-        """Return historical bars up to the current simulation time.
-
-        Parameters are accepted for interface compatibility with other
-        ``DataSource`` implementations.  The CSV-backed source ignores them and
-        simply returns all rows up to the current cursor position.
-
-        No look-ahead is performed; the last row corresponds to the current bar.
-        """
-        _ = token, start, end, timeframe  # Unused by CSV source
+    ) -> HistResult:
+        """Return historical bars up to the current simulation time."""
+        _ = token, start, end, timeframe
         end_idx = self._current_index + 1
-        return self._df.iloc[:end_idx].copy()
+        df = self._df.iloc[:end_idx].copy()
+        status = HistStatus.OK if not df.empty else HistStatus.NO_DATA
+        return HistResult(status=status, df=df)
 
     # --------------------------------------------------------------------- #
     # Convenience helpers (useful in tests/backtester)

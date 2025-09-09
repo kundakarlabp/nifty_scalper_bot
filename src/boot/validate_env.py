@@ -202,10 +202,11 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                     end = now_ist
                 else:
                     start, end = prev_session_last_20m(now_ist)
-                df = src.fetch_ohlc(
+                res = src.fetch_ohlc(
                     token=token, start=start, end=end, timeframe="minute",
                 )
-                if not isinstance(df, pd.DataFrame) or df.empty:
+                df = res.df
+                if df.empty:
                     # Outside market hours the historical API may return no data.
                     # Fall back to a simple last-price lookup so that a valid token
                     # doesn't trigger a false validation error.

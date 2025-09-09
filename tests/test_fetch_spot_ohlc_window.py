@@ -13,10 +13,10 @@ class StubDataSource:
     def __init__(self) -> None:
         self.calls = []
 
-    def fetch_ohlc(self, token, start, end, timeframe):
+    def fetch_ohlc_df(self, token, start, end, timeframe):
         self.calls.append((token, start, end, timeframe))
         idx = pd.date_range(start, end, freq="1min", inclusive="left")
-        data = {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 0}
+        data = {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 0, "ts": idx}
         return pd.DataFrame(data, index=idx)
 
     def get_last_price(self, symbol):
@@ -122,8 +122,8 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
             self.msgs.append(msg)
 
     class _FailSource:
-        def fetch_ohlc(self, *args, **kwargs):
-            return None
+        def fetch_ohlc_df(self, *args, **kwargs):
+            return pd.DataFrame()
 
         def get_last_price(self, symbol):
             return 1.0
@@ -137,7 +137,7 @@ def test_fetch_spot_ohlc_alert_on_none(monkeypatch):
 
     df = runner._fetch_spot_ohlc()
 
-    assert df is not None  # falls back to LTP
+    assert isinstance(df, pd.DataFrame)  # falls back to LTP
     # No automatic alert should be sent to Telegram
     assert telegram.msgs == []
     # Internal error state should still be set for on-demand inspection
