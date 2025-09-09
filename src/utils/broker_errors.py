@@ -59,6 +59,8 @@ def classify_broker_error(exc_or_msg: Any, status: Optional[int] = None) -> str:
             resp = getattr(exc_or_msg, "response", None)
             stat = getattr(resp, "status", getattr(resp, "status_code", None))
     m = msg.lower()
+    if "incorrect 'api_key' or 'access_token'" in m and stat not in (401, 403):
+        return UNKNOWN
     if stat in (401, 403) or any(p in m for p in _KEY_AUTH_PHRASES):
         return AUTH
     if any(k in m for k in _KEY_THROTTLE) or stat == 429:

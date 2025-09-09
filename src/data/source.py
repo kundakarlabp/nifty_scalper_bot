@@ -5,10 +5,11 @@ import logging
 import os
 import time
 import random
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import datetime as dt
-from typing import Any, Dict, Optional, Tuple, Callable, List
+from typing import Any, Dict, Optional, Tuple, Callable, List, Deque
 
 
 import numpy as np
@@ -38,6 +39,72 @@ except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
     # Collapse to base Exception so retry wrapper still works in paper mode
     NetworkException = TokenException = InputException = DataException = GeneralException = Exception  # type: ignore
+
+
+class MinuteBarBuilder:
+    """Aggregate ticks into 1-minute OHLCV bars.
+
+    The builder maintains a deque of the most recent ``max_bars`` fully-formed
+    bars and a partial bar for the current minute. Call :meth:`on_tick` for each
+    tick and retrieve bars via :meth:`get_recent_bars`.
+    """
+
+    def __init__(self, max_bars: int = 120) -> None:
+        self.max_bars = int(max_bars)
+        self.bars: Deque[dict[str, Any]] = deque(maxlen=self.max_bars)
+        self._current: dict[str, Any] | None = None
+        self._minute: datetime | None = None
+
+    def on_tick(self, tick: Dict[str, Any]) -> None:
+        """Incorporate ``tick`` into the current minute bar."""
+        ts = tick.get("timestamp") or tick.get("exchange_timestamp")
+        if ts is None:
+            return
+        if not isinstance(ts, datetime):
+            ts = datetime.fromtimestamp(float(ts))
+        minute = ts.replace(second=0, microsecond=0)
+        price = tick["last_price"]
+
+        vol = tick.get("volume", 0)
+        if minute != self._minute:
+            if self._current:
+                self.bars.append(self._current)
+            self._current = {
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": vol,
+                "vwap": price,
+                "count": 1,
+                "timestamp": minute,
+            }
+            self._minute = minute
+            return
+
+        bar = self._current
+        if bar is None:
+            return
+        bar["high"] = max(bar["high"], price)
+        bar["low"] = min(bar["low"], price)
+        bar["close"] = price
+        prev_vol = bar["volume"]
+        bar["volume"] += vol
+        if bar["volume"]:
+            bar["vwap"] = (bar["vwap"] * prev_vol + price * vol) / bar["volume"]
+        bar["count"] += 1
+
+    def get_recent_bars(self, n: int) -> List[dict[str, Any]]:
+        """Return up to ``n`` most recent bars including the current partial bar."""
+        out: List[dict[str, Any]] = list(self.bars)
+        if self._current:
+            out.append(self._current)
+        return out[-n:]
+
+    def have_min_bars(self, n: int) -> bool:
+        """Return ``True`` if at least ``n`` bars (including partial) are available."""
+        count = len(self.bars) + (1 if self._current else 0)
+        return count >= n
 
 
 # --------------------------------------------------------------------------------------
