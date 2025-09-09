@@ -41,9 +41,21 @@ SKIP_BROKER_VALIDATION: bool = (
 )
 
 
-ZERODHA_API_KEY_ALIASES: tuple[str, ...] = ("ZERODHA__API_KEY", "KITE_API_KEY")
-ZERODHA_API_SECRET_ALIASES: tuple[str, ...] = ("ZERODHA__API_SECRET", "KITE_API_SECRET")
-ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = ("ZERODHA__ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+ZERODHA_API_KEY_ALIASES: tuple[str, ...] = (
+    "ZERODHA__API_KEY",
+    "ZERODHA_API_KEY",
+    "KITE_API_KEY",
+)
+ZERODHA_API_SECRET_ALIASES: tuple[str, ...] = (
+    "ZERODHA__API_SECRET",
+    "ZERODHA_API_SECRET",
+    "KITE_API_SECRET",
+)
+ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = (
+    "ZERODHA__ACCESS_TOKEN",
+    "ZERODHA_ACCESS_TOKEN",
+    "KITE_ACCESS_TOKEN",
+)
 
 API_KEY = env_any(*ZERODHA_API_KEY_ALIASES)
 API_SECRET = env_any(*ZERODHA_API_SECRET_ALIASES)
@@ -154,15 +166,15 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     if cfg.enable_live_trading:
         if not cfg.zerodha.api_key:
             errors.append(
-                "ZERODHA__API_KEY (or KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true",
+                "ZERODHA__API_KEY (or ZERODHA_API_KEY/KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.api_secret:
             errors.append(
-                "ZERODHA__API_SECRET (or KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true",
+                "ZERODHA__API_SECRET (or ZERODHA_API_SECRET/KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true",
             )
         if not cfg.zerodha.access_token:
             errors.append(
-                "ZERODHA__ACCESS_TOKEN (or KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true",
+                "ZERODHA__ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN/KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true",
             )
 
     # Telegram configuration (required only when enabled)
