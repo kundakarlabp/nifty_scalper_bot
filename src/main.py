@@ -149,7 +149,9 @@ def _import_telegram_class():
 
         return TelegramController
     except Exception as e:
-        logging.getLogger("main").error("TelegramController import failed: %s", e)
+        logging.getLogger("main").error(
+            "TelegramController import failed: %s", e, exc_info=True
+        )
         return None
 
 
