@@ -134,7 +134,8 @@ def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
                 data = f.read(read_size) + data
         text = data.decode(errors="ignore")
         return text.splitlines()[-n:]
-    except Exception:
+    except Exception as exc:
+        logging.getLogger("main").warning("Failed to tail logs: %s", exc, exc_info=True)
         return []
 
 
