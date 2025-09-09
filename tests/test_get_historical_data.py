@@ -39,3 +39,17 @@ def test_get_historical_data_retries_on_short_data():
     assert len(ds.calls) == 4
     assert df is not None
     assert len(df) == 20
+
+
+def test_get_historical_data_floors_end_time():
+    """End timestamps with seconds should be floored to the last minute."""
+    ds = StubDataSource(max_bars=100)
+    end = datetime(2024, 1, 1, 10, 0, 30)
+    df = get_historical_data(ds, token=1, end=end, timeframe="minute", warmup_bars=10)
+
+    assert df is not None
+    assert len(ds.calls) == 1
+    call_start, call_end = ds.calls[0]
+    assert call_end == datetime(2024, 1, 1, 10, 0)
+    assert call_start == datetime(2024, 1, 1, 9, 50)
+    assert len(df) == 10

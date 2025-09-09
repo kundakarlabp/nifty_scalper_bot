@@ -145,6 +145,18 @@ _INTERVAL_TO_FREQ: Dict[str, str] = {
     "day": "1D",
 }
 
+
+def _floor_to_interval_end(ts: datetime, interval: str) -> datetime:
+    """Floor ``ts`` to the last fully-closed bar for ``interval``."""
+    if interval == "day":
+        return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+    mins = _INTERVAL_TO_MINUTES.get(interval, 1)
+    return ts - timedelta(
+        minutes=ts.minute % mins,
+        seconds=ts.second,
+        microseconds=ts.microsecond,
+    )
+
 from typing import Any, cast
 
 try:  # pragma: no cover - imported lazily to avoid circular dependency during settings init
@@ -462,6 +474,7 @@ def get_historical_data(
         warmup = 1
 
     interval = _coerce_interval(timeframe)
+    end = _floor_to_interval_end(end, interval)
     step = timedelta(minutes=_INTERVAL_TO_MINUTES.get(interval, 1) * warmup)
     start = end - step
 
