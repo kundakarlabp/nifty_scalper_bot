@@ -17,6 +17,7 @@ from src.utils.broker_errors import (
     AUTH,
     SUBSCRIPTION,
     THROTTLE,
+    UNKNOWN,
     classify_broker_error,
 )
 from src.utils.circuit_breaker import CircuitBreaker
@@ -154,7 +155,7 @@ def fetch_quote_with_depth(
             if kind == THROTTLE and attempt == 0:
                 time.sleep(min(2.0, 0.5))
                 continue
-            if kind == AUTH:
+            if kind == AUTH and classify_broker_error(e, getattr(e, "status", None)) == AUTH:
                 global _AUTH_WARNED
                 if cb is not None:
                     cooldown = int(os.getenv("BREAKER_AUTH_COOLDOWN_S", "60"))
@@ -162,6 +163,8 @@ def fetch_quote_with_depth(
                 if not _AUTH_WARNED:
                     log.warning("broker auth error: %s", e)
                     _AUTH_WARNED = True
+            elif kind == UNKNOWN:
+                pass
             elif kind not in (SUBSCRIPTION,):
                 if _QUOTE_ERR_RL.allow():
                     log.warning("broker error: %s", e)

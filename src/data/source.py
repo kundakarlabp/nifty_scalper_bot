@@ -563,14 +563,16 @@ def _synthetic_ohlc(
 
 HIST_WARN_RATELIMIT_S = int(os.getenv("HIST_WARN_RATELIMIT_S", "300"))
 _HIST_WARN_TS: Dict[int, float] = {}
+_GLOBAL_AUTH_WARN = 0.0
 
 
 def _hist_warn(
     token: int, interval: str, start: datetime, end: datetime, reason: str
 ) -> None:
+    global _GLOBAL_AUTH_WARN
     now = time.monotonic()
     last = _HIST_WARN_TS.get(token, 0.0)
-    if now - last < HIST_WARN_RATELIMIT_S:
+    if now - last < HIST_WARN_RATELIMIT_S or now - _GLOBAL_AUTH_WARN < HIST_WARN_RATELIMIT_S:
         return
     _HIST_WARN_TS[token] = now
     sym = getattr(settings.instruments, "trade_symbol", token)
@@ -583,6 +585,9 @@ def _hist_warn(
         end,
         reason,
     )
+    rlow = reason.lower()
+    if any(x in rlow for x in ("credential", "subscription", "api_key", "access_token", "auth")):
+        _GLOBAL_AUTH_WARN = now
 
 
 def get_historical_data(
