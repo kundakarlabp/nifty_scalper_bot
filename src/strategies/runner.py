@@ -1385,7 +1385,7 @@ class StrategyRunner:
         """Run backtest on a CSV file and return a summary string."""
         try:
             path = (
-                Path(csv_path)
+                Path(csv_path).expanduser().resolve()
                 if csv_path
                 else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
             )
