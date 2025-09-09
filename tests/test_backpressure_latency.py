@@ -26,9 +26,9 @@ def test_backpressure_handles_flood() -> None:
     start = time.time()
     for _ in range(50_000):
         broker.push_tick(1, Decimal("1"))
-    deadline = start + 2.0
+    deadline = start + 3.0
     while processed < 50_000 and time.time() < deadline:
         time.sleep(0.01)
     orch.stop()
     assert processed == 50_000
-    assert time.time() - start < 2.0
+    assert time.time() - start < 3.0

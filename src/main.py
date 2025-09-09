@@ -9,7 +9,7 @@ import os
 import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any, cast
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -31,7 +31,7 @@ from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
-from src.server.logging_utils import _setup_logging, _import_telegram_class  # noqa: E402
+from src.server.logging_utils import _setup_logging  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -87,7 +87,12 @@ def _build_kite_session() -> Optional["KiteConnect"]:
 # -----------------------------
 # Telegram Import Wrapper
 # -----------------------------
-def _import_telegram_class():
+def _import_telegram_class() -> type | None:
+    """Attempt to import the Telegram controller.
+
+    Returns the ``TelegramController`` class if available, otherwise ``None``.
+    """
+
     try:
         from src.notifications.telegram_controller import (
             TelegramController,
@@ -114,11 +119,14 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     try:
         TelegramController = _import_telegram_class()
     except ImportError:
+        TelegramController = None
+
+    if TelegramController is None:
         runner.telegram_controller = _NoopTelegram()
         runner.telegram = runner.telegram_controller
         return
 
-    tg = TelegramController.create(
+    tg = cast(Any, TelegramController).create(
         # providers
         status_provider=getattr(runner, "get_status_snapshot", lambda: {"ok": False}),
         positions_provider=getattr(runner.executor, "get_positions_kite", None),
