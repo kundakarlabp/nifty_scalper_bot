@@ -192,20 +192,20 @@ class DataSource:
     def get_last_bars(self, n: int) -> pd.DataFrame:  # pragma: no cover - legacy alias
         return self.get_recent_bars(n)
 
-    def have_min_bars(self, n: int) -> HistResult:
-        """Return a :class:`HistResult` for the last ``n`` bars."""
+    def have_min_bars(self, n: int) -> bool:
+        """Return ``True`` if at least ``n`` recent bars are available."""
         try:
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         except Exception:
-            return HistResult(HistStatus.ERROR, pd.DataFrame(), "invalid token")
+            return False
         from src.utils.time_windows import floor_to_minute, now_ist
 
         end = floor_to_minute(now_ist(), None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         res = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
-        res.df = _normalize_ohlc_df(res.df)
-        return res
+        df = _normalize_ohlc_df(res.df)
+        return len(df) >= n
 
 
 # Accept a few common aliases; default to 'minute'
@@ -661,6 +661,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
         self._backfill_cooldown_s = 60
+        self.hist_mode = (
+            "live_warmup" if data_warmup_disable() else "broker"
+        )
+        self.bar_builder = MinuteBarBuilder(max_bars=120)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -694,6 +698,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.ensure_backfill(
                     required_bars=WARMUP_BARS, token=token, timeframe="minute"
                 )
+                if getattr(self, "hist_mode", "") != "live_warmup":
+                    try:
+                        if not self.have_min_bars(WARMUP_BARS):
+                            log.warning(
+                                "historical backfill unavailable; using live warmup"
+                            )
+                            self.hist_mode = "live_warmup"
+                    except Exception:
+                        self.hist_mode = "live_warmup"
             except Exception as e:
                 log.warning("LiveKiteSource connect: backfill failed: %s", e)
 
@@ -740,6 +753,17 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.cb_quote.record_failure(lat, reason=str(e))
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
+
+    # ---- tick ingestion ----
+    def on_tick(self, tick: Dict[str, Any]) -> None:
+        """Handle live tick updates when warming up from ticks."""
+        self._last_tick_ts = datetime.utcnow()
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            self.bar_builder.on_tick(tick)
+            if self.bar_builder.bars:
+                ts = self.bar_builder.bars[-1]["timestamp"]
+                if isinstance(ts, datetime):
+                    self._last_bar_open_ts = ts
 
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
@@ -1013,6 +1037,22 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def fetch_ohlc(
         self, token: int, start: datetime, end: datetime, timeframe: str
     ) -> HistResult:
+        """Return historical bars for ``token`` over ``start`` to ``end``."""
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            bars = self.bar_builder.get_recent_bars(120)
+            df = pd.DataFrame(bars)
+            if not df.empty and "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df.set_index("timestamp", inplace=True)
+                df.sort_index(inplace=True)
+                df = df[["open", "high", "low", "close", "volume"]]
+                if not df.empty:
+                    self._last_bar_open_ts = df.index[-1].to_pydatetime()
+            df = _normalize_ohlc_df(df)
+            status = HistStatus.OK if len(df) else HistStatus.NO_DATA
+            reason = "" if status is HistStatus.OK else "no_bars"
+            return HistResult(status, df, reason)
+
         df = self._fetch_ohlc_df(token=token, start=start, end=end, timeframe=timeframe)
         df = _normalize_ohlc_df(df)
         status = HistStatus.OK if not df.empty else HistStatus.NO_DATA
@@ -1023,6 +1063,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             interval = _coerce_interval(str(timeframe))
             _hist_warn(int(token), interval, start, end, reason)
         return HistResult(status, df, reason)
+
+    def have_min_bars(self, n: int) -> bool:  # type: ignore[override]
+        """Return ``True`` if at least ``n`` bars are available."""
+        if getattr(self, "hist_mode", "") == "live_warmup":
+            return self.bar_builder.have_min_bars(n)
+        return super().have_min_bars(n)
 
 
 def _livekite_health() -> float:

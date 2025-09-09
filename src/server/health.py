@@ -152,3 +152,13 @@ def run(
             use_reloader=False,
             threaded=True,
         )
+
+
+if __name__ == "__main__":  # pragma: no cover - manual start
+    port = int(os.getenv("HEALTH_PORT", "8080"))
+    try:
+        from waitress import serve  # type: ignore[import-not-found]
+
+        serve(app, host="0.0.0.0", port=port)
+    except Exception:
+        app.run(host="0.0.0.0", port=port, debug=False)

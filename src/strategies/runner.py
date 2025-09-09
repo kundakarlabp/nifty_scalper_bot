@@ -34,7 +34,6 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.data.types import HistStatus
 from src.diagnostics.metrics import metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -163,8 +162,8 @@ class Orchestrator:
 
     def _watchdog_loop(self) -> None:
         while self._running:
-            time.sleep(self.stale_tick_timeout_s)
-            if time.time() - self._last_tick > self.stale_tick_timeout_s:
+            time.sleep(self.stale_tick_timeout_s / 2)
+            if time.time() - self._last_tick >= self.stale_tick_timeout_s:
                 if not self._paused:
                     self._paused = True
                     if self.on_stale:
@@ -412,12 +411,10 @@ class StrategyRunner:
             try:
                 token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
                 warm_min = int(getattr(settings, "warmup_min_bars", 0))
-                if warm_min > 0:
-                    res = self.data_source.have_min_bars(warm_min)
-                    if len(res.df) < warm_min and res.status is HistStatus.NO_DATA:
-                        self.log.info(
-                            "Warmup mode: live bars (broker OHLC unavailable)"
-                        )
+                if warm_min > 0 and not self.data_source.have_min_bars(warm_min):
+                    self.log.info(
+                        "Warmup mode: live bars (broker OHLC unavailable)"
+                    )
                 if token > 0:
                     now_ist = floor_to_minute(self._now_ist())
                     if is_market_open(now_ist):
@@ -752,6 +749,11 @@ class StrategyRunner:
         ]:
             if cb:
                 cb.tick(tick_now)
+        if tick is not None and hasattr(self.data_source, "on_tick"):
+            try:
+                self.data_source.on_tick(tick)
+            except Exception:
+                self.log.debug("data_source.on_tick failed", exc_info=True)
         try:
             if hasattr(self.order_executor, "step_queue"):
                 self.order_executor.step_queue(now)
@@ -762,6 +764,14 @@ class StrategyRunner:
         except Exception:
             self.log.debug("queue/reconcile step failed", exc_info=True)
         try:
+            warm_min = int(getattr(settings, "warmup_min_bars", 0))
+            if warm_min > 0 and not self.data_source.have_min_bars(warm_min):
+                flow["reason_block"] = "data_warmup"
+                self.log.info(
+                    "Waiting for warmup: %s bars required", warm_min
+                )
+                self._last_flow_debug = flow
+                return
             # fetch data first to allow ADX‑based window override
             df = self._fetch_spot_ohlc()
             if not isinstance(df, pd.DataFrame) or df.empty:
