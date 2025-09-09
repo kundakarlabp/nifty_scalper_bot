@@ -23,8 +23,8 @@ from src.boot.validate_env import (
 )  # noqa: E402
 
 seed_env_from_defaults()
-from src.config import settings  # noqa: E402
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
+from src.config import settings  # noqa: E402
 from src.utils.logging_tools import get_recent_logs  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
