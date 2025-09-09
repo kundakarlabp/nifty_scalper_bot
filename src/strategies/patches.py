@@ -1,45 +1,78 @@
 from __future__ import annotations
 
-"""Monkey patches for runtime tweaks.
+"""Runtime monkey patches for strategy helpers.
 
-This module clamps the lower ATR band to ``atr_min_pct`` to avoid false
-``atr_out_of_band`` blocks when ATR hovers around the minimum, and it
-ensures ATM option upkeep is invoked during strategy evaluation even if
-callers forget to do so.
+This module adjusts ATR band checks so that the lower band is clamped to
+``atr_min_pct`` without mutating configuration objects. It also ensures
+ATM upkeep helpers on data sources run during strategy evaluation.
 """
 
 import logging
-from typing import Any
+from importlib import import_module
+from typing import Any, Callable
 
 
-def _patch_atr_band() -> None:
-    try:  # pragma: no cover - best effort import
-        from .scalping_strategy import EnhancedScalpingStrategy as _Strat
+def _resolve_min_atr_pct() -> float:
+    """Resolve the minimum ATR percentage from config or runner."""
+
+    try:  # pragma: no cover - best effort
+        from .runner import StrategyRunner
+
+        runner = StrategyRunner.get_singleton()
     except Exception:  # pragma: no cover
-        from .scalping_strategy import ScalpingStrategy as _Strat  # type: ignore
+        runner = None
 
-    orig = _Strat.generate_signal
-
-    def wrapped(self: Any, df, current_tick=None, current_price=None, spot_df=None):
-        runner = getattr(self, "runner", None)
-        cfg = getattr(runner, "strategy_cfg", None)
-        if cfg is None:
+    cfg = getattr(runner, "strategy_cfg", None)
+    if cfg is None:
+        try:  # pragma: no cover - runtime fallback
             from .strategy_config import StrategyConfig, resolve_config_path
 
             cfg = StrategyConfig.load(resolve_config_path())
-        sym = getattr(runner, "under_symbol", "")
-        atr_min_pct = getattr(cfg, "min_atr_pct_banknifty", cfg.atr_min)
-        if "BANK" not in str(sym).upper():
-            atr_min_pct = getattr(cfg, "min_atr_pct_nifty", cfg.atr_min)
-        orig_band = float(cfg.atr_min)
-        band_low = min(orig_band, float(atr_min_pct))
-        try:
-            cfg.atr_min = band_low
-            return orig(self, df, current_tick=current_tick, current_price=current_price, spot_df=spot_df)
-        finally:
-            cfg.atr_min = orig_band
+        except Exception:  # pragma: no cover
+            return 0.0
 
-    _Strat.generate_signal = wrapped  # type: ignore[assignment]
+    sym = getattr(runner, "under_symbol", "")
+    if "BANK" in str(sym).upper():
+        return float(getattr(cfg, "min_atr_pct_banknifty", getattr(cfg, "atr_min", 0.0)))
+    return float(getattr(cfg, "min_atr_pct_nifty", getattr(cfg, "atr_min", 0.0)))
+
+
+def _wrap_gate(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return a wrapper that clamps ``band_low`` via call arguments."""
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        if args or "band_low" in kwargs:
+            band_low = kwargs.get("band_low", args[0] if args else None)
+            if band_low is not None:
+                clamped = min(float(band_low), _resolve_min_atr_pct())
+                if "band_low" in kwargs:
+                    kwargs["band_low"] = clamped
+                else:
+                    args = (clamped, *args[1:])
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
+def _patch_atr_band() -> None:
+    """Wrap the first available ATR gate/check function."""
+
+    candidates = ["gate_atr_band", "check_atr_band", "check_atr"]
+    modules = [
+        "src.strategies.runner",
+        "src.strategies.scalping_strategy",
+        "src.diagnostics.checks",
+    ]
+    for name in candidates:
+        for mod_name in modules:
+            try:  # pragma: no cover - best effort
+                mod = import_module(mod_name)
+            except Exception:
+                continue
+            fn = getattr(mod, name, None)
+            if callable(fn):
+                setattr(mod, name, _wrap_gate(fn))
+                return
 
 
 def _patch_runner_step() -> None:
@@ -48,12 +81,12 @@ def _patch_runner_step() -> None:
     except Exception:  # pragma: no cover
         return
 
-    def _wrap(cls):
+    def _wrap(cls: Any) -> None:
         if not hasattr(cls, "step"):
             return
         orig = cls.step
 
-        def step(self, *a, **k):
+        def step(self, *a: Any, **k: Any) -> Any:  # pragma: no cover - thin wrapper
             ds = getattr(self, "data_source", None)
             if ds:
                 for name in ("auto_resubscribe_atm", "ensure_atm_tokens"):
@@ -62,7 +95,9 @@ def _patch_runner_step() -> None:
                         try:
                             fn()
                         except Exception:
-                            logging.getLogger(__name__).warning("%s failed", name, exc_info=True)
+                            logging.getLogger(__name__).warning(
+                                "%s failed", name, exc_info=True
+                            )
             return orig(self, *a, **k)
 
         cls.step = step  # type: ignore[assignment]
@@ -75,3 +110,7 @@ def _patch_runner_step() -> None:
 
 _patch_atr_band()
 _patch_runner_step()
+
+
+__all__ = ["_patch_atr_band", "_resolve_min_atr_pct"]
+
