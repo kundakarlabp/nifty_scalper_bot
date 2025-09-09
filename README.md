@@ -108,7 +108,8 @@ docker compose up --build test     # run the test suite
 
 ## Health endpoints
 
-A lightweight Flask app exposes health probes on port `8000` by default:
+A lightweight Flask app, served by Waitress in production when available,
+exposes health probes on port `8000` by default:
 
 ```
 GET  /health  → JSON status bundle
