@@ -1011,7 +1011,7 @@ def _match_token(
                 and int(float(it.get("strike", 0))) == int(strike)
                 and it.get("instrument_type") == opt
             ):
-                return int(it.get("instrument_token"))
+                return int(it.get("instrument_token", 0) or 0)
         except Exception:
             continue
     return None
@@ -1062,7 +1062,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     items = _refresh_instruments_nfo(broker)
     if not items:
         return
-    under = underlying or getattr(settings.instruments, "trade_symbol", "NIFTY")
+    under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
     today = dt.date.today()
     expiry = _pick_expiry(items, under, today)
     if not expiry:
