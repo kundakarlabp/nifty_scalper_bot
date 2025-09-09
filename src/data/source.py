@@ -1015,25 +1015,23 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
         time.sleep(0.1)
 
 
-_auto_atm_last_check_ts = 0.0
-
-
 def auto_resubscribe_atm(self: Any) -> None:
     """Ensure current ATM tokens remain subscribed and have quotes.
 
     Respects ``AUTO_ATM_RESUB_INTERVAL_S`` (default ``30``) to avoid
-    spamming the broker with subscription requests.
+    spamming the broker with subscription requests. Throttled per
+    instance via ``self._atm_next_check_ts``.
     """
 
-    global _auto_atm_last_check_ts
     try:
         interval = int(os.getenv("AUTO_ATM_RESUB_INTERVAL_S", "30"))
     except Exception:
         interval = 30
     now = time.time()
-    if now - _auto_atm_last_check_ts < interval:
+    next_check = float(getattr(self, "_atm_next_check_ts", 0.0))
+    if now < next_check:
         return
-    _auto_atm_last_check_ts = now
+    self._atm_next_check_ts = now + interval
     tokens = list(getattr(self, "atm_tokens", []) or [])
     if not tokens:
         return
