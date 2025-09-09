@@ -55,6 +55,8 @@ def _tail_logs(path: str, n: int = 200) -> list[str]:  # pragma: no cover
             for line in f:
                 lines.append(line.rstrip("\n"))
         return list(lines)
-    except Exception:
-        logging.getLogger("main").exception("tail_logs failed for %s", path)
-        raise
+    except Exception as exc:
+        logging.getLogger("main").warning(
+            "tail_logs failed for %s: %s", path, exc, exc_info=True
+        )
+        return []
