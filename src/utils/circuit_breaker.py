@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any, Deque, Dict, Optional
 
 try:  # pragma: no cover - during tests settings may be absent
@@ -11,6 +11,18 @@ except Exception:  # pragma: no cover
     settings = None  # type: ignore
 
 log = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return current time as an aware UTC ``datetime``."""
+    return datetime.now(timezone.utc)
+
+
+def _as_aware_utc(dt: datetime) -> datetime:
+    """Convert ``dt`` to an aware UTC ``datetime``."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 class CircuitBreaker:
@@ -48,7 +60,7 @@ class CircuitBreaker:
         self._latencies: Deque[int] = deque(maxlen=self.window_size)
         self._errors = 0
         self._total = 0
-        self.open_until: Optional[datetime] = None
+        self.open_until: Optional[datetime] = None  # aware UTC time when breaker can half-open
         self._half_open_successes = 0
         self.last_reason: str = ""
 
@@ -88,7 +100,7 @@ class CircuitBreaker:
         self.last_reason = reason
         if self.state == self.HALF_OPEN:
             self._transition(self.HALF_OPEN, self.OPEN, reason=reason)
-            self.open_until = datetime.utcnow() + timedelta(seconds=self.open_cooldown_sec)
+            self.open_until = _utcnow() + timedelta(seconds=self.open_cooldown_sec)
             self._half_open_successes = 0
         else:
             self._evaluate(latency_ms, reason)
@@ -102,7 +114,7 @@ class CircuitBreaker:
         p95 = self._p95()
         if err_rate > self.error_rate_threshold or p95 > self.latency_p95_ms:
             self._transition(self.CLOSED, self.OPEN, err_rate=err_rate, p95=p95, reason=reason)
-            self.open_until = datetime.utcnow() + timedelta(seconds=self.open_cooldown_sec)
+            self.open_until = _utcnow() + timedelta(seconds=self.open_cooldown_sec)
 
     def _transition(self, src: str, dst: str, **extra: Any) -> None:
         log.info(
@@ -124,8 +136,9 @@ class CircuitBreaker:
         self.last_reason = ""
 
     # ----- house keeping -----
-    def tick(self, now: datetime) -> None:
+    def tick(self, now: datetime | None = None) -> None:
         """Advance internal timers (OPEN→HALF_OPEN)."""
+        now = _utcnow() if now is None else _as_aware_utc(now)
         if self.state == self.OPEN and self.open_until and now >= self.open_until:
             self._transition(self.OPEN, self.HALF_OPEN, reason="cooldown_done")
             self._half_open_successes = 0
@@ -144,7 +157,7 @@ class CircuitBreaker:
     def force_open(self, seconds: int) -> None:
         """Force breaker to OPEN for ``seconds`` seconds."""
         self.state = self.OPEN
-        self.open_until = datetime.utcnow() + timedelta(seconds=max(0, int(seconds)))
+        self.open_until = _utcnow() + timedelta(seconds=max(0, int(seconds)))
         self.last_reason = "forced_open"
 
     def reset(self) -> None:
