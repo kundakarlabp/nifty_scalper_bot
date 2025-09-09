@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from freezegun import freeze_time
 
 from src.data.source import LiveKiteSource, DataException
+from src.data.types import HistStatus
 from src.utils.market_time import prev_session_bounds
 from src.utils.time_windows import TZ
 
@@ -39,9 +40,10 @@ def test_fetch_ohlc_preopen_refetch_prev_session():
     src = LiveKiteSource(kite)
     start = datetime(2024, 1, 3, 9, 0)
     end = start + timedelta(minutes=10)
-    df = src.fetch_ohlc(123, start, end, "minute")
-
-    assert df is not None and not df.empty
+    res = src.fetch_ohlc(123, start, end, "minute")
+    assert res.status is HistStatus.OK
+    df = res.df
+    assert not df.empty
     prev_start, prev_end = prev_session_bounds(datetime(2024, 1, 3, 9, 0, tzinfo=TZ))
     call_start, call_end = kite.calls[-1]
     assert call_start.date() == prev_start.date()

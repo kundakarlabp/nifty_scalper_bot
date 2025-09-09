@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from src.data.source import DataSource, get_historical_data
+from src.data.types import HistResult, HistStatus
 
 
 class StubDataSource(DataSource):
@@ -10,13 +11,15 @@ class StubDataSource(DataSource):
         self.max_bars = max_bars
         self.calls: list[tuple[datetime, datetime]] = []
 
-    def fetch_ohlc(self, token, start: datetime, end: datetime, timeframe: str):
+    def fetch_ohlc(self, token, start: datetime, end: datetime, timeframe: str) -> HistResult:
         self.calls.append((start, end))
         diff = int((end - start).total_seconds() // 60)
         bars = min(diff, self.max_bars)
         idx = pd.date_range(end - timedelta(minutes=bars), periods=bars, freq="1min")
         data = {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 0}
-        return pd.DataFrame(data, index=idx)
+        df = pd.DataFrame(data, index=idx)
+        status = HistStatus.OK if not df.empty else HistStatus.NO_DATA
+        return HistResult(status=status, df=df)
 
     def get_last_price(self, symbol):
         return 1.0
@@ -27,7 +30,7 @@ def test_get_historical_data_returns_warmup():
     end = datetime(2024, 1, 1, 10, 0)
     df = get_historical_data(ds, token=1, end=end, timeframe="minute", warmup_bars=50)
     assert len(ds.calls) == 1
-    assert df is not None
+    assert isinstance(df, pd.DataFrame)
     assert len(df) == 50
 
 
@@ -37,5 +40,5 @@ def test_get_historical_data_retries_on_short_data():
     df = get_historical_data(ds, token=1, end=end, timeframe="minute", warmup_bars=50)
     # Should make four attempts as data never reaches warmup
     assert len(ds.calls) == 4
-    assert df is not None
+    assert isinstance(df, pd.DataFrame)
     assert len(df) == 20

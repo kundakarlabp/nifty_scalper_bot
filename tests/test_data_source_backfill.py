@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from src.data.source import DataSource
+from src.data.types import HistResult, HistStatus
 from src.data import source as source_mod
 
 
@@ -13,9 +14,10 @@ class DummySource(DataSource):
         self.backfill_calls = 0
         self._df = pd.DataFrame()
 
-    def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str):
+    def fetch_ohlc(self, token: int, start: datetime, end: datetime, timeframe: str) -> HistResult:
         self.fetch_calls += 1
-        return self._df
+        status = HistStatus.OK if not self._df.empty else HistStatus.NO_DATA
+        return HistResult(status=status, df=self._df)
 
     def ensure_backfill(self, *, required_bars: int, token: int = 0, timeframe: str = "minute") -> None:
         self.backfill_calls += 1

@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Tuple, Callable, List
 
 import numpy as np
 import pandas as pd
+from src.data.types import HistResult, HistStatus
 from src.utils.atr_helper import compute_atr
 from src.utils.indicators import calculate_vwap
 from src.utils.circuit_breaker import CircuitBreaker
@@ -51,13 +52,25 @@ class DataSource:
 
     def fetch_ohlc(
         self, token: int, start: datetime, end: datetime, timeframe: str
-    ) -> Optional[pd.DataFrame]:
-        """
-        Return an OHLC DataFrame with columns: open, high, low, close, volume.
-        Index should be pandas Timestamps (timezone‑naive IST is fine).
-        A subclass may return ``None`` if no data could be retrieved.
+    ) -> HistResult:
+        """Return historical bars for ``token``.
+
+        Implementations must always return a :class:`HistResult` where ``df`` is
+        a DataFrame (possibly empty) and ``status`` reflects whether data was
+        retrieved.
         """
         raise NotImplementedError
+
+    def fetch_ohlc_df(
+        self, token: int, start: datetime, end: datetime, timeframe: str
+    ) -> pd.DataFrame:
+        """Compatibility wrapper returning only the DataFrame from
+        :meth:`fetch_ohlc`.
+
+        Always returns a DataFrame, which may be empty.
+        """
+        res = self.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
+        return _normalize_ohlc_df(res.df)
 
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
         """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or instrument token."""
@@ -67,12 +80,13 @@ class DataSource:
         """Return circuit breaker health metrics if available."""
         return {}
 
-    def get_last_bars(self, n: int):
+    def get_recent_bars(self, n: int) -> pd.DataFrame:
         """Return the last ``n`` 1m bars with ATR% and VWAP if available."""
         try:
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         except Exception:
-            return None
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
+
         from src.utils.time_windows import now_ist, floor_to_minute
         from src.data.ohlc_builder import prepare_ohlc
 
@@ -81,34 +95,48 @@ class DataSource:
         end = floor_to_minute(cutoff, None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
-        df = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        df = self.fetch_ohlc_df(token=token, start=start, end=end, timeframe="minute")
 
-        # If no bars were fetched, attempt a backfill and retry once.  This helps
-        # recover when the bot starts with an empty cache or the broker API drops
-        # a request, which previously resulted in a permanent warmup failure.
-        if df is None or df.empty:
+        if df.empty:
             try:
                 ensure = getattr(self, "ensure_backfill", None)
                 if callable(ensure):
                     ensure(required_bars=n, token=token, timeframe="minute")
-                    df = self.fetch_ohlc(
+                    df = self.fetch_ohlc_df(
                         token=token, start=start, end=end, timeframe="minute"
                     )
             except Exception:
                 log.warning("ensure_backfill failed", exc_info=True)
-                df = None
-        if df is None or df.empty:
-            return None
+                df = pd.DataFrame()
+
         df = prepare_ohlc(df, now)
         if "vwap" not in df.columns:
             try:
                 df["vwap"] = calculate_vwap(df)
             except Exception:
                 log.debug("calculate_vwap failed", exc_info=True)
-        if "atr_pct" not in df.columns:
+        if "atr_pct" not in df.columns and not df.empty:
             atr = compute_atr(df, period=14)
             df["atr_pct"] = atr / df["close"] * 100.0
         return df.tail(n)
+
+    def get_last_bars(self, n: int) -> pd.DataFrame:  # pragma: no cover - legacy alias
+        return self.get_recent_bars(n)
+
+    def have_min_bars(self, n: int) -> HistResult:
+        """Return a :class:`HistResult` for the last ``n`` bars."""
+        try:
+            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        except Exception:
+            return HistResult(HistStatus.ERROR, pd.DataFrame(), "invalid token")
+        from src.utils.time_windows import now_ist, floor_to_minute
+
+        end = floor_to_minute(now_ist(), None)
+        lookback = max(60, n + 50)
+        start = end - timedelta(minutes=lookback)
+        res = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        res.df = _normalize_ohlc_df(res.df)
+        return res
 
 
 # Accept a few common aliases; default to 'minute'
@@ -227,8 +255,9 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
         end = floor_to_minute(cutoff, None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
-        df = ds.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
-        if df is None or df.empty:
+        res = ds.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        df = _normalize_ohlc_df(res.df)
+        if df.empty:
             return "no data"
         df = prepare_ohlc(df, now)
         vwap = calculate_vwap(df)
@@ -252,20 +281,18 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
         return f"bars error: {e}"
 
 
-def _safe_dataframe(rows: Any) -> pd.DataFrame:
-    """Return a sanitized OHLC frame.
+def _normalize_ohlc_df(rows: Any) -> pd.DataFrame:
+    """Return a sanitized OHLC frame with a ``ts`` column.
 
-    The input is copied, column names are lowercased and required OHLC columns
-    are verified. Numeric columns are coerced, infinite values are replaced with
-    ``pd.NA`` and rows with ``NaN`` values are dropped. Only rows with positive
-    prices and logical relationships (``low`` ≤ ``open``/``close`` ≤ ``high``)
-    are kept. The index is sorted and duplicate timestamps are removed keeping
-    the latest occurrence.
+    The input is copied, column names are normalised and required OHLC columns
+    are verified. Numeric columns are coerced and invalid rows dropped. The
+    index is sorted, duplicate timestamps removed, and a ``ts`` column is
+    always present.  If ``rows`` is falsy an empty DataFrame is returned.
     """
     try:
-        df = pd.DataFrame(rows or []).copy()
+        df = pd.DataFrame(rows if rows is not None else []).copy()
         if df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
 
         df = df.rename(columns=lambda c: str(c).lower())
         df = df.T.groupby(level=0).sum(min_count=1).T
@@ -284,7 +311,7 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
 
         need = ["open", "high", "low", "close"]
         if not set(need).issubset(df.columns):
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
 
         if "volume" not in df.columns:
             df["volume"] = 0
@@ -307,11 +334,12 @@ def _safe_dataframe(rows: Any) -> pd.DataFrame:
         df = df.sort_index()
         df = df[~df.index.duplicated(keep="last")]
 
-        return df
+        df["ts"] = pd.to_datetime(df.index)
+        return df[["open", "high", "low", "close", "volume", "ts"]]
 
     except Exception as e:
         log.warning("Failed to normalize OHLC frame: %s", e)
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
 
 
 def _retry(fn: Callable, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
@@ -435,13 +463,37 @@ def _synthetic_ohlc(
     return pd.DataFrame(data, index=idx)
 
 
+HIST_WARN_RATELIMIT_S = int(os.getenv("HIST_WARN_RATELIMIT_S", "300"))
+_HIST_WARN_TS: Dict[int, float] = {}
+
+
+def _hist_warn(
+    token: int, interval: str, start: datetime, end: datetime, reason: str
+) -> None:
+    now = time.monotonic()
+    last = _HIST_WARN_TS.get(token, 0.0)
+    if now - last < HIST_WARN_RATELIMIT_S:
+        return
+    _HIST_WARN_TS[token] = now
+    sym = getattr(settings.instruments, "trade_symbol", token)
+    log.warning(
+        "Historical data unavailable from broker token=%s symbol=%s interval=%s window=%s→%s reason=%s",
+        token,
+        sym,
+        interval,
+        start,
+        end,
+        reason,
+    )
+
+
 def get_historical_data(
     source: DataSource,
     token: int,
     end: datetime,
     timeframe: str,
     warmup_bars: int = WARMUP_BARS,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame:
     """Fetch at least ``warmup_bars`` rows of OHLC data.
 
     The helper expands the lookback window progressively until the desired
@@ -466,11 +518,13 @@ def get_historical_data(
     start = end - step
 
     attempts = 0
-    df: Optional[pd.DataFrame] = None
+    res: HistResult | None = None
+    df: pd.DataFrame = pd.DataFrame()
 
     while attempts < 4:
-        df = source.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
-        if isinstance(df, pd.DataFrame) and len(df) >= warmup:
+        res = source.fetch_ohlc(token=token, start=start, end=end, timeframe=timeframe)
+        df = _normalize_ohlc_df(res.df)
+        if len(df) >= warmup:
             return df.tail(warmup).copy()
         if attempts == 2:
             start -= step + timedelta(days=2)
@@ -478,12 +532,9 @@ def get_historical_data(
             start -= step
         attempts += 1
 
-    # Return whatever data was fetched (may be ``None`` or short).
-    if isinstance(df, pd.DataFrame):
-        if len(df) > warmup:
-            return df.tail(warmup).copy()
-        return df.copy()
-    return df
+    if len(df) > warmup:
+        return df.tail(warmup).copy()
+    return df.copy()
 
 
 # --------------------------------------------------------------------------------------
@@ -621,25 +672,24 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.warning("kite historical backfill failed: %s", e)
 
     # ---- main candle fetch ----
-    def fetch_ohlc(
+    def _fetch_ohlc_df(
         self, token: int, start: datetime, end: datetime, timeframe: str
-    ) -> Optional[pd.DataFrame]:
-        """
-        Primary path: Kite ``historical_data``.
-        Returns ``None`` if no candles were retrieved even after all retries.
-        """
+    ) -> pd.DataFrame:
+        self._last_hist_reason = ""
         # Guard inputs
         try:
             token = int(token)
         except Exception:
             log.error("fetch_ohlc: invalid token %r", token)
-            return None
+            self._last_hist_reason = "invalid_token"
+            return pd.DataFrame()
 
         if not isinstance(start, datetime) or not isinstance(end, datetime):
             log.error(
                 "fetch_ohlc: start/end must be datetime, got %r %r", type(start), type(end)
             )
-            return None
+            self._last_hist_reason = "invalid_time"
+            return pd.DataFrame()
 
         start = _naive_ist(start)
         end = _naive_ist(end)
@@ -683,8 +733,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
                 if not syn.empty:
                     self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
+                self._last_hist_reason = "synthetic_ltp"
                 return syn
-            return None
+            self._last_hist_reason = "broker_unavailable"
+            return pd.DataFrame()
 
         # Kite expects naive or tz-aware UTC; we'll pass naive (already)
         frm = pd.to_datetime(start).to_pydatetime()
@@ -748,13 +800,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
                                 tries=3,
                             )
                         except Exception:
-                            return None
-                        part = _safe_dataframe(rows)
+                            self._last_hist_reason = "preopen_fallback_failed"
+                            return pd.DataFrame()
+                        part = _normalize_ohlc_df(rows)
                         if not part.empty:
                             frames.append(part)
                             start, end = prev_start, prev_end
                             break
-                        return None
+                        self._last_hist_reason = "preopen_empty"
+                        return pd.DataFrame()
                     else:
                         self.cb_hist.record_failure(lat, reason=msg)
                         cur = cur_end
@@ -762,7 +816,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 else:
                     lat = int((time.monotonic() - t0) * 1000)
                     self.cb_hist.record_success(lat)
-                    part = _safe_dataframe(rows)
+                    part = _normalize_ohlc_df(rows)
                     if not part.empty:
                         frames.append(part)
                 cur = cur_end
@@ -792,8 +846,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         fetched_window,
                         (start, end),
                     )
+                    self._last_hist_reason = "synthetic_ltp"
                     return syn
-                return None
+                self._last_hist_reason = "empty"
+                return pd.DataFrame()
 
             clipped = _clip_window(df, start, end)
             fetched_window = (
@@ -812,7 +868,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self._last_bar_open_ts = pd.to_datetime(clipped.index[-1]).to_pydatetime()
                 return clipped
 
-            return None
+            self._last_hist_reason = "missing_cols"
+            return pd.DataFrame()
 
         except Exception as e:
             log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
@@ -832,8 +889,22 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
                 if not syn.empty:
                     self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
+                self._last_hist_reason = "synthetic_ltp"
                 return syn
-            return None
+            self._last_hist_reason = str(e)
+            return pd.DataFrame()
+
+    def fetch_ohlc(
+        self, token: int, start: datetime, end: datetime, timeframe: str
+    ) -> HistResult:
+        df = self._fetch_ohlc_df(token=token, start=start, end=end, timeframe=timeframe)
+        df = _normalize_ohlc_df(df)
+        status = HistStatus.OK if not df.empty else HistStatus.NO_DATA
+        reason = "" if status is HistStatus.OK else getattr(self, "_last_hist_reason", "")
+        if status is HistStatus.NO_DATA:
+            interval = _coerce_interval(str(timeframe))
+            _hist_warn(int(token), interval, start, end, reason)
+        return HistResult(status, df, reason)
 
 
 def _livekite_health() -> float:

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.config import settings
+from src.data.types import HistStatus
 from src.diagnostics.metrics import metrics
 from src.strategies.registry import init_default_registries
 from src.utils.time_windows import floor_to_minute, TZ
@@ -389,6 +390,11 @@ class StrategyRunner:
         if self.kite is not None and self.data_source is not None:
             try:
                 token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+                warm_min = int(getattr(settings, "warmup_min_bars", 0))
+                if warm_min > 0:
+                    res = self.data_source.have_min_bars(warm_min)
+                    if len(res.df) < warm_min and res.status is HistStatus.NO_DATA:
+                        self.log.info("Warmup mode: live bars (broker OHLC unavailable)")
                 if token > 0:
                     now_ist = floor_to_minute(self._now_ist())
                     if is_market_open(now_ist):
@@ -397,35 +403,28 @@ class StrategyRunner:
                     else:
                         start, end = prev_session_last_20m(now_ist)
                     self.plan_probe_window = (start.isoformat(), end.isoformat())
-                    df: pd.DataFrame | None = None
-                    try:
-                        df = self.data_source.fetch_ohlc(
-                            token=token, start=start, end=end, timeframe="minute"
-                        )
-                    except Exception as e:
-                        self.log.warning("startup: historical probe failed: %r", e)
-                    if (df is None or df.empty) and not is_market_open(now_ist):
+                    df = self.data_source.fetch_ohlc_df(
+                        token=token, start=start, end=end, timeframe="minute"
+                    )
+                    if df.empty and not is_market_open(now_ist):
                         prev_start, prev_end = prev_session_last_20m(now_ist - timedelta(days=1))
-                        try:
-                            df = self.data_source.fetch_ohlc(
-                                token=token,
-                                start=prev_start,
-                                end=prev_end,
-                                timeframe="minute",
+                        df = self.data_source.fetch_ohlc_df(
+                            token=token,
+                            start=prev_start,
+                            end=prev_end,
+                            timeframe="minute",
+                        )
+                        if not df.empty:
+                            self.log.warning(
+                                "startup: first probe empty; used holiday fallback window=%s..%s",
+                                prev_start,
+                                prev_end,
                             )
-                            if df is not None and not df.empty:
-                                self.log.warning(
-                                    "startup: first probe empty; used holiday fallback window=%s..%s",
-                                    prev_start,
-                                    prev_end,
-                                )
-                                self.plan_probe_window = (
-                                    prev_start.isoformat(),
-                                    prev_end.isoformat(),
-                                )
-                        except Exception:
-                            pass
-                    if not isinstance(df, pd.DataFrame) or df.empty:
+                            self.plan_probe_window = (
+                                prev_start.isoformat(),
+                                prev_end.isoformat(),
+                            )
+                    if df.empty:
                         self.log.warning(
                             "instrument_token %s returned no historical data; falling back",
                             token,
@@ -1696,7 +1695,7 @@ class StrategyRunner:
             timeframe = str(getattr(settings.data, "timeframe", "minute"))
 
             if token > 0:
-                df = self.data_source.fetch_ohlc(
+                df = self.data_source.fetch_ohlc_df(
                     token=token,
                     start=start,
                     end=end,
@@ -1704,8 +1703,8 @@ class StrategyRunner:
                 )
                 need = {"open", "high", "low", "close", "volume"}
                 min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 0))
-                valid = isinstance(df, pd.DataFrame) and need.issubset(df.columns)
-                rows = len(df) if isinstance(df, pd.DataFrame) else 0
+                valid = need.issubset(df.columns)
+                rows = len(df)
 
                 if not valid or rows < min_bars:
                     # First attempt yielded insufficient data; try again with expanded window
@@ -1725,17 +1724,13 @@ class StrategyRunner:
                         )
 
                     start2 = end - timedelta(minutes=lookback * 2)
-                    df2 = self.data_source.fetch_ohlc(
+                    df2 = self.data_source.fetch_ohlc_df(
                         token=token,
                         start=start2,
                         end=end,
                         timeframe=timeframe,
                     )
-                    if (
-                        isinstance(df2, pd.DataFrame)
-                        and not df2.empty
-                        and need.issubset(df2.columns)
-                    ):
+                    if not df2.empty and need.issubset(df2.columns):
                         df = df2.sort_index()
                         valid = True
                         rows = len(df)
@@ -1891,12 +1886,12 @@ class StrategyRunner:
             return "data_source_unavailable"
 
         try:
-            df = self.data_source.get_last_bars(n)
+            df = self.data_source.get_recent_bars(n)
         except Exception as e:  # pragma: no cover - defensive log
-            self.log.warning("get_last_bars failed: %s", e)
+            self.log.warning("get_recent_bars failed: %s", e)
             return "no data"
 
-        if df is None or df.empty:
+        if df.empty:
             self.log.warning("No bars fetched for lookback=%s", n)
             return "no data"
         if len(df) < n:

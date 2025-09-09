@@ -3,7 +3,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 from freezegun import freeze_time
 
-from src.data.source import LiveKiteSource, WARMUP_BARS
+from src.data.source import LiveKiteSource, WARMUP_BARS, _normalize_ohlc_df
+from src.data.types import HistStatus
 
 
 class FakeKite:
@@ -34,7 +35,9 @@ def test_fetch_ohlc_chunks_multiple_calls():
     src = LiveKiteSource(kite)
     end = datetime(2024, 1, 4)
     start = end - timedelta(days=3)
-    df = src.fetch_ohlc(123, start, end, 'minute')
+    res = src.fetch_ohlc(123, start, end, 'minute')
+    assert res.status is HistStatus.OK
+    df = res.df
     assert len(kite.calls) > 1  # chunked into multiple requests
 
     expected_start = pd.Timestamp(start)
@@ -58,6 +61,23 @@ def test_fetch_ohlc_network_failure_falls_back_to_ltp():
     src = LiveKiteSource(BoomKite())
     start = datetime(2024, 1, 1, 9, 0)
     end = start + timedelta(minutes=1)
-    df = src.fetch_ohlc(123, start, end, "minute")
-    assert len(df) >= WARMUP_BARS
-    assert (df.close == 1).all()
+    res = src.fetch_ohlc(123, start, end, "minute")
+    assert res.status is HistStatus.OK
+    assert len(res.df) >= WARMUP_BARS
+    assert (res.df.close == 1).all()
+
+
+def test_normalize_drops_invalid_rows() -> None:
+    raw = pd.DataFrame(
+        {
+            "open": [1, -1],
+            "high": [1, 1],
+            "low": [1, 1],
+            "close": [1, 1],
+            "volume": [0, 0],
+            "date": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
+        }
+    )
+    out = _normalize_ohlc_df(raw)
+    assert isinstance(out, pd.DataFrame)
+    assert len(out) == 1

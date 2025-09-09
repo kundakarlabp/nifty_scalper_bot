@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, Protocol
 
 import pandas as pd
 
+from src.data.types import HistResult
+
 
 class DataSource(Protocol):
     """Minimal interface expected from data providers."""
@@ -15,7 +17,7 @@ class DataSource(Protocol):
 
     def fetch_ohlc(
         self, token: int, start: datetime, end: datetime, timeframe: str
-    ) -> Optional[pd.DataFrame]: ...
+    ) -> HistResult: ...
 
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]: ...
 

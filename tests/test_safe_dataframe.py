@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.data.source import _safe_dataframe
+from src.data.source import _normalize_ohlc_df
 
 
 def test_safe_dataframe_filters_invalid_rows_and_dedupes():
@@ -13,17 +13,17 @@ def test_safe_dataframe_filters_invalid_rows_and_dedupes():
         {"date": "2023-01-01 09:35:00+05:30", "open": 400, "high": 410, "low": 390, "close": float("inf"), "volume": 100},
     ]
 
-    df = _safe_dataframe(rows)
+    df = _normalize_ohlc_df(rows)
 
-    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    assert list(df.columns) == ["open", "high", "low", "close", "volume", "ts"]
     assert df.index.tolist() == [
         pd.Timestamp("2023-01-01 09:15:00"),
         pd.Timestamp("2023-01-01 09:30:00"),
     ]
-    first = df.loc[pd.Timestamp("2023-01-01 09:15:00")]
+    first = df.loc[pd.Timestamp("2023-01-01 09:15:00")].drop("ts")
     assert first.to_dict() == {"open": 200.0, "high": 220.0, "low": 190.0, "close": 210.0, "volume": 2000.0}
 
 
 def test_safe_dataframe_missing_columns_returns_empty():
-    assert _safe_dataframe([{"open": 1, "high": 2}]).empty
+    assert _normalize_ohlc_df([{"open": 1, "high": 2}]).empty
 
