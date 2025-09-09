@@ -19,61 +19,25 @@ if str(ROOT_DIR) not in sys.path:
 from src.boot.validate_env import (
     seed_env_from_defaults,
     validate_critical_settings,
-    _log_cred_presence,
     broker_connect_for_data,
 )  # noqa: E402
 
 seed_env_from_defaults()
 from src.config import settings  # noqa: E402
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
-from src.utils.logging_tools import (
-    RateLimitFilter,
-    get_recent_logs,
-    log_buffer_handler,
-)  # noqa: E402
-from src.utils.logger_setup import setup_logging  # noqa: E402
-from src.utils.log_filters import install_warmup_filters  # noqa: E402
+from src.utils.logging_tools import get_recent_logs  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
+from src.server.logging_utils import _setup_logging, _import_telegram_class  # noqa: E402
 
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
 except Exception:
     KiteConnect = None  # type: ignore
-
-
-# -----------------------------
-# Logging
-# -----------------------------
-def _setup_logging() -> None:
-    setup_logging(level=settings.log_level, json=settings.log_json)
-    try:
-        install_warmup_filters()
-    except Exception:
-        pass
-    root = logging.getLogger()
-    root.addFilter(RateLimitFilter(interval=120.0))
-    if log_buffer_handler not in root.handlers:
-        root.addHandler(log_buffer_handler)
-    log_file = os.environ.get("LOG_FILE")
-    if log_file:
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                "%Y-%m-%d %H:%M:%S",
-            )
-        )
-        root.addHandler(fh)
-    try:
-        _log_cred_presence()
-    except Exception:
-        pass
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 # -----------------------------
@@ -118,27 +82,6 @@ def _build_kite_session() -> Optional["KiteConnect"]:
 
 
 # -----------------------------
-# Tail logs for Telegram
-# -----------------------------
-def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            block = 4096
-            data = b""
-            while size > 0 and data.count(b"\n") <= n:
-                read_size = block if size >= block else size
-                size -= read_size
-                f.seek(size)
-                data = f.read(read_size) + data
-        text = data.decode(errors="ignore")
-        return text.splitlines()[-n:]
-    except Exception:
-        return []
-
-
-# -----------------------------
 # Telegram Import Wrapper
 # -----------------------------
 def _import_telegram_class():
@@ -163,8 +106,9 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     runner.telegram_controller = None
     runner.telegram = None
 
-    TelegramController = _import_telegram_class()
-    if not TelegramController:
+    try:
+        TelegramController = _import_telegram_class()
+    except ImportError:
         runner.telegram_controller = _NoopTelegram()
         runner.telegram = runner.telegram_controller
         return

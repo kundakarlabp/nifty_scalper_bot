@@ -66,7 +66,6 @@ class KiteBroker(Broker):
         except Exception as exc:
             logger.exception("Kite connect failed")
             self._translate_and_raise(exc)
-            raise AssertionError("unreachable")
 
     def is_connected(self) -> bool:
         return bool(self._connected)
