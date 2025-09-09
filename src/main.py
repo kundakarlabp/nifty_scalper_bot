@@ -23,6 +23,7 @@ from src.boot.validate_env import (  # noqa: E402
 )
 
 seed_env_from_defaults()
+import src.boot.synthetic_warmup  # noqa: E402,F401  # apply synthetic warmup patch
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
 from src.config import settings  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
