@@ -1011,7 +1011,9 @@ def _match_token(
                 and int(float(it.get("strike", 0))) == int(strike)
                 and it.get("instrument_type") == opt
             ):
-                return int(it.get("instrument_token"))
+                token_val = it.get("instrument_token")
+                if token_val is not None:
+                    return int(float(token_val))
         except Exception:
             continue
     return None
@@ -1062,7 +1064,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     items = _refresh_instruments_nfo(broker)
     if not items:
         return
-    under = underlying or getattr(settings.instruments, "trade_symbol", "NIFTY")
+    under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
     today = dt.date.today()
     expiry = _pick_expiry(items, under, today)
     if not expiry:
@@ -1072,19 +1074,20 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
         return
     step = _strike_step(under)
     base = _round_strike(float(spot), step)
-    ce = pe = None
+    ce: Optional[int] = None
+    pe: Optional[int] = None
     strike = base
     for widen in range(0, 7):
         for sign in (0, 1, -1) if widen else (0,):
             s = base + sign * widen * step
             ce = _match_token(items, under, expiry, s, "CE")
             pe = _match_token(items, under, expiry, s, "PE")
-            if ce and pe:
+            if ce is not None and pe is not None:
                 strike = s
                 break
-        if ce and pe:
+        if ce is not None and pe is not None:
             break
-    if not (ce and pe):
+    if ce is None or pe is None:
         return
     tokens = [int(ce), int(pe)]
     self.atm_tokens = tuple(tokens)

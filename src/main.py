@@ -31,7 +31,7 @@ from src.strategies.runner import StrategyRunner  # noqa: E402
 from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
-from src.server.logging_utils import _setup_logging, _import_telegram_class  # noqa: E402
+from src.server.logging_utils import _setup_logging  # noqa: E402
 
 # Optional broker SDK
 try:
