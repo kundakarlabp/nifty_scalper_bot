@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
+from src.risk.greeks import OptionType
+from src.risk.limits import Exposure, RiskEngine
+from src.strategies.strategy_config import StrategyConfig
+from src.utils import strike_selector
+
 from .data_feed import SpotFeed
 from .sim_connector import SimConnector
-from src.strategies.strategy_config import StrategyConfig
-from src.risk.limits import RiskEngine, Exposure
-from src.risk.greeks import OptionType
-from src.utils import strike_selector
 
 
 @dataclass
@@ -189,21 +190,23 @@ class BacktestEngine:
         with open(trades_csv, "w", newline="") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=list(self.trades[0].keys())
-                if self.trades
-                else [
-                    "ts_entry",
-                    "ts_exit",
-                    "side",
-                    "strike",
-                    "qty",
-                    "entry",
-                    "exit",
-                    "exit_reason",
-                    "R",
-                    "pnl_R",
-                    "pnl_rupees",
-                ],
+                fieldnames=(
+                    list(self.trades[0].keys())
+                    if self.trades
+                    else [
+                        "ts_entry",
+                        "ts_exit",
+                        "side",
+                        "strike",
+                        "qty",
+                        "entry",
+                        "exit",
+                        "exit_reason",
+                        "R",
+                        "pnl_R",
+                        "pnl_rupees",
+                    ]
+                ),
             )
             writer.writeheader()
             for t in self.trades:

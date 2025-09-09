@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
-import logging
 from typing import Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)

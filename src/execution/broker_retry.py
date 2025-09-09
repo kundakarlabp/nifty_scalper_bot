@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Callable, TypeVar, ParamSpec, Optional
+from typing import Callable, Optional, ParamSpec, TypeVar
 
 from src.utils.circuit_breaker import CircuitBreaker
 
@@ -34,7 +34,17 @@ def call(fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
             last_exc = e
             CB.record_failure(int((time.monotonic() - t0) * 1000), reason=str(e))
             m = str(e).lower()
-            if any(key in m for key in ("429", "rate", "throttle", "timeout", "temporar", "connection")):
+            if any(
+                key in m
+                for key in (
+                    "429",
+                    "rate",
+                    "throttle",
+                    "timeout",
+                    "temporar",
+                    "connection",
+                )
+            ):
                 sleep = 0.5 * (2**i) + random.uniform(0, 0.05)
                 time.sleep(sleep)
                 continue

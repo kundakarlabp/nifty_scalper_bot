@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Kolkata")
 

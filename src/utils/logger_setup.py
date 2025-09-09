@@ -8,7 +8,9 @@ from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 
-def setup_logging(level: str = "INFO", log_file: Optional[str] = None, json: bool = False) -> None:
+def setup_logging(
+    level: str = "INFO", log_file: Optional[str] = None, json: bool = False
+) -> None:
     """Configure the root logger.
 
     Parameters

@@ -17,18 +17,15 @@ class Freshness:
 
 
 @overload
-def _to_aware_utc(dt: None) -> None:
-    ...
+def _to_aware_utc(dt: None) -> None: ...
 
 
 @overload
-def _to_aware_utc(dt: datetime) -> datetime:
-    ...
+def _to_aware_utc(dt: datetime) -> datetime: ...
 
 
 @overload
-def _to_aware_utc(dt: str) -> datetime | None:
-    ...
+def _to_aware_utc(dt: str) -> datetime | None: ...
 
 
 def _to_aware_utc(dt: datetime | str | None) -> datetime | None:
@@ -60,10 +57,13 @@ def compute(
     tick_ts = _to_aware_utc(last_tick_ts)
     bar_open = _to_aware_utc(last_bar_open_ts)
     bar_close = None if bar_open is None else bar_open + timedelta(seconds=tf_seconds)
-    tick_lag = None if tick_ts is None else max(0.0, (now_utc - tick_ts).total_seconds())
-    bar_lag = None if bar_close is None else max(0.0, (now_utc - bar_close).total_seconds())
-    ok = (
-        (tick_lag is None or tick_lag <= max_tick_lag_s)
-        and (bar_lag is None or bar_lag <= max_bar_lag_s)
+    tick_lag = (
+        None if tick_ts is None else max(0.0, (now_utc - tick_ts).total_seconds())
+    )
+    bar_lag = (
+        None if bar_close is None else max(0.0, (now_utc - bar_close).total_seconds())
+    )
+    ok = (tick_lag is None or tick_lag <= max_tick_lag_s) and (
+        bar_lag is None or bar_lag <= max_bar_lag_s
     )
     return Freshness(tick_lag_s=tick_lag, bar_lag_s=bar_lag, ok=ok)

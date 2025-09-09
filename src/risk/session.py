@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 # ----------------------------- Trade model ----------------------------- #
 
+
 @dataclass
 class Trade:
     """Represents a single trade from entry to exit."""
+
     symbol: str
-    direction: str              # "BUY" or "SELL"
+    direction: str  # "BUY" or "SELL"
     entry_price: float
-    quantity: int               # contracts (NOT lots)
+    quantity: int  # contracts (NOT lots)
     order_id: str
     atr_at_entry: float
     entry_time: datetime = field(default_factory=datetime.now)
@@ -35,7 +37,7 @@ class Trade:
     pnl: float = 0.0
     fees: float = 0.0
     net_pnl: float = 0.0
-    status: str = "OPEN"        # "OPEN" | "CLOSED"
+    status: str = "OPEN"  # "OPEN" | "CLOSED"
 
     def close(self, exit_price: float, fees: float = 0.0) -> None:
         """Mark the trade as closed and calculate P&L."""
@@ -54,10 +56,16 @@ class Trade:
         self.fees = float(fees or 0.0)
         self.net_pnl = self.pnl - self.fees
         self.status = "CLOSED"
-        logger.info("Closed trade %s (%s). Net P&L: %.2f", self.order_id, self.symbol, self.net_pnl)
+        logger.info(
+            "Closed trade %s (%s). Net P&L: %.2f",
+            self.order_id,
+            self.symbol,
+            self.net_pnl,
+        )
 
 
 # --------------------------- Trading session --------------------------- #
+
 
 class TradingSession:
     """
@@ -96,14 +104,20 @@ class TradingSession:
     def add_trade(self, trade: Trade) -> None:
         """Adds a new active trade to the session."""
         if trade.order_id in self.active_trades:
-            logger.warning("Attempted to add duplicate trade with order_id: %s", trade.order_id)
+            logger.warning(
+                "Attempted to add duplicate trade with order_id: %s", trade.order_id
+            )
             return
 
         self.active_trades[trade.order_id] = trade
         self.trades_today += 1
         logger.info(
             "New trade: %s %d %s @ %.2f (oid=%s)",
-            trade.direction, trade.quantity, trade.symbol, trade.entry_price, trade.order_id
+            trade.direction,
+            trade.quantity,
+            trade.symbol,
+            trade.entry_price,
+            trade.order_id,
         )
 
     def finalize_trade(self, order_id: str, exit_price: float) -> Trade | None:
@@ -113,7 +127,9 @@ class TradingSession:
         """
         trade = self.active_trades.pop(order_id, None)
         if not trade:
-            logger.warning("Could not find active trade with order_id: %s to finalize.", order_id)
+            logger.warning(
+                "Could not find active trade with order_id: %s to finalize.", order_id
+            )
             return None
 
         # fees: simple per-lot model
@@ -148,7 +164,9 @@ class TradingSession:
         Returns a string reason if a limit is breached, otherwise None.
         """
         if self.trades_today >= int(self.risk_config.max_trades_per_day):
-            return f"Max trades per day ({self.risk_config.max_trades_per_day}) reached."
+            return (
+                f"Max trades per day ({self.risk_config.max_trades_per_day}) reached."
+            )
 
         if self.consecutive_losses >= int(self.risk_config.consecutive_loss_limit):
             return f"Consecutive loss limit ({self.risk_config.consecutive_loss_limit}) reached."

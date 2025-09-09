@@ -18,13 +18,15 @@ class MockBroker(Broker):
         self._orders: Dict[str, Order] = {}
         self._oid = 0
 
-    def connect(self) -> None:  # noqa: D401 - brief override
+    def connect(self) -> None:  # - brief override
         self._connected = True
 
     def is_connected(self) -> bool:
         return self._connected
 
-    def subscribe_ticks(self, instruments: Sequence[int], on_tick: Callable[[Tick], None]) -> None:
+    def subscribe_ticks(
+        self, instruments: Sequence[int], on_tick: Callable[[Tick], None]
+    ) -> None:
         self._tick_cb = on_tick
 
     def push_tick(self, instrument_id: int, ltp: Decimal) -> None:
@@ -37,11 +39,18 @@ class MockBroker(Broker):
     def place_order(self, req: OrderRequest) -> str:
         self._oid += 1
         oid = f"MOCK-{self._oid}"
-        order = Order(order_id=oid, status=OrderStatus.FILLED, filled_qty=req.qty, avg_fill_price=req.price)
+        order = Order(
+            order_id=oid,
+            status=OrderStatus.FILLED,
+            filled_qty=req.qty,
+            avg_fill_price=req.price,
+        )
         self._orders[oid] = order
         return oid
 
-    def modify_order(self, order_id: str, **kwargs: Any) -> None:  # pragma: no cover - unused
+    def modify_order(
+        self, order_id: str, **kwargs: Any
+    ) -> None:  # pragma: no cover - unused
         pass
 
     def cancel_order(self, order_id: str) -> None:

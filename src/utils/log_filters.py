@@ -18,7 +18,9 @@ class DedupFilter(logging.Filter):
         self._last: dict[str, float] = {}
         self._win = int(window_s)
 
-    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - integration
+    def filter(
+        self, record: logging.LogRecord
+    ) -> bool:  # pragma: no cover - integration
         msg = f"{record.name} - {record.getMessage()}"
         now = time.time()
         for rx in self._res:
@@ -43,9 +45,11 @@ def install_warmup_filters() -> None:
     suppress = str(
         os.getenv(
             "LOG_SUPPRESS_WARMUP",
-            "true"
-            if os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_STATIC_URL")
-            else "false",
+            (
+                "true"
+                if os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_STATIC_URL")
+                else "false"
+            ),
         )
     ).lower() in {"1", "true", "yes"}
     if not suppress:

@@ -4,59 +4,71 @@ from __future__ import annotations
 import logging
 import math
 import os
+import tempfile
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time as dt_time, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List, ClassVar, Deque, Iterable, Callable, Mapping
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Deque,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+)
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-
-from src.config import settings
-from src.data.types import HistStatus
-from src.diagnostics.metrics import metrics
-from src.strategies.registry import init_default_registries
-from src.utils.time_windows import floor_to_minute, TZ
-from src.utils.market_time import (
-    is_market_open,
-    prev_session_last_20m,
-    prev_session_bounds,
-)
-from src.strategies.strategy_config import (
-    resolve_config_path,
-    try_load,
-    StrategyConfig,
-)
-import tempfile
 
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.data_feed import SpotFeed
 from src.backtesting.sim_connector import SimConnector
 from src.backtesting.synth import make_synth_1m
+from src.broker.interface import OrderRequest, Tick
+from src.config import settings
+from src.data.broker_source import BrokerDataSource
+from src.data.types import HistStatus
+from src.diagnostics.metrics import metrics
+from src.execution.broker_executor import BrokerOrderExecutor
+from src.execution.micro_filters import evaluate_micro
 from src.execution.order_executor import OrderReconciler
-from src.logs.journal import Journal
-from src.risk.limits import Exposure, LimitConfig, RiskEngine
-from src.risk.greeks import estimate_greeks_from_mid, next_weekly_expiry_ist  # noqa: F401
-from src.utils import strike_selector
-from src.utils.events import load_calendar, EventWindow
-from src.utils.env import env_flag
-from src.features.health import check as feat_check
 from src.features.indicators import atr_pct
-from src.utils.indicators import calculate_adx, calculate_bb_width
+from src.logs.journal import Journal
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
-from src.execution.micro_filters import micro_from_l1, evaluate_micro
-from .warmup import check as warmup_check, required_bars
-from src.utils.freshness import compute as compute_freshness
-from src.risk import risk_gates
+from src.risk import guards, risk_gates
+from src.risk.greeks import (  # noqa: F401
+    estimate_greeks_from_mid,
+    next_weekly_expiry_ist,
+)
+from src.risk.limits import Exposure, LimitConfig, RiskEngine
+from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score
-from src.data.broker_source import BrokerDataSource
-from src.execution.broker_executor import BrokerOrderExecutor
-from src.broker.interface import Tick, OrderRequest
-from src.risk import guards
+from src.strategies.strategy_config import (
+    StrategyConfig,
+    resolve_config_path,
+    try_load,
+)
+from src.utils import strike_selector
+from src.utils.env import env_flag
+from src.utils.events import EventWindow, load_calendar
+from src.utils.freshness import compute as compute_freshness
+from src.utils.indicators import calculate_adx, calculate_bb_width
+from src.utils.market_time import (
+    is_market_open,
+    prev_session_bounds,
+    prev_session_last_20m,
+)
+from src.utils.time_windows import TZ, floor_to_minute
+
+from .warmup import check as warmup_check, required_bars
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -183,9 +195,12 @@ class Orchestrator:
             logging.getLogger(self.__class__.__name__).warning(
                 "step exceeded budget %.3fs > %.3fs", elapsed, budget_s
             )
-        orders = result if isinstance(result, Iterable) and not isinstance(
-            result, (dict, OrderRequest)
-        ) else [result]
+        orders = (
+            result
+            if isinstance(result, Iterable)
+            and not isinstance(result, (dict, OrderRequest))
+            else [result]
+        )
         for order in orders:
             if not isinstance(order, OrderRequest):
                 continue
@@ -203,6 +218,7 @@ class Orchestrator:
 
 
 # ================================ Models ================================
+
 
 @dataclass
 class RiskState:
@@ -227,6 +243,7 @@ RISK_GATES_SKIPPED = object()
 
 
 # ============================== Runner =================================
+
 
 class StrategyRunner:
     """
@@ -314,14 +331,17 @@ class StrategyRunner:
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
             from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+
             return EnhancedScalpingStrategy()
 
         def _make_data_kite():
             from src.data.source import LiveKiteSource
+
             return LiveKiteSource(self.kite)
 
         def _make_connector_kite():
             from src.execution.order_executor import OrderExecutor
+
             return OrderExecutor(
                 kite=self.kite,
                 telegram_controller=self.telegram,
@@ -330,6 +350,7 @@ class StrategyRunner:
 
         def _make_connector_shadow():
             from src.execution.order_executor import OrderExecutor
+
             shadow_settings = self.settings
             try:
                 setattr(shadow_settings, "enable_live_trading", False)
@@ -394,7 +415,9 @@ class StrategyRunner:
                 if warm_min > 0:
                     res = self.data_source.have_min_bars(warm_min)
                     if len(res.df) < warm_min and res.status is HistStatus.NO_DATA:
-                        self.log.info("Warmup mode: live bars (broker OHLC unavailable)")
+                        self.log.info(
+                            "Warmup mode: live bars (broker OHLC unavailable)"
+                        )
                 if token > 0:
                     now_ist = floor_to_minute(self._now_ist())
                     if is_market_open(now_ist):
@@ -407,7 +430,9 @@ class StrategyRunner:
                         token=token, start=start, end=end, timeframe="minute"
                     )
                     if df.empty and not is_market_open(now_ist):
-                        prev_start, prev_end = prev_session_last_20m(now_ist - timedelta(days=1))
+                        prev_start, prev_end = prev_session_last_20m(
+                            now_ist - timedelta(days=1)
+                        )
                         df = self.data_source.fetch_ohlc_df(
                             token=token,
                             start=prev_start,
@@ -440,8 +465,8 @@ class StrategyRunner:
         if loss_cap is not None:
             self._max_daily_loss_rupees = float(loss_cap)
         else:
-            self._max_daily_loss_rupees = (
-                self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+            self._max_daily_loss_rupees = self._equity_cached_value * float(
+                settings.risk.max_daily_drawdown_pct
             )
 
         # State + debug
@@ -450,7 +475,9 @@ class StrategyRunner:
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
         self.last_spot: Optional[float] = None
-        self._log_signal_changes_only = os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
+        self._log_signal_changes_only = (
+            os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
+        )
         self._last_reason_block: Optional[str] = None
         self._last_has_signal: Optional[bool] = None
         self.eval_count: int = 0
@@ -474,7 +501,8 @@ class StrategyRunner:
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
-            settings.enable_live_trading, settings.risk.use_live_equity
+            settings.enable_live_trading,
+            settings.risk.use_live_equity,
         )
         # Log initial equity snapshot
         self._refresh_equity_if_due(silent=False)
@@ -504,16 +532,16 @@ class StrategyRunner:
             try:
                 self.data_source.ensure_history(minutes=lookback_min)
             except Exception as e:
-                self.log.warning(
-                    f"ensure_history({lookback_min}m) skipped: {e}"
-                )
+                self.log.warning(f"ensure_history({lookback_min}m) skipped: {e}")
 
     def _emit_diag(self, plan: dict, micro: dict | None = None):
-        msg = (f"diag | within_window={getattr(self, 'within_window', None)} "
-               f"regime={plan.get('regime')} score={plan.get('score')} atr%={plan.get('atr_pct')} "
-               f"rr={plan.get('rr')} opt={plan.get('option_type')} strike={plan.get('strike')} "
-               f"reason_block={plan.get('reason_block')} "
-               f"reasons={','.join(plan.get('reasons', []))}")
+        msg = (
+            f"diag | within_window={getattr(self, 'within_window', None)} "
+            f"regime={plan.get('regime')} score={plan.get('score')} atr%={plan.get('atr_pct')} "
+            f"rr={plan.get('rr')} opt={plan.get('option_type')} strike={plan.get('strike')} "
+            f"reason_block={plan.get('reason_block')} "
+            f"reasons={','.join(plan.get('reasons', []))}"
+        )
         if micro:
             msg += f" micro={{spread%:{micro.get('spread_pct')}, depth_ok:{micro.get('depth_ok')}}}"
         self.log.info(msg)
@@ -525,6 +553,7 @@ class StrategyRunner:
 
     def _maybe_emit_minute_diag(self, plan: dict):
         import time
+
         if not getattr(self.settings, "ENABLE_SIGNAL_DEBUG", False):
             return
         interval = int(getattr(self.settings, "DIAG_INTERVAL_SECONDS", 60))
@@ -609,18 +638,31 @@ class StrategyRunner:
         min_preview = float(getattr(self.settings, "MIN_PREVIEW_SCORE", 8))
         score = float(plan.get("score") or 0.0)
         rb = plan.get("reason_block") or ""
-        hard_block = rb in {"outside_window","warmup","cooloff","daily_dd","regime_no_trade"}
+        hard_block = rb in {
+            "outside_window",
+            "warmup",
+            "cooloff",
+            "daily_dd",
+            "regime_no_trade",
+        }
         if hard_block or score < min_preview:
             return
-        sig = (plan.get("regime"), plan.get("option_type"), plan.get("strike"),
-               round(score,1), round(float(plan.get("rr") or 0.0),2))
+        sig = (
+            plan.get("regime"),
+            plan.get("option_type"),
+            plan.get("strike"),
+            round(score, 1),
+            round(float(plan.get("rr") or 0.0), 2),
+        )
         if sig == self._last_signal_hash:
             return
         self._last_signal_hash = sig
-        text = (f"\U0001F7E1 Candidate | {plan.get('regime')} {plan.get('option_type')} {plan.get('strike')} "
-                f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry')} "
-                f"sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
-                f"reason_block={rb}")
+        text = (
+            f"\U0001f7e1 Candidate | {plan.get('regime')} {plan.get('option_type')} {plan.get('strike')} "
+            f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry')} "
+            f"sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
+            f"reason_block={rb}"
+        )
         self.log.info(text)
         if getattr(self.settings, "TELEGRAM__PRETRADE_ALERTS", False):
             try:
@@ -637,10 +679,19 @@ class StrategyRunner:
         if (not self._log_signal_changes_only) or changed:
             self.log.info(
                 "Signal plan: action=%s %s strike=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s reason_block=%s",
-                plan.get("action"), plan.get("option_type"), plan.get("strike"), plan.get("qty_lots"),
-                plan.get("regime"), plan.get("score"), float(plan.get("atr_pct") or 0.0),
-                float(micro.get("spread_pct") or 0.0), micro.get("depth_ok"),
-                float(plan.get("rr") or 0.0), plan.get("sl"), plan.get("tp1"), plan.get("tp2"),
+                plan.get("action"),
+                plan.get("option_type"),
+                plan.get("strike"),
+                plan.get("qty_lots"),
+                plan.get("regime"),
+                plan.get("score"),
+                float(plan.get("atr_pct") or 0.0),
+                float(micro.get("spread_pct") or 0.0),
+                micro.get("depth_ok"),
+                float(plan.get("rr") or 0.0),
+                plan.get("sl"),
+                plan.get("tp1"),
+                plan.get("tp2"),
                 plan.get("reason_block"),
             )
         plan["eval_count"] = self.eval_count
@@ -666,17 +717,29 @@ class StrategyRunner:
         if (self.eval_count % 60) == 0:
             snap = {
                 "now": self.now_ist.isoformat(),
-                "risk": self.risk_engine.snapshot() if hasattr(self, "risk_engine") else {},
-                "open_legs": getattr(self.order_executor, "open_legs_snapshot", lambda: [])(),
+                "risk": (
+                    self.risk_engine.snapshot() if hasattr(self, "risk_engine") else {}
+                ),
+                "open_legs": getattr(
+                    self.order_executor, "open_legs_snapshot", lambda: []
+                )(),
                 "components": self._active_names,
                 "last_plan": self.last_plan or {},
             }
             self.journal.save_checkpoint(snap)
         self.last_eval_ts = datetime.now(timezone.utc).isoformat()
         flow: Dict[str, Any] = {
-            "within_window": False, "paused": self._paused, "data_ok": False, "bars": 0,
-            "signal_ok": False, "rr_ok": True, "risk_gates": {}, "sizing": {}, "qty": 0,
-            "executed": False, "reason_block": None,
+            "within_window": False,
+            "paused": self._paused,
+            "data_ok": False,
+            "bars": 0,
+            "signal_ok": False,
+            "rr_ok": True,
+            "risk_gates": {},
+            "sizing": {},
+            "qty": 0,
+            "executed": False,
+            "reason_block": None,
         }
         self._last_error = None
         now = datetime.now(timezone.utc)
@@ -705,7 +768,10 @@ class StrategyRunner:
                 self.log.warning("OHLC fetch returned no data; retrying")
                 df = self._fetch_spot_ohlc()
                 if not isinstance(df, pd.DataFrame) or df.empty:
-                    if isinstance(getattr(self, "_ohlc_cache", None), pd.DataFrame) and not self._ohlc_cache.empty:
+                    if (
+                        isinstance(getattr(self, "_ohlc_cache", None), pd.DataFrame)
+                        and not self._ohlc_cache.empty
+                    ):
                         self.log.warning("Using cached OHLC data due to empty fetch")
                         df = self._ohlc_cache
                     else:
@@ -764,7 +830,8 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self.log.debug(
                     "Signal evaluation skipped: insufficient data (bars=%s, need=%s)",
-                    flow["bars"], int(settings.strategy.min_bars_for_signal)
+                    flow["bars"],
+                    int(settings.strategy.min_bars_for_signal),
                 )
                 return
             flow["data_ok"] = True
@@ -793,7 +860,9 @@ class StrategyRunner:
             plan["reasons"] = plan.get("reasons", [])
             plan["feature_ok"] = True
             plan["bar_count"] = int(len(df)) if isinstance(df, pd.DataFrame) else 0
-            plan["last_bar_ts"] = last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
+            plan["last_bar_ts"] = (
+                last_bar_ts_obj.isoformat() if last_bar_ts_obj else None
+            )
             bar_count = int(plan["bar_count"])
             self._last_bar_count = int(bar_count)
             self._warm = warmup_check(self.strategy_cfg, bar_count)
@@ -852,7 +921,9 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            score_val, details = compute_score(df, plan.get("regime"), self.strategy_cfg)
+            score_val, details = compute_score(
+                df, plan.get("regime"), self.strategy_cfg
+            )
             plan["score"] = float(score_val or 0.0)
             if details:
                 self._score_items = details.parts
@@ -927,7 +998,9 @@ class StrategyRunner:
                 flow["plan"] = {**plan, "rr_min": rr_min}
                 self._last_flow_debug = flow
                 self._record_plan(plan)
-                self.log.info("Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min)
+                self.log.info(
+                    "Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min
+                )
                 return
 
             cfg = self.strategy_cfg
@@ -968,7 +1041,10 @@ class StrategyRunner:
                 except Exception:
                     under_ltp = 0.0
             opt = self.option_resolver.resolve_atm(
-                self.under_symbol, under_ltp, plan.get("side_hint", "CE"), self._now_ist()
+                self.under_symbol,
+                under_ltp,
+                plan.get("side_hint", "CE"),
+                self._now_ist(),
             )
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
@@ -1058,9 +1134,14 @@ class StrategyRunner:
                 self.last_plan = plan
                 return
             if micro.get("mode") == "SOFT":
-                penalty = 0.5 if (
-                    micro.get("spread_pct") and micro.get("spread_pct") > micro.get("cap_pct")
-                ) else 0.0
+                penalty = (
+                    0.5
+                    if (
+                        micro.get("spread_pct")
+                        and micro.get("spread_pct") > micro.get("cap_pct")
+                    )
+                    else 0.0
+                )
                 plan["score"] = max(0.0, (plan.get("score", 0.0) - penalty))
 
             acct = risk_gates.AccountState(
@@ -1136,11 +1217,15 @@ class StrategyRunner:
                         atr_pct=plan.get("atr_pct"),
                     )
                     lot = getattr(self.settings, "LOT_SIZE", 50)
-                    planned_delta_units = (est.delta or 0.0) * lot * int(plan["qty_lots"])
+                    planned_delta_units = (
+                        (est.delta or 0.0) * lot * int(plan["qty_lots"])
+                    )
                     plan["planned_delta_units"] = round(planned_delta_units, 1)
 
             portfolio_delta_units = self._portfolio_delta_units()
-            gmode = self.now_ist.weekday() == 1 and self.now_ist.time() >= dt_time(14, 45)
+            gmode = self.now_ist.weekday() == 1 and self.now_ist.time() >= dt_time(
+                14, 45
+            )
 
             ok, reason, det = self.risk_engine.pre_trade_check(
                 equity_rupees=self._active_equity(),
@@ -1183,7 +1268,8 @@ class StrategyRunner:
             flow["qty"] = int(qty)
             flow["equity"] = self._active_equity()
             flow["risk_rupees"] = round(
-                float(diag.get("rupee_risk_per_lot", 0.0)) * float(diag.get("lots_final", 0)),
+                float(diag.get("rupee_risk_per_lot", 0.0))
+                * float(diag.get("lots_final", 0)),
                 2,
             )
             flow["trades_today"] = self.risk.trades_today
@@ -1210,7 +1296,9 @@ class StrategyRunner:
                 quote=quote,
                 qty_lots=planned_lots,
                 lot_size=int(settings.instruments.nifty_lot_size),
-                max_spread_pct=float(getattr(settings.executor, "max_spread_pct", 0.35)),
+                max_spread_pct=float(
+                    getattr(settings.executor, "max_spread_pct", 0.35)
+                ),
                 depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
             )
             plan["micro"] = micro
@@ -1227,14 +1315,20 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 return
-            if ok_micro and score_val >= int(settings.strategy.min_signal_score) and not plan.get("reason_block"):
+            if (
+                ok_micro
+                and score_val >= int(settings.strategy.min_signal_score)
+                and not plan.get("reason_block")
+            ):
                 plan["has_signal"] = True
                 self._emit_diag(plan, micro)
             else:
                 plan["has_signal"] = False
                 if plan.get("reason_block") in ("", None) and not ok_micro:
                     plan["reason_block"] = "microstructure"
-                flow["reason_block"] = flow.get("reason_block") or plan.get("reason_block")
+                flow["reason_block"] = flow.get("reason_block") or plan.get(
+                    "reason_block"
+                )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 return
@@ -1265,8 +1359,11 @@ class StrategyRunner:
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
                 token = int(getattr(settings.instruments, "instrument_token", 0))
                 oid = self.executor.place_entry_order(
-                    token=token, symbol=symbol, side=side,
-                    quantity=int(qty), price=float(plan.get("entry"))
+                    token=token,
+                    symbol=symbol,
+                    side=side,
+                    quantity=int(qty),
+                    price=float(plan.get("entry")),
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
@@ -1446,9 +1543,13 @@ class StrategyRunner:
     def _refresh_equity_if_due(self, silent: bool = False) -> None:
         now = time.time()
         if not settings.risk.use_live_equity:
-            self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+            self._max_daily_loss_rupees = self._equity_cached_value * float(
+                settings.risk.max_daily_drawdown_pct
+            )
             return
-        if (now - self._equity_last_refresh_ts) < int(settings.risk.equity_refresh_seconds):
+        if (now - self._equity_last_refresh_ts) < int(
+            settings.risk.equity_refresh_seconds
+        ):
             return
 
         new_eq = None
@@ -1457,7 +1558,11 @@ class StrategyRunner:
                 margins = self.kite.margins()  # type: ignore[attr-defined]
                 if isinstance(margins, dict):
                     # Typical structure: {'equity': {'net': ..., 'available': {'cash': ...}}}
-                    segment = margins.get("equity") if isinstance(margins.get("equity"), dict) else margins
+                    segment = (
+                        margins.get("equity")
+                        if isinstance(margins.get("equity"), dict)
+                        else margins
+                    )
                     if isinstance(segment, dict):
                         # First try direct numeric fields (net/cash/final)
                         for k in ("net", "cash", "final", "equity"):
@@ -1486,19 +1591,29 @@ class StrategyRunner:
                     else:
                         self.log.warning("Equity refresh failed; using fallback: %s", e)
 
-        self._equity_cached_value = float(new_eq) if (isinstance(new_eq, (int, float)) and new_eq > 0) \
+        self._equity_cached_value = (
+            float(new_eq)
+            if (isinstance(new_eq, (int, float)) and new_eq > 0)
             else float(settings.risk.default_equity)
-        self._max_daily_loss_rupees = self._equity_cached_value * float(settings.risk.max_daily_drawdown_pct)
+        )
+        self._max_daily_loss_rupees = self._equity_cached_value * float(
+            settings.risk.max_daily_drawdown_pct
+        )
         self._equity_last_refresh_ts = now
 
         if not silent:
             self.log.info(
                 "Equity snapshot: ₹%s | Max daily loss: ₹%s",
-                f"{self._equity_cached_value:,.0f}", f"{self._max_daily_loss_rupees:,.0f}"
+                f"{self._equity_cached_value:,.0f}",
+                f"{self._max_daily_loss_rupees:,.0f}",
             )
 
     def _active_equity(self) -> float:
-        return float(self._equity_cached_value) if settings.risk.use_live_equity else float(settings.risk.default_equity)
+        return (
+            float(self._equity_cached_value)
+            if settings.risk.use_live_equity
+            else float(settings.risk.default_equity)
+        )
 
     def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
         gates = {
@@ -1511,7 +1626,9 @@ class StrategyRunner:
         }
         if not self._within_trading_window():
             gates["market_hours"] = False
-        if settings.risk.use_live_equity and self._active_equity() < float(settings.risk.min_equity_floor):
+        if settings.risk.use_live_equity and self._active_equity() < float(
+            settings.risk.min_equity_floor
+        ):
             gates["equity_floor"] = False
         if self.risk.day_realized_loss >= self._max_daily_loss_rupees:
             gates["daily_drawdown"] = False
@@ -1527,7 +1644,9 @@ class StrategyRunner:
         limit = int(settings.risk.consecutive_loss_limit)
         if gates.get("loss_streak", True) and self.risk.consecutive_losses >= limit:
             gates["loss_streak"] = False
-            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
             self.risk.loss_cooldown_until = tomorrow
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
@@ -1552,17 +1671,25 @@ class StrategyRunner:
             gates["sl_valid"] = False
         return {k: bool(v) for k, v in gates.items()}
 
-    def _calculate_quantity_diag(self, *, entry: float, stop: float, lot_size: int, equity: float) -> Tuple[int, Dict]:
+    def _calculate_quantity_diag(
+        self, *, entry: float, stop: float, lot_size: int, equity: float
+    ) -> Tuple[int, Dict]:
         risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
         sl_points = abs(float(entry) - float(stop))
         rupee_risk_per_lot = sl_points * int(lot_size)
 
         if rupee_risk_per_lot <= 0:
             return 0, {
-                "entry": entry, "stop": stop, "equity": equity,
+                "entry": entry,
+                "stop": stop,
+                "equity": equity,
                 "risk_per_trade": settings.risk.risk_per_trade,
-                "sl_points": sl_points, "rupee_risk_per_lot": rupee_risk_per_lot,
-                "lots_raw": 0, "lots_final": 0, "exposure_notional_est": 0.0, "max_notional_cap": 0.0,
+                "sl_points": sl_points,
+                "rupee_risk_per_lot": rupee_risk_per_lot,
+                "lots_raw": 0,
+                "lots_final": 0,
+                "exposure_notional_est": 0.0,
+                "max_notional_cap": 0.0,
             }
 
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
@@ -1578,11 +1705,17 @@ class StrategyRunner:
 
         qty = lots * int(lot_size)
         diag = {
-            "entry": round(entry, 4), "stop": round(stop, 4), "equity": round(float(equity), 2),
-            "risk_per_trade": float(settings.risk.risk_per_trade), "lot_size": int(lot_size),
-            "sl_points": round(sl_points, 4), "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
-            "lots_raw": int(lots_raw), "lots_final": int(lots),
-            "exposure_notional_est": round(notional, 2), "max_notional_cap": round(max_notional, 2),
+            "entry": round(entry, 4),
+            "stop": round(stop, 4),
+            "equity": round(float(equity), 2),
+            "risk_per_trade": float(settings.risk.risk_per_trade),
+            "lot_size": int(lot_size),
+            "sl_points": round(sl_points, 4),
+            "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
+            "lots_raw": int(lots_raw),
+            "lots_final": int(lots),
+            "exposure_notional_est": round(notional, 2),
+            "max_notional_cap": round(max_notional, 2),
         }
         return int(qty), diag
 
@@ -1615,7 +1748,9 @@ class StrategyRunner:
         def _attach_indicators(df: pd.DataFrame) -> pd.DataFrame:
             if "bb_width" not in df.columns:
                 try:
-                    df["bb_width"] = calculate_bb_width(df["close"], use_percentage=True)
+                    df["bb_width"] = calculate_bb_width(
+                        df["close"], use_percentage=True
+                    )
                 except Exception:
                     df["bb_width"] = pd.Series([float("nan")] * len(df), index=df.index)
             if "adx" not in df.columns and not any(
@@ -1778,7 +1913,13 @@ class StrategyRunner:
             if isinstance(ltp, (int, float)) and ltp > 0:
                 ts = end
                 df = pd.DataFrame(
-                    {"open": [ltp], "high": [ltp], "low": [ltp], "close": [ltp], "volume": [0]},
+                    {
+                        "open": [ltp],
+                        "high": [ltp],
+                        "low": [ltp],
+                        "close": [ltp],
+                        "volume": [0],
+                    },
                     index=[ts],
                 )
                 self._last_fetch_ts = time.time()
@@ -1815,13 +1956,18 @@ class StrategyRunner:
 
         _ = adx_val  # legacy arg ignored; window no longer depends on ADX
         now = self._now_ist().time()
-        start = getattr(self, "_start_time", self._parse_hhmm(settings.risk.trading_window_start))
-        end = getattr(self, "_end_time", self._parse_hhmm(settings.risk.trading_window_end))
+        start = getattr(
+            self, "_start_time", self._parse_hhmm(settings.risk.trading_window_start)
+        )
+        end = getattr(
+            self, "_end_time", self._parse_hhmm(settings.risk.trading_window_end)
+        )
         return start <= now <= end
 
     @staticmethod
     def _parse_hhmm(text: str):
         from datetime import datetime as _dt
+
         return _dt.strptime(text, "%H:%M").time()
 
     def _now_ist(self) -> datetime:
@@ -1904,6 +2050,7 @@ class StrategyRunner:
             self.log.warning("Fetched %s bars (<%s) from data source", len(df), n)
 
         from src.data.source import render_last_bars
+
         return render_last_bars(self.data_source, n)
 
     def enable_trace(self, n: int) -> None:
@@ -1940,7 +2087,9 @@ class StrategyRunner:
             "now": str(self.now_ist),
             "bars": None if df is None else len(df),
             "last_bar_ts": str(last_ts),
-            "lag_s": None if last_ts is None else (self.now_ist - last_ts).total_seconds(),
+            "lag_s": (
+                None if last_ts is None else (self.now_ist - last_ts).total_seconds()
+            ),
             "eval_count": getattr(self, "eval_count", None),
             "gates": gates,
             "risk_pct": getattr(self.settings.risk, "risk_per_trade", None),
@@ -1952,53 +2101,73 @@ class StrategyRunner:
         checks: List[Dict[str, Any]] = []
 
         # Strategy and data provider info
-        checks.append({
-            "name": "Strategy",
-            "ok": self.strategy is not None,
-            "detail": getattr(self, "strategy_name", "unknown"),
-        })
-        checks.append({
-            "name": "Data provider",
-            "ok": self.data_source is not None,
-            "detail": getattr(self, "data_provider_name", "none"),
-        })
+        checks.append(
+            {
+                "name": "Strategy",
+                "ok": self.strategy is not None,
+                "detail": getattr(self, "strategy_name", "unknown"),
+            }
+        )
+        checks.append(
+            {
+                "name": "Data provider",
+                "ok": self.data_source is not None,
+                "detail": getattr(self, "data_provider_name", "none"),
+            }
+        )
 
         # Telegram wiring
-        checks.append({
-            "name": "Telegram wiring",
-            "ok": bool(self.telegram is not None),
-            "detail": "controller attached" if self.telegram else "missing controller",
-        })
+        checks.append(
+            {
+                "name": "Telegram wiring",
+                "ok": bool(self.telegram is not None),
+                "detail": (
+                    "controller attached" if self.telegram else "missing controller"
+                ),
+            }
+        )
 
         # Broker session (live flag + kite object)
         live = bool(settings.enable_live_trading)
-        checks.append({
-            "name": "Broker session",
-            "ok": (self.kite is not None) if live else True,
-            "detail": "live mode with kite" if (live and self.kite) else ("dry mode" if not live else "live but kite=None"),
-        })
+        checks.append(
+            {
+                "name": "Broker session",
+                "ok": (self.kite is not None) if live else True,
+                "detail": (
+                    "live mode with kite"
+                    if (live and self.kite)
+                    else ("dry mode" if not live else "live but kite=None")
+                ),
+            }
+        )
 
         # Data feed freshness
         age_s = (time.time() - self._last_fetch_ts) if self._last_fetch_ts else 1e9
-        checks.append({
-            "name": "Data feed",
-            "ok": age_s < 120,  # < 2 minutes considered fresh
-            "detail": "fresh" if age_s < 120 else "stale/never",
-            "hint": (
-                f"age={int(age_s)}s "
-                f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',20))}m"
-            ),
-        })
+        checks.append(
+            {
+                "name": "Data feed",
+                "ok": age_s < 120,  # < 2 minutes considered fresh
+                "detail": "fresh" if age_s < 120 else "stale/never",
+                "hint": (
+                    f"age={int(age_s)}s "
+                    f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
+                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',20))}m"
+                ),
+            }
+        )
 
         # Strategy readiness (min bars)
-        ready = isinstance(self._last_flow_debug, dict) and int(self._last_flow_debug.get("bars", 0)) >= int(getattr(settings.strategy, "min_bars_for_signal", 20))
-        checks.append({
-            "name": "Strategy readiness",
-            "ok": ready,
-            "detail": f"bars={int(self._last_flow_debug.get('bars', 0))}",
-            "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 20))}",
-        })
+        ready = isinstance(self._last_flow_debug, dict) and int(
+            self._last_flow_debug.get("bars", 0)
+        ) >= int(getattr(settings.strategy, "min_bars_for_signal", 20))
+        checks.append(
+            {
+                "name": "Strategy readiness",
+                "ok": ready,
+                "detail": f"bars={int(self._last_flow_debug.get('bars', 0))}",
+                "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 20))}",
+            }
+        )
 
         # Risk gates last view
         gates = (
@@ -2006,41 +2175,63 @@ class StrategyRunner:
             if isinstance(self._last_flow_debug, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = (
-            gates is RISK_GATES_SKIPPED
-            or (isinstance(gates, dict) and bool(gates.get("skipped")))
+        skipped = gates is RISK_GATES_SKIPPED or (
+            isinstance(gates, dict) and bool(gates.get("skipped"))
         )
         gates_dict = gates if isinstance(gates, dict) else {}
         gates_ok = True
         if not skipped and gates_dict:
             gates_ok = all(bool(v) for v in gates_dict.values())
-        checks.append({
-            "name": "Risk gates",
-            "ok": gates_ok,
-            "detail": (
-                "skipped"
-                if skipped
-                else ", ".join([f"{k}={'OK' if v else 'BLOCK'}" for k, v in gates_dict.items()]) if gates_dict else "no-eval"
-            ),
-        })
+        checks.append(
+            {
+                "name": "Risk gates",
+                "ok": gates_ok,
+                "detail": (
+                    "skipped"
+                    if skipped
+                    else (
+                        ", ".join(
+                            [
+                                f"{k}={'OK' if v else 'BLOCK'}"
+                                for k, v in gates_dict.items()
+                            ]
+                        )
+                        if gates_dict
+                        else "no-eval"
+                    )
+                ),
+            }
+        )
 
         # RR check
-        rr_ok = bool(self._last_flow_debug.get("rr_ok", True)) if isinstance(self._last_flow_debug, dict) else True
-        checks.append({
-            "name": "RR threshold",
-            "ok": rr_ok,
-            "detail": str(self._last_flow_debug.get("plan", {})),
-        })
+        rr_ok = (
+            bool(self._last_flow_debug.get("rr_ok", True))
+            if isinstance(self._last_flow_debug, dict)
+            else True
+        )
+        checks.append(
+            {
+                "name": "RR threshold",
+                "ok": rr_ok,
+                "detail": str(self._last_flow_debug.get("plan", {})),
+            }
+        )
 
         # Errors
-        checks.append({
-            "name": "Errors",
-            "ok": self._last_error is None,
-            "detail": "none" if self._last_error is None else self._last_error,
-        })
+        checks.append(
+            {
+                "name": "Errors",
+                "ok": self._last_error is None,
+                "detail": "none" if self._last_error is None else self._last_error,
+            }
+        )
 
         ok = all(c.get("ok", False) for c in checks)
-        last_sig = (time.time() - self._last_signal_at) < 900 if self._last_signal_at else False  # 15min
+        last_sig = (
+            (time.time() - self._last_signal_at) < 900
+            if self._last_signal_at
+            else False
+        )  # 15min
         open_legs = [
             {
                 "trade": fsm.trade_id,
@@ -2050,7 +2241,9 @@ class StrategyRunner:
                 "filled": leg.filled_qty,
                 "qty": leg.qty,
                 "avg": leg.avg_price,
-                "age_s": int((datetime.now(timezone.utc) - leg.created_at).total_seconds()),
+                "age_s": int(
+                    (datetime.now(timezone.utc) - leg.created_at).total_seconds()
+                ),
                 "status": fsm.status,
             }
             for fsm in getattr(self.order_executor, "open_trades", lambda: [])()
@@ -2073,7 +2266,9 @@ class StrategyRunner:
             "version": self.strategy_cfg.version,
             "tz": self.strategy_cfg.tz,
             "atr_band": [self.strategy_cfg.atr_min, self.strategy_cfg.atr_max],
-            "min_score": self.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35),
+            "min_score": self.strategy_cfg.raw.get("strategy", {}).get(
+                "min_score", 0.35
+            ),
         }
         return bundle
 
@@ -2098,16 +2293,15 @@ class StrategyRunner:
             if isinstance(flow, dict)
             else RISK_GATES_SKIPPED
         )
-        skipped = (
-            gates is RISK_GATES_SKIPPED
-            or (isinstance(gates, dict) and bool(gates.get("skipped")))
+        skipped = gates is RISK_GATES_SKIPPED or (
+            isinstance(gates, dict) and bool(gates.get("skipped"))
         )
         gates_dict = gates if isinstance(gates, dict) else {}
         gates_ok = True
         if not skipped and gates_dict:
             gates_ok = all(bool(v) for v in gates_dict.values())
         rr_ok = bool(flow.get("rr_ok", True))
-        no_errors = (self._last_error is None)
+        no_errors = self._last_error is None
 
         if skipped:
             gate_status = "skipped"
@@ -2120,7 +2314,9 @@ class StrategyRunner:
             "ok": bool(bundle.get("ok", False)),
             "status_messages": {
                 "telegram_wiring": "ok" if telegram_ok else "missing",
-                "broker_session": "ok" if broker_ok else ("dry mode" if not live else "missing"),
+                "broker_session": (
+                    "ok" if broker_ok else ("dry mode" if not live else "missing")
+                ),
                 "data_feed": "ok" if data_fresh else "stale",
                 "strategy_readiness": "ok" if strat_ready else "not ready",
                 "risk_gates": gate_status,
@@ -2152,14 +2348,24 @@ class StrategyRunner:
             "market_open": market_open,
             "within_window": within_window,
             "daily_dd_hit": self.risk.day_realized_loss >= self._max_daily_loss_rupees,
-            "cooloff_until": self.risk.loss_cooldown_until.isoformat() if self.risk.loss_cooldown_until else "-",
+            "cooloff_until": (
+                self.risk.loss_cooldown_until.isoformat()
+                if self.risk.loss_cooldown_until
+                else "-"
+            ),
             "paused": self._paused,
             "trades_today": self.risk.trades_today,
             "consecutive_losses": self.risk.consecutive_losses,
             "day_realized_loss": round(self.risk.day_realized_loss, 2),
             "day_realized_pnl": round(self.risk.day_realized_pnl, 2),
-            "active_orders": getattr(self.executor, "open_count", 0) if hasattr(self.executor, "open_count") else 0,
-            "open_positions": len(getattr(self.executor, "get_positions_kite", lambda: {})() or {}),
+            "active_orders": (
+                getattr(self.executor, "open_count", 0)
+                if hasattr(self.executor, "open_count")
+                else 0
+            ),
+            "open_positions": len(
+                getattr(self.executor, "get_positions_kite", lambda: {})() or {}
+            ),
             "last_signal_score": (
                 float(self._last_signal_debug.get("score") or 0.0)
                 if isinstance(self._last_signal_debug, dict)
@@ -2184,22 +2390,32 @@ class StrategyRunner:
             "order_connector": self._active_names.get("order_connector"),
         }
         try:
-            diag["data_provider_health"] = getattr(self.data_source, "health", lambda: {"status": "NA"})()
+            diag["data_provider_health"] = getattr(
+                self.data_source, "health", lambda: {"status": "NA"}
+            )()
         except Exception:
             diag["data_provider_health"] = {"status": "NA"}
         try:
-            diag["order_connector_health"] = getattr(self.order_executor, "health", lambda: {"status": "NA"})()
+            diag["order_connector_health"] = getattr(
+                self.order_executor, "health", lambda: {"status": "NA"}
+            )()
         except Exception:
             diag["order_connector_health"] = {"status": "NA"}
         diag["api_health"] = {
-            "orders": getattr(self.order_executor, "api_health", lambda: {})().get("orders", {}),
-            "modify": getattr(self.order_executor, "api_health", lambda: {})().get("modify", {}),
-            "hist": getattr(self.data_source, "api_health", lambda: {})().get("hist", {}),
-            "quote": getattr(self.data_source, "api_health", lambda: {})().get("quote", {}),
+            "orders": getattr(self.order_executor, "api_health", lambda: {})().get(
+                "orders", {}
+            ),
+            "modify": getattr(self.order_executor, "api_health", lambda: {})().get(
+                "modify", {}
+            ),
+            "hist": getattr(self.data_source, "api_health", lambda: {})().get(
+                "hist", {}
+            ),
+            "quote": getattr(self.data_source, "api_health", lambda: {})().get(
+                "quote", {}
+            ),
         }
-        diag["router"] = getattr(
-            self.order_executor, "router_health", lambda: {}
-        )()
+        diag["router"] = getattr(self.order_executor, "router_health", lambda: {})()
 
         plan = self.last_plan or {}
         diag["event_guard"] = plan.get("event_guard", {"active": False})
@@ -2271,8 +2487,12 @@ class StrategyRunner:
                     if b and a:
                         mid = (b + a) / 2
                 s = getattr(self, "last_spot", 0.0) or 0.0
-                atr_pct = self.last_plan.get("atr_pct", None) if self.last_plan else None
-                est = estimate_greeks_from_mid(s, k, mid, opt, now=self.now_ist, r=r, atr_pct=atr_pct)
+                atr_pct = (
+                    self.last_plan.get("atr_pct", None) if self.last_plan else None
+                )
+                est = estimate_greeks_from_mid(
+                    s, k, mid, opt, now=self.now_ist, r=r, atr_pct=atr_pct
+                )
                 delta = est.delta or 0.0
                 side = 1 if leg.side.name == "BUY" else -1
                 contracts = int(leg.qty / lot)
@@ -2281,7 +2501,8 @@ class StrategyRunner:
 
     def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
         qty, diag = self._calculate_quantity_diag(
-            entry=float(entry), stop=float(sl),
+            entry=float(entry),
+            stop=float(sl),
             lot_size=int(settings.instruments.nifty_lot_size),
             equity=self._active_equity(),
         )
@@ -2346,7 +2567,10 @@ class StrategyRunner:
                     if self.telegram:
                         self.telegram.send_message(msg)
                 except Exception:
-                    self.log.warning("Failed to notify Telegram about broker init failure", exc_info=True)
+                    self.log.warning(
+                        "Failed to notify Telegram about broker init failure",
+                        exc_info=True,
+                    )
                 # Re-raise so callers know live mode failed
                 raise
 

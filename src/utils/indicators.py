@@ -17,17 +17,21 @@ Return shapes are aligned with scalping_strategy.py:
 
 from __future__ import annotations
 
-from typing import Tuple, Optional, Union
-import pandas as pd
-import numpy as np
+from typing import Optional, Tuple, Union
 
-from src.utils.atr_helper import compute_atr_df  # unify ATR (RMA/Wilder) across codebase
+import numpy as np
+import pandas as pd
+
+from src.utils.atr_helper import (
+    compute_atr_df,  # unify ATR (RMA/Wilder) across codebase
+)
 
 # Try python-ta first
 try:
     from ta.momentum import RSIIndicator  # type: ignore
-    from ta.trend import EMAIndicator, MACD, ADXIndicator  # type: ignore
+    from ta.trend import MACD, ADXIndicator, EMAIndicator  # type: ignore
     from ta.volatility import AverageTrueRange, BollingerBands  # type: ignore
+
     TA_AVAILABLE = True
 except Exception:
     RSIIndicator = EMAIndicator = MACD = ADXIndicator = AverageTrueRange = BollingerBands = None  # type: ignore
@@ -83,7 +87,13 @@ def calculate_macd(
     """MACD tuple (macd_line, signal_line, hist)."""
     s = _series(close, "close")
     if TA_AVAILABLE and MACD:
-        macd_calc = MACD(close=s, window_slow=slow, window_fast=fast, window_sign=signal, fillna=False)
+        macd_calc = MACD(
+            close=s,
+            window_slow=slow,
+            window_fast=fast,
+            window_sign=signal,
+            fillna=False,
+        )
         macd_line = macd_calc.macd()
         signal_line = macd_calc.macd_signal()
         hist = macd_calc.macd_diff()
@@ -117,11 +127,13 @@ def calculate_atr(
     else:
         if low is None or close is None:
             raise ValueError("Provide low & close series when passing high as Series.")
-        df = pd.DataFrame({
-            "high": pd.to_numeric(high_or_df, errors="coerce").astype(float),
-            "low": pd.to_numeric(low, errors="coerce").astype(float),
-            "close": pd.to_numeric(close, errors="coerce").astype(float),
-        })
+        df = pd.DataFrame(
+            {
+                "high": pd.to_numeric(high_or_df, errors="coerce").astype(float),
+                "low": pd.to_numeric(low, errors="coerce").astype(float),
+                "close": pd.to_numeric(close, errors="coerce").astype(float),
+            }
+        )
     # ``compute_atr_df`` returns the original DataFrame with an ``atr`` column
     # appended.  ``calculate_atr`` is expected to return only the ATR values
     # as a ``Series`` to keep function outputs simple and consistent with
@@ -156,7 +168,9 @@ def calculate_supertrend(
             pd.to_numeric(close, errors="coerce").astype(float),
         )
 
-    atr = calculate_atr(pd.DataFrame({"high": h, "low": low_s, "close": c}), period=period)
+    atr = calculate_atr(
+        pd.DataFrame({"high": h, "low": low_s, "close": c}), period=period
+    )
     hl2 = (h + low_s) / 2.0
     upperband = hl2 + (multiplier * atr)
     lowerband = hl2 - (multiplier * atr)
@@ -170,12 +184,14 @@ def calculate_supertrend(
 
         final_upper.iat[i] = (
             upperband.iat[i]
-            if (upperband.iat[i] < final_upper.iat[i - 1]) or (prev_close > final_upper.iat[i - 1])
+            if (upperband.iat[i] < final_upper.iat[i - 1])
+            or (prev_close > final_upper.iat[i - 1])
             else final_upper.iat[i - 1]
         )
         final_lower.iat[i] = (
             lowerband.iat[i]
-            if (lowerband.iat[i] > final_lower.iat[i - 1]) or (prev_close < final_lower.iat[i - 1])
+            if (lowerband.iat[i] > final_lower.iat[i - 1])
+            or (prev_close < final_lower.iat[i - 1])
             else final_lower.iat[i - 1]
         )
 
@@ -251,7 +267,9 @@ def calculate_adx(
         low_s = _series(high_or_df, "low")
         c = _series(high_or_df, "close")
     else:
-        assert low is not None and close is not None, "Provide low & close series when passing high as Series."
+        assert (
+            low is not None and close is not None
+        ), "Provide low & close series when passing high as Series."
         h, low_s, c = (
             pd.to_numeric(high_or_df, errors="coerce").astype(float),
             pd.to_numeric(low, errors="coerce").astype(float),
@@ -272,7 +290,7 @@ def calculate_adx(
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
-    tr1 = (h - low_s)
+    tr1 = h - low_s
     tr2 = (h - prev_c).abs()
     tr3 = (low_s - prev_c).abs()
     tr = np.maximum.reduce([tr1, tr2, tr3])
@@ -282,8 +300,16 @@ def calculate_adx(
     tr_s = pd.Series(tr, index=c.index)
 
     atr = tr_s.rolling(window=period, min_periods=period).mean()
-    plus_di = 100.0 * plus_dm_s.rolling(window=period, min_periods=period).mean() / atr.replace(0, np.nan)
-    minus_di = 100.0 * minus_dm_s.rolling(window=period, min_periods=period).mean() / atr.replace(0, np.nan)
+    plus_di = (
+        100.0
+        * plus_dm_s.rolling(window=period, min_periods=period).mean()
+        / atr.replace(0, np.nan)
+    )
+    minus_di = (
+        100.0
+        * minus_dm_s.rolling(window=period, min_periods=period).mean()
+        / atr.replace(0, np.nan)
+    )
 
     dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     adx = dx.rolling(window=period, min_periods=period).mean()
@@ -312,13 +338,21 @@ def calculate_vwap(
             c = _series(high_or_df, "close")
         else:
             raise KeyError("DataFrame must contain 'high','low','close' columns.")
-        v = pd.to_numeric(high_or_df.get("volume", pd.Series(index=high_or_df.index, dtype=float)), errors="coerce").astype(float)
+        v = pd.to_numeric(
+            high_or_df.get("volume", pd.Series(index=high_or_df.index, dtype=float)),
+            errors="coerce",
+        ).astype(float)
     else:
-        assert low is not None and close is not None, "Provide low & close series when passing high as Series."
+        assert (
+            low is not None and close is not None
+        ), "Provide low & close series when passing high as Series."
         h = pd.to_numeric(high_or_df, errors="coerce").astype(float)
         low_series = pd.to_numeric(low, errors="coerce").astype(float)
         c = pd.to_numeric(close, errors="coerce").astype(float)
-        v = pd.to_numeric(volume if volume is not None else pd.Series(index=c.index, dtype=float), errors="coerce").astype(float)
+        v = pd.to_numeric(
+            volume if volume is not None else pd.Series(index=c.index, dtype=float),
+            errors="coerce",
+        ).astype(float)
 
     typical_price = (h + low_series + c) / 3.0
     if v.isna().all() or (v.fillna(0) == 0).all():

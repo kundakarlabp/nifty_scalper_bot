@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 
-def micro_from_l1(l1: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots: int) -> Tuple[Optional[float], Optional[bool], Optional[Dict[str, Any]]]:
+def micro_from_l1(
+    l1: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots: int
+) -> Tuple[Optional[float], Optional[bool], Optional[Dict[str, Any]]]:
     """Compute microstructure metrics from level-1 data."""
     if not l1 or "depth" not in l1:
         return None, None, None
@@ -24,7 +26,9 @@ def micro_from_l1(l1: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots
     return spread_pct, depth_ok, {"bid": bid, "ask": ask, "bid5": bq, "ask5": sq}
 
 
-def micro_from_quote(q: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots: int) -> Tuple[Optional[float], Optional[bool]]:
+def micro_from_quote(
+    q: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots: int
+) -> Tuple[Optional[float], Optional[bool]]:
     """Compute spread% and depth flag from a quote payload.
 
     Parameters

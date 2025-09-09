@@ -73,6 +73,7 @@ def classify_broker_error(exc_or_msg: Any, status: Optional[int] = None) -> str:
         return NETWORK
     return UNKNOWN
 
+
 __all__ = [
     "classify_broker_error",
     "AUTH",

@@ -132,4 +132,6 @@ def run(
     bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
 
     # No reloader, multi-threaded to avoid blocking the trading loop
-    app.run(host=bind_host, port=bind_port, debug=False, use_reloader=False, threaded=True)
+    app.run(
+        host=bind_host, port=bind_port, debug=False, use_reloader=False, threaded=True
+    )

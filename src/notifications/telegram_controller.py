@@ -4,31 +4,30 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import re
+import statistics as stats
 import threading
 import time
-import os
-from datetime import datetime, timedelta, time as dt_time, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
-import statistics as stats
-from pathlib import Path
-
-from src.logs.journal import read_trades_between
 
 import requests
 
 from src.config import settings
 from src.diagnostics import checks  # noqa: F401
-from src.diagnostics.registry import run_all, run
-from src.strategies.runner import StrategyRunner
-from src.risk.position_sizing import PositionSizer
-from src.utils.expiry import next_tuesday_expiry, last_tuesday_of_month
-from src.strategies.warmup import check as warmup_check
-from src.utils.freshness import compute as compute_freshness
-from src.execution.order_executor import fetch_quote_with_depth
+from src.diagnostics.registry import run, run_all
 from src.execution.micro_filters import micro_from_quote
+from src.execution.order_executor import fetch_quote_with_depth
+from src.logs.journal import read_trades_between
+from src.risk.position_sizing import PositionSizer
+from src.strategies.runner import StrategyRunner
+from src.strategies.warmup import check as warmup_check
 from src.utils import strike_selector
+from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
+from src.utils.freshness import compute as compute_freshness
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +88,7 @@ def _fmt_micro(
         f"last_bar_ts={last_bar_ts} lag_s={lag_s}"
     )
 
+
 class TelegramController:
     """
     Production-safe Telegram controller:
@@ -117,10 +117,14 @@ class TelegramController:
         status_provider: Callable[[], Dict[str, Any]],
         positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         actives_provider: Optional[Callable[[], List[Any]]] = None,
-        diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,          # detailed (/check)
+        diag_provider: Optional[
+            Callable[[], Dict[str, Any]]
+        ] = None,  # detailed (/check)
         logs_provider: Optional[Callable[[int], List[str]]] = None,
         last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
-        compact_diag_provider: Optional[Callable[[], Dict[str, Any]]] = None,  # NEW: compact (/diag)
+        compact_diag_provider: Optional[
+            Callable[[], Dict[str, Any]]
+        ] = None,  # NEW: compact (/diag)
         risk_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         limits_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         risk_reset_today: Optional[Callable[[], None]] = None,
@@ -156,7 +160,9 @@ class TelegramController:
         self._token: Optional[str] = getattr(tg, "bot_token", None)
         self._chat_id: Optional[int] = int(getattr(tg, "chat_id", 0) or 0)
         if not self._token or not self._chat_id:
-            raise RuntimeError("TelegramController: TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID missing")
+            raise RuntimeError(
+                "TelegramController: TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID missing"
+            )
 
         self._base = f"https://api.telegram.org/bot{self._token}"
         self._timeout = http_timeout
@@ -232,12 +238,14 @@ class TelegramController:
     def _escape_markdown(text: str) -> str:
         """Escape Markdown special characters for safe Telegram messages."""
         escape_chars = "_*[]()~`>#+-=|{}.!\\"
-        return "".join(
-            "\\" + ch if ch in escape_chars else ch
-            for ch in text
-        )
+        return "".join("\\" + ch if ch in escape_chars else ch for ch in text)
 
-    def _send(self, text: str, parse_mode: Optional[str] = None, disable_notification: bool = False) -> None:
+    def _send(
+        self,
+        text: str,
+        parse_mode: Optional[str] = None,
+        disable_notification: bool = False,
+    ) -> None:
         if not text or not text.strip():
             return
         if not self._rate_ok(text):
@@ -247,7 +255,11 @@ class TelegramController:
             text = self._escape_markdown(text)
         while True:
             try:
-                payload = {"chat_id": self._chat_id, "text": text, "disable_notification": disable_notification}
+                payload = {
+                    "chat_id": self._chat_id,
+                    "text": text,
+                    "disable_notification": disable_notification,
+                }
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
                 response = self._session.post(
@@ -273,7 +285,11 @@ class TelegramController:
                 self._backoff = delay
 
     def _send_inline(self, text: str, buttons: list[list[dict]]) -> None:
-        payload = {"chat_id": self._chat_id, "text": text, "reply_markup": {"inline_keyboard": buttons}}
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
         try:
             response = self._session.post(
                 f"{self._base}/sendMessage", json=payload, timeout=self._timeout
@@ -302,7 +318,9 @@ class TelegramController:
             log.info("Telegram polling already running; skipping start.")
             return
         self._stop.clear()
-        self._poll_thread = threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True)
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, name="tg-poll", daemon=True
+        )
         self._poll_thread.start()
         self._started = True
         log.info("Telegram polling started (chat_id=%s).", self._chat_id)
@@ -409,9 +427,19 @@ class TelegramController:
             try:
                 setattr(settings, "allow_offhours_testing", bool(allow_off_before))
             except Exception:
-                log.debug("Failed to restore allow_offhours_testing flag", exc_info=True)
+                log.debug(
+                    "Failed to restore allow_offhours_testing flag", exc_info=True
+                )
 
-        return "✅ Tick executed." if res else ("Dry tick executed (no action)." if dry else "Tick executed (no action).")
+        return (
+            "✅ Tick executed."
+            if res
+            else (
+                "Dry tick executed (no action)."
+                if dry
+                else "Tick executed (no action)."
+            )
+        )
 
     # --------------- health cards ---------------
     def _health_cards(self) -> str:
@@ -432,8 +460,12 @@ class TelegramController:
             detail = c.get("detail") or c.get("hint") or ""
             lines.append(f"{mark(c.get('ok', False))} {name} — {detail}")
 
-        lines.append(f"📈 Last signal: {'present' if diag.get('last_signal') else 'none'}")
-        lines.append(f"\nOverall: {'✅ ALL GOOD' if diag.get('ok') else '❗ Issues present'}")
+        lines.append(
+            f"📈 Last signal: {'present' if diag.get('last_signal') else 'none'}"
+        )
+        lines.append(
+            f"\nOverall: {'✅ ALL GOOD' if diag.get('ok') else '❗ Issues present'}"
+        )
         return "\n".join(lines)
 
     # --------------- commands ---------------
@@ -484,9 +516,12 @@ class TelegramController:
                 s = self._status_provider() if self._status_provider else {}
             except Exception:
                 s = {}
-            verbose = (args and args[0].lower().startswith("v"))
+            verbose = args and args[0].lower().startswith("v")
             if verbose:
-                return self._send("```json\n" + json.dumps(s, indent=2) + "\n```", parse_mode="Markdown")
+                return self._send(
+                    "```json\n" + json.dumps(s, indent=2) + "\n```",
+                    parse_mode="Markdown",
+                )
             return self._send(
                 f"📊 {s.get('time_ist')}\n"
                 f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
@@ -550,7 +585,8 @@ class TelegramController:
             else:
                 results = run_all()
             lines = [
-                f"{'✅' if r.ok else '❌'} {r.name} — {r.msg} ({r.took_ms}ms)" for r in results
+                f"{'✅' if r.ok else '❌'} {r.name} — {r.msg} ({r.took_ms}ms)"
+                for r in results
             ]
             for r in results:
                 if not r.ok and r.fix:
@@ -655,7 +691,9 @@ class TelegramController:
             if not p.exists():
                 return self._send("no log")
             lines = p.read_text(errors="ignore").splitlines()[-n:]
-            return self._send("```" + "\n".join(lines)[-3500:] + "```", parse_mode="Markdown")
+            return self._send(
+                "```" + "\n".join(lines)[-3500:] + "```", parse_mode="Markdown"
+            )
 
         if cmd == "/reload":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
@@ -707,10 +745,18 @@ class TelegramController:
                 except Exception:
                     secs = 30
                 cb_map = {
-                    "orders": getattr(getattr(runner, "order_executor", None), "cb_orders", None),
-                    "modify": getattr(getattr(runner, "order_executor", None), "cb_modify", None),
-                    "hist": getattr(getattr(runner, "data_source", None), "cb_hist", None),
-                    "quote": getattr(getattr(runner, "data_source", None), "cb_quote", None),
+                    "orders": getattr(
+                        getattr(runner, "order_executor", None), "cb_orders", None
+                    ),
+                    "modify": getattr(
+                        getattr(runner, "order_executor", None), "cb_modify", None
+                    ),
+                    "hist": getattr(
+                        getattr(runner, "data_source", None), "cb_hist", None
+                    ),
+                    "quote": getattr(
+                        getattr(runner, "data_source", None), "cb_quote", None
+                    ),
                 }
                 cb = cb_map.get(name)
                 if cb:
@@ -722,7 +768,9 @@ class TelegramController:
         if cmd == "/diag":
             try:
                 status = self._status_provider() if self._status_provider else {}
-                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                plan = (
+                    self._last_signal_provider() if self._last_signal_provider else {}
+                )
                 verbose = os.getenv("DIAG_VERBOSE", "true").lower() != "false"
 
                 def be(val: Any) -> str:
@@ -734,7 +782,9 @@ class TelegramController:
                 lines.append(f"• Daily DD Hit: {be(status.get('daily_dd_hit'))}")
                 lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
                 lines.append(f"• Trades Today: {status.get('trades_today')}")
-                lines.append(f"• Consecutive Losses: {status.get('consecutive_losses')}")
+                lines.append(
+                    f"• Consecutive Losses: {status.get('consecutive_losses')}"
+                )
                 lines.append("")
                 lines.append("📈 Signal")
                 reason_block = plan.get("reason_block") or "-"
@@ -809,7 +859,9 @@ class TelegramController:
             if not runner:
                 return self._send("Runner unavailable.")
             delta_units = round(runner._portfolio_delta_units(), 1)
-            gmode = runner.now_ist.weekday() == 1 and runner.now_ist.time() >= dt_time(14, 45)
+            gmode = runner.now_ist.weekday() == 1 and runner.now_ist.time() >= dt_time(
+                14, 45
+            )
             text = (
                 "📐 *Portfolio Greeks*\n"
                 f"Δ(units): {delta_units} | gamma_mode: {gmode}"
@@ -826,7 +878,9 @@ class TelegramController:
                 text = json.dumps(plan, ensure_ascii=False, indent=2)
                 if len(text) > 2000:
                     text = text[:2000] + "\n... (truncated)"
-                return self._send("🧩 *Plan*\n```\n" + text + "\n```", parse_mode="Markdown")
+                return self._send(
+                    "🧩 *Plan*\n```\n" + text + "\n```", parse_mode="Markdown"
+                )
             except Exception as e:
                 return self._send(f"Plan error: {e}")
 
@@ -836,7 +890,9 @@ class TelegramController:
                 return self._send("No events calendar loaded.")
             now = runner.now_ist
             active = runner.event_cal.active(now)
-            lines = [f"📅 Events v{runner.event_cal.version} tz={runner.event_cal.tz.key}"]
+            lines = [
+                f"📅 Events v{runner.event_cal.version} tz={runner.event_cal.tz.key}"
+            ]
             for ev in active[:5]:
                 lines.append(
                     f"ACTIVE: {ev.name}  guard: {ev.guard_start().time()}→{ev.guard_end().time()}  block={ev.block_trading} widen+{ev.post_widen_spread_pct:.2f}%"
@@ -873,28 +929,38 @@ class TelegramController:
             try:
                 s = runner.telemetry_snapshot()
                 sig, bars = s["signal"], s["bars"]
+
                 def pf(ok: bool, val: Any) -> tuple[str, Any]:
                     return ("✅ PASS ", val) if ok else ("❌ FAIL ", val)
+
                 window_ok = getattr(runner, "within_window", True)
                 re = getattr(runner, "risk_engine", None)
                 cool_ok = (re.state.cooloff_until is None) if re else True
                 dd_ok = (re.state.cum_R_today > -re.cfg.max_daily_dd_R) if re else True
-                bc_ok = (bars.get("bar_count") or 0) >= runner.strategy_cfg.min_bars_required
+                bc_ok = (
+                    bars.get("bar_count") or 0
+                ) >= runner.strategy_cfg.min_bars_required
                 stale_ok = True
                 try:
                     last = bars.get("last_bar_ts")
                     if last:
                         last_dt = datetime.fromisoformat(str(last))
                         if last_dt.tzinfo is None:
-                            last_dt = last_dt.replace(tzinfo=ZoneInfo(runner.strategy_cfg.tz))
+                            last_dt = last_dt.replace(
+                                tzinfo=ZoneInfo(runner.strategy_cfg.tz)
+                            )
                         age = (runner.now_ist - last_dt).total_seconds()
                         stale_ok = 0 <= age <= 150
                 except Exception:
                     stale_ok = False
                 regime_ok = sig.get("regime") in ("TREND", "RANGE")
                 atr = sig.get("atr_pct") or 0.0
-                atr_ok = runner.strategy_cfg.atr_min <= atr <= runner.strategy_cfg.atr_max
-                need = float(runner.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35))
+                atr_ok = (
+                    runner.strategy_cfg.atr_min <= atr <= runner.strategy_cfg.atr_max
+                )
+                need = float(
+                    runner.strategy_cfg.raw.get("strategy", {}).get("min_score", 0.35)
+                )
                 score_ok = (sig.get("score") or 0) >= need
                 micro = sig.get("micro") or {}
                 msp = micro.get("spread_pct")
@@ -903,8 +969,16 @@ class TelegramController:
                 lines = []
                 for name, ok, val in [
                     ("window", window_ok, getattr(runner, "window_tuple", "-")),
-                    ("cooloff", cool_ok, getattr(re.state, "cooloff_until", None) if re else None),
-                    ("daily_dd", dd_ok, getattr(re.state, "cum_R_today", 0.0) if re else 0.0),
+                    (
+                        "cooloff",
+                        cool_ok,
+                        getattr(re.state, "cooloff_until", None) if re else None,
+                    ),
+                    (
+                        "daily_dd",
+                        dd_ok,
+                        getattr(re.state, "cum_R_today", 0.0) if re else 0.0,
+                    ),
                     ("bar_count", bc_ok, bars.get("bar_count")),
                     ("data_stale", stale_ok, bars.get("last_bar_ts")),
                     ("regime", regime_ok, sig.get("regime")),
@@ -934,22 +1008,29 @@ class TelegramController:
                     f"router ack_p95: {rh.get('ack_p95_ms')} queues={rh.get('queues')}"
                 )
                 lines.append(f"reason_block: *{ob_reason}*")
-                return self._send("🧪 *Audit*\n" + "\n".join(lines), parse_mode="Markdown")
+                return self._send(
+                    "🧪 *Audit*\n" + "\n".join(lines), parse_mode="Markdown"
+                )
             except Exception as e:
                 return self._send(f"Audit error: {e}")
 
         if cmd == "/why":
             try:
                 status = self._status_provider() if self._status_provider else {}
-                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                plan = (
+                    self._last_signal_provider() if self._last_signal_provider else {}
+                )
                 runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
                 warm = getattr(runner, "_warm", None)
                 fresh = getattr(runner, "_fresh", None)
                 now = time.time()
+
                 def mark(ok: bool) -> str:
                     return "PASS" if ok else "FAIL"
+
                 def val(x: Any) -> str:
                     return str(x)
+
                 last_ts = plan.get("last_bar_ts")
                 last_ts_sec = 0.0
                 if last_ts:
@@ -961,7 +1042,9 @@ class TelegramController:
                 gates = []
                 within = bool(status.get("within_window"))
                 gates.append(("window", within, val(status.get("within_window"))))
-                cooloff = bool(status.get("cooloff_until") and status.get("cooloff_until") != "-")
+                cooloff = bool(
+                    status.get("cooloff_until") and status.get("cooloff_until") != "-"
+                )
                 gates.append(("cooloff", not cooloff, status.get("cooloff_until")))
                 dd = bool(status.get("daily_dd_hit"))
                 gates.append(("daily_dd", not dd, status.get("day_realized_loss")))
@@ -988,7 +1071,11 @@ class TelegramController:
                     lag = int(now - last_ts_sec) if last_ts_sec else None
                     data_stale = (lag or 0) <= 150
                     gates.append(
-                        ("data_stale", data_stale, f"lag_s={lag}" if lag is not None else "-")
+                        (
+                            "data_stale",
+                            data_stale,
+                            f"lag_s={lag}" if lag is not None else "-",
+                        )
                     )
                 regime = plan.get("regime") in ("TREND", "RANGE")
                 gates.append(("regime", regime, plan.get("regime")))
@@ -1000,7 +1087,13 @@ class TelegramController:
                 score = float(score_val) if score_val is not None else None
                 reg = str(plan.get("regime"))
                 need = 9 if reg == "TREND" else 8
-                gates.append(("score", score is not None and score >= need, score if score is not None else "N/A"))
+                gates.append(
+                    (
+                        "score",
+                        score is not None and score >= need,
+                        score if score is not None else "N/A",
+                    )
+                )
                 sp = plan.get("spread_pct")
                 dp = plan.get("depth_ok")
                 reason_block = plan.get("reason_block") or "-"
@@ -1012,9 +1105,7 @@ class TelegramController:
                     lines.append("micro: N/A (no_quote)")
                 else:
                     sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
-                    dp_line = (
-                        "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
-                    )
+                    dp_line = "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
                     lines.append(
                         f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
                     )
@@ -1084,7 +1175,9 @@ class TelegramController:
                 if self._quotes_provider:
                     sym = args[0] if args else ""
                     return self._send(self._quotes_provider(sym))
-                plan = self._last_signal_provider() if self._last_signal_provider else {}
+                plan = (
+                    self._last_signal_provider() if self._last_signal_provider else {}
+                )
                 sym = plan.get("strike") or plan.get("symbol") or "-"
                 text = "📈 *Quotes*\n" + _fmt_micro(
                     sym,
@@ -1118,13 +1211,15 @@ class TelegramController:
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
                 return self._send("Runner unavailable.")
-            arg = (args[0].lower() if args else "week")
+            arg = args[0].lower() if args else "week"
             tz = ZoneInfo(getattr(runner.settings, "TZ", "Asia/Kolkata"))
             now = datetime.now(tz)
             if arg == "month":
                 start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             else:
-                start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+                start = (now - timedelta(days=now.weekday())).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
             trades = read_trades_between(start, now)
             k = _kpis(trades)
             rh = getattr(runner.order_executor, "router_health", lambda: {})()
@@ -1152,14 +1247,16 @@ class TelegramController:
                 lines.append(
                     f"{ts}  {t.get('side')} {t.get('symbol')}  R={t.get('R')}  pnl_R={t.get('pnl_R')}"
                 )
-            return self._send("\U0001F5DE *Last Trades*\n" + "\n".join(lines), parse_mode="Markdown")
+            return self._send(
+                "\U0001f5de *Last Trades*\n" + "\n".join(lines), parse_mode="Markdown"
+            )
 
         if cmd == "/hb":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
                 return self._send("Runner unavailable.")
-            arg = (args[0].lower() if args else "on")
-            runner.hb_enabled = (arg != "off")
+            arg = args[0].lower() if args else "on"
+            runner.hb_enabled = arg != "off"
             return self._send(f"Heartbeat: {'ON' if runner.hb_enabled else 'OFF'}")
 
         if cmd == "/smoketest":
@@ -1198,7 +1295,9 @@ class TelegramController:
                     extra = c.get("hint") or c.get("detail") or ""
                     lines.append(f"{mark} {c.get('name')} — {extra}")
 
-                lines.append(f"📈 last_signal: {'present' if d.get('last_signal') else 'none'}")
+                lines.append(
+                    f"📈 last_signal: {'present' if d.get('last_signal') else 'none'}"
+                )
 
                 return self._send("\n".join(lines))
             except Exception as e:
@@ -1209,7 +1308,9 @@ class TelegramController:
             if not self._positions_provider:
                 return self._send("Positions provider not wired.")
             pos = self._positions_provider() or {}
-            err = getattr(getattr(self._positions_provider, "__self__", None), "last_error", None)
+            err = getattr(
+                getattr(self._positions_provider, "__self__", None), "last_error", None
+            )
             if err:
                 return self._send(f"Positions error: {err}")
             if not pos:
@@ -1234,7 +1335,9 @@ class TelegramController:
             except Exception:
                 page = 1
             acts = self._actives_provider() or []
-            err = getattr(getattr(self._actives_provider, "__self__", None), "last_error", None)
+            err = getattr(
+                getattr(self._actives_provider, "__self__", None), "last_error", None
+            )
             if err:
                 return self._send(f"Active-orders error: {err}")
             n = len(acts)
@@ -1302,8 +1405,12 @@ class TelegramController:
             state = str(args[0]).lower()
             if state not in ("live", "dry"):
                 return self._send("Usage: /mode live|dry")
-            val = (state == "live")
-            runner = getattr(self._set_live_mode, "__self__", None) if self._set_live_mode else None
+            val = state == "live"
+            runner = (
+                getattr(self._set_live_mode, "__self__", None)
+                if self._set_live_mode
+                else None
+            )
             if self._set_live_mode:
                 try:
                     self._set_live_mode(val)
@@ -1461,8 +1568,12 @@ class TelegramController:
         if cmd == "/cancel_all":
             return self._send_inline(
                 "Confirm cancel all?",
-                [[{"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
-                  {"text": "❌ Abort", "callback_data": "abort"}]],
+                [
+                    [
+                        {"text": "✅ Confirm", "callback_data": "confirm_cancel_all"},
+                        {"text": "❌ Abort", "callback_data": "abort"},
+                    ]
+                ],
             )
 
         # --- Strategy tuning ---

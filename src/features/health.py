@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import datetime as dt
+from dataclasses import dataclass
 from typing import List, Optional
 
 import pandas as pd
@@ -56,5 +56,6 @@ def check(
 
     atr_ok = bars_ok  # ATR needs sufficient bars; NaNs handled by indicator
 
-    return FeatureHealth(bars_ok=bars_ok, atr_ok=atr_ok, fresh_ok=age_ok, reasons=reasons)
-
+    return FeatureHealth(
+        bars_ok=bars_ok, atr_ok=atr_ok, fresh_ok=age_ok, reasons=reasons
+    )

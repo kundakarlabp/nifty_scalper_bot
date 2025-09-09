@@ -34,6 +34,12 @@ def v1(
     """
 
     strategy = EnhancedScalpingStrategy()
-    return strategy.generate_signal(
-        df=df, current_tick=current_tick, current_price=current_price, spot_df=spot_df
-    ) or {}
+    return (
+        strategy.generate_signal(
+            df=df,
+            current_tick=current_tick,
+            current_price=current_price,
+            spot_df=spot_df,
+        )
+        or {}
+    )

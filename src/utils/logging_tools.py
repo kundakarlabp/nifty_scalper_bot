@@ -46,7 +46,9 @@ class InMemoryLogHandler(logging.Handler):
         self.capacity = settings.system.log_buffer_capacity
         self._buf: Deque[Tuple[float, int, str]] = deque(maxlen=self.capacity)
         self._lock = threading.Lock()
-        self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        self.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

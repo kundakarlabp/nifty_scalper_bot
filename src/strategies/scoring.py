@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Dict
+from typing import Dict, Mapping
 
 
 @dataclass(frozen=True)
@@ -41,4 +41,3 @@ def compute_score(
         items[key] = round(float(weight) * value, 6)
     total = round(sum(items.values()), 6)
     return ScoreInfo(total=total, items=items)
-

@@ -30,7 +30,9 @@ def evaluate(plan: dict, acct: AccountState, cfg: Any) -> Tuple[bool, List[str]]
     if acct.dd_rupees >= acct.max_daily_loss:
         reasons.append("daily_dd")
 
-    if getattr(acct, "loss_streak", 0) >= int(getattr(getattr(cfg, "risk", object()), "max_consec_losses", 3)):
+    if getattr(acct, "loss_streak", 0) >= int(
+        getattr(getattr(cfg, "risk", object()), "max_consec_losses", 3)
+    ):
         reasons.append("loss_streak")
 
     rrt = getattr(cfg, "rr_threshold", None)

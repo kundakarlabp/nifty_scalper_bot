@@ -47,6 +47,7 @@ def warmup_status(have: int, need: int) -> WarmupInfo:
 # Backwards-compatible helpers used by existing code/tests
 # ---------------------------------------------------------------------------
 
+
 def required_bars(cfg: Any) -> int:
     """Compatibility wrapper returning ``compute_required_bars`` value."""
 
@@ -60,4 +61,3 @@ def check(cfg: Any, have_bars: int) -> WarmupInfo:
 
     need = required_bars(cfg)
     return warmup_status(have_bars, need)
-

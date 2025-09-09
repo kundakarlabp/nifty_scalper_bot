@@ -1,7 +1,8 @@
 # src/diagnostics/healthkit.py
 from __future__ import annotations
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -13,7 +14,12 @@ class HealthItem:
     severity: str = "info"  # info|warn|error
 
 
-def to_dict(items: List[HealthItem], *, last_signal: dict | None = None, meta: dict | None = None) -> Dict[str, Any]:
+def to_dict(
+    items: List[HealthItem],
+    *,
+    last_signal: dict | None = None,
+    meta: dict | None = None,
+) -> Dict[str, Any]:
     return {
         "ok": all(x.ok for x in items),
         "checks": [asdict(x) for x in items],

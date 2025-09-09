@@ -3,6 +3,7 @@
 This module avoids hard dependency on torch/torchvision. If those
 libraries are unavailable, Pillow/NumPy operations are used instead.
 """
+
 from __future__ import annotations
 
 import logging

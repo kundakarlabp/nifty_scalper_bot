@@ -34,8 +34,10 @@ class BrokerOrderExecutor:
         instrument_id_mapper: Optional[Callable[[str], int]] = None,
     ) -> str:
         """Place an order and return the broker order ID."""
-        order = req if isinstance(req, OrderRequest) else self._coerce_request(
-            req, instrument_id_mapper
+        order = (
+            req
+            if isinstance(req, OrderRequest)
+            else self._coerce_request(req, instrument_id_mapper)
         )
         if self._kill_switch_engaged():
             raise RuntimeError("kill switch active")
@@ -70,9 +72,21 @@ class BrokerOrderExecutor:
             side=side,
             qty=qty,
             order_type=kwargs.get("order_type", OrderType.MARKET),
-            price=Decimal(str(kwargs.get("price"))) if kwargs.get("price") is not None else None,
-            stop_loss=Decimal(str(kwargs.get("stop_loss"))) if kwargs.get("stop_loss") is not None else None,
-            target=Decimal(str(kwargs.get("target"))) if kwargs.get("target") is not None else None,
+            price=(
+                Decimal(str(kwargs.get("price")))
+                if kwargs.get("price") is not None
+                else None
+            ),
+            stop_loss=(
+                Decimal(str(kwargs.get("stop_loss")))
+                if kwargs.get("stop_loss") is not None
+                else None
+            ),
+            target=(
+                Decimal(str(kwargs.get("target")))
+                if kwargs.get("target") is not None
+                else None
+            ),
             tif=kwargs.get("tif", TimeInForce.DAY),
             client_order_id=kwargs.get("client_order_id"),
             metadata=kwargs.get("metadata"),
@@ -134,9 +148,21 @@ class BrokerOrderExecutor:
             side=side,
             qty=int(qty_val),
             order_type=order_type,
-            price=Decimal(str(data.get("price"))) if data.get("price") is not None else None,
-            stop_loss=Decimal(str(data.get("stop_loss"))) if data.get("stop_loss") is not None else None,
-            target=Decimal(str(data.get("target"))) if data.get("target") is not None else None,
+            price=(
+                Decimal(str(data.get("price")))
+                if data.get("price") is not None
+                else None
+            ),
+            stop_loss=(
+                Decimal(str(data.get("stop_loss")))
+                if data.get("stop_loss") is not None
+                else None
+            ),
+            target=(
+                Decimal(str(data.get("target")))
+                if data.get("target") is not None
+                else None
+            ),
             tif=tif,
             client_order_id=data.get("client_order_id"),
             metadata=data.get("metadata"),

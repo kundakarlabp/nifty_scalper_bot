@@ -4,8 +4,8 @@ from typing import Optional, Tuple
 
 import pandas as pd
 
-
 # ---------------------------- Core ATR pieces ----------------------------
+
 
 def _true_range(df: pd.DataFrame) -> pd.Series:
     """
@@ -68,7 +68,9 @@ def compute_atr(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.S
     return atr
 
 
-def compute_atr_df(df: pd.DataFrame, period: int = 14, method: str = "rma") -> pd.DataFrame:
+def compute_atr_df(
+    df: pd.DataFrame, period: int = 14, method: str = "rma"
+) -> pd.DataFrame:
     """Return a copy of `df` with an 'atr' column appended. Safe on empty/invalid input."""
     out = df.copy()
     out.loc[:, "atr"] = compute_atr(out, period=period, method=method)
@@ -92,6 +94,7 @@ def latest_atr_value(atr_series: Optional[pd.Series], default: float = 0.0) -> f
 
 
 # ---------------------------- SL/TP shaping ----------------------------
+
 
 def atr_sl_tp_points(
     *,
@@ -129,8 +132,8 @@ def atr_sl_tp_points(
     sl_conf_adj = max(-0.2, min(0.2, float(sl_conf_adj)))
     tp_conf_adj = max(-0.2, min(0.2, float(tp_conf_adj)))
 
-    sl_nudge = (conf / 10.0) * sl_conf_adj    # tighten SL
-    tp_nudge = (conf / 10.0) * tp_conf_adj    # widen TP
+    sl_nudge = (conf / 10.0) * sl_conf_adj  # tighten SL
+    tp_nudge = (conf / 10.0) * tp_conf_adj  # widen TP
 
     sl_pts = max(0.01, sl_base * (1.0 - sl_nudge))
     tp_pts = max(0.01, tp_base * (1.0 + tp_nudge))

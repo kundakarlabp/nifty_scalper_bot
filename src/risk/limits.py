@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, time
-from typing import Dict, Optional, Tuple, List
+from datetime import datetime, time, timedelta
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 
@@ -101,7 +101,11 @@ class RiskEngine:
         details: Dict[str, float] = {}
 
         if self.state.cooloff_until and now < self.state.cooloff_until:
-            return False, "loss_cooloff", {"until": self.state.cooloff_until.isoformat()}
+            return (
+                False,
+                "loss_cooloff",
+                {"until": self.state.cooloff_until.isoformat()},
+            )
 
         if self.state.skip_next_open_date == now.date().isoformat():
             return False, "skip_next_open", {}
@@ -115,63 +119,107 @@ class RiskEngine:
                 and len(self.state.daily_caps_hit_recent) >= 2
                 and self.state.daily_caps_hit_recent[-1] == self.state.session_date
             ):
-                self.state.skip_next_open_date = (now.date() + timedelta(days=1)).isoformat()
-            return False, "daily_dd_hit", {"cum_R_today": round(self.state.cum_R_today, 2)}
+                self.state.skip_next_open_date = (
+                    now.date() + timedelta(days=1)
+                ).isoformat()
+            return (
+                False,
+                "daily_dd_hit",
+                {"cum_R_today": round(self.state.cum_R_today, 2)},
+            )
 
         if self.state.trades_today >= self.cfg.max_trades_per_session:
-            return False, "max_trades_session", {"trades_today": self.state.trades_today}
+            return (
+                False,
+                "max_trades_session",
+                {"trades_today": self.state.trades_today},
+            )
 
         current_lots = exposure.lots_by_symbol.get(intended_symbol, 0)
         if current_lots + intended_lots > self.cfg.max_lots_per_symbol:
-            return False, "max_lots_symbol", {
-                "sym": intended_symbol,
-                "lots": current_lots,
-                "intended": intended_lots,
-            }
+            return (
+                False,
+                "max_lots_symbol",
+                {
+                    "sym": intended_symbol,
+                    "lots": current_lots,
+                    "intended": intended_lots,
+                },
+            )
 
         intended_notional = entry_price * lot_size * intended_lots
         if exposure.notional_rupees + intended_notional > self.cfg.max_notional_rupees:
-            return False, "max_notional", {
-                "cur": exposure.notional_rupees,
-                "add": intended_notional,
-            }
+            return (
+                False,
+                "max_notional",
+                {
+                    "cur": exposure.notional_rupees,
+                    "add": intended_notional,
+                },
+            )
 
         gmode = gamma_mode if gamma_mode is not None else self._is_gamma_mode(now)
 
         if gmode and intended_lots > self.cfg.max_gamma_mode_lots:
-            return False, "gamma_mode_lot_cap", {
-                "intended": intended_lots,
-                "cap": self.cfg.max_gamma_mode_lots,
-            }
+            return (
+                False,
+                "gamma_mode_lot_cap",
+                {
+                    "intended": intended_lots,
+                    "cap": self.cfg.max_gamma_mode_lots,
+                },
+            )
 
         cap = (
-            self.cfg.max_portfolio_delta_units_gamma if gmode else self.cfg.max_portfolio_delta_units
+            self.cfg.max_portfolio_delta_units_gamma
+            if gmode
+            else self.cfg.max_portfolio_delta_units
         )
         if portfolio_delta_units is not None and abs(portfolio_delta_units) > cap:
-            return False, "delta_cap", {
-                "portfolio_delta_units": round(portfolio_delta_units, 1),
-                "cap": cap,
-            }
+            return (
+                False,
+                "delta_cap",
+                {
+                    "portfolio_delta_units": round(portfolio_delta_units, 1),
+                    "cap": cap,
+                },
+            )
         if planned_delta_units is not None and portfolio_delta_units is not None:
             if abs(portfolio_delta_units + planned_delta_units) > cap:
-                return False, "delta_cap_on_add", {
-                    "would_be": round(portfolio_delta_units + planned_delta_units, 1),
-                    "cap": cap,
-                }
+                return (
+                    False,
+                    "delta_cap_on_add",
+                    {
+                        "would_be": round(
+                            portfolio_delta_units + planned_delta_units, 1
+                        ),
+                        "cap": cap,
+                    },
+                )
 
         if len(self.state.roll_R_last10) >= 10:
             avg10 = sum(self.state.roll_R_last10[-10:]) / 10.0
             details["roll10_avgR"] = round(avg10, 3)
             if avg10 < self.cfg.roll10_pause_R:
-                self.state.cooloff_until = now + timedelta(minutes=self.cfg.roll10_pause_minutes)
-                return False, "roll10_down", {
-                    "avg10R": round(avg10, 3),
-                    "until": self.state.cooloff_until.isoformat(),
-                }
+                self.state.cooloff_until = now + timedelta(
+                    minutes=self.cfg.roll10_pause_minutes
+                )
+                return (
+                    False,
+                    "roll10_down",
+                    {
+                        "avg10R": round(avg10, 3),
+                        "until": self.state.cooloff_until.isoformat(),
+                    },
+                )
 
         if self.state.consecutive_losses >= self.cfg.cooloff_losses:
             self.state.cooloff_until = now + timedelta(minutes=self.cfg.cooloff_minutes)
-            return False, "loss_cooloff", {"until": self.state.cooloff_until.isoformat()}
+            return (
+                False,
+                "loss_cooloff",
+                {"until": self.state.cooloff_until.isoformat()},
+            )
 
         if entry_price and stop_loss_price and lot_size and intended_lots:
             r_per_contract = abs(entry_price - stop_loss_price)
@@ -214,7 +262,11 @@ class RiskEngine:
             "cum_R_today": round(self.state.cum_R_today, 3),
             "trades_today": self.state.trades_today,
             "consecutive_losses": self.state.consecutive_losses,
-            "cooloff_until": self.state.cooloff_until.isoformat() if self.state.cooloff_until else None,
+            "cooloff_until": (
+                self.state.cooloff_until.isoformat()
+                if self.state.cooloff_until
+                else None
+            ),
             "roll10_avgR": avg10,
             "daily_caps_hit_recent": list(self.state.daily_caps_hit_recent),
             "skip_next_open_date": self.state.skip_next_open_date,

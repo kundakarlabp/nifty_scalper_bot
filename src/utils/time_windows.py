@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = "Asia/Kolkata"
@@ -17,6 +17,7 @@ def get_timezone() -> ZoneInfo:
     tz_name = DEFAULT_TZ
     try:
         from src.config import settings  # deferred to avoid heavy import at module load
+
         tz_name = getattr(settings, "tz", DEFAULT_TZ)
     except Exception:
         tz_name = DEFAULT_TZ
@@ -43,5 +44,6 @@ def floor_to_minute(ts: datetime, tz: ZoneInfo | None = None) -> datetime:
         ts = ts.replace(tzinfo=tz)
     ts = ts.astimezone(tz)
     return ts.replace(second=0, microsecond=0)
+
 
 __all__ = ["now_ist", "floor_to_minute", "TZ", "get_timezone"]

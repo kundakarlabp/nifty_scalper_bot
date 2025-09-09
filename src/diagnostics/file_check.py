@@ -4,10 +4,11 @@ This module exposes :func:`run_file_diagnostics` which executes Ruff, mypy
 and pytest (for test files) on a given path. It returns a human‑readable
 string summarizing the results so it can be surfaced via Telegram.
 """
+
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from typing import List, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
