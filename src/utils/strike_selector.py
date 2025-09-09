@@ -14,18 +14,18 @@ Safe in shadow mode (when kite_instance is None).
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from statistics import median
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import re
 
 from src.config import settings
-from src.utils.market_time import IST, is_market_open as _market_is_open
-from src.risk.greeks import OptionType, implied_vol_newton, bs_price_delta_gamma
+from src.risk.greeks import OptionType, bs_price_delta_gamma, implied_vol_newton
 from src.utils.expiry import next_tuesday_expiry
+from src.utils.market_time import IST, is_market_open as _market_is_open
 
 try:
     # Optional; only imported if installed
@@ -34,8 +34,8 @@ except Exception:  # pragma: no cover
     KiteConnect = object  # type: ignore
 
 
-
 logger = logging.getLogger(__name__)
+
 
 # -----------------------------------------------------------------------------
 # Parsers
@@ -52,6 +52,7 @@ def parse_nfo_symbol(tsym: str):
     k = float(m.group(2))
     opt = m.group(3)
     return {"strike": k, "option_type": opt}
+
 
 # -----------------------------------------------------------------------------
 # Module-level rate limiting and small caches
@@ -104,7 +105,9 @@ def is_market_open() -> bool:
 # -----------------------------------------------------------------------------
 # Data fetchers (safe when kite is None)
 # -----------------------------------------------------------------------------
-def _fetch_instruments_nfo(kite: Optional[KiteConnect]) -> Optional[List[Dict[str, Any]]]:
+def _fetch_instruments_nfo(
+    kite: Optional[KiteConnect],
+) -> Optional[List[Dict[str, Any]]]:
     """
     Fetch the full list of NFO instruments (options) with a short cache & rate limit.
     """
@@ -112,9 +115,17 @@ def _fetch_instruments_nfo(kite: Optional[KiteConnect]) -> Optional[List[Dict[st
     now = time.time()
 
     # Return cached copy if fresh enough
-    if _instruments_cache is not None and (now - _instruments_cache_ts) < _INSTRUMENTS_TTL:
-        trade_symbol = str(getattr(getattr(settings, "instruments", object()), "trade_symbol", "")).upper()
-        if not any(str(row.get("name", "")).upper() == trade_symbol for row in _instruments_cache):
+    if (
+        _instruments_cache is not None
+        and (now - _instruments_cache_ts) < _INSTRUMENTS_TTL
+    ):
+        trade_symbol = str(
+            getattr(getattr(settings, "instruments", object()), "trade_symbol", "")
+        ).upper()
+        if not any(
+            str(row.get("name", "")).upper() == trade_symbol
+            for row in _instruments_cache
+        ):
             msg = f"Trade symbol {trade_symbol} not found in NFO instruments dump"
             logger.warning(msg)
             raise ValueError(msg)
@@ -129,8 +140,12 @@ def _fetch_instruments_nfo(kite: Optional[KiteConnect]) -> Optional[List[Dict[st
         # Correct signature for Kite: instruments(exchange)
         instruments = _rate_call(kite.instruments, call_key, "NFO")
         if isinstance(instruments, list) and instruments:
-            trade_symbol = str(getattr(getattr(settings, "instruments", object()), "trade_symbol", "")).upper()
-            if not any(str(row.get("name", "")).upper() == trade_symbol for row in instruments):
+            trade_symbol = str(
+                getattr(getattr(settings, "instruments", object()), "trade_symbol", "")
+            ).upper()
+            if not any(
+                str(row.get("name", "")).upper() == trade_symbol for row in instruments
+            ):
                 msg = f"Trade symbol {trade_symbol} not found in NFO instruments dump"
                 logger.warning(msg)
                 raise ValueError(msg)
@@ -248,7 +263,9 @@ def resolve_weekly_atm(
     return out
 
 
-def _resolve_weekly_expiry_from_dump(nfo_instruments: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
+def _resolve_weekly_expiry_from_dump(
+    nfo_instruments: List[Dict[str, Any]], trade_symbol: str
+) -> Optional[str]:
     """
     From the live instrument dump, collect expiries for the given name/symbol and
     pick the nearest one >= today (IST). Return 'YYYY-MM-DD' or None.
@@ -304,7 +321,9 @@ def _same_day_expiry(now: datetime) -> Optional[str]:
     return None
 
 
-def _nearest_expiry(now: datetime, dump: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
+def _nearest_expiry(
+    now: datetime, dump: List[Dict[str, Any]], trade_symbol: str
+) -> Optional[str]:
     """Resolve the nearest expiry from the instrument dump or fallback."""
     exp = _resolve_weekly_expiry_from_dump(dump, trade_symbol)
     if exp is not None:
@@ -312,9 +331,13 @@ def _nearest_expiry(now: datetime, dump: List[Dict[str, Any]], trade_symbol: str
     return _next_weekly_expiry(now)
 
 
-def _pick_expiry(now: datetime, dump: List[Dict[str, Any]], trade_symbol: str) -> Optional[str]:
+def _pick_expiry(
+    now: datetime, dump: List[Dict[str, Any]], trade_symbol: str
+) -> Optional[str]:
     """Choose an expiry according to configuration with safe fallbacks."""
-    mode = getattr(getattr(settings, "strategy", object()), "option_expiry_mode", "nearest")
+    mode = getattr(
+        getattr(settings, "strategy", object()), "option_expiry_mode", "nearest"
+    )
     if mode == "today":
         exp = _same_day_expiry(now)
         if exp is None:
@@ -370,7 +393,7 @@ def get_instrument_tokens(
                 px = float(spot_price)
             except Exception:
                 px = None
-        if (px is None or px <= 0.0):
+        if px is None or px <= 0.0:
             px = _get_spot_ltp(kite_instance, spot_symbol)
 
         # Without a spot price, we can still return static info
@@ -495,7 +518,9 @@ def health_check() -> Dict[str, Any]:
     return {
         "ok": True,
         "ist_open": is_market_open(),
-        "trade_symbol": getattr(getattr(settings, "instruments", object()), "trade_symbol", "NIFTY"),
+        "trade_symbol": getattr(
+            getattr(settings, "instruments", object()), "trade_symbol", "NIFTY"
+        ),
     }
 
 
@@ -514,7 +539,9 @@ def _default_option_info_fetcher(strike: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-_option_info_fetcher: Callable[[int], Optional[Dict[str, Any]]] = _default_option_info_fetcher
+_option_info_fetcher: Callable[[int], Optional[Dict[str, Any]]] = (
+    _default_option_info_fetcher
+)
 
 
 def set_option_info_fetcher(fn: Callable[[int], Optional[Dict[str, Any]]]) -> None:
@@ -523,9 +550,13 @@ def set_option_info_fetcher(fn: Callable[[int], Optional[Dict[str, Any]]]) -> No
     _option_info_fetcher = fn
 
 
-def select_strike(spot: float, score: int, allow_pm1_if_score_ge: int = 9) -> Optional[StrikeInfo]:
+def select_strike(
+    spot: float, score: int, allow_pm1_if_score_ge: int = 9
+) -> Optional[StrikeInfo]:
     """Pick an ATM (or +/-1) strike subject to basic liquidity guards."""
-    step = _infer_step(getattr(getattr(settings, "instruments", object()), "trade_symbol", ""))
+    step = _infer_step(
+        getattr(getattr(settings, "instruments", object()), "trade_symbol", "")
+    )
     atm = int(round(float(spot) / step) * step)
     candidates = [atm]
     if score >= int(allow_pm1_if_score_ge):
@@ -573,7 +604,9 @@ def select_strike_by_delta(
     return sorted(cand, key=lambda x: x[0])[0][1]
 
 
-def needs_reatm(entry_spot: float, current_spot: float, drift_pct: float = 0.35) -> bool:
+def needs_reatm(
+    entry_spot: float, current_spot: float, drift_pct: float = 0.35
+) -> bool:
     """Return True if spot drift from entry exceeds ``drift_pct`` percent."""
     try:
         entry = float(entry_spot)

@@ -3,6 +3,7 @@ from __future__ import annotations
 """Synthetic data utilities for backtesting."""
 
 from datetime import datetime
+
 import pandas as pd
 
 

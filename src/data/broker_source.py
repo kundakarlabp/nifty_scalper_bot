@@ -23,7 +23,9 @@ class BrokerDataSource:
         """Set the callback invoked for each tick."""
         self._tick_cb = cb
 
-    def on_tick(self, cb: Callable[[Tick], None]) -> None:  # pragma: no cover - simple alias
+    def on_tick(
+        self, cb: Callable[[Tick], None]
+    ) -> None:  # pragma: no cover - simple alias
         """Alias for :meth:`set_tick_callback`."""
         self.set_tick_callback(cb)
 

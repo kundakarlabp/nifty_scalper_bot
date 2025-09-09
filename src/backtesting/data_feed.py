@@ -3,9 +3,9 @@ from __future__ import annotations
 """Minimal spot data feed for backtests."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterator, Optional, Tuple
 from zoneinfo import ZoneInfo
-from datetime import datetime
 
 import pandas as pd
 
@@ -39,7 +39,9 @@ class SpotFeed:
         else:
             ts = pd.to_datetime(ts_col, utc=False, infer_datetime_format=True)
         df.index = ts.dt.tz_localize(None)
-        df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]].sort_index()
+        df = df.rename(columns=str.lower)[
+            ["open", "high", "low", "close", "volume"]
+        ].sort_index()
         return cls(df=df, tz=ZoneInfo(tz))
 
     def window(self, start: Optional[str], end: Optional[str]) -> "SpotFeed":
@@ -56,4 +58,6 @@ class SpotFeed:
         """Yield each bar as ``(ts, open, high, low, close, volume)``."""
 
         for ts, row in self.df.iterrows():
-            yield ts, float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume or 0.0)
+            yield ts, float(row.open), float(row.high), float(row.low), float(
+                row.close
+            ), float(row.volume or 0.0)

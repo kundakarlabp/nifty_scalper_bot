@@ -135,7 +135,10 @@ def estimate_greeks_from_mid(
     to an ATR-based proxy or a constant guess.
     """
     expiry = next_weekly_expiry_ist(now, tz)
-    T = max(1e-9, (expiry - now.astimezone(ZoneInfo(tz))).total_seconds() / (365.0 * 24 * 3600.0))
+    T = max(
+        1e-9,
+        (expiry - now.astimezone(ZoneInfo(tz))).total_seconds() / (365.0 * 24 * 3600.0),
+    )
     iv = implied_vol_newton(mid, S, K, T, r, q, opt)
     if iv:
         _, d, g = bs_price_delta_gamma(S, K, T, r, q, iv, opt)

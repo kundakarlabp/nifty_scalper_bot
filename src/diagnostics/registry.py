@@ -8,10 +8,10 @@ components can expose health checks.  Results are represented by
 Telegram or log consumption.
 """
 
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, List, Optional
 import json
 import time
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -29,7 +29,9 @@ class CheckResult:
 _registry: Dict[str, Callable[[], CheckResult]] = {}
 
 
-def register(name: str) -> Callable[[Callable[[], CheckResult]], Callable[[], CheckResult]]:
+def register(
+    name: str,
+) -> Callable[[Callable[[], CheckResult]], Callable[[], CheckResult]]:
     """Decorator to register a diagnostic check under ``name``."""
 
     def deco(fn: Callable[[], CheckResult]) -> Callable[[], CheckResult]:

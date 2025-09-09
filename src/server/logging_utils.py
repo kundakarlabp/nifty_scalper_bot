@@ -6,9 +6,9 @@ from collections import deque
 
 from src.boot.validate_env import _log_cred_presence
 from src.config import settings
-from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
-from src.utils.logger_setup import setup_logging
 from src.utils.log_filters import install_warmup_filters
+from src.utils.logger_setup import setup_logging
+from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
 
 
 def _setup_logging() -> None:  # pragma: no cover
@@ -40,12 +40,13 @@ def _setup_logging() -> None:  # pragma: no cover
 
 def _import_telegram_class():  # pragma: no cover
     try:
-        from src.notifications.telegram_controller import TelegramController  # type: ignore
+        from src.notifications.telegram_controller import (
+            TelegramController,  # type: ignore
+        )
+
         return TelegramController
     except ImportError:
-        logging.getLogger("main").exception(
-            "Failed to import Telegram controller"
-        )
+        logging.getLogger("main").exception("Failed to import Telegram controller")
         raise
 
 

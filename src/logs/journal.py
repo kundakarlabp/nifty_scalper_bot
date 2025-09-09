@@ -154,7 +154,9 @@ class Journal:
     # ---------------- idempotency ----------------
     def get_idemp_leg(self, key: str) -> Optional[str]:
         """Return leg_id associated with ``key`` if known."""
-        cur = self._exec("SELECT leg_id FROM idempotency WHERE idempotency_key=?", (key,))
+        cur = self._exec(
+            "SELECT leg_id FROM idempotency WHERE idempotency_key=?", (key,)
+        )
         r = cur.fetchone()
         return r[0] if r else None
 
@@ -162,7 +164,9 @@ class Journal:
     def save_checkpoint(self, payload: Dict[str, Any]) -> None:
         """Persist a lightweight checkpoint snapshot."""
         ts = datetime.utcnow().isoformat()
-        self._exec("INSERT INTO checkpoints(ts,payload) VALUES(?,?)", (ts, json.dumps(payload)))
+        self._exec(
+            "INSERT INTO checkpoints(ts,payload) VALUES(?,?)", (ts, json.dumps(payload))
+        )
 
     def load_latest_checkpoint(self) -> Optional[Dict[str, Any]]:
         """Return latest checkpoint payload if present."""
@@ -186,7 +190,11 @@ class Journal:
             if etype in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED"}:
                 continue
             payload = json.loads(payload_json or "{}")
-            if not payload.get("side") or not payload.get("symbol") or not payload.get("qty"):
+            if (
+                not payload.get("side")
+                or not payload.get("symbol")
+                or not payload.get("qty")
+            ):
                 cur2 = self._exec(
                     "SELECT payload FROM events WHERE leg_id=? AND etype='NEW' ORDER BY id ASC LIMIT 1",
                     (leg_id,),
@@ -224,7 +232,9 @@ class Journal:
 
 
 # ---------------- compatibility helpers ----------------
-def read_trades_between(start_dt: datetime, end_dt: datetime, path: str = "data/journal.sqlite") -> List[Dict[str, Any]]:
+def read_trades_between(
+    start_dt: datetime, end_dt: datetime, path: str = "data/journal.sqlite"
+) -> List[Dict[str, Any]]:
     """Return trades closed between ``start_dt`` and ``end_dt`` from the journal."""
     j = Journal.open(path)
     cur = j._exec(
@@ -233,8 +243,10 @@ def read_trades_between(start_dt: datetime, end_dt: datetime, path: str = "data/
     )
     rows: List[Dict[str, Any]] = []
     for ts_exit, pnl_R in cur.fetchall():
-        rows.append({
-            "ts_close": datetime.fromisoformat(ts_exit),
-            "pnl_R": float(pnl_R),
-        })
+        rows.append(
+            {
+                "ts_close": datetime.fromisoformat(ts_exit),
+                "pnl_R": float(pnl_R),
+            }
+        )
     return rows

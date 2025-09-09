@@ -1,27 +1,27 @@
 # src/data/source.py
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
-import time
 import random
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import datetime as dt
-from typing import Any, Dict, Optional, Tuple, Callable, List, Deque
-
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from src.data.types import HistResult, HistStatus
-from src.utils.atr_helper import compute_atr
-from src.utils.indicators import calculate_vwap
-from src.utils.circuit_breaker import CircuitBreaker
-from src.data.base_source import BaseDataSource
+
 from src.boot.validate_env import (
     data_warmup_disable,
 )
+from src.data.base_source import BaseDataSource
+from src.data.types import HistResult, HistStatus
+from src.utils.atr_helper import compute_atr
+from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.indicators import calculate_vwap
 
 log = logging.getLogger(__name__)
 
@@ -29,11 +29,11 @@ log = logging.getLogger(__name__)
 try:
     from kiteconnect import KiteConnect  # type: ignore
     from kiteconnect.exceptions import (  # type: ignore
-        NetworkException,
-        TokenException,
-        InputException,
         DataException,
         GeneralException,
+        InputException,
+        NetworkException,
+        TokenException,
     )
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
@@ -152,10 +152,12 @@ class DataSource:
         try:
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         except Exception:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "ts"]
+            )
 
-        from src.utils.time_windows import now_ist, floor_to_minute
         from src.data.ohlc_builder import prepare_ohlc
+        from src.utils.time_windows import floor_to_minute, now_ist
 
         now = now_ist()
         cutoff = now - timedelta(seconds=5)
@@ -196,7 +198,7 @@ class DataSource:
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         except Exception:
             return HistResult(HistStatus.ERROR, pd.DataFrame(), "invalid token")
-        from src.utils.time_windows import now_ist, floor_to_minute
+        from src.utils.time_windows import floor_to_minute, now_ist
 
         end = floor_to_minute(now_ist(), None)
         lookback = max(60, n + 50)
@@ -252,6 +254,7 @@ def _floor_to_interval_end(ts: datetime, interval: str) -> datetime:
         microseconds=ts.microsecond,
     )
 
+
 from typing import Any, cast
 
 try:  # pragma: no cover - imported lazily to avoid circular dependency during settings init
@@ -283,11 +286,14 @@ class _TTLCache:
     Extremely simple per‑(token,interval) cache to soften historical_data pressure
     during frequent ticks or Telegram diagnostics. Keeps a tiny TTL.
     """
+
     def __init__(self, ttl_sec: float = 4.0) -> None:
         self._ttl = float(ttl_sec)
         self._data: Dict[Tuple[int, str], _CacheEntry] = {}
 
-    def get(self, token: int, interval: str, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
+    def get(
+        self, token: int, interval: str, start: datetime, end: datetime
+    ) -> Optional[pd.DataFrame]:
         key = (int(token), interval)
         ent = self._data.get(key)
         if not ent:
@@ -298,7 +304,9 @@ class _TTLCache:
         s0, e0 = ent.fetched_window
         if s0 <= start and e0 >= end:
             try:
-                return ent.df.loc[(ent.df.index >= start) & (ent.df.index <= end)].copy()
+                return ent.df.loc[
+                    (ent.df.index >= start) & (ent.df.index <= end)
+                ].copy()
             except Exception:
                 return None
         return None
@@ -326,8 +334,8 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
         token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         if token <= 0:
             return "instrument_token missing"
-        from src.utils.time_windows import now_ist, floor_to_minute
         from src.data.ohlc_builder import prepare_ohlc
+        from src.utils.time_windows import floor_to_minute, now_ist
 
         now = now_ist()
         cutoff = now - timedelta(seconds=5)
@@ -353,8 +361,14 @@ def render_last_bars(ds: DataSource, n: int = 5) -> str:
                 f"{ts:%H:%M} O={row['open']:.2f} H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} VWAP={vwap_val:.2f} ATR={atr_val:.2f} EMA21={ema21_val:.2f} EMA50={ema50_val:.2f}"
             )
         last_ts = df.index[-1]
-        atr_pct = (float(atr.iloc[-1]) / float(df["close"].iloc[-1]) * 100.0) if len(atr) else 0.0
-        lines.append(f"last_bar_ts={last_ts.to_pydatetime().isoformat()} ATR%={atr_pct:.2f}")
+        atr_pct = (
+            (float(atr.iloc[-1]) / float(df["close"].iloc[-1]) * 100.0)
+            if len(atr)
+            else 0.0
+        )
+        lines.append(
+            f"last_bar_ts={last_ts.to_pydatetime().isoformat()} ATR%={atr_pct:.2f}"
+        )
         return "\n".join(lines)
     except Exception as e:  # pragma: no cover - diagnostic helper
         return f"bars error: {e}"
@@ -371,7 +385,9 @@ def _normalize_ohlc_df(rows: Any) -> pd.DataFrame:
     try:
         df = pd.DataFrame(rows if rows is not None else []).copy()
         if df.empty:
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "ts"]
+            )
 
         df = df.rename(columns=lambda c: str(c).lower())
         df = df.T.groupby(level=0).sum(min_count=1).T
@@ -390,7 +406,9 @@ def _normalize_ohlc_df(rows: Any) -> pd.DataFrame:
 
         need = ["open", "high", "low", "close"]
         if not set(need).issubset(df.columns):
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "ts"])
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "ts"]
+            )
 
         if "volume" not in df.columns:
             df["volume"] = 0
@@ -433,8 +451,9 @@ def _retry(fn: Callable, *args, tries: int = 3, base_delay: float = 0.25, **kwar
 
     # Import lazily to avoid hard dependency on requests/urllib3 during tests
     try:  # pragma: no cover - simple import guard
-        from requests import exceptions as req_exc  # type: ignore
         import urllib3  # type: ignore
+        from requests import exceptions as req_exc  # type: ignore
+
         http_exc: Tuple[type[BaseException], ...] = (
             req_exc.RequestException,
             urllib3.exceptions.HTTPError,
@@ -702,7 +721,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
             key = str(sym_or_token)
             v = (data or {}).get(key)
             if not isinstance(v, dict):
-                log.warning("get_last_price: %s not found in LTP response", sym_or_token)
+                log.warning(
+                    "get_last_price: %s not found in LTP response", sym_or_token
+                )
                 return None
             val = v.get("last_price")
             price = float(val) if isinstance(val, (int, float)) else None
@@ -743,7 +764,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         df.sort_index(inplace=True)
                         if hasattr(self, "seed_ohlc"):
                             try:
-                                self.seed_ohlc(df[["open", "high", "low", "close", "volume"]])
+                                self.seed_ohlc(
+                                    df[["open", "high", "low", "close", "volume"]]
+                                )
                             except Exception:
                                 pass
                     if len(df) >= required_bars:
@@ -766,7 +789,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         if not isinstance(start, datetime) or not isinstance(end, datetime):
             log.error(
-                "fetch_ohlc: start/end must be datetime, got %r %r", type(start), type(end)
+                "fetch_ohlc: start/end must be datetime, got %r %r",
+                type(start),
+                type(end),
             )
             self._last_hist_reason = "invalid_time"
             return pd.DataFrame()
@@ -781,9 +806,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = _INTERVAL_TO_MINUTES.get(interval, 1) * 60
 
         # Ensure warmup window
-        needed = timedelta(
-            minutes=_INTERVAL_TO_MINUTES.get(interval, 1) * WARMUP_BARS
-        )
+        needed = timedelta(minutes=_INTERVAL_TO_MINUTES.get(interval, 1) * WARMUP_BARS)
         if end - start < needed:
             start = end - needed
 
@@ -812,7 +835,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     (start, end),
                 )
                 if not syn.empty:
-                    self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
+                    self._last_bar_open_ts = pd.to_datetime(
+                        syn.index[-1]
+                    ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
                 return syn
             self._last_hist_reason = "broker_unavailable"
@@ -945,14 +970,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
             )
             need = {"open", "high", "low", "close"}
             if not clipped.empty and need.issubset(clipped.columns):
-                self._last_bar_open_ts = pd.to_datetime(clipped.index[-1]).to_pydatetime()
+                self._last_bar_open_ts = pd.to_datetime(
+                    clipped.index[-1]
+                ).to_pydatetime()
                 return clipped
 
             self._last_hist_reason = "missing_cols"
             return pd.DataFrame()
 
         except Exception as e:
-            log.warning("fetch_ohlc failed token=%s interval=%s: %s", token, interval, e)
+            log.warning(
+                "fetch_ohlc failed token=%s interval=%s: %s", token, interval, e
+            )
             ltp = self.get_last_price(token)
             if isinstance(ltp, (int, float)):
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
@@ -968,7 +997,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     (start, end),
                 )
                 if not syn.empty:
-                    self._last_bar_open_ts = pd.to_datetime(syn.index[-1]).to_pydatetime()
+                    self._last_bar_open_ts = pd.to_datetime(
+                        syn.index[-1]
+                    ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
                 return syn
             self._last_hist_reason = str(e)
@@ -980,7 +1011,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
         df = self._fetch_ohlc_df(token=token, start=start, end=end, timeframe=timeframe)
         df = _normalize_ohlc_df(df)
         status = HistStatus.OK if not df.empty else HistStatus.NO_DATA
-        reason = "" if status is HistStatus.OK else getattr(self, "_last_hist_reason", "")
+        reason = (
+            "" if status is HistStatus.OK else getattr(self, "_last_hist_reason", "")
+        )
         if status is HistStatus.NO_DATA:
             interval = _coerce_interval(str(timeframe))
             _hist_warn(int(token), interval, start, end, reason)
@@ -1003,7 +1036,9 @@ def _refresh_instruments_nfo(broker: Any) -> list[dict]:
         mins = int(os.getenv("INSTRUMENTS_REFRESH_MINUTES", "15"))
     except Exception:
         mins = 15
-    if (_instruments_cache["items"] and now - _instruments_cache["ts"] < mins * 60) or not broker:
+    if (
+        _instruments_cache["items"] and now - _instruments_cache["ts"] < mins * 60
+    ) or not broker:
         return list(_instruments_cache["items"])
     items: list[dict] = []
     fn = getattr(broker, "instruments", None)
@@ -1016,7 +1051,9 @@ def _refresh_instruments_nfo(broker: Any) -> list[dict]:
     return list(items)
 
 
-def _pick_expiry(items: list[dict], underlying: str, today: dt.date) -> Optional[dt.date]:
+def _pick_expiry(
+    items: list[dict], underlying: str, today: dt.date
+) -> Optional[dt.date]:
     """Pick weekly expiry for ``underlying`` on/after ``today``."""
     week_wd = int(os.getenv("WEEKLY_EXPIRY_WEEKDAY", "2")) - 1
     prefer_monthly = os.getenv("PREFER_MONTHLY_EXPIRY", "false").lower() == "true"
@@ -1198,5 +1235,3 @@ def auto_resubscribe_atm(self: Any) -> None:
 # Bind helpers to DataSource for easy access
 DataSource.auto_resubscribe_atm = auto_resubscribe_atm  # type: ignore[attr-defined]
 DataSource.ensure_atm_tokens = ensure_atm_tokens  # type: ignore[attr-defined]
-
-

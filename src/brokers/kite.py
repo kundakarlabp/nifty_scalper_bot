@@ -7,12 +7,13 @@ from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency
-    from kiteconnect import KiteConnect  # type: ignore
     import kiteconnect.exceptions as kex  # type: ignore
+    from kiteconnect import KiteConnect  # type: ignore
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
     kex = None  # type: ignore
 
+from src.broker.instruments import InstrumentStore
 from src.broker.interface import (
     AuthError,
     Broker,
@@ -30,12 +31,11 @@ from src.broker.interface import (
     Tick,
     TimeInForce,
 )
-from src.broker.instruments import InstrumentStore
 from src.execution import broker_retry
 from src.utils.broker_errors import (
     AUTH,
-    THROTTLE,
     NETWORK as NET,
+    THROTTLE,
     classify_broker_error,
 )
 
@@ -76,7 +76,9 @@ class KiteBroker(Broker):
     def is_connected(self) -> bool:
         return bool(self._connected)
 
-    def subscribe_ticks(self, instruments: Sequence[int], on_tick: Callable[[Tick], None]) -> None:  # pragma: no cover - WS omitted
+    def subscribe_ticks(
+        self, instruments: Sequence[int], on_tick: Callable[[Tick], None]
+    ) -> None:  # pragma: no cover - WS omitted
         self._tick_cb = on_tick
 
     def ltp(self, instrument_id: int) -> Decimal:  # pragma: no cover - network omitted
@@ -87,14 +89,18 @@ class KiteBroker(Broker):
         return Decimal(str(first.get("last_price")))
 
     # Order management ----------------------------------------------------------
-    def place_order(self, req: OrderRequest) -> str:  # pragma: no cover - network omitted
+    def place_order(
+        self, req: OrderRequest
+    ) -> str:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
         params = self._map_order_request(req)
         oid = self._kite.place_order(**params)  # type: ignore[call-arg]
         return str(oid)
 
-    def modify_order(self, order_id: str, **kwargs: Any) -> None:  # pragma: no cover - network omitted
+    def modify_order(
+        self, order_id: str, **kwargs: Any
+    ) -> None:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
         self._kite.modify_order(order_id=order_id, **kwargs)  # type: ignore[call-arg]
@@ -111,7 +117,9 @@ class KiteBroker(Broker):
         payload = hist[-1] if hist else {"order_id": order_id, "status": "UNKNOWN"}
         return self._map_order(payload)
 
-    def get_positions(self) -> List[Dict[str, Any]]:  # pragma: no cover - network omitted
+    def get_positions(
+        self,
+    ) -> List[Dict[str, Any]]:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
         pos = broker_retry.call(self._kite.positions)  # type: ignore[call-arg]
@@ -156,11 +164,19 @@ class KiteBroker(Broker):
             "CANCELLED": OrderStatus.CANCELLED,
             "REJECTED": OrderStatus.REJECTED,
         }
-        status = status_map.get(str(payload.get("status", "")).upper(), OrderStatus.OPEN)
+        status = status_map.get(
+            str(payload.get("status", "")).upper(), OrderStatus.OPEN
+        )
         filled = int(payload.get("filled_quantity", payload.get("filled_qty", 0)) or 0)
         avg = payload.get("average_price") or payload.get("avg_price")
         avg_dec = Decimal(str(avg)) if avg is not None else None
-        return Order(order_id=str(payload.get("order_id", "")), status=status, filled_qty=filled, avg_fill_price=avg_dec, raw=payload)
+        return Order(
+            order_id=str(payload.get("order_id", "")),
+            status=status,
+            filled_qty=filled,
+            avg_fill_price=avg_dec,
+            raw=payload,
+        )
 
     # Error translation ---------------------------------------------------------
     def _translate_and_raise(self, exc: Exception) -> None:

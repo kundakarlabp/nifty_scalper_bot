@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, Optional
 
 try:  # pragma: no cover - during tests settings may be absent
@@ -39,11 +39,21 @@ class CircuitBreaker:
 
     def __init__(self, name: str, **cfg: float) -> None:
         env = {
-            "error_rate_threshold": float(getattr(settings, "cb_error_rate", 0.10) if settings else 0.10),
-            "latency_p95_ms": int(getattr(settings, "cb_p95_ms", 1200) if settings else 1200),
-            "min_samples": int(getattr(settings, "cb_min_samples", 30) if settings else 30),
-            "open_cooldown_sec": int(getattr(settings, "cb_open_cooldown_sec", 30) if settings else 30),
-            "half_open_probe": int(getattr(settings, "cb_half_open_probe", 3) if settings else 3),
+            "error_rate_threshold": float(
+                getattr(settings, "cb_error_rate", 0.10) if settings else 0.10
+            ),
+            "latency_p95_ms": int(
+                getattr(settings, "cb_p95_ms", 1200) if settings else 1200
+            ),
+            "min_samples": int(
+                getattr(settings, "cb_min_samples", 30) if settings else 30
+            ),
+            "open_cooldown_sec": int(
+                getattr(settings, "cb_open_cooldown_sec", 30) if settings else 30
+            ),
+            "half_open_probe": int(
+                getattr(settings, "cb_half_open_probe", 3) if settings else 3
+            ),
             "window_size": 200,
         }
         env.update(cfg)
@@ -60,7 +70,9 @@ class CircuitBreaker:
         self._latencies: Deque[int] = deque(maxlen=self.window_size)
         self._errors = 0
         self._total = 0
-        self.open_until: Optional[datetime] = None  # aware UTC time when breaker can half-open
+        self.open_until: Optional[datetime] = (
+            None  # aware UTC time when breaker can half-open
+        )
         self._half_open_successes = 0
         self.last_reason: str = ""
 
@@ -87,7 +99,11 @@ class CircuitBreaker:
         if self.state == self.HALF_OPEN:
             self._half_open_successes += 1
             if self._half_open_successes >= self.half_open_probe:
-                self._transition(self.HALF_OPEN, self.CLOSED, reason=f"probe={self._half_open_successes}/{self.half_open_probe}")
+                self._transition(
+                    self.HALF_OPEN,
+                    self.CLOSED,
+                    reason=f"probe={self._half_open_successes}/{self.half_open_probe}",
+                )
                 self._reset_metrics()
         else:
             self._evaluate(latency_ms)
@@ -113,7 +129,9 @@ class CircuitBreaker:
         err_rate = self._err_rate()
         p95 = self._p95()
         if err_rate > self.error_rate_threshold or p95 > self.latency_p95_ms:
-            self._transition(self.CLOSED, self.OPEN, err_rate=err_rate, p95=p95, reason=reason)
+            self._transition(
+                self.CLOSED, self.OPEN, err_rate=err_rate, p95=p95, reason=reason
+            )
             self.open_until = _utcnow() + timedelta(seconds=self.open_cooldown_sec)
 
     def _transition(self, src: str, dst: str, **extra: Any) -> None:

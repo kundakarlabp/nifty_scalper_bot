@@ -70,7 +70,9 @@ def check_data_window() -> CheckResult:
         return _bad("runner not ready", name="data_window", fix="start the bot")
     df = r.ohlc_window()
     if df is None or df.empty:
-        return _bad("no bars", name="data_window", fix="enable backfill or broker history")
+        return _bad(
+            "no bars", name="data_window", fix="enable backfill or broker history"
+        )
     last_ts = df.index[-1]
     lag_s = (r.now_ist - last_ts).total_seconds()
     tf_s = 60  # timeframe is minute
@@ -81,7 +83,12 @@ def check_data_window() -> CheckResult:
         name="data_window",
         ok=ok,
         msg=msg,
-        details={"bars": len(df), "last_bar_ts": str(last_ts), "lag_s": lag_s, "tf_s": tf_s},
+        details={
+            "bars": len(df),
+            "last_bar_ts": str(last_ts),
+            "lag_s": lag_s,
+            "tf_s": tf_s,
+        },
         fix=fix,
     )
 
@@ -142,8 +149,8 @@ def check_regime() -> CheckResult:
 def check_strategy() -> CheckResult:
     """Ensure strategy produces a structured plan."""
 
-    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
     from src.strategies.runner import StrategyRunner
+    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 
     r = StrategyRunner.get_singleton()
     if r is None:
@@ -152,7 +159,9 @@ def check_strategy() -> CheckResult:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return _bad("no data", name="strategy", fix="wait for bars")
     st = EnhancedScalpingStrategy()
-    plan: Dict[str, Any] = st.generate_signal(df, current_price=float(df["close"].iloc[-1])) or {}
+    plan: Dict[str, Any] = (
+        st.generate_signal(df, current_price=float(df["close"].iloc[-1])) or {}
+    )
     need = {"action", "rr", "score", "reasons"}
     missing = [k for k in need if k not in plan]
     if missing:
@@ -199,8 +208,8 @@ def check_sizing() -> CheckResult:
 def check_micro() -> CheckResult:
     """Check option microstructure metrics (spread and depth)."""
 
-    from src.strategies.runner import StrategyRunner
     from src.execution.micro_filters import micro_from_l1
+    from src.strategies.runner import StrategyRunner
 
     r = StrategyRunner.get_singleton()
     if r is None:
@@ -231,7 +240,9 @@ def check_broker() -> CheckResult:
 
     r = StrategyRunner.get_singleton()
     if r is None or r.kite is None:
-        return _bad("no session", name="broker", fix="re-login / check API key", connected=False)
+        return _bad(
+            "no session", name="broker", fix="re-login / check API key", connected=False
+        )
     return _ok("connected", name="broker", connected=True)
 
 

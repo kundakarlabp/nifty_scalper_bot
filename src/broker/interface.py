@@ -119,7 +119,9 @@ class Broker(Protocol):
     def is_connected(self) -> bool:
         """Return ``True`` if a connection is active."""
 
-    def subscribe_ticks(self, instruments: Sequence[int], on_tick: Callable[[Tick], None]) -> None:
+    def subscribe_ticks(
+        self, instruments: Sequence[int], on_tick: Callable[[Tick], None]
+    ) -> None:
         """Subscribe to tick data for instruments."""
 
     def ltp(self, instrument_id: int) -> Decimal:

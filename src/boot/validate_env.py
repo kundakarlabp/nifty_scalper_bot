@@ -1,11 +1,10 @@
-from datetime import datetime, timedelta
 import logging
 import os
+from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional, cast
-from decimal import Decimal
 
-import pandas as pd
 import yaml  # type: ignore[import-untyped]
 
 from src.config import AppSettings, settings
@@ -36,9 +35,9 @@ def _skip_validation() -> bool:
 
 
 # Exposed flag so tests can monkeypatch and skip broker checks
-SKIP_BROKER_VALIDATION: bool = (
-    str(os.getenv("SKIP_BROKER_VALIDATION", "false")).lower() in {"1", "true", "yes"}
-)
+SKIP_BROKER_VALIDATION: bool = str(
+    os.getenv("SKIP_BROKER_VALIDATION", "false")
+).lower() in {"1", "true", "yes"}
 
 
 ZERODHA_API_KEY_ALIASES: tuple[str, ...] = (
@@ -107,14 +106,9 @@ def _ensure_env_seeded() -> None:
 
 def enable_live_trading() -> bool:
     _ensure_env_seeded()
-    return (
-        str(
-            os.getenv("ENABLE_LIVE_TRADING")
-            or os.getenv("ENABLE_TRADING")
-            or "false"
-        ).lower()
-        in {"1", "true", "yes"}
-    )
+    return str(
+        os.getenv("ENABLE_LIVE_TRADING") or os.getenv("ENABLE_TRADING") or "false"
+    ).lower() in {"1", "true", "yes"}
 
 
 def skip_broker_validation() -> bool:
@@ -135,10 +129,11 @@ def skip_broker_validation() -> bool:
 
 def broker_connect_for_data() -> bool:
     _ensure_env_seeded()
-    return (
-        str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower()
-        in {"1", "true", "yes"}
-    )
+    return str(os.getenv("BROKER_CONNECT_FOR_DATA", "false")).lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def data_warmup_disable() -> bool:
@@ -207,7 +202,8 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
             try:
                 src.connect()
                 now_ist = datetime.now(IST).replace(
-                    second=0, microsecond=0,
+                    second=0,
+                    microsecond=0,
                 )
                 if is_market_open(now_ist):
                     start = now_ist - timedelta(minutes=20)
@@ -215,7 +211,10 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                 else:
                     start, end = prev_session_last_20m(now_ist)
                 res = src.fetch_ohlc(
-                    token=token, start=start, end=end, timeframe="minute",
+                    token=token,
+                    start=start,
+                    end=end,
+                    timeframe="minute",
                 )
                 df = res.df
                 if df.empty:
@@ -235,11 +234,13 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                         disconnect()
                     except Exception:
                         logging.getLogger("config").debug(
-                            "LiveKiteSource disconnect failed", exc_info=True,
+                            "LiveKiteSource disconnect failed",
+                            exc_info=True,
                         )
         except Exception as e:
             logging.getLogger("config").warning(
-                "instrument_token validation skipped: %s", e,
+                "instrument_token validation skipped: %s",
+                e,
             )
         finally:
             if src is not None:
@@ -249,7 +250,8 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
                         disconnect_fn()
                     except Exception:
                         logging.getLogger("config").debug(
-                            "instrument_token validation disconnect failed", exc_info=True,
+                            "instrument_token validation disconnect failed",
+                            exc_info=True,
                         )
 
     if errors:
@@ -306,8 +308,10 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 def _log_cred_presence() -> None:
     """Log the presence of live trading credentials without revealing them."""
     log = logging.getLogger(__name__)
+
     def mask(v: str | None) -> bool:
         return bool(v and v.strip())
+
     log.info(
         "live=%s (env=%s), skip_validation=%s, api_key=%s, secret=%s, access=%s",
         settings.enable_live_trading,
@@ -317,4 +321,3 @@ def _log_cred_presence() -> None:
         mask(API_SECRET),
         mask(ACCESS_TOKEN),
     )
-

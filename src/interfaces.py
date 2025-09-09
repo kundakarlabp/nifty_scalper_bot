@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Optional, Protocol
 
-import pandas as pd
 
 from src.data.types import HistResult
 

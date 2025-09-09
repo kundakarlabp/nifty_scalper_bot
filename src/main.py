@@ -2,36 +2,36 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
-import time
-import os
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, List, Optional, Dict, Any, cast
+from typing import Any, Callable, Dict, Optional, cast
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.boot.validate_env import (
+from src.boot.validate_env import (  # noqa: E402
+    broker_connect_for_data,
     seed_env_from_defaults,
     validate_critical_settings,
-    broker_connect_for_data,
-)  # noqa: E402
+)
 
 seed_env_from_defaults()
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
 from src.config import settings  # noqa: E402
-from src.utils.logging_tools import get_recent_logs  # noqa: E402
-from src.diagnostics.metrics import metrics  # noqa: E402
-from src.strategies.runner import StrategyRunner  # noqa: E402
-from src.server import health  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
+from src.diagnostics.metrics import metrics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
+from src.server import health  # noqa: E402
 from src.server.logging_utils import _setup_logging  # noqa: E402
+from src.strategies.runner import StrategyRunner  # noqa: E402
+from src.utils.logging_tools import get_recent_logs  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -94,9 +94,9 @@ def _import_telegram_class() -> type | None:
     """
 
     try:
-        from src.notifications.telegram_controller import (
+        from src.notifications.telegram_controller import (  # type: ignore
             TelegramController,
-        )  # type: ignore
+        )
 
         return TelegramController
     except Exception as e:
@@ -226,12 +226,16 @@ def main() -> int:
     try:
         validate_critical_settings()
     except Exception as e:
-        logging.getLogger("main").error("\u274c Config validation failed: %s", e, exc_info=True)
+        logging.getLogger("main").error(
+            "\u274c Config validation failed: %s", e, exc_info=True
+        )
         return 1
     log = logging.getLogger("main")
     rcfg = settings.risk
     loss_cap = (
-        f"{rcfg.max_daily_loss_rupees:.0f}" if rcfg.max_daily_loss_rupees is not None else f"{rcfg.max_daily_drawdown_pct:.2%} equity"
+        f"{rcfg.max_daily_loss_rupees:.0f}"
+        if rcfg.max_daily_loss_rupees is not None
+        else f"{rcfg.max_daily_drawdown_pct:.2%} equity"
     )
     log.info(
         "Risk guardrails → window %s-%s | loss_cap=%s | max_lots=%d | exposure_cap=%.0f | max_consec_losses=%d",
@@ -313,7 +317,12 @@ def main() -> int:
             latency_ms = (time.perf_counter() - start_ts) * 1000.0
             metrics.observe_latency(latency_ms)
             metrics.inc_ticks()
-            qd = sum(len(q) for q in getattr(getattr(runner, "executor", None), "_queues", {}).values())
+            qd = sum(
+                len(q)
+                for q in getattr(
+                    getattr(runner, "executor", None), "_queues", {}
+                ).values()
+            )
             metrics.set_queue_depth(qd)
             flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
             if isinstance(flow, dict):
@@ -349,7 +358,9 @@ def main() -> int:
         try:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception as e:
-            log.warning("Failed to send shutdown message to Telegram: %s", e, exc_info=True)
+            log.warning(
+                "Failed to send shutdown message to Telegram: %s", e, exc_info=True
+            )
         try:
             runner.telegram_controller.stop_polling()
         except Exception as e:
@@ -358,7 +369,9 @@ def main() -> int:
             try:  # pragma: no cover
                 cmd_listener.stop()  # pragma: no cover
             except Exception as e:  # pragma: no cover
-                log.warning("Failed to stop Telegram commands: %s", e, exc_info=True)  # pragma: no cover
+                log.warning(
+                    "Failed to stop Telegram commands: %s", e, exc_info=True
+                )  # pragma: no cover
 
     return 0
 

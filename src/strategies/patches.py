@@ -33,7 +33,9 @@ def _resolve_min_atr_pct() -> float:
 
     sym = getattr(runner, "under_symbol", "")
     if "BANK" in str(sym).upper():
-        return float(getattr(cfg, "min_atr_pct_banknifty", getattr(cfg, "atr_min", 0.0)))
+        return float(
+            getattr(cfg, "min_atr_pct_banknifty", getattr(cfg, "atr_min", 0.0))
+        )
     return float(getattr(cfg, "min_atr_pct_nifty", getattr(cfg, "atr_min", 0.0)))
 
 
@@ -113,4 +115,3 @@ _patch_runner_step()
 
 
 __all__ = ["_patch_atr_band", "_resolve_min_atr_pct"]
-

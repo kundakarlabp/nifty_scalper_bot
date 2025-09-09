@@ -3,12 +3,12 @@ from __future__ import annotations
 """Simulated order connector for backtests."""
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
 from datetime import datetime
+from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
 from src.config import settings
-from src.risk.greeks import estimate_greeks_from_mid, OptionType
+from src.risk.greeks import OptionType, estimate_greeks_from_mid
 
 
 def synth_book_from_mid(mid: float, settings) -> tuple[float, float]:
@@ -60,14 +60,28 @@ class SimConnector:
         self.costs = costs or CostModel()
         self.micro = micro or MicroModel()
 
-    def synth_option_book(self, spot: float, strike: float, opt_type: OptionType, now: datetime, atr_pct: float) -> Dict[str, float]:
+    def synth_option_book(
+        self,
+        spot: float,
+        strike: float,
+        opt_type: OptionType,
+        now: datetime,
+        atr_pct: float,
+    ) -> Dict[str, float]:
         """Return a synthetic top-of-book quote for an option."""
 
         now_tz = now if now.tzinfo else now.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
         estimate_greeks_from_mid(
-            S=spot, K=strike, mid=max(1.0, 0.5), opt=opt_type, now=now_tz, atr_pct=atr_pct
+            S=spot,
+            K=strike,
+            mid=max(1.0, 0.5),
+            opt=opt_type,
+            now=now_tz,
+            atr_pct=atr_pct,
         )
-        intrinsic = max(0.0, spot - strike) if opt_type == "CE" else max(0.0, strike - spot)
+        intrinsic = (
+            max(0.0, spot - strike) if opt_type == "CE" else max(0.0, strike - spot)
+        )
         tv = max(0.5, spot * (atr_pct / 100.0) * 0.25)
         mid = max(1.0, intrinsic + tv)
         spr_pct = self.micro.spread_pct_for_time((now.hour, now.minute))
@@ -77,14 +91,23 @@ class SimConnector:
         if bid <= 0 or ask <= 0:
             bid, ask = synth_book_from_mid(mid, settings)
         depth_units = self.micro.depth_per_lot * self.lot_size
-        return {"bid": bid, "ask": ask, "bid5": depth_units * 10, "ask5": depth_units * 10, "mid": mid, "spread_pct": spr_pct}
+        return {
+            "bid": bid,
+            "ask": ask,
+            "bid5": depth_units * 10,
+            "ask5": depth_units * 10,
+            "mid": mid,
+            "spread_pct": spr_pct,
+        }
 
     def ladder_prices(self, mid: float, spread: float) -> Tuple[float, float]:
         """Return two ladder prices inside the spread."""
 
         return mid + 0.25 * spread, mid + 0.40 * spread
 
-    def fill_limit_buy(self, price: float, bid: float, ask: float) -> Tuple[bool, float]:
+    def fill_limit_buy(
+        self, price: float, bid: float, ask: float
+    ) -> Tuple[bool, float]:
         """Simulate a limit buy fill."""
 
         if price >= ask:
@@ -93,7 +116,9 @@ class SimConnector:
             return True, price
         return False, 0.0
 
-    def fill_limit_sell(self, price: float, bid: float, ask: float) -> Tuple[bool, float]:
+    def fill_limit_sell(
+        self, price: float, bid: float, ask: float
+    ) -> Tuple[bool, float]:
         """Simulate a limit sell fill."""
 
         if price <= bid:

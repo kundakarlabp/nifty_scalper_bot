@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Helper utilities for Indian market session times."""
 
-from datetime import datetime, time, timedelta, date as ddate
+from datetime import date as ddate, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -28,8 +28,12 @@ def prev_weekday(day: ddate) -> ddate:
 def session_bounds(day: ddate) -> tuple[datetime, datetime]:
     """Return the start/end datetimes for the trading session of ``day``."""
     day = prev_weekday(day)
-    start = datetime(day.year, day.month, day.day, MKT_START.hour, MKT_START.minute, tzinfo=IST)
-    end = datetime(day.year, day.month, day.day, MKT_END.hour, MKT_END.minute, tzinfo=IST)
+    start = datetime(
+        day.year, day.month, day.day, MKT_START.hour, MKT_START.minute, tzinfo=IST
+    )
+    end = datetime(
+        day.year, day.month, day.day, MKT_END.hour, MKT_END.minute, tzinfo=IST
+    )
     return start, end
 
 

@@ -116,10 +116,16 @@ def detect_market_regime(
 
     try:
         adx_val = float((adx.iloc[-1] if adx is not None and len(adx) else 0.0) or 0.0)
-        dip = float((di_plus.iloc[-1] if di_plus is not None and len(di_plus) else 0.0) or 0.0)
-        dim = float((di_minus.iloc[-1] if di_minus is not None and len(di_minus) else 0.0) or 0.0)
+        dip = float(
+            (di_plus.iloc[-1] if di_plus is not None and len(di_plus) else 0.0) or 0.0
+        )
+        dim = float(
+            (di_minus.iloc[-1] if di_minus is not None and len(di_minus) else 0.0)
+            or 0.0
+        )
         bb_width_val = float(
-            (bb_width.iloc[-1] if bb_width is not None and len(bb_width) else 0.0) or 0.0
+            (bb_width.iloc[-1] if bb_width is not None and len(bb_width) else 0.0)
+            or 0.0
         )
     except Exception:
         return RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "bad_inputs")
@@ -131,17 +137,20 @@ def detect_market_regime(
         and di_delta >= DI_DELTA_TREND
         and bb_width_val >= BB_WIDTH_TREND
     ):
-        return RegimeResult("TREND", adx_val, dip, dim, bb_width_val, "trend_conditions")
+        return RegimeResult(
+            "TREND", adx_val, dip, dim, bb_width_val, "trend_conditions"
+        )
 
     if (
         adx_val < ADX_RANGE
         or bb_width_val < BB_WIDTH_RANGE
         or di_delta < DI_DELTA_RANGE
     ):
-        return RegimeResult("RANGE", adx_val, dip, dim, bb_width_val, "range_conditions")
+        return RegimeResult(
+            "RANGE", adx_val, dip, dim, bb_width_val, "range_conditions"
+        )
 
     return RegimeResult("NO_TRADE", adx_val, dip, dim, bb_width_val, "indecisive")
 
 
 __all__ = ["RegimeResult", "detect_market_regime"]
-

@@ -19,11 +19,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from src.backtesting.synth import make_synth_1m
 from src.config import settings
 from src.data.source import DataSource
 from src.data.types import HistResult, HistStatus
 from src.utils.logging_tools import RateLimitFilter
-from src.backtesting.synth import make_synth_1m
 
 logger = logging.getLogger(__name__)
 logging.getLogger().addFilter(RateLimitFilter(interval=120.0))
@@ -115,7 +115,9 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
         df.set_index("datetime", inplace=True)
 
     if df.index.tz is None:
-        df = df.tz_localize("Asia/Kolkata", nonexistent="shift_forward", ambiguous="NaT")
+        df = df.tz_localize(
+            "Asia/Kolkata", nonexistent="shift_forward", ambiguous="NaT"
+        )
 
     cols = ["open", "high", "low", "close", "volume"]
     return df[cols]
@@ -174,7 +176,8 @@ class BacktestCsvSource(DataSource):
         if str(symbol).strip() != self.symbol:
             logger.warning(
                 "Requested symbol %s does not match data source symbol %s",
-                symbol, self.symbol,
+                symbol,
+                self.symbol,
             )
             return None
         return float(self._df["close"].iloc[self._current_index])

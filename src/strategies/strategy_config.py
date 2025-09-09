@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import shutil
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
 from typing import Any, Dict, Optional
-from pathlib import Path
-import logging
-import os
-import shutil
-import yaml  # type: ignore[import-untyped]
 
+import yaml  # type: ignore[import-untyped]
 
 log = logging.getLogger(__name__)
 
@@ -127,13 +126,17 @@ class StrategyConfig:
             gamma_enabled=bool(lc.get("gamma_mode", {}).get("enabled", True)),
             gamma_after=_parse_time(lc.get("gamma_mode", {}).get("tue_after", "14:45")),
             gamma_tp2_cap=float(lc.get("gamma_mode", {}).get("tp2_R_cap", 1.40)),
-            gamma_trail_mult=float(lc.get("gamma_mode", {}).get("trail_atr_mult", 0.60)),
+            gamma_trail_mult=float(
+                lc.get("gamma_mode", {}).get("trail_atr_mult", 0.60)
+            ),
             gamma_time_stop_min=int(lc.get("gamma_mode", {}).get("time_stop_min", 8)),
             min_atr_pct_nifty=float(thresholds.get("min_atr_pct_nifty", 0.04)),
             min_atr_pct_banknifty=float(thresholds.get("min_atr_pct_banknifty", 0.06)),
             max_tick_lag_s=int(thresholds.get("max_tick_lag_s", 8)),
             max_bar_lag_s=int(thresholds.get("max_bar_lag_s", 75)),
-            min_bars_required=int(warm.get("min_bars", warm.get("min_bars_required", 20))),
+            min_bars_required=int(
+                warm.get("min_bars", warm.get("min_bars_required", 20))
+            ),
             lower_score_temp=bool(dbg.get("lower_score_temp", False)),
             source_path=path,
             mtime=os.path.getmtime(path),
@@ -160,7 +163,9 @@ class StrategyConfig:
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.resolve() != repo_default.resolve():
                 shutil.copy2(repo_default, target)
-            log.warning("No external strategy config found. Seeded default at %s", target)
+            log.warning(
+                "No external strategy config found. Seeded default at %s", target
+            )
             return cls.load(str(target))
 
         raise FileNotFoundError(

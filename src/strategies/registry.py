@@ -1,30 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Protocol, Any
+from typing import Any, Callable, Dict, Protocol
 
 # ---- Protocols (no imports from your code here; keep it decoupled) ----
 
+
 class StrategyLike(Protocol):
     def name(self) -> str: ...
+
     # evaluate(...) signature stays whatever you have today
+
 
 class DataProviderLike(Protocol):
     @property
     def name(self) -> str: ...
     def health(self) -> dict: ...  # {status: "OK"/"DEGRADED"/"DOWN", details:{...}}
 
+
 class OrderConnectorLike(Protocol):
     @property
     def name(self) -> str: ...
     def health(self) -> dict: ...
 
+
 # ---- Registries --------------------------------------------------------
+
 
 @dataclass
 class _Entry:
     factory: Callable[[], Any]
     desc: str
+
 
 class _BaseRegistry:
     def __init__(self) -> None:
@@ -39,7 +46,9 @@ class _BaseRegistry:
     def create(self, key: str) -> Any:
         k = (key or "").strip().lower()
         if k not in self._items:
-            raise KeyError(f"Unknown key: {key!r}; available={list(self._items.keys())}")
+            raise KeyError(
+                f"Unknown key: {key!r}; available={list(self._items.keys())}"
+            )
         return self._items[k].factory()
 
     def keys(self) -> list[str]:
@@ -48,17 +57,25 @@ class _BaseRegistry:
     def describe(self) -> dict:
         return {k: v.desc for k, v in self._items.items()}
 
+
 class StrategyRegistry(_BaseRegistry): ...
+
+
 class DataProviderRegistry(_BaseRegistry): ...
+
+
 class OrderConnectorRegistry(_BaseRegistry): ...
 
+
 # ---- Adapters (wrap your existing classes without changing them) -------
+
 
 def make_data_provider_adapter(obj: Any, name: str) -> DataProviderLike:
     class _Adapter(DataProviderLike):  # type: ignore[misc]
         @property
         def name(self) -> str:
             return name
+
         def health(self) -> dict:
             # Try to ask the underlying object; else return a minimal OK.
             try:
@@ -67,16 +84,20 @@ def make_data_provider_adapter(obj: Any, name: str) -> DataProviderLike:
             except Exception as e:
                 return {"status": "DOWN", "details": {"error": str(e)}}
             return {"status": "OK", "details": {}}
+
         # Expose original for callers that expect the concrete object
         def __getattr__(self, item):  # delegate
             return getattr(obj, item)
+
     return _Adapter()
+
 
 def make_order_connector_adapter(obj: Any, name: str) -> OrderConnectorLike:
     class _Adapter(OrderConnectorLike):  # type: ignore[misc]
         @property
         def name(self) -> str:
             return name
+
         def health(self) -> dict:
             try:
                 if hasattr(obj, "health"):
@@ -84,11 +105,15 @@ def make_order_connector_adapter(obj: Any, name: str) -> OrderConnectorLike:
             except Exception as e:
                 return {"status": "DOWN", "details": {"error": str(e)}}
             return {"status": "OK", "details": {}}
+
         def __getattr__(self, item):
             return getattr(obj, item)
+
     return _Adapter()
 
+
 # ---- Bootstrap helpers -------------------------------------------------
+
 
 @dataclass
 class ActiveComponents:
@@ -97,7 +122,15 @@ class ActiveComponents:
     order_connector: OrderConnectorLike
     names: dict  # {"strategy": "...", "data_provider": "...", "order_connector": "..."}
 
-def init_default_registries(settings, *, make_strategy, make_data_kite, make_connector_kite, make_connector_shadow) -> ActiveComponents:
+
+def init_default_registries(
+    settings,
+    *,
+    make_strategy,
+    make_data_kite,
+    make_connector_kite,
+    make_connector_shadow,
+) -> ActiveComponents:
     """
     settings: your config object (must expose ACTIVE_STRATEGY/ACTIVE_DATA_PROVIDER/ACTIVE_CONNECTOR or env-backed).
     make_*: callables returning your existing instances. We wrap them with adapters.
@@ -107,16 +140,34 @@ def init_default_registries(settings, *, make_strategy, make_data_kite, make_con
     oreg = OrderConnectorRegistry()
 
     # Register strategy(ies)
-    sreg.register("scalping", lambda: make_strategy(), "NIFTY scalping strategy (current)")
+    sreg.register(
+        "scalping", lambda: make_strategy(), "NIFTY scalping strategy (current)"
+    )
     # add more here later: sreg.register("meanrev", ...)
 
     # Register data providers
-    dreg.register("kite", lambda: make_data_provider_adapter(make_data_kite(), "kite"), "Broker minute OHLC (primary)")
-    dreg.register("auto", lambda: make_data_provider_adapter(make_data_kite(), "auto"), "Auto-select (currently kite)")
+    dreg.register(
+        "kite",
+        lambda: make_data_provider_adapter(make_data_kite(), "kite"),
+        "Broker minute OHLC (primary)",
+    )
+    dreg.register(
+        "auto",
+        lambda: make_data_provider_adapter(make_data_kite(), "auto"),
+        "Auto-select (currently kite)",
+    )
 
     # Register order connectors
-    oreg.register("kite", lambda: make_order_connector_adapter(make_connector_kite(), "kite"), "Zerodha Kite connector")
-    oreg.register("shadow", lambda: make_order_connector_adapter(make_connector_shadow(), "shadow"), "Shadow (paper) connector")
+    oreg.register(
+        "kite",
+        lambda: make_order_connector_adapter(make_connector_kite(), "kite"),
+        "Zerodha Kite connector",
+    )
+    oreg.register(
+        "shadow",
+        lambda: make_order_connector_adapter(make_connector_shadow(), "shadow"),
+        "Shadow (paper) connector",
+    )
 
     # Resolve names from settings/env (non-fatal fallbacks)
     s_name = (getattr(settings, "ACTIVE_STRATEGY", None) or "scalping").lower()

@@ -1,12 +1,12 @@
 # src/utils/retry.py
 from __future__ import annotations
 
-import time
+import asyncio
 import logging
 import random
-import asyncio
+import time
 from functools import wraps
-from typing import Callable, Optional, Tuple, TypeVar, ParamSpec
+from typing import Callable, Optional, ParamSpec, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,7 @@ def retry(
 
     def deco_retry(func: Callable[P, T]) -> Callable[P, T]:
         if asyncio.iscoroutinefunction(func):
+
             @wraps(func)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:  # type: ignore[misc]
                 last_exc: Optional[BaseException] = None
@@ -108,12 +109,23 @@ def retry(
                         if attempt >= tries:
                             if reraise:
                                 raise
-                            lg.error("Retry: giving up after %d attempts on %s: %s", attempt, func.__name__, e)
+                            lg.error(
+                                "Retry: giving up after %d attempts on %s: %s",
+                                attempt,
+                                func.__name__,
+                                e,
+                            )
                             return None  # type: ignore[return-value]
-                        sleep_s = _compute_sleep(delay, backoff, attempt, max_delay, jitter)
+                        sleep_s = _compute_sleep(
+                            delay, backoff, attempt, max_delay, jitter
+                        )
                         lg.warning(
                             "Retry %s attempt %d/%d failed: %s — sleeping %.2fs",
-                            func.__name__, attempt, tries, e, sleep_s,
+                            func.__name__,
+                            attempt,
+                            tries,
+                            e,
+                            sleep_s,
                         )
                         if on_retry:
                             try:
@@ -142,12 +154,21 @@ def retry(
                     if attempt >= tries:
                         if reraise:
                             raise
-                        lg.error("Retry: giving up after %d attempts on %s: %s", attempt, func.__name__, e)
+                        lg.error(
+                            "Retry: giving up after %d attempts on %s: %s",
+                            attempt,
+                            func.__name__,
+                            e,
+                        )
                         return None  # type: ignore[return-value]
                     sleep_s = _compute_sleep(delay, backoff, attempt, max_delay, jitter)
                     lg.warning(
                         "Retry %s attempt %d/%d failed: %s — sleeping %.2fs",
-                        func.__name__, attempt, tries, e, sleep_s,
+                        func.__name__,
+                        attempt,
+                        tries,
+                        e,
+                        sleep_s,
                     )
                     if on_retry:
                         try:

@@ -3,13 +3,24 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import random
 import threading
 import time
-import random
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+
+from src.logs.journal import Journal
+from src.utils.broker_errors import (
+    AUTH,
+    SUBSCRIPTION,
+    THROTTLE,
+    classify_broker_error,
+)
+from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.reliability import RateLimiter
 
 from .order_state import (
     LegType,
@@ -19,26 +30,13 @@ from .order_state import (
     TradeFSM,
 )
 
-import os
-from src.utils.circuit_breaker import CircuitBreaker
-from src.logs.journal import Journal
-from src.utils.broker_errors import (
-    AUTH,
-    THROTTLE,
-    SUBSCRIPTION,
-    classify_broker_error,
-)
-from src.utils.reliability import RateLimiter
-
-
-
 # --- Optional broker SDK (graceful fallback in paper mode) ---
 try:
     from kiteconnect import KiteConnect  # type: ignore
     from kiteconnect.exceptions import (  # type: ignore
+        InputException,
         NetworkException,
         TokenException,
-        InputException,
     )
 except Exception:
     KiteConnect = None  # type: ignore
@@ -262,7 +260,6 @@ class KiteOrderConnector:
         return _retry_call(self.kite.orders)
 
 
-
 def micro_ok(
     quote: Dict[str, Any],
     qty_lots: int,
@@ -292,10 +289,14 @@ def micro_ok(
         if ask <= 0:
             ask = ltp + spr / 2
     mid = (bid + ask) / 2.0
-    spread_pct = ((ask - bid) / mid * 100.0) if (ask > 0 and bid > 0 and mid > 0) else getattr(
-        settings.executor,
-        "default_spread_pct_est",
-        0.25,
+    spread_pct = (
+        ((ask - bid) / mid * 100.0)
+        if (ask > 0 and bid > 0 and mid > 0)
+        else getattr(
+            settings.executor,
+            "default_spread_pct_est",
+            0.25,
+        )
     )
     qty_contracts = qty_lots * lot_size
     need = depth_mult * qty_contracts
@@ -487,7 +488,9 @@ class OrderExecutor:
             getattr(cfg, "MAX_PLACE_RETRIES", getattr(settings, "MAX_PLACE_RETRIES", 2))
         )
         self.router_max_modify_retries = int(
-            getattr(cfg, "MAX_MODIFY_RETRIES", getattr(settings, "MAX_MODIFY_RETRIES", 2))
+            getattr(
+                cfg, "MAX_MODIFY_RETRIES", getattr(settings, "MAX_MODIFY_RETRIES", 2)
+            )
         )
         self.router_max_inflight_per_symbol = 1
         self.router_plan_stale_sec = 20
@@ -506,7 +509,9 @@ class OrderExecutor:
         self._ack_lat_ms: List[int] = []
         self._order_ts: Deque[float] = deque()
         self.max_orders_per_min = int(
-            getattr(cfg, "MAX_ORDERS_PER_MIN", getattr(settings, "MAX_ORDERS_PER_MIN", 20))
+            getattr(
+                cfg, "MAX_ORDERS_PER_MIN", getattr(settings, "MAX_ORDERS_PER_MIN", 20)
+            )
         )
         self.on_trade_closed = on_trade_closed
         self._closed_trades: Set[str] = set()
@@ -633,12 +638,18 @@ class OrderExecutor:
                 "oi": 0,
             }
 
-
     def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
-        from src.utils.strike_selector import _fetch_instruments_nfo, _get_spot_ltp, resolve_weekly_atm
+        from src.utils.strike_selector import (
+            _fetch_instruments_nfo,
+            _get_spot_ltp,
+            resolve_weekly_atm,
+        )
 
         inst_dump = _fetch_instruments_nfo(self.kite) or []
-        spot = _get_spot_ltp(self.kite, getattr(getattr(settings, "instruments", object()), "spot_symbol", ""))
+        spot = _get_spot_ltp(
+            self.kite,
+            getattr(getattr(settings, "instruments", object()), "spot_symbol", ""),
+        )
         atm = resolve_weekly_atm(spot or 0.0, inst_dump)
         if not atm:
             return "instrument resolution failed"
@@ -653,11 +664,19 @@ class OrderExecutor:
             q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
             bid = float(q.get("bid") or 0.0)
             ask = float(q.get("ask") or 0.0)
-            spread_pct = ((ask - bid) / ((ask + bid) / 2) * 100.0) if bid > 0 and ask > 0 else None
+            spread_pct = (
+                ((ask - bid) / ((ask + bid) / 2) * 100.0)
+                if bid > 0 and ask > 0
+                else None
+            )
             bid5 = int(q.get("bid5_qty") or 0)
             ask5 = int(q.get("ask5_qty") or 0)
             depth_ok = min(bid5, ask5) >= int(self.depth_multiplier) * qty_lots * lot
-            ok = spread_pct is not None and spread_pct <= self.max_spread_pct * 100 and depth_ok
+            ok = (
+                spread_pct is not None
+                and spread_pct <= self.max_spread_pct * 100
+                and depth_ok
+            )
             lines.append(
                 f"{t.upper()} tsym={tsym} src={q.get('source')} ltp={q.get('ltp')} bid={bid} ask={ask} "
                 f"spread%={None if spread_pct is None else round(spread_pct,2)} bid5={bid5} ask5={ask5} "
@@ -666,10 +685,17 @@ class OrderExecutor:
         return "\n".join(lines)
 
     def selftest(self, opt: str = "ce") -> str:
-        from src.utils.strike_selector import _fetch_instruments_nfo, _get_spot_ltp, resolve_weekly_atm
+        from src.utils.strike_selector import (
+            _fetch_instruments_nfo,
+            _get_spot_ltp,
+            resolve_weekly_atm,
+        )
 
         inst_dump = _fetch_instruments_nfo(self.kite) or []
-        spot = _get_spot_ltp(self.kite, getattr(getattr(settings, "instruments", object()), "spot_symbol", ""))
+        spot = _get_spot_ltp(
+            self.kite,
+            getattr(getattr(settings, "instruments", object()), "spot_symbol", ""),
+        )
         atm = resolve_weekly_atm(spot or 0.0, inst_dump)
         if not atm:
             return "instrument resolution failed"
@@ -682,16 +708,26 @@ class OrderExecutor:
         ask = float(q.get("ask") or 0.0)
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
         spread = ask - bid
-        ok, meta = micro_ok({
-            "bid": bid,
-            "ask": ask,
-            "bid5_qty": q.get("bid5_qty", 0),
-            "ask5_qty": q.get("ask5_qty", 0),
-        }, qty_lots=1, lot_size=lot, max_spread_pct=self.max_spread_pct, depth_mult=int(self.depth_multiplier))
+        ok, meta = micro_ok(
+            {
+                "bid": bid,
+                "ask": ask,
+                "bid5_qty": q.get("bid5_qty", 0),
+                "ask5_qty": q.get("ask5_qty", 0),
+            },
+            qty_lots=1,
+            lot_size=lot,
+            max_spread_pct=self.max_spread_pct,
+            depth_mult=int(self.depth_multiplier),
+        )
         steps = []
         if mid and spread:
             steps = [round(mid + 0.25 * spread, 2), round(mid + 0.40 * spread, 2)]
-        result = "WOULD_PLACE" if ok else f"WOULD_BLOCK(spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')})"
+        result = (
+            "WOULD_PLACE"
+            if ok
+            else f"WOULD_BLOCK(spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')})"
+        )
         return f"mid={mid:.2f} spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')} steps={steps} {result}"
 
     # ----------- entry API (runner calls place_order with payload) ----------
@@ -744,7 +780,10 @@ class OrderExecutor:
         # prevent duplicate symbol entries (case-insensitive)
         norm_symbol = str(symbol).upper()
         with self._lock:
-            if any(rec.symbol.upper() == norm_symbol and rec.is_open for rec in self._active.values()):
+            if any(
+                rec.symbol.upper() == norm_symbol and rec.is_open
+                for rec in self._active.values()
+            ):
                 self.last_error = "duplicate_symbol_open"
                 log.warning("Open record exists on %s; skip new entry.", norm_symbol)
                 return None
@@ -814,7 +853,9 @@ class OrderExecutor:
                 self._active[rec.record_id] = rec
             # Notify (best-effort)
             self._notify(f"🧪 PAPER entry: {symbol} {action} qty={qty} @ {price}")
-            log.info("Paper entry recorded: %s %s qty=%d @%s", symbol, action, qty, price)
+            log.info(
+                "Paper entry recorded: %s %s qty=%d @%s", symbol, action, qty, price
+            )
             return rec.record_id
 
         # LIVE MODE
@@ -883,11 +924,15 @@ class OrderExecutor:
         with self._lock:
             self._active[rec.record_id] = rec
 
-        self._notify(f"✅ LIVE entry: {symbol} {action} qty={qty} @ {price} (rid={rec.record_id})")
+        self._notify(
+            f"✅ LIVE entry: {symbol} {action} qty={qty} @ {price} (rid={rec.record_id})"
+        )
         return rec.record_id
 
     # ----------- SL/TP orchestration ----------
-    def setup_gtt_orders(self, record_id: str, sl_price: float, tp_price: float) -> None:
+    def setup_gtt_orders(
+        self, record_id: str, sl_price: float, tp_price: float
+    ) -> None:
         """Place/refresh SL-GTT and TP limit orders for an active record."""
         with self._lock:
             rec = self._active.get(record_id)
@@ -907,12 +952,18 @@ class OrderExecutor:
             if old:
                 res_cancel = self._cancel_with_cb(old, variety=rec.variety)
                 if not res_cancel.get("ok"):
-                    log.debug("Failed to cancel TP order %s: %s", old, res_cancel.get("reason"))
+                    log.debug(
+                        "Failed to cancel TP order %s: %s",
+                        old,
+                        res_cancel.get("reason"),
+                    )
         rec.tp1_order_id = rec.tp2_order_id = None
 
         # partial split
         if rec.partial_enabled:
-            q_tp1 = _round_to_step(int(round(qty * max(0, min(1, rec.tp1_ratio)))), self.lot_size)
+            q_tp1 = _round_to_step(
+                int(round(qty * max(0, min(1, rec.tp1_ratio)))), self.lot_size
+            )
             q_tp1 = min(max(q_tp1, self.lot_size), qty)
             q_tp2 = qty - q_tp1
         else:
@@ -967,7 +1018,9 @@ class OrderExecutor:
             try:
                 _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
             except Exception:
-                log.debug("Failed to cancel existing SL GTT %s", rec.sl_gtt_id, exc_info=True)
+                log.debug(
+                    "Failed to cancel existing SL GTT %s", rec.sl_gtt_id, exc_info=True
+                )
             rec.sl_gtt_id = None
 
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
@@ -1027,7 +1080,9 @@ class OrderExecutor:
                 proposed = min(proposed, rec.sl_price)
 
         rec.sl_price = proposed
-        self._refresh_sl_gtt(rec, sl_price=proposed, qty=rec.remaining_qty or rec.quantity)
+        self._refresh_sl_gtt(
+            rec, sl_price=proposed, qty=rec.remaining_qty or rec.quantity
+        )
 
     def handle_tp1_fill(self, record_id: str) -> None:
         """Internal helper used to apply TP1 partial exit effects."""
@@ -1044,7 +1099,9 @@ class OrderExecutor:
         new_sl = rec.entry_price + rec.side_sign() * 0.1 * rec.r_value
         rec.sl_price = _round_to_tick(new_sl, rec.tick_size)
         rec.trailing_mult = rec.trail_atr_mult or rec.trailing_mult
-        self._refresh_sl_gtt(rec, sl_price=rec.sl_price, qty=rec.remaining_qty or rec.quantity)
+        self._refresh_sl_gtt(
+            rec, sl_price=rec.sl_price, qty=rec.remaining_qty or rec.quantity
+        )
 
     # ----------- polling / OCO enforcement ----------
     def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
@@ -1059,7 +1116,10 @@ class OrderExecutor:
             return []
         fills: List[Tuple[str, float]] = []
         try:
-            omap = {o.get("order_id"): o for o in _retry_call(self.kite.orders, tries=2) or []}
+            omap = {
+                o.get("order_id"): o
+                for o in _retry_call(self.kite.orders, tries=2) or []
+            }
         except Exception as e:
             self.last_error = f"orders: {e}"
             log.error("orders() failed: %s", e)
@@ -1097,12 +1157,16 @@ class OrderExecutor:
                     continue
                 o = omap.get(oid, {})
                 if o.get("status", "").upper() == "COMPLETE":
-                    if tid == "tp1_order_id" and rec.partial_enabled and not rec.tp1_done:
+                    if (
+                        tid == "tp1_order_id"
+                        and rec.partial_enabled
+                        and not rec.tp1_done
+                    ):
                         self.handle_tp1_fill(rec.record_id)
 
             # SL GTT state
             if rec.sl_gtt_id:
-                g = (gmap.get(rec.sl_gtt_id) or {})
+                g = gmap.get(rec.sl_gtt_id) or {}
                 s = (g.get("status") or g.get("state") or "").lower()
                 if s in ("triggered", "cancelled", "deleted", "expired", "completed"):
                     rec.is_open = False
@@ -1110,8 +1174,14 @@ class OrderExecutor:
                     continue
 
             # All TPs done?
-            tp1_done = (not rec.tp1_order_id) or (omap.get(rec.tp1_order_id, {}).get("status", "").upper() == "COMPLETE")
-            tp2_done = (rec.tp2_order_id and omap.get(rec.tp2_order_id, {}).get("status", "").upper() == "COMPLETE")
+            tp1_done = (not rec.tp1_order_id) or (
+                omap.get(rec.tp1_order_id, {}).get("status", "").upper() == "COMPLETE"
+            )
+            tp2_done = (
+                rec.tp2_order_id
+                and omap.get(rec.tp2_order_id, {}).get("status", "").upper()
+                == "COMPLETE"
+            )
             if tp1_done and tp2_done:
                 rec.is_open = False
                 fills.append((rec.record_id, float(rec.tp_price or 0.0)))
@@ -1119,7 +1189,11 @@ class OrderExecutor:
                     try:
                         _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
                     except Exception:
-                        log.debug("Failed to cancel SL GTT %s during sweep", rec.sl_gtt_id, exc_info=True)
+                        log.debug(
+                            "Failed to cancel SL GTT %s during sweep",
+                            rec.sl_gtt_id,
+                            exc_info=True,
+                        )
 
         if fills:
             with self._lock:
@@ -1129,7 +1203,9 @@ class OrderExecutor:
                 if self.telegram and hasattr(self.telegram, "notify_fills"):
                     self.telegram.notify_fills(fills)
                 else:
-                    self._notify("📬 Fills: " + ", ".join([f"{rid}@{px}" for rid, px in fills]))
+                    self._notify(
+                        "📬 Fills: " + ", ".join([f"{rid}@{px}" for rid, px in fills])
+                    )
             except Exception:
                 log.debug("Failed to send fills notification", exc_info=True)
 
@@ -1152,14 +1228,21 @@ class OrderExecutor:
                 if not oid:
                     continue
                 try:
-                    _retry_call(self.kite.cancel_order, variety=rec.variety, order_id=oid, tries=2)
+                    _retry_call(
+                        self.kite.cancel_order,
+                        variety=rec.variety,
+                        order_id=oid,
+                        tries=2,
+                    )
                 except Exception:
                     log.debug("Failed to cancel order %s", oid, exc_info=True)
             if rec.sl_gtt_id:
                 try:
                     _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
                 except Exception:
-                    log.debug("Failed to cancel SL GTT %s", rec.sl_gtt_id, exc_info=True)
+                    log.debug(
+                        "Failed to cancel SL GTT %s", rec.sl_gtt_id, exc_info=True
+                    )
             rec.is_open = False
 
         with self._lock:
@@ -1235,7 +1318,11 @@ class OrderExecutor:
     def create_trade_fsm(self, plan: Dict[str, Any]) -> TradeFSM:
         """Build a TradeFSM from a strategy plan."""
         trade_id = str(plan.get("trade_id") or int(time.time() * 1000))
-        side = OrderSide.BUY if str(plan.get("action", "BUY")).upper() == "BUY" else OrderSide.SELL
+        side = (
+            OrderSide.BUY
+            if str(plan.get("action", "BUY")).upper() == "BUY"
+            else OrderSide.SELL
+        )
         symbol = str(plan.get("symbol") or plan.get("tradingsymbol") or "")
         qty = int(plan.get("qty") or plan.get("quantity") or 0)
         price = plan.get("limit_price") or plan.get("entry")
@@ -1292,7 +1379,10 @@ class OrderExecutor:
         self._idemp_map[leg.idempotency_key] = leg.leg_id
         fsm = self._fsms.setdefault(leg.trade_id, TradeFSM(leg.trade_id, legs={}))
         fsm.legs[leg.leg_id] = leg
-        quote = {"bid": float(leg.limit_price or 100.0), "ask": float(leg.limit_price or 100.0) + 0.4}
+        quote = {
+            "bid": float(leg.limit_price or 100.0),
+            "ask": float(leg.limit_price or 100.0) + 0.4,
+        }
         self._enqueue_router(leg, quote, None)
 
     def _enqueue_router(
@@ -1390,10 +1480,14 @@ class OrderExecutor:
     def _compute_pnl_R(self, fsm: TradeFSM) -> float:
         """Estimate trade PnL in R units for the given FSM."""
 
-        entry_leg = next((leg for leg in fsm.legs.values() if leg.leg_type is LegType.ENTRY), None)
+        entry_leg = next(
+            (leg for leg in fsm.legs.values() if leg.leg_type is LegType.ENTRY), None
+        )
         if not entry_leg:
             return 0.0
-        exit_legs = [leg for leg in fsm.legs.values() if leg.leg_type is not LegType.ENTRY]
+        exit_legs = [
+            leg for leg in fsm.legs.values() if leg.leg_type is not LegType.ENTRY
+        ]
         if not exit_legs:
             return 0.0
         pnl_rupees = 0.0
@@ -1404,7 +1498,13 @@ class OrderExecutor:
                 pnl_rupees += (leg.avg_price - entry_leg.avg_price) * leg.qty
             else:
                 pnl_rupees += (entry_leg.avg_price - leg.avg_price) * leg.qty
-        risk_rupees = abs(getattr(fsm, "entry_price", entry_leg.avg_price) - getattr(fsm, "stop_loss", entry_leg.avg_price)) * entry_leg.qty
+        risk_rupees = (
+            abs(
+                getattr(fsm, "entry_price", entry_leg.avg_price)
+                - getattr(fsm, "stop_loss", entry_leg.avg_price)
+            )
+            * entry_leg.qty
+        )
         if risk_rupees <= 0:
             return 0.0
         return pnl_rupees / risk_rupees
@@ -1412,7 +1512,10 @@ class OrderExecutor:
     def step_queue(self, now: Optional[datetime] = None) -> None:
         now_ms = self._now_ms()
         for sym, q in list(self._queues.items()):
-            if self._inflight_symbols.get(sym, 0) >= self.router_max_inflight_per_symbol:
+            if (
+                self._inflight_symbols.get(sym, 0)
+                >= self.router_max_inflight_per_symbol
+            ):
                 continue
             if not q:
                 continue
@@ -1447,7 +1550,9 @@ class OrderExecutor:
             t0 = self._now_ms()
             res = self._place_with_cb(req)
             if not res.get("ok"):
-                delay = self.router_backoff_ms * (1 + qi.retries) + random.randint(0, 25)
+                delay = self.router_backoff_ms * (1 + qi.retries) + random.randint(
+                    0, 25
+                )
                 time.sleep(delay / 1000.0)
                 qi.retries += 1
                 if qi.retries > self.router_max_place_retries:
@@ -1562,7 +1667,9 @@ class OrderExecutor:
             leg.on_reject("place_failed")
             return
         leg.mark_acked(str(order_id))
-        self._inflight_symbols[leg.symbol] = self._inflight_symbols.get(leg.symbol, 0) + 1
+        self._inflight_symbols[leg.symbol] = (
+            self._inflight_symbols.get(leg.symbol, 0) + 1
+        )
         if self.journal:
             try:
                 self.journal.append_event(
@@ -1585,7 +1692,17 @@ class OrderExecutor:
         r = reason.lower()
         return any(
             x in r
-            for x in ["timeout", "timed out", "502", "503", "504", "network", "429", "rate", "throttle"]
+            for x in [
+                "timeout",
+                "timed out",
+                "502",
+                "503",
+                "504",
+                "network",
+                "429",
+                "rate",
+                "throttle",
+            ]
         )
 
     def _build_place_request(
@@ -1723,7 +1840,11 @@ class OrderExecutor:
         Example placeholder: NIFTY24500CE  (expiry not encoded here).
         """
         try:
-            base = getattr(settings.instruments, "trade_symbol", "NIFTY") if settings else "NIFTY"
+            base = (
+                getattr(settings.instruments, "trade_symbol", "NIFTY")
+                if settings
+                else "NIFTY"
+            )
         except Exception:
             base = "NIFTY"
         strike = payload.get("strike")
@@ -1756,7 +1877,9 @@ class OrderExecutor:
 class OrderReconciler:
     """Poll broker orders and reconcile with local FSM legs."""
 
-    def __init__(self, kite: Any, fsm_store: OrderExecutor, logger: logging.Logger) -> None:
+    def __init__(
+        self, kite: Any, fsm_store: OrderExecutor, logger: logging.Logger
+    ) -> None:
         self.kite = kite
         self.store = fsm_store
         self.log = logger
@@ -1835,7 +1958,11 @@ class OrderReconciler:
                 except Exception:
                     pass
 
-            if leg.state in {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED}:
+            if leg.state in {
+                OrderState.FILLED,
+                OrderState.CANCELLED,
+                OrderState.REJECTED,
+            }:
                 q = self.store._queues.get(leg.symbol)
                 if q and q and q[0].leg_id == leg.leg_id:
                     q.popleft()
@@ -1860,10 +1987,13 @@ class OrderReconciler:
                     exit_reason = leg.reason
                     if entry_leg and self.store.journal:
                         try:
-                            risk = abs(
-                                getattr(fsm, "entry_price", entry_leg.avg_price)
-                                - getattr(fsm, "stop_loss", entry_leg.avg_price)
-                            ) * entry_leg.qty
+                            risk = (
+                                abs(
+                                    getattr(fsm, "entry_price", entry_leg.avg_price)
+                                    - getattr(fsm, "stop_loss", entry_leg.avg_price)
+                                )
+                                * entry_leg.qty
+                            )
                             pnl_rupees = (
                                 (exit_price - entry_leg.avg_price) * entry_leg.qty
                                 if entry_leg.side is OrderSide.BUY
@@ -1890,7 +2020,9 @@ class OrderReconciler:
                         try:
                             self.store.on_trade_closed(pnl_R)
                         except Exception:
-                            self.log.debug("on_trade_closed callback failed", exc_info=True)
+                            self.log.debug(
+                                "on_trade_closed callback failed", exc_info=True
+                            )
                     self.store._closed_trades.add(fsm.trade_id)
 
             updated += 1

@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from .instruments_cache import InstrumentsCache, nearest_weekly_expiry
 from src.utils.strike_selector import resolve_weekly_atm
+
+from .instruments_cache import InstrumentsCache, nearest_weekly_expiry
 
 try:  # pragma: no cover - optional dependency
     from kiteconnect import KiteConnect  # type: ignore
@@ -24,7 +25,9 @@ class OptionResolver:
         instrument cache does not contain the requested option token.
     """
 
-    def __init__(self, cache: InstrumentsCache, kite: Optional[KiteConnect] = None) -> None:
+    def __init__(
+        self, cache: InstrumentsCache, kite: Optional[KiteConnect] = None
+    ) -> None:
         self.cache = cache
         self.kite = kite
 
@@ -56,4 +59,9 @@ class OptionResolver:
                     key = (under_symbol.upper(), expiry, strike, kind.upper())
                     self.cache._by_key[key] = meta  # type: ignore[attr-defined]
 
-        return {"under": under_symbol, "strike": strike, "expiry": expiry, **(meta or {})}
+        return {
+            "under": under_symbol,
+            "strike": strike,
+            "expiry": expiry,
+            **(meta or {}),
+        }

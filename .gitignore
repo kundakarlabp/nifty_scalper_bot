@@ -43,3 +43,7 @@ reports/
 
 # Docker
 *.tar
+
+# Janitor report
+JANITOR_REPORT.json
+

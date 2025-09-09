@@ -4,32 +4,32 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from datetime import datetime, time as dt_time
-from typing import Any, Dict, Optional, Tuple, Literal, Deque
 from dataclasses import dataclass
+from datetime import datetime, time as dt_time
+from random import uniform as rand_uniform
+from typing import Any, Deque, Dict, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from src.config import settings
+from src.execution.micro_filters import cap_for_mid, evaluate_micro
+from src.execution.order_executor import fetch_quote_with_depth
+from src.signals.regime_detector import detect_market_regime
+from src.strategies.strategy_config import StrategyConfig
+from src.strategies.warmup import warmup_status
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
-    calculate_vwap,
-    calculate_macd,
-    calculate_bb_width,
     calculate_adx,
+    calculate_bb_width,
+    calculate_macd,
+    calculate_vwap,
 )
-from src.signals.regime_detector import detect_market_regime
-from src.execution.order_executor import fetch_quote_with_depth
-from src.execution.micro_filters import evaluate_micro, cap_for_mid
 from src.utils.strike_selector import (
     get_instrument_tokens,
-    select_strike,
     resolve_weekly_atm,
+    select_strike,
 )
-from src.strategies.strategy_config import StrategyConfig
-from random import uniform as rand_uniform
-from src.strategies.warmup import warmup_status
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
     """Return True if current time is Tuesday after ``threshold``."""
     now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
     return now.weekday() == 1 and now.time() >= threshold
+
 
 # ---------- scoring helpers ----------
 
@@ -181,8 +182,12 @@ class EnhancedScalpingStrategy:
         # Regime shaping (add to multipliers; can be negative)
         self.trend_tp_boost = float(getattr(settings.strategy, "trend_tp_boost", 0.6))
         self.trend_sl_relax = float(getattr(settings.strategy, "trend_sl_relax", 0.2))
-        self.range_tp_tighten = float(getattr(settings.strategy, "range_tp_tighten", -0.4))
-        self.range_sl_tighten = float(getattr(settings.strategy, "range_sl_tighten", -0.2))
+        self.range_tp_tighten = float(
+            getattr(settings.strategy, "range_tp_tighten", -0.4)
+        )
+        self.range_sl_tighten = float(
+            getattr(settings.strategy, "range_sl_tighten", -0.2)
+        )
 
         # Bars threshold for validity
         self.min_bars_for_signal = int(min_bars_for_signal)
@@ -191,15 +196,25 @@ class EnhancedScalpingStrategy:
         # Config is typically 0..100; internal scoring below returns ~0..8
         raw_conf = float(confidence_threshold)  # e.g., 55 (%)
         raw_conf_rel = float(
-            getattr(settings.strategy, "confidence_threshold_relaxed", max(0.0, raw_conf - 20))
+            getattr(
+                settings.strategy,
+                "confidence_threshold_relaxed",
+                max(0.0, raw_conf - 20),
+            )
         )
-        self.min_conf_strict = raw_conf / 10.0   # 55 -> 5.5 on a 0..10-ish scale
+        self.min_conf_strict = raw_conf / 10.0  # 55 -> 5.5 on a 0..10-ish scale
         self.min_conf_relaxed = raw_conf_rel / 10.0
 
         self.min_score_strict = int(min_signal_score)
-        self.auto_relax_enabled = bool(getattr(settings.strategy, "auto_relax_enabled", True))
+        self.auto_relax_enabled = bool(
+            getattr(settings.strategy, "auto_relax_enabled", True)
+        )
         self.min_score_relaxed = int(
-            getattr(settings.strategy, "min_signal_score_relaxed", max(2, self.min_score_strict - 1))
+            getattr(
+                settings.strategy,
+                "min_signal_score_relaxed",
+                max(2, self.min_score_strict - 1),
+            )
         )
 
         # ATR & confidence shaping
@@ -230,7 +245,9 @@ class EnhancedScalpingStrategy:
         return rsi
 
     @staticmethod
-    def _extract_adx_columns(spot_df: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
+    def _extract_adx_columns(
+        spot_df: pd.DataFrame,
+    ) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
         """Return (adx, di_plus, di_minus) from spot_df; tolerant to suffix (_{n}) naming."""
         if spot_df is None or spot_df.empty:
             return None, None, None
@@ -288,9 +305,15 @@ class EnhancedScalpingStrategy:
         if not isinstance(cfg, StrategyConfig):
             return None
         adx = plan.get("adx")
-        if plan.get("regime") == "TREND" and adx is not None and adx < int(cfg.adx_min_trend):
+        if (
+            plan.get("regime") == "TREND"
+            and adx is not None
+            and adx < int(cfg.adx_min_trend)
+        ):
             return "weak_trend", {"adx": adx}
-        ivpct = self._est_iv_pct(S=close, K=plan.get("atm_strike", int(close)), T=plan.get("T", 3 / 365))
+        ivpct = self._est_iv_pct(
+            S=close, K=plan.get("atm_strike", int(close)), T=plan.get("T", 3 / 365)
+        )
         plan["iv_pct"] = ivpct
         limit = int(cfg.iv_percentile_limit)
         min_score = self._normalize_min_score(
@@ -318,6 +341,7 @@ class EnhancedScalpingStrategy:
         )
         if not isinstance(cfg, StrategyConfig):
             from src.strategies.strategy_config import resolve_config_path
+
             cfg = StrategyConfig.load(resolve_config_path())
 
         plan: Dict[str, Any] = {
@@ -376,7 +400,14 @@ class EnhancedScalpingStrategy:
         def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
             sd = plan.setdefault(
                 "score_dbg",
-                {"components": {}, "weights": {}, "penalties": {}, "raw": 0.0, "final": 0.0, "threshold": 0.0},
+                {
+                    "components": {},
+                    "weights": {},
+                    "penalties": {},
+                    "raw": 0.0,
+                    "final": 0.0,
+                    "threshold": 0.0,
+                },
             )
             sd.setdefault("components", {})
             sd.setdefault("weights", {})
@@ -419,10 +450,24 @@ class EnhancedScalpingStrategy:
             plan["last_bar_ts"] = last_ts.to_pydatetime().isoformat()
             spot_last = float(spot_df["close"].iloc[-1])
             if current_price is None:
-                current_price = float(current_tick.get("ltp", spot_last)) if current_tick else spot_last
-            atr_p = int(getattr(cfg, "atr_period", 14)) if hasattr(cfg, "atr_period") else 14
-            config_min = int(getattr(cfg, "min_bars_required", self.min_bars_for_signal))
-            warmup_bars = int(getattr(cfg, "warmup_bars", 0)) if hasattr(cfg, "warmup_bars") else 0
+                current_price = (
+                    float(current_tick.get("ltp", spot_last))
+                    if current_tick
+                    else spot_last
+                )
+            atr_p = (
+                int(getattr(cfg, "atr_period", 14))
+                if hasattr(cfg, "atr_period")
+                else 14
+            )
+            config_min = int(
+                getattr(cfg, "min_bars_required", self.min_bars_for_signal)
+            )
+            warmup_bars = (
+                int(getattr(cfg, "warmup_bars", 0))
+                if hasattr(cfg, "warmup_bars")
+                else 0
+            )
             required_bars = max(
                 self.min_bars_for_signal,
                 config_min,
@@ -441,7 +486,9 @@ class EnhancedScalpingStrategy:
                 pass
             if not w.ok:
                 try:
-                    if hasattr(self, "data_source") and hasattr(self.data_source, "ensure_backfill"):
+                    if hasattr(self, "data_source") and hasattr(
+                        self.data_source, "ensure_backfill"
+                    ):
                         self.data_source.ensure_backfill(required_bars=required_bars)
                         # refresh bars after backfill attempt
                         if hasattr(self.data_source, "get_last_bars"):
@@ -459,15 +506,21 @@ class EnhancedScalpingStrategy:
                             }
                         else:
                             return plan_block(
-                                "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                                "insufficient_bars",
+                                bar_count=have_bars,
+                                need_bars=required_bars,
                             )
                     else:
                         return plan_block(
-                            "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                            "insufficient_bars",
+                            bar_count=have_bars,
+                            need_bars=required_bars,
                         )
                 except Exception:
                     return plan_block(
-                        "insufficient_bars", bar_count=have_bars, need_bars=required_bars
+                        "insufficient_bars",
+                        bar_count=have_bars,
+                        need_bars=required_bars,
                     )
             if current_price is None or current_price <= 0:
                 return plan_block("indicator_unready", bar_count=len(df))
@@ -626,7 +679,9 @@ class EnhancedScalpingStrategy:
                 and len(obv) >= 2
             ):
                 obv_rising = float(obv.iloc[-1]) > float(obv.iloc[-2])
-                if (side == "BUY" and obv_rising) or (side == "SELL" and not obv_rising):
+                if (side == "BUY" and obv_rising) or (
+                    side == "SELL" and not obv_rising
+                ):
                     momentum_score += 1
             else:
                 logger.debug("Invalid OBV series for momentum scoring: %r", obv)
@@ -649,14 +704,14 @@ class EnhancedScalpingStrategy:
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
             if not info_atm:
-                return plan_block("no_option_token", micro={"spread_pct": None, "depth_ok": None})
+                return plan_block(
+                    "no_option_token", micro={"spread_pct": None, "depth_ok": None}
+                )
             tsym, lot_sz = info_atm
             q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
-            micro = evaluate_micro(
-                q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg
-            )
+            micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
             if not isinstance(micro, dict):
                 micro = {}
             micro["cap_pct"] = cap_pct
@@ -721,7 +776,9 @@ class EnhancedScalpingStrategy:
                 return plan_block(reason, **extra)
 
             entry_price = float(current_price)
-            tick_size = float(getattr(getattr(settings, "executor", object()), "tick_size", 0.05))
+            tick_size = float(
+                getattr(getattr(settings, "executor", object()), "tick_size", 0.05)
+            )
 
             if reg.regime == "RANGE" and side == "SELL":
                 struct_sl_price = float(df["high"].iloc[-1]) + 0.25 * atr_val
@@ -744,7 +801,9 @@ class EnhancedScalpingStrategy:
             trail_mult = cfg.trail_atr_mult
             time_stop = cfg.time_stop_min
             runner_obj = getattr(self, "runner", None)
-            now_dt = runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))
+            now_dt = (
+                runner_obj.now_ist if runner_obj else datetime.now(ZoneInfo(cfg.tz))
+            )
             if cfg.gamma_enabled and is_tue_after(cfg.gamma_after, now=now_dt):
                 tp2_mult = min(tp2_mult, cfg.gamma_tp2_cap)
                 trail_mult = min(trail_mult, cfg.gamma_trail_mult)
@@ -770,7 +829,10 @@ class EnhancedScalpingStrategy:
                 liquidity_info: Optional[Dict[str, Any]] = None
                 try:
                     from src.utils import strike_selector as ss
-                    liquidity_info = ss._option_info_fetcher(int(round(price / 50.0) * 50))
+
+                    liquidity_info = ss._option_info_fetcher(
+                        int(round(price / 50.0) * 50)
+                    )
                 except Exception:
                     liquidity_info = None
                 if liquidity_info is not None:
@@ -779,22 +841,24 @@ class EnhancedScalpingStrategy:
             else:
                 strike = int(strike_info.strike)
 
-            plan.update({
-                "has_signal": True,
-                "action": side,
-                "option_type": option_type or None,
-                "strike": str(strike),
-                "entry": entry_price,
-                "sl": stop_loss,
-                "tp1": tp1,
-                "tp2": tp2,
-                "trail_atr_mult": trail_mult,
-                "time_stop_min": time_stop,
-                "rr": round(rr, 2),
-                "regime": reg.regime,
-                "score": score,
-                "reasons": reasons,
-            })
+            plan.update(
+                {
+                    "has_signal": True,
+                    "action": side,
+                    "option_type": option_type or None,
+                    "strike": str(strike),
+                    "entry": entry_price,
+                    "sl": stop_loss,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "trail_atr_mult": trail_mult,
+                    "time_stop_min": time_stop,
+                    "rr": round(rr, 2),
+                    "regime": reg.regime,
+                    "score": score,
+                    "reasons": reasons,
+                }
+            )
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
@@ -845,7 +909,8 @@ class ScalpingStrategy(EnhancedScalpingStrategy):
         """Update internal buffer with a bar and reuse ``generate_signal``."""
 
         if not hasattr(self, "_bt_df"):
-            self._bt_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            self._bt_df = pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume"]
+            )
         self._bt_df.loc[ts] = {"open": o, "high": h, "low": l, "close": c, "volume": v}
         return self.generate_signal(self._bt_df)
-

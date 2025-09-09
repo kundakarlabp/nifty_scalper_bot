@@ -26,6 +26,7 @@ class SizingParams:
     min_lots / max_lots: hard clamps on lots
     max_position_size_pct: cap notional exposure vs equity (0.10 = 10%)
     """
+
     risk_per_trade: float = 0.01
     min_lots: int = 1
     max_lots: int = 10
@@ -84,7 +85,9 @@ class PositionSizer:
         if risk_per_trade <= 0 or risk_per_trade > 0.10:
             raise ValueError("risk_per_trade must be within (0, 0.10].")
         if min_lots <= 0 or max_lots <= 0 or max_lots < min_lots:
-            raise ValueError("min_lots and max_lots must be positive and max_lots >= min_lots.")
+            raise ValueError(
+                "min_lots and max_lots must be positive and max_lots >= min_lots."
+            )
         if max_position_size_pct < 0 or max_position_size_pct > 1:
             raise ValueError("max_position_size_pct must be within [0, 1].")
 
@@ -132,7 +135,12 @@ class PositionSizer:
     @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
         # Basic input validation
-        if si.entry_price <= 0 or si.stop_loss <= 0 or si.lot_size <= 0 or si.equity <= 0:
+        if (
+            si.entry_price <= 0
+            or si.stop_loss <= 0
+            or si.lot_size <= 0
+            or si.equity <= 0
+        ):
             return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0)
 
         sl_points = abs(si.entry_price - si.stop_loss)
@@ -143,15 +151,31 @@ class PositionSizer:
         risk_rupees = si.equity * sp.risk_per_trade
         rupee_risk_per_lot = sl_points * si.lot_size
         if rupee_risk_per_lot <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, sl_points, 0, risk_rupees, 0, 0, 0, 0)
+            return (
+                0,
+                0,
+                PositionSizer._diag(si, sp, sl_points, 0, risk_rupees, 0, 0, 0, 0),
+            )
 
         # Lots affordable under risk budget
         lots_raw = int(risk_rupees // rupee_risk_per_lot)
 
         # If the risk budget can't fund even a single lot, exit early
         if lots_raw < 1:
-            return 0, 0, PositionSizer._diag(
-                si, sp, sl_points, rupee_risk_per_lot, risk_rupees, lots_raw, 0, 0, 0
+            return (
+                0,
+                0,
+                PositionSizer._diag(
+                    si,
+                    sp,
+                    sl_points,
+                    rupee_risk_per_lot,
+                    risk_rupees,
+                    lots_raw,
+                    0,
+                    0,
+                    0,
+                ),
             )
 
         # Enforce min/max only when at least one lot is affordable
@@ -160,7 +184,11 @@ class PositionSizer:
 
         # Exposure cap (notional)
         exposure_notional = si.entry_price * si.lot_size * lots
-        max_notional = si.equity * sp.max_position_size_pct if sp.max_position_size_pct > 0 else float("inf")
+        max_notional = (
+            si.equity * sp.max_position_size_pct
+            if sp.max_position_size_pct > 0
+            else float("inf")
+        )
         if exposure_notional > max_notional:
             denom = si.entry_price * si.lot_size
             lots_cap = int(max_notional // denom) if denom > 0 else 0
@@ -170,8 +198,15 @@ class PositionSizer:
 
         quantity = lots * si.lot_size
         diag = PositionSizer._diag(
-            si, sp, sl_points, rupee_risk_per_lot, risk_rupees, lots_raw, lots, exposure_notional,
-            0.0 if max_notional == float("inf") else max_notional
+            si,
+            sp,
+            sl_points,
+            rupee_risk_per_lot,
+            risk_rupees,
+            lots_raw,
+            lots,
+            exposure_notional,
+            0.0 if max_notional == float("inf") else max_notional,
         )
         return quantity, lots, diag
 

@@ -9,12 +9,12 @@ import os
 from datetime import datetime, timedelta
 from typing import List, Tuple
 
-from src.backtesting.data_feed import SpotFeed
-from src.backtesting.sim_connector import SimConnector
 from src.backtesting.backtest_engine import BacktestEngine
+from src.backtesting.data_feed import SpotFeed
+from src.backtesting.metrics import reject
+from src.backtesting.sim_connector import SimConnector
 from src.risk.limits import LimitConfig, RiskEngine
 from src.strategies.strategy_config import resolve_config_path, try_load
-from src.backtesting.metrics import reject
 
 
 def daterange(start: datetime, end: datetime):
@@ -26,7 +26,9 @@ def daterange(start: datetime, end: datetime):
         cur = cur + timedelta(days=1)
 
 
-def build_walkforward_windows(start: datetime, end: datetime, train_w: int, test_w: int) -> List[Tuple[datetime, datetime, datetime]]:
+def build_walkforward_windows(
+    start: datetime, end: datetime, train_w: int, test_w: int
+) -> List[Tuple[datetime, datetime, datetime]]:
     """Compute walk-forward train/test windows."""
 
     windows: List[Tuple[datetime, datetime, datetime]] = []
@@ -44,7 +46,11 @@ def build_walkforward_windows(start: datetime, end: datetime, train_w: int, test
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="CSV with 1m OHLC (timestamp,open,high,low,close,volume)")
+    ap.add_argument(
+        "--data",
+        required=True,
+        help="CSV with 1m OHLC (timestamp,open,high,low,close,volume)",
+    )
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--wf", default="6:2", help="train_weeks:test_weeks")
@@ -75,7 +81,13 @@ def main() -> None:
                 local_cfg.raw.setdefault("strategy", {})["min_score"] = min_score
                 local_cfg.tp2_R_trend = tp2R
                 risk_tr = RiskEngine(LimitConfig(tz=cfg.tz))
-                bt_tr = BacktestEngine(feed, local_cfg, risk_tr, sim, outdir=os.path.join(fold_dir, "train"))
+                bt_tr = BacktestEngine(
+                    feed,
+                    local_cfg,
+                    risk_tr,
+                    sim,
+                    outdir=os.path.join(fold_dir, "train"),
+                )
                 s_tr = bt_tr.run(start=tr_s.isoformat(), end=tr_e.isoformat())
                 if reject(s_tr):
                     continue
@@ -85,15 +97,20 @@ def main() -> None:
             with open(os.path.join(fold_dir, "NO_CANDIDATES"), "w") as f:
                 f.write("all rejected")
             continue
-        best = sorted(candidates, key=lambda x: (x[0]["PF"], x[0]["AvgR"]), reverse=True)[0]
+        best = sorted(
+            candidates, key=lambda x: (x[0]["PF"], x[0]["AvgR"]), reverse=True
+        )[0]
 
         risk_te = RiskEngine(LimitConfig(tz=cfg.tz))
         cfg.raw.setdefault("strategy", {})["min_score"] = best[1]["min_score"]
         cfg.tp2_R_trend = best[1]["tp2_R_trend"]
-        bt_te = BacktestEngine(feed, cfg, risk_te, sim, outdir=os.path.join(fold_dir, "test"))
+        bt_te = BacktestEngine(
+            feed, cfg, risk_te, sim, outdir=os.path.join(fold_dir, "test")
+        )
         s_te = bt_te.run(start=tr_e.isoformat(), end=te_e.isoformat())
         with open(os.path.join(fold_dir, "best_config.yaml"), "w") as f:
             import yaml  # type: ignore[import]
+
             yaml.safe_dump(best[1], f)
         with open(os.path.join(fold_dir, "test_summary.json"), "w") as f:
             json.dump(s_te, f, indent=2)

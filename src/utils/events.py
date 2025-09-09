@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import List, Optional
-import os
+from zoneinfo import ZoneInfo
+
 import yaml  # type: ignore
 
 
@@ -87,7 +88,13 @@ def _weekly_recurring(
     horizon_days: int = 14,
 ) -> List[tuple[datetime, datetime]]:
     """Expand a simple weekly rule into concrete datetime windows."""
-    wd_map = {"WEEKLY_MON": 0, "WEEKLY_TUE": 1, "WEEKLY_WED": 2, "WEEKLY_THU": 3, "WEEKLY_FRI": 4}
+    wd_map = {
+        "WEEKLY_MON": 0,
+        "WEEKLY_TUE": 1,
+        "WEEKLY_WED": 2,
+        "WEEKLY_THU": 3,
+        "WEEKLY_FRI": 4,
+    }
     wd = wd_map.get(rule)
     if wd is None:
         return []
@@ -113,7 +120,9 @@ def load_calendar(path: str) -> EventCalendar:
     defaults = GuardDefaults(
         guard_before_min=int(y.get("defaults", {}).get("guard_before_min", 5)),
         guard_after_min=int(y.get("defaults", {}).get("guard_after_min", 5)),
-        post_widen_spread_pct=float(y.get("defaults", {}).get("post_widen_spread_pct", 0.10)),
+        post_widen_spread_pct=float(
+            y.get("defaults", {}).get("post_widen_spread_pct", 0.10)
+        ),
         block_trading=bool(y.get("defaults", {}).get("block_trading", True)),
     )
     evs: List[EventWindow] = []
@@ -125,7 +134,9 @@ def load_calendar(path: str) -> EventCalendar:
                 end=_parse_dt(ev["end"], tz),
                 before_min=int(ev.get("guard_before_min", defaults.guard_before_min)),
                 after_min=int(ev.get("guard_after_min", defaults.guard_after_min)),
-                post_widen_spread_pct=float(ev.get("post_widen_spread_pct", defaults.post_widen_spread_pct)),
+                post_widen_spread_pct=float(
+                    ev.get("post_widen_spread_pct", defaults.post_widen_spread_pct)
+                ),
                 block_trading=bool(ev.get("block_trading", defaults.block_trading)),
             )
         )
@@ -139,7 +150,9 @@ def load_calendar(path: str) -> EventCalendar:
                     name=str(r.get("name", rule)),
                     start=sdt,
                     end=edt,
-                    before_min=int(r.get("guard_before_min", defaults.guard_before_min)),
+                    before_min=int(
+                        r.get("guard_before_min", defaults.guard_before_min)
+                    ),
                     after_min=int(r.get("guard_after_min", defaults.guard_after_min)),
                     post_widen_spread_pct=float(
                         r.get("post_widen_spread_pct", defaults.post_widen_spread_pct)
