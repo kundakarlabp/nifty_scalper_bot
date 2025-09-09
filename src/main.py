@@ -42,7 +42,10 @@ from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
-except Exception:
+except Exception as exc:  # pragma: no cover
+    logging.getLogger("main").warning(  # pragma: no cover
+        "KiteConnect import failed: %s", exc, exc_info=True  # pragma: no cover
+    )  # pragma: no cover
     KiteConnect = None  # type: ignore
 
 
@@ -53,8 +56,10 @@ def _setup_logging() -> None:
     setup_logging(level=settings.log_level, json=settings.log_json)
     try:
         install_warmup_filters()
-    except Exception:
-        pass
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger("main").warning(  # pragma: no cover
+            "Warmup filter installation failed: %s", exc, exc_info=True  # pragma: no cover
+        )  # pragma: no cover
     root = logging.getLogger()
     root.addFilter(RateLimitFilter(interval=120.0))
     if log_buffer_handler not in root.handlers:
@@ -71,8 +76,10 @@ def _setup_logging() -> None:
         root.addHandler(fh)
     try:
         _log_cred_presence()
-    except Exception:
-        pass
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger("main").warning(  # pragma: no cover
+            "Credential presence logging failed: %s", exc, exc_info=True  # pragma: no cover
+        )  # pragma: no cover
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
@@ -134,8 +141,11 @@ def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
                 data = f.read(read_size) + data
         text = data.decode(errors="ignore")
         return text.splitlines()[-n:]
-    except Exception:
-        return []
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger("main").warning(  # pragma: no cover
+            "Failed to tail logs from %s: %s", path, exc, exc_info=True  # pragma: no cover
+        )  # pragma: no cover
+        return []  # pragma: no cover
 
 
 # -----------------------------
@@ -216,8 +226,10 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     try:
         tg.start_polling()
         logging.getLogger("main").info("📡 Telegram polling started")
-    except Exception:
-        logging.getLogger("main").warning("Telegram polling failed to start")
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger("main").warning(  # pragma: no cover
+            "Telegram polling failed to start: %s", exc, exc_info=True  # pragma: no cover
+        )  # pragma: no cover
 
 
 # -----------------------------
@@ -256,8 +268,10 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _handler)
-        except Exception:
-            logging.getLogger("main").warning("Failed to set handler for %s", sig)
+        except Exception as exc:  # pragma: no cover
+            logging.getLogger("main").warning(  # pragma: no cover
+                "Failed to set handler for %s: %s", sig, exc, exc_info=True  # pragma: no cover
+            )  # pragma: no cover
 
 
 def main() -> int:
@@ -381,8 +395,10 @@ def main() -> int:
     finally:
         try:
             runner.shutdown()
-        except Exception:
-            log.exception("Runner shutdown failed")
+        except Exception as exc:  # pragma: no cover
+            logging.getLogger("main").warning(  # pragma: no cover
+                "Runner shutdown failed: %s", exc, exc_info=True  # pragma: no cover
+            )  # pragma: no cover
         try:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception as e:
