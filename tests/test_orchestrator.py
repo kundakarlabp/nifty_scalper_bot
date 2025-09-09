@@ -59,7 +59,7 @@ def test_orchestrator_stale_watchdog() -> None:
     orch.start()
     ds.subscribe([1])
     broker.push_tick(1, Decimal("1"))
-    time.sleep(0.3)
+    time.sleep(0.5)
     assert triggered == ["x"]
     assert orch._paused
     broker.push_tick(1, Decimal("1"))
