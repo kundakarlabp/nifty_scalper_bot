@@ -34,7 +34,6 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.data.types import HistStatus
 from src.diagnostics.metrics import metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -68,7 +67,7 @@ from src.utils.market_time import (
 )
 from src.utils.time_windows import TZ, floor_to_minute
 
-from .warmup import check as warmup_check, required_bars
+from .warmup import check as warmup_check, required_bars, warmup_status
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -411,13 +410,13 @@ class StrategyRunner:
         if self.kite is not None and self.data_source is not None:
             try:
                 token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
-                warm_min = int(getattr(settings, "warmup_min_bars", 0))
-                if warm_min > 0:
-                    res = self.data_source.have_min_bars(warm_min)
-                    if len(res.df) < warm_min and res.status is HistStatus.NO_DATA:
-                        self.log.info(
-                            "Warmup mode: live bars (broker OHLC unavailable)"
-                        )
+                warm_min = int(
+                    getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
+                )
+                if warm_min > 0 and not self.data_source.have_min_bars(warm_min):
+                    self.log.info(
+                        "Warmup mode: live bars (broker OHLC unavailable)",
+                    )
                 if token > 0:
                     now_ist = floor_to_minute(self._now_ist())
                     if is_market_open(now_ist):
@@ -742,6 +741,22 @@ class StrategyRunner:
             "reason_block": None,
         }
         self._last_error = None
+        warm_min = int(
+            getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
+        )
+        if (
+            self.data_source
+            and warm_min > 0
+            and not self.data_source.have_min_bars(warm_min)
+        ):
+            self._warm = warmup_status(0, warm_min)
+            self.ready = False
+            flow["reason_block"] = "warmup"
+            self._last_flow_debug = flow
+            self.log.info(
+                "Waiting for warmup: %s bars required", warm_min
+            )
+            return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
         for cb in [

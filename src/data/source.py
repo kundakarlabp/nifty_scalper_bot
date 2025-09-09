@@ -192,20 +192,22 @@ class DataSource:
     def get_last_bars(self, n: int) -> pd.DataFrame:  # pragma: no cover - legacy alias
         return self.get_recent_bars(n)
 
-    def have_min_bars(self, n: int) -> HistResult:
-        """Return a :class:`HistResult` for the last ``n`` bars."""
+    def have_min_bars(self, n: int) -> bool:
+        """Return ``True`` if at least ``n`` recent bars are available."""
+
         try:
             token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
         except Exception:
-            return HistResult(HistStatus.ERROR, pd.DataFrame(), "invalid token")
+            return False
+
         from src.utils.time_windows import floor_to_minute, now_ist
 
         end = floor_to_minute(now_ist(), None)
         lookback = max(60, n + 50)
         start = end - timedelta(minutes=lookback)
         res = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
-        res.df = _normalize_ohlc_df(res.df)
-        return res
+        df = _normalize_ohlc_df(res.df)
+        return len(df) >= n
 
 
 # Accept a few common aliases; default to 'minute'

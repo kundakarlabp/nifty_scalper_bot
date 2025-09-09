@@ -49,6 +49,12 @@ def test_fetch_ohlc_chunks_multiple_calls():
     assert len(df) >= WARMUP_BARS
 
 
+def test_have_min_bars_returns_bool() -> None:
+    kite = FakeKite()
+    src = LiveKiteSource(kite)
+    assert src.have_min_bars(10)
+
+
 @freeze_time("2024-01-01 09:30:00")
 def test_fetch_ohlc_network_failure_falls_back_to_ltp():
     class BoomKite:
