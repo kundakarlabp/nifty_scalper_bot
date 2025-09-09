@@ -65,8 +65,7 @@ class KiteBroker(Broker):
             logger.info("Kite REST connected")
         except Exception as exc:
             logger.exception("Kite connect failed")
-            self._translate_and_raise(exc)
-            raise AssertionError("unreachable")
+            raise self._translate_and_raise(exc) from exc
 
     def is_connected(self) -> bool:
         return bool(self._connected)
@@ -158,36 +157,36 @@ class KiteBroker(Broker):
         return Order(order_id=str(payload.get("order_id", "")), status=status, filled_qty=filled, avg_fill_price=avg_dec, raw=payload)
 
     # Error translation ---------------------------------------------------------
-    def _translate_and_raise(self, exc: Exception) -> None:
+    def _translate_and_raise(self, exc: Exception) -> Exception:
         if kex is not None:
             if isinstance(exc, getattr(kex, "TokenException", ())):
-                raise AuthError(str(exc)) from exc
+                return AuthError(str(exc))
             if isinstance(exc, getattr(kex, "NetworkException", ())):
-                raise NetworkError(str(exc)) from exc
+                return NetworkError(str(exc))
             if isinstance(exc, getattr(kex, "RateLimitException", ())):
-                raise RateLimitError(str(exc)) from exc
+                return RateLimitError(str(exc))
             if isinstance(exc, getattr(kex, "PermissionException", ())):
-                raise AuthError(str(exc)) from exc
+                return AuthError(str(exc))
             if isinstance(exc, getattr(kex, "InputException", ())):
-                raise OrderRejected(str(exc)) from exc
+                return OrderRejected(str(exc))
             if isinstance(exc, getattr(kex, "OrderException", ())):
                 msg = str(exc)
                 if "margin" in msg.lower():
-                    raise InsufficientMargin(msg) from exc
-                raise OrderRejected(msg) from exc
+                    return InsufficientMargin(msg)
+                return OrderRejected(msg)
             if isinstance(exc, getattr(kex, "GeneralException", ())):
-                raise BrokerError(str(exc)) from exc
+                return BrokerError(str(exc))
         msg = str(exc)
         if "Token" in msg or "auth" in msg.lower():
-            raise AuthError(msg) from exc
+            return AuthError(msg)
         if "rate limit" in msg.lower() or "429" in msg:
-            raise RateLimitError(msg) from exc
+            return RateLimitError(msg)
         if "margin" in msg.lower():
-            raise InsufficientMargin(msg) from exc
+            return InsufficientMargin(msg)
         if "reject" in msg.lower():
-            raise OrderRejected(msg) from exc
+            return OrderRejected(msg)
         if "not found" in msg.lower():
-            raise OrderNotFound(msg) from exc
+            return OrderNotFound(msg)
         if any(s in msg for s in ("Connection", "Timeout", "HTTPError", "Network")):
-            raise NetworkError(msg) from exc
-        raise BrokerError(msg) from exc
+            return NetworkError(msg)
+        return BrokerError(msg)
