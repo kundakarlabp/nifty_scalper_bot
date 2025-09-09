@@ -7,9 +7,10 @@ import sys
 import time
 import os
 import threading
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable, List, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -122,18 +123,9 @@ def _build_kite_session() -> Optional["KiteConnect"]:
 # -----------------------------
 def _tail_logs(n: int = 180, path: str = "trading_bot.log") -> List[str]:
     try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            block = 4096
-            data = b""
-            while size > 0 and data.count(b"\n") <= n:
-                read_size = block if size >= block else size
-                size -= read_size
-                f.seek(size)
-                data = f.read(read_size) + data
-        text = data.decode(errors="ignore")
-        return text.splitlines()[-n:]
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = deque(f, maxlen=max(1, n))
+        return [line.rstrip("\n") for line in lines]
     except Exception:
         return []
 
