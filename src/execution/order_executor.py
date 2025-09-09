@@ -19,8 +19,16 @@ from .order_state import (
     TradeFSM,
 )
 
+import os
 from src.utils.circuit_breaker import CircuitBreaker
 from src.logs.journal import Journal
+from src.utils.broker_errors import (
+    AUTH,
+    THROTTLE,
+    SUBSCRIPTION,
+    classify_broker_error,
+)
+from src.utils.reliability import RateLimiter
 
 
 
@@ -98,9 +106,13 @@ def _chunks(total: int, chunk: int) -> List[int]:
 
 _QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
+_QUOTE_ERR_RL = RateLimiter(5)
+_AUTH_WARNED = False
 
 
-def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, Any]:
+def fetch_quote_with_depth(
+    kite: Optional[KiteConnect], tsym: str, cb: Optional[CircuitBreaker] = None
+) -> Dict[str, Any]:
     """Return quote with depth for the given trading symbol."""
     if not kite or not tsym:
         return {
@@ -115,14 +127,13 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             "timestamp": None,
             "source": "none",
         }
-    try:
-        bid = ask = 0.0
-        bid_qty = ask_qty = 0
-        bid5 = ask5 = 0
-        ltp = 0.0
-        oi = ts = None
-        # Attempt twice if depth is missing even without an exception
-        for _ in range(2):
+    bid = ask = 0.0
+    bid_qty = ask_qty = 0
+    bid5 = ask5 = 0
+    ltp = 0.0
+    oi = ts = None
+    for attempt in range(2):
+        try:
             data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
             info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
             depth = info.get("depth", {}) if isinstance(info, dict) else {}
@@ -140,26 +151,27 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
             if bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0:
                 break
             time.sleep(0.25)
-        if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
-            raise ValueError("bad_depth")
-        quote = {
-            "ltp": ltp,
-            "bid": bid,
-            "ask": ask,
-            "bid_qty": bid_qty,
-            "ask_qty": ask_qty,
-            "bid5_qty": bid5,
-            "ask5_qty": ask5,
-            "oi": oi,
-            "timestamp": ts,
-            "source": "quote",
-        }
-        if ltp > 0:
-            with _CACHE_LOCK:
-                _QUOTE_CACHE[tsym] = quote
-        return quote
-    except Exception as e:
-        log.debug("fetch_quote_with_depth failed: %s", e)
+        except Exception as e:  # pragma: no cover - broker errors
+            kind = classify_broker_error(e)
+            if kind == THROTTLE and attempt == 0:
+                time.sleep(min(2.0, 0.5))
+                continue
+            if kind == AUTH:
+                global _AUTH_WARNED
+                if cb is not None:
+                    cooldown = int(os.getenv("BREAKER_AUTH_COOLDOWN_S", "60"))
+                    cb.force_open(cooldown)
+                if not _AUTH_WARNED:
+                    log.warning("broker auth error: %s", e)
+                    _AUTH_WARNED = True
+            elif kind not in (SUBSCRIPTION,):
+                if _QUOTE_ERR_RL.allow():
+                    log.warning("broker error: %s", e)
+            else:
+                if _QUOTE_ERR_RL.allow():
+                    log.warning("broker subscription error: %s", e)
+            break
+    if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
         with _CACHE_LOCK:
             cached = _QUOTE_CACHE.get(tsym)
         if cached:
@@ -205,6 +217,22 @@ def fetch_quote_with_depth(kite: Optional[KiteConnect], tsym: str) -> Dict[str, 
         with _CACHE_LOCK:
             _QUOTE_CACHE[tsym] = quote
         return quote
+    quote = {
+        "ltp": ltp,
+        "bid": bid,
+        "ask": ask,
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "bid5_qty": bid5,
+        "ask5_qty": ask5,
+        "oi": oi,
+        "timestamp": ts,
+        "source": "quote",
+    }
+    if ltp > 0:
+        with _CACHE_LOCK:
+            _QUOTE_CACHE[tsym] = quote
+    return quote
 
 
 class KiteOrderConnector:
@@ -622,7 +650,7 @@ class OrderExecutor:
                 lines.append(f"{t.upper()}: tsym_missing")
                 continue
             tsym, lot = info
-            q = fetch_quote_with_depth(self.kite, tsym)
+            q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
             bid = float(q.get("bid") or 0.0)
             ask = float(q.get("ask") or 0.0)
             spread_pct = ((ask - bid) / ((ask + bid) / 2) * 100.0) if bid > 0 and ask > 0 else None
@@ -649,7 +677,7 @@ class OrderExecutor:
         if not info:
             return "token missing"
         tsym, lot = info
-        q = fetch_quote_with_depth(self.kite, tsym)
+        q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
         bid = float(q.get("bid") or 0.0)
         ask = float(q.get("ask") or 0.0)
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
@@ -705,7 +733,7 @@ class OrderExecutor:
 
         if self.kite:
             try:
-                qd = fetch_quote_with_depth(self.kite, symbol)
+                qd = fetch_quote_with_depth(self.kite, symbol, self.cb_orders)
                 bid5 = int(qd.get("bid5_qty") or qd.get("bid_qty") or 0)
                 ask5 = int(qd.get("ask5_qty") or qd.get("ask_qty") or 0)
                 avail = int(min(bid5, ask5) * 0.8)

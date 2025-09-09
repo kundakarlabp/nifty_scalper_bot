@@ -32,6 +32,12 @@ from src.broker.interface import (
 )
 from src.broker.instruments import InstrumentStore
 from src.execution import broker_retry
+from src.utils.broker_errors import (
+    AUTH,
+    THROTTLE,
+    NETWORK as NET,
+    classify_broker_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -177,16 +183,17 @@ class KiteBroker(Broker):
             if isinstance(exc, getattr(kex, "GeneralException", ())):
                 raise BrokerError(str(exc)) from exc
         msg = str(exc)
-        if "Token" in msg or "auth" in msg.lower():
+        kind = classify_broker_error(exc)
+        if kind == AUTH:
             raise AuthError(msg) from exc
-        if "rate limit" in msg.lower() or "429" in msg:
+        if kind == THROTTLE:
             raise RateLimitError(msg) from exc
+        if kind == NET:
+            raise NetworkError(msg) from exc
         if "margin" in msg.lower():
             raise InsufficientMargin(msg) from exc
         if "reject" in msg.lower():
             raise OrderRejected(msg) from exc
         if "not found" in msg.lower():
             raise OrderNotFound(msg) from exc
-        if any(s in msg for s in ("Connection", "Timeout", "HTTPError", "Network")):
-            raise NetworkError(msg) from exc
         raise BrokerError(msg) from exc
