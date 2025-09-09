@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import builtins
+import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
-from src.server.health import app
+from src.server import health as health_module
 from src.strategies import runner as runner_module
 
 
@@ -23,7 +26,7 @@ def test_ready_endpoint_ok(monkeypatch) -> None:
     monkeypatch.setattr(
         runner_module.StrategyRunner, "get_singleton", classmethod(lambda cls: fake_runner)
     )
-    client = app.test_client()
+    client = health_module.app.test_client()
     resp = client.get("/ready")
     assert resp.status_code == 200
 
@@ -34,12 +37,65 @@ def test_ready_endpoint_stale(monkeypatch) -> None:
     monkeypatch.setattr(
         runner_module.StrategyRunner, "get_singleton", classmethod(lambda cls: fake_runner)
     )
-    client = app.test_client()
+    client = health_module.app.test_client()
     resp = client.get("/ready")
     assert resp.status_code == 503
 
 
 def test_live_endpoint() -> None:
-    client = app.test_client()
+    client = health_module.app.test_client()
     resp = client.get("/live")
     assert resp.status_code == 200
+
+
+def test_run_uses_waitress_when_available(monkeypatch) -> None:
+    calls: dict[str, tuple[str, int]] = {}
+
+    def fake_serve(app, host: str, port: int) -> None:  # noqa: ANN001
+        calls["args"] = (host, port)
+
+    monkeypatch.setitem(sys.modules, "waitress", SimpleNamespace(serve=fake_serve))
+    monkeypatch.setattr(
+        health_module.app,
+        "run",
+        lambda **_: (_ for _ in ()).throw(AssertionError("should not call app.run")),
+    )
+
+    health_module.run(host="1.2.3.4", port=5555)
+    assert calls["args"] == ("1.2.3.4", 5555)
+
+
+def test_run_falls_back_when_waitress_missing(monkeypatch) -> None:
+    monkeypatch.delitem(sys.modules, "waitress", raising=False)
+    orig_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):  # noqa: ANN001
+        if name == "waitress":
+            raise ImportError
+        return orig_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    calls: dict[str, Any] = {}
+
+    def fake_run(*, host: str, port: int, debug: bool, use_reloader: bool, threaded: bool) -> None:
+        calls.update(
+            {
+                "host": host,
+                "port": port,
+                "debug": debug,
+                "use_reloader": use_reloader,
+                "threaded": threaded,
+            }
+        )
+
+    monkeypatch.setattr(health_module.app, "run", fake_run)
+
+    health_module.run(host="0.0.0.0", port=8080)
+    assert calls == {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "debug": False,
+        "use_reloader": False,
+        "threaded": True,
+    }

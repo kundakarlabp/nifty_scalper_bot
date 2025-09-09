@@ -1,5 +1,6 @@
 # src/server/health.py
 # Lightweight health server for Railway/Render probes.
+# Uses Waitress in production when available.
 
 from __future__ import annotations
 
@@ -112,6 +113,9 @@ def run(
 ) -> None:
     """
     Start the health server in the current thread.
+
+    Uses Waitress when installed, falling back to Flask's development server.
+
     Typical usage is from a daemon thread:
 
         threading.Thread(
@@ -131,7 +135,20 @@ def run(
     bind_host = host or os.environ.get("HEALTH_HOST", "0.0.0.0")
     bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
 
-    # No reloader, multi-threaded to avoid blocking the trading loop
-    app.run(
-        host=bind_host, port=bind_port, debug=False, use_reloader=False, threaded=True
-    )
+    # Attempt to use a production-grade server if available
+    try:
+        from waitress import serve  # type: ignore[import-not-found]
+    except ImportError:  # pragma: no cover - import guarded for optional dep
+        serve = None
+
+    if serve is not None:
+        serve(app, host=bind_host, port=bind_port)
+    else:
+        # No reloader, multi-threaded to avoid blocking the trading loop
+        app.run(
+            host=bind_host,
+            port=bind_port,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
