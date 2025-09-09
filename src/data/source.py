@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -663,6 +663,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
         self._backfill_cooldown_s = 60
+        # Historical mode defaults to using broker backfill.  When backfill is
+        # skipped (e.g., warmup disabled), switch to live warmup using in-memory
+        # tick aggregation.
+        self.hist_mode = "backfill"
+        self.bar_builder: MinuteBarBuilder | None = None
+        if data_warmup_disable():
+            self.hist_mode = "live_warmup"
+            self.bar_builder = MinuteBarBuilder(max_bars=120)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -691,13 +699,23 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 except Exception as e:
                     log.warning("LiveKiteSource connect: subscribe failed: %s", e)
 
-        if token > 0:
+        warmup_disabled = data_warmup_disable()
+        warmup_failed = False
+        if token > 0 and not warmup_disabled:
             try:
                 self.ensure_backfill(
                     required_bars=WARMUP_BARS, token=token, timeframe="minute"
                 )
             except Exception as e:
                 log.warning("LiveKiteSource connect: backfill failed: %s", e)
+                warmup_failed = True
+        else:
+            warmup_failed = warmup_disabled
+
+        if warmup_failed:  # pragma: no cover - rare path
+            self.hist_mode = "live_warmup"
+            if self.bar_builder is None:
+                self.bar_builder = MinuteBarBuilder(max_bars=120)
 
     def disconnect(self) -> None:
         """Close the underlying Kite session if available."""
@@ -743,6 +761,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
 
+    def on_tick(self, tick: Dict[str, Any]) -> None:
+        """Handle incoming tick by updating warmup bar builder."""
+        self._last_tick_ts = datetime.utcnow()
+        if self.hist_mode == "live_warmup" and self.bar_builder:
+            try:
+                self.bar_builder.on_tick(tick)
+            except Exception:  # pragma: no cover - defensive
+                log.debug("bar_builder.on_tick failed", exc_info=True)
+
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
     ) -> None:
@@ -780,6 +807,44 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         return
         except Exception as e:
             log.warning("kite historical backfill failed: %s", e)
+    
+    def get_recent_bars(self, n: int) -> pd.DataFrame:
+        """Return last ``n`` bars using live ticks when warmup is active."""
+        if self.hist_mode == "live_warmup" and self.bar_builder:
+            bars = self.bar_builder.get_recent_bars(n)
+            if not bars:
+                return pd.DataFrame(
+                    columns=["open", "high", "low", "close", "volume", "ts"]
+                )
+            df = pd.DataFrame(bars).drop(columns=["count"], errors="ignore")
+            df = df.rename(columns={"timestamp": "ts"}).set_index("ts")
+            if "vwap" not in df.columns:  # pragma: no cover - vwap always present
+                try:
+                    df["vwap"] = calculate_vwap(df)
+                except Exception:  # pragma: no cover - defensive
+                    log.debug("calculate_vwap failed", exc_info=True)
+            if "atr_pct" not in df.columns and not df.empty:
+                atr = compute_atr(df, period=14)
+                df["atr_pct"] = atr / df["close"] * 100.0
+            return df.tail(n)
+        return super().get_recent_bars(n)
+
+    def have_min_bars(self, n: int) -> HistResult:
+        """Check bar availability using live tick aggregation when needed."""
+        if self.hist_mode == "live_warmup" and self.bar_builder:
+            if not self.bar_builder.have_min_bars(n):  # pragma: no cover - insufficient data
+                return HistResult(
+                    HistStatus.NO_DATA, pd.DataFrame(), "live_warmup"
+                )
+            bars = self.bar_builder.get_recent_bars(n)
+            df = (
+                pd.DataFrame(bars)
+                .drop(columns=["count"], errors="ignore")
+                .rename(columns={"timestamp": "ts"})
+                .set_index("ts")
+            )
+            return HistResult(HistStatus.OK, df)
+        return super().have_min_bars(n)
 
     # ---- main candle fetch ----
     def _fetch_ohlc_df(
