@@ -36,7 +36,8 @@ from src.server.logging_utils import _setup_logging, _import_telegram_class  # n
 # Optional broker SDK
 try:
     from kiteconnect import KiteConnect  # type: ignore
-except Exception:
+except Exception as exc:
+    logging.getLogger("main").warning("KiteConnect import failed: %s", exc, exc_info=True)
     KiteConnect = None  # type: ignore
 
 
@@ -162,8 +163,10 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
     try:
         tg.start_polling()
         logging.getLogger("main").info("📡 Telegram polling started")
-    except Exception:
-        logging.getLogger("main").warning("Telegram polling failed to start")
+    except Exception as exc:
+        logging.getLogger("main").warning(
+            "Telegram polling failed to start: %s", exc, exc_info=True
+        )
 
 
 # -----------------------------
@@ -202,8 +205,10 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _handler)
-        except Exception:
-            logging.getLogger("main").warning("Failed to set handler for %s", sig)
+        except Exception as exc:
+            logging.getLogger("main").warning(
+                "Failed to set handler for %s: %s", sig, exc, exc_info=True
+            )
 
 
 def main() -> int:
@@ -327,8 +332,10 @@ def main() -> int:
     finally:
         try:
             runner.shutdown()
-        except Exception:
-            log.exception("Runner shutdown failed")
+        except Exception as exc:
+            logging.getLogger("main").warning(
+                "Runner shutdown failed: %s", exc, exc_info=True
+            )
         try:
             runner.telegram_controller.send_message("🛑 Bot stopped.")
         except Exception as e:

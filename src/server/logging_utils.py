@@ -31,8 +31,10 @@ def _setup_logging() -> None:  # pragma: no cover
             root.addHandler(fh)
         _log_cred_presence()
         logging.getLogger("urllib3").setLevel(logging.WARNING)
-    except Exception:
-        logging.getLogger("main").exception("Failed to initialize logging")
+    except Exception as exc:
+        logging.getLogger("main").warning(
+            "Failed to initialize logging: %s", exc, exc_info=True
+        )
         raise
 
 
@@ -55,6 +57,8 @@ def _tail_logs(path: str, n: int = 200) -> list[str]:  # pragma: no cover
             for line in f:
                 lines.append(line.rstrip("\n"))
         return list(lines)
-    except Exception:
-        logging.getLogger("main").exception("tail_logs failed for %s", path)
+    except Exception as exc:
+        logging.getLogger("main").warning(
+            "tail_logs failed for %s: %s", path, exc, exc_info=True
+        )
         raise
