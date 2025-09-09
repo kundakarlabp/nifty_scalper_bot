@@ -413,7 +413,11 @@ class StrategyRunner:
                 warm_min = int(
                     getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
                 )
-                if warm_min > 0 and not self.data_source.have_min_bars(warm_min):
+                if (
+                    warm_min > 0
+                    and hasattr(self.data_source, "have_min_bars")
+                    and not self.data_source.have_min_bars(warm_min)
+                ):
                     self.log.info(
                         "Warmup mode: live bars (broker OHLC unavailable)",
                     )
@@ -747,6 +751,7 @@ class StrategyRunner:
         if (
             self.data_source
             and warm_min > 0
+            and hasattr(self.data_source, "have_min_bars")
             and not self.data_source.have_min_bars(warm_min)
         ):
             self._warm = warmup_status(0, warm_min)

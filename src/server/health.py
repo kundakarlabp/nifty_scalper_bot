@@ -137,7 +137,7 @@ def run(
 
     # Attempt to use a production-grade server if available
     try:
-        from waitress import serve  # type: ignore[import-not-found]
+        from waitress import serve  # type: ignore[import-not-found,import-untyped]
     except ImportError:  # pragma: no cover - import guarded for optional dep
         serve = None
 
