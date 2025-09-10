@@ -173,6 +173,44 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
     assert plan.get("reason_block") != "microstructure"
 
 
+def test_uses_data_source_atm_tokens(
+    strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strategy should pick option tokens from the attached data source."""
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = create_test_dataframe(trending_up=True)
+    strategy.data_source = type(
+        "DS", (), {"atm_tokens": (111, 222), "current_atm_strike": 17000}
+    )()
+
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.resolve_weekly_atm",
+        lambda price: {"ce": ("TESTCE", 50), "pe": ("TESTPE", 50)},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.fetch_quote_with_depth",
+        lambda *args, **kwargs: {"bid": 100.0, "ask": 100.5, "bid_qty": 100, "ask_qty": 100},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.evaluate_micro",
+        lambda *args, **kwargs: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.cap_for_mid", lambda mid, cfg: 1.0
+    )
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+    expected = 111 if plan.get("option_type") == "CE" else 222
+    assert plan["option_token"] == expected
+    assert plan["atm_strike"] == 17000
+
+
 def test_respects_min_bars_for_signal(strategy_config: StrategySettings) -> None:
     """Strategy should require the max of internal and config min bars."""
 
