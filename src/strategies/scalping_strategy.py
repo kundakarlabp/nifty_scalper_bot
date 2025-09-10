@@ -14,7 +14,7 @@ import pandas as pd
 
 from src.config import settings
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
-from src.execution.order_executor import fetch_quote_with_depth
+from src.execution.order_executor import QuoteFetchError, fetch_quote_with_depth
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
@@ -708,7 +708,13 @@ class EnhancedScalpingStrategy:
                     "no_option_token", micro={"spread_pct": None, "depth_ok": None}
                 )
             tsym, lot_sz = info_atm
-            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
+            try:
+                q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
+            except QuoteFetchError:
+                return plan_block(
+                    "no_quote",
+                    micro={"spread_pct": None, "depth_ok": None},
+                )
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)

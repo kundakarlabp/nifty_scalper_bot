@@ -20,7 +20,7 @@ from src.config import settings
 from src.diagnostics import checks  # noqa: F401
 from src.diagnostics.registry import run, run_all
 from src.execution.micro_filters import micro_from_quote
-from src.execution.order_executor import fetch_quote_with_depth
+from src.execution.order_executor import QuoteFetchError, fetch_quote_with_depth
 from src.logs.journal import read_trades_between
 from src.risk.position_sizing import PositionSizer
 from src.strategies.runner import StrategyRunner
@@ -1756,7 +1756,10 @@ class TelegramController:
                 if not info:
                     return self._send("📉 Micro: N/A (no_option_token)")
                 tsym, lot = info
-                q = fetch_quote_with_depth(runner.kite, tsym)
+                try:
+                    q = fetch_quote_with_depth(runner.kite, tsym)
+                except QuoteFetchError:
+                    return self._send("📉 Micro: N/A (no_quote)")
                 spread_pct, depth_ok = micro_from_quote(
                     q, lot_size=lot, depth_min_lots=runner.strategy_cfg.depth_min_lots
                 )

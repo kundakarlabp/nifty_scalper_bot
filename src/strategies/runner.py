@@ -37,7 +37,7 @@ from src.data.broker_source import BrokerDataSource
 from src.diagnostics.metrics import metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
-from src.execution.order_executor import OrderReconciler
+from src.execution.order_executor import OrderReconciler, QuoteFetchError
 from src.features.indicators import atr_pct
 from src.logs.journal import Journal
 from src.options.instruments_cache import InstrumentsCache
@@ -2502,7 +2502,10 @@ class StrategyRunner:
                 q = getattr(self.order_executor, "fetch_quote_with_depth", None)
                 mid = leg.avg_price or leg.limit_price or 0.0
                 if q:
-                    qt = q(self.order_executor.kite, leg.symbol)
+                    try:
+                        qt = q(self.order_executor.kite, leg.symbol)
+                    except QuoteFetchError:
+                        qt = {}
                     b, a = qt.get("bid"), qt.get("ask")
                     if b and a:
                         mid = (b + a) / 2

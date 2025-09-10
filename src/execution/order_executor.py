@@ -49,9 +49,21 @@ try:
 except Exception:  # pragma: no cover
     settings = None  # type: ignore
 
+# Optional market data source for LTP fallback
+try:  # pragma: no cover - optional dependency
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
+
 log = logging.getLogger(__name__)
 
-__all__ = ["OrderExecutor", "OrderReconciler", "micro_ok", "fetch_quote_with_depth"]
+__all__ = [
+    "OrderExecutor",
+    "OrderReconciler",
+    "micro_ok",
+    "fetch_quote_with_depth",
+    "QuoteFetchError",
+]
 
 
 # ------------------- small helpers -------------------
@@ -109,10 +121,18 @@ _QUOTE_ERR_RL = RateLimiter(5)
 _AUTH_WARNED = False
 
 
+class QuoteFetchError(Exception):
+    """Raised when quote and fallback sources provide no data."""
+
+
 def fetch_quote_with_depth(
     kite: Optional[KiteConnect], tsym: str, cb: Optional[CircuitBreaker] = None
 ) -> Dict[str, Any]:
-    """Return quote with depth for the given trading symbol."""
+    """Return quote with depth for ``tsym``.
+
+    Raises:
+        QuoteFetchError: if no quote or fallback price is available.
+    """
     if not kite or not tsym:
         return {
             "ltp": 0.0,
@@ -197,7 +217,7 @@ def fetch_quote_with_depth(
             except Exception:
                 ltp = 0.0
         if ltp <= 0.0:
-            ltp = 1.0
+            raise QuoteFetchError(f"no quote data for {tsym}")
         est_spread_pct = getattr(settings.executor, "default_spread_pct_est", 0.25)
         spr = ltp * (est_spread_pct / 100.0)
         if spr <= 0:
@@ -664,7 +684,11 @@ class OrderExecutor:
                 lines.append(f"{t.upper()}: tsym_missing")
                 continue
             tsym, lot = info
-            q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
+            try:
+                q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
+            except QuoteFetchError:
+                lines.append(f"{t.upper()} tsym={tsym} quote_error")
+                continue
             bid = float(q.get("bid") or 0.0)
             ask = float(q.get("ask") or 0.0)
             spread_pct = (
@@ -706,7 +730,10 @@ class OrderExecutor:
         if not info:
             return "token missing"
         tsym, lot = info
-        q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
+        try:
+            q = fetch_quote_with_depth(self.kite, tsym, self.cb_orders)
+        except QuoteFetchError:
+            return "quote_unavailable"
         bid = float(q.get("bid") or 0.0)
         ask = float(q.get("ask") or 0.0)
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
@@ -777,7 +804,7 @@ class OrderExecutor:
                 ask5 = int(qd.get("ask5_qty") or qd.get("ask_qty") or 0)
                 avail = int(min(bid5, ask5) * 0.8)
                 qty = min(qty, _round_to_step(avail, self.lot_size))
-            except Exception:
+            except QuoteFetchError:
                 pass
 
         # prevent duplicate symbol entries (case-insensitive)

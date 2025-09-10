@@ -1,3 +1,5 @@
+import pytest
+
 from src.execution import order_executor as oe
 
 
@@ -57,4 +59,19 @@ def test_fetch_quote_with_depth_uses_cache_when_quote_missing():
     assert cached["bid_qty"] == 1
     assert cached["ask_qty"] == 1
     assert cached["source"] == "cache"
+
+
+class DummyKiteNoData:
+    def quote(self, *args, **kwargs):
+        raise Exception("quote fail")
+
+    def ltp(self, symbols):
+        return {symbols[0]: {"last_price": 0}}
+
+
+def test_fetch_quote_with_depth_raises_when_no_sources():
+    oe._QUOTE_CACHE.clear()
+    kite = DummyKiteNoData()
+    with pytest.raises(oe.QuoteFetchError):
+        oe.fetch_quote_with_depth(kite, "NIFTY24APR10000CE")
 
