@@ -1531,7 +1531,8 @@ class StrategyRunner:
             win_rate = (wins / trades * 100.0) if trades else 0.0
             return f"Backtest done: trades={trades}, win%={win_rate:.2f}, pnl={pnl:.2f}"
         except Exception as e:
-            self.log.error("Backtest failed: %s", e, exc_info=True)
+            # Log the error message without the full traceback to keep logs concise
+            self.log.error("Backtest failed: %s", e, exc_info=False)
             return f"Backtest error: {e}"
 
     def health_check(self) -> Dict[str, Any]:
