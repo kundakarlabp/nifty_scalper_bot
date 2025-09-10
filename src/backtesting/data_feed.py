@@ -26,12 +26,15 @@ _OHLC_MAP = {
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize timestamp/OHLC columns from various aliases."""
 
-    norm = {c: c.lower().replace(" ", "").replace("/", "").replace("-", "") for c in df.columns}
+    def _clean(s: str) -> str:
+        return s.lower().replace(" ", "").replace("/", "").replace("-", "").replace("_", "")
+
+    norm = {c: _clean(c) for c in df.columns}
 
     ts_col: str | None = None
     for c in df.columns:
         key = norm[c]
-        if key in [a.replace("_", "") for a in _TS_ALIASES]:
+        if key in {"timestamp", "datetime"}:
             ts_col = c
             break
 
@@ -42,6 +45,12 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
             df[date_col].astype(str) + " " + df[time_col].astype(str)
         )
         ts_col = "timestamp"
+
+    if ts_col is None:
+        for c in df.columns:
+            if norm[c] in {"date", "time"}:
+                ts_col = c
+                break
 
     if ts_col is None:
         raise KeyError(f"No timestamp-like column found. Available: {list(df.columns)}")
@@ -55,10 +64,11 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
 
     rename: dict[str, str] = {}
     for target, aliases in _OHLC_MAP.items():
+        alias_keys = {_clean(a) for a in aliases}
         for c in df.columns:
             if c == "timestamp" or c in rename:
                 continue
-            if c.lower() in [a.lower() for a in aliases]:
+            if _clean(c) in alias_keys:
                 rename[c] = target
                 break
     df = df.rename(columns=rename)
