@@ -741,6 +741,28 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
 
+    def _get_prev_session_close(self, token: int) -> Optional[float]:
+        """Return previous session close price for ``token`` if available."""
+        if not self.kite:
+            return None
+        try:
+            from src.utils.market_time import prev_session_bounds
+            from src.utils.time_windows import TZ
+
+            prev_start, prev_end = prev_session_bounds(dt.datetime.now(TZ))
+            prev_start = _naive_ist(prev_start)
+            prev_end = _naive_ist(prev_end)
+            rows = _retry(
+                self.kite.historical_data, token, prev_start, prev_end, "minute", tries=2
+            )
+            if rows:
+                close = rows[-1].get("close")
+                if isinstance(close, (int, float)) and close > 0:
+                    return float(close)
+        except Exception:
+            log.debug("prev session close fetch failed", exc_info=True)
+        return None
+
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
     ) -> None:
@@ -826,7 +848,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if not self.kite or not self.cb_hist.allow():
             log.warning("LiveKiteSource.fetch_ohlc: broker unavailable.")
             ltp = self.get_last_price(token)
-            if isinstance(ltp, (int, float)):
+            if not isinstance(ltp, (int, float)) or ltp <= 0:
+                ltp = self._get_prev_session_close(token)
+            if isinstance(ltp, (int, float)) and ltp > 0:
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
                 fetched_window = (
                     pd.to_datetime(syn.index.min()).to_pydatetime(),
@@ -943,7 +967,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     end,
                 )
                 ltp = self.get_last_price(token)
-                if isinstance(ltp, (int, float)):
+                if not isinstance(ltp, (int, float)) or ltp <= 0:
+                    ltp = self._get_prev_session_close(token)
+                if isinstance(ltp, (int, float)) and ltp > 0:
                     syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
                     fetched_window = (
                         pd.to_datetime(syn.index.min()).to_pydatetime(),
@@ -956,6 +982,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         fetched_window,
                         (start, end),
                     )
+                    if not syn.empty:
+                        self._last_bar_open_ts = pd.to_datetime(
+                            syn.index[-1]
+                        ).to_pydatetime()
                     self._last_hist_reason = "synthetic_ltp"
                     return syn
                 self._last_hist_reason = "empty"
@@ -988,7 +1018,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 "fetch_ohlc failed token=%s interval=%s: %s", token, interval, e
             )
             ltp = self.get_last_price(token)
-            if isinstance(ltp, (int, float)):
+            if not isinstance(ltp, (int, float)) or ltp <= 0:
+                ltp = self._get_prev_session_close(token)
+            if isinstance(ltp, (int, float)) and ltp > 0:
                 syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
                 fetched_window = (
                     pd.to_datetime(syn.index.min()).to_pydatetime(),
