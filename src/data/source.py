@@ -829,7 +829,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return df.tail(n)
         return super().get_recent_bars(n)
 
-    def have_min_bars(self, n: int) -> HistResult:
+    def have_min_bars(self, n: int) -> HistResult | bool:  # type: ignore[override]
         """Check bar availability using live tick aggregation when needed."""
         if self.hist_mode == "live_warmup" and self.bar_builder:
             if not self.bar_builder.have_min_bars(n):  # pragma: no cover - insufficient data
@@ -845,6 +845,37 @@ class LiveKiteSource(DataSource, BaseDataSource):
             )
             return HistResult(HistStatus.OK, df)
         return super().have_min_bars(n)
+
+    def _prev_session_close(self, token: int, interval: str) -> Optional[float]:
+        """Return previous session's close price for ``token`` if available."""
+        if not self.kite:
+            return None
+        try:
+            from src.utils.market_time import prev_session_bounds
+            from src.utils.time_windows import TZ
+
+            prev_start, prev_end = prev_session_bounds(dt.datetime.now(TZ))
+            prev_start = _naive_ist(prev_start)
+            prev_end = _naive_ist(prev_end)
+            rows = _retry(
+                self.kite.historical_data,
+                token,
+                prev_start,
+                prev_end,
+                interval,
+                continuous=False,
+                oi=False,
+                tries=3,
+            )
+        except Exception:
+            return None
+        df = _normalize_ohlc_df(rows)
+        if df.empty:
+            return None
+        try:
+            return float(df["close"].iloc[-1])
+        except Exception:
+            return None
 
     # ---- main candle fetch ----
     def _fetch_ohlc_df(
@@ -911,6 +942,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         syn.index[-1]
                     ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
+                return syn
+            prev_close = self._prev_session_close(token, interval)
+            if isinstance(prev_close, (int, float)):
+                syn = _synthetic_ohlc(float(prev_close), end, interval, WARMUP_BARS)
+                fetched_window = (
+                    pd.to_datetime(syn.index.min()).to_pydatetime(),
+                    pd.to_datetime(syn.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    int(token),
+                    interval,
+                    syn,
+                    fetched_window,
+                    (start, end),
+                )
+                if not syn.empty:
+                    self._last_bar_open_ts = pd.to_datetime(
+                        syn.index[-1]
+                    ).to_pydatetime()
+                self._last_hist_reason = "synthetic_prev_close"
                 return syn
             self._last_hist_reason = "broker_unavailable"
             return pd.DataFrame()
@@ -1025,6 +1076,22 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     )
                     self._last_hist_reason = "synthetic_ltp"
                     return syn
+                prev_close = self._prev_session_close(token, interval)
+                if isinstance(prev_close, (int, float)):
+                    syn = _synthetic_ohlc(float(prev_close), end, interval, WARMUP_BARS)
+                    fetched_window = (
+                        pd.to_datetime(syn.index.min()).to_pydatetime(),
+                        pd.to_datetime(syn.index.max()).to_pydatetime(),
+                    )
+                    self._cache.set(
+                        token,
+                        interval,
+                        syn,
+                        fetched_window,
+                        (start, end),
+                    )
+                    self._last_hist_reason = "synthetic_prev_close"
+                    return syn
                 self._last_hist_reason = "empty"
                 return pd.DataFrame()
 
@@ -1073,6 +1140,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         syn.index[-1]
                     ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
+                return syn
+            prev_close = self._prev_session_close(token, interval)
+            if isinstance(prev_close, (int, float)):
+                syn = _synthetic_ohlc(float(prev_close), end, interval, WARMUP_BARS)
+                fetched_window = (
+                    pd.to_datetime(syn.index.min()).to_pydatetime(),
+                    pd.to_datetime(syn.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    token,
+                    interval,
+                    syn,
+                    fetched_window,
+                    (start, end),
+                )
+                if not syn.empty:
+                    self._last_bar_open_ts = pd.to_datetime(
+                        syn.index[-1]
+                    ).to_pydatetime()
+                self._last_hist_reason = "synthetic_prev_close"
                 return syn
             self._last_hist_reason = str(e)
             return pd.DataFrame()
