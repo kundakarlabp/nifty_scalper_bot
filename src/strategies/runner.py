@@ -1506,7 +1506,11 @@ class StrategyRunner:
                 else Path(__file__).resolve().parent.parent / "data" / "nifty_ohlc.csv"
             )
             if path.exists():
-                feed = SpotFeed.from_csv(str(path))
+                try:
+                    feed = SpotFeed.from_csv(str(path))
+                except KeyError as e:
+                    self.log.error("Backtest failed: %s", e)
+                    return f"Backtest error: {e}"
             else:
                 df = make_synth_1m(start=datetime.now())
                 feed = SpotFeed(df=df, tz=ZoneInfo("Asia/Kolkata"))
