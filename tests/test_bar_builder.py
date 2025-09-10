@@ -40,3 +40,15 @@ def test_have_min_bars() -> None:
     t2 = t.replace(minute=31)
     builder.on_tick({'last_price': 101, 'exchange_timestamp': t2})
     assert builder.have_min_bars(2)
+
+
+def test_tick_without_last_price_is_ignored() -> None:
+    builder = MinuteBarBuilder()
+    t = datetime(2025, 1, 1, 9, 30, 0, tzinfo=timezone.utc)
+    builder.on_tick({'volume': 5, 'exchange_timestamp': t})
+    assert builder.get_recent_bars(1) == []
+
+    builder.on_tick({'last_price': 100, 'volume': 10, 'exchange_timestamp': t})
+    bars = builder.get_recent_bars(1)
+    assert len(bars) == 1
+    assert bars[0]['open'] == 100

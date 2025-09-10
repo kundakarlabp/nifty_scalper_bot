@@ -63,9 +63,11 @@ class MinuteBarBuilder:
         if not isinstance(ts, datetime):
             ts = datetime.fromtimestamp(float(ts))
         minute = ts.replace(second=0, microsecond=0)
-        price = tick["last_price"]
+        price = tick.get("last_price")
+        if price is None:
+            return
 
-        vol = tick.get("volume", 0)
+        vol = cast(float, tick.get("volume") or 0)
         if minute != self._minute:
             if self._current:
                 self.bars.append(self._current)
@@ -88,8 +90,8 @@ class MinuteBarBuilder:
         bar["high"] = max(bar["high"], price)
         bar["low"] = min(bar["low"], price)
         bar["close"] = price
-        prev_vol = bar["volume"]
-        bar["volume"] += vol
+        prev_vol = cast(float, bar["volume"])
+        bar["volume"] = prev_vol + vol
         if bar["volume"]:
             bar["vwap"] = (bar["vwap"] * prev_vol + price * vol) / bar["volume"]
         bar["count"] += 1
