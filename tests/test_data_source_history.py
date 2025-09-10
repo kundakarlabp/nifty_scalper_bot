@@ -3,7 +3,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 from freezegun import freeze_time
 
-from src.data.source import LiveKiteSource, WARMUP_BARS, _normalize_ohlc_df
+from src.config import settings
+from src.data.source import (
+    LiveKiteSource,
+    WARMUP_BARS,
+    _normalize_ohlc_df,
+    render_last_bars,
+)
 from src.data.types import HistStatus
 
 
@@ -52,7 +58,11 @@ def test_fetch_ohlc_chunks_multiple_calls():
 def test_have_min_bars_returns_bool() -> None:
     kite = FakeKite()
     src = LiveKiteSource(kite)
-    assert src.have_min_bars(10)
+    res = src.have_min_bars(10)
+    assert isinstance(res, bool)
+    assert res
+    bars = src.get_recent_bars(5)
+    assert len(bars) == 5
 
 
 @freeze_time("2024-01-01 09:30:00")
@@ -87,3 +97,12 @@ def test_normalize_drops_invalid_rows() -> None:
     out = _normalize_ohlc_df(raw)
     assert isinstance(out, pd.DataFrame)
     assert len(out) == 1
+
+
+def test_render_last_bars_outputs_string(monkeypatch) -> None:
+    kite = FakeKite()
+    src = LiveKiteSource(kite)
+    monkeypatch.setattr(settings.instruments, "instrument_token", 123)
+    out = render_last_bars(src, n=1)
+    assert isinstance(out, str)
+    assert "O=" in out
