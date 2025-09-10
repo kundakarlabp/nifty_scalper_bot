@@ -1,7 +1,7 @@
 from datetime import datetime
 
 import src.data.source as source
-from src.data.source import HistStatus, LiveKiteSource
+from src.data.source import LiveKiteSource
 
 
 def test_live_warmup_ticks(monkeypatch):
@@ -20,5 +20,10 @@ def test_live_warmup_ticks(monkeypatch):
     df = src.get_recent_bars(2)
     assert len(df) >= 2
     res = src.have_min_bars(2)
-    assert res.status == HistStatus.OK
-    assert len(res.df) >= 2
+    assert isinstance(res, bool)
+    assert res
+    assert not src.have_min_bars(100)
+
+    src.bar_builder = None
+    src._synth_bars_n = 50
+    assert src.have_min_bars(30)

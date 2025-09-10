@@ -829,21 +829,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return df.tail(n)
         return super().get_recent_bars(n)
 
-    def have_min_bars(self, n: int) -> HistResult:
-        """Check bar availability using live tick aggregation when needed."""
-        if self.hist_mode == "live_warmup" and self.bar_builder:
-            if not self.bar_builder.have_min_bars(n):  # pragma: no cover - insufficient data
-                return HistResult(
-                    HistStatus.NO_DATA, pd.DataFrame(), "live_warmup"
-                )
-            bars = self.bar_builder.get_recent_bars(n)
-            df = (
-                pd.DataFrame(bars)
-                .drop(columns=["count"], errors="ignore")
-                .rename(columns={"timestamp": "ts"})
-                .set_index("ts")
-            )
-            return HistResult(HistStatus.OK, df)
+    def have_min_bars(self, n: int) -> bool:
+        """Return ``True`` if at least ``n`` recent bars are available.
+
+        When ``hist_mode`` is ``live_warmup`` the method avoids broker calls and
+        checks the in-memory :class:`MinuteBarBuilder` first.  If synthetic bars
+        were generated earlier (e.g. by ``synthetic_warmup``) the count is
+        tracked via ``_synth_bars_n``.  For the regular backfill mode we defer
+        to :meth:`DataSource.have_min_bars` which fetches historical data as
+        needed.
+        """
+        if self.hist_mode == "live_warmup":
+            bb = self.bar_builder
+            if bb and bb.have_min_bars(n):
+                return True
+            try:
+                if int(getattr(self, "_synth_bars_n", 0)) >= int(n):
+                    return True
+            except Exception:  # pragma: no cover - defensive
+                pass
+            return False
         return super().have_min_bars(n)
 
     # ---- main candle fetch ----
