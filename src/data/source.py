@@ -15,6 +15,9 @@ import numpy as np
 import pandas as pd
 
 from src.boot.validate_env import (
+    data_allow_synthetic_on_empty,
+    data_clamp_to_market_open,
+    data_warmup_backfill_min,
     data_warmup_disable,
 )
 from src.data.base_source import BaseDataSource
@@ -22,6 +25,8 @@ from src.data.types import HistResult, HistStatus
 from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.indicators import calculate_vwap
+from src.utils.market_time import prev_session_bounds
+from src.utils.time_windows import TZ
 
 log = logging.getLogger(__name__)
 
@@ -779,7 +784,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if data_warmup_disable():
             log.info("ensure_backfill skipped via DATA__WARMUP_DISABLE=true")
             return
-
         now = dt.datetime.now()
         if (
             self._last_backfill
@@ -787,28 +791,70 @@ class LiveKiteSource(DataSource, BaseDataSource):
         ):
             return
         self._last_backfill = now
+
+        bars_needed = max(int(required_bars), data_warmup_backfill_min())
+        lookback = bars_needed + 5
+
+        to_dt = now
+        from_dt = to_dt - dt.timedelta(minutes=lookback)
+        reason = "empty"
+        if timeframe == "minute" and data_clamp_to_market_open():
+            now_ist = dt.datetime.now(TZ)
+            if now_ist.time() < dt.time(9, 16):
+                prev_start, prev_end = prev_session_bounds(now_ist)
+                to_dt = prev_end.replace(tzinfo=None)
+                from_dt = max(
+                    prev_start.replace(tzinfo=None),
+                    to_dt - dt.timedelta(minutes=lookback),
+                )
+                reason = "preopen_empty"
+            else:
+                mkt_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+                if from_dt < mkt_open:
+                    from_dt = mkt_open
+
+        hist: list[dict[str, Any]] | None = None
         try:
             if self.kite:
-                to_dt = now
-                from_dt = to_dt - dt.timedelta(minutes=max(required_bars + 5, 60))
                 hist = self.kite.historical_data(token, from_dt, to_dt, timeframe)
-                if hist:
-                    df = pd.DataFrame(hist)
-                    if not df.empty and "date" in df.columns:
-                        df["date"] = pd.to_datetime(df["date"])
-                        df.set_index("date", inplace=True)
-                        df.sort_index(inplace=True)
-                        if hasattr(self, "seed_ohlc"):
-                            try:
-                                self.seed_ohlc(
-                                    df[["open", "high", "low", "close", "volume"]]
-                                )
-                            except Exception:
-                                pass
-                    if len(df) >= required_bars:
-                        return
         except Exception as e:
             log.warning("kite historical backfill failed: %s", e)
+
+        df = pd.DataFrame(hist or [])
+        if df.empty:
+            if data_allow_synthetic_on_empty():
+                ltp = self.get_last_price(token)
+                if isinstance(ltp, (int, float)):
+                    syn = _synthetic_ohlc(float(ltp), to_dt, timeframe, bars_needed)
+                    try:
+                        self._synth_bars_n = len(syn)
+                    except Exception:
+                        pass
+                    if hasattr(self, "seed_ohlc"):
+                        try:
+                            self.seed_ohlc(
+                                syn[["open", "high", "low", "close", "volume"]]
+                            )
+                        except Exception:
+                            pass
+                    log.info(
+                        "synthetic_warmup used: have=%d, reason=%s",
+                        len(syn),
+                        reason,
+                    )
+            return
+
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+            df.set_index("date", inplace=True)
+            df.sort_index(inplace=True)
+            if hasattr(self, "seed_ohlc"):
+                try:
+                    self.seed_ohlc(df[["open", "high", "low", "close", "volume"]])
+                except Exception:
+                    pass
+        if len(df) >= required_bars:
+            return
     
     def get_recent_bars(self, n: int) -> pd.DataFrame:
         """Return last ``n`` bars using live ticks when warmup is active."""
