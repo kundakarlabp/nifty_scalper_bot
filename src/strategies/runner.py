@@ -542,6 +542,7 @@ class StrategyRunner:
             f"diag | within_window={getattr(self, 'within_window', None)} "
             f"regime={plan.get('regime')} score={plan.get('score')} atr%={plan.get('atr_pct')} "
             f"rr={plan.get('rr')} opt={plan.get('option_type')} strike={plan.get('strike')} "
+            f"atm_strike={plan.get('atm_strike')} token={plan.get('option_token')} "
             f"reason_block={plan.get('reason_block')} "
             f"reasons={','.join(plan.get('reasons', []))}"
         )
@@ -662,6 +663,7 @@ class StrategyRunner:
         self._last_signal_hash = sig
         text = (
             f"\U0001f7e1 Candidate | {plan.get('regime')} {plan.get('option_type')} {plan.get('strike')} "
+            f"atm_strike={plan.get('atm_strike')} token={plan.get('option_token')} "
             f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry')} "
             f"sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
             f"reason_block={rb}"
@@ -681,10 +683,12 @@ class StrategyRunner:
         )
         if (not self._log_signal_changes_only) or changed:
             self.log.info(
-                "Signal plan: action=%s %s strike=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s reason_block=%s",
+                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s reason_block=%s",
                 plan.get("action"),
                 plan.get("option_type"),
                 plan.get("strike"),
+                plan.get("atm_strike"),
+                plan.get("option_token"),
                 plan.get("qty_lots"),
                 plan.get("regime"),
                 plan.get("score"),
@@ -1066,10 +1070,14 @@ class StrategyRunner:
                 plan.get("side_hint", "CE"),
                 self._now_ist(),
             )
+            token = opt.get("token")
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
+            plan["option_token"] = token
+            ds = getattr(self, "data_source", None)
+            plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
             self._last_option = opt
-            if not opt.get("token"):
+            if not token:
                 plan["reason_block"] = "no_option_token"
                 plan.setdefault("reasons", []).append("no_option_token")
                 self.log.warning(

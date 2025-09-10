@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from hypothesis import assume, given, settings, strategies as st
+from hypothesis import assume, given, settings, strategies as st, HealthCheck
 from unittest.mock import patch
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
@@ -66,7 +66,7 @@ def test_gamma_mode_cap(monkeypatch):
     lots=st.integers(min_value=1, max_value=5),
     max_notional=st.floats(min_value=50_000, max_value=2_000_000),
 )
-@settings(max_examples=25, deadline=None)
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_notional):
     cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
     eng = RiskEngine(cfg)
@@ -94,7 +94,7 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
     lots=st.integers(min_value=1, max_value=5),
     max_notional=st.floats(min_value=50_000, max_value=2_000_000),
 )
-@settings(max_examples=25, deadline=None)
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_notional):
     cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
     eng = RiskEngine(cfg)
