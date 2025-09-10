@@ -120,7 +120,9 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
         )
 
     cols = ["open", "high", "low", "close", "volume"]
-    return df[cols]
+    if "volume" not in df.columns:
+        df["volume"] = 0
+    return df.reindex(columns=cols)
 
 
 class BacktestCsvSource(DataSource):
