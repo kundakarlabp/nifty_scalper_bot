@@ -22,3 +22,6 @@ def test_live_warmup_ticks(monkeypatch):
     res = src.have_min_bars(2)
     assert res.status == HistStatus.OK
     assert len(res.df) >= 2
+    res2 = src.have_min_bars(200)
+    assert res2.status == HistStatus.NO_DATA
+    assert not res2
