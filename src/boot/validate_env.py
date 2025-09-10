@@ -145,6 +145,33 @@ def data_warmup_disable() -> bool:
     return str(val).lower() in {"1", "true", "yes"}
 
 
+def data_warmup_backfill_min() -> int:
+    _ensure_env_seeded()
+    val = os.getenv("DATA__WARMUP_BACKFILL_MIN")
+    if val is None:
+        val = os.getenv("DATA_WARMUP_BACKFILL_MIN", "30")
+    try:
+        return max(0, int(val))
+    except Exception:
+        return 30
+
+
+def data_allow_synthetic_on_empty() -> bool:
+    _ensure_env_seeded()
+    val = os.getenv("DATA__ALLOW_SYNTHETIC_ON_EMPTY")
+    if val is None:
+        val = os.getenv("DATA_ALLOW_SYNTHETIC_ON_EMPTY", "true")
+    return str(val).lower() in {"1", "true", "yes"}
+
+
+def data_clamp_to_market_open() -> bool:
+    _ensure_env_seeded()
+    val = os.getenv("DATA__CLAMP_TO_MARKET_OPEN")
+    if val is None:
+        val = os.getenv("DATA_CLAMP_TO_MARKET_OPEN", "true")
+    return str(val).lower() in {"1", "true", "yes"}
+
+
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
