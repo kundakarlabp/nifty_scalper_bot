@@ -39,19 +39,21 @@ try:
         NetworkException,
         TokenException,
     )
-except Exception:
+except ImportError:
     KiteConnect = None  # type: ignore
     NetworkException = TokenException = InputException = Exception  # type: ignore
 
 # --- Local imports (settings is optional for tests) ---
 try:
     from src.config import settings
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     settings = None  # type: ignore
 
 log = logging.getLogger(__name__)
 
 __all__ = ["OrderExecutor", "OrderReconciler", "micro_ok", "fetch_quote_with_depth"]
+
+BROKER_EXCEPTIONS = (NetworkException, TokenException, InputException)
 
 
 # ------------------- small helpers -------------------
@@ -78,14 +80,14 @@ def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
 def _round_to_tick(x: float, tick: float) -> float:
     try:
         return round(float(x) / tick) * tick if tick > 0 else float(x)
-    except Exception:
+    except (TypeError, ValueError):
         return float(x)
 
 
 def _round_to_step(qty: int, step: int) -> int:
     try:
         return int(math.floor(qty / step) * step) if step > 0 else int(qty)
-    except Exception:
+    except (TypeError, ValueError):
         return int(qty)
 
 
@@ -150,7 +152,7 @@ def fetch_quote_with_depth(
             if bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0:
                 break
             time.sleep(0.25)
-        except Exception as e:  # pragma: no cover - broker errors
+        except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
             kind = classify_broker_error(e)
             if kind == THROTTLE and attempt == 0:
                 time.sleep(min(2.0, 0.5))
@@ -186,15 +188,16 @@ def fetch_quote_with_depth(
         try:
             data = _retry_call(kite.ltp, [f"NFO:{tsym}"], tries=2)
             ltp = float((data or {}).get(f"NFO:{tsym}", {}).get("last_price", 0.0))
-        except Exception:
-            pass
+        except BROKER_EXCEPTIONS as e:
+            log.warning("ltp() failed for %s: %s", tsym, e)
         if ltp <= 0.0 and yf is not None:  # pragma: no cover - best effort
             try:
                 tkr = yf.Ticker(f"{tsym}.NS")
                 hist = tkr.history(period="1d", interval="1m")
                 if not hist.empty:
                     ltp = float(hist["Close"].iloc[-1])
-            except Exception:
+            except (OSError, ValueError) as e:
+                log.warning("yfinance fetch failed for %s: %s", tsym, e)
                 ltp = 0.0
         if ltp <= 0.0:
             ltp = 1.0
@@ -569,7 +572,7 @@ class OrderExecutor:
             return recs
         try:
             _retry_call(self.kite.orders, tries=2)
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"orders: {e}"
             log.error("orders() failed: %s", e)
         return recs
@@ -586,7 +589,7 @@ class OrderExecutor:
         try:
             data = _retry_call(self.kite.positions, tries=2) or {}
             return {p.get("tradingsymbol"): p for p in data.get("day", [])}
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"positions: {e}"
             log.error("positions() failed: %s", e)
             return {}
@@ -628,7 +631,7 @@ class OrderExecutor:
                 "ask_qty_top5": ask5,
                 "oi": oi,
             }
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"quote: {e}"
             return {
                 "ltp": 0.0,
@@ -777,8 +780,8 @@ class OrderExecutor:
                 ask5 = int(qd.get("ask5_qty") or qd.get("ask_qty") or 0)
                 avail = int(min(bid5, ask5) * 0.8)
                 qty = min(qty, _round_to_step(avail, self.lot_size))
-            except Exception:
-                pass
+            except BROKER_EXCEPTIONS as e:
+                log.warning("depth fetch failed: %s", e)
 
         # prevent duplicate symbol entries (case-insensitive)
         norm_symbol = str(symbol).upper()
@@ -809,7 +812,7 @@ class OrderExecutor:
                         else:
                             depth_val = float(depth)
                         depth_ok = depth_val >= self.depth_multiplier * qty
-                    except Exception:
+                    except (TypeError, ValueError):
                         depth_ok = True
                 if spread_pct <= max_sp and depth_ok:
                     price = min(float(ask), mid + 0.15 * spread)
@@ -817,10 +820,7 @@ class OrderExecutor:
                     break
                 tries += 1
                 if callable(refresh_cb):
-                    try:
-                        bid, ask, depth = refresh_cb()
-                    except Exception:
-                        pass
+                    bid, ask, depth = refresh_cb()
                 time.sleep(0.2 + 0.1 * tries)
                 if tries >= self.micro_retry_limit:
                     self.last_error = "microstructure_block"
@@ -1020,9 +1020,12 @@ class OrderExecutor:
         if rec.sl_gtt_id:
             try:
                 _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
-            except Exception:
+            except BROKER_EXCEPTIONS as e:
                 log.debug(
-                    "Failed to cancel existing SL GTT %s", rec.sl_gtt_id, exc_info=True
+                    "Failed to cancel existing SL GTT %s: %s",
+                    rec.sl_gtt_id,
+                    e,
+                    exc_info=True,
                 )
             rec.sl_gtt_id = None
 
@@ -1052,7 +1055,7 @@ class OrderExecutor:
             )
             gid = res["id"] if isinstance(res, dict) else int(res)
             rec.sl_gtt_id, rec.sl_price = gid, sl_price
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"sl_gtt: {e}"
             log.error("SL GTT failed: %s", e)
 
@@ -1123,7 +1126,7 @@ class OrderExecutor:
                 o.get("order_id"): o
                 for o in _retry_call(self.kite.orders, tries=2) or []
             }
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"orders: {e}"
             log.error("orders() failed: %s", e)
             omap = {}
@@ -1133,7 +1136,7 @@ class OrderExecutor:
                 gid = g.get("id") or g.get("gtt_id")
                 if gid:
                     gmap[int(gid)] = g
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             self.last_error = f"gtts: {e}"
             log.error("gtts() failed: %s", e)
             gmap = {}
@@ -1191,10 +1194,11 @@ class OrderExecutor:
                 if rec.sl_gtt_id:
                     try:
                         _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
-                    except Exception:
+                    except BROKER_EXCEPTIONS as e:
                         log.debug(
-                            "Failed to cancel SL GTT %s during sweep",
+                            "Failed to cancel SL GTT %s during sweep: %s",
                             rec.sl_gtt_id,
+                            e,
                             exc_info=True,
                         )
 
@@ -1209,8 +1213,8 @@ class OrderExecutor:
                     self._notify(
                         "📬 Fills: " + ", ".join([f"{rid}@{px}" for rid, px in fills])
                     )
-            except Exception:
-                log.debug("Failed to send fills notification", exc_info=True)
+            except Exception as e:
+                log.debug("Failed to send fills notification: %s", e, exc_info=True)
 
         return fills
 
@@ -1237,14 +1241,17 @@ class OrderExecutor:
                         order_id=oid,
                         tries=2,
                     )
-                except Exception:
-                    log.debug("Failed to cancel order %s", oid, exc_info=True)
+                except BROKER_EXCEPTIONS as e:
+                    log.debug("Failed to cancel order %s: %s", oid, e, exc_info=True)
             if rec.sl_gtt_id:
                 try:
                     _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
-                except Exception:
+                except BROKER_EXCEPTIONS as e:
                     log.debug(
-                        "Failed to cancel SL GTT %s", rec.sl_gtt_id, exc_info=True
+                        "Failed to cancel SL GTT %s: %s",
+                        rec.sl_gtt_id,
+                        e,
+                        exc_info=True,
                     )
             rec.is_open = False
 
@@ -1259,15 +1266,15 @@ class OrderExecutor:
                 return
             # optionally touch lightweight endpoints
             # _retry_call(self.kite.profile, tries=1)
-        except Exception as e:
+        except BROKER_EXCEPTIONS as e:
             log.warning("OrderExecutor health warning: %s", e)
 
     def shutdown(self) -> None:
         """Graceful teardown: cancel orders and journal shutdown."""
         try:
             self.cancel_all_orders()
-        except Exception:
-            log.debug("Error during executor shutdown", exc_info=True)
+        except Exception as e:
+            log.debug("Error during executor shutdown: %s", e, exc_info=True)
         if self.journal:
             try:
                 self.journal.append_event(
@@ -1276,8 +1283,8 @@ class OrderExecutor:
                     leg_id="SHUTDOWN",
                     etype="SHUTDOWN",
                 )
-            except Exception:
-                log.debug("Error journalling shutdown", exc_info=True)
+            except Exception as e:
+                log.debug("Error journalling shutdown: %s", e, exc_info=True)
 
     # ----------- telegram-wired mutators ----------
     def set_trailing_enabled(self, on: bool) -> None:
@@ -1350,7 +1357,7 @@ class OrderExecutor:
         try:
             fsm.entry_price = float(plan.get("entry") or 0.0)  # type: ignore[attr-defined]
             fsm.stop_loss = float(plan.get("sl") or 0.0)  # type: ignore[attr-defined]
-        except Exception:
+        except (TypeError, ValueError):
             fsm.entry_price = float(price or 0.0)  # type: ignore[attr-defined]
             fsm.stop_loss = 0.0  # type: ignore[attr-defined]
         self._fsms[trade_id] = fsm
@@ -1375,8 +1382,8 @@ class OrderExecutor:
                         "limit_price": leg.limit_price,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Journal append failed: %s", e)
         if leg.idempotency_key in self._idemp_map:
             return
         self._idemp_map[leg.idempotency_key] = leg.leg_id
@@ -1433,13 +1440,13 @@ class OrderExecutor:
         else:
             try:
                 state = OrderState(state_str)
-            except Exception:
+            except ValueError:
                 state = OrderState.NEW
         side = OrderSide[str(leg_dict.get("side", "BUY"))]
         leg_type_str = str(leg_dict.get("leg_id", "")).split(":")[-1]
         try:
             leg_type = LegType[leg_type_str]
-        except Exception:
+        except KeyError:
             leg_type = LegType.ENTRY
         leg = OrderLeg(
             trade_id=leg_dict["trade_id"],
@@ -1547,8 +1554,8 @@ class OrderExecutor:
                         idempotency_key=idemp,
                         payload={},
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Journal append failed: %s", e)
 
             t0 = self._now_ms()
             res = self._place_with_cb(req)
@@ -1589,8 +1596,8 @@ class OrderExecutor:
                             idempotency_key=idemp,
                             payload={"price": tgt},
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("Journal append failed: %s", e)
 
     def on_order_acked(self, symbol: str, leg_id: str) -> None:
         q = self._queues.get(symbol)
@@ -1662,7 +1669,7 @@ class OrderExecutor:
             try:
                 resp = self.kite.create_order(leg, idempotency_key=leg.idempotency_key)
                 order_id = getattr(resp, "order_id", None) or str(resp)
-            except Exception as e:  # pragma: no cover - broker errors
+            except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
                 log.debug("place_order failed: %s", e)
         else:
             order_id = f"PAPER-{int(time.time() * 1000)}"
@@ -1684,8 +1691,8 @@ class OrderExecutor:
                     idempotency_key=leg.idempotency_key,
                     payload={"price": leg.limit_price},
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Journal append failed: %s", e)
 
     # ----------- circuit breaker wrapped calls ----------
 
@@ -1745,7 +1752,7 @@ class OrderExecutor:
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_orders.record_success(lat)
                 return {"ok": True, "order_id": oid, "lat_ms": lat}
-            except Exception as e:  # pragma: no cover - broker errors
+            except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_orders.record_failure(lat, reason=str(e))
                 return {"ok": False, "reason": str(e), "lat_ms": lat}
@@ -1779,7 +1786,7 @@ class OrderExecutor:
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_modify.record_success(lat)
                 return {"ok": True, "resp": resp, "lat_ms": lat}
-            except Exception as e:  # pragma: no cover
+            except BROKER_EXCEPTIONS as e:  # pragma: no cover
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_modify.record_failure(lat, reason=str(e))
                 return {"ok": False, "reason": str(e), "lat_ms": lat}
@@ -1813,7 +1820,7 @@ class OrderExecutor:
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_modify.record_success(lat)
                 return {"ok": True, "resp": resp, "lat_ms": lat}
-            except Exception as e:  # pragma: no cover
+            except BROKER_EXCEPTIONS as e:  # pragma: no cover
                 lat = int((time.monotonic() - t0) * 1000)
                 self.cb_modify.record_failure(lat, reason=str(e))
                 return {"ok": False, "reason": str(e), "lat_ms": lat}
@@ -1848,7 +1855,7 @@ class OrderExecutor:
                 if settings
                 else "NIFTY"
             )
-        except Exception:
+        except AttributeError:
             base = "NIFTY"
         strike = payload.get("strike")
         opt = str(payload.get("option_type", "")).upper()  # CE/PE
@@ -1856,7 +1863,7 @@ class OrderExecutor:
             return None
         try:
             s = int(float(strike))
-        except Exception:
+        except (TypeError, ValueError):
             return None
         return f"{base}{s}{opt}"
 
@@ -1873,8 +1880,8 @@ class OrderExecutor:
                     self.telegram.send_message(text)
                 elif hasattr(self.telegram, "notify"):
                     self.telegram.notify(text)  # legacy fallback
-        except Exception:
-            log.debug("Failed to send notification", exc_info=True)
+        except Exception as e:
+            log.debug("Failed to send notification: %s", e, exc_info=True)
 
 
 class OrderReconciler:
@@ -1892,7 +1899,7 @@ class OrderReconciler:
             return 0
         try:
             orders = self.kite.orders() or []
-        except Exception as e:  # pragma: no cover - network errors
+        except BROKER_EXCEPTIONS as e:  # pragma: no cover - network errors
             self.log.debug("reconcile orders failed: %s", e)
             return 0
 
@@ -1958,8 +1965,8 @@ class OrderReconciler:
                         broker_order_id=leg.broker_order_id,
                         payload=payload,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log.debug("journal append failed: %s", e)
 
             if leg.state in {
                 OrderState.FILLED,
@@ -2017,14 +2024,14 @@ class OrderReconciler:
                                 "pnl_rupees": round(pnl_rupees, 2),
                             }
                             self.store.journal.append_trade(trade_rec)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.log.debug("append_trade failed: %s", e)
                     if self.store.on_trade_closed:
                         try:
                             self.store.on_trade_closed(pnl_R)
-                        except Exception:
+                        except Exception as e:
                             self.log.debug(
-                                "on_trade_closed callback failed", exc_info=True
+                                "on_trade_closed callback failed: %s", e, exc_info=True
                             )
                     self.store._closed_trades.add(fsm.trade_id)
 

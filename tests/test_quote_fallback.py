@@ -3,21 +3,23 @@ from src.execution import order_executor as oe
 
 class DummyKite:
     def quote(self, *args, **kwargs):
-        raise Exception("quote fail")
+        raise oe.NetworkException("quote fail")
 
     def ltp(self, symbols):
         return {symbols[0]: {"last_price": 123.0}}
 
 
-def test_fetch_quote_with_depth_uses_ltp_on_failure():
+def test_fetch_quote_with_depth_uses_ltp_on_failure(caplog):
     oe._QUOTE_CACHE.clear()
     kite = DummyKite()
-    q = oe.fetch_quote_with_depth(kite, "NIFTY24APR10000CE")
+    with caplog.at_level("WARNING"):
+        q = oe.fetch_quote_with_depth(kite, "NIFTY24APR10000CE")
     assert q["ltp"] == 123.0
     assert q["source"] == "ltp_fallback"
     assert q["bid"] < q["ltp"] < q["ask"]
     assert q["bid_qty"] == 0
     assert q["ask_qty"] == 0
+    assert "quote fail" in caplog.text
 
 
 class DummyKiteQuote:
@@ -35,10 +37,10 @@ class DummyKiteQuote:
 
 class DummyKiteFail:
     def quote(self, *args, **kwargs):  # pragma: no cover - simple exception
-        raise Exception("quote fail")
+        raise oe.NetworkException("quote fail")
 
     def ltp(self, *args, **kwargs):  # pragma: no cover - no data
-        raise Exception("ltp fail")
+        raise oe.NetworkException("ltp fail")
 
 
 def test_fetch_quote_with_depth_uses_cache_when_quote_missing():
