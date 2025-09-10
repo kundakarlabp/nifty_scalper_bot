@@ -138,10 +138,9 @@ def broker_connect_for_data() -> bool:
 
 def data_warmup_disable() -> bool:
     _ensure_env_seeded()
-    default = "true" if IS_HOSTED_RAILWAY else "false"
     val = os.getenv("DATA__WARMUP_DISABLE")
     if val is None:
-        val = os.getenv("DATA_WARMUP_DISABLE", default)
+        val = os.getenv("DATA_WARMUP_DISABLE", "false")
     return str(val).lower() in {"1", "true", "yes"}
 
 

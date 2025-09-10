@@ -12,7 +12,7 @@ def _reload_validate_env():
 
 
 def test_railway_defaults(monkeypatch):
-    """Flags default to true on Railway unless overridden."""
+    """Flags default to false even on Railway unless overridden."""
 
     monkeypatch.delenv("RAILWAY_PROJECT_ID", raising=False)
     monkeypatch.delenv("RAILWAY_STATIC_URL", raising=False)
@@ -24,6 +24,10 @@ def test_railway_defaults(monkeypatch):
     monkeypatch.setenv("RAILWAY_PROJECT_ID", "123")
     ve = _reload_validate_env()
     assert ve.IS_HOSTED_RAILWAY is True
+    assert ve.data_warmup_disable() is False
+
+    monkeypatch.setenv("DATA__WARMUP_DISABLE", "true")
+    ve = _reload_validate_env()
     assert ve.data_warmup_disable() is True
 
     monkeypatch.setenv("DATA__WARMUP_DISABLE", "false")
