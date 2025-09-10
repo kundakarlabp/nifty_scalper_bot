@@ -719,15 +719,35 @@ class EnhancedScalpingStrategy:
                     except Exception:
                         option_token = None
             plan["option_token"] = option_token
+            # --- Resolve the tradeable option instrument ---
+            # Prefer data source's ATM tokens (single source of truth).
+            tsym_or_token = None
+            lot_sz = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
 
-            atm = resolve_weekly_atm(price)
-            info_atm = atm.get(option_type.lower()) if atm else None
-            if not info_atm:
-                return plan_block(
-                    "no_option_token", micro={"spread_pct": None, "depth_ok": None}
-                )
-            tsym, lot_sz = info_atm
-            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
+            if option_type is not None and option_token is not None:
+                # Map CE/PE deterministically to ds.atm_tokens ordering
+                # (index 0 -> CE, index 1 -> PE) as set by the data source.
+                try:
+                    tokens_ds = getattr(ds, "atm_tokens", None)
+                    if isinstance(tokens_ds, (list, tuple)) and len(tokens_ds) == 2:
+                        want_idx = 0 if option_type.upper() == "CE" else 1
+                        if option_token == tokens_ds[want_idx]:
+                            tsym_or_token = str(option_token)  # pass token to quote fn
+                except Exception:
+                    tsym_or_token = None
+
+            # Fallback: use resolver only if ds tokens are not available/usable
+            if tsym_or_token is None:
+                atm = resolve_weekly_atm(price)
+                info_atm = atm.get(option_type.lower()) if atm else None
+                if not info_atm:
+                    return plan_block(
+                        "no_option_token", micro={"spread_pct": None, "depth_ok": None}
+                    )
+                tsym_or_token, lot_sz = info_atm
+
+            # Fetch quote/depth using whichever identifier we have
+            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym_or_token)
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
