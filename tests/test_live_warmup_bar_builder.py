@@ -17,7 +17,11 @@ def test_live_warmup_ticks(monkeypatch):
     src.on_tick({"last_price": 101.0, "timestamp": t2, "volume": 20})
     src.on_tick({"last_price": 102.0, "timestamp": t3, "volume": 30})
 
-    assert src.have_min_bars(2)
-    assert not src.have_min_bars(200)
+    have = src.have_min_bars(2)
+    assert isinstance(have, bool)
+    assert have is True
+    have = src.have_min_bars(200)
+    assert isinstance(have, bool)
+    assert have is False
     df = src.get_recent_bars(2)
     assert len(df) >= 2

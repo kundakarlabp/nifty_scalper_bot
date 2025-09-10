@@ -835,7 +835,32 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Return ``True`` if at least ``n`` bars are available."""
         if self.hist_mode == "live_warmup" and self.bar_builder:
             return self.bar_builder.have_min_bars(n)
-        return super().have_min_bars(n)
+
+        try:
+            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        except Exception:
+            return False
+
+        from src.utils.time_windows import floor_to_minute, now_ist
+
+        end = floor_to_minute(now_ist(), None)
+        lookback = max(60, n + 50)
+        start = end - timedelta(minutes=lookback)
+
+        cached = self._cache.get(token, "minute", start, end)
+        if cached is not None and len(cached) >= n:
+            return True
+
+        try:
+            synth_n = int(getattr(self, "_synth_bars_n", 0))
+            if synth_n >= n:
+                return True
+        except Exception:
+            pass
+
+        res = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
+        df = _normalize_ohlc_df(res.df)
+        return len(df) >= n
 
     # ---- main candle fetch ----
     def _fetch_ohlc_df(
