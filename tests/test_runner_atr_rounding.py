@@ -45,7 +45,9 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     )
     runner.order_executor = exec_stub
     runner.executor = exec_stub
-    runner.data_source = SimpleNamespace(cb_hist=None, cb_quote=None)
+    runner.data_source = SimpleNamespace(
+        cb_hist=None, cb_quote=None, current_atm_strike=17000
+    )
 
     import src.strategies.runner as runner_mod
 
@@ -99,3 +101,5 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     runner.process_tick({})
     flow = runner.get_last_flow_debug()
     assert flow["reason_block"] != "atr_low"
+    assert runner.last_plan["option_token"] == 1
+    assert runner.last_plan["atm_strike"] == 17000

@@ -97,7 +97,7 @@ class TelegramSettings(BaseModel):
                 enabled = False
         return cls(
             enabled=enabled,
-            bot_token=token,
+            bot_token=str(token or ""),
             chat_id=chat,
         )
 
