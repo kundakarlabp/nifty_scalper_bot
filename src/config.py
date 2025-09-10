@@ -95,7 +95,7 @@ class TelegramSettings(BaseModel):
         if not token or chat == 0:
             if enabled_env is None:
                 enabled = False
-        return cls.model_construct(
+        return cls(
             enabled=enabled,
             bot_token=token,
             chat_id=chat,
