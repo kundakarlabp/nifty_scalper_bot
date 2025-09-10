@@ -26,22 +26,45 @@ class SpotFeed:
     ) -> "SpotFeed":
         """Load a CSV of OHLCV data.
 
-        The CSV must contain a ``timestamp`` column along with ``open``, ``high``,
-        ``low``, ``close`` and ``volume`` columns. The timestamp is interpreted
-        as naive local time (no timezone).
+        A timestamp column is detected by looking for case-insensitive headers
+        among ``timestamp``, ``date``, ``time`` or ``datetime`` (additional names
+        may be provided via ``parse_dates``). OHLC headers are normalized
+        case-insensitively with aliases such as ``Adj Close`` mapped to ``close``.
+        If a ``volume`` column is missing, it is added and filled with zeros.
+        The timestamp is interpreted as naive local time (no timezone).
         """
 
-        parse_dates = parse_dates or ["timestamp"]
         df = pd.read_csv(path)
-        ts_col = df[parse_dates[0]]
+
+        lower_cols = {c.lower(): c for c in df.columns}
+        candidates = [
+            *(parse_dates or []),
+            "timestamp",
+            "date",
+            "time",
+            "datetime",
+        ]
+        ts_name: Optional[str] = None
+        for name in (c.lower() for c in candidates):
+            if name in lower_cols:
+                ts_name = lower_cols[name]
+                break
+        if ts_name is None:
+            raise ValueError("no timestamp column found")
+
+        ts_col = df[ts_name]
         if pd.api.types.is_numeric_dtype(ts_col):
             ts = pd.to_datetime(ts_col, unit="s", utc=False)
         else:
             ts = pd.to_datetime(ts_col, utc=False, infer_datetime_format=True)
         df.index = ts.dt.tz_localize(None)
-        df = df.rename(columns=str.lower)[
-            ["open", "high", "low", "close", "volume"]
-        ].sort_index()
+
+        df = df.rename(columns=str.lower)
+        df = df.rename(columns={"adj close": "close", "adj_close": "close"})
+        if "volume" not in df.columns:
+            df["volume"] = 0
+        df = df[["open", "high", "low", "close", "volume"]].sort_index()
+
         return cls(df=df, tz=ZoneInfo(tz))
 
     def window(self, start: Optional[str], end: Optional[str]) -> "SpotFeed":
