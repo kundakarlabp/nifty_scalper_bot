@@ -18,6 +18,7 @@ from src.execution.order_executor import fetch_quote_with_depth
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
+from src.strategies.patches import _resolve_min_atr_pct
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_adx,
@@ -656,7 +657,7 @@ class EnhancedScalpingStrategy:
             atr_pct = float((atr_val / price) * 100.0)
             plan["atr_pct"] = round(atr_pct, 2)
             self.last_atr_pct = float(plan["atr_pct"])
-            atr_min = float(cfg.atr_min)
+            atr_min = min(float(cfg.atr_min), _resolve_min_atr_pct())
             atr_max = float(cfg.atr_max)
             atr_pct_val = float(plan["atr_pct"])
             if not (atr_min <= atr_pct_val <= atr_max):
