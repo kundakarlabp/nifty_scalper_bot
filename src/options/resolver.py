@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from src.utils.strike_selector import resolve_weekly_atm
+from src.utils.strike_selector import resolve_weekly_atm, _fetch_instruments_nfo
 
 from .instruments_cache import InstrumentsCache, nearest_weekly_expiry
 
@@ -45,7 +45,8 @@ class OptionResolver:
 
         if not meta and self.kite is not None:
             # Attempt a lightweight lookup via trading symbol -> token
-            opt = resolve_weekly_atm(under_ltp)
+            inst_dump = _fetch_instruments_nfo(self.kite) or []
+            opt = resolve_weekly_atm(under_ltp, inst_dump)
             sym_info = opt.get(kind.lower()) if isinstance(opt, dict) else None
             if sym_info:
                 tsym, lot = sym_info
