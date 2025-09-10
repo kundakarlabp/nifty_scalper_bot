@@ -1,11 +1,15 @@
 from unittest.mock import Mock
 
-from src.execution.order_executor import OrderExecutor
+from src.execution.order_executor import NetworkException, OrderExecutor
 
 
 def test_place_with_retry_and_breaker() -> None:
     kite = Mock()
-    kite.place_order.side_effect = [Exception("timeout"), Exception("HTTP 502"), "OID123"]
+    kite.place_order.side_effect = [
+        NetworkException("timeout"),
+        NetworkException("HTTP 502"),
+        "OID123",
+    ]
     ex = OrderExecutor(kite=kite, telegram_controller=None)
     res = ex._place_with_cb({})
     assert res["ok"]
