@@ -57,3 +57,29 @@ def test_option_resolver_fetches_missing_token():
         resolver = OptionResolver(cache, kite)
         opt = resolver.resolve_atm("NIFTY", 22510, "CE", datetime(2024, 5, 27))
     assert opt["token"] == 789
+
+
+def test_option_resolver_fetches_instruments(monkeypatch):
+    """Fetches instrument dump when cache lacks option token."""
+    cache = InstrumentsCache(instruments=[])
+    kite = MagicMock()
+    inst_dump = [
+        {
+            "name": "NIFTY",
+            "segment": "NFO-OPT",
+            "expiry": datetime(2024, 5, 28).date(),
+            "instrument_type": "CE",
+            "strike": 22500,
+            "tradingsymbol": "NIFTY24MAY22500CE",
+            "lot_size": 50,
+        }
+    ]
+    monkeypatch.setattr(
+        "src.options.resolver._fetch_instruments_nfo", lambda _k: inst_dump
+    )
+    kite.ltp.return_value = {
+        "NFO:NIFTY24MAY22500CE": {"instrument_token": 321}
+    }
+    resolver = OptionResolver(cache, kite)
+    opt = resolver.resolve_atm("NIFTY", 22510, "CE", datetime(2024, 5, 27))
+    assert opt["token"] == 321
