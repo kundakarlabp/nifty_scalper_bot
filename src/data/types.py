@@ -17,3 +17,7 @@ class HistResult:
     status: HistStatus
     df: pd.DataFrame
     reason: str = ""
+
+    def __bool__(self) -> bool:
+        """Return ``True`` only when historical data is available."""
+        return self.status is HistStatus.OK
