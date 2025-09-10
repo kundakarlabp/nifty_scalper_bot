@@ -12,26 +12,14 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_TS_ALIASES = [
-    "timestamp",
-    "datetime",
-    "date_time",
-    "date",
-    "time",
-    "ts",
-    "created_at",
-    "Timestamp",
-    "Date",
-    "Time",
-    "DATETIME",
-]
+_TS_ALIASES = ["timestamp", "datetime", "date", "time"]
 
 _OHLC_MAP = {
-    "open": ["open", "o", "Open", "OPEN"],
-    "high": ["high", "h", "High", "HIGH"],
-    "low": ["low", "l", "Low", "LOW"],
-    "close": ["close", "c", "Close", "CLOSE", "adj_close", "Adj Close"],
-    "volume": ["volume", "vol", "Volume", "VOL", "qty", "Qty", "QTY"],
+    "open": ["open", "o"],
+    "high": ["high", "h"],
+    "low": ["low", "l"],
+    "close": ["close", "c", "adj close", "adj_close", "adjclose"],
+    "volume": ["volume", "vol", "qty"],
 }
 
 
@@ -43,20 +31,17 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     ts_col: str | None = None
     for c in df.columns:
         key = norm[c]
-        if any(key == a.lower().replace("_", "") for a in _TS_ALIASES):
+        if key in [a.replace("_", "") for a in _TS_ALIASES]:
             ts_col = c
             break
 
     if ts_col is None and {"date", "time"}.issubset(set(norm.values())):
         date_col = next(cc for cc in df.columns if norm[cc] == "date")
         time_col = next(cc for cc in df.columns if norm[cc] == "time")
-        df["timestamp"] = df[date_col].astype(str) + " " + df[time_col].astype(str)
+        df["timestamp"] = pd.to_datetime(
+            df[date_col].astype(str) + " " + df[time_col].astype(str)
+        )
         ts_col = "timestamp"
-
-    if ts_col is None:
-        first = df.columns[0]
-        if pd.to_datetime(df[first], errors="coerce").notna().mean() > 0.8:
-            ts_col = first
 
     if ts_col is None:
         raise KeyError(f"No timestamp-like column found. Available: {list(df.columns)}")
@@ -65,7 +50,7 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     if pd.api.types.is_numeric_dtype(col):
         df["timestamp"] = pd.to_datetime(col, unit="s", errors="coerce")
     else:
-        df["timestamp"] = pd.to_datetime(col, errors="coerce", infer_datetime_format=True)
+        df["timestamp"] = pd.to_datetime(col, errors="coerce")
     df = df.dropna(subset=["timestamp"])
 
     rename: dict[str, str] = {}
@@ -73,7 +58,7 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
         for c in df.columns:
             if c == "timestamp" or c in rename:
                 continue
-            if c in aliases or c.lower() in [a.lower() for a in aliases]:
+            if c.lower() in [a.lower() for a in aliases]:
                 rename[c] = target
                 break
     df = df.rename(columns=rename)
