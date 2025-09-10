@@ -670,6 +670,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
         self._backfill_cooldown_s = 60
+        self.atm_tokens: tuple[int | None, int | None] = (None, None)
+        self.current_atm_strike: int | None = None
         # Historical mode defaults to using broker backfill.  When backfill is
         # skipped (e.g., warmup disabled), switch to live warmup using in-memory
         # tick aggregation.
@@ -705,6 +707,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         mode_fn(full_mode, [token])
                 except Exception as e:
                     log.warning("LiveKiteSource connect: subscribe failed: %s", e)
+
+            try:
+                self.ensure_atm_tokens()
+            except Exception as e:
+                log.warning(
+                    "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
+                )
 
         warmup_disabled = data_warmup_disable()
         warmup_failed = False
@@ -1379,10 +1388,18 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
             break
     if not (ce and pe):
         return
-    tokens = [int(ce), int(pe)]
+    ce_token, pe_token = int(ce), int(pe)
+    tokens = [ce_token, pe_token]
     self.atm_tokens = tuple(tokens)
     self.current_atm_strike = strike
     self.current_atm_expiry = expiry
+    log.info(
+        "ATM tokens resolved: expiry=%s, strike=%d, ce=%d, pe=%d",
+        expiry.isoformat(),
+        int(strike),
+        ce_token,
+        pe_token,
+    )
     _subscribe_tokens(self, tokens)
     for _ in range(2):
         missing = [t for t in tokens if not _have_quote(self, t)]
