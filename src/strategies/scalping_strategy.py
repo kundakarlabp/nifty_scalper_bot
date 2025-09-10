@@ -383,6 +383,8 @@ class EnhancedScalpingStrategy:
             "confidence": 0.0,
             "breakeven_ticks": None,
             "tp1_qty_ratio": None,
+            "atm_strike": None,
+            "option_token": None,
         }
 
         plan["score_dbg"] = {
@@ -701,6 +703,22 @@ class EnhancedScalpingStrategy:
                 structure_score += 1
 
             vol_score = 1 if atr_min <= atr_pct_val <= atr_max else 0
+
+            ds = getattr(getattr(self, "runner", None), "data_source", None) or getattr(
+                self, "data_source", None
+            )
+            option_token = None
+            if ds is not None:
+                tokens_ds = getattr(ds, "atm_tokens", None)
+                strike_ds = getattr(ds, "current_atm_strike", None)
+                if tokens_ds and strike_ds is not None:
+                    try:
+                        idx = 0 if str(option_type).upper() == "CE" else 1
+                        option_token = tokens_ds[idx]
+                        plan["atm_strike"] = int(strike_ds)
+                    except Exception:
+                        option_token = None
+            plan["option_token"] = option_token
 
             atm = resolve_weekly_atm(price)
             info_atm = atm.get(option_type.lower()) if atm else None
