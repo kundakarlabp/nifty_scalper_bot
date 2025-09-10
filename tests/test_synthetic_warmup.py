@@ -31,5 +31,7 @@ def test_synthetic_warmup_fallback(monkeypatch) -> None:
     assert df is not None
     if hasattr(df, "empty"):
         assert not df.empty
-    assert ds.have_min_bars(30)
+    result = ds.have_min_bars(30)
+    assert isinstance(result, bool)
+    assert result is True
 
