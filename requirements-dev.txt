@@ -1,6 +1,9 @@
 ruff>=0.6.9
 mypy==1.10.0
 
+# API / server
+waitress==3.0.2
+
 # Testing
 pytest>=8.2
 pytest-cov>=5.0

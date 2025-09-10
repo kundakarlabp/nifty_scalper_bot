@@ -26,7 +26,7 @@
    cd ~/niftybot && docker build -t niftybot:latest .
    sudo tee /etc/systemd/system/niftybot.service < deploy/gce/niftybot.service
    sudo systemctl daemon-reload && sudo systemctl enable niftybot && sudo systemctl start niftybot
-   curl http://<VM_IP>:8000/health
+   curl http://<VM_IP>:8000/health  # served by Waitress
    ```
 
 8. **GitHub Actions**

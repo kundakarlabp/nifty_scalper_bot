@@ -18,9 +18,9 @@ worker: bash manage_bot.sh run
 ```
 
 ## Health
-A lightweight Flask server, served via Waitress in production when available,
-exposes `GET /health` on port 8000 to help Railway detect unhealthy states and
-restart.
+A lightweight Flask server, backed by Waitress by default (falling back to Flask
+only if Waitress is missing), exposes `GET /health` on port 8000 to help Railway
+detect unhealthy states and restart.
 
 ## Start/Stop jobs
 Use the included scripts from a Railway Cron or separate services:

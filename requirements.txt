@@ -22,6 +22,7 @@ pyyaml==6.0.2
 
 # API / server
 flask==3.0.3
+waitress==3.0.2
 
 # Testing
 pytest==7.4.4
