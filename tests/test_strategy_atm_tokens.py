@@ -1,0 +1,71 @@
+import smoke  # noqa: F401
+from types import SimpleNamespace
+
+import pandas as pd
+
+import src.strategies.scalping_strategy as ss
+from src.strategies.strategy_config import resolve_config_path
+from tests.test_strategy import create_test_dataframe
+
+
+def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
+    """Strategy should not block when ATM tokens are available."""
+    cfg = ss.StrategyConfig.load(resolve_config_path())
+    cfg.raw.setdefault("strategy", {})["min_score"] = 0.0
+    monkeypatch.setattr(ss.StrategyConfig, "load", classmethod(lambda cls, path: cfg))
+
+    df = create_test_dataframe(trending_up=True)
+    monkeypatch.setattr(ss, "latest_atr_value", lambda *a, **k: 0.06)
+    monkeypatch.setattr(
+        ss,
+        "compute_atr",
+        lambda *a, **k: pd.Series([0.06] * len(df), index=df.index),
+    )
+
+    monkeypatch.setattr(
+        ss,
+        "fetch_quote_with_depth",
+        lambda *a, **k: {"bid": 100.0, "ask": 100.0},
+    )
+    monkeypatch.setattr(
+        ss,
+        "evaluate_micro",
+        lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"},
+    )
+    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 1.0)
+    monkeypatch.setattr(
+        ss,
+        "resolve_weekly_atm",
+        lambda price: {"ce": ("CE", 1), "pe": ("PE", 1)},
+    )
+    monkeypatch.setattr(
+        ss,
+        "get_instrument_tokens",
+        lambda *a, **k: {"atm_tokens": {"ce": 1, "pe": 2}, "atm_strike": 17050},
+    )
+    monkeypatch.setattr(
+        ss,
+        "detect_market_regime",
+        lambda **k: SimpleNamespace(regime="TREND"),
+    )
+    monkeypatch.setattr(
+        ss,
+        "compute_score",
+        lambda df, regime, cfg: (10.0, None),
+    )
+    monkeypatch.setattr(
+        ss,
+        "select_strike",
+        lambda price, score: ss.StrikeInfo(strike=17050),
+    )
+
+    strat = ss.EnhancedScalpingStrategy(
+        min_signal_score=0.0,
+        confidence_threshold=0.0,
+        atr_period=14,
+        atr_sl_multiplier=1.5,
+        atr_tp_multiplier=3.0,
+    )
+    strat.data_source = SimpleNamespace(atm_tokens=(1, 2), current_atm_strike=17050)
+    plan = strat.generate_signal(df, current_price=100.0)
+    assert plan.get("reason_block") != "no_option_token"
