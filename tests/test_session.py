@@ -134,3 +134,53 @@ def test_risk_limit_max_drawdown(risk_config: RiskSettings):
     result = session.check_risk_limits()
     assert result is not None, "Drawdown risk limit should be hit"
     assert "Max daily drawdown" in result
+
+
+def test_trade_close_warn_on_double_close(session: TradingSession, caplog: pytest.LogCaptureFixture) -> None:
+    trade = Trade("NIFTY_CE", "BUY", 200.0, 75, "orderX", atr_at_entry=10.0)
+    trade.close(210.0)
+    with caplog.at_level("WARNING"):
+        trade.close(220.0)
+    assert "already closed" in caplog.text
+
+
+def test_trade_close_sell_branch() -> None:
+    trade = Trade("NIFTY_PE", "SELL", 200.0, 75, "orderY", atr_at_entry=10.0)
+    trade.close(190.0)
+    assert trade.pnl == (200.0 - 190.0) * 75
+
+
+def test_add_trade_duplicate(session: TradingSession, caplog: pytest.LogCaptureFixture) -> None:
+    trade = Trade("NIFTY_CE", "BUY", 200.0, 75, "dup", atr_at_entry=10.0)
+    session.add_trade(trade)
+    with caplog.at_level("WARNING"):
+        session.add_trade(trade)
+    assert session.trades_today == 1
+    assert len(session.active_trades) == 1
+    assert "duplicate trade" in caplog.text
+
+
+def test_session_requires_risksettings() -> None:
+    with pytest.raises(TypeError):
+        TradingSession(risk_config="bad", starting_equity=0.0)
+
+
+def test_finalize_trade_missing(session: TradingSession, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        assert session.finalize_trade("missing", 100.0) is None
+    assert "Could not find active trade" in caplog.text
+
+
+def test_estimate_fees_zero_lot(session: TradingSession) -> None:
+    session.lot_size = 0
+    assert session._estimate_fees(100) == 0.0
+
+
+def test_estimate_fees_exception(session: TradingSession) -> None:
+    session.lot_size = "bad"  # type: ignore[assignment]
+    assert session._estimate_fees(100) == 0.0
+
+
+def test_to_status_dict(session: TradingSession) -> None:
+    status = session.to_status_dict()
+    assert "session_date" in status
