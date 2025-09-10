@@ -19,3 +19,4 @@
 - **Network down**: health check fails or no ticks. Verify connectivity and restart.
 - **Broker reject**: order API returns an error. Review logs and `/apihealth` for circuit breaker status.
 - **Stale ticks**: `/status` shows old timestamps. Restart data feed using the restart procedure.
+- **No warm-up bars**: The bot requires market-hour ticks to build warm-up bars. When running with `DATA__WARMUP_DISABLE=true`, allow ~30 minutes of live ticks before trading. Use `/why` or `/force_eval` to diagnose or trigger evaluation.
