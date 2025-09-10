@@ -135,7 +135,7 @@ class BacktestRunner:
 
     def _check_entry(self, current_dt: datetime, current_bar: pd.Series) -> None:
         # History up to current bar (inclusive) prevents look-ahead
-        df_history = self.data_source.fetch_ohlc(
+        df_history = self.data_source.fetch_ohlc_df(
             token=0,
             start=datetime.min,
             end=current_dt,
