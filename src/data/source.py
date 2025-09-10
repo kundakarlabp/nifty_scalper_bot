@@ -898,6 +898,52 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if end - start < needed:
             start = end - needed
 
+        def _use_prev_close() -> pd.DataFrame:
+            """Return synthetic bars seeded from previous session's close."""
+            if not self.kite:
+                return pd.DataFrame()
+            try:
+                from src.utils.market_time import prev_session_bounds
+                from src.utils.time_windows import TZ
+
+                prev_start, prev_end = prev_session_bounds(dt.datetime.now(TZ))
+                prev_start = _naive_ist(prev_start)
+                prev_end = _naive_ist(prev_end)
+                rows = _retry(
+                    self.kite.historical_data,
+                    token,
+                    prev_start,
+                    prev_end,
+                    interval,
+                    continuous=False,
+                    oi=False,
+                    tries=3,
+                )
+                part = _normalize_ohlc_df(rows)
+                if part.empty:
+                    return pd.DataFrame()
+                close = float(part["close"].iloc[-1])
+                syn = _synthetic_ohlc(close, end, interval, WARMUP_BARS)
+                fetched_window = (
+                    pd.to_datetime(syn.index.min()).to_pydatetime(),
+                    pd.to_datetime(syn.index.max()).to_pydatetime(),
+                )
+                self._cache.set(
+                    int(token),
+                    interval,
+                    syn,
+                    fetched_window,
+                    (start, end),
+                )
+                if not syn.empty:
+                    self._last_bar_open_ts = pd.to_datetime(
+                        syn.index[-1]
+                    ).to_pydatetime()
+                self._last_hist_reason = "synthetic_prev_close"
+                return syn
+            except Exception:
+                return pd.DataFrame()
+
         # Try cache first
         cached = self._cache.get(token, interval, start, end)
         if cached is not None and not cached.empty:
@@ -928,6 +974,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
                 return syn
+            prev_syn = _use_prev_close()
+            if not prev_syn.empty:
+                return prev_syn
             self._last_hist_reason = "broker_unavailable"
             return pd.DataFrame()
 
@@ -1041,6 +1090,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     )
                     self._last_hist_reason = "synthetic_ltp"
                     return syn
+                prev_syn = _use_prev_close()
+                if not prev_syn.empty:
+                    return prev_syn
                 self._last_hist_reason = "empty"
                 return pd.DataFrame()
 
@@ -1090,6 +1142,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     ).to_pydatetime()
                 self._last_hist_reason = "synthetic_ltp"
                 return syn
+            prev_syn = _use_prev_close()
+            if not prev_syn.empty:
+                return prev_syn
             self._last_hist_reason = str(e)
             return pd.DataFrame()
 
