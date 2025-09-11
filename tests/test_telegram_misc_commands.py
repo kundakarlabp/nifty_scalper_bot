@@ -32,6 +32,14 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
         "depth_ok": True,
         "quote_src": "test",
         "feature_ok": True,
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp1": 110.0,
+        "tp2": 120.0,
+        "opt_entry": 10.0,
+        "opt_sl": 9.5,
+        "opt_tp1": 11.0,
+        "opt_tp2": 12.0,
     }
     status = {"within_window": True, "cooloff_until": "-", "daily_dd_hit": False}
     import src.diagnostics.registry as diag_registry
@@ -52,6 +60,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "/why gates" in msg
     assert "window: PASS" in msg
     assert "micro:" in msg
+    assert "opt: entry=" in msg
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
@@ -215,6 +224,16 @@ def test_state_outputs_metrics(monkeypatch) -> None:
             "cooloff_until": "-",
             "consecutive_losses": 1,
         },
+        get_last_signal_debug=lambda: {
+            "entry": 100.0,
+            "sl": 95.0,
+            "tp1": 110.0,
+            "tp2": 120.0,
+            "opt_entry": 10.0,
+            "opt_sl": 9.5,
+            "opt_tp1": 11.0,
+            "opt_tp2": 12.0,
+        },
     )
     monkeypatch.setattr(
         StrategyRunner,
@@ -227,6 +246,7 @@ def test_state_outputs_metrics(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/state"}})
     msg = sent[0]
     assert "eq=1000.0" in msg and "trades=2" in msg and "losses=1" in msg and "evals=7" in msg
+    assert "opt: entry=" in msg and "tp_basis=" in msg
 
 
 def test_atrmin_updates_config(monkeypatch) -> None:
