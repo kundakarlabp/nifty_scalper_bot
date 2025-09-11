@@ -673,6 +673,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._backfill_cooldown_s = 60
         self.atm_tokens: tuple[int | None, int | None] = (None, None)
         self.current_atm_strike: int | None = None
+        self.current_atm_expiry: dt.date | None = None
+        self._atm_next_resolve_ts: float = 0.0
+        self._atm_resolve_date: dt.date | None = None
         # Historical mode defaults to using broker backfill.  When backfill is
         # skipped (e.g., warmup disabled), switch to live warmup using in-memory
         # tick aggregation.
@@ -681,10 +684,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if data_warmup_disable():
             self.hist_mode = "live_warmup"
             self.bar_builder = MinuteBarBuilder(max_bars=120)
-
-    def ensure_atm_tokens(self, underlying: str | None = None) -> None:
-        """Resolve and subscribe current ATM tokens (no-op by default)."""
-        return
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1356,7 +1355,26 @@ def _have_quote(obj: Any, token: int) -> bool:
 
 
 def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
-    """Resolve and subscribe current ATM option tokens."""
+    """Resolve and subscribe current ATM option tokens.
+
+    Calls are throttled per instance to avoid excessive broker requests.
+    """
+
+    try:
+        cooldown = int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45"))
+    except Exception:
+        cooldown = 45
+    now = time.time()
+    next_ts = float(getattr(self, "_atm_next_resolve_ts", 0.0))
+    existing = getattr(self, "atm_tokens", None)
+    if (
+        isinstance(existing, (list, tuple))
+        and all(t is not None for t in existing)
+        and now < next_ts
+    ):
+        return
+    self._atm_next_resolve_ts = now + cooldown
+
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     items = _refresh_instruments_nfo(broker)
     if not items:
@@ -1393,6 +1411,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     self.atm_tokens = tuple(tokens)
     self.current_atm_strike = strike
     self.current_atm_expiry = expiry
+    self._atm_resolve_date = today
     log.info(
         "ATM tokens resolved: expiry=%s, strike=%d, ce=%d, pe=%d",
         expiry.isoformat(),
