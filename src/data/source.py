@@ -1356,7 +1356,22 @@ def _have_quote(obj: Any, token: int) -> bool:
 
 
 def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
-    """Resolve and subscribe current ATM option tokens."""
+    """Resolve and subscribe current ATM option tokens.
+
+    Calls are throttled per instance to at most once every 45 seconds to
+    avoid spamming the broker with instrument lookups and subscriptions.
+    """
+    try:
+        interval = int(os.getenv("ATM_ROLL_INTERVAL_S", "45"))
+    except Exception:
+        interval = 45
+    interval = max(45, interval)
+    now = time.time()
+    next_check = float(getattr(self, "_atm_roll_next_ts", 0.0))
+    if now < next_check:
+        return
+    self._atm_roll_next_ts = now + interval
+
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     items = _refresh_instruments_nfo(broker)
     if not items:

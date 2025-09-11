@@ -747,6 +747,14 @@ class EnhancedScalpingStrategy:
             if ds is not None:
                 idx = 0 if str(option_type).upper() == "CE" else 1
                 strike_ds = getattr(ds, "current_atm_strike", None)
+                if strike_ds is None or abs(float(price) - float(strike_ds)) >= 75:
+                    refresh = getattr(ds, "ensure_atm_tokens", None)
+                    if callable(refresh):
+                        try:
+                            refresh()
+                        except Exception:
+                            logger.debug("ensure_atm_tokens failed", exc_info=True)
+                    strike_ds = getattr(ds, "current_atm_strike", strike_ds)
                 symbols_ds = getattr(ds, "atm_tradingsymbols", None)
                 tokens_ds = getattr(ds, "atm_tokens", None)
                 if (
