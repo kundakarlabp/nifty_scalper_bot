@@ -49,7 +49,7 @@ from src.risk.greeks import (  # noqa: F401
 )
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 from src.strategies.registry import init_default_registries
-from src.strategies.scalping_strategy import compute_score
+from src.strategies.scalping_strategy import compute_score, _log_throttled
 from src.strategies.strategy_config import (
     StrategyConfig,
     resolve_config_path,
@@ -327,6 +327,8 @@ class StrategyRunner:
         )
 
         self._risk_state = _RiskCheckState()
+        self._last_trade_time = self.now_ist
+        self._auto_relax_active = False
 
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
@@ -978,7 +980,7 @@ class StrategyRunner:
                         bar_count,
                         regime,
                     )
-            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
+            min_score = self._min_score_threshold()
             if score_val < min_score and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"
                 plan.setdefault("reasons", []).extend(
@@ -1346,7 +1348,7 @@ class StrategyRunner:
             self._preview_candidate(plan, micro)
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
-            min_score = float(getattr(self.strategy_cfg, "min_score", 0.35))
+            min_score = self._min_score_threshold()
             if score_val < min_score and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"
                 flow["reason_block"] = plan["reason_block"]
@@ -1446,6 +1448,8 @@ class StrategyRunner:
 
             flow["executed"] = placed_ok
             if placed_ok:
+                self._last_trade_time = self.now_ist
+                self._auto_relax_active = False
                 metrics.inc_orders(placed=1)
             else:
                 metrics.inc_orders(rejected=1)
@@ -1738,6 +1742,31 @@ class StrategyRunner:
             gates["sl_valid"] = False
         return {k: bool(v) for k, v in gates.items()}
 
+    def _min_score_threshold(self) -> float:
+        base = float(getattr(self.strategy_cfg, "min_score", 0.35))
+        now = self.now_ist
+        last = self._last_trade_time
+        if now.tzinfo is None and last.tzinfo is not None:
+            last = last.replace(tzinfo=None)
+        elif now.tzinfo is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=now.tzinfo)
+        minutes_since = (now - last).total_seconds() / 60.0
+        relax_after = getattr(getattr(self, "strategy", None), "auto_relax_after_min", 30)
+        enabled = getattr(getattr(self, "strategy", None), "auto_relax_enabled", False)
+        if enabled and minutes_since > relax_after:
+            relaxed = max(base - 0.1, 0.25)
+            self._auto_relax_active = True
+            _log_throttled(
+                "auto_relax",
+                logging.INFO,
+                "auto_relax active %.1fmin, min_score %.2f",
+                minutes_since,
+                relaxed,
+            )
+            return relaxed
+        self._auto_relax_active = False
+        return base
+
     def _calculate_quantity_diag(
         self, *, entry: float, stop: float, lot_size: int, equity: float
     ) -> Tuple[int, Dict]:
@@ -1806,6 +1835,8 @@ class StrategyRunner:
             self.risk.consecutive_losses = 0
         self.risk.day_realized_pnl += pnl
         self.risk.trades_today += 1
+        self._last_trade_time = self.now_ist
+        self._auto_relax_active = False
         try:
             self.risk_engine.on_trade_closed(pnl_R=pnl)
         except Exception:
@@ -2450,6 +2481,11 @@ class StrategyRunner:
             "strategy": getattr(self, "strategy_name", "unknown"),
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
+
+        mins_since = (self.now_ist - self._last_trade_time).total_seconds() / 60.0
+        diag["minutes_since_last_trade"] = round(mins_since, 1)
+        if self._auto_relax_active:
+            diag.setdefault("banners", []).append("auto_relax")
 
         plan = self.last_plan or {}
         diag["last_signal"] = {

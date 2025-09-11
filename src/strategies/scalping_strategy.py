@@ -242,6 +242,9 @@ class EnhancedScalpingStrategy:
         self.auto_relax_enabled = bool(
             getattr(settings.strategy, "auto_relax_enabled", True)
         )
+        self.auto_relax_after_min = int(
+            getattr(settings.strategy, "auto_relax_after_min", 30)
+        )
         self.min_score_relaxed = int(
             getattr(
                 settings.strategy,
