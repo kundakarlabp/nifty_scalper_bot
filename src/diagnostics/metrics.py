@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from threading import Lock
-from typing import Deque, Dict
+from typing import Deque, Dict, List
+from zoneinfo import ZoneInfo
+
+from src.config import settings
 
 
 @dataclass
@@ -167,3 +173,56 @@ class RuntimeMetrics:
 
 
 runtime_metrics = RuntimeMetrics()
+
+
+TZ = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
+_JOURNAL_HDR = ["ts", "pnl_R", "slippage_bps"]
+
+
+def _journal_path(dt: datetime | None = None) -> Path:
+    dt = dt or datetime.now(TZ)
+    return Path("data/journal") / f"{dt.date()}.csv"
+
+
+def record_trade(pnl_r: float, slippage_bps: float) -> None:
+    """Append a trade row to today's CSV journal."""
+    path = _journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
+    with path.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=_JOURNAL_HDR)
+        if new:
+            w.writeheader()
+        w.writerow(
+            {
+                "ts": datetime.now(TZ).isoformat(),
+                "pnl_R": float(pnl_r),
+                "slippage_bps": float(slippage_bps),
+            }
+        )
+
+
+def daily_summary(dt: datetime | None = None) -> Dict[str, float]:
+    """Return aggregated trade metrics for the day."""
+    path = _journal_path(dt)
+    if not path.exists():
+        return {"R": 0.0, "hit_rate": 0.0, "avg_R": 0.0, "slippage_bps": 0.0, "trades": 0}
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    rs = [float(r.get("pnl_R", 0.0)) for r in rows]
+    sls = [float(r.get("slippage_bps", 0.0)) for r in rows]
+    trades = len(rs)
+    if trades == 0:
+        return {"R": 0.0, "hit_rate": 0.0, "avg_R": 0.0, "slippage_bps": 0.0, "trades": 0}
+    total_r = sum(rs)
+    hit_rate = (sum(1 for r in rs if r > 0) / trades) * 100.0
+    avg_r = total_r / trades
+    avg_slip = sum(sls) / trades if sls else 0.0
+    return {
+        "R": round(total_r, 2),
+        "hit_rate": round(hit_rate, 1),
+        "avg_R": round(avg_r, 2),
+        "slippage_bps": round(avg_slip, 2),
+        "trades": trades,
+    }
+

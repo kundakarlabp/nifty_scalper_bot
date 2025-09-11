@@ -9,7 +9,7 @@ import re
 import statistics as stats
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -28,6 +28,7 @@ from src.strategies.warmup import check as warmup_check
 from src.utils import strike_selector
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 from src.utils.freshness import compute as compute_freshness
+from src.diagnostics.metrics import daily_summary
 
 log = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class TelegramController:
         self._stop = threading.Event()
         self._started = False
         self._last_update_id: Optional[int] = None
+        self._last_summary_date: Optional[date] = None
 
         # allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
@@ -312,6 +314,21 @@ class TelegramController:
     def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
         self._send(text, parse_mode=parse_mode)
 
+    def _maybe_send_close_summary(self) -> None:
+        """Emit a daily P&L summary at market close."""
+        tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
+        now = datetime.now(tz)
+        cutoff = dt_time(15, 29)
+        if now.time() >= cutoff and self._last_summary_date != now.date():
+            stats = daily_summary(now)
+            text = (
+                f"\U0001F4CA Close R={stats['R']} "
+                f"Hit={stats['hit_rate']}% AvgR={stats['avg_R']} "
+                f"Slip={stats['slippage_bps']}bps"
+            )
+            self._send(text)
+            self._last_summary_date = now.date()
+
     # --------------- polling loop ---------------
     def start_polling(self) -> None:
         if self._started:
@@ -357,6 +374,7 @@ class TelegramController:
                     self._last_update_id = int(upd.get("update_id", 0))
                     self._handle_update(upd)
                 backoff = 1.0
+                self._maybe_send_close_summary()
             except (OSError, requests.exceptions.ConnectionError) as e:
                 log.warning("Telegram poll network error: %s", e)
                 try:
