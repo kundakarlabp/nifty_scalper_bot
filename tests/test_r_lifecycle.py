@@ -23,8 +23,8 @@ def test_r_lifecycle_trailing(monkeypatch):
     ex.handle_tp1_fill(rid)
     rec = ex._active[rid]
     assert rec.quantity == ex.lot_size
-    assert abs(rec.sl_price - 100.1) < 1e-6
+    assert abs(rec.sl_price - 100.0) < 1e-6
     assert rec.trailing_mult == 0.8
 
     ex.update_trailing_stop(rid, current_price=101.5, atr=0.5)
-    assert rec.sl_price >= 100.1
+    assert rec.sl_price >= 101.0

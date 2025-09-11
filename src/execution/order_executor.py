@@ -1160,7 +1160,7 @@ class OrderExecutor:
             rec.quantity -= tp_qty
             if rec.quantity < 0:
                 rec.quantity = 0
-        new_sl = rec.entry_price + rec.side_sign() * 0.1 * rec.r_value
+        new_sl = rec.entry_price
         rec.sl_price = _round_to_tick(new_sl, rec.tick_size)
         rec.trailing_mult = rec.trail_atr_mult or rec.trailing_mult
         self._refresh_sl_gtt(

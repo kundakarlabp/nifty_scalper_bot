@@ -262,6 +262,7 @@ class EnhancedScalpingStrategy:
         # Exportable debug snapshot
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
+        self._opt_window: Deque[float] = getattr(self, "_opt_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
 
     # ---------- tech utils ----------
@@ -420,6 +421,7 @@ class EnhancedScalpingStrategy:
             "tp1_qty_ratio": None,
             "atm_strike": None,
             "option_token": None,
+            "opt_atr": None,
         }
 
         plan["score_dbg"] = {
@@ -802,6 +804,21 @@ class EnhancedScalpingStrategy:
             q = fetch_quote_with_depth(getattr(settings, "kite", None), quote_id)
             plan["_last_quote"] = q
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
+            if mid:
+                mid_f = float(mid)
+                self._opt_window.append(mid_f)
+                opt_df = pd.DataFrame(
+                    {
+                        "high": list(self._opt_window),
+                        "low": list(self._opt_window),
+                        "close": list(self._opt_window),
+                    }
+                )
+                plan["opt_atr"] = latest_atr_value(
+                    compute_atr(opt_df, period=14)
+                )
+            else:
+                plan["opt_atr"] = None
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
             if not isinstance(micro, dict):

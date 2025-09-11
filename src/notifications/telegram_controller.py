@@ -594,11 +594,12 @@ class TelegramController:
                 )
             )
             lines.append(
-                "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr}".format(
                     e=plan.get("opt_entry"),
                     sl=plan.get("opt_sl"),
                     tp1=plan.get("opt_tp1"),
                     tp2=plan.get("opt_tp2"),
+                    atr=plan.get("opt_atr"),
                 )
             )
             return self._send("\n".join(lines))
@@ -1170,11 +1171,12 @@ class TelegramController:
                     )
                 )
                 lines.append(
-                    "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                    "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr}".format(
                         e=plan.get("opt_entry"),
                         sl=plan.get("opt_sl"),
                         tp1=plan.get("opt_tp1"),
                         tp2=plan.get("opt_tp2"),
+                        atr=plan.get("opt_atr"),
                     )
                 )
                 lines.append(
