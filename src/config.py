@@ -264,7 +264,17 @@ class RiskSettings(BaseModel):
     trading_window_end: str = "15:30"
     max_daily_loss_rupees: float | None = None
     max_lots_per_symbol: int = 5
-    max_notional_rupees: float = 1_500_000.0
+    max_notional_rupees: float = Field(
+        default_factory=lambda: float(
+            env_any("EXPOSURE_CAP", "RISK__MAX_NOTIONAL_RUPEES")
+            or 1_500_000.0
+        )
+    )
+    exposure_basis: Literal["underlying", "premium"] = Field(
+        default_factory=lambda: str(
+            env_any("EXPOSURE_BASIS", "RISK__EXPOSURE_BASIS") or "underlying"
+        )
+    )
 
     @field_validator("risk_per_trade")
     @classmethod

@@ -101,6 +101,8 @@ class BacktestEngine:
                 lot_size=self.sim.lot_size,
                 entry_price=ladd0,
                 stop_loss_price=plan.get("sl") or max(0.5, ladd0 - (spread * 2)),
+                spot_price=c,
+                option_mid_price=mid,
             )
             if not ok:
                 plan["has_signal"] = False
