@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+import os
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
+
+MICRO_SPREAD_CAP = float(os.getenv("MICRO_SPREAD_CAP", "0.35"))
+ENTRY_WAIT_S = int(os.getenv("ENTRY_WAIT_S", "8"))
 
 
 def micro_from_l1(
@@ -22,8 +26,13 @@ def micro_from_l1(
         return None, None, None
     mid = (bid + ask) / 2.0
     spread_pct = (ask - bid) / mid * 100.0
-    depth_ok = min(bq, sq) >= depth_min_lots * lot_size
-    return spread_pct, depth_ok, {"bid": bid, "ask": ask, "bid5": bq, "ask5": sq}
+    depth_lots = min(bq, sq) // lot_size
+    depth_ok = depth_lots >= depth_min_lots
+    return (
+        spread_pct,
+        depth_ok,
+        {"bid": bid, "ask": ask, "bid5": bq, "ask5": sq, "depth_lots": depth_lots},
+    )
 
 
 def micro_from_quote(
@@ -54,6 +63,32 @@ def micro_from_quote(
     spread = (ask - bid) / mid * 100.0
     depth_ok = min(bq, sq) >= depth_min_lots * lot_size
     return spread, depth_ok
+
+
+def entry_metrics(
+    bid: float,
+    ask: float,
+    depth: Optional[Union[float, int, Sequence[float]]] = None,
+    *,
+    lot_size: int,
+) -> Tuple[Optional[float], int]:
+    """Return spread% and available depth in lots for entry gating."""
+
+    if bid <= 0 or ask <= 0 or bid >= ask:
+        return None, 0
+    mid = (bid + ask) / 2.0
+    spread_pct = (ask - bid) / mid * 100.0
+    depth_lots = 1_000_000
+    if depth is not None:
+        try:
+            if isinstance(depth, Sequence):
+                depth_val = min(float(depth[0]), float(depth[1]))
+            else:
+                depth_val = float(depth)
+            depth_lots = max(int(depth_val // lot_size), 0)
+        except (TypeError, ValueError):
+            depth_lots = 0
+    return spread_pct, depth_lots
 
 
 def _micro_cfg(cfg: Any) -> Dict[str, Any]:

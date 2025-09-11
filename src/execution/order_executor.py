@@ -23,6 +23,7 @@ from src.utils.broker_errors import (
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.reliability import RateLimiter
 
+from .micro_filters import ENTRY_WAIT_S, MICRO_SPREAD_CAP, entry_metrics
 from .order_state import (
     LegType,
     OrderLeg,
@@ -806,35 +807,46 @@ class OrderExecutor:
 
         # microstructure gates + mid execution
         if bid is not None and ask is not None:
-            tries = 0
-            while tries < self.micro_retry_limit:
-                mid = (float(bid) + float(ask)) / 2.0
-                spread = float(ask) - float(bid)
-                spread_pct = spread / mid * 100.0 if mid else float("inf")
-                max_sp = self.max_spread_pct
-                if max_sp < 1:
-                    max_sp *= 100.0
-                depth_ok = True
-                if depth is not None:
-                    try:
-                        if isinstance(depth, (tuple, list)):
-                            depth_val = min(float(depth[0]), float(depth[1]))
-                        else:
-                            depth_val = float(depth)
-                        depth_ok = depth_val >= self.depth_multiplier * qty
-                    except (TypeError, ValueError):
-                        depth_ok = True
-                if spread_pct <= max_sp and depth_ok:
+            start_ts = time.monotonic()
+            qty_lots = max(qty // self.lot_size, 1)
+            while True:
+                spread_pct, depth_lots = entry_metrics(
+                    float(bid), float(ask), depth, lot_size=self.lot_size
+                )
+                if (
+                    spread_pct is not None
+                    and spread_pct <= MICRO_SPREAD_CAP
+                    and depth_lots >= qty_lots
+                ):
+                    mid = (float(bid) + float(ask)) / 2.0
+                    spread = float(ask) - float(bid)
                     price = min(float(ask), mid + 0.15 * spread)
                     price = _round_to_tick(price, self.tick_size)
+                    self.last_error = None
                     break
-                tries += 1
-                if callable(refresh_cb):
-                    bid, ask, depth = refresh_cb()
-                time.sleep(0.2 + 0.1 * tries)
-                if tries >= self.micro_retry_limit:
-                    self.last_error = "microstructure_block"
+                elapsed = time.monotonic() - start_ts
+                if elapsed >= ENTRY_WAIT_S:
+                    self.last_error = "micro_block"
+                    log.info(
+                        "micro_block: spread%%=%s depth_lots=%s qty_lots=%s",
+                        f"{spread_pct:.2f}" if spread_pct is not None else "-",
+                        depth_lots,
+                        qty_lots,
+                    )
                     return None
+                self.last_error = "micro_wait"
+                log.info(
+                    "micro_wait: spread%%=%s depth_lots=%s qty_lots=%s",
+                    f"{spread_pct:.2f}" if spread_pct is not None else "-",
+                    depth_lots,
+                    qty_lots,
+                )
+                if callable(refresh_cb):
+                    try:
+                        bid, ask, depth = refresh_cb()
+                    except Exception:
+                        pass
+                time.sleep(2.0)
 
         if not self.kite:
             # PAPER MODE: create a synthetic record so the rest of the flow works

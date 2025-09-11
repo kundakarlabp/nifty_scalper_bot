@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.execution.micro_filters import cap_for_mid, evaluate_micro
+from src.execution.micro_filters import cap_for_mid, entry_metrics, evaluate_micro
 
 
 def _cfg() -> SimpleNamespace:
@@ -35,3 +35,9 @@ def test_evaluate_micro_flags_depth():
     micro2 = evaluate_micro(shallow, lot_size=50, atr_pct=0.03, cfg=cfg)
     assert micro2["depth_ok"] is False
     assert micro2["would_block"] is True
+
+
+def test_entry_metrics_returns_spread_and_depth_lots():
+    sp, depth = entry_metrics(100.0, 101.0, (150, 200), lot_size=50)
+    assert round(sp, 2) == round((1.0 / 100.5) * 100.0, 2)
+    assert depth == 3
