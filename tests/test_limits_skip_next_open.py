@@ -16,6 +16,7 @@ def _args():
         stop_loss_price=90.0,
         spot_price=100.0,
         option_mid_price=100.0,
+        quote={"mid": 100.0},
     )
 
 

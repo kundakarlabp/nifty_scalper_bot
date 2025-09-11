@@ -1114,9 +1114,14 @@ class StrategyRunner:
             try:
                 b = q["depth"]["buy"][0]
                 s = q["depth"]["sell"][0]
+                bid = float(b.get("price", 0.0))
+                ask = float(s.get("price", 0.0))
+                mid = (bid + ask) / 2.0 if bid and ask else 0.0
                 quote_dict = {
-                    "bid": float(b.get("price", 0.0)),
-                    "ask": float(s.get("price", 0.0)),
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "ltp": float(q.get("last_price") or q.get("ltp") or 0.0),
                     "bid_qty": int(b.get("quantity", 0)),
                     "ask_qty": int(s.get("quantity", 0)),
                     "bid5_qty": int(
@@ -1146,6 +1151,7 @@ class StrategyRunner:
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
             plan["quote_src"] = "kite"
+            plan["quote"] = quote_dict
             if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
                 plan["reason_block"] = "no_option_quote"
                 plan.setdefault("reasons", []).append("no_option_quote")
@@ -1266,7 +1272,7 @@ class StrategyRunner:
                 entry_price=float(entry or 0.0),
                 stop_loss_price=float(sl or 0.0),
                 spot_price=float(getattr(self, "last_spot", 0.0) or 0.0),
-                option_mid_price=float(entry or 0.0),
+                quote=plan.get("quote"),
                 planned_delta_units=planned_delta_units,
                 portfolio_delta_units=portfolio_delta_units,
                 gamma_mode=gmode,
@@ -1732,12 +1738,20 @@ class StrategyRunner:
         lots = max(lots_raw, int(settings.instruments.min_lots))
         lots = min(lots, int(settings.instruments.max_lots))
 
-        notional = float(entry) * int(lot_size) * lots
+        basis = getattr(self.settings, "exposure_basis", "premium")
+        if basis == "premium":
+            unit_notional = float(entry) * int(lot_size)
+        else:
+            spot = float(getattr(self, "last_spot", entry) or entry)
+            unit_notional = spot * int(lot_size)
+
+        notional = unit_notional * lots
         max_notional = float(equity) * float(settings.risk.max_position_size_pct)
         if max_notional > 0 and notional > max_notional:
-            denom = float(entry) * int(lot_size)
+            denom = unit_notional
             lots_cap = int(max_notional // denom) if denom > 0 else 0
             lots = max(min(lots_cap, lots), 0)
+            notional = unit_notional * lots
 
         qty = lots * int(lot_size)
         diag = {
@@ -2500,7 +2514,7 @@ class StrategyRunner:
             spot = self.last_spot or 0.0
             return spot * lot_size * total_lots
         total = 0.0
-        basis = getattr(self.settings.risk, "exposure_basis", "underlying")
+        basis = getattr(self.settings.risk, "exposure_basis", "premium")
         spot = float(getattr(self, "last_spot", 0.0) or 0.0)
         for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
             for leg in fsm.open_legs():

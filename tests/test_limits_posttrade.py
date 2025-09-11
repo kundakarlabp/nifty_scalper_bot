@@ -22,6 +22,7 @@ def test_posttrade_updates_and_cooloff():
         stop_loss_price=90.0,
         spot_price=100.0,
         option_mid_price=100.0,
+        quote={"mid": 100.0},
     )
     assert not ok and reason == "loss_cooloff"
     assert eng.state.cooloff_until is not None
@@ -43,6 +44,7 @@ def test_roll10_down(monkeypatch):
         stop_loss_price=90.0,
         spot_price=100.0,
         option_mid_price=100.0,
+        quote={"mid": 100.0},
     )
     assert not ok and reason == "roll10_down"
     assert "avg10R" in det
