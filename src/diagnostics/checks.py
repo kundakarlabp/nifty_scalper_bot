@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 import pandas as pd
 
 from src.config import settings
 from src.diagnostics.registry import CheckResult, register
+from src.execution.order_executor import OrderManager
+from src.execution.order_state import OrderSide, OrderState
 from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
@@ -216,6 +219,41 @@ def check_sizing() -> CheckResult:
         if ok
         else "use equity*risk_pct and mid*lot for unit_notional/min_equity",
     )
+
+
+@register("order_manager")
+def check_order_manager() -> CheckResult:
+    """Self-test partial fill handling and timeout cancellation."""
+
+    calls: List[Dict[str, Any]] = []
+
+    def _place(payload: Dict[str, Any]) -> str:
+        calls.append(payload)
+        return f"OID{len(calls)}"
+
+    om = OrderManager(_place, tick_size=1.0, fill_timeout_ms=1)
+    quote = {
+        "bid": 99.0,
+        "ask": 100.0,
+        "depth": {
+            "buy": [{"price": 99.0, "quantity": 10}],
+            "sell": [
+                {"price": 100.0, "quantity": 5},
+                {"price": 101.0, "quantity": 5},
+            ],
+        },
+        "tick": 1.0,
+    }
+    om.submit({"action": "BUY", "symbol": "TEST", "quantity": 8, "quote": quote})
+    cid = next(iter(om.orders))
+    om.handle_partial(cid, 3, 100.0, quote)
+    partial_ok = om.orders[cid].state == OrderState.PARTIAL and len(calls) == 2
+    om.orders[cid].expires_at = datetime.utcnow() - timedelta(milliseconds=10)
+    om.check_timeouts()
+    timeout_ok = om.orders[cid].state == OrderState.CANCELLED
+    if partial_ok and timeout_ok:
+        return _ok("ok", name="order_manager")
+    return _bad("lifecycle", name="order_manager", fix="review order manager")
 
 
 @register("micro")

@@ -39,7 +39,7 @@ from src.data.broker_source import BrokerDataSource
 from src.diagnostics.metrics import metrics, runtime_metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
-from src.execution.order_executor import OrderReconciler
+from src.execution.order_executor import OrderManager, OrderReconciler
 from src.state import StateStore
 from src.features.indicators import atr_pct
 from src.logs.journal import Journal
@@ -407,6 +407,11 @@ class StrategyRunner:
                 except Exception:
                     self.log.debug("resume order failed: %s", oid, exc_info=True)
         self.executor = self.order_executor
+        self.order_manager = OrderManager(
+            self.order_executor.place_order,
+            kite=getattr(self.order_executor, "kite", None),
+            tick_size=getattr(self.order_executor, "tick_size", 0.05),
+        )
         self.reconciler = OrderReconciler(
             getattr(self.order_executor, "kite", None), self.order_executor, self.log
         )
@@ -1455,7 +1460,7 @@ class StrategyRunner:
                     "option_type": plan["option_type"],
                     "client_oid": client_oid,
                 }
-                placed_ok = bool(self.executor.place_order(exec_payload))
+                placed_ok = bool(self.order_manager.submit(exec_payload))
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
                     try:
                         plan_exec = dict(plan)
