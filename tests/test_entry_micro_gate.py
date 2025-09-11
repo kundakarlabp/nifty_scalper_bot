@@ -57,5 +57,5 @@ def test_place_order_waits_and_succeeds(monkeypatch) -> None:
     }
     rid = ex.place_order(payload)
     assert rid is not None
-    assert ex.last_error is None
+    assert ex.last_error == "micro_wait"
 
