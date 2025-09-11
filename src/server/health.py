@@ -84,6 +84,31 @@ def health_head() -> Tuple[Response, int]:
     return Response(status=200), 200
 
 
+def _metrics_snapshot() -> Dict[str, Any]:
+    """Return runtime metrics enriched with live trading data."""
+    runner = StrategyRunner.get_singleton()
+    if runner is not None:
+        try:
+            now = getattr(runner, "now_ist", datetime.utcnow())
+            last = getattr(runner, "_last_trade_time", None)
+            if last:
+                mins = (now - last).total_seconds() / 60.0
+                runtime_metrics.set_minutes_since_last_trade(round(mins, 1))
+            plan = getattr(runner, "last_plan", {}) or {}
+            runtime_metrics.set_delta(float(plan.get("delta") or 0.0))
+            runtime_metrics.set_elasticity(float(plan.get("elasticity") or 0.0))
+            basis = getattr(runner.settings, "exposure_basis", "premium")
+            runtime_metrics.set_exposure_basis(basis)
+            lot = int(getattr(runner.settings.instruments, "nifty_lot_size", 75))
+            entry = float(plan.get("opt_entry") or plan.get("entry") or 0.0)
+            spot_entry = float(plan.get("spot_entry") or entry)
+            unit = (entry if basis == "premium" else spot_entry) * lot
+            runtime_metrics.set_unit_notional(round(unit, 2))
+        except Exception:
+            pass
+    return runtime_metrics.snapshot()
+
+
 @app.route("/health", methods=["GET"])
 def health_get() -> Tuple[Dict[str, Any], int]:
     """Return lightweight health status."""
@@ -95,7 +120,7 @@ def health_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }
         return resp, 200 if ok else 503
     except Exception as e:
@@ -103,7 +128,7 @@ def health_get() -> Tuple[Dict[str, Any], int]:
         return {
             "ok": False,
             "error": str(e),
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }, 500
 
 
@@ -117,7 +142,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }
         return resp, 200
     except Exception as e:
@@ -125,7 +150,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
         return {
             "ok": False,
             "error": str(e),
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }, 500
 
 
@@ -133,7 +158,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
 def metrics_get() -> Tuple[Dict[str, Any], int]:
     """Return runtime execution metrics."""
     try:
-        return runtime_metrics.snapshot(), 200
+        return _metrics_snapshot(), 200
     except Exception as e:
         log.exception("Metrics GET error: %s", e)
         return {"error": str(e)}, 500

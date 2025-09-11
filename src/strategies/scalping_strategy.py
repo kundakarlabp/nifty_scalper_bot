@@ -15,6 +15,7 @@ import pandas as pd
 from src.config import settings
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 from src.execution.order_executor import fetch_quote_with_depth
+from src.diagnostics.metrics import runtime_metrics
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
@@ -1001,6 +1002,10 @@ class EnhancedScalpingStrategy:
                 delta = max(0.25, min(delta, 0.75))
                 spot_entry = float(plan.get("spot_entry") or 0.0)
                 elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
+                plan["delta"] = delta
+                plan["elasticity"] = elasticity
+                runtime_metrics.set_delta(delta)
+                runtime_metrics.set_elasticity(elasticity)
 
                 def _opt_target(spot_target: float) -> float:
                     premium_offset = elasticity * (spot_target - spot_entry)

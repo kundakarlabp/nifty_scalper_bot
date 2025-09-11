@@ -76,9 +76,14 @@ class RuntimeMetrics:
     fills: int = 0
     cancels: int = 0
     slippage_bps: float = 0.0
-    spread_at_entry: float = 0.0
+    avg_entry_spread: float = 0.0
     micro_wait_ratio: float = 0.0
     auto_relax: float = 0.0
+    minutes_since_last_trade: float = 0.0
+    delta: float = 0.0
+    elasticity: float = 0.0
+    exposure_basis: str = ""
+    unit_notional: float = 0.0
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def inc_fills(self, n: int = 1) -> None:
@@ -93,9 +98,13 @@ class RuntimeMetrics:
         with self._lock:
             self.slippage_bps = float(value)
 
-    def set_spread_at_entry(self, value: float) -> None:
+    def set_avg_entry_spread(self, value: float) -> None:
         with self._lock:
-            self.spread_at_entry = float(value)
+            self.avg_entry_spread = float(value)
+
+    # Backwards compat alias
+    def set_spread_at_entry(self, value: float) -> None:  # pragma: no cover - alias
+        self.set_avg_entry_spread(value)
 
     def set_micro_wait_ratio(self, value: float) -> None:
         with self._lock:
@@ -105,15 +114,40 @@ class RuntimeMetrics:
         with self._lock:
             self.auto_relax = float(value)
 
+    def set_minutes_since_last_trade(self, value: float) -> None:
+        with self._lock:
+            self.minutes_since_last_trade = float(value)
+
+    def set_delta(self, value: float) -> None:
+        with self._lock:
+            self.delta = float(value)
+
+    def set_elasticity(self, value: float) -> None:
+        with self._lock:
+            self.elasticity = float(value)
+
+    def set_exposure_basis(self, value: str) -> None:
+        with self._lock:
+            self.exposure_basis = str(value)
+
+    def set_unit_notional(self, value: float) -> None:
+        with self._lock:
+            self.unit_notional = float(value)
+
     def reset(self) -> None:
         """Reset all metrics to their default values."""
         with self._lock:
             self.fills = 0
             self.cancels = 0
             self.slippage_bps = 0.0
-            self.spread_at_entry = 0.0
+            self.avg_entry_spread = 0.0
             self.micro_wait_ratio = 0.0
             self.auto_relax = 0.0
+            self.minutes_since_last_trade = 0.0
+            self.delta = 0.0
+            self.elasticity = 0.0
+            self.exposure_basis = ""
+            self.unit_notional = 0.0
 
     def snapshot(self) -> Dict[str, float]:
         with self._lock:
@@ -121,9 +155,14 @@ class RuntimeMetrics:
                 "fills": self.fills,
                 "cancels": self.cancels,
                 "slippage_bps": self.slippage_bps,
-                "spread_at_entry": self.spread_at_entry,
+                "avg_entry_spread": self.avg_entry_spread,
                 "micro_wait_ratio": self.micro_wait_ratio,
                 "auto_relax": self.auto_relax,
+                "minutes_since_last_trade": self.minutes_since_last_trade,
+                "delta": self.delta,
+                "elasticity": self.elasticity,
+                "exposure_basis": self.exposure_basis,
+                "unit_notional": self.unit_notional,
             }
 
 
