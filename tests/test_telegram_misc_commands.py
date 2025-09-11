@@ -284,7 +284,7 @@ def test_warmup_command(monkeypatch) -> None:
 
     cfg = SimpleNamespace(
         warmup_pad=2,
-        warmup_bars_min=20,
+        warmup_bars_min=15,
         atr_period=14,
         ema_slow=21,
         regime_min_bars=20,
