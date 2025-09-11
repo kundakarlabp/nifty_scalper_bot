@@ -103,3 +103,48 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     assert flow["reason_block"] != "atr_low"
     assert runner.last_plan["option_token"] == 1
     assert runner.last_plan["atm_strike"] == 17000
+
+
+def test_nearest_strike_consistency():
+    """Both resolvers should pick the same ATM strike for odd spot prices."""
+    from datetime import datetime
+    from src.options.instruments_cache import InstrumentsCache
+    from src.options.resolver import OptionResolver
+    from src.utils.strike_selector import (
+        _nearest_strike,
+        resolve_weekly_atm,
+    )
+
+    now = datetime(2024, 1, 1)
+    spot = 24977
+    expected = _nearest_strike(spot, 50)
+
+    cache = InstrumentsCache(instruments=[])
+    resolver = OptionResolver(cache)
+    opt = resolver.resolve_atm("NIFTY", spot, "CE", now)
+    assert opt["strike"] == expected
+
+    expiry = opt["expiry"]
+    inst_dump = [
+        {
+            "segment": "NFO-OPT",
+            "name": "NIFTY",
+            "expiry": expiry,
+            "strike": expected,
+            "instrument_type": "CE",
+            "tradingsymbol": f"NIFTYXX{expected}CE",
+            "lot_size": 50,
+        },
+        {
+            "segment": "NFO-OPT",
+            "name": "NIFTY",
+            "expiry": expiry,
+            "strike": expected,
+            "instrument_type": "PE",
+            "tradingsymbol": f"NIFTYXX{expected}PE",
+            "lot_size": 50,
+        },
+    ]
+    weekly = resolve_weekly_atm(spot, inst_dump)
+    assert weekly["ce"][0].endswith(f"{expected}CE")
+    assert weekly["pe"][0].endswith(f"{expected}PE")

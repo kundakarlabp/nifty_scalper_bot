@@ -215,6 +215,11 @@ def _infer_step(trade_symbol: str) -> int:
     return 50  # NIFTY / FINNIFTY / default
 
 
+def _nearest_strike(p: float, step: int = 50) -> int:
+    """Return the nearest strike rounded to ``step``."""
+    return int(step * round(float(p) / step))
+
+
 def resolve_weekly_atm(
     spot: float,
     instruments: Optional[List[Dict[str, Any]]] = None,
@@ -222,7 +227,7 @@ def resolve_weekly_atm(
     """Resolve current-week ATM option trading symbols and lot size."""
     trade_symbol = str(getattr(settings.instruments, "trade_symbol", ""))
     step = _infer_step(trade_symbol)
-    strike = int(round(float(spot) / step) * step)
+    strike = _nearest_strike(spot, step)
     nfo = instruments or []
     if not nfo:
         try:
