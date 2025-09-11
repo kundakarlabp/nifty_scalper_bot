@@ -14,7 +14,7 @@ from flask import Flask, Response
 
 from src.strategies.runner import StrategyRunner
 from src.utils.freshness import compute as compute_freshness
-from src.diagnostics.metrics import runtime_metrics
+from src.diagnostics.metrics import metrics as core_metrics, runtime_metrics
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
@@ -109,6 +109,45 @@ def _metrics_snapshot() -> Dict[str, Any]:
     return runtime_metrics.snapshot()
 
 
+def _prometheus_metrics() -> str:
+    """Return selected metrics in Prometheus text format."""
+    snap = runtime_metrics.snapshot()
+    now = time.time()
+    evals_per_sec = core_metrics.signals / max(now - core_metrics._start_ts, 1e-6)
+
+    runner = StrategyRunner.get_singleton()
+    tick_age = 0.0
+    breaker = 0
+    warm_bars = 0
+    open_risk = 0.0
+    if runner is not None:
+        ds = getattr(runner, "data_source", None)
+        if ds is not None:
+            last = getattr(ds, "last_tick_ts", lambda: None)()
+            if last:
+                tick_age = (datetime.utcnow() - last).total_seconds()
+            try:
+                api_h = getattr(ds, "api_health", lambda: {})().get("quote", {})
+                state = str(api_h.get("state", "CLOSED"))
+                breaker = {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}.get(state, 0)
+            except Exception:
+                breaker = 0
+        warm = getattr(runner, "_warm", None)
+        warm_bars = int(getattr(warm, "have_bars", 0)) if warm else 0
+        open_risk = float((getattr(runner, "last_plan", {}) or {}).get("risk_rupees") or 0.0)
+
+    lines = [
+        f"evals_per_sec {evals_per_sec}",
+        f"tick_age {tick_age}",
+        f"breaker_state {breaker}",
+        f"warmup_bars {warm_bars}",
+        f"open_risk_rupees {open_risk}",
+        f"micro_wait_ratio {snap.get('micro_wait_ratio', 0.0)}",
+        f"slippage_bps {snap.get('slippage_bps', 0.0)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 @app.route("/health", methods=["GET"])
 def health_get() -> Tuple[Dict[str, Any], int]:
     """Return lightweight health status."""
@@ -155,13 +194,14 @@ def status_get() -> Tuple[Dict[str, Any], int]:
 
 
 @app.route("/metrics", methods=["GET"])
-def metrics_get() -> Tuple[Dict[str, Any], int]:
-    """Return runtime execution metrics."""
+def metrics_get() -> Tuple[Response, int]:
+    """Return runtime execution metrics in Prometheus format."""
     try:
-        return _metrics_snapshot(), 200
+        text = _prometheus_metrics()
+        return Response(text, mimetype="text/plain"), 200
     except Exception as e:
         log.exception("Metrics GET error: %s", e)
-        return {"error": str(e)}, 500
+        return Response(f"# error {e}\n", mimetype="text/plain"), 500
 
 
 def run(

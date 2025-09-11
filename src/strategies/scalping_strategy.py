@@ -1033,6 +1033,8 @@ class EnhancedScalpingStrategy:
             plan["side"] = side
             plan["confidence"] = min(1.0, max(0.0, score / 10.0))
             plan["breakeven_ticks"] = breakeven_ticks
+            runtime_metrics.set_delta(float(plan.get("delta") or 0.0))
+            runtime_metrics.set_elasticity(float(plan.get("elasticity") or 0.0))
             plan["tp1_qty_ratio"] = cfg.tp1_partial
 
             self._last_debug = {

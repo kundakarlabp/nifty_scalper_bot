@@ -1406,7 +1406,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     """Resolve and subscribe current ATM option tokens.
 
     Re-resolves when drift from current strike exceeds ``ATM_ROLL_DRIFT_PTS``
-    or at scheduled weekly/monthly rolls (Tuesdays 15:20). Calls are
+    or at scheduled rolls (daily 00:05, Tuesday 09:16 and 13:45). Calls are
     throttled per instance via ``ATM_RESOLVE_COOLDOWN_S`` (min 45s).
     """
 
@@ -1415,9 +1415,9 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     except Exception:
         cooldown = 45
     try:
-        drift_pts = float(os.getenv("ATM_ROLL_DRIFT_PTS", "75"))
+        drift_pts = float(os.getenv("ATM_ROLL_DRIFT_PTS", "50"))
     except Exception:
-        drift_pts = 75.0
+        drift_pts = 50.0
 
     now = time.time()
     under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
@@ -1428,25 +1428,29 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     roll = False
     try:
         now_dt = dt.datetime.now(TZ)
-        if now_dt.weekday() == 1 and now_dt.time() >= dt.time(15, 20):
-            last_roll = getattr(self, "_atm_last_roll", None)
-            if last_roll != now_dt.date():
+        marks = getattr(self, "_atm_roll_marks", set())
+        checks: list[tuple[str, bool]] = []
+        checks.append((f"day-{now_dt.date()}", now_dt.time() >= dt.time(0, 5)))
+        if now_dt.weekday() == 1:
+            checks.append((f"tue-am-{now_dt.date()}", now_dt.time() >= dt.time(9, 16)))
+            checks.append((f"tue-pm-{now_dt.date()}", now_dt.time() >= dt.time(13, 45)))
+        for key, cond in checks:
+            if cond and key not in marks:
                 roll = True
-                self._atm_last_roll = now_dt.date()
+                marks.add(key)
+                break
+        self._atm_roll_marks = marks
     except Exception:
         roll = False
 
     next_ts = float(getattr(self, "_atm_next_resolve_ts", 0.0))
     existing = getattr(self, "atm_tokens", None)
-    if (
-        isinstance(existing, (list, tuple))
-        and all(t is not None for t in existing)
-        and now < next_ts
-        and drift < drift_pts
-        and not roll
-    ):
+    have_tokens = isinstance(existing, (list, tuple)) and all(t is not None for t in existing)
+    if now < next_ts and have_tokens:
         return
     self._atm_next_resolve_ts = now + cooldown
+    if have_tokens and drift < drift_pts and not roll:
+        return
 
     if drift >= drift_pts or roll:
         log.info("atm_roll: reason=%s", "drift" if drift >= drift_pts else "expiry")

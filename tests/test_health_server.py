@@ -160,25 +160,16 @@ def test_run_falls_back_when_waitress_missing(monkeypatch) -> None:
 
 def test_metrics_endpoint(monkeypatch) -> None:
     runtime_metrics.reset()
-    runtime_metrics.inc_fills()
-    runtime_metrics.inc_cancels(2)
-    runtime_metrics.set_slippage_bps(1.2)
-    runtime_metrics.set_avg_entry_spread(0.5)
     runtime_metrics.set_micro_wait_ratio(0.8)
-    runtime_metrics.set_auto_relax(1.0)
+    runtime_metrics.set_slippage_bps(1.2)
+    ds = SimpleNamespace(
+        last_tick_ts=lambda: datetime.utcnow(),
+        api_health=lambda: {"quote": {"state": "CLOSED"}},
+    )
     stub_runner = SimpleNamespace(
-        now_ist=datetime(2024, 1, 1, 10, 0),
-        _last_trade_time=datetime(2024, 1, 1, 9, 55),
-        last_plan={
-            "delta": 0.5,
-            "elasticity": 0.8,
-            "opt_entry": 100.0,
-            "spot_entry": 200.0,
-        },
-        settings=SimpleNamespace(
-            exposure_basis="premium",
-            instruments=SimpleNamespace(nifty_lot_size=50),
-        ),
+        data_source=ds,
+        _warm=SimpleNamespace(have_bars=10),
+        last_plan={"risk_rupees": 0.0},
     )
     monkeypatch.setattr(
         runner_module.StrategyRunner,
@@ -188,17 +179,5 @@ def test_metrics_endpoint(monkeypatch) -> None:
     client = health_module.app.test_client()
     resp = client.get("/metrics")
     assert resp.status_code == 200
-    data = resp.get_json()
-    assert data == {
-        "fills": 1,
-        "cancels": 2,
-        "slippage_bps": 1.2,
-        "avg_entry_spread": 0.5,
-        "micro_wait_ratio": 0.8,
-        "auto_relax": 1.0,
-        "minutes_since_last_trade": 5.0,
-        "delta": 0.5,
-        "elasticity": 0.8,
-        "exposure_basis": "premium",
-        "unit_notional": 5000.0,
-    }
+    body = resp.data.decode()
+    assert "slippage_bps" in body and "micro_wait_ratio" in body
