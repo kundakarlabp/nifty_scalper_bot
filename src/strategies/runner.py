@@ -478,6 +478,23 @@ class StrategyRunner:
                         self.state_store.record_position(sym, info)
             except Exception:
                 self.log.debug("live positions fetch failed", exc_info=True)
+        try:
+            pos_snap = self.state_store.snapshot().positions
+            recs = getattr(self.order_executor, "get_active_orders", lambda: [])()
+            for rec in recs:
+                info = pos_snap.get(rec.symbol, {})
+                ltp = float(info.get("last_price") or info.get("average_price") or 0.0)
+                if ltp <= 0:
+                    continue
+                atr = rec.r_value / (rec.trailing_mult or 1.0)
+                try:
+                    self.order_executor.update_trailing_stop(
+                        rec.record_id, current_price=ltp, atr=atr
+                    )
+                except Exception:
+                    self.log.debug("trail restore failed: %s", rec.symbol, exc_info=True)
+        except Exception:
+            self.log.debug("trail resume failed", exc_info=True)
         self.executor = self.order_executor
         self.order_manager = OrderManager(
             self.order_executor.place_order,
@@ -901,6 +918,14 @@ class StrategyRunner:
                     getattr(
                         self.order_executor, "close_all_positions_eod", lambda: None
                     )()
+                    self._notify(
+                        "\U0001F514 EOD flatten — positions closed and orders cancelled"
+                    )
+                if hasattr(self.telegram, "send_eod_summary"):
+                    try:
+                        self.telegram.send_eod_summary()
+                    except Exception:
+                        pass
                 tag = self._flatten_time.strftime("after_%H%M")
                 flow["reason_block"] = tag
                 self.last_plan = {"reason_block": tag}

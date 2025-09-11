@@ -10,9 +10,13 @@ class DummyTelegram:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.eod_calls = 0
 
     def send_message(self, msg: str) -> None:  # pragma: no cover - capture only
         self.messages.append(msg)
+
+    def send_eod_summary(self) -> None:  # pragma: no cover - capture only
+        self.eod_calls += 1
 
 
 TZ = ZoneInfo("Asia/Kolkata")
@@ -66,3 +70,5 @@ def test_eod_close_triggers(monkeypatch) -> None:
     assert flow["reason_block"] == "after_1528"
     assert called["close"] == 1
     assert called["cancel"] == 1
+    assert telegram.eod_calls == 1
+    assert any("EOD" in m for m in telegram.messages)

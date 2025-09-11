@@ -314,6 +314,18 @@ class TelegramController:
     def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
         self._send(text, parse_mode=parse_mode)
 
+    def send_eod_summary(self) -> None:
+        """Send end-of-day flatten notice with daily stats."""
+        tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
+        now = datetime.now(tz)
+        stats = daily_summary(now)
+        text = (
+            f"\U0001F514 EOD flat R={stats['R']} "
+            f"Hit={stats['hit_rate']}% AvgR={stats['avg_R']} "
+            f"Slip={stats['slippage_bps']}bps"
+        )
+        self._send(text)
+
     def _maybe_send_close_summary(self) -> None:
         """Emit a daily P&L summary at market close."""
         tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
