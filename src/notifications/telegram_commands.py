@@ -25,6 +25,14 @@ class TelegramCommands:
         self._offset: Optional[int] = None
         self._running = False
         self._th: Optional[threading.Thread] = None
+        # runtime state for UX commands
+        self.basis = "premium"
+        self.unit_notional = 0.0
+        self.lots = 0
+        self.caps = 0.0
+        self.risk_pct = 0.0
+        self.exposure_mode = "premium"
+        self.paused_until = 0.0
 
     def start(self) -> None:
         """Start polling for commands."""
@@ -67,6 +75,8 @@ class TelegramCommands:
                         continue
                     cmd, *rest = text.split(maxsplit=1)
                     arg = rest[0] if rest else ""
+                    if self._handle_cmd(cmd, arg):
+                        continue
                     if self.on_cmd:
                         try:
                             self.on_cmd(cmd, arg)
@@ -77,3 +87,55 @@ class TelegramCommands:
             except Exception:
                 logger.exception("telegram polling error")
                 time.sleep(1)
+
+    # ------------ command helpers ------------
+    def _send(self, text: str) -> None:
+        if not (self.token and self.chat):
+            return
+        try:
+            import requests
+
+            requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                json={"chat_id": self.chat, "text": text},
+                timeout=10,
+            )
+        except Exception:
+            logger.exception("telegram send error")
+
+    def _handle_cmd(self, cmd: str, arg: str) -> bool:
+        if cmd == "/pause":
+            mins = 0
+            if arg.endswith("m"):
+                try:
+                    mins = int(arg[:-1])
+                except ValueError:
+                    mins = 0
+            self.paused_until = time.time() + mins * 60
+            self._send(f"Paused for {mins}m")
+            return True
+        if cmd == "/risk":
+            try:
+                self.risk_pct = float(arg.strip("%"))
+            except ValueError:
+                self.risk_pct = 0.0
+            self._send(f"risk_pct set to {self.risk_pct}%")
+            return True
+        if cmd == "/exposure":
+            if arg in ("premium", "underlying"):
+                self.exposure_mode = arg
+            self._send(f"exposure mode = {self.exposure_mode}")
+            return True
+        if cmd == "/flatten":
+            self.lots = 0
+            self.unit_notional = 0.0
+            self._send("positions flattened")
+            return True
+        if cmd == "/status" and arg == "brief":
+            msg = (
+                f"basis={self.basis} unit_notional={self.unit_notional} "
+                f"lots={self.lots} caps={self.caps}"
+            )
+            self._send(msg)
+            return True
+        return False

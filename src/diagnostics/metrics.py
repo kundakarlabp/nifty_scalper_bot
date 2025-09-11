@@ -45,7 +45,7 @@ class Metrics:
         with self._lock:
             self._latencies_ms.append(float(ms))
 
-    def snapshot(self) -> Dict[str, float]:
+    def snapshot(self) -> Dict[str, float | str]:
         with self._lock:
             now = time.time()
             age = now - self.last_tick_ts
@@ -149,7 +149,7 @@ class RuntimeMetrics:
             self.exposure_basis = ""
             self.unit_notional = 0.0
 
-    def snapshot(self) -> Dict[str, float]:
+    def snapshot(self) -> Dict[str, float | str]:
         with self._lock:
             return {
                 "fills": self.fills,
