@@ -162,6 +162,8 @@ class BacktestRunner:
             stop_loss=float(plan["stop_loss"]),
             lot_size=settings.instruments.nifty_lot_size,
             equity=self.session.current_equity,
+            spot_sl_points=abs(current_price - float(plan["stop_loss"])),
+            delta=0.5,
         )
         if qty <= 0:
             return

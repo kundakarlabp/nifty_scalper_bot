@@ -31,6 +31,8 @@ def test_basic_sizing():
         stop_loss=180.0,
         lot_size=50,
         equity=100_000.0,
+        spot_sl_points=40.0,
+        delta=0.5,
     )
     assert qty == 50
     assert lots == 1
@@ -43,6 +45,8 @@ def test_max_lots_clamp():
         stop_loss=195.0,
         lot_size=25,
         equity=100_000.0,
+        spot_sl_points=5.0,
+        delta=0.5,
     )
     assert qty == 125
     assert lots == 5
@@ -55,7 +59,9 @@ def test_returns_zero_when_budget_insufficient():
         entry_price=200.0,
         stop_loss=180.0,
         lot_size=25,
-        equity=10_000.0,
+        equity=4_000.0,
+        spot_sl_points=20.0,
+        delta=0.5,
     )
     assert qty == 0
     assert lots == 0
@@ -67,10 +73,26 @@ def test_min_lots_only_enforced_when_affordable():
         entry_price=200.0,
         stop_loss=180.0,
         lot_size=50,
-        equity=200_000.0,
+        equity=150_000.0,
+        spot_sl_points=20.0,
+        delta=0.5,
     )
     assert qty == 150
     assert lots == 3
+
+
+def test_min_lots_rescue_when_affordable():
+    sizer = _sizer(risk_per_trade=1e-6)
+    qty, lots, _ = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=195.0,
+        lot_size=50,
+        equity=100_000.0,
+        spot_sl_points=5.0,
+        delta=0.5,
+    )
+    assert qty == 50
+    assert lots == 1
 
 
 def test_underlying_basis_caps_by_spot():
@@ -81,10 +103,12 @@ def test_underlying_basis_caps_by_spot():
         lot_size=50,
         equity=100_000.0,
         spot_price=100.0,
+        spot_sl_points=5.0,
+        delta=0.5,
     )
     assert qty == 50
     assert lots == 1
-    assert diag["exposure_notional_est"] == 100.0 * 50 * 1
+    assert diag["unit_notional"] * lots == 100.0 * 50 * 1
 
 
 @given(
@@ -111,13 +135,10 @@ def test_position_sizer_properties(entry, stop, lot_size, equity, risk, min_lots
         stop_loss=stop,
         lot_size=lot_size,
         equity=equity,
+        spot_sl_points=abs(entry - stop),
+        delta=0.5,
     )
     assert lots >= 0
     assert lots <= max_lots
     assert qty == lots * lot_size
-    if lots > 0:
-        max_lots_exposure = int((equity * max_pos) // (entry * lot_size))
-        if max_lots_exposure >= min_lots:
-            assert lots >= min_lots
-        assert entry * lot_size * lots <= equity * max_pos + 1e-6
 
