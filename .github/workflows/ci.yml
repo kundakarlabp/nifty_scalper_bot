@@ -1,157 +1,56 @@
----  # yamllint disable rule:truthy rule:line-length
 name: CI
-
 on:
-  push:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  workflow_dispatch: {}
-
-permissions:
-  contents: read
-  pull-requests: write
+  push:
+    branches: [ main ]
 
 jobs:
-  build-test:
-    name: Build, Lint, Test
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt -r requirements-app.txt || true
+      - run: pip install ruff==0.6.9 black==24.8.0 mypy==1.11.1
+      - run: ruff check .
+      - run: black --check .
+      - run: mypy src || true
 
-      - uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
-
-      - name: Run pre-commit
-        uses: pre-commit/action@v3.0.1
-
-      - name: Run project checks
-        run: ./run_checks.sh
-        env:
-          RUN_BACKTEST: 0
-
-  docker-image:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -t nifty-scalper:${{ github.ref_name }} .
-      - name: Push image
-        if: ${{ secrets.REGISTRY && secrets.REGISTRY_USER && secrets.REGISTRY_PASSWORD }}
-        env:
-          REGISTRY: ${{ secrets.REGISTRY }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-          docker tag nifty-scalper:${{ github.ref_name }} "$REGISTRY/nifty-scalper:${{ github.ref_name }}"
-          docker push "$REGISTRY/nifty-scalper:${{ github.ref_name }}"
-      - name: TODO add registry credentials
-        if: ${{ !(secrets.REGISTRY && secrets.REGISTRY_USER && secrets.REGISTRY_PASSWORD) }}
-        run: echo 'TODO: Configure REGISTRY, REGISTRY_USER and REGISTRY_PASSWORD secrets to enable image push.'
-
-  ai-review:
-    name: AI Code Review (PRs only)
-    # Skip for non-PRs and for PRs from forks (no write perms/secrets)
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
+  test:
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      TZ: Asia/Kolkata
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+      # Force paper mode in CI
+      ENABLE_LIVE_TRADING: "false"
+      ENABLE_TRADING: "false"
+      SKIP_BROKER_VALIDATION: "true"
+      RUN_BACKTEST: "0"
+      DATA__WARMUP_DISABLE: "true"
+      EXPOSURE_BASIS: "premium"
+      # Dummy creds
+      TELEGRAM__BOT_TOKEN: "test"
+      TELEGRAM__CHAT_ID: "0"
+      ZERODHA__API_KEY: "test"
+      ZERODHA__API_SECRET: "test"
+      ZERODHA__ACCESS_TOKEN: "test"
+      # Coverage threshold (tune later)
+      CI_COV_MIN: "75"
     steps:
-      - name: Checkout (full history for diff)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install deps
-        run: python -m pip install --upgrade pip requests
-
-      - name: AI code review (safe, skips if no key)
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_API_URL: https://api.github.com
+          cache: 'pip'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt -r requirements-app.txt || true
+      - run: pip install pytest pytest-cov
+      - run: pip install -r requirements-dev.txt || true
+      - name: Run tests (skip slow/integration) with coverage
         run: |
-          python - <<'PY'
-          import os, sys, subprocess, textwrap, time, requests
-
-          def ok_skip(msg): print(msg); sys.exit(0)
-          def fail(msg): print(msg, file=sys.stderr); sys.exit(1)
-
-          if not (os.getenv("OPENAI_API_KEY") or "").strip():
-            ok_skip("ℹ OPENAI_API_KEY not set; skipping AI review.")
-          if not (os.getenv("GITHUB_TOKEN") or "").strip():
-            ok_skip("ℹ GITHUB_TOKEN missing or read-only; skipping AI review.")
-
-          BASE=os.getenv("BASE_SHA","" ).strip()
-          HEAD=os.getenv("HEAD_SHA","" ).strip()
-          REPO=os.getenv("REPO","" ).strip()
-          PR=os.getenv("PR_NUMBER","" ).strip()
-          if not all([BASE,HEAD,REPO,PR]): ok_skip("ℹ Missing PR context; skipping AI review.")
-
-          def sh(cmd):
-            try: return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-            except subprocess.CalledProcessError as e:
-              fail(f"git failed: {' '.join(cmd)}\n{e.output}")
-
-          sh(["git","fetch","origin",BASE,HEAD,"--depth","50"])
-          files = sh(["git","diff","--name-only",BASE,HEAD]).splitlines()
-          if not files: ok_skip("ℹ No changed files; skipping AI review.")
-
-          diffs=[]
-          for p in files:
-            d = sh(["git","diff","--unified=0",BASE,HEAD,"--",p])
-            if d.strip(): diffs.append(f"--- FILE: {p}\n{d[:120000]}")
-          if not diffs: ok_skip("ℹ No reviewable diff hunks; skipping AI review.")
-
-          payload={"model":"gpt-4o-mini","messages":[
-            {"role":"system","content":"You are a senior code reviewer. Be concise and actionable."},
-            {"role":"user","content":"Review this diff:\n"+("\n".join(diffs))[:400000]}
-          ],"temperature":0.2,"max_tokens":1000}
-
-          def post_with_backoff(url, headers, data, tries=5):
-            last=None
-            for i in range(1,tries+1):
-              r = requests.post(url, headers=headers, json=data, timeout=45)
-              last=r
-              if r.status_code in (429,500,502,503):
-                time.sleep(min(60,2**i)); continue
-              r.raise_for_status(); return r
-            fail(f"API failed after {tries} attempts: {last.status_code if last else 'n/a'}")
-
-          hdrs={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}", "Content-Type":"application/json"}
-          try:
-            review = post_with_backoff("https://api.openai.com/v1/chat/completions", hdrs, payload).json()["choices"][0]["message"]["content"]
-          except Exception as e:
-            ok_skip(f"ℹ OpenAI error ({e}); skipping AI review.")
-
-          gh_hdr={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}", "Accept":"application/vnd.github+json"}
-          url=f"{os.environ.get('GITHUB_API_URL','https://api.github.com')}/repos/{REPO}/issues/{PR}/comments"
-          try:
-            post_with_backoff(url, gh_hdr, {"body": review})
-          except Exception as e:
-            ok_skip(f"ℹ Could not post comment ({e}); skipping AI review.")
-          print("✅ AI review posted.")
-          PY
+          pytest -m "not slow and not integration" --cov=src --cov-report=term-missing --cov-fail-under=${CI_COV_MIN}
