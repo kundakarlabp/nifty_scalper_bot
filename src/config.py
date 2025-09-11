@@ -279,8 +279,8 @@ class RiskSettings(BaseModel):
     @field_validator("risk_per_trade")
     @classmethod
     def _v_risk_pct(cls, v: float) -> float:
-        if not 0.001 <= v <= 0.10:
-            raise ValueError("risk_per_trade must be between 0.1% and 10%")
+        if not 0.0 < v <= 0.10:
+            raise ValueError("risk_per_trade must be within (0, 0.10]")
         return v
 
     @field_validator("max_daily_drawdown_pct")
@@ -288,6 +288,13 @@ class RiskSettings(BaseModel):
     def _v_dd_pct(cls, v: float) -> float:
         if not 0.01 <= v <= 0.20:
             raise ValueError("max_daily_drawdown_pct must be between 1% and 20%")
+        return v
+
+    @field_validator("max_position_size_pct")
+    @classmethod
+    def _v_pos_size_pct(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError("max_position_size_pct must be within (0, 1]")
         return v
 
     @field_validator("trading_window_start", "trading_window_end")
@@ -305,7 +312,12 @@ class RiskSettings(BaseModel):
             raise ValueError("value must be > 0")
         return float(v)
 
-    @field_validator("max_lots_per_symbol")
+    @field_validator(
+        "max_lots_per_symbol",
+        "max_trades_per_day",
+        "consecutive_loss_limit",
+        "equity_refresh_seconds",
+    )
     @classmethod
     def _v_positive_int(cls, v: int) -> int:
         if int(v) <= 0:
@@ -805,6 +817,13 @@ def load_settings() -> AppSettings:
         telegram=TelegramSettings.from_env(),
     )
     _apply_env_overrides(cfg)
+    snap = cfg.model_dump()
+    for k in ("api_key", "api_secret", "access_token"):
+        if k in snap.get("zerodha", {}):
+            snap["zerodha"][k] = "***"
+    if "telegram" in snap and "bot_token" in snap["telegram"]:
+        snap["telegram"]["bot_token"] = "***"
+    logging.getLogger("config").info("settings snapshot: %s", snap)
     return cfg
 
 

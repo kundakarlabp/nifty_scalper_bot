@@ -43,6 +43,12 @@ def test_validation_error_on_invalid_data():
         # Direct instantiation to trigger validation errors
         RiskSettings(max_daily_drawdown_pct=2.0)  # Invalid (must be < 0.2)
 
+
+def test_risk_per_trade_bounds() -> None:
+    with pytest.raises(ValidationError) as e:
+        RiskSettings(risk_per_trade=0.5)
+    assert "risk_per_trade must be within (0, 0.10]" in str(e.value)
+
 def test_default_values():
     """Tests that default values are used when environment variables are not set."""
     # Ensure these are not in the environment
