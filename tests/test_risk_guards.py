@@ -7,7 +7,8 @@ import pytest
 from src.risk.guards import RiskConfig, RiskGuards
 
 
-def test_rate_limit_blocks() -> None:
+def test_rate_limit_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_TRADING", "true")
     cfg = RiskConfig(max_orders_per_min=2, trading_start_hm="00:00", trading_end_hm="23:59")
     guards = RiskGuards(cfg)
     assert guards.ok_to_trade()
@@ -33,6 +34,7 @@ def test_kill_switch_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_trading_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_TRADING", "true")
     cfg = RiskConfig(trading_start_hm="10:00", trading_end_hm="10:01")
     guards = RiskGuards(cfg)
 

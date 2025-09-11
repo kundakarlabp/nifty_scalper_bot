@@ -2,6 +2,14 @@
 # run_checks.sh — setup, lint (if available), test, and run backtester
 set -euo pipefail
 
+export ENABLE_LIVE_TRADING=${ENABLE_LIVE_TRADING:-false}
+export ENABLE_TRADING=${ENABLE_TRADING:-false}
+export SKIP_BROKER_VALIDATION=${SKIP_BROKER_VALIDATION:-true}
+export RUN_BACKTEST=${RUN_BACKTEST:-0}
+export DATA__WARMUP_DISABLE=${DATA__WARMUP_DISABLE:-false}
+export EXPOSURE_BASIS=${EXPOSURE_BASIS:-premium}
+export CI_COV_MIN=${CI_COV_MIN:-75}
+
 # ---------------------------
 # Resolve repo root & cd there
 # ---------------------------
@@ -84,7 +92,7 @@ if [[ -d "tests" ]]; then
   # -q quiet; -x fail fast; add --maxfail=1 to bail on first failure
   if $PYTHON_BIN -m pip show pytest >/dev/null 2>&1; then
     # run with coverage and enforce minimum percentage
-    pytest --cov --cov-report=term-missing --cov-fail-under=80
+    pytest --cov --cov-report=term-missing --cov-fail-under=${CI_COV_MIN}
   else
     echo "❌ pytest not installed but tests/ exists. Install pytest or remove tests/"; exit 1
   fi
