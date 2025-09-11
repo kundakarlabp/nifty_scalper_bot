@@ -18,6 +18,7 @@ def _basic_args():
         stop_loss_price=90.0,
         spot_price=100.0,
         option_mid_price=100.0,
+        quote={"mid": 100.0},
     )
 
 
@@ -53,6 +54,7 @@ def test_max_notional():
             "entry_price": 200.0,
             "option_mid_price": 200.0,
             "spot_price": 200.0,
+            "quote": {"mid": 200.0},
         }
     )
     assert not ok and reason == "max_notional"
@@ -83,6 +85,7 @@ def test_notional_underlying_vs_premium():
             "spot_price": spot,
             "option_mid_price": premium,
             "entry_price": premium,
+            "quote": {"mid": premium},
         }
     )
     assert not ok and reason == "max_notional"
@@ -97,9 +100,28 @@ def test_notional_underlying_vs_premium():
             "spot_price": spot,
             "option_mid_price": premium,
             "entry_price": premium,
+            "quote": {"mid": premium},
         }
     )
     assert ok2 and reason2 == ""
+
+
+def test_mid_price_from_quote():
+    cfg = LimitConfig(max_notional_rupees=150.0, exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    exp = Exposure(notional_rupees=145.0)
+    quote = {"bid": 9.0, "ask": 11.0}
+    ok, reason, _ = eng.pre_trade_check(
+        **{
+            **_basic_args(),
+            "exposure": exp,
+            "quote": quote,
+            "option_mid_price": None,
+            "entry_price": 0.0,
+            "spot_price": 0.0,
+        }
+    )
+    assert not ok and reason == "max_notional"
 
 
 @given(
@@ -126,6 +148,7 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
                 "entry_price": entry,
                 "option_mid_price": entry,
                 "spot_price": entry,
+                "quote": {"mid": entry},
             }
         )
         assert ok and reason == ""
@@ -156,6 +179,7 @@ def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_n
                 "entry_price": entry,
                 "option_mid_price": entry,
                 "spot_price": entry,
+                "quote": {"mid": entry},
             }
         )
         assert not ok and reason == "max_notional"

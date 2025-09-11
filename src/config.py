@@ -272,7 +272,7 @@ class RiskSettings(BaseModel):
     )
     exposure_basis: Literal["underlying", "premium"] = Field(
         default_factory=lambda: str(
-            env_any("EXPOSURE_BASIS", "RISK__EXPOSURE_BASIS") or "underlying"
+            env_any("EXPOSURE_BASIS", "RISK__EXPOSURE_BASIS") or "premium"
         )
     )
 

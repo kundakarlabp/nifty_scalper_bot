@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Literal
 from zoneinfo import ZoneInfo
+import os
+import logging
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,7 +21,9 @@ class LimitConfig:
     max_trades_per_session: int = 40
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = 1_500_000.0
-    exposure_basis: Literal["underlying", "premium"] = "underlying"
+    exposure_basis: Literal["underlying", "premium"] = field(
+        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium"))
+    )
     max_gamma_mode_lots: int = 2
     max_portfolio_delta_units: int = 100
     max_portfolio_delta_units_gamma: int = 60
@@ -91,7 +97,8 @@ class RiskEngine:
         entry_price: float,
         stop_loss_price: float,
         spot_price: float,
-        option_mid_price: float,
+        quote: Optional[Dict[str, float]] = None,
+        option_mid_price: Optional[float] = None,
         planned_delta_units: Optional[float] = None,
         portfolio_delta_units: Optional[float] = None,
         gamma_mode: Optional[bool] = None,
@@ -152,13 +159,32 @@ class RiskEngine:
 
         exposure_cap = self.cfg.max_notional_rupees
         basis = self.cfg.exposure_basis
+
+        def _mid_from_quote(q: Optional[Dict[str, float]], fallback: float) -> float:
+            if not q:
+                return fallback
+            if q.get("mid"):
+                return float(q["mid"])
+            bid = q.get("bid")
+            ask = q.get("ask")
+            if bid and ask:
+                return (float(bid) + float(ask)) / 2.0
+            return float(q.get("ltp", fallback))
+
         if basis == "premium":
-            unit_notional = option_mid_price * lot_size
+            mid = _mid_from_quote(quote, float(option_mid_price or 0.0))
+            unit_notional = mid * lot_size
         else:
             unit_notional = spot_price * lot_size
-        max_lots_by_cap = int(exposure_cap // max(1.0, unit_notional))
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
+            log.info(
+                "max_notional block: basis=%s unit_notional=%.2f lots=%s cap=%.2f",
+                basis,
+                unit_notional,
+                intended_lots,
+                exposure_cap,
+            )
             return (
                 False,
                 "max_notional",

@@ -671,6 +671,7 @@ class TelegramController:
                 min_lots=settings.risk.min_lots,
                 max_lots=settings.risk.max_lots,
                 max_position_size_pct=settings.risk.max_position_size_pct,
+                exposure_basis=settings.risk.exposure_basis,
             )
             qty, lots, diag = ps.size_from_signal(
                 entry_price=200, stop_loss=190, lot_size=50, equity=100_000

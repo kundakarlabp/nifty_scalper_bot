@@ -1,8 +1,9 @@
 # Path: src/risk/position_sizing.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Tuple, Literal
+import os
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -17,6 +18,7 @@ class SizingInputs:
     stop_loss: float
     lot_size: int
     equity: float
+    spot_price: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,9 @@ class SizingParams:
     min_lots: int = 1
     max_lots: int = 10
     max_position_size_pct: float = 0.10
+    exposure_basis: Literal["underlying", "premium"] = field(
+        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium"))
+    )
 
 
 class PositionSizer:
@@ -52,6 +57,7 @@ class PositionSizer:
         min_lots: int | None = None,
         max_lots: int | None = None,
         max_position_size_pct: float | None = None,
+        exposure_basis: str | None = None,
     ) -> None:
         """Create a PositionSizer.
 
@@ -71,6 +77,7 @@ class PositionSizer:
             min_lots = getattr(rs, "min_lots", 1)
             max_lots = getattr(rs, "max_lots", 10)
             max_position_size_pct = getattr(rs, "max_position_size_pct", 0.10)
+            exposure_basis = getattr(rs, "exposure_basis", None)
 
         if (
             min_lots is None
@@ -81,6 +88,8 @@ class PositionSizer:
             raise TypeError(
                 "PositionSizer requires either a risk settings object or explicit parameters"
             )
+
+        exposure_basis = exposure_basis or os.getenv("EXPOSURE_BASIS", "premium")
 
         if risk_per_trade <= 0 or risk_per_trade > 0.10:
             raise ValueError("risk_per_trade must be within (0, 0.10].")
@@ -96,6 +105,7 @@ class PositionSizer:
             min_lots=min_lots,
             max_lots=max_lots,
             max_position_size_pct=max_position_size_pct,
+            exposure_basis=str(exposure_basis),
         )
 
     @classmethod
@@ -106,6 +116,7 @@ class PositionSizer:
         min_lots: int,
         max_lots: int,
         max_position_size_pct: float,
+        exposure_basis: str = "premium",
     ) -> "PositionSizer":
         """Convenience creator to mirror env/config fields; keeps imports clean here."""
         return cls(
@@ -113,6 +124,7 @@ class PositionSizer:
             min_lots=int(min_lots),
             max_lots=int(max_lots),
             max_position_size_pct=float(max_position_size_pct),
+            exposure_basis=str(exposure_basis),
         )
 
     def size_from_signal(
@@ -122,12 +134,14 @@ class PositionSizer:
         stop_loss: float,
         lot_size: int,
         equity: float,
+        spot_price: float | None = None,
     ) -> Tuple[int, int, Dict]:
         si = SizingInputs(
             entry_price=float(entry_price),
             stop_loss=float(stop_loss),
             lot_size=int(lot_size),
             equity=float(equity),
+            spot_price=float(spot_price or 0.0),
         )
         qty, lots, diag = self._compute_quantity(si, self.params)
         return qty, lots, diag
@@ -183,18 +197,23 @@ class PositionSizer:
         lots = min(lots, sp.max_lots)
 
         # Exposure cap (notional)
-        exposure_notional = si.entry_price * si.lot_size * lots
+        if sp.exposure_basis == "premium":
+            unit_notional = si.entry_price * si.lot_size
+        else:
+            unit_notional = (si.spot_price or si.entry_price) * si.lot_size
+
+        exposure_notional = unit_notional * lots
         max_notional = (
             si.equity * sp.max_position_size_pct
             if sp.max_position_size_pct > 0
             else float("inf")
         )
         if exposure_notional > max_notional:
-            denom = si.entry_price * si.lot_size
+            denom = unit_notional
             lots_cap = int(max_notional // denom) if denom > 0 else 0
             lots = max(min(lots_cap, lots), 0)
             # recompute after cap so diagnostics reflect the final state
-            exposure_notional = si.entry_price * si.lot_size * lots
+            exposure_notional = unit_notional * lots
 
         quantity = lots * si.lot_size
         diag = PositionSizer._diag(

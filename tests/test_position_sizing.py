@@ -11,6 +11,7 @@ def _sizer(
     min_lots: int = 1,
     max_lots: int = 10,
     max_position_size_pct: float = 1.0,
+    exposure_basis: str = "premium",
 ) -> PositionSizer:
     """Helper to create a ``PositionSizer`` with sensible defaults."""
 
@@ -19,6 +20,7 @@ def _sizer(
         min_lots=min_lots,
         max_lots=max_lots,
         max_position_size_pct=max_position_size_pct,
+        exposure_basis=exposure_basis,
     )
 
 
@@ -69,6 +71,20 @@ def test_min_lots_only_enforced_when_affordable():
     )
     assert qty == 150
     assert lots == 3
+
+
+def test_underlying_basis_caps_by_spot():
+    sizer = _sizer(max_position_size_pct=0.05, exposure_basis="underlying")
+    qty, lots, diag = sizer.size_from_signal(
+        entry_price=10.0,
+        stop_loss=5.0,
+        lot_size=50,
+        equity=100_000.0,
+        spot_price=100.0,
+    )
+    assert qty == 50
+    assert lots == 1
+    assert diag["exposure_notional_est"] == 100.0 * 50 * 1
 
 
 @given(
