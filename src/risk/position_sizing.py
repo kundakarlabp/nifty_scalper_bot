@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Literal
+from typing import Dict, Tuple, Literal, cast
 import os
 import logging
 
@@ -39,7 +39,10 @@ class SizingParams:
     max_lots: int = 10
     max_position_size_pct: float = 0.10
     exposure_basis: Literal["underlying", "premium"] = field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium"))
+        default_factory=lambda: cast(
+            Literal["underlying", "premium"],
+            str(os.getenv("EXPOSURE_BASIS", "premium")),
+        )
     )
 
 
@@ -110,7 +113,7 @@ class PositionSizer:
             min_lots=min_lots,
             max_lots=max_lots,
             max_position_size_pct=max_position_size_pct,
-            exposure_basis=str(exposure_basis),
+            exposure_basis=cast(Literal["underlying", "premium"], str(exposure_basis)),
         )
     @classmethod
     def from_settings(
