@@ -682,6 +682,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.hist_mode = "live_warmup"
             self.bar_builder = MinuteBarBuilder(max_bars=120)
 
+    def ensure_atm_tokens(self, underlying: str | None = None) -> None:
+        """Resolve and subscribe current ATM tokens (no-op by default)."""
+        return
+
     # ---- lifecycle ----
     def connect(self) -> None:
         """Connect to broker, subscribe to SPOT token and warm up cache."""

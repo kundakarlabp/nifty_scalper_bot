@@ -667,6 +667,7 @@ class StrategyRunner:
             f"atm_strike={plan.get('atm_strike')} token={plan.get('option_token')} "
             f"score={score:.1f} rr={plan.get('rr')} entry\u2248{plan.get('entry')} "
             f"sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')} "
+            f"opt_sl={plan.get('opt_sl')} opt_tp1={plan.get('opt_tp1')} opt_tp2={plan.get('opt_tp2')} "
             f"reason_block={rb}"
         )
         self.log.info(text)
@@ -684,7 +685,7 @@ class StrategyRunner:
         )
         if (not self._log_signal_changes_only) or changed:
             self.log.info(
-                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s reason_block=%s",
+                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s reason_block=%s",
                 plan.get("action"),
                 plan.get("option_type"),
                 plan.get("strike"),
@@ -700,6 +701,9 @@ class StrategyRunner:
                 plan.get("sl"),
                 plan.get("tp1"),
                 plan.get("tp2"),
+                plan.get("opt_sl"),
+                plan.get("opt_tp1"),
+                plan.get("opt_tp2"),
                 plan.get("reason_block"),
             )
         plan["eval_count"] = self.eval_count
@@ -1374,20 +1378,34 @@ class StrategyRunner:
 
             # ---- execution (support both executors)
             placed_ok = False
+            tp_basis = getattr(settings, "tp_basis", "premium").lower()
+            entry_px = float(
+                plan.get("opt_entry") if tp_basis == "premium" else plan.get("entry")
+            )
+            sl_px = float(
+                plan.get("opt_sl") if tp_basis == "premium" else plan.get("sl")
+            )
+            tp2_px = float(
+                plan.get("opt_tp2") if tp_basis == "premium" else plan.get("tp2")
+            )
             if hasattr(self.executor, "place_order"):
                 exec_payload = {
                     "action": plan["action"],
                     "quantity": int(qty),
-                    "entry_price": float(plan.get("entry")),
-                    "stop_loss": float(plan.get("sl")),
-                    "take_profit": float(plan.get("tp2")),
+                    "entry_price": entry_px,
+                    "stop_loss": sl_px,
+                    "take_profit": tp2_px,
                     "strike": float(plan["strike"]),
                     "option_type": plan["option_type"],
                 }
                 placed_ok = bool(self.executor.place_order(exec_payload))
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
                     try:
-                        fsm = self.executor.create_trade_fsm(plan)
+                        plan_exec = dict(plan)
+                        plan_exec["entry"] = entry_px
+                        plan_exec["sl"] = sl_px
+                        plan_exec["tp2"] = tp2_px
+                        fsm = self.executor.create_trade_fsm(plan_exec)
                         self.executor.place_trade(fsm)
                     except Exception:
                         self.log.debug("FSM enqueue failed", exc_info=True)
@@ -1400,13 +1418,17 @@ class StrategyRunner:
                     symbol=symbol,
                     side=side,
                     quantity=int(qty),
-                    price=float(plan.get("entry")),
+                    price=entry_px,
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
                     try:
-                        plan["trade_id"] = oid
-                        fsm = self.executor.create_trade_fsm(plan)
+                        plan_exec = dict(plan)
+                        plan_exec["trade_id"] = oid
+                        plan_exec["entry"] = entry_px
+                        plan_exec["sl"] = sl_px
+                        plan_exec["tp2"] = tp2_px
+                        fsm = self.executor.create_trade_fsm(plan_exec)
                         self.executor.place_trade(fsm)
                     except Exception:
                         self.log.debug("FSM enqueue failed", exc_info=True)
@@ -1414,8 +1436,8 @@ class StrategyRunner:
                     try:
                         self.executor.setup_gtt_orders(
                             record_id=oid,
-                            sl_price=float(plan.get("sl")),
-                            tp_price=float(plan.get("tp2")),
+                            sl_price=sl_px,
+                            tp_price=tp2_px,
                         )
                     except Exception as e:
                         self.log.warning("setup_gtt_orders failed: %s", e)
@@ -1453,7 +1475,7 @@ class StrategyRunner:
                 p = self.last_plan or {}
                 m = p.get("micro") or {}
                 self.log.info(
-                    "TRACE regime=%s score=%s atr%%=%.2f spread%%=%s depth=%s rr=%s entry=%s sl=%s tp1=%s tp2=%s block=%s reasons=%s",
+                    "TRACE regime=%s score=%s atr%%=%.2f spread%%=%s depth=%s rr=%s entry=%s sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s block=%s reasons=%s",
                     p.get("regime"),
                     p.get("score"),
                     float(p.get("atr_pct") or 0.0),
@@ -1464,6 +1486,9 @@ class StrategyRunner:
                     p.get("sl"),
                     p.get("tp1"),
                     p.get("tp2"),
+                    p.get("opt_sl"),
+                    p.get("opt_tp1"),
+                    p.get("opt_tp2"),
                     p.get("reason_block"),
                     p.get("reasons"),
                 )

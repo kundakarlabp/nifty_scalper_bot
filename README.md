@@ -137,7 +137,7 @@ Risk checks guard every trade.  The runner tracks:
 - daily drawdown percentage
 - equity floor
 
-Use the Telegram `/risk` command to inspect current limits.  Live trading is enabled by default; set `ENABLE_LIVE_TRADING=false` (alias `ENABLE_TRADING=false`) to run in paper mode or trigger the kill switch.
+Use the Telegram `/risk` command to inspect current limits.  Live trading is enabled by default; set `ENABLE_LIVE_TRADING=false` (alias `ENABLE_TRADING=false`) to run in paper mode or trigger the kill switch.  Premium‑based targets are used by default; set `TP_BASIS=spot` to revert to legacy spot‑based SL/TP.
 
 ## Telegram control
 

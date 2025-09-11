@@ -793,6 +793,7 @@ class EnhancedScalpingStrategy:
 
             # Fetch quote/depth using whichever identifier we have
             q = fetch_quote_with_depth(getattr(settings, "kite", None), quote_id)
+            plan["_last_quote"] = q
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
@@ -943,6 +944,41 @@ class EnhancedScalpingStrategy:
                     "reasons": reasons,
                 }
             )
+            # --- premium-basis equivalents ---
+            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
+            q = plan.get("_last_quote") or {}
+            mid = q.get("mid") or (
+                (
+                    (q.get("bid", 0) + q.get("ask", 0)) / 2
+                    if q.get("bid") and q.get("ask")
+                    else q.get("ltp")
+                )
+            )
+            if mid:
+                opt_entry = float(mid)
+                delta = float(plan.get("delta") or 0.5)
+                delta = max(0.25, min(delta, 0.75))
+
+                def _opt_target(spot_target: float) -> float:
+                    spot_move = abs(spot_target - float(plan["entry"]))
+                    spot_dir = 1.0 if spot_target >= plan["entry"] else -1.0
+                    parity = 1.0 if plan["option_type"] == "CE" else -1.0
+                    opt_dir = spot_dir * parity
+                    prem_move = delta * spot_move
+                    if plan["action"] == "BUY":
+                        return opt_entry + opt_dir * prem_move
+                    return opt_entry - opt_dir * prem_move
+
+                plan["opt_entry"] = opt_entry
+                plan["opt_sl"] = (
+                    _opt_target(plan["sl"]) if plan["sl"] is not None else None
+                )
+                plan["opt_tp1"] = (
+                    _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
+                )
+                plan["opt_tp2"] = (
+                    _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
+                )
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
