@@ -747,26 +747,22 @@ class EnhancedScalpingStrategy:
             if ds is not None:
                 idx = 0 if str(option_type).upper() == "CE" else 1
                 strike_ds = getattr(ds, "current_atm_strike", None)
-                symbols_ds = getattr(ds, "atm_tradingsymbols", None)
+                need_resolve = strike_ds is None or abs(price - float(strike_ds)) >= 75
+                now_dt = datetime.now(ZoneInfo("Asia/Kolkata"))
+                expiry_ds = getattr(ds, "current_atm_expiry", None)
+                last_resolved = getattr(ds, "_atm_resolve_date", None)
+                if getattr(expiry_ds, "month", now_dt.month) != now_dt.month:
+                    need_resolve = True
+                if now_dt.weekday() == 1 and last_resolved != now_dt.date():
+                    need_resolve = True
+                if need_resolve:
+                    try:
+                        ds.ensure_atm_tokens()
+                    except Exception:
+                        logger.debug("ensure_atm_tokens failed", exc_info=True)
+                    strike_ds = getattr(ds, "current_atm_strike", strike_ds)
                 tokens_ds = getattr(ds, "atm_tokens", None)
                 if (
-                    isinstance(symbols_ds, (list, tuple))
-                    and len(symbols_ds) == 2
-                    and symbols_ds[idx]
-                ):
-                    quote_id = symbols_ds[idx]
-                    if (
-                        isinstance(tokens_ds, (list, tuple))
-                        and len(tokens_ds) == 2
-                        and tokens_ds[idx] is not None
-                    ):
-                        option_token = tokens_ds[idx]
-                        res = _token_to_symbol_and_lot(
-                            getattr(settings, "kite", None), option_token
-                        )
-                        if res:
-                            _, lot_sz = res
-                elif (
                     isinstance(tokens_ds, (list, tuple))
                     and len(tokens_ds) == 2
                     and tokens_ds[idx] is not None
@@ -778,6 +774,14 @@ class EnhancedScalpingStrategy:
                     )
                     if res:
                         _, lot_sz = res
+                else:
+                    symbols_ds = getattr(ds, "atm_tradingsymbols", None)
+                    if (
+                        isinstance(symbols_ds, (list, tuple))
+                        and len(symbols_ds) == 2
+                        and symbols_ds[idx]
+                    ):
+                        quote_id = symbols_ds[idx]
                 if strike_ds is not None:
                     plan["atm_strike"] = int(strike_ds)
             plan["option_token"] = option_token
