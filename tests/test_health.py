@@ -20,6 +20,7 @@ def test_health_get_paths(caplog):
     body, status = health.health_get()
     assert status == 200
     assert body["ok"]
+    assert "metrics" in body
 
     # error path via callback raising
     def bad_cb():
@@ -30,6 +31,7 @@ def test_health_get_paths(caplog):
         body, status = health.health_get()
     assert status == 500
     assert not body["ok"]
+    assert "metrics" in body
 
 
 def test_status_get_paths(caplog):

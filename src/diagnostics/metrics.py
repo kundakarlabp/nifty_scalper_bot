@@ -67,3 +67,64 @@ class Metrics:
 
 
 metrics = Metrics()
+
+
+@dataclass
+class RuntimeMetrics:
+    """Thread-safe recorder for trade execution metrics."""
+
+    fills: int = 0
+    cancels: int = 0
+    slippage_bps: float = 0.0
+    spread_at_entry: float = 0.0
+    micro_wait_ratio: float = 0.0
+    auto_relax: float = 0.0
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    def inc_fills(self, n: int = 1) -> None:
+        with self._lock:
+            self.fills += int(n)
+
+    def inc_cancels(self, n: int = 1) -> None:
+        with self._lock:
+            self.cancels += int(n)
+
+    def set_slippage_bps(self, value: float) -> None:
+        with self._lock:
+            self.slippage_bps = float(value)
+
+    def set_spread_at_entry(self, value: float) -> None:
+        with self._lock:
+            self.spread_at_entry = float(value)
+
+    def set_micro_wait_ratio(self, value: float) -> None:
+        with self._lock:
+            self.micro_wait_ratio = float(value)
+
+    def set_auto_relax(self, value: float) -> None:
+        with self._lock:
+            self.auto_relax = float(value)
+
+    def reset(self) -> None:
+        """Reset all metrics to their default values."""
+        with self._lock:
+            self.fills = 0
+            self.cancels = 0
+            self.slippage_bps = 0.0
+            self.spread_at_entry = 0.0
+            self.micro_wait_ratio = 0.0
+            self.auto_relax = 0.0
+
+    def snapshot(self) -> Dict[str, float]:
+        with self._lock:
+            return {
+                "fills": self.fills,
+                "cancels": self.cancels,
+                "slippage_bps": self.slippage_bps,
+                "spread_at_entry": self.spread_at_entry,
+                "micro_wait_ratio": self.micro_wait_ratio,
+                "auto_relax": self.auto_relax,
+            }
+
+
+runtime_metrics = RuntimeMetrics()

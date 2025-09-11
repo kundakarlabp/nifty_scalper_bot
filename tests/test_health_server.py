@@ -8,6 +8,7 @@ from typing import Any
 
 from src.server import health as health_module
 from src.strategies import runner as runner_module
+from src.diagnostics.metrics import runtime_metrics
 
 
 def _runner_with_tick(ts: datetime) -> SimpleNamespace:
@@ -96,6 +97,28 @@ def test_run_falls_back_when_waitress_missing(monkeypatch) -> None:
         "host": "0.0.0.0",
         "port": 8080,
         "debug": False,
-        "use_reloader": False,
-        "threaded": True,
+      "use_reloader": False,
+      "threaded": True,
+      }
+
+
+def test_metrics_endpoint() -> None:
+    runtime_metrics.reset()
+    runtime_metrics.inc_fills()
+    runtime_metrics.inc_cancels(2)
+    runtime_metrics.set_slippage_bps(1.2)
+    runtime_metrics.set_spread_at_entry(0.5)
+    runtime_metrics.set_micro_wait_ratio(0.8)
+    runtime_metrics.set_auto_relax(1.0)
+    client = health_module.app.test_client()
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data == {
+        "fills": 1,
+        "cancels": 2,
+        "slippage_bps": 1.2,
+        "spread_at_entry": 0.5,
+        "micro_wait_ratio": 0.8,
+        "auto_relax": 1.0,
     }
