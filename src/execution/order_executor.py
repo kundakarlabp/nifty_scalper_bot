@@ -1004,9 +1004,25 @@ class OrderExecutor:
         sl_price = _round_to_tick(sl_price, rec.tick_size)
         slip = self.exit_slip
         if slip > 0:
-            adj = 1 - slip if rec.side == "BUY" else 1 + slip
-            tp_price = _round_to_tick(tp_price * adj, rec.tick_size)
-            sl_price = _round_to_tick(sl_price * adj, rec.tick_size)
+            q = fetch_quote_with_depth(self.kite, rec.symbol)
+            bid = float(q.get("bid", 0.0))
+            ask = float(q.get("ask", 0.0))
+            mid = (bid + ask) / 2.0 if bid and ask else float(q.get("ltp", 0.0))
+            if mid > 0:
+                if rec.side == "BUY":
+                    mid_adj = mid * (1 - slip)
+                    tp_price = min(tp_price, mid_adj)
+                    sl_price = min(sl_price, mid_adj)
+                else:
+                    mid_adj = mid * (1 + slip)
+                    tp_price = max(tp_price, mid_adj)
+                    sl_price = max(sl_price, mid_adj)
+                tp_price = _round_to_tick(tp_price, rec.tick_size)
+                sl_price = _round_to_tick(sl_price, rec.tick_size)
+            else:
+                adj = 1 - slip if rec.side == "BUY" else 1 + slip
+                tp_price = _round_to_tick(tp_price * adj, rec.tick_size)
+                sl_price = _round_to_tick(sl_price * adj, rec.tick_size)
 
         # cancel old TPs if any
         for old in (rec.tp1_order_id, rec.tp2_order_id):

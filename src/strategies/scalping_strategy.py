@@ -969,7 +969,7 @@ class EnhancedScalpingStrategy:
                 }
             )
             # --- premium-basis equivalents ---
-            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
+            tp_basis = getattr(settings, "tp_basis", "premium").lower()
             q = plan.get("_last_quote") or {}
             mid = q.get("mid") or (
                 (
@@ -978,14 +978,12 @@ class EnhancedScalpingStrategy:
                     else q.get("ltp")
                 )
             )
-            if mid:
+            if tp_basis == "premium" and mid:
                 opt_entry = float(mid)
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
                 spot_entry = float(plan["entry"])
-                elasticity = _clamp(
-                    delta * (spot_entry / opt_entry), 0.3, 1.2
-                )
+                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
 
                 def _opt_target(spot_target: float) -> float:
                     spot_offset = spot_target - spot_entry
@@ -1007,6 +1005,11 @@ class EnhancedScalpingStrategy:
                 plan["opt_tp2"] = (
                     _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
                 )
+            else:
+                plan["opt_entry"] = None
+                plan["opt_sl"] = None
+                plan["opt_tp1"] = None
+                plan["opt_tp2"] = None
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
