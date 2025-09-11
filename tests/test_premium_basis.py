@@ -15,7 +15,7 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
 
     monkeypatch.setattr(
         "src.strategies.scalping_strategy.fetch_quote_with_depth",
-        lambda *a, **k: {"mid": 5.0},
+        lambda *a, **k: {"mid": 5.03},
     )
     monkeypatch.setattr(
         "src.strategies.scalping_strategy.resolve_weekly_atm",
@@ -35,7 +35,7 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
 
-    assert plan["opt_entry"] == 5.0
+    assert plan["opt_entry"] == 5.05
     entry = float(plan["entry"])
 
     def opt_target(spot_target: float) -> float:
@@ -44,9 +44,9 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
         parity = 1.0 if plan["option_type"] == "CE" else -1.0
         opt_dir = spot_dir * parity
         prem_move = 0.5 * spot_move
-        if plan["action"] == "BUY":
-            return 5.0 + opt_dir * prem_move
-        return 5.0 - opt_dir * prem_move
+        base = 5.05
+        tgt = base + opt_dir * prem_move if plan["action"] == "BUY" else base - opt_dir * prem_move
+        return round(round(tgt / 0.05) * 0.05, 2)
 
     assert plan["opt_sl"] == pytest.approx(opt_target(plan["sl"]))
     assert plan["opt_tp1"] == pytest.approx(opt_target(plan["tp1"]))

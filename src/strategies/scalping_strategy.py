@@ -945,8 +945,14 @@ class EnhancedScalpingStrategy:
                 }
             )
             # --- premium-basis equivalents ---
-            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
             q = plan.get("_last_quote") or {}
+
+            def _round_to_tick(x: float, tick: float = 0.05) -> float:
+                try:
+                    return round(round(float(x) / tick) * tick, 2)
+                except Exception:
+                    return float(x)
+
             mid = q.get("mid") or (
                 (
                     (q.get("bid", 0) + q.get("ask", 0)) / 2
@@ -954,8 +960,9 @@ class EnhancedScalpingStrategy:
                     else q.get("ltp")
                 )
             )
-            if mid:
-                opt_entry = float(mid)
+            tp_basis = str(getattr(settings, "tp_basis", "premium")).lower()
+            if mid and tp_basis == "premium":
+                opt_entry = _round_to_tick(float(mid))
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
 
@@ -971,13 +978,19 @@ class EnhancedScalpingStrategy:
 
                 plan["opt_entry"] = opt_entry
                 plan["opt_sl"] = (
-                    _opt_target(plan["sl"]) if plan["sl"] is not None else None
+                    _round_to_tick(_opt_target(plan["sl"]))
+                    if plan["sl"] is not None
+                    else None
                 )
                 plan["opt_tp1"] = (
-                    _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
+                    _round_to_tick(_opt_target(plan["tp1"]))
+                    if plan["tp1"] is not None
+                    else None
                 )
                 plan["opt_tp2"] = (
-                    _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
+                    _round_to_tick(_opt_target(plan["tp2"]))
+                    if plan["tp2"] is not None
+                    else None
                 )
             # backward compatibility extras
             plan["entry_price"] = entry_price

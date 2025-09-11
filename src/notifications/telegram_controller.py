@@ -577,6 +577,14 @@ class TelegramController:
                 f"losses={status.get('consecutive_losses')} "
                 f"evals={getattr(runner, 'eval_count', 0)}"
             )
+            plan = (
+                self._last_signal_provider() if self._last_signal_provider else {}
+            )
+            if plan:
+                msg += (
+                    f" | spot e={plan.get('entry')} sl={plan.get('sl')} tp={plan.get('tp2')}"
+                    f" | opt e={plan.get('opt_entry')} sl={plan.get('opt_sl')} tp={plan.get('opt_tp2')}"
+                )
             return self._send(msg)
 
         if cmd == "/selftest":
@@ -1067,6 +1075,12 @@ class TelegramController:
                         last_ts_sec = last_dt.timestamp()
                     except Exception:
                         last_ts_sec = 0.0
+                spot_line = (
+                    f"spot e={plan.get('entry')} sl={plan.get('sl')} tp1={plan.get('tp1')} tp2={plan.get('tp2')}"
+                )
+                opt_line = (
+                    f"opt e={plan.get('opt_entry')} sl={plan.get('opt_sl')} tp1={plan.get('opt_tp1')} tp2={plan.get('opt_tp2')}"
+                )
                 gates = []
                 within = bool(status.get("within_window"))
                 gates.append(("window", within, val(status.get("within_window"))))
@@ -1126,7 +1140,7 @@ class TelegramController:
                 dp = plan.get("depth_ok")
                 reason_block = plan.get("reason_block") or "-"
                 reasons = plan.get("reasons") or []
-                lines = ["/why gates"]
+                lines = [spot_line, opt_line, "/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
                 if reason_block in {"no_option_quote", "no_option_token"}:

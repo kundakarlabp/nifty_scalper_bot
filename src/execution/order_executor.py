@@ -459,6 +459,8 @@ class OrderExecutor:
         self.variety = getattr(ex, "order_variety", "regular")
         self.entry_order_type = getattr(ex, "entry_order_type", "LIMIT")
         self.tick_size = float(getattr(ex, "tick_size", 0.05))
+        self.entry_slippage_pct = float(getattr(ex, "entry_slippage_pct", 0.0))
+        self.exit_slippage_pct = float(getattr(ex, "exit_slippage_pct", 0.0))
         self.freeze_qty = int(getattr(ex, "exchange_freeze_qty", 900))
         self.lot_size = int(getattr(ins, "nifty_lot_size", 75))  # NIFTY lot
 
@@ -825,7 +827,10 @@ class OrderExecutor:
                     except (TypeError, ValueError):
                         depth_ok = True
                 if spread_pct <= max_sp and depth_ok:
-                    price = min(float(ask), mid + 0.15 * spread)
+                    if action == "BUY":
+                        price = min(float(ask), mid * (1 + self.entry_slippage_pct))
+                    else:
+                        price = max(float(bid), mid * (1 - self.entry_slippage_pct))
                     price = _round_to_tick(price, self.tick_size)
                     break
                 tries += 1
@@ -957,6 +962,13 @@ class OrderExecutor:
             return
 
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
+        slip = self.exit_slippage_pct
+        if exit_side == "SELL":
+            tp_price *= 1 - slip
+            sl_price *= 1 - slip
+        else:
+            tp_price *= 1 + slip
+            sl_price *= 1 + slip
         tp_price = _round_to_tick(tp_price, rec.tick_size)
         sl_price = _round_to_tick(sl_price, rec.tick_size)
 
