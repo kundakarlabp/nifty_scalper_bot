@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import random
+import hashlib
 import threading
 import time
 from collections import deque
@@ -337,6 +338,7 @@ class _OrderRecord:
     entry_price: float
     tick_size: float = 0.05
 
+    client_oid: Optional[str] = None
     is_open: bool = True
     filled_qty: int = 0
 
@@ -779,6 +781,14 @@ class OrderExecutor:
         symbol = payload.get("symbol") or self._infer_symbol(payload)
         token = int(payload.get("instrument_token") or 0)
         client_oid = str(payload.get("client_oid") or "")
+        if not client_oid:
+            ts_val = payload.get("ts") or payload.get("timestamp") or ""
+            raw = f"{ts_val}|{action}|{payload.get('strike') or ''}|{token}|{qty}"
+            client_oid = hashlib.sha256(raw.encode()).hexdigest()[:20]
+            payload["client_oid"] = client_oid
+        if self.state_store and client_oid and self.state_store.has_order(client_oid):
+            log.info("duplicate client_oid %s; skip", client_oid)
+            return None
 
         if action not in ("BUY", "SELL") or qty <= 0 or price <= 0 or not symbol:
             self.last_error = "invalid_payload"
@@ -969,21 +979,57 @@ class OrderExecutor:
                 symbol,
                 {"side": action, "qty": qty, "entry_price": float(price)},
             )
-
         if self.kite:
-            reconciler = OrderReconciler(self.kite, self, log)
-            for _ in range(5):
-                if not rec.is_open:
-                    break
-                reconciler.step(datetime.utcnow())
-                if not rec.is_open:
-                    break
-                time.sleep(0.5)
+            self._poll_until_terminal(child_ids, rec, client_oid)
 
         self._notify(
             f"✅ LIVE entry: {symbol} {action} qty={qty} @ {price} (rid={rec.record_id})"
         )
         return rec.record_id
+
+    def _poll_until_terminal(
+        self, order_ids: List[str], rec: _OrderRecord, client_oid: str
+    ) -> None:
+        """Poll order status until it reaches a terminal state."""
+        for oid in order_ids:
+            for _ in range(10):
+                try:
+                    hist = self.kite.order_history(oid) or []  # type: ignore[attr-defined]
+                except BROKER_EXCEPTIONS as e:  # pragma: no cover - network
+                    log.debug("order_history failed: %s", e)
+                    time.sleep(0.5)
+                    continue
+                if not hist:
+                    time.sleep(0.5)
+                    continue
+                last = hist[-1]
+                status = str(last.get("status") or "").upper()
+                filled = int(last.get("filled_quantity") or 0)
+                avg = float(last.get("average_price") or 0.0)
+                if filled:
+                    rec.filled_qty = filled
+                    if self.state_store and client_oid:
+                        self.state_store.record_position(
+                            rec.symbol,
+                            {
+                                "side": rec.side,
+                                "qty": filled,
+                                "entry_price": avg,
+                            },
+                        )
+                if status in {"COMPLETE", "FILLED"}:
+                    rec.is_open = False
+                    break
+                if status in {"CANCELLED", "REJECTED"}:
+                    rec.is_open = False
+                    if self.state_store and client_oid:
+                        self.state_store.remove_position(rec.symbol)
+                    break
+                time.sleep(0.5)
+            if not rec.is_open:
+                break
+        if self.state_store and client_oid and not rec.is_open:
+            self.state_store.remove_order(client_oid)
 
     # ----------- SL/TP orchestration ----------
     def setup_gtt_orders(

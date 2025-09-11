@@ -215,6 +215,13 @@ class PositionSizer:
         )
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
+        logger.info(
+            "sizer calc: exposure=%d risk=%d limit=%d -> calc=%d",
+            max_lots_exposure,
+            max_lots_risk,
+            max_lots_limit,
+            calc_lots,
+        )
         lots = calc_lots
         min_eq_needed = (
             unit_notional / sp.max_position_size_pct
@@ -241,6 +248,7 @@ class PositionSizer:
                 and sp.min_lots <= max_lots_limit
             ):
                 lots = sp.min_lots
+                logger.info("sizer clamp to min lots=%d", lots)
             block_reason = ""
             if lots == 0:
                 if max_lots_limit < sp.min_lots:
