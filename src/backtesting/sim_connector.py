@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import random
 from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
@@ -101,12 +102,17 @@ class SimConnector:
         }
 
     def ioc_fill(
-        self, side: str, ob: Dict[str, float], qty: int
+        self,
+        side: str,
+        ob: Dict[str, float],
+        qty: int,
+        jitter_ms: float | None = None,
     ) -> Tuple[bool, float, float]:
         """Simulate an IOC order using a premium mid price.
 
         Orders are executed at ``mid ± 0.5 * spread`` depending on ``side``.
         The fill succeeds only if the available depth can absorb ``qty``.
+        Optional ``jitter_ms`` adds random latency jitter to the fill price.
 
         Returns a tuple ``(filled, price, slippage)``.
         """
@@ -118,6 +124,8 @@ class SimConnector:
         spread = ob["ask"] - ob["bid"]
         mid = ob["mid"]
         price = mid + 0.5 * spread if side == "BUY" else mid - 0.5 * spread
+        if jitter_ms:
+            price += random.uniform(-0.0005, 0.0005) * spread
         slippage = abs(price - mid)
         return True, price, slippage
 

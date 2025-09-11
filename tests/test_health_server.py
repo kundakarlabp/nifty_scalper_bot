@@ -43,6 +43,37 @@ def test_ready_endpoint_stale(monkeypatch) -> None:
     assert resp.status_code == 503
 
 
+def test_ready_endpoint_red_flag(monkeypatch) -> None:
+    class DS:
+        def last_tick_ts(self) -> datetime:
+            return datetime.utcnow()
+
+        def last_bar_open_ts(self) -> None:
+            return None
+
+        timeframe_seconds = 60
+
+        def tick_watchdog(self) -> bool:
+            return True
+
+        def tick_watchdog_details(self) -> dict[str, Any]:
+            return {"age": 5.0, "checks": 3}
+
+    cfg = SimpleNamespace(max_tick_lag_s=10, max_bar_lag_s=75)
+    fake_runner = SimpleNamespace(
+        kite=SimpleNamespace(is_connected=lambda: True),
+        data_source=DS(),
+        strategy_cfg=cfg,
+    )
+    monkeypatch.setattr(
+        runner_module.StrategyRunner, "get_singleton", classmethod(lambda cls: fake_runner)
+    )
+    client = health_module.app.test_client()
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.get_json().get("red_flag") == {"age": 5.0, "checks": 3}
+
+
 def test_live_endpoint() -> None:
     client = health_module.app.test_client()
     resp = client.get("/live")

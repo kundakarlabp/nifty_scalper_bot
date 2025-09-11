@@ -7,6 +7,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import timedelta
+import random
 from typing import Any, cast
 
 from src.risk.greeks import OptionType
@@ -109,10 +110,13 @@ class BacktestEngine:
                 continue
 
             side = "BUY" if plan.get("action") == "BUY" else "SELL"
-            entry_ts = ts + timedelta(seconds=plan.get("entry_wait", 0))
+            jitter = random.uniform(0.0, 0.25)
+            entry_ts = ts + timedelta(seconds=plan.get("entry_wait", 0) + jitter)
             qty = self.sim.lot_size * plan.get("qty_lots", 1)
             ok0, entry_px, slippage = self.sim.ioc_fill(side, ob, qty)
             if not ok0:
+                plan["has_signal"] = False
+                plan["reason_block"] = "depth_reject"
                 continue
             costs_in = self.sim.apply_costs(
                 "BUY" if side == "BUY" else "SELL", entry_px, qty
@@ -126,13 +130,16 @@ class BacktestEngine:
             exit_ts = None
             exit_reason = "time"
             mae = 0.0
+            mfe = 0.0
             for fts, _fo, fh, fl, fc, _fv in self.feed.iter_bars():
                 if fts <= entry_ts:
                     continue
                 if side == "BUY":
                     mae = max(mae, entry_px - fl)
+                    mfe = max(mfe, fh - entry_px)
                 else:
                     mae = max(mae, fh - entry_px)
+                    mfe = max(mfe, entry_px - fl)
                 if (side == "BUY" and fh >= tp1) or (side == "SELL" and fl <= tp1):
                     exit_px, exit_ts, exit_reason = tp1, fts, "TP1"
                     break
@@ -158,6 +165,9 @@ class BacktestEngine:
             self.equity += net
             self.equity_curve.append((exit_ts.isoformat(), round(self.equity, 2)))
 
+            slippage_bps = (slippage / mid * 10_000) if mid else 0.0
+            bucket = f"{entry_ts.hour:02d}:{(entry_ts.minute // 30) * 30:02d}"
+
             self.trades.append(
                 {
                     "ts_entry": entry_ts.isoformat(),
@@ -174,6 +184,9 @@ class BacktestEngine:
                     "regime": plan.get("regime", "TREND"),
                     "slippage": round(slippage, 2),
                     "mae": round(mae, 2),
+                    "mfe": round(mfe, 2),
+                    "slippage_bps": round(slippage_bps, 2),
+                    "bucket": bucket,
                 }
             )
             self.risk.on_trade_closed(pnl_R=pnl_R)
@@ -230,8 +243,49 @@ class BacktestEngine:
                 "trades_range": len(by_regime.get("RANGE", [])),
             }
         )
+
+        bucket_stats: dict[tuple[str, str], dict[str, Any]] = {}
+        for t in self.trades:
+            reg = str(t.get("regime", "TREND"))
+            bkt = str(t.get("bucket", "00:00"))
+            key = (reg, bkt)
+            stats = bucket_stats.setdefault(
+                key,
+                {
+                    "pnl": 0.0,
+                    "hit": 0,
+                    "trades": 0,
+                    "slippage": [],
+                    "mae": [],
+                    "mfe": [],
+                },
+            )
+            stats["pnl"] += float(t.get("pnl_rupees", 0.0))
+            stats["hit"] += 1 if float(t.get("pnl_rupees", 0.0)) > 0 else 0
+            stats["trades"] += 1
+            stats["slippage"].append(float(t.get("slippage_bps", 0.0)))
+            stats["mae"].append(float(t.get("mae", 0.0)))
+            stats["mfe"].append(float(t.get("mfe", 0.0)))
+
+        bucket_report: dict[str, dict[str, Any]] = {}
+        for (reg, bkt), s in bucket_stats.items():
+            bucket_report.setdefault(reg, {})[bkt] = {
+                "PnL": round(s["pnl"], 2),
+                "HitRate": round(100 * s["hit"] / s["trades"], 1)
+                if s["trades"]
+                else 0.0,
+                "slippage_bps": round(sum(s["slippage"]) / s["trades"], 2)
+                if s["trades"]
+                else 0.0,
+                "MAE": round(sum(s["mae"]) / s["trades"], 2) if s["trades"] else 0.0,
+                "MFE": round(sum(s["mfe"]) / s["trades"], 2) if s["trades"] else 0.0,
+            }
+
+        summary["by_bucket"] = bucket_report
         with open(os.path.join(self.outdir, "summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
+        with open(os.path.join(self.outdir, "bucket_report.json"), "w") as f:
+            json.dump(bucket_report, f, indent=2)
         return summary
 
     def _summary_metrics(self, trades: list[dict[str, Any]]) -> dict[str, float]:
