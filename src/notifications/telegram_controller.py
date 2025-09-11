@@ -1637,6 +1637,12 @@ class TelegramController:
                 if self._cancel_all:
                     self._cancel_all()
                 runner.shutdown()
+                kill_file = os.getenv("KILL_SWITCH_FILE", "")
+                if kill_file:
+                    try:
+                        Path(kill_file).touch()
+                    except Exception:
+                        log.exception("failed to persist kill switch")
                 return self._send("Emergency stop executed.")
             except Exception as e:
                 return self._send(f"Emergency stop failed: {e}")

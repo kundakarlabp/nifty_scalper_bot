@@ -64,7 +64,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "opt: entry=" in msg and "atr=" in msg
 
 
-def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
+def test_emergency_stop_runs_shutdown(monkeypatch, tmp_path) -> None:
     _prep_settings(monkeypatch)
     called: list[str] = []
 
@@ -77,12 +77,15 @@ def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
         "get_singleton",
         classmethod(lambda cls: runner),
     )
+    kill_file = tmp_path / "kill"
+    monkeypatch.setenv("KILL_SWITCH_FILE", str(kill_file))
     tc = TelegramController(status_provider=lambda: {}, cancel_all=cancel_all)
     sent: list[str] = []
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/emergency_stop"}})
     assert called == ["cancel", "shutdown"]
     assert sent[0] == "Emergency stop executed."
+    assert kill_file.exists()
 
 
 def test_probe_returns_snapshot(monkeypatch) -> None:

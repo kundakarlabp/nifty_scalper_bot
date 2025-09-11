@@ -2,7 +2,7 @@ from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
 def test_posttrade_updates_and_cooloff():
-    cfg = LimitConfig(cooloff_losses=3, cooloff_minutes=60)
+    cfg = LimitConfig(max_consec_losses=3, cooloff_minutes=60)
     eng = RiskEngine(cfg)
     eng.on_trade_closed(pnl_R=1.0)
     assert eng.state.trades_today == 1

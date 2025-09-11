@@ -125,6 +125,15 @@ def test_notional_underlying_vs_premium():
     assert ok2 and reason2 == ""
 
 
+def test_daily_premium_loss_blocks():
+    cfg = LimitConfig(max_daily_loss_rupees=100.0)
+    eng = RiskEngine(cfg)
+    eng.state.session_date = datetime.now(ZoneInfo(cfg.tz)).date().isoformat()
+    eng.state.cum_loss_rupees = -150.0
+    ok, reason, _ = eng.pre_trade_check(**_basic_args())
+    assert not ok and reason == "daily_premium_loss"
+
+
 def test_mid_price_from_quote():
     cfg = LimitConfig(max_notional_rupees=150.0, exposure_basis="premium")
     eng = RiskEngine(cfg)
