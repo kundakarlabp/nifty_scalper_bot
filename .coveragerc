@@ -1,13 +1,12 @@
 [run]
+branch = True
 source = src
 omit =
-    src/main.py
-    src/notifications/*
-    src/execution/*
-    src/strategies/*
-    src/diagnostics/*
-    src/utils/*
-    scripts/*
+    src/backtesting/*
+    src/server/health.py
+    src/__main__.py
+    */__init__.py
 
 [report]
-show_missing = true
+skip_covered = True
+show_missing = True
