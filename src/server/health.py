@@ -14,6 +14,7 @@ from flask import Flask, Response
 
 from src.strategies.runner import StrategyRunner
 from src.utils.freshness import compute as compute_freshness
+from src.diagnostics.metrics import runtime_metrics
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
@@ -82,11 +83,16 @@ def health_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
+            "metrics": runtime_metrics.snapshot(),
         }
         return resp, 200 if ok else 503
     except Exception as e:
         log.exception("Health GET error: %s", e)
-        return {"ok": False, "error": str(e)}, 500
+        return {
+            "ok": False,
+            "error": str(e),
+            "metrics": runtime_metrics.snapshot(),
+        }, 500
 
 
 @app.route("/status", methods=["GET"])
@@ -99,11 +105,26 @@ def status_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
+            "metrics": runtime_metrics.snapshot(),
         }
         return resp, 200
     except Exception as e:
         log.exception("Status GET error: %s", e)
-        return {"ok": False, "error": str(e)}, 500
+        return {
+            "ok": False,
+            "error": str(e),
+            "metrics": runtime_metrics.snapshot(),
+        }, 500
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics_get() -> Tuple[Dict[str, Any], int]:
+    """Return runtime execution metrics."""
+    try:
+        return runtime_metrics.snapshot(), 200
+    except Exception as e:
+        log.exception("Metrics GET error: %s", e)
+        return {"error": str(e)}, 500
 
 
 def run(
