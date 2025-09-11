@@ -26,6 +26,7 @@ from src.utils.indicators import (
     calculate_macd,
     calculate_vwap,
 )
+from src.utils import strike_selector
 from src.utils.strike_selector import (
     get_instrument_tokens,
     resolve_weekly_atm,
@@ -55,6 +56,37 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
     """Return True if current time is Tuesday after ``threshold``."""
     now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
     return now.weekday() == 1 and now.time() >= threshold
+
+
+def _token_to_symbol_and_lot(
+    kite: Any, token: int
+) -> Optional[Tuple[str, int]]:
+    """Return trading symbol and lot size for ``token``.
+
+    Parameters
+    ----------
+    kite:
+        Optional broker client used to fetch instrument dump.
+    token:
+        Instrument token to resolve.
+
+    Returns
+    -------
+    Optional[Tuple[str, int]]
+        Tuple of trading symbol and lot size if resolution succeeds.
+    """
+
+    try:
+        inst_dump = strike_selector._fetch_instruments_nfo(kite) or []
+        token_int = int(token)
+        for row in inst_dump:
+            if int(row.get("instrument_token", 0)) == token_int:
+                tsym = str(row.get("tradingsymbol"))
+                lot_sz = int(row.get("lot_size") or 0)
+                return tsym, lot_sz
+    except Exception:  # pragma: no cover
+        return None
+    return None
 
 
 # ---------- scoring helpers ----------
@@ -721,8 +753,10 @@ class EnhancedScalpingStrategy:
             plan["option_token"] = option_token
             # --- Resolve the tradeable option instrument ---
             # Prefer data source's ATM tokens (single source of truth).
-            tsym_or_token = None
-            lot_sz = int(getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75))
+            tsym: Optional[str] = None
+            lot_sz = int(
+                getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75)
+            )
 
             if option_type is not None and option_token is not None:
                 # Map CE/PE deterministically to ds.atm_tokens ordering
@@ -732,22 +766,26 @@ class EnhancedScalpingStrategy:
                     if isinstance(tokens_ds, (list, tuple)) and len(tokens_ds) == 2:
                         want_idx = 0 if option_type.upper() == "CE" else 1
                         if option_token == tokens_ds[want_idx]:
-                            tsym_or_token = str(option_token)  # pass token to quote fn
+                            res = _token_to_symbol_and_lot(
+                                getattr(settings, "kite", None), option_token
+                            )
+                            if res:
+                                tsym, lot_sz = res
                 except Exception:
-                    tsym_or_token = None
+                    tsym = None
 
             # Fallback: use resolver only if ds tokens are not available/usable
-            if tsym_or_token is None:
+            if tsym is None:
                 atm = resolve_weekly_atm(price)
                 info_atm = atm.get(option_type.lower()) if atm else None
                 if not info_atm:
                     return plan_block(
                         "no_option_token", micro={"spread_pct": None, "depth_ok": None}
                     )
-                tsym_or_token, lot_sz = info_atm
+                tsym, lot_sz = info_atm
 
             # Fetch quote/depth using whichever identifier we have
-            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym_or_token)
+            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
