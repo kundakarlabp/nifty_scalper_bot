@@ -399,6 +399,13 @@ class StrategyRunner:
                 len(snap.open_orders),
                 len(snap.positions),
             )
+            for oid, data in snap.open_orders.items():
+                payload = dict(data)
+                payload["client_oid"] = oid
+                try:
+                    self.order_executor.place_order(payload)
+                except Exception:
+                    self.log.debug("resume order failed: %s", oid, exc_info=True)
         self.executor = self.order_executor
         self.reconciler = OrderReconciler(
             getattr(self.order_executor, "kite", None), self.order_executor, self.log

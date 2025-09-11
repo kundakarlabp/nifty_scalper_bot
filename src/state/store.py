@@ -55,6 +55,10 @@ class StateStore:
             del self.state.open_orders[client_oid]
             self._save()
 
+    def has_order(self, client_oid: str) -> bool:
+        """Return True if an open order with ``client_oid`` exists."""
+        return client_oid in self.state.open_orders
+
     def record_position(self, symbol: str, info: Dict[str, Any]) -> None:
         """Persist an open position snapshot."""  # pragma: no cover - I/O
         self.state.positions[symbol] = dict(info)
