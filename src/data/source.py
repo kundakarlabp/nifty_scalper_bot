@@ -1405,34 +1405,62 @@ def _have_quote(obj: Any, token: int) -> bool:
 def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     """Resolve and subscribe current ATM option tokens.
 
-    Calls are throttled per instance to avoid excessive broker requests.
+    Re-resolves when drift from current strike exceeds ``ATM_ROLL_DRIFT_PTS``
+    or at scheduled weekly/monthly rolls (Tuesdays 15:20). Calls are
+    throttled per instance via ``ATM_RESOLVE_COOLDOWN_S`` (min 45s).
     """
 
     try:
         cooldown = max(45, int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45")))
     except Exception:
         cooldown = 45
+    try:
+        drift_pts = float(os.getenv("ATM_ROLL_DRIFT_PTS", "75"))
+    except Exception:
+        drift_pts = 75.0
+
     now = time.time()
+    under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
+    spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
+    current_strike = float(getattr(self, "current_atm_strike", 0) or 0)
+    drift = abs(float(spot or 0) - current_strike)
+
+    roll = False
+    try:
+        now_dt = dt.datetime.now(TZ)
+        if now_dt.weekday() == 1 and now_dt.time() >= dt.time(15, 20):
+            last_roll = getattr(self, "_atm_last_roll", None)
+            if last_roll != now_dt.date():
+                roll = True
+                self._atm_last_roll = now_dt.date()
+    except Exception:
+        roll = False
+
     next_ts = float(getattr(self, "_atm_next_resolve_ts", 0.0))
     existing = getattr(self, "atm_tokens", None)
     if (
         isinstance(existing, (list, tuple))
         and all(t is not None for t in existing)
         and now < next_ts
+        and drift < drift_pts
+        and not roll
     ):
         return
     self._atm_next_resolve_ts = now + cooldown
+
+    if drift >= drift_pts or roll:
+        log.info("atm_roll: reason=%s", "drift" if drift >= drift_pts else "expiry")
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     items = _refresh_instruments_nfo(broker)
     if not items:
         return
-    under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
     today = dt.date.today()
     expiry = _pick_expiry(items, under, today)
     if not expiry:
         return
-    spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
+    if spot is None:
+        spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
     if spot is None:
         return
     try:

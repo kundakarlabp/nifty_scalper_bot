@@ -74,6 +74,31 @@ def test_ready_endpoint_red_flag(monkeypatch) -> None:
     assert resp.get_json().get("red_flag") == {"age": 5.0, "checks": 3}
 
 
+def test_ready_endpoint_no_runner(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner_module.StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: None),
+    )
+    client = health_module.app.test_client()
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.get_json() == {"status": "starting"}
+
+
+def test_ready_endpoint_no_data(monkeypatch) -> None:
+    runner = SimpleNamespace(kite=SimpleNamespace(is_connected=lambda: True), data_source=None)
+    monkeypatch.setattr(
+        runner_module.StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    client = health_module.app.test_client()
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.get_json()["reason"] == "data"
+
+
 def test_live_endpoint() -> None:
     client = health_module.app.test_client()
     resp = client.get("/live")
@@ -133,14 +158,33 @@ def test_run_falls_back_when_waitress_missing(monkeypatch) -> None:
       }
 
 
-def test_metrics_endpoint() -> None:
+def test_metrics_endpoint(monkeypatch) -> None:
     runtime_metrics.reset()
     runtime_metrics.inc_fills()
     runtime_metrics.inc_cancels(2)
     runtime_metrics.set_slippage_bps(1.2)
-    runtime_metrics.set_spread_at_entry(0.5)
+    runtime_metrics.set_avg_entry_spread(0.5)
     runtime_metrics.set_micro_wait_ratio(0.8)
     runtime_metrics.set_auto_relax(1.0)
+    stub_runner = SimpleNamespace(
+        now_ist=datetime(2024, 1, 1, 10, 0),
+        _last_trade_time=datetime(2024, 1, 1, 9, 55),
+        last_plan={
+            "delta": 0.5,
+            "elasticity": 0.8,
+            "opt_entry": 100.0,
+            "spot_entry": 200.0,
+        },
+        settings=SimpleNamespace(
+            exposure_basis="premium",
+            instruments=SimpleNamespace(nifty_lot_size=50),
+        ),
+    )
+    monkeypatch.setattr(
+        runner_module.StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: stub_runner),
+    )
     client = health_module.app.test_client()
     resp = client.get("/metrics")
     assert resp.status_code == 200
@@ -149,7 +193,12 @@ def test_metrics_endpoint() -> None:
         "fills": 1,
         "cancels": 2,
         "slippage_bps": 1.2,
-        "spread_at_entry": 0.5,
+        "avg_entry_spread": 0.5,
         "micro_wait_ratio": 0.8,
         "auto_relax": 1.0,
+        "minutes_since_last_trade": 5.0,
+        "delta": 0.5,
+        "elasticity": 0.8,
+        "exposure_basis": "premium",
+        "unit_notional": 5000.0,
     }
