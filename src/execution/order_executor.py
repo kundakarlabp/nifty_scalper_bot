@@ -476,8 +476,12 @@ class OrderExecutor:
         self.enable_trailing = bool(getattr(ex, "enable_trailing", True))
         self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
-        self.entry_slip = float(getattr(ex, "entry_slippage_pct", 0.25)) / 100.0
-        self.exit_slip = float(getattr(ex, "exit_slippage_pct", 0.25)) / 100.0
+        self.entry_slip = max(
+            0.0, float(getattr(ex, "entry_slippage_pct", 0.25)) / 100.0
+        )
+        self.exit_slip = max(
+            0.0, float(getattr(ex, "exit_slippage_pct", 0.25)) / 100.0
+        )
 
         # microstructure constraints
         self.max_spread_pct = float(getattr(ex, "max_spread_pct", 0.0035))

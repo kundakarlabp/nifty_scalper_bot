@@ -98,6 +98,12 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
 
+def _round_tick(x: float, tick: float) -> float:
+    """Round ``x`` to the nearest multiple of ``tick``."""
+
+    return round(round(float(x) / tick) * tick, 2)
+
+
 @dataclass
 class ScoreDetails:
     """Detailed score breakdown for diagnostics."""
@@ -978,41 +984,41 @@ class EnhancedScalpingStrategy:
                 }
             )
             # --- premium-basis equivalents ---
-            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
-            q = plan.get("_last_quote") or {}
-            mid = q.get("mid") or (
-                (
-                    (q.get("bid", 0) + q.get("ask", 0)) / 2
-                    if q.get("bid") and q.get("ask")
-                    else q.get("ltp")
+            tp_basis = getattr(settings, "tp_basis", "premium").lower()
+            if tp_basis == "premium":
+                q = plan.get("_last_quote") or {}
+                mid = q.get("mid") or (
+                    (
+                        (q.get("bid", 0) + q.get("ask", 0)) / 2
+                        if q.get("bid") and q.get("ask")
+                        else q.get("ltp")
+                    )
                 )
-            )
-            if mid:
-                opt_entry = float(mid)
-                delta = float(plan.get("delta") or 0.5)
-                delta = max(0.25, min(delta, 0.75))
-                spot_entry = float(plan.get("spot_entry") or 0.0)
-                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
+                if mid:
+                    opt_entry = float(mid)
+                    delta = float(plan.get("delta") or 0.5)
+                    delta = max(0.25, min(delta, 0.75))
+                    spot_entry = float(plan.get("spot_entry") or 0.0)
+                    elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
 
-                def _opt_target(spot_target: float) -> float:
-                    premium_offset = elasticity * (spot_target - spot_entry)
-                    if plan["option_type"] == "PE":
-                        premium_offset *= -1.0
-                    if plan["action"] == "SELL":
-                        premium_offset *= -1.0
-                    prem = opt_entry + premium_offset
-                    return round(round(prem / tick_size) * tick_size, 2)
+                    def _opt_target(spot_target: float) -> float:
+                        premium_offset = elasticity * (spot_target - spot_entry)
+                        if plan["option_type"] == "PE":
+                            premium_offset *= -1.0
+                        if plan["action"] == "SELL":
+                            premium_offset *= -1.0
+                        return _round_tick(opt_entry + premium_offset, tick_size)
 
-                plan["opt_entry"] = opt_entry
-                plan["opt_sl"] = (
-                    _opt_target(plan["sl"]) if plan["sl"] is not None else None
-                )
-                plan["opt_tp1"] = (
-                    _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
-                )
-                plan["opt_tp2"] = (
-                    _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
-                )
+                    plan["opt_entry"] = _round_tick(opt_entry, tick_size)
+                    plan["opt_sl"] = (
+                        _opt_target(plan["sl"]) if plan["sl"] is not None else None
+                    )
+                    plan["opt_tp1"] = (
+                        _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
+                    )
+                    plan["opt_tp2"] = (
+                        _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
+                    )
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
