@@ -644,25 +644,35 @@ class OrderExecutor:
                 "oi": 0,
             }
 
-    def quote_diagnostics(self, opt: str = "both", qty_lots: int = 1) -> str:
-        from src.utils.strike_selector import (
-            _fetch_instruments_nfo,
-            _get_spot_ltp,
-            resolve_weekly_atm,
-        )
+    def quote_diagnostics(
+        self,
+        opt: str = "both",
+        qty_lots: int = 1,
+        *,
+        runner: Any | None = None,
+    ) -> str:
+        """Return quote and depth info for current ATM options."""
 
-        inst_dump = _fetch_instruments_nfo(self.kite) or []
-        spot = _get_spot_ltp(
-            self.kite,
-            getattr(getattr(settings, "instruments", object()), "spot_symbol", ""),
-        )
-        atm = resolve_weekly_atm(spot or 0.0, inst_dump)
-        if not atm:
-            return "instrument resolution failed"
+        from src.strategies.runner import StrategyRunner
+        from src.strategies.scalping_strategy import _token_to_symbol_and_lot
+
+        runner = runner or StrategyRunner.get_singleton()
+        ds = getattr(runner, "data_source", None) if runner else None
+        tokens = getattr(ds, "atm_tokens", (None, None)) if ds else (None, None)
+        strike = getattr(ds, "current_atm_strike", None) if ds else None
+        if not tokens or None in tokens or strike is None:
+            return "ATM not ready"
+
+        ce_token, pe_token = tokens
+        token_map = {"ce": ce_token, "pe": pe_token}
         types = [opt.lower()] if opt.lower() in ("ce", "pe") else ["ce", "pe"]
-        lines: List[str] = []
+        lines: List[str] = [f"ATM strike {int(strike)}"]
         for t in types:
-            info = atm.get(t)
+            token = token_map.get(t)
+            if not token:
+                lines.append(f"{t.upper()}: token_missing")
+                continue
+            info = _token_to_symbol_and_lot(self.kite, token)
             if not info:
                 lines.append(f"{t.upper()}: tsym_missing")
                 continue
