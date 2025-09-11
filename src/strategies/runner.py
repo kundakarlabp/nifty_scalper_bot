@@ -1,6 +1,8 @@
 # Path: src/strategies/runner.py
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -38,6 +40,7 @@ from src.diagnostics.metrics import metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
 from src.execution.order_executor import OrderReconciler
+from src.state import StateStore
 from src.features.indicators import atr_pct
 from src.logs.journal import Journal
 from src.options.instruments_cache import InstrumentsCache
@@ -370,6 +373,9 @@ class StrategyRunner:
             make_connector_shadow=_make_connector_shadow,
         )
 
+        self.state_store = StateStore(
+            getattr(self.settings, "STATE_STORE_PATH", "data/state.json")
+        )
         self.strategy = self.components.strategy
         try:
             setattr(self.strategy, "runner", self)
@@ -382,6 +388,15 @@ class StrategyRunner:
             except Exception as e:
                 self.log.debug("Data source connect failed: %s", e)
         self.order_executor = self.components.order_connector
+        if hasattr(self.order_executor, "state_store") and not self.order_executor.state_store:
+            self.order_executor.state_store = self.state_store
+        snap = self.state_store.snapshot()
+        if snap.open_orders or snap.positions:
+            self.log.info(
+                "State restore: %s open orders %s positions",
+                len(snap.open_orders),
+                len(snap.positions),
+            )
         self.executor = self.order_executor
         self.reconciler = OrderReconciler(
             getattr(self.order_executor, "kite", None), self.order_executor, self.log
@@ -1389,6 +1404,18 @@ class StrategyRunner:
                 plan.get("opt_tp2") if tp_basis == "premium" else plan.get("tp2")
             )
             if hasattr(self.executor, "place_order"):
+                hash_input = {
+                    "action": plan["action"],
+                    "option_type": plan["option_type"],
+                    "strike": float(plan["strike"]),
+                    "entry": entry_px,
+                    "sl": sl_px,
+                    "tp": tp2_px,
+                    "qty": int(qty),
+                }
+                client_oid = hashlib.sha256(
+                    json.dumps(hash_input, sort_keys=True).encode()
+                ).hexdigest()[:20]
                 exec_payload = {
                     "action": plan["action"],
                     "quantity": int(qty),
@@ -1397,6 +1424,7 @@ class StrategyRunner:
                     "take_profit": tp2_px,
                     "strike": float(plan["strike"]),
                     "option_type": plan["option_type"],
+                    "client_oid": client_oid,
                 }
                 placed_ok = bool(self.executor.place_order(exec_payload))
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
@@ -1405,6 +1433,7 @@ class StrategyRunner:
                         plan_exec["entry"] = entry_px
                         plan_exec["sl"] = sl_px
                         plan_exec["tp2"] = tp2_px
+                        plan_exec["client_oid"] = client_oid
                         fsm = self.executor.create_trade_fsm(plan_exec)
                         self.executor.place_trade(fsm)
                     except Exception:

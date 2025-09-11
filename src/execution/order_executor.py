@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from src.logs.journal import Journal
+from src.state import StateStore
 from src.utils.broker_errors import (
     AUTH,
     SUBSCRIPTION,
@@ -427,6 +428,7 @@ class OrderExecutor:
         telegram_controller: Any = None,
         on_trade_closed: Optional[Callable[[float], None]] = None,
         journal: Optional[Journal] = None,
+        state_store: Optional[StateStore] = None,
     ) -> None:
         """Create a new executor.
 
@@ -448,6 +450,7 @@ class OrderExecutor:
         self._live = kite is not None
         self.telegram = telegram_controller
         self._active: Dict[str, _OrderRecord] = {}
+        self.state_store = state_store
         self.last_error: Optional[str] = None
 
         # execution config (default-safe if settings missing)
@@ -773,6 +776,7 @@ class OrderExecutor:
         refresh_cb = payload.get("refresh_market")
         symbol = payload.get("symbol") or self._infer_symbol(payload)
         token = int(payload.get("instrument_token") or 0)
+        client_oid = str(payload.get("client_oid") or "")
 
         if action not in ("BUY", "SELL") or qty <= 0 or price <= 0 or not symbol:
             self.last_error = "invalid_payload"
@@ -904,6 +908,8 @@ class OrderExecutor:
             )
             if self.entry_order_type.upper() == "LIMIT":
                 params["price"] = _round_to_tick(price, self.tick_size)
+            if client_oid:
+                params["tag"] = client_oid
 
             res = self._place_with_cb(params)
             if not res.get("ok"):
@@ -952,6 +958,23 @@ class OrderExecutor:
         )
         with self._lock:
             self._active[rec.record_id] = rec
+
+        if self.state_store and client_oid:
+            self.state_store.record_order(client_oid, payload)
+            self.state_store.record_position(
+                symbol,
+                {"side": action, "qty": qty, "entry_price": float(price)},
+            )
+
+        if self.kite:
+            reconciler = OrderReconciler(self.kite, self, log)
+            for _ in range(5):
+                if not rec.is_open:
+                    break
+                reconciler.step(datetime.utcnow())
+                if not rec.is_open:
+                    break
+                time.sleep(0.5)
 
         self._notify(
             f"✅ LIVE entry: {symbol} {action} qty={qty} @ {price} (rid={rec.record_id})"
@@ -1368,7 +1391,9 @@ class OrderExecutor:
         qty = int(plan.get("qty") or plan.get("quantity") or 0)
         price = plan.get("limit_price") or plan.get("entry")
         leg_id = f"{trade_id}:ENTRY"
-        idemp = f"{trade_id}:ENTRY:{int(time.time() * 1000)}"
+        idemp = str(
+            plan.get("client_oid") or f"{trade_id}:ENTRY:{int(time.time() * 1000)}"
+        )
         leg = OrderLeg(
             trade_id=trade_id,
             leg_id=leg_id,
