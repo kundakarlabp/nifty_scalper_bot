@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from src.logs.journal import Journal
@@ -33,6 +33,7 @@ from .order_state import (
     OrderSide,
     OrderState,
     TradeFSM,
+    TERMINAL_STATES,
 )
 
 # --- Optional broker SDK (graceful fallback in paper mode) ---
@@ -55,7 +56,13 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-__all__ = ["OrderExecutor", "OrderReconciler", "micro_ok", "fetch_quote_with_depth"]
+__all__ = [
+    "OrderExecutor",
+    "OrderReconciler",
+    "micro_ok",
+    "fetch_quote_with_depth",
+    "OrderManager",
+]
 
 BROKER_EXCEPTIONS = (NetworkException, TokenException, InputException)
 
@@ -268,6 +275,144 @@ class KiteOrderConnector:
         if not self.kite:
             return []
         return _retry_call(self.kite.orders)
+
+
+class OrderManager:
+    """Manage order lifecycle with depth-aware limit pricing."""
+
+    def __init__(
+        self,
+        place_fn: Callable[[Dict[str, Any]], Optional[str]],
+        *,
+        kite: Optional[KiteConnect] = None,
+        tick_size: float = 0.05,
+        max_slip_ticks: int = 5,
+        fill_timeout_ms: int = 5000,
+    ) -> None:
+        self._place_fn = place_fn
+        self.kite = kite
+        self.tick_size = float(tick_size)
+        self.max_slip_ticks = int(max_slip_ticks)
+        self.fill_timeout_ms = int(fill_timeout_ms)
+        self.orders: Dict[str, OrderLeg] = {}
+        self._seen: Set[str] = set()
+
+    @staticmethod
+    def make_client_oid(
+        tsym: str, side: str | OrderSide, qty: int, ms: int
+    ) -> str:
+        """Return deterministic client order id."""
+        side_val = side.value if isinstance(side, OrderSide) else str(side).upper()
+        raw = f"{tsym}|{side_val}|{qty}|{ms}"
+        return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+    def calc_limit_price(
+        self, side: OrderSide, qty: int, quote: Dict[str, Any]
+    ) -> Tuple[float, float]:
+        """Compute limit price and slippage hint."""
+        tick = float(quote.get("tick", self.tick_size))
+        max_slip = tick * self.max_slip_ticks
+        depth = quote.get("depth") or {}
+        if side is OrderSide.BUY:
+            best = float(quote.get("ask", 0.0))
+            levels = depth.get("sell", [])
+            direction = 1
+        else:
+            best = float(quote.get("bid", 0.0))
+            levels = depth.get("buy", [])
+            direction = -1
+        price = best + direction * tick
+        cum = 0
+        for lvl in levels:
+            qty_level = int(lvl.get("quantity", 0))
+            cum += qty_level
+            price = float(lvl.get("price", best))
+            if cum >= qty:
+                break
+        price += direction * tick
+        if side is OrderSide.BUY:
+            price = min(price, best + max_slip)
+        else:
+            price = max(price, best - max_slip)
+        price = _round_to_tick(price, tick)
+        slip = abs(price - best)
+        return price, slip
+
+    def submit(self, payload: Dict[str, Any]) -> Optional[str]:
+        symbol = str(payload.get("symbol") or "")
+        side = OrderSide(str(payload.get("action", "BUY")).upper())
+        qty = int(payload.get("quantity", 0))
+        ms = int(payload.get("timestamp_ms") or int(time.time() * 1000))
+        client_oid = payload.get("client_oid") or self.make_client_oid(
+            symbol, side, qty, ms
+        )
+        if client_oid in self._seen:
+            return None
+        quote = payload.get("quote")
+        if not quote:
+            quote = fetch_quote_with_depth(self.kite, symbol) if self.kite else {}
+        price, slip = self.calc_limit_price(side, qty, quote)
+        payload["entry_price"] = price
+        payload["client_oid"] = client_oid
+        rid = self._place_fn(payload)
+        if rid:
+            leg = OrderLeg(
+                trade_id=client_oid,
+                leg_id=client_oid,
+                leg_type=LegType.ENTRY,
+                side=side,
+                symbol=symbol,
+                qty=qty,
+                limit_price=price,
+                state=OrderState.PENDING,
+                idempotency_key=client_oid,
+                expires_at=datetime.utcnow()
+                + timedelta(milliseconds=self.fill_timeout_ms),
+            )
+            leg.broker_order_id = rid
+            setattr(leg, "slippage_hint", slip)
+            self.orders[client_oid] = leg
+            self._seen.add(client_oid)
+        return rid
+
+    def handle_partial(
+        self,
+        client_oid: str,
+        filled_qty: int,
+        avg_price: float,
+        quote: Dict[str, Any],
+    ) -> None:
+        leg = self.orders.get(client_oid)
+        if not leg:
+            return
+        leg.on_partial(filled_qty, avg_price)
+        remaining = max(leg.qty - filled_qty, 0)
+        if remaining > 0:
+            price, slip = self.calc_limit_price(leg.side, remaining, quote)
+            payload = {
+                "action": leg.side.value,
+                "symbol": leg.symbol,
+                "quantity": remaining,
+                "entry_price": price,
+                "client_oid": client_oid,
+            }
+            self._place_fn(payload)
+            setattr(leg, "slippage_hint", slip)
+        else:
+            leg.on_fill(avg_price)
+
+    def handle_fill(self, client_oid: str, avg_price: float) -> None:
+        leg = self.orders.get(client_oid)
+        if leg:
+            leg.on_fill(avg_price)
+
+    def check_timeouts(self) -> None:
+        now = datetime.utcnow()
+        for leg in self.orders.values():
+            if leg.state in TERMINAL_STATES:
+                continue
+            if leg.expired(now):
+                leg.on_cancel("timeout")
 
 
 def micro_ok(
