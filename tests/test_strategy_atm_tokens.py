@@ -22,11 +22,14 @@ def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
         lambda *a, **k: pd.Series([0.06] * len(df), index=df.index),
     )
 
-    monkeypatch.setattr(
-        ss,
-        "fetch_quote_with_depth",
-        lambda *a, **k: {"bid": 100.0, "ask": 100.0},
-    )
+    seen: dict[str, str] = {}
+
+    def fake_fetch(kite, tsym):
+        seen["tsym"] = tsym
+        return {"bid": 100.0, "ask": 100.0}
+
+    monkeypatch.setattr(ss, "fetch_quote_with_depth", fake_fetch)
+    monkeypatch.setattr(ss, "_token_to_symbol_and_lot", lambda k, t: ("FOO", 50))
     monkeypatch.setattr(
         ss,
         "evaluate_micro",
@@ -69,3 +72,6 @@ def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
     strat.data_source = SimpleNamespace(atm_tokens=(1, 2), current_atm_strike=17050)
     plan = strat.generate_signal(df, current_price=100.0)
     assert plan.get("reason_block") != "no_option_token"
+    assert plan["micro"]["spread_pct"] == 0.1
+    assert plan["micro"]["depth_ok"] is True
+    assert seen["tsym"] == "FOO"
