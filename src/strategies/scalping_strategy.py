@@ -958,16 +958,20 @@ class EnhancedScalpingStrategy:
                 opt_entry = float(mid)
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
+                spot_entry = float(plan["entry"])
+                elasticity = _clamp(
+                    delta * (spot_entry / opt_entry), 0.3, 1.2
+                )
 
                 def _opt_target(spot_target: float) -> float:
-                    spot_move = abs(spot_target - float(plan["entry"]))
-                    spot_dir = 1.0 if spot_target >= plan["entry"] else -1.0
+                    spot_offset = spot_target - spot_entry
                     parity = 1.0 if plan["option_type"] == "CE" else -1.0
-                    opt_dir = spot_dir * parity
-                    prem_move = delta * spot_move
+                    offset = elasticity * spot_offset * parity
                     if plan["action"] == "BUY":
-                        return opt_entry + opt_dir * prem_move
-                    return opt_entry - opt_dir * prem_move
+                        prem = opt_entry + offset
+                    else:
+                        prem = opt_entry - offset
+                    return round(round(prem / tick_size) * tick_size, 2)
 
                 plan["opt_entry"] = opt_entry
                 plan["opt_sl"] = (
