@@ -70,7 +70,7 @@ from src.utils.market_time import (
 )
 from src.utils.time_windows import TZ, floor_to_minute
 
-from .warmup import check as warmup_check, required_bars, warmup_status
+from .warmup import check as warmup_check, required_bars
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -325,6 +325,7 @@ class StrategyRunner:
         self._score_items: dict[str, float] | None = None
         self._score_total: float | None = None
         self._last_bar_count: int = 0
+        self._warmup_log_ts: float = 0.0
 
         self.settings = settings
 
@@ -864,14 +865,21 @@ class StrategyRunner:
             and hasattr(self.data_source, "have_min_bars")
             and not self.data_source.have_min_bars(warm_min)
         ):
-            self._warm = warmup_status(0, warm_min)
-            self.ready = False
-            flow["reason_block"] = "warmup"
-            self._last_flow_debug = flow
-            self.log.info(
-                "Waiting for warmup: %s bars required", warm_min
-            )
-            return
+            ok = False
+            ensure = getattr(self.data_source, "ensure_warmup", None)
+            if callable(ensure):
+                ok = bool(ensure(warm_min))
+            if not ok:
+                self.ready = False
+                flow["reason_block"] = "warmup"
+                self._last_flow_debug = flow
+                now_t = time.time()
+                if now_t - getattr(self, "_warmup_log_ts", 0.0) > 30:
+                    self.log.info(
+                        "Waiting for warmup: %s bars required", warm_min
+                    )
+                    self._warmup_log_ts = now_t
+                return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
         for cb in [
