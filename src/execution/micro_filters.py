@@ -11,8 +11,19 @@ from typing import Any, Dict, Optional, Tuple
 # environment variables at runtime. Values are expressed in percentage points
 # (0.35 => 0.35%).
 MICRO_SPREAD_CAP: float = float(os.getenv("MICRO_SPREAD_CAP", "0.35"))
-# Maximum time to wait for acceptable microstructure before aborting entry.
+# Maximum time (seconds) to wait for acceptable microstructure before aborting entry.
 ENTRY_WAIT_S: float = float(os.getenv("ENTRY_WAIT_S", "8"))
+
+__all__ = [
+    "MICRO_SPREAD_CAP",
+    "ENTRY_WAIT_S",
+    "micro_from_l1",
+    "micro_from_quote",
+    "depth_to_lots",
+    "cap_for_mid",
+    "depth_required_lots",
+    "evaluate_micro",
+]
 
 
 def micro_from_l1(

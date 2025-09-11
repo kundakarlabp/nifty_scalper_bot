@@ -27,4 +27,8 @@ def test_r_lifecycle_trailing(monkeypatch):
     assert rec.trailing_mult == 0.8
 
     ex.update_trailing_stop(rid, current_price=101.5, atr=0.5)
-    assert rec.sl_price >= 101.0
+    first_sl = rec.sl_price
+    assert first_sl >= 101.0
+
+    ex.update_trailing_stop(rid, current_price=101.0, atr=0.5)
+    assert rec.sl_price == first_sl

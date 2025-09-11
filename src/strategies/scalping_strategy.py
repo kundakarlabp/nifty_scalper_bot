@@ -421,6 +421,10 @@ class EnhancedScalpingStrategy:
             "tp1_qty_ratio": None,
             "atm_strike": None,
             "option_token": None,
+            "opt_entry": None,
+            "opt_sl": None,
+            "opt_tp1": None,
+            "opt_tp2": None,
             "opt_atr": None,
         }
 
