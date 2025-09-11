@@ -65,7 +65,8 @@ def test_returns_zero_when_budget_insufficient():
     )
     assert qty == 0
     assert lots == 0
-    assert diag["block_reason"] == "exposure_cap"
+    assert diag["block_reason"] == "too_small_for_one_lot"
+    assert diag["min_equity_needed"] > diag["equity"]
 
 
 def test_min_lots_only_enforced_when_affordable():
@@ -84,7 +85,7 @@ def test_min_lots_only_enforced_when_affordable():
 
 def test_min_lots_rescue_when_affordable():
     sizer = _sizer(risk_per_trade=1e-6)
-    qty, lots, _ = sizer.size_from_signal(
+    qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
         stop_loss=195.0,
         lot_size=50,
@@ -92,8 +93,9 @@ def test_min_lots_rescue_when_affordable():
         spot_sl_points=5.0,
         delta=0.5,
     )
-    assert qty == 50
-    assert lots == 1
+    assert qty == 0
+    assert lots == 0
+    assert diag["block_reason"] == "too_small_for_one_lot"
 
 
 def test_underlying_basis_caps_by_spot():

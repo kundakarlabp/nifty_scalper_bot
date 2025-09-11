@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Literal, cast
+from src.config import settings
 from zoneinfo import ZoneInfo
 import os
 import logging
@@ -181,6 +182,19 @@ class RiskEngine:
             unit_notional = mid * lot_size
         else:
             unit_notional = spot_price * lot_size
+        if basis == "premium" and intended_lots < 1:
+            max_pos_pct = float(getattr(settings.risk, "max_position_size_pct", 1.0))
+            min_eq_needed = (
+                unit_notional / max_pos_pct if max_pos_pct > 0 else unit_notional
+            )
+            return (
+                False,
+                "too_small_for_one_lot",
+                {
+                    "unit_notional": round(unit_notional, 2),
+                    "min_equity_needed": round(min_eq_needed, 2),
+                },
+            )
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
             log.info(
