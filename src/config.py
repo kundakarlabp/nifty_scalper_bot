@@ -401,6 +401,7 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
+    exposure_basis: Literal["premium", "underlying"] = "premium"
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200

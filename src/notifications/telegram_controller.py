@@ -1377,7 +1377,8 @@ class TelegramController:
             if expo:
                 notional = expo.get("notional_rupees", 0.0)
                 lots = expo.get("lots_by_symbol", {})
-                exp_line = f"exposure: notional ₹{notional:,.0f}"
+                basis = expo.get("basis", "premium")
+                exp_line = f"exposure: notional ({basis}) ₹{notional:,.0f}"
                 for sym, lot_count in lots.items():
                     exp_line += f"  {sym}: {lot_count} lots"
                 lines.append(exp_line)
