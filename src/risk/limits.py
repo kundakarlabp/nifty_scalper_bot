@@ -33,9 +33,18 @@ class LimitConfig:
     max_portfolio_delta_units_gamma: int = 60
     roll10_pause_R: float = -0.2
     roll10_pause_minutes: int = 60
+    # Maximum consecutive losing trades before a cooloff is enforced.
+    # `cooloff_losses` is kept for backwards compatibility.
     cooloff_losses: int = 3
+    max_consec_losses: int = 3
     cooloff_minutes: int = 45
     skip_next_open_after_two_daily_caps: bool = True
+    # Maximum realised loss in premium (rupee) terms before halting for the day.
+    max_daily_loss_rupees: float = 1_000_000.0
+
+    def __post_init__(self) -> None:
+        if self.max_consec_losses == 3 and self.cooloff_losses != 3:
+            self.max_consec_losses = self.cooloff_losses
 
 
 @dataclass
@@ -53,6 +62,7 @@ class RiskState:
     tz: str = "Asia/Kolkata"
     session_date: Optional[str] = None
     cum_R_today: float = 0.0
+    cum_loss_rupees: float = 0.0
     trades_today: int = 0
     consecutive_losses: int = 0
     roll_R_last10: List[float] = field(default_factory=list)
@@ -67,6 +77,7 @@ class RiskState:
         if self.session_date != d:
             self.session_date = d
             self.cum_R_today = 0.0
+            self.cum_loss_rupees = 0.0
             self.trades_today = 0
             self.consecutive_losses = 0
             self.cooloff_until = None
@@ -140,6 +151,13 @@ class RiskEngine:
                 False,
                 "daily_dd_hit",
                 {"cum_R_today": round(self.state.cum_R_today, 2)},
+            )
+
+        if self.state.cum_loss_rupees <= -abs(self.cfg.max_daily_loss_rupees):
+            return (
+                False,
+                "daily_premium_loss",
+                {"cum_loss_rupees": round(self.state.cum_loss_rupees, 2)},
             )
 
         if self.state.trades_today >= self.cfg.max_trades_per_session:
@@ -268,7 +286,7 @@ class RiskEngine:
                     },
                 )
 
-        if self.state.consecutive_losses >= self.cfg.cooloff_losses:
+        if self.state.consecutive_losses >= self.cfg.max_consec_losses:
             self.state.cooloff_until = now + timedelta(minutes=self.cfg.cooloff_minutes)
             return (
                 False,
@@ -284,12 +302,14 @@ class RiskEngine:
         return True, "", details
 
     # -------- POST-TRADE UPDATE --------
-    def on_trade_closed(self, *, pnl_R: float) -> None:
+    def on_trade_closed(self, *, pnl_R: float, pnl_rupees: float | None = None) -> None:
         now = self._now()
         self.state.new_session_if_needed(now)
 
         self.state.trades_today += 1
         self.state.cum_R_today += pnl_R
+        if pnl_rupees is not None:
+            self.state.cum_loss_rupees += pnl_rupees
         self.state.roll_R_last10.append(pnl_R)
         if len(self.state.roll_R_last10) > 20:
             self.state.roll_R_last10 = self.state.roll_R_last10[-20:]
@@ -315,6 +335,7 @@ class RiskEngine:
         return {
             "session_date": self.state.session_date,
             "cum_R_today": round(self.state.cum_R_today, 3),
+            "cum_loss_rupees": round(self.state.cum_loss_rupees, 2),
             "trades_today": self.state.trades_today,
             "consecutive_losses": self.state.consecutive_losses,
             "cooloff_until": (
