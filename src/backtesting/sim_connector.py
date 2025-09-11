@@ -100,6 +100,27 @@ class SimConnector:
             "spread_pct": spr_pct,
         }
 
+    def ioc_fill(
+        self, side: str, ob: Dict[str, float], qty: int
+    ) -> Tuple[bool, float, float]:
+        """Simulate an IOC order using a premium mid price.
+
+        Orders are executed at ``mid ± 0.5 * spread`` depending on ``side``.
+        The fill succeeds only if the available depth can absorb ``qty``.
+
+        Returns a tuple ``(filled, price, slippage)``.
+        """
+
+        depth_key = "ask5" if side == "BUY" else "bid5"
+        if qty > ob.get(depth_key, 0):
+            return False, 0.0, 0.0
+
+        spread = ob["ask"] - ob["bid"]
+        mid = ob["mid"]
+        price = mid + 0.5 * spread if side == "BUY" else mid - 0.5 * spread
+        slippage = abs(price - mid)
+        return True, price, slippage
+
     def ladder_prices(self, mid: float, spread: float) -> Tuple[float, float]:
         """Return two ladder prices inside the spread."""
 

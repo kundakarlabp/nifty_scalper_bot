@@ -90,7 +90,6 @@ class BacktestEngine:
             )
             spread = ob["ask"] - ob["bid"]
             mid = ob["mid"]
-            ladd0, ladd1 = self.sim.ladder_prices(mid, spread)
 
             ok, _, _ = self.risk.pre_trade_check(
                 equity_rupees=self.equity,
@@ -99,8 +98,8 @@ class BacktestEngine:
                 intended_symbol=tsym,
                 intended_lots=plan.get("qty_lots", 1),
                 lot_size=self.sim.lot_size,
-                entry_price=ladd0,
-                stop_loss_price=plan.get("sl") or max(0.5, ladd0 - (spread * 2)),
+                entry_price=mid,
+                stop_loss_price=plan.get("sl") or max(0.5, mid - (spread * 2)),
                 spot_price=c,
                 quote={"mid": mid},
             )
@@ -110,41 +109,30 @@ class BacktestEngine:
                 continue
 
             side = "BUY" if plan.get("action") == "BUY" else "SELL"
-            if side == "BUY":
-                ok0, px0 = self.sim.fill_limit_buy(ladd0, ob["bid"], ob["ask"])
-                if not ok0:
-                    ok1, px1 = self.sim.fill_limit_buy(ladd1, ob["bid"], ob["ask"])
-                    if not ok1:
-                        continue
-                    entry_px = px1
-                else:
-                    entry_px = px0
-            else:
-                ok0, px0 = self.sim.fill_limit_sell(ladd0, ob["bid"], ob["ask"])
-                if not ok0:
-                    ok1, px1 = self.sim.fill_limit_sell(ladd1, ob["bid"], ob["ask"])
-                    if not ok1:
-                        continue
-                    entry_px = px1
-                else:
-                    entry_px = px0
-
+            entry_ts = ts + timedelta(seconds=plan.get("entry_wait", 0))
             qty = self.sim.lot_size * plan.get("qty_lots", 1)
+            ok0, entry_px, slippage = self.sim.ioc_fill(side, ob, qty)
+            if not ok0:
+                continue
             costs_in = self.sim.apply_costs(
                 "BUY" if side == "BUY" else "SELL", entry_px, qty
             )
             R = abs((plan.get("sl") or (entry_px - spread)) - entry_px)
             tp1 = entry_px + plan.get("tp1_R", 1.0) * R * (1 if side == "BUY" else -1)
             _tp2 = entry_px + plan.get("tp2_R", 1.6) * R * (1 if side == "BUY" else -1)
-            time_stop_ts = ts + timedelta(minutes=plan.get("time_stop_min", 12))
+            time_stop_ts = entry_ts + timedelta(minutes=plan.get("time_stop_min", 12))
 
             exit_px = None
             exit_ts = None
             exit_reason = "time"
+            mae = 0.0
             for fts, _fo, fh, fl, fc, _fv in self.feed.iter_bars():
-                if fts <= ts:
+                if fts <= entry_ts:
                     continue
-                hi, lo = (fh, fl) if side == "BUY" else (fl, fh)
+                if side == "BUY":
+                    mae = max(mae, entry_px - fl)
+                else:
+                    mae = max(mae, fh - entry_px)
                 if (side == "BUY" and fh >= tp1) or (side == "SELL" and fl <= tp1):
                     exit_px, exit_ts, exit_reason = tp1, fts, "TP1"
                     break
@@ -172,7 +160,7 @@ class BacktestEngine:
 
             self.trades.append(
                 {
-                    "ts_entry": ts.isoformat(),
+                    "ts_entry": entry_ts.isoformat(),
                     "ts_exit": exit_ts.isoformat(),
                     "side": side,
                     "strike": tsym,
@@ -184,6 +172,8 @@ class BacktestEngine:
                     "pnl_R": round(pnl_R, 2),
                     "pnl_rupees": round(net, 2),
                     "regime": plan.get("regime", "TREND"),
+                    "slippage": round(slippage, 2),
+                    "mae": round(mae, 2),
                 }
             )
             self.risk.on_trade_closed(pnl_R=pnl_R)
@@ -255,6 +245,9 @@ class BacktestEngine:
         pf = (sum(pos) / sum(neg)) if neg else float("inf")
         win = (sum(1 for r in rs if r > 0) / len(rs)) * 100.0
         avgR = sum(rs) / len(rs)
+        pnl = sum(float(t.get("pnl_rupees", 0.0)) for t in trades)
+        slippages = [float(t.get("slippage", 0.0)) for t in trades]
+        max_ae = max(float(t.get("mae", 0.0)) for t in trades)
         eq = 0.0
         peak = 0.0
         mdd = 0.0
@@ -268,6 +261,10 @@ class BacktestEngine:
             "Win%": round(win, 1),
             "AvgR": round(avgR, 2),
             "MaxDD_R": round(-mdd, 2),
+            "PnL": round(pnl, 2),
+            "HitRate": round(win, 1),
+            "AvgSlippage": round(sum(slippages) / len(slippages), 2),
+            "MaxAE": round(max_ae, 2),
         }
 
     def _exposure_snapshot(self) -> Exposure:
