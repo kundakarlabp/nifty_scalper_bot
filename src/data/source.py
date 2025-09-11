@@ -217,6 +217,15 @@ class DataSource:
         df = _normalize_ohlc_df(res.df)
         return len(df) >= n
 
+    def ensure_warmup(self, n: int) -> bool:
+        """Best-effort warmup to have at least ``n`` recent bars.
+
+        Default implementation simply checks :meth:`have_min_bars`.
+        Subclasses may override to provide broker backfill or live tick
+        aggregation. Returns ``True`` once the requirement is met.
+        """
+        return self.have_min_bars(n)
+
 
 # Accept a few common aliases; default to 'minute'
 _INTERVAL_MAP: Dict[str, str] = {
@@ -968,6 +977,32 @@ class LiveKiteSource(DataSource, BaseDataSource):
         res = self.fetch_ohlc(token=token, start=start, end=end, timeframe="minute")
         df = _normalize_ohlc_df(res.df)
         return len(df) >= n
+
+    def ensure_warmup(self, n: int) -> bool:
+        """Try broker backfill, else fall back to live tick aggregation."""
+        if self.have_min_bars(n):
+            return True
+        token = 0
+        try:
+            token = int(getattr(settings.instruments, "instrument_token", 0) or 0)
+        except Exception:
+            token = 0
+
+        if self.hist_mode != "live_warmup" and token > 0:
+            try:
+                self.ensure_backfill(
+                    required_bars=n, token=token, timeframe="minute"
+                )
+            except Exception:
+                pass
+            if self.have_min_bars(n):
+                return True
+
+        # Broker backfill unavailable; switch to live warmup using bar builder
+        self.hist_mode = "live_warmup"
+        if self.bar_builder is None:
+            self.bar_builder = MinuteBarBuilder(max_bars=120)
+        return self.have_min_bars(n)
 
     # ---- main candle fetch ----
     def _fetch_ohlc_df(
