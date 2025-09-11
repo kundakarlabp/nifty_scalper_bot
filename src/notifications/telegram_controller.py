@@ -576,13 +576,16 @@ class TelegramController:
                 else {}
             )
             eq = getattr(runner, "_equity_cached_value", 0.0)
+            ex = getattr(runner, "executor", None)
+            trail_on = bool(getattr(ex, "enable_trailing", False))
             lines = [
                 (
                     f"eq={round(float(eq),2)} trades={status.get('trades_today')} "
                     f"cooloff={status.get('cooloff_until', '-')} "
                     f"losses={status.get('consecutive_losses')} "
                     f"evals={getattr(runner, 'eval_count', 0)} "
-                    f"tp_basis={getattr(settings, 'tp_basis', 'premium')}"
+                    f"tp_basis={getattr(settings, 'tp_basis', 'premium')} "
+                    f"trail={'on' if trail_on else 'off'}"
                 )
             ]
             lines.append(

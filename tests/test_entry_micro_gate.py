@@ -40,7 +40,10 @@ def test_place_order_waits_and_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(oe.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(oe.time, "sleep", fake_sleep)
 
+    calls: list[str | None] = []
+
     def refresh():
+        calls.append(ex.last_error)
         return (100.0, 100.1, (ex.lot_size * 10, ex.lot_size * 10))
 
     payload = {
@@ -58,4 +61,6 @@ def test_place_order_waits_and_succeeds(monkeypatch) -> None:
     rid = ex.place_order(payload)
     assert rid is not None
     assert ex.last_error is None
+    assert "micro_wait" in calls
+    assert fake_time["t"] > 0
 

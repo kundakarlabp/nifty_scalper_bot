@@ -245,8 +245,13 @@ def test_state_outputs_metrics(monkeypatch) -> None:
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/state"}})
     msg = sent[0]
-    assert "eq=1000.0" in msg and "trades=2" in msg and "losses=1" in msg and "evals=7" in msg
-    assert "opt: entry=" in msg and "tp_basis=" in msg
+    assert (
+        "eq=1000.0" in msg
+        and "trades=2" in msg
+        and "losses=1" in msg
+        and "evals=7" in msg
+    )
+    assert "opt: entry=" in msg and "tp_basis=" in msg and "trail=" in msg
 
 
 def test_atrmin_updates_config(monkeypatch) -> None:

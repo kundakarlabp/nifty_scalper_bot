@@ -58,6 +58,9 @@ __all__ = ["OrderExecutor", "OrderReconciler", "micro_ok", "fetch_quote_with_dep
 
 BROKER_EXCEPTIONS = (NetworkException, TokenException, InputException)
 
+# Default multiplier for option-premium ATR trailing
+TRAIL_ATR_OPT_MULT: float = float(os.getenv("TRAIL_ATR_OPT_MULT", "0.8"))
+
 
 # ------------------- small helpers -------------------
 def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
@@ -472,7 +475,9 @@ class OrderExecutor:
         self.tp1_ratio = float(getattr(ex, "tp1_qty_ratio", 0.5))
         self.breakeven_ticks = int(getattr(ex, "breakeven_ticks", 2))
         self.enable_trailing = bool(getattr(ex, "enable_trailing", True))
-        self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
+        self.trailing_mult = float(
+            getattr(ex, "trailing_atr_multiplier", TRAIL_ATR_OPT_MULT)
+        )
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
         self.entry_slip = float(getattr(ex, "entry_slippage_pct", 0.25)) / 100.0
         self.exit_slip = float(getattr(ex, "exit_slippage_pct", 0.25)) / 100.0
@@ -1130,23 +1135,28 @@ class OrderExecutor:
             rec = self._active.get(record_id)
         if not rec or not rec.is_open:
             return
-        if not rec.trailing_enabled or atr <= 0 or current_price <= 0:
+        if (
+            not rec.trailing_enabled
+            or atr <= 0
+            or current_price <= 0
+            or not rec.tp1_done
+        ):
             return
-
         m = float(atr_multiplier or rec.trailing_mult)
         if rec.side == "BUY":
             proposed = _round_to_tick(current_price - m * atr, rec.tick_size)
-            if rec.tp1_done and rec.sl_price is not None:
+            if rec.sl_price is not None:
                 proposed = max(proposed, rec.sl_price)
         else:
             proposed = _round_to_tick(current_price + m * atr, rec.tick_size)
-            if rec.tp1_done and rec.sl_price is not None:
+            if rec.sl_price is not None:
                 proposed = min(proposed, rec.sl_price)
 
-        rec.sl_price = proposed
-        self._refresh_sl_gtt(
-            rec, sl_price=proposed, qty=rec.remaining_qty or rec.quantity
-        )
+        if proposed != rec.sl_price:
+            rec.sl_price = proposed
+            self._refresh_sl_gtt(
+                rec, sl_price=proposed, qty=rec.remaining_qty or rec.quantity
+            )
 
     def handle_tp1_fill(self, record_id: str) -> None:
         """Internal helper used to apply TP1 partial exit effects."""
@@ -1160,8 +1170,8 @@ class OrderExecutor:
             rec.quantity -= tp_qty
             if rec.quantity < 0:
                 rec.quantity = 0
-        new_sl = rec.entry_price + rec.side_sign() * 0.1 * rec.r_value
-        rec.sl_price = _round_to_tick(new_sl, rec.tick_size)
+        # Move SL to breakeven after TP1 fill
+        rec.sl_price = _round_to_tick(rec.entry_price, rec.tick_size)
         rec.trailing_mult = rec.trail_atr_mult or rec.trailing_mult
         self._refresh_sl_gtt(
             rec, sl_price=rec.sl_price, qty=rec.remaining_qty or rec.quantity

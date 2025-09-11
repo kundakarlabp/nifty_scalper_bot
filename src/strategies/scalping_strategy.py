@@ -263,6 +263,10 @@ class EnhancedScalpingStrategy:
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
+        # Option premium ATR window
+        self._opt_window: Deque[Dict[str, float]] = getattr(
+            self, "_opt_window", deque(maxlen=30)
+        )
 
     # ---------- tech utils ----------
     @staticmethod
@@ -801,7 +805,12 @@ class EnhancedScalpingStrategy:
             # Fetch quote/depth using whichever identifier we have
             q = fetch_quote_with_depth(getattr(settings, "kite", None), quote_id)
             plan["_last_quote"] = q
-            mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
+            bid_q = float(q.get("bid", 0.0))
+            ask_q = float(q.get("ask", 0.0))
+            mid = (bid_q + ask_q) / 2.0
+            self._opt_window.append({"high": ask_q, "low": bid_q, "close": mid})
+            opt_df = pd.DataFrame(self._opt_window)
+            plan["option_atr"] = latest_atr_value(compute_atr(opt_df, period=14))
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
             if not isinstance(micro, dict):
@@ -962,7 +971,9 @@ class EnhancedScalpingStrategy:
                 )
             )
             if mid:
-                opt_entry = float(mid)
+                opt_entry = round(
+                    round(float(mid) / tick_size) * tick_size, 2
+                )
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
                 spot_entry = float(plan["entry"])
@@ -990,6 +1001,12 @@ class EnhancedScalpingStrategy:
                 plan["opt_tp2"] = (
                     _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
                 )
+                for k in ("opt_sl", "opt_tp1", "opt_tp2"):
+                    if plan.get(k) is not None:
+                        plan[k] = round(
+                            round(float(plan[k]) / tick_size) * tick_size,
+                            2,
+                        )
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss
