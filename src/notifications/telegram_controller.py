@@ -129,7 +129,7 @@ class TelegramController:
         limits_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         risk_reset_today: Optional[Callable[[], None]] = None,
         bars_provider: Optional[Callable[[int], str]] = None,
-        quotes_provider: Optional[Callable[[str], str]] = None,
+        quotes_provider: Optional[Callable[..., str]] = None,
         probe_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         trace_provider: Optional[Callable[[int], None]] = None,
         selftest_provider: Optional[Callable[[str], str]] = None,
@@ -1173,8 +1173,11 @@ class TelegramController:
         if cmd == "/quotes":
             try:
                 if self._quotes_provider:
-                    sym = args[0] if args else ""
-                    return self._send(self._quotes_provider(sym))
+                    opt = args[0] if args else "both"
+                    runner = StrategyRunner.get_singleton()
+                    if runner is None:
+                        return self._send("runner not ready")
+                    return self._send(self._quotes_provider(opt, runner=runner))
                 plan = (
                     self._last_signal_provider() if self._last_signal_provider else {}
                 )
