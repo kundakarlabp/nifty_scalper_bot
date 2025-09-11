@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Literal
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -19,6 +22,8 @@ class SizingInputs:
     lot_size: int
     equity: float
     spot_price: float = 0.0
+    spot_sl_points: float = 0.0
+    delta: float | None = None
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,7 @@ class PositionSizer:
 
     def __init__(
         self,
-        risk_per_trade,
+        risk_per_trade: float | None = None,
         min_lots: int | None = None,
         max_lots: int | None = None,
         max_position_size_pct: float | None = None,
@@ -74,28 +79,28 @@ class PositionSizer:
         ):
             rs = risk_per_trade
             risk_per_trade = getattr(rs, "risk_per_trade")
-            min_lots = getattr(rs, "min_lots", 1)
-            max_lots = getattr(rs, "max_lots", 10)
-            max_position_size_pct = getattr(rs, "max_position_size_pct", 0.10)
+            min_lots = getattr(rs, "min_lots", None)
+            max_lots = getattr(rs, "max_lots", None)
+            max_position_size_pct = getattr(rs, "max_position_size_pct", None)
             exposure_basis = getattr(rs, "exposure_basis", None)
 
-        if (
-            min_lots is None
-            or max_lots is None
-            or max_position_size_pct is None
-            or risk_per_trade is None
-        ):
-            raise TypeError(
-                "PositionSizer requires either a risk settings object or explicit parameters"
-            )
-
+        risk_per_trade = float(
+            risk_per_trade
+            if risk_per_trade is not None
+            else os.getenv("RISK__RISK_PER_TRADE_PCT", 0.01)
+        )
+        min_lots = int(min_lots if min_lots is not None else os.getenv("RISK__MIN_LOTS", 1))
+        max_lots = int(max_lots if max_lots is not None else os.getenv("RISK__MAX_LOTS", 10))
+        max_position_size_pct = float(
+            max_position_size_pct if max_position_size_pct is not None else 0.10
+        )
         exposure_basis = exposure_basis or os.getenv("EXPOSURE_BASIS", "premium")
 
         if risk_per_trade <= 0 or risk_per_trade > 0.10:
             raise ValueError("risk_per_trade must be within (0, 0.10].")
         if min_lots <= 0 or max_lots <= 0 or max_lots < min_lots:
             raise ValueError(
-                "min_lots and max_lots must be positive and max_lots >= min_lots."
+                "min_lots and max_lots must be positive and max_lots >= min_lots.",
             )
         if max_position_size_pct < 0 or max_position_size_pct > 1:
             raise ValueError("max_position_size_pct must be within [0, 1].")
@@ -107,7 +112,6 @@ class PositionSizer:
             max_position_size_pct=max_position_size_pct,
             exposure_basis=str(exposure_basis),
         )
-
     @classmethod
     def from_settings(
         cls,
@@ -135,97 +139,102 @@ class PositionSizer:
         lot_size: int,
         equity: float,
         spot_price: float | None = None,
+        spot_sl_points: float | None = None,
+        delta: float | None = None,
+        quote: Dict | None = None,
     ) -> Tuple[int, int, Dict]:
+        mid = self._mid_from_quote(quote) if quote else float(entry_price)
+        sl_points_spot = (
+            float(spot_sl_points)
+            if spot_sl_points is not None
+            else abs(float(spot_price or 0.0) - float(stop_loss))
+        )
         si = SizingInputs(
-            entry_price=float(entry_price),
+            entry_price=float(mid),
             stop_loss=float(stop_loss),
             lot_size=int(lot_size),
             equity=float(equity),
             spot_price=float(spot_price or 0.0),
+            spot_sl_points=sl_points_spot,
+            delta=delta,
         )
         qty, lots, diag = self._compute_quantity(si, self.params)
         return qty, lots, diag
 
     @staticmethod
+    def _mid_from_quote(q: Dict | None) -> float:
+        if not q:
+            return 0.0
+        mid = q.get("mid")
+        if mid is None:
+            bid = q.get("bid")
+            ask = q.get("ask")
+            if bid is not None and ask is not None:
+                mid = (bid + ask) / 2
+            else:
+                mid = q.get("ltp", 0.0)
+        return float(mid)
+
+    @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
-        # Basic input validation
-        if (
-            si.entry_price <= 0
-            or si.stop_loss <= 0
-            or si.lot_size <= 0
-            or si.equity <= 0
-        ):
-            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0)
+        if si.entry_price <= 0 or si.lot_size <= 0 or si.equity <= 0:
+            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0, 0)
 
-        sl_points = abs(si.entry_price - si.stop_loss)
-        if sl_points <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0)
+        spot_sl_points = abs(si.spot_sl_points)
+        if spot_sl_points <= 0:
+            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0, 0)
 
-        # Risk math
+        delta = si.delta if si.delta is not None else 0.5
+        delta = max(0.25, min(0.75, delta))
+        opt_sl_points = abs(spot_sl_points * delta)
+        risk_per_lot_rupees = max(0.5, opt_sl_points) * si.lot_size
+
         risk_rupees = si.equity * sp.risk_per_trade
-        rupee_risk_per_lot = sl_points * si.lot_size
-        if rupee_risk_per_lot <= 0:
-            return (
-                0,
-                0,
-                PositionSizer._diag(si, sp, sl_points, 0, risk_rupees, 0, 0, 0, 0),
-            )
+        max_lots_risk = int(risk_rupees // risk_per_lot_rupees) if risk_per_lot_rupees > 0 else 0
 
-        # Lots affordable under risk budget
-        lots_raw = int(risk_rupees // rupee_risk_per_lot)
-
-        # If the risk budget can't fund even a single lot, exit early
-        if lots_raw < 1:
-            return (
-                0,
-                0,
-                PositionSizer._diag(
-                    si,
-                    sp,
-                    sl_points,
-                    rupee_risk_per_lot,
-                    risk_rupees,
-                    lots_raw,
-                    0,
-                    0,
-                    0,
-                ),
-            )
-
-        # Enforce min/max only when at least one lot is affordable
-        lots = max(lots_raw, sp.min_lots)
-        lots = min(lots, sp.max_lots)
-
-        # Exposure cap (notional)
         if sp.exposure_basis == "premium":
             unit_notional = si.entry_price * si.lot_size
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
 
-        exposure_notional = unit_notional * lots
-        max_notional = (
+        exposure_cap = (
             si.equity * sp.max_position_size_pct
             if sp.max_position_size_pct > 0
             else float("inf")
         )
-        if exposure_notional > max_notional:
-            denom = unit_notional
-            lots_cap = int(max_notional // denom) if denom > 0 else 0
-            lots = max(min(lots_cap, lots), 0)
-            # recompute after cap so diagnostics reflect the final state
-            exposure_notional = unit_notional * lots
+        max_lots_exposure = int(exposure_cap // unit_notional) if unit_notional > 0 else 0
+        max_lots_limit = sp.max_lots
+        lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
+        if lots == 0 and unit_notional <= exposure_cap and sp.min_lots <= max_lots_limit:
+            lots = sp.min_lots
 
+        if lots == 0:
+            logger.info(
+                "sizer: basis=%s mid=%.2f lot=%d unit=%.2f risk/lot=%.2f caps: exposure=%d risk=%d limit=%d -> lots=%d",
+                sp.exposure_basis,
+                si.entry_price,
+                si.lot_size,
+                unit_notional,
+                risk_per_lot_rupees,
+                max_lots_exposure,
+                max_lots_risk,
+                max_lots_limit,
+                lots,
+            )
+
+        exposure_notional = unit_notional * lots
         quantity = lots * si.lot_size
         diag = PositionSizer._diag(
             si,
             sp,
-            sl_points,
-            rupee_risk_per_lot,
+            spot_sl_points,
+            risk_per_lot_rupees,
             risk_rupees,
-            lots_raw,
+            max_lots_exposure,
+            max_lots_risk,
             lots,
-            exposure_notional,
-            0.0 if max_notional == float("inf") else max_notional,
+            unit_notional,
+            exposure_cap,
         )
         return quantity, lots, diag
 
@@ -233,29 +242,30 @@ class PositionSizer:
     def _diag(
         si: SizingInputs,
         sp: SizingParams,
-        sl_points: float,
-        rupee_risk_per_lot: float,
+        spot_sl_points: float,
+        risk_per_lot: float,
         risk_rupees: float,
-        lots_raw: int,
-        lots_capped: int,
-        exposure_notional: float,
-        max_notional: float,
+        max_lots_exposure: int,
+        max_lots_risk: int,
+        lots_final: int,
+        unit_notional: float,
+        exposure_cap: float,
     ) -> Dict:
-        # Round floats for compact Telegram display and logs
         return {
             "entry_price": round(si.entry_price, 4),
-            "stop_loss": round(si.stop_loss, 4),
             "equity": round(si.equity, 2),
             "lot_size": int(si.lot_size),
             "risk_per_trade": float(sp.risk_per_trade),
             "min_lots": int(sp.min_lots),
             "max_lots": int(sp.max_lots),
             "max_position_size_pct": float(sp.max_position_size_pct),
-            "sl_points": round(sl_points, 4),
-            "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
+            "spot_sl_points": round(spot_sl_points, 4),
+            "delta": None if si.delta is None else float(si.delta),
+            "risk_per_lot": round(risk_per_lot, 2),
             "risk_rupees": round(risk_rupees, 2),
-            "lots_raw": int(lots_raw),
-            "lots_final": int(lots_capped),
-            "exposure_notional_est": round(exposure_notional, 2),
-            "max_notional_cap": round(max_notional, 2),
+            "unit_notional": round(unit_notional, 2),
+            "max_lots_exposure": int(max_lots_exposure),
+            "max_lots_risk": int(max_lots_risk),
+            "lots_final": int(lots_final),
+            "exposure_cap": round(exposure_cap, 2),
         }

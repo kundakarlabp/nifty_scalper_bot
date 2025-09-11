@@ -674,7 +674,12 @@ class TelegramController:
                 exposure_basis=settings.risk.exposure_basis,
             )
             qty, lots, diag = ps.size_from_signal(
-                entry_price=200, stop_loss=190, lot_size=50, equity=100_000
+                entry_price=200,
+                stop_loss=190,
+                lot_size=50,
+                equity=100_000,
+                spot_sl_points=10,
+                delta=0.5,
             )
             return self._send(
                 f"risk%={settings.risk.risk_per_trade} rupees={diag['risk_rupees']} lots={lots} qty={qty}"

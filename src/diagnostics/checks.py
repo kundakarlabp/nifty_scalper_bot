@@ -192,7 +192,12 @@ def check_sizing() -> CheckResult:
         exposure_basis=settings.risk.exposure_basis,
     )
     qty, lots, diag = ps.size_from_signal(
-        entry_price=200, stop_loss=190, lot_size=50, equity=100_000
+        entry_price=200,
+        stop_loss=190,
+        lot_size=50,
+        equity=100_000,
+        spot_sl_points=10,
+        delta=0.5,
     )
     expected = 100_000 * float(settings.risk.risk_per_trade)
     ok = diag["risk_rupees"] == expected
