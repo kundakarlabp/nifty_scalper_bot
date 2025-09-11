@@ -251,6 +251,17 @@ def calculate_bb_width(
     return width
 
 
+def calculate_bb_percent(
+    close: SeriesOrDF, window: int = 20, std: float = 2.0
+) -> pd.Series:
+    """Return Bollinger %B (0 at lower band, 1 at upper band)."""
+
+    s = _series(close, "close")
+    upper, lower = calculate_bollinger_bands(s, window=window, std=std)
+    width = upper - lower
+    return (s - lower) / width.replace(0, np.nan)
+
+
 # ---------------------------------- ADX ----------------------------------- #
 def calculate_adx(
     high_or_df: SeriesOrDF,
@@ -314,6 +325,13 @@ def calculate_adx(
     dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     adx = dx.rolling(window=period, min_periods=period).mean()
     return adx, plus_di, minus_di
+
+
+def calculate_adx_slope(adx: SeriesOrDF, period: int = 1) -> pd.Series:
+    """Return ADX slope over ``period`` bars."""
+
+    s = _series(adx, "adx")
+    return s.diff(period)
 
 
 # --------------------------------- VWAP ----------------------------------- #

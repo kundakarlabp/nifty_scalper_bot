@@ -23,6 +23,8 @@ from src.strategies.patches import _resolve_min_atr_pct
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_adx,
+    calculate_adx_slope,
+    calculate_bb_percent,
     calculate_bb_width,
     calculate_macd,
     calculate_vwap,
@@ -130,8 +132,14 @@ def _range_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
     raw = dist / (bandw / (df["atr"].iloc[-1] or 1e-9))
     s = _clamp(raw)
     wide_pen = _clamp((dev.iloc[-1] / (mid.iloc[-1] or 1e-9)) * 4.0)
-    s = _clamp(s * (1.0 - 0.5 * wide_pen))
-    det = ScoreDetails("RANGE", {"mr_dist": s, "wide_pen": wide_pen}, s)
+    bbp = float(calculate_bb_percent(df["close"], window=period).iloc[-1])
+    chop_pen = _clamp(1.0 - abs(bbp - 0.5) * 2.0)
+    s = _clamp(s * (1.0 - 0.5 * wide_pen) * (1.0 - 0.5 * chop_pen))
+    det = ScoreDetails(
+        "RANGE",
+        {"mr_dist": s, "wide_pen": wide_pen, "chop_pen": chop_pen, "bb_percent": bbp},
+        s,
+    )
     return s, det
 
 
@@ -438,6 +446,8 @@ class EnhancedScalpingStrategy:
             "raw": 0.0,
             "final": 0.0,
             "threshold": 0.0,
+            "bb_percent": None,
+            "adx_slope": None,
         }
 
         plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
@@ -454,6 +464,8 @@ class EnhancedScalpingStrategy:
                     "raw": 0.0,
                     "final": 0.0,
                     "threshold": 0.0,
+                    "bb_percent": plan.get("bb_percent"),
+                    "adx_slope": plan.get("adx_slope"),
                 },
             )
             sd.setdefault("components", {})
@@ -462,6 +474,8 @@ class EnhancedScalpingStrategy:
             sd.setdefault("raw", 0.0)
             sd.setdefault("final", 0.0)
             sd.setdefault("threshold", 0.0)
+            sd.setdefault("bb_percent", plan.get("bb_percent"))
+            sd.setdefault("adx_slope", plan.get("adx_slope"))
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
@@ -606,13 +620,30 @@ class EnhancedScalpingStrategy:
                     adx_series, di_plus, di_minus = calculate_adx(spot_df)
                 except Exception:
                     adx_series = di_plus = di_minus = None
+            adx_slope_val = (
+                float(calculate_adx_slope(adx_series).iloc[-1])
+                if adx_series is not None and len(adx_series) > 1
+                else None
+            )
             bb_width = spot_df.get("bb_width")
             if bb_width is None:
                 try:
                     bb_width = calculate_bb_width(spot_df["close"], use_percentage=True)
                 except Exception:
                     bb_width = None
+            bb_percent_val = None
+            try:
+                bbp_series = calculate_bb_percent(spot_df["close"])
+                bb_percent_val = float(bbp_series.iloc[-1])
+            except Exception:
+                bb_percent_val = None
             plan["adx"] = float(adx_series.iloc[-1]) if adx_series is not None else None
+            plan["adx_slope"] = adx_slope_val
+            plan["bb_percent"] = bb_percent_val
+            sd = plan.get("score_dbg")
+            if isinstance(sd, dict):
+                sd["bb_percent"] = bb_percent_val
+                sd["adx_slope"] = adx_slope_val
             reg = detect_market_regime(
                 df=df,
                 adx=adx_series,
@@ -887,6 +918,8 @@ class EnhancedScalpingStrategy:
                 "threshold": self._normalize_min_score(
                     float(strat_cfg.get("min_score", 0.35))
                 ),
+                "bb_percent": bb_percent_val,
+                "adx_slope": adx_slope_val,
             }
             plan["reasons"] = reasons
 
