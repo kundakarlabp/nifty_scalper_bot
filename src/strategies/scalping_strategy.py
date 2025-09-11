@@ -264,6 +264,7 @@ class EnhancedScalpingStrategy:
         self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
         self._opt_window: Deque[float] = getattr(self, "_opt_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
+        self._next_atm_roll_ts: float = 0.0
 
     # ---------- tech utils ----------
     @staticmethod
@@ -761,11 +762,14 @@ class EnhancedScalpingStrategy:
                 if now_dt.weekday() == 1 and last_resolved != now_dt.date():
                     need_resolve = True
                 if need_resolve:
-                    try:
-                        ds.ensure_atm_tokens()
-                    except Exception:
-                        logger.debug("ensure_atm_tokens failed", exc_info=True)
-                    strike_ds = getattr(ds, "current_atm_strike", strike_ds)
+                    now_roll = time.time()
+                    if now_roll >= getattr(self, "_next_atm_roll_ts", 0.0):
+                        self._next_atm_roll_ts = now_roll + 45.0
+                        try:
+                            ds.ensure_atm_tokens()
+                        except Exception:
+                            logger.debug("ensure_atm_tokens failed", exc_info=True)
+                        strike_ds = getattr(ds, "current_atm_strike", strike_ds)
                 tokens_ds = getattr(ds, "atm_tokens", None)
                 if (
                     isinstance(tokens_ds, (list, tuple))

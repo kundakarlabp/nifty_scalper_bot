@@ -442,7 +442,11 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
     risk: RiskSettings = RiskSettings()
-    executor: ExecutorSettings = ExecutorSettings()
+    executor: ExecutorSettings = Field(
+        default_factory=lambda: ExecutorSettings(
+            entry_slippage_pct=0.25, exit_slippage_pct=0.25
+        )
+    )
     health: HealthSettings = HealthSettings()
     system: SystemSettings = SystemSettings()
 
