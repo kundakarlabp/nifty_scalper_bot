@@ -1288,6 +1288,43 @@ class OrderExecutor:
 
         with self._lock:
             self._active.clear()
+
+    def close_all_positions_eod(self) -> None:
+        """Close any open positions using IOC; fallback to market.
+
+        Emits an ``eod_close`` log for each symbol that is flattened.
+        In paper mode this simply clears the in-memory order book.
+        """
+        if not self.kite:
+            with self._lock:
+                self._active.clear()
+            log.info("eod_close: paper mode")
+            return
+        positions = self.get_positions_kite()
+        if not positions:
+            return
+        for tsym, pos in positions.items():
+            qty = int(pos.get("quantity") or 0)
+            if qty == 0:
+                continue
+            side = "SELL" if qty > 0 else "BUY"
+            qty = abs(qty)
+            req = {
+                "variety": self.variety,
+                "exchange": self.exchange,
+                "tradingsymbol": tsym,
+                "transaction_type": side,
+                "quantity": qty,
+                "product": self.product,
+                "order_type": "MARKET",
+                "validity": "IOC",
+                "tag": "eod_close",
+            }
+            res = self._place_with_cb(req)
+            if not res.get("ok"):
+                req.pop("validity", None)
+                res = self._place_with_cb(req)
+            log.info("eod_close: %s qty=%s ok=%s", tsym, qty, res.get("ok"))
         log.info("All open executor orders cancelled.")
 
     def health_check(self) -> None:

@@ -790,6 +790,26 @@ class StrategyRunner:
                 self.reconciler.step(now)
         except Exception:
             self.log.debug("queue/reconcile step failed", exc_info=True)
+        if bool(getattr(settings, "enable_live_trading", False)):
+            now_ist = self._now_ist()
+            t = now_ist.time()
+            if t >= dt_time(15, 25):
+                if getattr(self.order_executor, "open_count", 0) > 0:
+                    self.log.info("eod_close")
+                    getattr(
+                        self.order_executor, "close_all_positions_eod", lambda: None
+                    )()
+                flow["reason_block"] = "after_1525"
+                self.last_plan = {"reason_block": "after_1525"}
+                self._record_plan(self.last_plan)
+                self._last_flow_debug = flow
+                return
+            if t >= dt_time(15, 20):
+                flow["reason_block"] = "after_1520"
+                self.last_plan = {"reason_block": "after_1520"}
+                self._record_plan(self.last_plan)
+                self._last_flow_debug = flow
+                return
         try:
             # fetch data first to allow ADX‑based window override
             df = self._fetch_spot_ohlc()
