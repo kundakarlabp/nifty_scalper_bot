@@ -475,6 +475,9 @@ class OrderExecutor:
         self.depth_multiplier = float(getattr(ex, "depth_multiplier", 5.0))
         self.micro_retry_limit = int(getattr(ex, "micro_retry_limit", 3))
 
+        self.entry_slippage_pct = float(os.getenv("ENTRY_SLIPPAGE_PCT", "0.25"))
+        self.exit_slippage_pct = float(os.getenv("EXIT_SLIPPAGE_PCT", "0.25"))
+
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
         self.logger = log
@@ -537,6 +540,13 @@ class OrderExecutor:
         mid = (bid + ask) / 2.0
         spr = ask - bid
         return mid, spr
+
+    @staticmethod
+    def _price_with_slippage(mid: float, side: str, pct: float) -> float:
+        if mid <= 0:
+            return mid
+        mult = 1 + (pct / 100.0) if side.upper() == "BUY" else 1 - (pct / 100.0)
+        return mid * mult
 
     def _record_ack_latency(self, ms: int) -> None:
         self._ack_lat_ms.append(ms)
@@ -825,7 +835,13 @@ class OrderExecutor:
                     except (TypeError, ValueError):
                         depth_ok = True
                 if spread_pct <= max_sp and depth_ok:
-                    price = min(float(ask), mid + 0.15 * spread)
+                    price = self._price_with_slippage(
+                        mid, action, self.entry_slippage_pct
+                    )
+                    if action == "BUY" and ask:
+                        price = min(float(ask), price)
+                    elif action == "SELL" and bid:
+                        price = max(float(bid), price)
                     price = _round_to_tick(price, self.tick_size)
                     break
                 tries += 1
@@ -959,6 +975,19 @@ class OrderExecutor:
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
         tp_price = _round_to_tick(tp_price, rec.tick_size)
         sl_price = _round_to_tick(sl_price, rec.tick_size)
+        q = (
+            fetch_quote_with_depth(self.kite, rec.symbol, self.cb_orders)
+            if self.kite
+            else {}
+        )
+        mid = (float(q.get("bid", 0.0)) + float(q.get("ask", 0.0))) / 2.0
+        if mid <= 0:
+            mid = float(q.get("ltp", 0.0))
+        slip = self._price_with_slippage(mid, exit_side, self.exit_slippage_pct)
+        if exit_side == "SELL":
+            tp_price = max(tp_price, slip)
+        else:
+            tp_price = min(tp_price, slip)
 
         # cancel old TPs if any
         for old in (rec.tp1_order_id, rec.tp2_order_id):
@@ -1040,6 +1069,19 @@ class OrderExecutor:
             rec.sl_gtt_id = None
 
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
+        q = (
+            fetch_quote_with_depth(self.kite, rec.symbol, self.cb_orders)
+            if self.kite
+            else {}
+        )
+        mid = (float(q.get("bid", 0.0)) + float(q.get("ask", 0.0))) / 2.0
+        if mid <= 0:
+            mid = float(q.get("ltp", 0.0))
+        slip = self._price_with_slippage(mid, exit_side, self.exit_slippage_pct)
+        if exit_side == "SELL":
+            sl_limit = min(sl_price, slip)
+        else:
+            sl_limit = max(sl_price, slip)
         sl_leg = {
             "exchange": rec.exchange,
             "tradingsymbol": rec.symbol,
@@ -1047,7 +1089,7 @@ class OrderExecutor:
             "quantity": int(qty),
             "order_type": "SL-M" if rec.use_slm_exit else "SL",
             "product": rec.product,
-            "price": None if rec.use_slm_exit else sl_price,
+            "price": None if rec.use_slm_exit else self._round_to_tick(sl_limit, rec.tick_size),
             "trigger_price": sl_price,
         }
         try:

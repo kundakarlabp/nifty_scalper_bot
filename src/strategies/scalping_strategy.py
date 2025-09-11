@@ -943,6 +943,28 @@ class EnhancedScalpingStrategy:
                     "reasons": reasons,
                 }
             )
+            # premium equivalents for execution
+            mid = q.get("mid")
+            if mid is None or mid <= 0:
+                bid = q.get("bid")
+                ask = q.get("ask")
+                if bid and ask:
+                    mid = (float(bid) + float(ask)) / 2.0
+                else:
+                    mid = float(q.get("ltp", 0.0))
+            delta = float(plan.get("delta") or 0.5)
+            delta = max(0.25, min(0.75, delta))
+            spot_entry = float(plan.get("entry", 0.0))
+
+            def _map(target: float | None) -> Optional[float]:
+                if target is None:
+                    return None
+                return float(mid) + delta * (float(target) - spot_entry)
+
+            plan["opt_entry"] = float(mid)
+            plan["opt_sl"] = _map(plan.get("sl"))
+            plan["opt_tp1"] = _map(plan.get("tp1"))
+            plan["opt_tp2"] = _map(plan.get("tp2"))
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss

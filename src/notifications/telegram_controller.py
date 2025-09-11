@@ -577,6 +577,13 @@ class TelegramController:
                 f"losses={status.get('consecutive_losses')} "
                 f"evals={getattr(runner, 'eval_count', 0)}"
             )
+            plan = self._last_signal_provider() if self._last_signal_provider else {}
+            if plan:
+                msg += (
+                    f" | spot: {plan.get('entry')}/{plan.get('sl')}/{plan.get('tp1')}/{plan.get('tp2')}"
+                    f" | opt: {plan.get('opt_entry')}/{plan.get('opt_sl')}/{plan.get('opt_tp1')}/{plan.get('opt_tp2')}"
+                    f" | TP_BASIS={os.getenv('TP_BASIS', 'premium')}"
+                )
             return self._send(msg)
 
         if cmd == "/selftest":
@@ -826,6 +833,17 @@ class TelegramController:
                             tp1=plan.get("tp1"),
                             tp2=plan.get("tp2"),
                         )
+                    )
+                    lines.append(
+                        "• Opt: {e} | SL: {sl} | TP1: {t1} | TP2: {t2}".format(
+                            e=plan.get("opt_entry"),
+                            sl=plan.get("opt_sl"),
+                            t1=plan.get("opt_tp1"),
+                            t2=plan.get("opt_tp2"),
+                        )
+                    )
+                    lines.append(
+                        f"• TP_BASIS: {os.getenv('TP_BASIS', 'premium')}"
                     )
                     lines.append(f"• Block: {reason_block}")
                     reasons = plan.get("reasons") or []
@@ -1120,6 +1138,12 @@ class TelegramController:
                     lines.append(
                         f"option: {o['kind']} {o['strike']} {o['expiry']} token={o['token']} src={plan.get('quote_src','-')}"
                     )
+                lines.append(
+                    f"spot: {plan.get('entry')}/{plan.get('sl')}/{plan.get('tp1')}/{plan.get('tp2')}"
+                )
+                lines.append(
+                    f"opt: {plan.get('opt_entry')}/{plan.get('opt_sl')}/{plan.get('opt_tp1')}/{plan.get('opt_tp2')} basis={os.getenv('TP_BASIS', 'premium')}"
+                )
                 lines.append(
                     f"features: {'PASS' if plan.get('feature_ok') else 'FAIL'} "
                     f"reasons={','.join(plan.get('reasons', [])) or '-'}"

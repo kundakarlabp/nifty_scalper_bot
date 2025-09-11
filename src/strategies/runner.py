@@ -1375,12 +1375,22 @@ class StrategyRunner:
             # ---- execution (support both executors)
             placed_ok = False
             if hasattr(self.executor, "place_order"):
+                tp_basis = os.getenv("TP_BASIS", "premium").lower()
+                if tp_basis == "premium":
+                    entry_px = float(plan.get("opt_entry", plan.get("entry")))
+                    sl_px = float(plan.get("opt_sl", plan.get("sl")))
+                    tp_px = float(plan.get("opt_tp2", plan.get("tp2")))
+                else:
+                    entry_px = float(plan.get("entry"))
+                    sl_px = float(plan.get("sl"))
+                    tp_px = float(plan.get("tp2"))
+                plan["tp_basis"] = tp_basis
                 exec_payload = {
                     "action": plan["action"],
                     "quantity": int(qty),
-                    "entry_price": float(plan.get("entry")),
-                    "stop_loss": float(plan.get("sl")),
-                    "take_profit": float(plan.get("tp2")),
+                    "entry_price": entry_px,
+                    "stop_loss": sl_px,
+                    "take_profit": tp_px,
                     "strike": float(plan["strike"]),
                     "option_type": plan["option_type"],
                 }
@@ -1395,12 +1405,22 @@ class StrategyRunner:
                 side = "BUY" if str(plan["action"]).upper() == "BUY" else "SELL"
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
                 token = int(getattr(settings.instruments, "instrument_token", 0))
+                tp_basis = os.getenv("TP_BASIS", "premium").lower()
+                if tp_basis == "premium":
+                    entry_px = float(plan.get("opt_entry", plan.get("entry")))
+                    sl_px = float(plan.get("opt_sl", plan.get("sl")))
+                    tp_px = float(plan.get("opt_tp2", plan.get("tp2")))
+                else:
+                    entry_px = float(plan.get("entry"))
+                    sl_px = float(plan.get("sl"))
+                    tp_px = float(plan.get("tp2"))
+                plan["tp_basis"] = tp_basis
                 oid = self.executor.place_entry_order(
                     token=token,
                     symbol=symbol,
                     side=side,
                     quantity=int(qty),
-                    price=float(plan.get("entry")),
+                    price=entry_px,
                 )
                 placed_ok = bool(oid)
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
@@ -1414,8 +1434,8 @@ class StrategyRunner:
                     try:
                         self.executor.setup_gtt_orders(
                             record_id=oid,
-                            sl_price=float(plan.get("sl")),
-                            tp_price=float(plan.get("tp2")),
+                            sl_price=sl_px,
+                            tp_price=tp_px,
                         )
                     except Exception as e:
                         self.log.warning("setup_gtt_orders failed: %s", e)
