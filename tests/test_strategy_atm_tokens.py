@@ -22,10 +22,10 @@ def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
         lambda *a, **k: pd.Series([0.06] * len(df), index=df.index),
     )
 
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
-    def fake_fetch(kite, tsym):
-        seen["tsym"] = tsym
+    def fake_fetch(kite, ident):
+        seen["ident"] = ident
         return {"bid": 100.0, "ask": 100.0}
 
     monkeypatch.setattr(ss, "fetch_quote_with_depth", fake_fetch)
@@ -74,4 +74,4 @@ def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
     assert plan.get("reason_block") != "no_option_token"
     assert plan["micro"]["spread_pct"] == 0.1
     assert plan["micro"]["depth_ok"] is True
-    assert seen["tsym"] == "FOO"
+    assert seen["ident"] == plan["option_token"]
