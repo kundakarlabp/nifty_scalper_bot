@@ -23,6 +23,8 @@ from src.utils.broker_errors import (
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.reliability import RateLimiter
 
+from .micro_filters import ENTRY_WAIT_S, MICRO_SPREAD_CAP, depth_to_lots
+
 from .order_state import (
     LegType,
     OrderLeg,
@@ -816,25 +818,14 @@ class OrderExecutor:
 
         # microstructure gates + mid execution
         if bid is not None and ask is not None:
-            tries = 0
-            while tries < self.micro_retry_limit:
+            qty_lots = qty // self.lot_size if self.lot_size > 0 else qty
+            deadline = time.monotonic() + ENTRY_WAIT_S
+            while True:
                 mid = (float(bid) + float(ask)) / 2.0
                 spread = float(ask) - float(bid)
-                spread_pct = spread / mid * 100.0 if mid else float("inf")
-                max_sp = self.max_spread_pct
-                if max_sp < 1:
-                    max_sp *= 100.0
-                depth_ok = True
-                if depth is not None:
-                    try:
-                        if isinstance(depth, (tuple, list)):
-                            depth_val = min(float(depth[0]), float(depth[1]))
-                        else:
-                            depth_val = float(depth)
-                        depth_ok = depth_val >= self.depth_multiplier * qty
-                    except (TypeError, ValueError):
-                        depth_ok = True
-                if spread_pct <= max_sp and depth_ok:
+                spread_pct = spread / mid * 100.0 if mid > 0 else float("inf")
+                depth_lots = depth_to_lots(depth, lot_size=self.lot_size) or 0.0
+                if spread_pct <= MICRO_SPREAD_CAP and depth_lots >= qty_lots:
                     slip = self.entry_slip
                     if action == "BUY":
                         px = mid * (1 + slip)
@@ -843,14 +834,27 @@ class OrderExecutor:
                         px = mid * (1 - slip)
                         price = max(float(bid), px)
                     price = _round_to_tick(price, self.tick_size)
+                    self.last_error = None
                     break
-                tries += 1
+                if time.monotonic() >= deadline:
+                    self.last_error = "micro_block"
+                    log.info(
+                        "entry blocked: micro_block spread%%=%.2f depth_lots=%.2f qty_lots=%s",
+                        spread_pct,
+                        depth_lots,
+                        qty_lots,
+                    )
+                    return None
+                self.last_error = "micro_wait"
+                log.info(
+                    "waiting for micro: spread%%=%.2f depth_lots=%.2f qty_lots=%s",
+                    spread_pct,
+                    depth_lots,
+                    qty_lots,
+                )
                 if callable(refresh_cb):
                     bid, ask, depth = refresh_cb()
-                time.sleep(0.2 + 0.1 * tries)
-                if tries >= self.micro_retry_limit:
-                    self.last_error = "microstructure_block"
-                    return None
+                time.sleep(2)
 
         if not self.kite:
             # PAPER MODE: create a synthetic record so the rest of the flow works

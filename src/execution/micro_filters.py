@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Configurable microstructure guards
+# ---------------------------------------------------------------------------
+# These caps are intentionally lightweight and can be overridden via
+# environment variables at runtime. Values are expressed in percentage points
+# (0.35 => 0.35%).
+MICRO_SPREAD_CAP: float = float(os.getenv("MICRO_SPREAD_CAP", "0.35"))
+# Maximum time to wait for acceptable microstructure before aborting entry.
+ENTRY_WAIT_S: float = float(os.getenv("ENTRY_WAIT_S", "8"))
 
 
 def micro_from_l1(
@@ -54,6 +66,28 @@ def micro_from_quote(
     spread = (ask - bid) / mid * 100.0
     depth_ok = min(bq, sq) >= depth_min_lots * lot_size
     return spread, depth_ok
+
+
+def depth_to_lots(depth: Any, *, lot_size: int) -> Optional[float]:
+    """Normalize depth information to lots.
+
+    ``depth`` may be a single quantity (in units) or a tuple/list containing
+    bid and ask quantities. The function returns the smaller side expressed in
+    lot units. Invalid inputs yield ``None``.
+    """
+
+    if depth is None:
+        return None
+    try:
+        if isinstance(depth, (tuple, list)):
+            qty = min(float(depth[0]), float(depth[1]))
+        else:
+            qty = float(depth)
+        if lot_size <= 0:
+            return None
+        return qty / float(lot_size)
+    except (TypeError, ValueError):
+        return None
 
 
 def _micro_cfg(cfg: Any) -> Dict[str, Any]:
