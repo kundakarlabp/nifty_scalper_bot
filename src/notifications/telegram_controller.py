@@ -822,6 +822,14 @@ class TelegramController:
                             tp2=plan.get("tp2"),
                         )
                     )
+                    lines.append(
+                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP1: {tp1} | Opt TP2: {tp2}".format(
+                            e=plan.get("opt_entry"),
+                            sl=plan.get("opt_sl"),
+                            tp1=plan.get("opt_tp1"),
+                            tp2=plan.get("opt_tp2"),
+                        )
+                    )
                     lines.append(f"• Block: {reason_block}")
                     reasons = plan.get("reasons") or []
                     if reasons:
@@ -848,6 +856,20 @@ class TelegramController:
                             r=plan.get("regime"),
                             sc=plan.get("score"),
                             rr=plan.get("rr"),
+                        )
+                    )
+                    lines.append(
+                        "• Entry: {e} | SL: {sl} | TP2: {tp2}".format(
+                            e=plan.get("entry"),
+                            sl=plan.get("sl"),
+                            tp2=plan.get("tp2"),
+                        )
+                    )
+                    lines.append(
+                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP2: {tp2}".format(
+                            e=plan.get("opt_entry"),
+                            sl=plan.get("opt_sl"),
+                            tp2=plan.get("opt_tp2"),
                         )
                     )
                     lines.append(f"• Block: {reason_block}")

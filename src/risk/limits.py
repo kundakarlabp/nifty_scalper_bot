@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional, Tuple, Literal
+from typing import Dict, List, Optional, Tuple, Literal, cast
 from zoneinfo import ZoneInfo
 import os
 import logging
@@ -22,7 +22,10 @@ class LimitConfig:
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = 1_500_000.0
     exposure_basis: Literal["underlying", "premium"] = field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium"))
+        default_factory=lambda: cast(
+            Literal["underlying", "premium"],
+            os.getenv("EXPOSURE_BASIS", "premium"),
+        )
     )
     max_gamma_mode_lots: int = 2
     max_portfolio_delta_units: int = 100
