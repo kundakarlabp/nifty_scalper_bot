@@ -1428,7 +1428,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     roll = False
     try:
         now_dt = dt.datetime.now(TZ)
-        marks = getattr(self, "_atm_roll_marks", set())
+        marks: set[str] = getattr(self, "_atm_roll_marks", set())
         checks: list[tuple[str, bool]] = []
         checks.append((f"day-{now_dt.date()}", now_dt.time() >= dt.time(0, 5)))
         if now_dt.weekday() == 1:

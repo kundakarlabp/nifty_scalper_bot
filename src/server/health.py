@@ -127,8 +127,9 @@ def _prometheus_metrics() -> str:
             if last:
                 tick_age = (datetime.utcnow() - last).total_seconds()
             try:
-                api_h = getattr(ds, "api_health", lambda: {})().get("quote", {})
-                state = str(api_h.get("state", "CLOSED"))
+                api_h = getattr(ds, "api_health", lambda: {})()
+                quote_h: Dict[str, Any] = api_h.get("quote") or {}
+                state = str(quote_h.get("state", "CLOSED"))
                 breaker = {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}.get(state, 0)
             except Exception:
                 breaker = 0
