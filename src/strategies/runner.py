@@ -329,6 +329,9 @@ class StrategyRunner:
             )
         )
 
+        self._no_new_after = self._parse_hhmm(self.risk_engine.cfg.no_new_after_hhmm)
+        self._flatten_time = self._parse_hhmm(self.risk_engine.cfg.eod_flatten_hhmm)
+
         self._risk_state = _RiskCheckState()
         self._last_trade_time = self.now_ist
         self._auto_relax_active = False
@@ -393,19 +396,42 @@ class StrategyRunner:
         if hasattr(self.order_executor, "state_store") and not self.order_executor.state_store:
             self.order_executor.state_store = self.state_store
         snap = self.state_store.snapshot()
-        if snap.open_orders or snap.positions:
-            self.log.info(
-                "State restore: %s open orders %s positions",
-                len(snap.open_orders),
-                len(snap.positions),
-            )
-            for oid, data in snap.open_orders.items():
-                payload = dict(data)
-                payload["client_oid"] = oid
+        live_orders: Dict[str, Any] = {}
+        if getattr(self.order_executor, "kite", None):
+            try:  # pragma: no cover - network
+                for o in self.order_executor.kite.orders() or []:
+                    tag = str(o.get("tag") or "")
+                    if tag and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}:
+                        live_orders[tag] = o
+            except Exception:
+                self.log.debug("live order fetch failed", exc_info=True)
+        for tag, order in live_orders.items():
+            if tag not in snap.open_orders:
                 try:
-                    self.order_executor.place_order(payload)
+                    self.order_executor.kite.cancel_order(
+                        variety=order.get("variety", "regular"),
+                        order_id=order.get("order_id"),
+                    )
+                    self.log.info("cancelled orphan order %s", tag)
                 except Exception:
-                    self.log.debug("resume order failed: %s", oid, exc_info=True)
+                    self.log.debug("cancel orphan failed: %s", tag, exc_info=True)
+        for oid, data in snap.open_orders.items():
+            if oid in live_orders:
+                try:
+                    self.order_executor.restore_record(oid, data)
+                except Exception:
+                    self.log.debug("restore record failed: %s", oid, exc_info=True)
+            else:
+                self.state_store.remove_order(oid)
+        if getattr(self.order_executor, "kite", None):
+            try:  # pragma: no cover - network
+                positions = self.order_executor.get_positions_kite()
+                for sym, info in positions.items():
+                    qty = int(info.get("quantity") or 0)
+                    if qty:
+                        self.state_store.record_position(sym, info)
+            except Exception:
+                self.log.debug("live positions fetch failed", exc_info=True)
         self.executor = self.order_executor
         self.reconciler = OrderReconciler(
             getattr(self.order_executor, "kite", None), self.order_executor, self.log
@@ -817,20 +843,23 @@ class StrategyRunner:
         if bool(getattr(settings, "enable_live_trading", False)):
             now_ist = self._now_ist()
             t = now_ist.time()
-            if t >= dt_time(15, 25):
+            if t >= self._flatten_time:
                 if getattr(self.order_executor, "open_count", 0) > 0:
                     self.log.info("eod_close")
+                    getattr(self.order_executor, "cancel_all_orders", lambda: None)()
                     getattr(
                         self.order_executor, "close_all_positions_eod", lambda: None
                     )()
-                flow["reason_block"] = "after_1525"
-                self.last_plan = {"reason_block": "after_1525"}
+                tag = self._flatten_time.strftime("after_%H%M")
+                flow["reason_block"] = tag
+                self.last_plan = {"reason_block": tag}
                 self._record_plan(self.last_plan)
                 self._last_flow_debug = flow
                 return
-            if t >= dt_time(15, 20):
-                flow["reason_block"] = "after_1520"
-                self.last_plan = {"reason_block": "after_1520"}
+            if t >= self._no_new_after:
+                tag = self._no_new_after.strftime("after_%H%M")
+                flow["reason_block"] = tag
+                self.last_plan = {"reason_block": tag}
                 self._record_plan(self.last_plan)
                 self._last_flow_debug = flow
                 return
