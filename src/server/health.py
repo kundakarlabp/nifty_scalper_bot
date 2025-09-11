@@ -24,6 +24,16 @@ _status_callback: Optional[Callable[[], Dict[str, Any]]] = None
 _start_ts = time.time()
 
 
+def _metrics_snapshot() -> Dict[str, Any]:
+    data = runtime_metrics.snapshot()
+    runner = StrategyRunner.get_singleton()
+    strat = getattr(runner, "strategy", None) if runner else None
+    if strat is not None:
+        data.setdefault("delta", getattr(strat, "last_delta", 0.0))
+        data.setdefault("elasticity", getattr(strat, "last_elasticity", 0.0))
+    return data
+
+
 @app.route("/live", methods=["GET"])
 def live() -> Tuple[Dict[str, Any], int]:
     """Liveness probe: returns 200 as long as the process is up."""
@@ -83,7 +93,7 @@ def health_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }
         return resp, 200 if ok else 503
     except Exception as e:
@@ -91,7 +101,7 @@ def health_get() -> Tuple[Dict[str, Any], int]:
         return {
             "ok": False,
             "error": str(e),
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }, 500
 
 
@@ -105,7 +115,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
             "uptime": int(time.time() - _start_ts),
             "window": diag.get("within_window"),
             "diag": diag,
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }
         return resp, 200
     except Exception as e:
@@ -113,7 +123,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
         return {
             "ok": False,
             "error": str(e),
-            "metrics": runtime_metrics.snapshot(),
+            "metrics": _metrics_snapshot(),
         }, 500
 
 
@@ -121,7 +131,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
 def metrics_get() -> Tuple[Dict[str, Any], int]:
     """Return runtime execution metrics."""
     try:
-        return runtime_metrics.snapshot(), 200
+        return _metrics_snapshot(), 200
     except Exception as e:
         log.exception("Metrics GET error: %s", e)
         return {"error": str(e)}, 500

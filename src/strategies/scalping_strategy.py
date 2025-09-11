@@ -263,6 +263,20 @@ class EnhancedScalpingStrategy:
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
+        self._last_delta: float = 0.0
+        self._last_elasticity: float = 1.0
+
+    @property
+    def last_delta(self) -> float:
+        """Return delta from the most recent signal."""
+
+        return self._last_delta
+
+    @property
+    def last_elasticity(self) -> float:
+        """Return elasticity from the most recent signal."""
+
+        return self._last_elasticity
 
     # ---------- tech utils ----------
     @staticmethod
@@ -966,9 +980,11 @@ class EnhancedScalpingStrategy:
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
                 spot_entry = float(plan["entry"])
-                elasticity = _clamp(
-                    delta * (spot_entry / opt_entry), 0.3, 1.2
-                )
+                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
+                self._last_delta = delta
+                self._last_elasticity = elasticity
+                plan["delta"] = delta
+                plan["elasticity"] = elasticity
 
                 def _opt_target(spot_target: float) -> float:
                     spot_offset = spot_target - spot_entry

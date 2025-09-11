@@ -1357,71 +1357,109 @@ def _have_quote(obj: Any, token: int) -> bool:
 def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     """Resolve and subscribe current ATM option tokens.
 
-    Calls are throttled per instance to avoid excessive broker requests.
+    Resolution is throttled per instance and will re-run when the current
+    strike drifts from spot or when rolling past weekly/monthly expiry.
     """
 
     try:
-        cooldown = int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45"))
+        cooldown = max(int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45")), 45)
     except Exception:
         cooldown = 45
-    now = time.time()
+    try:
+        drift_pts = int(os.getenv("ATM_ROLL_DRIFT_PTS", "75"))
+    except Exception:
+        drift_pts = 75
+
+    now_ts = time.time()
     next_ts = float(getattr(self, "_atm_next_resolve_ts", 0.0))
-    existing = getattr(self, "atm_tokens", None)
+    tokens = getattr(self, "atm_tokens", None)
+    strike = getattr(self, "current_atm_strike", None)
+    expiry = getattr(self, "current_atm_expiry", None)
+
+    spot = self.get_last_price(
+        getattr(settings.instruments, "spot_symbol", underlying or "NIFTY")
+    )
+    need_roll = False
+
+    if spot is not None and strike is not None:
+        if abs(float(spot) - float(strike)) >= drift_pts:
+            need_roll = True
+
+    now_dt = dt.datetime.now(TZ)
     if (
-        isinstance(existing, (list, tuple))
-        and all(t is not None for t in existing)
-        and now < next_ts
+        expiry
+        and expiry <= now_dt.date()
+        and now_dt.weekday() == 1
+        and now_dt.time() >= dt.time(15, 20)
+    ):
+        need_roll = True
+
+    if (
+        not need_roll
+        and isinstance(tokens, (list, tuple))
+        and all(t is not None for t in tokens)
+        and now_ts < next_ts
     ):
         return
-    self._atm_next_resolve_ts = now + cooldown
+
+    self._atm_next_resolve_ts = now_ts + cooldown
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     items = _refresh_instruments_nfo(broker)
     if not items:
         return
     under = str(underlying or getattr(settings.instruments, "trade_symbol", "NIFTY"))
-    today = dt.date.today()
-    expiry = _pick_expiry(items, under, today)
-    if not expiry:
+    today = now_dt.date()
+    pick_from = (
+        today + dt.timedelta(days=1)
+        if need_roll and expiry and expiry <= today
+        else today
+    )
+    expiry_new = _pick_expiry(items, under, pick_from)
+    if not expiry_new:
         return
-    spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
+
     if spot is None:
-        return
+        spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
+        if spot is None:
+            return
+
     try:
         step = int(getattr(settings.instruments, "strike_step", 50))
     except Exception:
         step = 50
     base = _nearest_strike(float(spot), step)
     ce = pe = None
-    strike = base
+    strike_new = base
     for widen in range(0, 7):
         for sign in (0, 1, -1) if widen else (0,):
             s = base + sign * widen * step
-            ce = _match_token(items, under, expiry, s, "CE")
-            pe = _match_token(items, under, expiry, s, "PE")
+            ce = _match_token(items, under, expiry_new, s, "CE")
+            pe = _match_token(items, under, expiry_new, s, "PE")
             if ce and pe:
-                strike = s
+                strike_new = s
                 break
         if ce and pe:
             break
     if not (ce and pe):
         return
+
     ce_token, pe_token = int(ce), int(pe)
-    tokens = [ce_token, pe_token]
-    self.atm_tokens = tuple(tokens)
-    self.current_atm_strike = strike
-    self.current_atm_expiry = expiry
+    resolved_tokens = [ce_token, pe_token]
+    self.atm_tokens = tuple(resolved_tokens)
+    self.current_atm_strike = strike_new
+    self.current_atm_expiry = expiry_new
     self._atm_resolve_date = today
     log.info(
-        "ATM tokens resolved: expiry=%s, strike=%d, ce=%d, pe=%d",
-        expiry.isoformat(),
-        int(strike),
+        "atm_roll: expiry=%s strike=%d ce=%d pe=%d",  # marker for roll events
+        expiry_new.isoformat(),
+        int(strike_new),
         ce_token,
         pe_token,
     )
-    _subscribe_tokens(self, tokens)
+    _subscribe_tokens(self, resolved_tokens)
     for _ in range(2):
-        missing = [t for t in tokens if not _have_quote(self, t)]
+        missing = [t for t in resolved_tokens if not _have_quote(self, t)]
         if not missing:
             break
         _subscribe_tokens(self, missing)

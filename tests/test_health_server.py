@@ -107,18 +107,25 @@ def test_metrics_endpoint() -> None:
     runtime_metrics.inc_fills()
     runtime_metrics.inc_cancels(2)
     runtime_metrics.set_slippage_bps(1.2)
-    runtime_metrics.set_spread_at_entry(0.5)
+    runtime_metrics.set_avg_entry_spread(0.5)
     runtime_metrics.set_micro_wait_ratio(0.8)
     runtime_metrics.set_auto_relax(1.0)
+    runtime_metrics.set_delta(0.4)
+    runtime_metrics.set_elasticity(0.9)
+    runtime_metrics.set_exposure_basis(0.1)
+    runtime_metrics.set_unit_notional(2.5)
     client = health_module.app.test_client()
     resp = client.get("/metrics")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data == {
-        "fills": 1,
-        "cancels": 2,
-        "slippage_bps": 1.2,
-        "spread_at_entry": 0.5,
-        "micro_wait_ratio": 0.8,
-        "auto_relax": 1.0,
-    }
+    assert data["fills"] == 1
+    assert data["cancels"] == 2
+    assert data["slippage_bps"] == 1.2
+    assert data["avg_entry_spread"] == 0.5
+    assert data["micro_wait_ratio"] == 0.8
+    assert data["auto_relax"] == 1.0
+    assert data["delta"] == 0.4
+    assert data["elasticity"] == 0.9
+    assert data["exposure_basis"] == 0.1
+    assert data["unit_notional"] == 2.5
+    assert data["minutes_since_last_trade"] >= 0
