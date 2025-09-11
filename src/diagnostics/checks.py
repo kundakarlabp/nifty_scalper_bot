@@ -201,13 +201,20 @@ def check_sizing() -> CheckResult:
     )
     expected = 100_000 * float(settings.risk.risk_per_trade)
     unit_expected = 200 * 50
-    ok = diag["risk_rupees"] == expected and diag["unit_notional"] == unit_expected
+    min_eq_expected = unit_expected / float(settings.risk.max_position_size_pct)
+    ok = (
+        diag["risk_rupees"] == expected
+        and diag["unit_notional"] == unit_expected
+        and diag["min_equity_needed"] == min_eq_expected
+    )
     return CheckResult(
         name="sizing",
         ok=ok,
         msg="percent-risk",
         details=diag,
-        fix=None if ok else "use equity*risk_pct and mid*lot for unit_notional",
+        fix=None
+        if ok
+        else "use equity*risk_pct and mid*lot for unit_notional/min_equity",
     )
 
 

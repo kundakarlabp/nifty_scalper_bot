@@ -60,6 +60,24 @@ def test_max_notional():
     assert not ok and reason == "max_notional"
 
 
+def test_too_small_for_one_lot():
+    cfg = LimitConfig(exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    ok, reason, details = eng.pre_trade_check(
+        **{
+            **_basic_args(),
+            "intended_lots": 0,
+            "lot_size": 25,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    assert not ok and reason == "too_small_for_one_lot"
+    assert details["unit_notional"] == 200.0 * 25
+    assert details["min_equity_needed"] > 0
+
+
 def test_gamma_mode_cap(monkeypatch):
     cfg = LimitConfig(max_gamma_mode_lots=1)
     eng = RiskEngine(cfg)
