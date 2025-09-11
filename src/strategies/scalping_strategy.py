@@ -997,9 +997,8 @@ class EnhancedScalpingStrategy:
                 )
             )
             if mid:
-                opt_entry = float(mid)
-                delta = float(plan.get("delta") or 0.5)
-                delta = max(0.25, min(delta, 0.75))
+                opt_entry = round(round(float(mid) / tick_size) * tick_size, 2)
+                delta = _clamp(float(plan.get("delta") or 0.5), 0.25, 0.75)
                 spot_entry = float(plan.get("spot_entry") or 0.0)
                 elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
                 plan["delta"] = delta

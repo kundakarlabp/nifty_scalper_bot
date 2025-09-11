@@ -60,7 +60,7 @@ def test_place_order_waits_and_succeeds(monkeypatch) -> None:
     assert ex.last_error == "micro_wait"
 
 
-def test_price_uses_half_spread_slippage(monkeypatch) -> None:
+def test_price_uses_pct_slippage(monkeypatch) -> None:
     ex = _executor()
     monkeypatch.setattr(oe, "ENTRY_WAIT_S", 0.0)
     monkeypatch.setattr(oe, "MICRO_SPREAD_CAP", 2.0)
@@ -78,5 +78,5 @@ def test_price_uses_half_spread_slippage(monkeypatch) -> None:
     rid = ex.place_order(payload)
     assert rid is not None
     rec = ex._active[rid]
-    assert rec.entry_price == 101.0
+    assert rec.entry_price == 100.75
 
