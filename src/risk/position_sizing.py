@@ -224,18 +224,15 @@ class PositionSizer:
             if sp.max_position_size_pct > 0
             else unit_notional
         )
-        if (
-            sp.exposure_basis == "premium"
-            and calc_lots < 1
-        ):
+        if sp.exposure_basis == "premium" and max_lots_exposure < 1:
             lots = 0
             block_reason = "too_small_for_one_lot"
             logger.info(
-                "sizer block: basis=%s unit=%.2f calc_lots=%d cap=%s",
+                "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
                 sp.exposure_basis,
                 unit_notional,
-                calc_lots,
-                block_reason,
+                max_lots_exposure,
+                exposure_cap,
             )
         else:
             if (
@@ -253,11 +250,11 @@ class PositionSizer:
                 else:
                     block_reason = "risk_cap"
                 logger.info(
-                    "sizer block: basis=%s unit=%.2f calc_lots=%d cap=%s",
+                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
                     sp.exposure_basis,
                     unit_notional,
                     calc_lots,
-                    block_reason,
+                    exposure_cap,
                 )
 
         quantity = lots * si.lot_size
@@ -307,10 +304,13 @@ class PositionSizer:
             "risk_per_lot": round(risk_per_lot, 2),
             "risk_rupees": round(risk_rupees, 2),
             "unit_notional": round(unit_notional, 2),
+            "basis": sp.exposure_basis,
             "max_lots_exposure": int(max_lots_exposure),
             "max_lots_risk": int(max_lots_risk),
             "lots_final": int(lots_final),
+            "lots": int(lots_final),
             "exposure_cap": round(exposure_cap, 2),
+            "cap": round(exposure_cap, 2),
             "calc_lots": int(calc_lots),
             "min_equity_needed": round(min_equity_needed, 2),
             "block_reason": block_reason,

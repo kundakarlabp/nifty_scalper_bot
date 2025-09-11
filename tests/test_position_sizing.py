@@ -67,6 +67,9 @@ def test_returns_zero_when_budget_insufficient():
     assert lots == 0
     assert diag["block_reason"] == "too_small_for_one_lot"
     assert diag["min_equity_needed"] > diag["equity"]
+    assert diag["basis"] == "premium"
+    assert diag["lots"] == diag["lots_final"]
+    assert diag["cap"] == diag["exposure_cap"]
 
 
 def test_min_lots_only_enforced_when_affordable():
@@ -93,9 +96,9 @@ def test_min_lots_rescue_when_affordable():
         spot_sl_points=5.0,
         delta=0.5,
     )
-    assert qty == 0
-    assert lots == 0
-    assert diag["block_reason"] == "too_small_for_one_lot"
+    assert qty == 50
+    assert lots == 1
+    assert diag["block_reason"] == ""
 
 
 def test_underlying_basis_caps_by_spot():
