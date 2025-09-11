@@ -739,53 +739,60 @@ class EnhancedScalpingStrategy:
             ds = getattr(getattr(self, "runner", None), "data_source", None) or getattr(
                 self, "data_source", None
             )
+            quote_id: Any | None = None
             option_token = None
-            if ds is not None:
-                tokens_ds = getattr(ds, "atm_tokens", None)
-                strike_ds = getattr(ds, "current_atm_strike", None)
-                if tokens_ds and strike_ds is not None:
-                    try:
-                        idx = 0 if str(option_type).upper() == "CE" else 1
-                        option_token = tokens_ds[idx]
-                        plan["atm_strike"] = int(strike_ds)
-                    except Exception:
-                        option_token = None
-            plan["option_token"] = option_token
-            # --- Resolve the tradeable option instrument ---
-            # Prefer data source's ATM tokens (single source of truth).
-            tsym: Optional[str] = None
             lot_sz = int(
                 getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75)
             )
+            if ds is not None:
+                idx = 0 if str(option_type).upper() == "CE" else 1
+                strike_ds = getattr(ds, "current_atm_strike", None)
+                symbols_ds = getattr(ds, "atm_tradingsymbols", None)
+                tokens_ds = getattr(ds, "atm_tokens", None)
+                if (
+                    isinstance(symbols_ds, (list, tuple))
+                    and len(symbols_ds) == 2
+                    and symbols_ds[idx]
+                ):
+                    quote_id = symbols_ds[idx]
+                    if (
+                        isinstance(tokens_ds, (list, tuple))
+                        and len(tokens_ds) == 2
+                        and tokens_ds[idx] is not None
+                    ):
+                        option_token = tokens_ds[idx]
+                        res = _token_to_symbol_and_lot(
+                            getattr(settings, "kite", None), option_token
+                        )
+                        if res:
+                            _, lot_sz = res
+                elif (
+                    isinstance(tokens_ds, (list, tuple))
+                    and len(tokens_ds) == 2
+                    and tokens_ds[idx] is not None
+                ):
+                    option_token = tokens_ds[idx]
+                    quote_id = option_token
+                    res = _token_to_symbol_and_lot(
+                        getattr(settings, "kite", None), option_token
+                    )
+                    if res:
+                        _, lot_sz = res
+                if strike_ds is not None:
+                    plan["atm_strike"] = int(strike_ds)
+            plan["option_token"] = option_token
 
-            if option_type is not None and option_token is not None:
-                # Map CE/PE deterministically to ds.atm_tokens ordering
-                # (index 0 -> CE, index 1 -> PE) as set by the data source.
-                try:
-                    tokens_ds = getattr(ds, "atm_tokens", None)
-                    if isinstance(tokens_ds, (list, tuple)) and len(tokens_ds) == 2:
-                        want_idx = 0 if option_type.upper() == "CE" else 1
-                        if option_token == tokens_ds[want_idx]:
-                            res = _token_to_symbol_and_lot(
-                                getattr(settings, "kite", None), option_token
-                            )
-                            if res:
-                                tsym, lot_sz = res
-                except Exception:
-                    tsym = None
-
-            # Fallback: use resolver only if ds tokens are not available/usable
-            if tsym is None:
+            if quote_id is None:
                 atm = resolve_weekly_atm(price)
                 info_atm = atm.get(option_type.lower()) if atm else None
                 if not info_atm:
                     return plan_block(
                         "no_option_token", micro={"spread_pct": None, "depth_ok": None}
                     )
-                tsym, lot_sz = info_atm
+                quote_id, lot_sz = info_atm
 
             # Fetch quote/depth using whichever identifier we have
-            q = fetch_quote_with_depth(getattr(settings, "kite", None), tsym)
+            q = fetch_quote_with_depth(getattr(settings, "kite", None), quote_id)
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
