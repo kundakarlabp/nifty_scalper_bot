@@ -945,7 +945,11 @@ class EnhancedScalpingStrategy:
                 }
             )
             # --- premium-basis equivalents ---
-            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
+            plan["spot_entry"] = plan["entry"]
+            plan["spot_sl"] = plan["sl"]
+            plan["spot_tp1"] = plan["tp1"]
+            plan["spot_tp2"] = plan["tp2"]
+
             q = plan.get("_last_quote") or {}
             mid = q.get("mid") or (
                 (
@@ -959,31 +963,44 @@ class EnhancedScalpingStrategy:
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
 
-                def _opt_target(spot_target: float) -> float:
-                    spot_move = abs(spot_target - float(plan["entry"]))
-                    spot_dir = 1.0 if spot_target >= plan["entry"] else -1.0
+                def _round_tick(x: Optional[float], tick: float = 0.05) -> Optional[float]:
+                    if x is None:
+                        return None
+                    try:
+                        val = float(x)
+                    except (TypeError, ValueError):
+                        return None
+                    return round(val / tick) * tick
+
+                def _opt_target(spot_target: Optional[float]) -> Optional[float]:
+                    if spot_target is None:
+                        return None
+                    spot_move = abs(spot_target - float(plan["spot_entry"]))
+                    spot_dir = 1.0 if spot_target >= plan["spot_entry"] else -1.0
                     parity = 1.0 if plan["option_type"] == "CE" else -1.0
                     opt_dir = spot_dir * parity
                     prem_move = delta * spot_move
                     if plan["action"] == "BUY":
-                        return opt_entry + opt_dir * prem_move
-                    return opt_entry - opt_dir * prem_move
+                        px = opt_entry + opt_dir * prem_move
+                    else:
+                        px = opt_entry - opt_dir * prem_move
+                    return _round_tick(px)
 
-                plan["opt_entry"] = opt_entry
-                plan["opt_sl"] = (
-                    _opt_target(plan["sl"]) if plan["sl"] is not None else None
-                )
-                plan["opt_tp1"] = (
-                    _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
-                )
-                plan["opt_tp2"] = (
-                    _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
-                )
+                plan["opt_entry"] = _round_tick(opt_entry)
+                plan["opt_sl"] = _opt_target(plan.get("sl"))
+                plan["opt_tp1"] = _opt_target(plan.get("tp1"))
+                plan["opt_tp2"] = _opt_target(plan.get("tp2"))
+
+                if getattr(settings, "tp_basis", "premium").lower() == "premium":
+                    plan["entry"] = plan["opt_entry"]
+                    plan["sl"] = plan["opt_sl"]
+                    plan["tp1"] = plan["opt_tp1"]
+                    plan["tp2"] = plan["opt_tp2"]
             # backward compatibility extras
-            plan["entry_price"] = entry_price
-            plan["stop_loss"] = stop_loss
-            plan["take_profit"] = tp2
-            plan["target"] = tp2
+            plan["entry_price"] = plan.get("entry")
+            plan["stop_loss"] = plan.get("sl")
+            plan["take_profit"] = plan.get("tp2")
+            plan["target"] = plan.get("tp2")
             plan["side"] = side
             plan["confidence"] = min(1.0, max(0.0, score / 10.0))
             plan["breakeven_ticks"] = breakeven_ticks

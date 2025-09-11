@@ -77,11 +77,13 @@ def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
             delay *= 2.0
 
 
-def _round_to_tick(x: float, tick: float) -> float:
+def _round_to_tick(x: float | None, tick: float) -> float:
+    """Round ``x`` to nearest ``tick``; return 0.0 on invalid input."""
     try:
-        return round(float(x) / tick) * tick if tick > 0 else float(x)
+        val = float(x)
     except (TypeError, ValueError):
-        return float(x)
+        return 0.0
+    return round(val / tick) * tick if tick > 0 else val
 
 
 def _round_to_step(qty: int, step: int) -> int:

@@ -36,7 +36,7 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
 
     assert plan["opt_entry"] == 5.0
-    entry = float(plan["entry"])
+    entry = float(plan["spot_entry"])
 
     def opt_target(spot_target: float) -> float:
         spot_move = abs(spot_target - entry)
@@ -45,9 +45,11 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
         opt_dir = spot_dir * parity
         prem_move = 0.5 * spot_move
         if plan["action"] == "BUY":
-            return 5.0 + opt_dir * prem_move
-        return 5.0 - opt_dir * prem_move
+            px = 5.0 + opt_dir * prem_move
+        else:
+            px = 5.0 - opt_dir * prem_move
+        return round(px / 0.05) * 0.05
 
-    assert plan["opt_sl"] == pytest.approx(opt_target(plan["sl"]))
-    assert plan["opt_tp1"] == pytest.approx(opt_target(plan["tp1"]))
-    assert plan["opt_tp2"] == pytest.approx(opt_target(plan["tp2"]))
+    assert plan["opt_sl"] == pytest.approx(opt_target(plan["spot_sl"]))
+    assert plan["opt_tp1"] == pytest.approx(opt_target(plan["spot_tp1"]))
+    assert plan["opt_tp2"] == pytest.approx(opt_target(plan["spot_tp2"]))

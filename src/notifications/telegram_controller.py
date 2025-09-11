@@ -585,20 +585,26 @@ class TelegramController:
                     f"tp_basis={getattr(settings, 'tp_basis', 'premium')}"
                 )
             ]
+            def fmt_px(x: Any) -> str:
+                try:
+                    return f"{float(x):.2f}"
+                except (TypeError, ValueError):
+                    return "-"
+
             lines.append(
                 "spot: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
-                    e=plan.get("entry"),
-                    sl=plan.get("sl"),
-                    tp1=plan.get("tp1"),
-                    tp2=plan.get("tp2"),
+                    e=fmt_px(plan.get("spot_entry") or plan.get("entry")),
+                    sl=fmt_px(plan.get("spot_sl") or plan.get("sl")),
+                    tp1=fmt_px(plan.get("spot_tp1") or plan.get("tp1")),
+                    tp2=fmt_px(plan.get("spot_tp2") or plan.get("tp2")),
                 )
             )
             lines.append(
                 "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
-                    e=plan.get("opt_entry"),
-                    sl=plan.get("opt_sl"),
-                    tp1=plan.get("opt_tp1"),
-                    tp2=plan.get("opt_tp2"),
+                    e=fmt_px(plan.get("opt_entry")),
+                    sl=fmt_px(plan.get("opt_sl")),
+                    tp1=fmt_px(plan.get("opt_tp1")),
+                    tp2=fmt_px(plan.get("opt_tp2")),
                 )
             )
             return self._send("\n".join(lines))
@@ -843,20 +849,26 @@ class TelegramController:
                             d=be(micro.get("depth_ok")),
                         )
                     )
+                    def fmt_px(x: Any) -> str:
+                        try:
+                            return f"{float(x):.2f}"
+                        except (TypeError, ValueError):
+                            return "-"
+
                     lines.append(
                         "• Entry: {e} | SL: {sl} | TP1: {tp1} | TP2: {tp2}".format(
-                            e=plan.get("entry"),
-                            sl=plan.get("sl"),
-                            tp1=plan.get("tp1"),
-                            tp2=plan.get("tp2"),
+                            e=fmt_px(plan.get("spot_entry") or plan.get("entry")),
+                            sl=fmt_px(plan.get("spot_sl") or plan.get("sl")),
+                            tp1=fmt_px(plan.get("spot_tp1") or plan.get("tp1")),
+                            tp2=fmt_px(plan.get("spot_tp2") or plan.get("tp2")),
                         )
                     )
                     lines.append(
                         "• Opt Entry: {e} | Opt SL: {sl} | Opt TP1: {tp1} | Opt TP2: {tp2}".format(
-                            e=plan.get("opt_entry"),
-                            sl=plan.get("opt_sl"),
-                            tp1=plan.get("opt_tp1"),
-                            tp2=plan.get("opt_tp2"),
+                            e=fmt_px(plan.get("opt_entry")),
+                            sl=fmt_px(plan.get("opt_sl")),
+                            tp1=fmt_px(plan.get("opt_tp1")),
+                            tp2=fmt_px(plan.get("opt_tp2")),
                         )
                     )
                     lines.append(f"• Block: {reason_block}")
