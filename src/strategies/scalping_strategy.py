@@ -389,6 +389,7 @@ class EnhancedScalpingStrategy:
             # zero values when signal generation exits early.
             "score": None,
             "atr_pct": 0.0,
+            "option_atr": None,
             "micro": {"spread_pct": None, "depth_ok": None},
             "rr": 0.0,
             "entry": None,
@@ -958,6 +959,7 @@ class EnhancedScalpingStrategy:
                 opt_entry = float(mid)
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
+                plan["option_atr"] = round(abs(delta) * atr_val, 2)
 
                 def _opt_target(spot_target: float) -> float:
                     spot_move = abs(spot_target - float(plan["entry"]))
@@ -995,6 +997,7 @@ class EnhancedScalpingStrategy:
                 "rr": rr,
                 "reason_block": None,
                 "atr_pct": plan["atr_pct"],
+                "option_atr": plan.get("option_atr"),
                 "score_dbg": plan.get("score_dbg"),
             }
             return plan

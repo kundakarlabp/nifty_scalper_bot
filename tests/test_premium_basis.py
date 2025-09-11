@@ -1,6 +1,7 @@
 import pytest
 from tests.test_strategy import create_test_dataframe, strategy_config  # noqa: F401
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+from src.utils.atr_helper import compute_atr, latest_atr_value
 
 
 def test_premium_targets_are_computed(strategy_config, monkeypatch):
@@ -51,3 +52,8 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
     assert plan["opt_sl"] == pytest.approx(opt_target(plan["sl"]))
     assert plan["opt_tp1"] == pytest.approx(opt_target(plan["tp1"]))
     assert plan["opt_tp2"] == pytest.approx(opt_target(plan["tp2"]))
+
+    atr_series = compute_atr(df, period=14)
+    atr_val = latest_atr_value(atr_series, default=0.0)
+    expected_opt_atr = round(0.5 * atr_val, 2)
+    assert plan["option_atr"] == pytest.approx(expected_opt_atr)

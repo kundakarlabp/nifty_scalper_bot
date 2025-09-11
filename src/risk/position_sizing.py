@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Literal
+from typing import Dict, Tuple, Literal, cast
 import os
 import logging
 
@@ -39,7 +39,10 @@ class SizingParams:
     max_lots: int = 10
     max_position_size_pct: float = 0.10
     exposure_basis: Literal["underlying", "premium"] = field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium"))
+        default_factory=lambda: cast(
+            Literal["underlying", "premium"],
+            os.getenv("EXPOSURE_BASIS", "premium"),
+        )
     )
 
 
@@ -94,7 +97,10 @@ class PositionSizer:
         max_position_size_pct = float(
             max_position_size_pct if max_position_size_pct is not None else 0.10
         )
-        exposure_basis = exposure_basis or os.getenv("EXPOSURE_BASIS", "premium")
+        exposure_basis = cast(
+            Literal["underlying", "premium"],
+            exposure_basis or os.getenv("EXPOSURE_BASIS", "premium"),
+        )
 
         if risk_per_trade <= 0 or risk_per_trade > 0.10:
             raise ValueError("risk_per_trade must be within (0, 0.10].")
