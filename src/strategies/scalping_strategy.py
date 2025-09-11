@@ -940,6 +940,7 @@ class EnhancedScalpingStrategy:
                     "option_type": option_type or None,
                     "strike": str(strike),
                     "entry": entry_price,
+                    "spot_entry": price,
                     "sl": stop_loss,
                     "tp1": tp1,
                     "tp2": tp2,
@@ -965,19 +966,16 @@ class EnhancedScalpingStrategy:
                 opt_entry = float(mid)
                 delta = float(plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
-                spot_entry = float(plan["entry"])
-                elasticity = _clamp(
-                    delta * (spot_entry / opt_entry), 0.3, 1.2
-                )
+                spot_entry = float(plan.get("spot_entry") or 0.0)
+                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
 
                 def _opt_target(spot_target: float) -> float:
-                    spot_offset = spot_target - spot_entry
-                    parity = 1.0 if plan["option_type"] == "CE" else -1.0
-                    offset = elasticity * spot_offset * parity
-                    if plan["action"] == "BUY":
-                        prem = opt_entry + offset
-                    else:
-                        prem = opt_entry - offset
+                    premium_offset = elasticity * (spot_target - spot_entry)
+                    if plan["option_type"] == "PE":
+                        premium_offset *= -1.0
+                    if plan["action"] == "SELL":
+                        premium_offset *= -1.0
+                    prem = opt_entry + premium_offset
                     return round(round(prem / tick_size) * tick_size, 2)
 
                 plan["opt_entry"] = opt_entry

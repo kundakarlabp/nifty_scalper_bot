@@ -8,7 +8,7 @@ from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 def _basic_args():
     return dict(
-        equity_rupees=0.0,
+        equity_rupees=10_000_000.0,
         plan={},
         exposure=Exposure(),
         intended_symbol="SYM",
@@ -66,7 +66,8 @@ def test_too_small_for_one_lot():
     ok, reason, details = eng.pre_trade_check(
         **{
             **_basic_args(),
-            "intended_lots": 0,
+            "equity_rupees": 0.0,
+            "intended_lots": 1,
             "lot_size": 25,
             "entry_price": 200.0,
             "option_mid_price": 200.0,

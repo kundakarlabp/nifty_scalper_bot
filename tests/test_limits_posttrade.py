@@ -12,7 +12,7 @@ def test_posttrade_updates_and_cooloff():
     eng.on_trade_closed(pnl_R=-0.5)
     eng.on_trade_closed(pnl_R=-0.5)
     ok, reason, _ = eng.pre_trade_check(
-        equity_rupees=0.0,
+        equity_rupees=100_000.0,
         plan={},
         exposure=Exposure(),
         intended_symbol="SYM",
@@ -34,7 +34,7 @@ def test_roll10_down(monkeypatch):
     for _ in range(10):
         eng.on_trade_closed(pnl_R=-0.3)
     ok, reason, det = eng.pre_trade_check(
-        equity_rupees=0.0,
+        equity_rupees=100_000.0,
         plan={},
         exposure=Exposure(),
         intended_symbol="SYM",
