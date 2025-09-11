@@ -16,6 +16,8 @@ def _basic_args():
         lot_size=1,
         entry_price=100.0,
         stop_loss_price=90.0,
+        spot_price=100.0,
+        option_mid_price=100.0,
     )
 
 
@@ -43,7 +45,15 @@ def test_max_notional():
     eng = RiskEngine(cfg)
     exp = Exposure(notional_rupees=900.0)
     ok, reason, _ = eng.pre_trade_check(
-        **{**_basic_args(), "exposure": exp, "intended_lots": 1, "lot_size": 1, "entry_price": 200.0}
+        **{
+            **_basic_args(),
+            "exposure": exp,
+            "intended_lots": 1,
+            "lot_size": 1,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "spot_price": 200.0,
+        }
     )
     assert not ok and reason == "max_notional"
 
@@ -57,6 +67,39 @@ def test_gamma_mode_cap(monkeypatch):
         **{**_basic_args(), "intended_lots": 2}
     )
     assert not ok and reason == "gamma_mode_lot_cap"
+
+
+def test_notional_underlying_vs_premium():
+    """Ensure notional is computed based on exposure basis."""
+    spot = 60.0
+    premium = 10.0
+    exp_under = Exposure(notional_rupees=100.0)
+    cfg_under = LimitConfig(max_notional_rupees=150.0, exposure_basis="underlying")
+    eng_under = RiskEngine(cfg_under)
+    ok, reason, _ = eng_under.pre_trade_check(
+        **{
+            **_basic_args(),
+            "exposure": exp_under,
+            "spot_price": spot,
+            "option_mid_price": premium,
+            "entry_price": premium,
+        }
+    )
+    assert not ok and reason == "max_notional"
+
+    exp_prem = Exposure(notional_rupees=100.0)
+    cfg_prem = LimitConfig(max_notional_rupees=150.0, exposure_basis="premium")
+    eng_prem = RiskEngine(cfg_prem)
+    ok2, reason2, _ = eng_prem.pre_trade_check(
+        **{
+            **_basic_args(),
+            "exposure": exp_prem,
+            "spot_price": spot,
+            "option_mid_price": premium,
+            "entry_price": premium,
+        }
+    )
+    assert ok2 and reason2 == ""
 
 
 @given(
@@ -81,6 +124,8 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
                 "intended_lots": lots,
                 "lot_size": lot_size,
                 "entry_price": entry,
+                "option_mid_price": entry,
+                "spot_price": entry,
             }
         )
         assert ok and reason == ""
@@ -109,6 +154,8 @@ def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_n
                 "intended_lots": lots,
                 "lot_size": lot_size,
                 "entry_price": entry,
+                "option_mid_price": entry,
+                "spot_price": entry,
             }
         )
         assert not ok and reason == "max_notional"

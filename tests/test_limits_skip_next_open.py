@@ -14,6 +14,8 @@ def _args():
         lot_size=1,
         entry_price=100.0,
         stop_loss_price=90.0,
+        spot_price=100.0,
+        option_mid_price=100.0,
     )
 
 

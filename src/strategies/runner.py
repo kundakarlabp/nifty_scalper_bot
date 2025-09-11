@@ -310,6 +310,7 @@ class StrategyRunner:
                 max_trades_per_session=settings.risk.max_trades_per_day,
                 max_lots_per_symbol=settings.risk.max_lots_per_symbol,
                 max_notional_rupees=settings.risk.max_notional_rupees,
+                exposure_basis=settings.risk.exposure_basis,
                 max_gamma_mode_lots=getattr(self.settings, "MAX_GAMMA_MODE_LOTS", 2),
                 max_portfolio_delta_units=getattr(
                     self.settings, "MAX_PORTFOLIO_DELTA_UNITS", 100
@@ -1264,6 +1265,8 @@ class StrategyRunner:
                 lot_size=lot_size,
                 entry_price=float(entry or 0.0),
                 stop_loss_price=float(sl or 0.0),
+                spot_price=float(getattr(self, "last_spot", 0.0) or 0.0),
+                option_mid_price=float(entry or 0.0),
                 planned_delta_units=planned_delta_units,
                 portfolio_delta_units=portfolio_delta_units,
                 gamma_mode=gmode,
@@ -2490,10 +2493,13 @@ class StrategyRunner:
 
     def _notional_rupees(self) -> float:
         total = 0.0
+        basis = getattr(self.settings.risk, "exposure_basis", "underlying")
+        spot = float(getattr(self, "last_spot", 0.0) or 0.0)
         for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
             for leg in fsm.open_legs():
                 price = leg.limit_price or leg.avg_price or 0.0
-                total += price * leg.qty
+                unit = price if basis == "premium" else spot
+                total += unit * leg.qty
         return total
 
     def _portfolio_delta_units(self) -> float:
