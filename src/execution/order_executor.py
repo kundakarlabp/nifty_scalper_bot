@@ -1758,6 +1758,36 @@ class OrderExecutor:
         if leg.idempotency_key:
             self._idemp_map[leg.idempotency_key] = leg.leg_id
 
+    # ---------------- state restore ----------------
+    def restore_record(self, client_oid: str, payload: Dict[str, Any]) -> None:
+        """Recreate an active order record from a persisted payload."""
+        symbol = str(payload.get("symbol", ""))
+        action = str(payload.get("action")) or str(payload.get("side", "BUY"))
+        qty = int(payload.get("quantity") or payload.get("qty") or 0)
+        price = float(payload.get("entry_price") or payload.get("price") or 0.0)
+        rec = _OrderRecord(
+            order_id=client_oid,
+            instrument_token=int(payload.get("instrument_token", 0)),
+            symbol=symbol,
+            side=action,
+            quantity=qty,
+            entry_price=price,
+            tick_size=self.tick_size,
+            client_oid=client_oid,
+            sl_price=float(payload.get("stop_loss", 0.0)) or None,
+            tp_price=float(payload.get("take_profit", 0.0)) or None,
+            partial_enabled=bool(payload.get("partial_tp_enable", self.partial_enable)),
+            tp1_ratio=float(payload.get("tp1_qty_ratio", self.tp1_ratio)),
+            breakeven_ticks=int(payload.get("breakeven_ticks", self.breakeven_ticks)),
+            trailing_enabled=bool(payload.get("trailing_enabled", self.enable_trailing)),
+            trailing_mult=float(payload.get("trailing_atr_mult", self.trailing_mult)),
+            trail_atr_mult=float(payload.get("trail_atr_mult", payload.get("trailing_atr_mult", self.trailing_mult))),
+            r_value=abs(price - float(payload.get("stop_loss", 0.0))),
+            child_order_ids=[],
+        )
+        with self._lock:
+            self._active[rec.record_id] = rec
+
     def open_legs_snapshot(self) -> List[Dict[str, Any]]:
         """Return a compact snapshot of open legs for checkpoints."""
         snap: List[Dict[str, Any]] = []

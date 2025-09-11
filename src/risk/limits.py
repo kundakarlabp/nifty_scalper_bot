@@ -41,6 +41,8 @@ class LimitConfig:
     skip_next_open_after_two_daily_caps: bool = True
     # Maximum realised loss in premium (rupee) terms before halting for the day.
     max_daily_loss_rupees: float = 1_000_000.0
+    no_new_after_hhmm: str = "15:20"
+    eod_flatten_hhmm: str = "15:28"
 
     def __post_init__(self) -> None:
         if self.max_consec_losses == 3 and self.cooloff_losses != 3:
@@ -166,6 +168,12 @@ class RiskEngine:
                 "max_trades_session",
                 {"trades_today": self.state.trades_today},
             )
+
+        cutoff = datetime.strptime(
+            self.cfg.no_new_after_hhmm, "%H:%M"
+        ).time()
+        if now.time() >= cutoff:
+            return False, "session_closed", {"cutoff": self.cfg.no_new_after_hhmm}
 
         current_lots = exposure.lots_by_symbol.get(intended_symbol, 0)
         if current_lots + intended_lots > self.cfg.max_lots_per_symbol:

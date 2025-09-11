@@ -42,20 +42,27 @@ def test_eod_close_triggers(monkeypatch) -> None:
     monkeypatch.setattr(
         runner,
         "_now_ist",
-        lambda: datetime(2024, 1, 1, 15, 25, tzinfo=TZ),
+        lambda: datetime(2024, 1, 1, 15, 28, tzinfo=TZ),
     )
     monkeypatch.setattr(runner.order_executor, "open_count", 1, raising=False)
 
-    called = {"n": 0}
+    called = {"close": 0, "cancel": 0}
 
     def fake_close() -> None:
-        called["n"] += 1
+        called["close"] += 1
+
+    def fake_cancel() -> None:
+        called["cancel"] += 1
 
     monkeypatch.setattr(
         runner.order_executor, "close_all_positions_eod", fake_close, raising=False
     )
+    monkeypatch.setattr(
+        runner.order_executor, "cancel_all_orders", fake_cancel, raising=False
+    )
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1525"
-    assert called["n"] == 1
+    assert flow["reason_block"] == "after_1528"
+    assert called["close"] == 1
+    assert called["cancel"] == 1
