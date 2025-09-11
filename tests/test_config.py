@@ -170,6 +170,7 @@ def test_skip_broker_validation_allows_missing_creds(caplog):
         import src.boot.validate_env as validate_env
 
         validate_env = importlib.reload(validate_env)
+        validate_env.SKIP_BROKER_VALIDATION = False
         settings = AppSettings(_env_file=None)
         with mock.patch("src.config.settings", settings), mock.patch(
             "src.boot.validate_env.settings", settings
@@ -185,16 +186,22 @@ def test_zerodha_creds_required_when_live():
     """Zerodha credentials must be present when live trading is enabled."""
     env = {
         "ENABLE_LIVE_TRADING": "true",
+        "SKIP_BROKER_VALIDATION": "false",
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "12345",
     }
     with mock.patch.dict(os.environ, env, clear=True):
+        import importlib
+        import src.boot.validate_env as validate_env
+
+        validate_env = importlib.reload(validate_env)
+        validate_env.SKIP_BROKER_VALIDATION = False
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings), mock.patch(
-        "src.boot.validate_env.settings", settings
-    ):
-        with pytest.raises(ValueError) as exc:
-            validate_critical_settings()
+        with mock.patch("src.config.settings", settings), mock.patch(
+            "src.boot.validate_env.settings", settings
+        ):
+            with pytest.raises(ValueError) as exc:
+                validate_env.validate_critical_settings()
     msg = str(exc.value)
     assert "ZERODHA__API_KEY" in msg and "KITE_API_KEY" in msg
 
@@ -235,6 +242,7 @@ def test_negative_chat_id_allowed():
 def test_invalid_instrument_token_detected(monkeypatch):
     env = {
         "ENABLE_LIVE_TRADING": "true",
+        "SKIP_BROKER_VALIDATION": "false",
         "ZERODHA__API_KEY": "k",
         "ZERODHA__API_SECRET": "s",
         "ZERODHA__ACCESS_TOKEN": "t",
@@ -242,25 +250,30 @@ def test_invalid_instrument_token_detected(monkeypatch):
         "TELEGRAM__CHAT_ID": "123",
     }
     with mock.patch.dict(os.environ, env, clear=True):
+        import importlib
+        import src.boot.validate_env as validate_env
+
+        validate_env = importlib.reload(validate_env)
+        validate_env.SKIP_BROKER_VALIDATION = False
         settings = AppSettings(_env_file=None)
 
-    class DummySource:
-        def __init__(self, kite):
-            pass
+        class DummySource:
+            def __init__(self, kite):
+                pass
 
-        def connect(self) -> None:
-            pass
+            def connect(self) -> None:
+                pass
 
-        def fetch_ohlc(self, *_, **__):
-            return HistResult(status=HistStatus.OK, df=pd.DataFrame())
+            def fetch_ohlc(self, *_, **__):
+                return HistResult(status=HistStatus.OK, df=pd.DataFrame())
 
-    with mock.patch("src.config.settings", settings), mock.patch(
-        "src.boot.validate_env.settings", settings
-    ), monkeypatch.context() as m:
-        m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
-        with pytest.raises(ValueError) as exc:
-            validate_critical_settings()
-    assert "valid F&O token" in str(exc.value)
+        with mock.patch("src.config.settings", settings), mock.patch(
+            "src.boot.validate_env.settings", settings
+        ), monkeypatch.context() as m:
+            m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
+            with pytest.raises(ValueError) as exc:
+                validate_env.validate_critical_settings()
+        assert "valid F&O token" in str(exc.value)
 
 
 def test_decimal_instrument_token_coerced():
@@ -341,15 +354,21 @@ def test_lookback_less_than_min_bars():
         "DATA__LOOKBACK_MINUTES": "20",
         "STRATEGY__MIN_BARS_FOR_SIGNAL": "50",
         "ENABLE_LIVE_TRADING": "false",
+        "SKIP_BROKER_VALIDATION": "false",
     }
     with mock.patch.dict(os.environ, env, clear=True):
+        import importlib
+        import src.boot.validate_env as validate_env
+
+        validate_env = importlib.reload(validate_env)
+        validate_env.SKIP_BROKER_VALIDATION = False
         settings = AppSettings(_env_file=None)
-    with mock.patch("src.config.settings", settings), mock.patch(
-        "src.boot.validate_env.settings", settings
-    ):
-        with pytest.raises(ValueError) as exc:
-            validate_critical_settings()
-    assert "LOOKBACK_MINUTES" in str(exc.value)
+        with mock.patch("src.config.settings", settings), mock.patch(
+            "src.boot.validate_env.settings", settings
+        ):
+            with pytest.raises(ValueError) as exc:
+                validate_env.validate_critical_settings()
+        assert "LOOKBACK_MINUTES" in str(exc.value)
 
 
 def test_instrument_token_validation_skips_on_network_error(monkeypatch):

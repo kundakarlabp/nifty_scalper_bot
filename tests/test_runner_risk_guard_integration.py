@@ -7,7 +7,8 @@ class DummyTelegram:
         pass
 
 
-def test_risk_guard_blocks_after_loss() -> None:
+def test_risk_guard_blocks_after_loss(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_TRADING", "true")
     runner = StrategyRunner(telegram_controller=DummyTelegram())
     cfg = RiskConfig(daily_loss_cap=100, trading_start_hm="00:00", trading_end_hm="23:59")
     guards = RiskGuards(cfg)
