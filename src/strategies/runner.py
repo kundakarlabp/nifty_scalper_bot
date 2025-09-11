@@ -36,7 +36,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.diagnostics.metrics import metrics, runtime_metrics
+from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
 from src.execution.order_executor import OrderManager, OrderReconciler
@@ -85,6 +85,33 @@ except Exception:
     LiveKiteSource = None  # type: ignore
 
 
+# =========================== Cadence controller ============================
+
+
+@dataclass
+class CadenceController:
+    """Adaptive evaluation cadence based on market activity."""
+
+    min_interval: float = 0.3
+    max_interval: float = 1.5
+    interval: float = 0.3
+
+    def update(self, atr_pct: float | None, tick_age: float, breaker_open: bool) -> float:
+        """Return next evaluation interval."""
+        if breaker_open:
+            self.interval = self.max_interval
+            return self.interval
+
+        atr = float(atr_pct or 0.0)
+        # Normalize ATR%% to 0-1 assuming 0-1% range.
+        norm = max(0.0, min(1.0, atr))
+        self.interval = self.max_interval - norm * (self.max_interval - self.min_interval)
+        if tick_age > 1.0:
+            self.interval = min(self.max_interval, self.interval + 0.3)
+        self.interval = max(self.min_interval, min(self.max_interval, self.interval))
+        return self.interval
+
+
 # ============================== Orchestrator ==============================
 
 
@@ -117,6 +144,7 @@ class Orchestrator:
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._risk = guards.RiskGuards(risk_config)
+        self._cadence = CadenceController() if min_eval_interval_s > 0 else None
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -162,6 +190,8 @@ class Orchestrator:
                 continue
             self._last_eval = now
             self.step(tick)
+            if self._cadence is not None:
+                self._update_cadence(tick)
 
     def _watchdog_loop(self) -> None:
         while self._running:
@@ -171,6 +201,22 @@ class Orchestrator:
                     self._paused = True
                     if self.on_stale:
                         self.on_stale()
+
+    def _update_cadence(self, tick: Tick) -> None:
+        """Adjust evaluation cadence based on market conditions."""
+        runner = getattr(self.on_tick, "__self__", None)
+        atr = None
+        if runner is not None and getattr(runner, "last_plan", None):
+            atr = runner.last_plan.get("atr_pct")
+        try:
+            state = (
+                self.executor.api_health().get("orders", {}).get("state", "closed")
+            )
+            breaker_open = state != "closed"
+        except Exception:
+            breaker_open = False
+        age = max(0.0, time.time() - float(getattr(tick, "ts", time.time())))
+        self.min_eval_interval_s = self._cadence.update(atr, age, breaker_open)
 
     # ------------------------------------------------------------------
     def step(self, tick: Tick, budget_s: float | None = None) -> None:
@@ -1937,6 +1983,10 @@ class StrategyRunner:
             self.risk_engine.on_trade_closed(pnl_R=pnl)
         except Exception:
             self.log.debug("risk_engine on_trade_closed failed", exc_info=True)
+        try:
+            record_trade(pnl, runtime_metrics.slippage_bps)
+        except Exception:
+            self.log.debug("record_trade failed", exc_info=True)
 
     # ---------------- data helpers ----------------
     def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
