@@ -2291,6 +2291,7 @@ class StrategyRunner:
             "risk": self.risk_engine.snapshot(),
             "exposure": {
                 "notional_rupees": round(self._notional_rupees(), 2),
+                "basis": getattr(self.settings, "exposure_basis", "premium"),
                 "lots_by_symbol": self._lots_by_symbol(),
             },
         }
@@ -2468,6 +2469,7 @@ class StrategyRunner:
         snap = self.risk_engine.snapshot()
         snap["exposure"] = {
             "notional_rupees": round(self._notional_rupees(), 2),
+            "basis": getattr(self.settings, "exposure_basis", "premium"),
             "lots_by_symbol": self._lots_by_symbol(),
         }
         return snap
@@ -2489,6 +2491,11 @@ class StrategyRunner:
         return lots
 
     def _notional_rupees(self) -> float:
+        if getattr(self.settings, "exposure_basis", "premium") == "underlying":
+            lot_size = int(getattr(self.settings.instruments, "nifty_lot_size", 75))
+            total_lots = sum(self._lots_by_symbol().values())
+            spot = self.last_spot or 0.0
+            return spot * lot_size * total_lots
         total = 0.0
         for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
             for leg in fsm.open_legs():
