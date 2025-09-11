@@ -123,9 +123,9 @@ Disable the server by setting `HEALTH__ENABLE_SERVER=false` in the environment.
 By default the bot pulls a small slice of historical candles from the broker to warm up indicators before live ticks arrive.
 
 - `DATA__WARMUP_DISABLE` – set to `true` to skip the warmup phase. Default `false`.
-- `DATA__WARMUP_BACKFILL_MIN` – minutes of history to request during warmup. Default `30`.
-- `DATA__ALLOW_SYNTHETIC_ON_EMPTY` – generate synthetic bars when the broker returns none. Default `true`.
-- `DATA__CLAMP_TO_MARKET_OPEN` – avoid fetching pre‑open candles before `09:15`. Default `true`.
+ - `DATA__WARMUP_BACKFILL_MIN` – minutes of history to request during warmup. Default `15`.
+ - `DATA__ALLOW_SYNTHETIC_ON_EMPTY` – generate synthetic bars when the broker returns none. Default `true`.
+ - `DATA__CLAMP_TO_MARKET_OPEN` – avoid fetching pre‑open candles before `09:15`. Default `false`.
 Override the flag in your environment or `.env` file if you want to skip warmup.
 
 ## Risk flags & kill switch

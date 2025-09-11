@@ -15,7 +15,7 @@ def test_ensure_backfill_synthetic_preopen(monkeypatch) -> None:
     seeded: list = []
     ds.seed_ohlc = lambda df: seeded.append(df)
     monkeypatch.setattr(settings.instruments, "instrument_token", 256265, raising=False)
-    ds.ensure_backfill(required_bars=30, token=256265, timeframe="minute")
-    assert int(getattr(ds, "_synth_bars_n", 0)) >= 30
-    assert ds.have_min_bars(30) is True
-    assert seeded and len(seeded[-1]) >= 30
+    ds.ensure_backfill(required_bars=15, token=256265, timeframe="minute")
+    assert int(getattr(ds, "_synth_bars_n", 0)) >= 15
+    assert ds.have_min_bars(15) is True
+    assert seeded and len(seeded[-1]) >= 15

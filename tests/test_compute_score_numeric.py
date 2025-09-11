@@ -13,7 +13,7 @@ def _make_df(n: int = 30) -> pd.DataFrame:
 
 def test_compute_score_trend() -> None:
     df = _make_df()
-    cfg = SimpleNamespace(ema_fast=3, ema_slow=7, warmup_bars_min=20)
+    cfg = SimpleNamespace(ema_fast=3, ema_slow=7, warmup_bars_min=15)
     score, details = compute_score(df, "TREND", cfg)
     assert 0.0 <= score <= 1.0
     assert details and details.regime == "TREND"
@@ -21,7 +21,7 @@ def test_compute_score_trend() -> None:
 
 def test_compute_score_unknown_regime_returns_zero() -> None:
     df = _make_df()
-    cfg = SimpleNamespace(ema_fast=3, ema_slow=7, warmup_bars_min=20)
+    cfg = SimpleNamespace(ema_fast=3, ema_slow=7, warmup_bars_min=15)
     score, details = compute_score(df, "UNKNOWN", cfg)
     assert score == 0.0
     assert details is None

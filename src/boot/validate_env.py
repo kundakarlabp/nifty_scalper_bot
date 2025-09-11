@@ -148,11 +148,11 @@ def data_warmup_backfill_min() -> int:
     _ensure_env_seeded()
     val = os.getenv("DATA__WARMUP_BACKFILL_MIN")
     if val is None:
-        val = os.getenv("DATA_WARMUP_BACKFILL_MIN", "30")
+        val = os.getenv("DATA_WARMUP_BACKFILL_MIN", "15")
     try:
         return max(0, int(val))
     except Exception:
-        return 30
+        return 15
 
 
 def data_allow_synthetic_on_empty() -> bool:
@@ -167,7 +167,7 @@ def data_clamp_to_market_open() -> bool:
     _ensure_env_seeded()
     val = os.getenv("DATA__CLAMP_TO_MARKET_OPEN")
     if val is None:
-        val = os.getenv("DATA_CLAMP_TO_MARKET_OPEN", "true")
+        val = os.getenv("DATA_CLAMP_TO_MARKET_OPEN", "false")
     return str(val).lower() in {"1", "true", "yes"}
 
 

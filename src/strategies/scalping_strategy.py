@@ -149,7 +149,7 @@ def compute_score(
         Strategy configuration providing lookback parameters.
     """
 
-    if df is None or len(df) < getattr(cfg, "warmup_bars_min", 20):
+    if df is None or len(df) < getattr(cfg, "warmup_bars_min", 15):
         return 0.0, None
     if "atr" not in df.columns:
         period = getattr(cfg, "atr_period", 14)
