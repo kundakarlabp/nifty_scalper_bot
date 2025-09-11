@@ -55,7 +55,7 @@ def test_max_lots_clamp():
 def test_returns_zero_when_budget_insufficient():
     """Even with a higher min_lots, zero should be returned when one lot is unaffordable."""
     sizer = _sizer(min_lots=3)
-    qty, lots, _ = sizer.size_from_signal(
+    qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
         stop_loss=180.0,
         lot_size=25,
@@ -65,6 +65,7 @@ def test_returns_zero_when_budget_insufficient():
     )
     assert qty == 0
     assert lots == 0
+    assert diag["block_reason"] == "exposure_cap"
 
 
 def test_min_lots_only_enforced_when_affordable():

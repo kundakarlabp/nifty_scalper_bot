@@ -178,11 +178,15 @@ class PositionSizer:
     @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
         if si.entry_price <= 0 or si.lot_size <= 0 or si.equity <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0, 0)
+            return 0, 0, PositionSizer._diag(
+                si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, "invalid"
+            )
 
         spot_sl_points = abs(si.spot_sl_points)
         if spot_sl_points <= 0:
-            return 0, 0, PositionSizer._diag(si, sp, 0, 0, 0, 0, 0, 0, 0, 0)
+            return 0, 0, PositionSizer._diag(
+                si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, "no_sl"
+            )
 
         delta = si.delta if si.delta is not None else 0.5
         delta = max(0.25, min(0.75, delta))
@@ -190,7 +194,11 @@ class PositionSizer:
         risk_per_lot_rupees = max(0.5, opt_sl_points) * si.lot_size
 
         risk_rupees = si.equity * sp.risk_per_trade
-        max_lots_risk = int(risk_rupees // risk_per_lot_rupees) if risk_per_lot_rupees > 0 else 0
+        max_lots_risk = (
+            int(risk_rupees // risk_per_lot_rupees)
+            if risk_per_lot_rupees > 0
+            else 0
+        )
 
         if sp.exposure_basis == "premium":
             unit_notional = si.entry_price * si.lot_size
@@ -202,27 +210,31 @@ class PositionSizer:
             if sp.max_position_size_pct > 0
             else float("inf")
         )
-        max_lots_exposure = int(exposure_cap // unit_notional) if unit_notional > 0 else 0
+        max_lots_exposure = (
+            int(exposure_cap // unit_notional) if unit_notional > 0 else 0
+        )
         max_lots_limit = sp.max_lots
-        lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
+        calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
+        lots = calc_lots
         if lots == 0 and unit_notional <= exposure_cap and sp.min_lots <= max_lots_limit:
             lots = sp.min_lots
 
+        block_reason = ""
         if lots == 0:
+            if max_lots_limit < sp.min_lots:
+                block_reason = "lot_limit"
+            elif unit_notional > exposure_cap:
+                block_reason = "exposure_cap"
+            else:
+                block_reason = "risk_cap"
             logger.info(
-                "sizer: basis=%s mid=%.2f lot=%d unit=%.2f risk/lot=%.2f caps: exposure=%d risk=%d limit=%d -> lots=%d",
+                "sizer block: basis=%s unit=%.2f calc_lots=%d cap=%s",
                 sp.exposure_basis,
-                si.entry_price,
-                si.lot_size,
                 unit_notional,
-                risk_per_lot_rupees,
-                max_lots_exposure,
-                max_lots_risk,
-                max_lots_limit,
-                lots,
+                calc_lots,
+                block_reason,
             )
 
-        exposure_notional = unit_notional * lots
         quantity = lots * si.lot_size
         diag = PositionSizer._diag(
             si,
@@ -235,6 +247,8 @@ class PositionSizer:
             lots,
             unit_notional,
             exposure_cap,
+            calc_lots,
+            block_reason,
         )
         return quantity, lots, diag
 
@@ -250,6 +264,8 @@ class PositionSizer:
         lots_final: int,
         unit_notional: float,
         exposure_cap: float,
+        calc_lots: int,
+        block_reason: str,
     ) -> Dict:
         return {
             "entry_price": round(si.entry_price, 4),
@@ -268,4 +284,6 @@ class PositionSizer:
             "max_lots_risk": int(max_lots_risk),
             "lots_final": int(lots_final),
             "exposure_cap": round(exposure_cap, 2),
+            "calc_lots": int(calc_lots),
+            "block_reason": block_reason,
         }
