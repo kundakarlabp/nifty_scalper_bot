@@ -570,14 +570,38 @@ class TelegramController:
             if not runner:
                 return self._send("runner not ready")
             status = runner.get_status_snapshot()
-            eq = getattr(runner, "_equity_cached_value", 0.0)
-            msg = (
-                f"eq={round(float(eq),2)} trades={status.get('trades_today')} "
-                f"cooloff={status.get('cooloff_until', '-')} "
-                f"losses={status.get('consecutive_losses')} "
-                f"evals={getattr(runner, 'eval_count', 0)}"
+            plan = (
+                runner.get_last_signal_debug()
+                if hasattr(runner, "get_last_signal_debug")
+                else {}
             )
-            return self._send(msg)
+            eq = getattr(runner, "_equity_cached_value", 0.0)
+            lines = [
+                (
+                    f"eq={round(float(eq),2)} trades={status.get('trades_today')} "
+                    f"cooloff={status.get('cooloff_until', '-')} "
+                    f"losses={status.get('consecutive_losses')} "
+                    f"evals={getattr(runner, 'eval_count', 0)} "
+                    f"tp_basis={getattr(settings, 'tp_basis', 'premium')}"
+                )
+            ]
+            lines.append(
+                "spot: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                    e=plan.get("entry"),
+                    sl=plan.get("sl"),
+                    tp1=plan.get("tp1"),
+                    tp2=plan.get("tp2"),
+                )
+            )
+            lines.append(
+                "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                    e=plan.get("opt_entry"),
+                    sl=plan.get("opt_sl"),
+                    tp1=plan.get("opt_tp1"),
+                    tp2=plan.get("opt_tp2"),
+                )
+            )
+            return self._send("\n".join(lines))
 
         if cmd == "/selftest":
             if args:
@@ -1137,6 +1161,25 @@ class TelegramController:
                     lines.append(
                         f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
                     )
+                lines.append(
+                    "spot: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                        e=plan.get("entry"),
+                        sl=plan.get("sl"),
+                        tp1=plan.get("tp1"),
+                        tp2=plan.get("tp2"),
+                    )
+                )
+                lines.append(
+                    "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                        e=plan.get("opt_entry"),
+                        sl=plan.get("opt_sl"),
+                        tp1=plan.get("opt_tp1"),
+                        tp2=plan.get("opt_tp2"),
+                    )
+                )
+                lines.append(
+                    f"tp_basis: {getattr(settings, 'tp_basis', 'premium')}"
+                )
                 if plan.get("option"):
                     o = plan["option"]
                     lines.append(

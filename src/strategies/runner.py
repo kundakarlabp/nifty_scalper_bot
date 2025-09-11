@@ -2451,6 +2451,19 @@ class StrategyRunner:
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
 
+        plan = self.last_plan or {}
+        diag["last_signal"] = {
+            "entry": plan.get("entry"),
+            "sl": plan.get("sl"),
+            "tp1": plan.get("tp1"),
+            "tp2": plan.get("tp2"),
+            "opt_entry": plan.get("opt_entry"),
+            "opt_sl": plan.get("opt_sl"),
+            "opt_tp1": plan.get("opt_tp1"),
+            "opt_tp2": plan.get("opt_tp2"),
+        }
+        diag["tp_basis"] = getattr(settings, "tp_basis", "premium")
+
         portfolio_delta_units = self._portfolio_delta_units()
         gmode = self.now_ist.weekday() == 1 and self.now_ist.time() >= dt_time(14, 45)
         diag["portfolio_greeks"] = {

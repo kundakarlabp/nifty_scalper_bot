@@ -469,6 +469,8 @@ class OrderExecutor:
         self.enable_trailing = bool(getattr(ex, "enable_trailing", True))
         self.trailing_mult = float(getattr(ex, "trailing_atr_multiplier", 1.5))
         self.use_slm_exit = bool(getattr(ex, "use_slm_exit", True))
+        self.entry_slip = float(getattr(ex, "entry_slippage_pct", 0.25)) / 100.0
+        self.exit_slip = float(getattr(ex, "exit_slippage_pct", 0.25)) / 100.0
 
         # microstructure constraints
         self.max_spread_pct = float(getattr(ex, "max_spread_pct", 0.0035))
@@ -804,6 +806,14 @@ class OrderExecutor:
                 log.warning("Open record exists on %s; skip new entry.", norm_symbol)
                 return None
 
+        if (bid is None or ask is None) and self.kite:
+            try:
+                qd = fetch_quote_with_depth(self.kite, symbol, self.cb_orders)
+                bid = bid if bid is not None else qd.get("bid")
+                ask = ask if ask is not None else qd.get("ask")
+            except BROKER_EXCEPTIONS:
+                pass
+
         # microstructure gates + mid execution
         if bid is not None and ask is not None:
             tries = 0
@@ -825,7 +835,13 @@ class OrderExecutor:
                     except (TypeError, ValueError):
                         depth_ok = True
                 if spread_pct <= max_sp and depth_ok:
-                    price = min(float(ask), mid + 0.15 * spread)
+                    slip = self.entry_slip
+                    if action == "BUY":
+                        px = mid * (1 + slip)
+                        price = min(float(ask), px)
+                    else:
+                        px = mid * (1 - slip)
+                        price = max(float(bid), px)
                     price = _round_to_tick(price, self.tick_size)
                     break
                 tries += 1
@@ -959,6 +975,11 @@ class OrderExecutor:
         exit_side = "SELL" if rec.side == "BUY" else "BUY"
         tp_price = _round_to_tick(tp_price, rec.tick_size)
         sl_price = _round_to_tick(sl_price, rec.tick_size)
+        slip = self.exit_slip
+        if slip > 0:
+            adj = 1 - slip if rec.side == "BUY" else 1 + slip
+            tp_price = _round_to_tick(tp_price * adj, rec.tick_size)
+            sl_price = _round_to_tick(sl_price * adj, rec.tick_size)
 
         # cancel old TPs if any
         for old in (rec.tp1_order_id, rec.tp2_order_id):

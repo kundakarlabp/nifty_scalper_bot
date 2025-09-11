@@ -338,6 +338,12 @@ class ExecutorSettings(BaseModel):
     trailing_atr_multiplier: float = 1.4
     fee_per_lot: float = 20.0
     slippage_ticks: int = 1
+    entry_slippage_pct: float = Field(
+        0.25, validation_alias=AliasChoices("ENTRY_SLIPPAGE_PCT", "EXECUTOR__ENTRY_SLIPPAGE_PCT")
+    )
+    exit_slippage_pct: float = Field(
+        0.25, validation_alias=AliasChoices("EXIT_SLIPPAGE_PCT", "EXECUTOR__EXIT_SLIPPAGE_PCT")
+    )
     ack_timeout_ms: int = 1500
     fill_timeout_ms: int = 10000
     max_place_retries: int = 2
@@ -695,6 +701,14 @@ class AppSettings(BaseSettings):
     @property
     def executor_slippage_ticks(self) -> int:
         return self.executor.slippage_ticks
+
+    @property
+    def executor_entry_slippage_pct(self) -> float:
+        return self.executor.entry_slippage_pct
+
+    @property
+    def executor_exit_slippage_pct(self) -> float:
+        return self.executor.exit_slippage_pct
 
     @property
     def executor_ack_timeout_ms(self) -> int:
