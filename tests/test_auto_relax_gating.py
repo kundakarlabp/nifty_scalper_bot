@@ -18,8 +18,10 @@ def test_min_score_relaxes_after_inactivity(monkeypatch) -> None:
     now = datetime(2024, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
     monkeypatch.setattr(runner, "_now_ist", lambda: now)
     runner._last_trade_time = now - timedelta(minutes=31)
-    assert runner._min_score_threshold() == 0.25
+    assert runner._min_score_threshold() == 0.30
     assert runner._auto_relax_active is True
+    runner._last_trade_time = now - timedelta(minutes=61)
+    assert round(runner._min_score_threshold(), 2) == 0.25
     runner._last_trade_time = now - timedelta(minutes=5)
     assert runner._min_score_threshold() == 0.35
     assert runner._auto_relax_active is False

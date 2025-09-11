@@ -263,6 +263,9 @@ class EnhancedScalpingStrategy:
         self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
+        self._option_last_price: Optional[float] = None
+        self._option_atr: float = 0.0
+        self.option_atr_pct: float = 0.0
 
     # ---------- tech utils ----------
     @staticmethod
@@ -315,6 +318,20 @@ class EnhancedScalpingStrategy:
     def _normalize_min_score(val: float) -> float:
         """Return ``val`` on a 0..1 scale, accepting percentages."""
         return val / 100.0 if val > 1 else val
+
+    def _update_option_atr(self, price: Optional[float]) -> None:
+        """Update rolling option ATR using tick-based RMA."""
+        if price is None or price <= 0:
+            return
+        prev = self._option_last_price
+        if prev is not None:
+            tr = abs(price - prev)
+            if self._option_atr == 0.0:
+                self._option_atr = tr
+            else:
+                self._option_atr += (tr - self._option_atr) / 14.0
+            self.option_atr_pct = (self._option_atr / price) * 100.0 if price > 0 else 0.0
+        self._option_last_price = price
 
     def _est_iv_pct(self, S: float, K: float, T: float) -> Optional[int]:
         """Estimate rolling IV percentile."""
@@ -802,6 +819,13 @@ class EnhancedScalpingStrategy:
             q = fetch_quote_with_depth(getattr(settings, "kite", None), quote_id)
             plan["_last_quote"] = q
             mid = (q.get("bid", 0.0) + q.get("ask", 0.0)) / 2.0
+            price_opt = float(q.get("ltp") or 0.0)
+            if price_opt <= 0 and mid > 0:
+                price_opt = mid
+            self._update_option_atr(price_opt)
+            plan["option_atr_pct"] = (
+                round(self.option_atr_pct, 2) if self.option_atr_pct > 0 else None
+            )
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
             if not isinstance(micro, dict):

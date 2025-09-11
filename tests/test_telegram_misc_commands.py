@@ -63,6 +63,38 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "opt: entry=" in msg
 
 
+def test_why_reports_auto_relax(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    now = datetime.now()
+    plan = {
+        "last_bar_ts": (now - timedelta(seconds=60)).isoformat(),
+        "bar_count": 25,
+        "regime": "TREND",
+        "atr_pct": 0.6,
+        "atr_min": 0.5,
+        "score": 10,
+        "spread_pct": 0.1,
+        "depth_ok": True,
+        "quote_src": "test",
+        "feature_ok": True,
+    }
+    status = {
+        "within_window": True,
+        "cooloff_until": "-",
+        "daily_dd_hit": False,
+        "auto_relax": 0.05,
+    }
+    tc = TelegramController(
+        status_provider=lambda: status,
+        last_signal_provider=lambda: plan,
+    )
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/why"}})
+    msg = sent[0]
+    assert "auto_relax" in msg
+
+
 def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
     _prep_settings(monkeypatch)
     called: list[str] = []

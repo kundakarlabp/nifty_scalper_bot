@@ -36,7 +36,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.diagnostics.metrics import metrics
+from src.diagnostics.metrics import metrics, runtime_metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
 from src.execution.order_executor import OrderReconciler
@@ -332,6 +332,7 @@ class StrategyRunner:
         self._risk_state = _RiskCheckState()
         self._last_trade_time = self.now_ist
         self._auto_relax_active = False
+        self._auto_relax_current = 0.0
 
         # Factories that return your existing objects WITHOUT changing their classes
         def _make_strategy():
@@ -1499,6 +1500,8 @@ class StrategyRunner:
             if placed_ok:
                 self._last_trade_time = self.now_ist
                 self._auto_relax_active = False
+                self._auto_relax_current = 0.0
+                runtime_metrics.set_auto_relax(0.0)
                 metrics.inc_orders(placed=1)
             else:
                 metrics.inc_orders(rejected=1)
@@ -1802,18 +1805,24 @@ class StrategyRunner:
         minutes_since = (now - last).total_seconds() / 60.0
         relax_after = getattr(getattr(self, "strategy", None), "auto_relax_after_min", 30)
         enabled = getattr(getattr(self, "strategy", None), "auto_relax_enabled", False)
+        relax = 0.0
         if enabled and minutes_since > relax_after:
-            relaxed = max(base - 0.1, 0.25)
+            steps = math.floor(minutes_since / relax_after)
+            relax = min(steps * 0.05, 0.10)
+        self._auto_relax_current = relax
+        if relax > 0.0:
             self._auto_relax_active = True
+            runtime_metrics.set_auto_relax(relax)
             _log_throttled(
                 "auto_relax",
                 logging.INFO,
                 "auto_relax active %.1fmin, min_score %.2f",
                 minutes_since,
-                relaxed,
+                base - relax,
             )
-            return relaxed
+            return base - relax
         self._auto_relax_active = False
+        runtime_metrics.set_auto_relax(0.0)
         return base
 
     def _calculate_quantity_diag(
@@ -1886,6 +1895,8 @@ class StrategyRunner:
         self.risk.trades_today += 1
         self._last_trade_time = self.now_ist
         self._auto_relax_active = False
+        self._auto_relax_current = 0.0
+        runtime_metrics.set_auto_relax(0.0)
         try:
             self.risk_engine.on_trade_closed(pnl_R=pnl)
         except Exception:
@@ -2533,6 +2544,7 @@ class StrategyRunner:
 
         mins_since = (self.now_ist - self._last_trade_time).total_seconds() / 60.0
         diag["minutes_since_last_trade"] = round(mins_since, 1)
+        diag["auto_relax"] = round(self._auto_relax_current, 2)
         if self._auto_relax_active:
             diag.setdefault("banners", []).append("auto_relax")
 

@@ -1153,6 +1153,9 @@ class TelegramController:
                 lines = ["/why gates"]
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
+                ar = float(status.get("auto_relax", 0.0) or 0.0)
+                if ar > 0.0:
+                    lines.append(f"auto_relax: {ar:.2f}")
                 if reason_block in {"no_option_quote", "no_option_token"}:
                     lines.append("micro: N/A (no_quote)")
                 else:
