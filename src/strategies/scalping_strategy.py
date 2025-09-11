@@ -867,27 +867,28 @@ class EnhancedScalpingStrategy:
                 reason, extra = rej
                 return plan_block(reason, **extra)
 
-            entry_price = float(current_price)
+            # spot-based targets (premium equivalents derived later)
+            spot_entry = float(price)
             tick_size = float(
                 getattr(getattr(settings, "executor", object()), "tick_size", 0.05)
             )
 
             if reg.regime == "RANGE" and side == "SELL":
                 struct_sl_price = float(df["high"].iloc[-1]) + 0.25 * atr_val
-                struct_dist = struct_sl_price - entry_price
+                struct_dist = struct_sl_price - spot_entry
             elif reg.regime == "RANGE" and side == "BUY":
                 struct_sl_price = float(df["low"].iloc[-1]) - 0.25 * atr_val
-                struct_dist = entry_price - struct_sl_price
+                struct_dist = spot_entry - struct_sl_price
             else:
                 struct_dist = 0.8 * atr_val
 
             sl_dist = max(0.8 * atr_val, struct_dist)
             if side == "BUY":
-                stop_loss = entry_price - sl_dist
+                spot_sl = spot_entry - sl_dist
             else:
-                stop_loss = entry_price + sl_dist
+                spot_sl = spot_entry + sl_dist
 
-            R = abs(entry_price - stop_loss)
+            R = abs(spot_entry - spot_sl)
             tp1_mult = rand_uniform(cfg.tp1_R_min, cfg.tp1_R_max)
             tp2_mult = cfg.tp2_R_trend if reg.regime == "TREND" else cfg.tp2_R_range
             trail_mult = cfg.trail_atr_mult
@@ -902,14 +903,14 @@ class EnhancedScalpingStrategy:
                 time_stop = min(time_stop, cfg.gamma_time_stop_min)
                 reasons.append("gamma_mode")
             if side == "BUY":
-                tp1 = entry_price + tp1_mult * R
-                tp2 = entry_price + tp2_mult * R
+                spot_tp1 = spot_entry + tp1_mult * R
+                spot_tp2 = spot_entry + tp2_mult * R
             else:
-                tp1 = entry_price - tp1_mult * R
-                tp2 = entry_price - tp2_mult * R
+                spot_tp1 = spot_entry - tp1_mult * R
+                spot_tp2 = spot_entry - tp2_mult * R
 
             breakeven_ticks = int(max(1, round(0.1 * R / tick_size)))
-            rr = (abs(tp2 - entry_price) / R) if R > 0 else 0.0
+            rr = (abs(spot_tp2 - spot_entry) / R) if R > 0 else 0.0
 
             # strike selection & liquidity
             try:
@@ -939,10 +940,10 @@ class EnhancedScalpingStrategy:
                     "action": side,
                     "option_type": option_type or None,
                     "strike": str(strike),
-                    "entry": entry_price,
-                    "sl": stop_loss,
-                    "tp1": tp1,
-                    "tp2": tp2,
+                    "entry": spot_entry,
+                    "sl": spot_sl,
+                    "tp1": spot_tp1,
+                    "tp2": spot_tp2,
                     "trail_atr_mult": trail_mult,
                     "time_stop_min": time_stop,
                     "rr": round(rr, 2),
@@ -962,13 +963,10 @@ class EnhancedScalpingStrategy:
                 )
             )
             if mid:
-                opt_entry = float(mid)
-                delta = float(plan.get("delta") or 0.5)
+                opt_entry = round(round(float(mid) / tick_size) * tick_size, 2)
+                delta = float(q.get("delta") or plan.get("delta") or 0.5)
                 delta = max(0.25, min(delta, 0.75))
-                spot_entry = float(plan["entry"])
-                elasticity = _clamp(
-                    delta * (spot_entry / opt_entry), 0.3, 1.2
-                )
+                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
 
                 def _opt_target(spot_target: float) -> float:
                     spot_offset = spot_target - spot_entry
@@ -990,11 +988,16 @@ class EnhancedScalpingStrategy:
                 plan["opt_tp2"] = (
                     _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
                 )
-            # backward compatibility extras
-            plan["entry_price"] = entry_price
-            plan["stop_loss"] = stop_loss
-            plan["take_profit"] = tp2
-            plan["target"] = tp2
+            tp_basis = getattr(settings, "tp_basis", "premium").lower()
+            if tp_basis == "premium":
+                plan["entry_price"] = plan.get("opt_entry")
+                plan["stop_loss"] = plan.get("opt_sl")
+                plan["take_profit"] = plan.get("opt_tp2")
+            else:
+                plan["entry_price"] = spot_entry
+                plan["stop_loss"] = spot_sl
+                plan["take_profit"] = spot_tp2
+            plan["target"] = plan["take_profit"]
             plan["side"] = side
             plan["confidence"] = min(1.0, max(0.0, score / 10.0))
             plan["breakeven_ticks"] = breakeven_ticks

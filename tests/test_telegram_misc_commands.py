@@ -60,7 +60,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "/why gates" in msg
     assert "window: PASS" in msg
     assert "micro:" in msg
-    assert "opt: entry=" in msg
+    assert "premium: entry=" in msg
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch) -> None:
@@ -246,7 +246,7 @@ def test_state_outputs_metrics(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/state"}})
     msg = sent[0]
     assert "eq=1000.0" in msg and "trades=2" in msg and "losses=1" in msg and "evals=7" in msg
-    assert "opt: entry=" in msg and "tp_basis=" in msg
+    assert "premium: entry=" in msg and "tp_basis=" in msg
 
 
 def test_atrmin_updates_config(monkeypatch) -> None:

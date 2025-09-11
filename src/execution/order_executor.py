@@ -818,6 +818,12 @@ class OrderExecutor:
             except BROKER_EXCEPTIONS:
                 pass
 
+        if bid is None or ask is None:
+            slip = self.entry_slip
+            if slip > 0 and price > 0:
+                adj = 1 + slip if action == "BUY" else 1 - slip
+                price = _round_to_tick(price * adj, self.tick_size)
+
         # microstructure gates + mid execution
         if bid is not None and ask is not None:
             tries = 0
