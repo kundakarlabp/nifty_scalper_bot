@@ -47,7 +47,7 @@ class BacktestEngine:
         self.sim = sim
         self.outdir = outdir
         os.makedirs(outdir, exist_ok=True)
-        self.trades: list[dict[str, object]] = []
+        self.trades: list[dict[str, Any]] = []
         self.equity = 100_000.0
         self.equity_curve: list[tuple[str, float]] = []
 
@@ -222,7 +222,7 @@ class BacktestEngine:
             w.writerow(["ts", "equity"])
             w.writerows(self.equity_curve)
 
-        summary = self._summary_metrics(self.trades)
+        summary: dict[str, Any] = self._summary_metrics(self.trades)
         by_regime: dict[str, list[float]] = {"TREND": [], "RANGE": []}
         for t in self.trades:
             reg = str(t.get("regime", "TREND"))

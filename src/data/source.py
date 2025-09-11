@@ -792,7 +792,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._stale_tick_checks = 0
         return self._stale_tick_checks >= self._stale_tick_thresh
 
-    def tick_watchdog_details(self) -> dict[str, float]:
+    def tick_watchdog_details(self) -> dict[str, float | int | None]:
         ts = self._last_tick_ts
         age = (datetime.utcnow() - ts).total_seconds() if ts else None
         return {"age": age, "checks": self._stale_tick_checks}
