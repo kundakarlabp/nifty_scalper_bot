@@ -873,6 +873,7 @@ class EnhancedScalpingStrategy:
                 micro = {}
             micro["cap_pct"] = cap_pct
             plan["micro"] = micro
+            plan["lot_size"] = lot_sz
             sp = micro.get("spread_pct") if isinstance(micro, dict) else None
             cap = micro.get("cap_pct") if isinstance(micro, dict) else None
             depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
@@ -1020,44 +1021,34 @@ class EnhancedScalpingStrategy:
                 }
             )
             # --- premium-basis equivalents ---
-            _ = int(getattr(settings.instruments, "nifty_lot_size", 75))
             q = plan.get("_last_quote") or {}
-            mid = q.get("mid") or (
-                (
-                    (q.get("bid", 0) + q.get("ask", 0)) / 2
-                    if q.get("bid") and q.get("ask")
-                    else q.get("ltp")
+            option_mid = q.get("mid")
+            if option_mid is None:
+                bid = q.get("bid")
+                ask = q.get("ask")
+                if bid and ask:
+                    option_mid = (bid + ask) / 2.0
+                else:
+                    option_mid = q.get("ltp")
+            if option_mid:
+                opt_entry = round(float(option_mid), 2)
+                entry = float(plan.get("entry") or 0.0)
+
+                def _apply_pct(target: float | None) -> float | None:
+                    if target is None or entry == 0:
+                        return None
+                    pct = (target - entry) / entry
+                    return round(opt_entry * (1.0 + pct), 2)
+
+                lot_raw = plan.get("lot_size") or getattr(
+                    settings.instruments, "nifty_lot_size", 75
                 )
-            )
-            if mid:
-                opt_entry = round(round(float(mid) / tick_size) * tick_size, 2)
-                delta = _clamp(float(plan.get("delta") or 0.5), 0.25, 0.75)
-                spot_entry = float(plan.get("spot_entry") or 0.0)
-                elasticity = _clamp(delta * (spot_entry / opt_entry), 0.3, 1.2)
-                plan["delta"] = delta
-                plan["elasticity"] = elasticity
-                runtime_metrics.set_delta(delta)
-                runtime_metrics.set_elasticity(elasticity)
-
-                def _opt_target(spot_target: float) -> float:
-                    premium_offset = elasticity * (spot_target - spot_entry)
-                    if plan["option_type"] == "PE":
-                        premium_offset *= -1.0
-                    if plan["action"] == "SELL":
-                        premium_offset *= -1.0
-                    prem = opt_entry + premium_offset
-                    return round(round(prem / tick_size) * tick_size, 2)
-
+                lot_sz = int(float(lot_raw))
                 plan["opt_entry"] = opt_entry
-                plan["opt_sl"] = (
-                    _opt_target(plan["sl"]) if plan["sl"] is not None else None
-                )
-                plan["opt_tp1"] = (
-                    _opt_target(plan["tp1"]) if plan["tp1"] is not None else None
-                )
-                plan["opt_tp2"] = (
-                    _opt_target(plan["tp2"]) if plan["tp2"] is not None else None
-                )
+                plan["opt_sl"] = _apply_pct(plan.get("sl"))
+                plan["opt_tp1"] = _apply_pct(plan.get("tp1"))
+                plan["opt_tp2"] = _apply_pct(plan.get("tp2"))
+                plan["opt_lot_cost"] = round(opt_entry * lot_sz, 2)
             # backward compatibility extras
             plan["entry_price"] = entry_price
             plan["stop_loss"] = stop_loss

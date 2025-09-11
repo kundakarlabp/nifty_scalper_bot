@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from typing import List, Tuple
@@ -15,6 +16,8 @@ from src.backtesting.metrics import reject
 from src.backtesting.sim_connector import SimConnector
 from src.risk.limits import LimitConfig, RiskEngine
 from src.strategies.strategy_config import resolve_config_path, try_load
+
+log = logging.getLogger(__name__)
 
 
 def daterange(start: datetime, end: datetime):
@@ -121,7 +124,7 @@ def main() -> None:
     if best_overall:
         with open(os.path.join(args.out, "best_overall.json"), "w") as f:
             json.dump(best_overall, f, indent=2)
-    print("DONE")
+    log.info("DONE")
 
 
 if __name__ == "__main__":

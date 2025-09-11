@@ -613,15 +613,19 @@ class TelegramController:
                     tp2=plan.get("tp2"),
                 )
             )
-            lines.append(
-                "premium: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr}".format(
-                    e=plan.get("opt_entry"),
-                    sl=plan.get("opt_sl"),
-                    tp1=plan.get("opt_tp1"),
-                    tp2=plan.get("opt_tp2"),
-                    atr=plan.get("opt_atr"),
+            basis = str(
+                getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
+            ).lower()
+            if basis == "premium":
+                lines.append(
+                    "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
+                        e=plan.get("opt_entry"),
+                        sl=plan.get("opt_sl"),
+                        tp1=plan.get("opt_tp1"),
+                        tp2=plan.get("opt_tp2"),
+                        lc=plan.get("opt_lot_cost"),
+                    )
                 )
-            )
             return self._send("\n".join(lines))
 
         if cmd == "/selftest":
@@ -942,20 +946,32 @@ class TelegramController:
             return self._send(text, parse_mode="Markdown")
 
         if cmd == "/plan":
-            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            runner = StrategyRunner.get_singleton()
             if not runner:
-                return self._send("Runner unavailable.")
-            try:
-                snap = runner.telemetry_snapshot()
-                plan = snap.get("signal", {})
-                text = json.dumps(plan, ensure_ascii=False, indent=2)
-                if len(text) > 2000:
-                    text = text[:2000] + "\n... (truncated)"
-                return self._send(
-                    "🧩 *Plan*\n```\n" + text + "\n```", parse_mode="Markdown"
+                return self._send("runner not ready")
+            plan = runner.last_plan if runner else {}
+            lines = [
+                "spot: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
+                    e=plan.get("entry"),
+                    sl=plan.get("sl"),
+                    tp1=plan.get("tp1"),
+                    tp2=plan.get("tp2"),
                 )
-            except Exception as e:
-                return self._send(f"Plan error: {e}")
+            ]
+            basis = str(
+                getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
+            ).lower()
+            if basis == "premium":
+                lines.append(
+                    "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
+                        e=plan.get("opt_entry"),
+                        sl=plan.get("opt_sl"),
+                        tp1=plan.get("opt_tp1"),
+                        tp2=plan.get("opt_tp2"),
+                        lc=plan.get("opt_lot_cost"),
+                    )
+                )
+            return self._send("\n".join(lines))
 
         if cmd == "/events":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
@@ -1192,16 +1208,21 @@ class TelegramController:
                         tp2=plan.get("tp2"),
                     )
                 )
-                lines.append(
-                    "premium: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr} atr_pct={atrp}".format(
-                        e=plan.get("opt_entry"),
-                        sl=plan.get("opt_sl"),
-                        tp1=plan.get("opt_tp1"),
-                        tp2=plan.get("opt_tp2"),
-                        atr=plan.get("opt_atr"),
-                        atrp=plan.get("opt_atr_pct"),
+                basis = str(
+                    getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
+                ).lower()
+                if basis == "premium":
+                    lines.append(
+                        "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc} atr {atr} atr_pct {atrp}".format(
+                            e=plan.get("opt_entry"),
+                            sl=plan.get("opt_sl"),
+                            tp1=plan.get("opt_tp1"),
+                            tp2=plan.get("opt_tp2"),
+                            lc=plan.get("opt_lot_cost"),
+                            atr=plan.get("opt_atr"),
+                            atrp=plan.get("opt_atr_pct"),
+                        )
                     )
-                )
                 lines.append(
                     f"tp_basis: {getattr(settings, 'tp_basis', 'premium')}"
                 )

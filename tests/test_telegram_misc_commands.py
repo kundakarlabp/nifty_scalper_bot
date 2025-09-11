@@ -42,6 +42,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
         "opt_tp2": 12.0,
         "opt_atr": 0.4,
         "opt_atr_pct": 4.0,
+        "opt_lot_cost": 750.0,
     }
     status = {"within_window": True, "cooloff_until": "-", "daily_dd_hit": False}
     import src.diagnostics.registry as diag_registry
@@ -62,7 +63,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "/why gates" in msg
     assert "window: PASS" in msg
     assert "micro:" in msg
-    assert "premium: entry=" in msg and "atr=" in msg and "atr_pct=" in msg
+    assert "Option → entry" in msg and "atr" in msg and "atr_pct" in msg
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch, tmp_path) -> None:
@@ -178,6 +179,33 @@ def test_expiry_shows_dates(monkeypatch) -> None:
     assert sent[0] == "weekly=2024-07-02 | monthly=2024-07-30"
 
 
+def test_plan_displays_option_numbers(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    plan = {
+        "entry": 100.0,
+        "sl": 95.0,
+        "tp1": 110.0,
+        "tp2": 120.0,
+        "opt_entry": 10.0,
+        "opt_sl": 9.5,
+        "opt_tp1": 11.0,
+        "opt_tp2": 12.0,
+        "opt_lot_cost": 750.0,
+    }
+    runner = SimpleNamespace(last_plan=plan)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/plan"}})
+    msg = sent[0]
+    assert "Option → entry" in msg and "lot" in msg
+
+
 def test_config_outputs_strategy_config(monkeypatch) -> None:
     _prep_settings(monkeypatch)
     cfg = SimpleNamespace(
@@ -239,6 +267,7 @@ def test_state_outputs_metrics(monkeypatch) -> None:
             "opt_tp1": 11.0,
             "opt_tp2": 12.0,
             "opt_atr": 0.5,
+            "opt_lot_cost": 750.0,
         },
         order_executor=SimpleNamespace(enable_trailing=True),
     )
@@ -253,7 +282,7 @@ def test_state_outputs_metrics(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/state"}})
     msg = sent[0]
     assert "eq=1000.0" in msg and "trades=2" in msg and "losses=1" in msg and "evals=7" in msg
-    assert "premium: entry=" in msg and "atr=" in msg and "tp_basis=" in msg
+    assert "Option → entry" in msg and "tp_basis=" in msg
     assert "trail=on" in msg
 
 

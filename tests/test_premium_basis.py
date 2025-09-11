@@ -38,19 +38,13 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
     assert plan["opt_entry"] == 5.0
     entry = float(plan["entry"])
 
-    delta = 0.5
-    elasticity = max(0.3, min(1.2, delta * (entry / plan["opt_entry"])))
-
-    def opt_target(spot_target: float) -> float:
-        spot_offset = spot_target - entry
-        parity = 1.0 if plan["option_type"] == "CE" else -1.0
-        offset = elasticity * spot_offset * parity
-        if plan["action"] == "BUY":
-            prem = plan["opt_entry"] + offset
-        else:
-            prem = plan["opt_entry"] - offset
-        return round(round(prem / 0.05) * 0.05, 2)
+    def opt_target(spot_target: float | None) -> float | None:
+        if spot_target is None:
+            return None
+        pct = (spot_target - entry) / entry
+        return round(plan["opt_entry"] * (1 + pct), 2)
 
     assert plan["opt_sl"] == pytest.approx(opt_target(plan["sl"]))
     assert plan["opt_tp1"] == pytest.approx(opt_target(plan["tp1"]))
     assert plan["opt_tp2"] == pytest.approx(opt_target(plan["tp2"]))
+    assert plan["opt_lot_cost"] == pytest.approx(plan["opt_entry"] * 50)

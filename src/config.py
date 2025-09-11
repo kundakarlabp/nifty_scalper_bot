@@ -276,6 +276,14 @@ class RiskSettings(BaseModel):
         )
     )
 
+    @field_validator("exposure_basis", mode="before")
+    @classmethod
+    def _v_exposure_basis(cls, v: object) -> str:
+        val = str(v).lower()
+        if val not in {"premium", "underlying"}:
+            raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
+        return val
+
     @field_validator("risk_per_trade")
     @classmethod
     def _v_risk_pct(cls, v: float) -> float:
@@ -421,6 +429,14 @@ class AppSettings(BaseSettings):
     log_json: bool = False
     exposure_basis: Literal["premium", "underlying"] = "premium"
     tp_basis: Literal["premium", "spot"] = "premium"
+
+    @field_validator("exposure_basis", mode="before")
+    @classmethod
+    def _v_app_exposure_basis(cls, v: object) -> str:
+        val = str(v).lower()
+        if val not in {"premium", "underlying"}:
+            raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
+        return val
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
