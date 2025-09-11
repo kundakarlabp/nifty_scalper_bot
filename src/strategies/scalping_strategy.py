@@ -423,6 +423,7 @@ class EnhancedScalpingStrategy:
             "atm_strike": None,
             "option_token": None,
             "opt_atr": None,
+            "opt_atr_pct": None,
         }
 
         plan["score_dbg"] = {
@@ -821,8 +822,15 @@ class EnhancedScalpingStrategy:
                 plan["opt_atr"] = latest_atr_value(
                     compute_atr(opt_df, period=14)
                 )
+                if plan["opt_atr"] and mid_f:
+                    plan["opt_atr_pct"] = (
+                        float(plan["opt_atr"]) / mid_f * 100.0
+                    )
+                else:
+                    plan["opt_atr_pct"] = None
             else:
                 plan["opt_atr"] = None
+                plan["opt_atr_pct"] = None
             cap_pct = cap_for_mid(mid, cfg)
             micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
             if not isinstance(micro, dict):

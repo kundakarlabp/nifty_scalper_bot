@@ -59,3 +59,24 @@ def test_place_order_waits_and_succeeds(monkeypatch) -> None:
     assert rid is not None
     assert ex.last_error is None
 
+
+def test_price_uses_half_spread_slippage(monkeypatch) -> None:
+    ex = _executor()
+    monkeypatch.setattr(oe, "ENTRY_WAIT_S", 0.0)
+    monkeypatch.setattr(oe, "MICRO_SPREAD_CAP", 2.0)
+    payload = {
+        "action": "BUY",
+        "quantity": ex.lot_size,
+        "entry_price": 100.0,
+        "stop_loss": 90.0,
+        "take_profit": 110.0,
+        "symbol": "SYM",
+        "bid": 100.0,
+        "ask": 101.0,
+        "depth": (ex.lot_size * 10, ex.lot_size * 10),
+    }
+    rid = ex.place_order(payload)
+    assert rid is not None
+    rec = ex._active[rid]
+    assert rec.entry_price == 101.0
+

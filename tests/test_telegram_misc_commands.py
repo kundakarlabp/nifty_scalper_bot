@@ -41,6 +41,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
         "opt_tp1": 11.0,
         "opt_tp2": 12.0,
         "opt_atr": 0.4,
+        "opt_atr_pct": 4.0,
     }
     status = {"within_window": True, "cooloff_until": "-", "daily_dd_hit": False}
     import src.diagnostics.registry as diag_registry
@@ -61,7 +62,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "/why gates" in msg
     assert "window: PASS" in msg
     assert "micro:" in msg
-    assert "opt: entry=" in msg and "atr=" in msg
+    assert "opt: entry=" in msg and "atr=" in msg and "atr_pct=" in msg
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch) -> None:

@@ -1152,6 +1152,8 @@ class TelegramController:
                 reason_block = plan.get("reason_block") or "-"
                 reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
+                if "auto_relax" in status.get("banners", []):
+                    lines.append("auto_relax: active")
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
                 if reason_block in {"no_option_quote", "no_option_token"}:
@@ -1171,12 +1173,13 @@ class TelegramController:
                     )
                 )
                 lines.append(
-                    "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr}".format(
+                    "opt: entry={e} sl={sl} tp1={tp1} tp2={tp2} atr={atr} atr_pct={atrp}".format(
                         e=plan.get("opt_entry"),
                         sl=plan.get("opt_sl"),
                         tp1=plan.get("opt_tp1"),
                         tp2=plan.get("opt_tp2"),
                         atr=plan.get("opt_atr"),
+                        atrp=plan.get("opt_atr_pct"),
                     )
                 )
                 lines.append(

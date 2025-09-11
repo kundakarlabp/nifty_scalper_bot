@@ -840,12 +840,12 @@ class OrderExecutor:
                 spread_pct = spread / mid * 100.0 if mid > 0 else float("inf")
                 depth_lots = depth_to_lots(depth, lot_size=self.lot_size) or 0.0
                 if spread_pct <= MICRO_SPREAD_CAP and depth_lots >= qty_lots:
-                    slip = self.entry_slip
+                    slip = spread * 0.5
                     if action == "BUY":
-                        px = mid * (1 + slip)
+                        px = mid + slip
                         price = min(float(ask), px)
                     else:
-                        px = mid * (1 - slip)
+                        px = mid - slip
                         price = max(float(bid), px)
                     price = _round_to_tick(price, self.tick_size)
                     self.last_error = None
