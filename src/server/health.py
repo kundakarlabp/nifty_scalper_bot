@@ -56,12 +56,24 @@ def ready() -> Tuple[Dict[str, Any], int]:
         max_tick_lag_s=int(getattr(runner.strategy_cfg, "max_tick_lag_s", 8)),
         max_bar_lag_s=int(getattr(runner.strategy_cfg, "max_bar_lag_s", 75)),
     )
-    if not fresh.ok:
-        return {
+    watchdog = getattr(ds, "tick_watchdog", None)
+    red_details: Dict[str, Any] = {}
+    red_flag = False
+    if callable(watchdog):
+        red_flag = bool(watchdog())
+        if red_flag:
+            details_fn = getattr(ds, "tick_watchdog_details", None)
+            if callable(details_fn):
+                red_details = details_fn()
+    if not fresh.ok or red_flag:
+        resp: Dict[str, Any] = {
             "status": "down",
             "reason": "stale",
             "tick_lag_s": fresh.tick_lag_s,
-        }, 503
+        }
+        if red_flag:
+            resp["red_flag"] = red_details
+        return resp, 503
     return {"status": "ready"}, 200
 
 

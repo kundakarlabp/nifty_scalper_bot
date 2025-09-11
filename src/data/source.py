@@ -685,6 +685,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.hist_mode = "live_warmup"
             self.bar_builder = MinuteBarBuilder(max_bars=120)
 
+        self._reconnect_backoff = 1.0
+        self._stale_tick_checks = 0
+        self._stale_tick_thresh = 3
+        self._last_refresh_min: tuple[int, int] | None = None
+        self._last_auth_warn = 0.0
+
     # ---- lifecycle ----
     def connect(self) -> None:
         """Connect to broker, subscribe to SPOT token and warm up cache."""
@@ -710,14 +716,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         sub_fn([token])
                         mode_fn(full_mode, [token])
                 except Exception as e:
-                    log.warning("LiveKiteSource connect: subscribe failed: %s", e)
+                    if time.time() - self._last_auth_warn > 60:
+                        log.warning("LiveKiteSource connect: subscribe failed: %s", e)
+                        self._last_auth_warn = time.time()
 
             try:
                 self.ensure_atm_tokens()  # type: ignore[attr-defined]
             except Exception as e:
-                log.warning(
-                    "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
-                )
+                if time.time() - self._last_auth_warn > 60:
+                    log.warning(
+                        "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
+                    )
+                    self._last_auth_warn = time.time()
 
         warmup_disabled = data_warmup_disable()
         warmup_failed = False
@@ -727,7 +737,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     required_bars=WARMUP_BARS, token=token, timeframe="minute"
                 )
             except Exception as e:
-                log.warning("LiveKiteSource connect: backfill failed: %s", e)
+                if time.time() - self._last_auth_warn > 60:
+                    log.warning("LiveKiteSource connect: backfill failed: %s", e)
+                    self._last_auth_warn = time.time()
                 warmup_failed = True
         else:
             warmup_failed = warmup_disabled
@@ -748,6 +760,42 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:
                 log.debug("LiveKiteSource: kite close failed", exc_info=True)
         log.info("LiveKiteSource: disconnected from Kite.")
+
+    def reconnect_with_backoff(self) -> None:
+        delay = self._reconnect_backoff
+        while True:
+            try:
+                self.disconnect()
+                self.connect()
+                self._reconnect_backoff = 1.0
+                break
+            except Exception:
+                time.sleep(delay + random.uniform(0, 0.5))
+                delay = min(delay * 2.0, 60.0)
+                self._reconnect_backoff = delay
+
+    def maybe_refresh_session(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(TZ)
+        key = (now.hour, now.minute)
+        if key in {(12, 30), (14, 30)} and key != self._last_refresh_min:
+            self.reconnect_with_backoff()
+            self._last_refresh_min = key
+
+    def tick_watchdog(self, max_age_s: float = 3.0) -> bool:
+        ts = self._last_tick_ts
+        if ts is None:
+            return False
+        age = (datetime.utcnow() - ts).total_seconds()
+        if age > max_age_s:
+            self._stale_tick_checks += 1
+        else:
+            self._stale_tick_checks = 0
+        return self._stale_tick_checks >= self._stale_tick_thresh
+
+    def tick_watchdog_details(self) -> dict[str, float]:
+        ts = self._last_tick_ts
+        age = (datetime.utcnow() - ts).total_seconds() if ts else None
+        return {"age": age, "checks": self._stale_tick_checks}
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health for broker APIs."""
