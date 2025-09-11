@@ -36,7 +36,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src.diagnostics.metrics import metrics
+from src.diagnostics.metrics import metrics, runtime_metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
 from src.execution.order_executor import OrderReconciler
@@ -1809,9 +1809,14 @@ class StrategyRunner:
         minutes_since = (now - last).total_seconds() / 60.0
         relax_after = getattr(getattr(self, "strategy", None), "auto_relax_after_min", 30)
         enabled = getattr(getattr(self, "strategy", None), "auto_relax_enabled", False)
-        if enabled and minutes_since > relax_after:
-            relaxed = max(base - 0.1, 0.25)
+        relax = 0.0
+        if enabled and relax_after > 0:
+            steps = int(minutes_since // float(relax_after))
+            relax = min(steps * 0.05, 0.1)
+        if relax > 0.0:
+            relaxed = max(base - relax, 0.25)
             self._auto_relax_active = True
+            runtime_metrics.set_auto_relax(relax)
             _log_throttled(
                 "auto_relax",
                 logging.INFO,
@@ -1821,6 +1826,7 @@ class StrategyRunner:
             )
             return relaxed
         self._auto_relax_active = False
+        runtime_metrics.set_auto_relax(0.0)
         return base
 
     def _calculate_quantity_diag(
@@ -2553,6 +2559,8 @@ class StrategyRunner:
             "opt_sl": plan.get("opt_sl"),
             "opt_tp1": plan.get("opt_tp1"),
             "opt_tp2": plan.get("opt_tp2"),
+            "opt_atr": plan.get("opt_atr"),
+            "opt_atr_pct": plan.get("opt_atr_pct"),
         }
         diag["tp_basis"] = getattr(settings, "tp_basis", "premium")
 
