@@ -175,14 +175,16 @@ class RiskEngine:
             return float(q.get("ltp", fallback))
 
         if basis == "premium":
-            mid = _mid_from_quote(quote, float(option_mid_price or 0.0))
+            mid = _mid_from_quote(
+                quote, float(option_mid_price if option_mid_price is not None else entry_price)
+            )
             unit_notional = mid * lot_size
         else:
             unit_notional = spot_price * lot_size
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
             log.info(
-                "max_notional block: basis=%s unit_notional=%.2f lots=%s cap=%.2f",
+                "max_notional block: basis=%s unit_notional=%.2f calc_lots=%d cap=%.2f",
                 basis,
                 unit_notional,
                 intended_lots,
