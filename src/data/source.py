@@ -27,6 +27,7 @@ from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
 from src.utils.time_windows import TZ
+from src.utils.strike_selector import _nearest_strike
 
 log = logging.getLogger(__name__)
 
@@ -1290,14 +1291,6 @@ def _pick_expiry(
     return dates[0]
 
 
-def _strike_step(underlying: str) -> int:
-    return 100 if "BANK" in underlying.upper() else 50
-
-
-def _round_strike(x: float, step: int) -> int:
-    return int(round(x / step) * step)
-
-
 def _match_token(
     items: list[dict],
     underlying: str,
@@ -1372,8 +1365,11 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     spot = self.get_last_price(getattr(settings.instruments, "spot_symbol", under))
     if spot is None:
         return
-    step = _strike_step(under)
-    base = _round_strike(float(spot), step)
+    try:
+        step = int(getattr(settings.instruments, "strike_step", 50))
+    except Exception:
+        step = 50
+    base = _nearest_strike(float(spot), step)
     ce = pe = None
     strike = base
     for widen in range(0, 7):
