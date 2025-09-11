@@ -713,7 +713,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     log.warning("LiveKiteSource connect: subscribe failed: %s", e)
 
             try:
-                self.ensure_atm_tokens()
+                self.ensure_atm_tokens()  # type: ignore[attr-defined]
             except Exception as e:
                 log.warning(
                     "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
@@ -1361,7 +1361,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     """
 
     try:
-        cooldown = int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45"))
+        cooldown = max(45, int(os.getenv("ATM_RESOLVE_COOLDOWN_S", "45")))
     except Exception:
         cooldown = 45
     now = time.time()
