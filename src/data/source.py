@@ -31,6 +31,9 @@ from src.utils.strike_selector import _nearest_strike
 
 log = logging.getLogger(__name__)
 
+# Warn only once when historical data access is denied
+_warn_perm_once = False
+
 # Optional broker SDK (keep imports tolerant so paper mode works)
 try:
     from kiteconnect import KiteConnect  # type: ignore
@@ -40,9 +43,14 @@ try:
         InputException,
         NetworkException,
         TokenException,
+        PermissionException,
     )
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
+
+    class PermissionException(Exception):
+        """Fallback used when kiteconnect is unavailable."""
+
     # Collapse to base Exception so retry wrapper still works in paper mode
     NetworkException = TokenException = InputException = DataException = GeneralException = Exception  # type: ignore
 
@@ -1258,6 +1266,20 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 return clipped
 
             self._last_hist_reason = "missing_cols"
+            return pd.DataFrame()
+
+        except PermissionException as e:
+            self._last_hist_reason = "permission_denied"
+            global _warn_perm_once
+            if not _warn_perm_once:
+                log.warning(
+                    "fetch_ohlc permission denied token=%s interval=%s: %s; falling back to live warmup",
+                    token,
+                    interval,
+                    e,
+                )
+                _warn_perm_once = True
+            self.hist_mode = "live_warmup"
             return pd.DataFrame()
 
         except Exception as e:
