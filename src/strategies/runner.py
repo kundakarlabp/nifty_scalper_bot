@@ -2621,6 +2621,15 @@ class StrategyRunner:
         }
 
     def get_status_snapshot(self) -> Dict[str, Any]:
+        try:
+            pos = getattr(self.executor, "get_positions_kite", lambda: {})() or {}
+        except Exception:
+            pos = {}
+        try:
+            mr = getattr(self.executor, "get_margins_kite", lambda: {})() or {}
+        except Exception:
+            mr = {}
+
         market_open = self._within_trading_window(None)
         within_window = (
             (not getattr(settings, "enable_time_windows", True))
@@ -2649,9 +2658,7 @@ class StrategyRunner:
                 if hasattr(self.executor, "open_count")
                 else 0
             ),
-            "open_positions": len(
-                getattr(self.executor, "get_positions_kite", lambda: {})() or {}
-            ),
+            "open_positions": len(pos),
             "last_signal_score": (
                 float(self._last_signal_debug.get("score") or 0.0)
                 if isinstance(self._last_signal_debug, dict)
@@ -2660,6 +2667,8 @@ class StrategyRunner:
             "strategy": getattr(self, "strategy_name", "unknown"),
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
+        if mr:
+            diag["margins"] = mr
 
         mins_since = (self.now_ist - self._last_trade_time).total_seconds() / 60.0
         diag["minutes_since_last_trade"] = round(mins_since, 1)
