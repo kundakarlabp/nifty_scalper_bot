@@ -214,31 +214,28 @@ class RiskEngine:
             unit_notional = spot_price * lot_size
         if basis == "premium":
             max_pos_pct = float(getattr(settings.risk, "max_position_size_pct", 1.0))
-            exposure_cap_eq = (
-                equity_rupees * max_pos_pct if max_pos_pct > 0 else 0.0
-            )
-            lots_exposure = (
-                int(exposure_cap_eq // unit_notional) if unit_notional > 0 else 0
-            )
-            if lots_exposure < 1:
-                min_eq_needed = (
-                    unit_notional / max_pos_pct if max_pos_pct > 0 else unit_notional
+            if max_pos_pct > 0:
+                exposure_cap_eq = equity_rupees * max_pos_pct
+                lots_exposure = (
+                    int(exposure_cap_eq // unit_notional) if unit_notional > 0 else 0
                 )
-                log.info(
-                    "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                    basis,
-                    unit_notional,
-                    lots_exposure,
-                    exposure_cap_eq,
-                )
-                return (
-                    False,
-                    "too_small_for_one_lot",
-                    {
-                        "unit_notional": round(unit_notional, 2),
-                        "min_equity_needed": round(min_eq_needed, 2),
-                    },
-                )
+                if lots_exposure < 1:
+                    min_eq_needed = unit_notional / max_pos_pct
+                    log.info(
+                        "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                        basis,
+                        unit_notional,
+                        lots_exposure,
+                        exposure_cap_eq,
+                    )
+                    return (
+                        False,
+                        "too_small_for_one_lot",
+                        {
+                            "unit_notional": round(unit_notional, 2),
+                            "min_equity_needed": round(min_eq_needed, 2),
+                        },
+                    )
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
             log.info(
