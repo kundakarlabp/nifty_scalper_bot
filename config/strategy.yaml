@@ -66,7 +66,7 @@ lifecycle:
     time_stop_min: 8
 
 risk:
-  per_trade_pct_max: 0.60    # % of CURRENT equity per trade (example: 0.60 = 0.6%)
+  per_trade_pct_max: 0.006   # fraction of CURRENT equity per trade (example: 0.006 = 0.6%)
   max_consec_losses: 3
   cooldown_min: 20
 

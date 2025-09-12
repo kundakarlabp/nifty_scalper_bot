@@ -29,7 +29,7 @@ class SizingInputs:
 @dataclass(frozen=True)
 class SizingParams:
     """
-    risk_per_trade: fraction of equity to risk per trade (0.30 = 30%)
+    risk_per_trade: fraction of equity to risk per trade (e.g., 0.30 = 30%, 0.006 = 0.6%)
     min_lots / max_lots: hard clamps on lots
     max_position_size_pct: cap notional exposure vs equity (0.10 = 10%)
     """
@@ -55,6 +55,7 @@ class SizingParams:
 class PositionSizer:
     """
     Long options position sizing:
+      - risk_per_trade is a decimal fraction of equity (e.g., 0.006 = 0.6%)
       - risk_rupees = equity * risk_per_trade
       - rupee risk per 1 lot = sl_points * lot_size
       - lots_raw = floor(risk_rupees / rupee_risk_per_lot)
