@@ -59,6 +59,12 @@ try:
 except ImportError:  # pragma: no cover
     settings = None  # type: ignore
 
+# --- Optional market data fallback ---
+try:  # pragma: no cover - optional dependency
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover - module may be missing
+    yf = None  # type: ignore
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -2349,7 +2355,11 @@ class OrderReconciler:
                 ):
                     pnl_R = self.store._compute_pnl_R(fsm)
                     entry_leg = next(
-                        (l for l in fsm.legs.values() if l.leg_type is LegType.ENTRY),
+                        (
+                            candidate
+                            for candidate in fsm.legs.values()
+                            if candidate.leg_type is LegType.ENTRY
+                        ),
                         None,
                     )
                     exit_price = leg.avg_price

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Minimal spot data feed for backtests."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime

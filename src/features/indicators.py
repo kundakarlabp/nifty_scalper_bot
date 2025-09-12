@@ -18,11 +18,14 @@ def atr_pct(ohlc: pd.DataFrame, period: int = 14) -> float | None:
 
     # Ensure numeric float series; some backfill sources return object dtype
     h = pd.to_numeric(ohlc["high"], errors="coerce").astype(float)
-    l = pd.to_numeric(ohlc["low"], errors="coerce").astype(float)
+    low = pd.to_numeric(ohlc["low"], errors="coerce").astype(float)
     c = pd.to_numeric(ohlc["close"], errors="coerce").astype(float)
 
     prev_c = c.shift(1)
-    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(
+    tr = pd.concat(
+        [(h - low).abs(), (h - prev_c).abs(), (low - prev_c).abs()],
+        axis=1,
+    ).max(
         axis=1
     )
     atr = tr.rolling(period, min_periods=period).mean().iloc[-1]

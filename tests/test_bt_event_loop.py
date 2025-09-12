@@ -33,7 +33,7 @@ def test_bt_event_loop(tmp_path, monkeypatch):
     sim = SimConnector()
     bt = BacktestEngine(feed, cfg, risk, sim, outdir=str(tmp_path / "out"))
 
-    def stub_eval(self, ts, o, h, l, c, v):
+    def stub_eval(self, ts, o, h, low, c, v):
         return {
             "has_signal": True,
             "action": "BUY",

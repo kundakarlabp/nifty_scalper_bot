@@ -1,5 +1,3 @@
-import types
-import logging
 from src.server import health
 
 
