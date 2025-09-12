@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 
 from src.boot.validate_env import (
-    data_allow_synthetic_on_empty,
     data_clamp_to_market_open,
     data_warmup_backfill_min,
     data_warmup_disable,
@@ -867,7 +866,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         to_dt = now
         from_dt = to_dt - dt.timedelta(minutes=lookback)
-        reason = "empty"
         if timeframe == "minute" and data_clamp_to_market_open():
             now_ist = dt.datetime.now(TZ)
             if now_ist.time() < dt.time(9, 16):
@@ -877,7 +875,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     prev_start.replace(tzinfo=None),
                     to_dt - dt.timedelta(minutes=lookback),
                 )
-                reason = "preopen_empty"
             else:
                 mkt_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
                 if from_dt < mkt_open:
@@ -892,27 +889,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         df = pd.DataFrame(hist or [])
         if df.empty:
-            if data_allow_synthetic_on_empty():
-                ltp = self.get_last_price(token)
-                if isinstance(ltp, (int, float)):
-                    syn = _synthetic_ohlc(float(ltp), to_dt, timeframe, bars_needed)
-                    try:
-                        self._synth_bars_n = len(syn)
-                    except Exception:
-                        pass
-                    if hasattr(self, "seed_ohlc"):
-                        try:
-                            self.seed_ohlc(
-                                syn[["open", "high", "low", "close", "volume"]]
-                            )
-                        except Exception:
-                            pass
-                    log.info(
-                        "synthetic_warmup used: have=%d, reason=%s",
-                        len(syn),
-                        reason,
-                    )
-            return
+            if self.hist_mode != "broker":
+                log.info(
+                    "Backfill skipped (no OHLC). Using live_warmup bars."
+                )
+                return
+            raise RuntimeError("historical_data empty ...")
 
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
