@@ -44,9 +44,14 @@ try:
         NetworkException,
         TokenException,
     )
+    try:  # Kite SDK versions may omit PermissionException
+        from kiteconnect.exceptions import PermissionException  # type: ignore
+    except Exception:  # pragma: no cover - very rare
+        class PermissionException(Exception):  # type: ignore
+            """Fallback when Kite lacks PermissionException."""
 except ImportError:
     KiteConnect = None  # type: ignore
-    NetworkException = TokenException = InputException = Exception  # type: ignore
+    NetworkException = TokenException = InputException = PermissionException = Exception  # type: ignore
 
 # --- Local imports (settings is optional for tests) ---
 try:
@@ -120,6 +125,29 @@ _QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 _QUOTE_ERR_RL = RateLimiter(5)
 _AUTH_WARNED = False
+_PERM_WARN_TS = 0.0
+
+
+def _warn_perm_once(log: logging.Logger, msg: str) -> None:
+    """Log permission issues at most once every 5 minutes."""
+    global _PERM_WARN_TS
+    now = time.time()
+    if now - _PERM_WARN_TS >= 300:
+        log.warning(msg)
+        _PERM_WARN_TS = now
+
+
+def _safe_kite_call(
+    fn: Callable[[], Any], default: Any, label: str, log: logging.Logger
+) -> Any:
+    """Invoke a Kite SDK function and guard permission errors."""
+    try:
+        return fn()
+    except PermissionException as e:  # pragma: no cover - broker perms
+        _warn_perm_once(log, f"{label}: {e}")
+    except Exception as e:  # pragma: no cover - best effort
+        log.error("%s() failed: %s", label, e)
+    return default
 
 
 def fetch_quote_with_depth(
@@ -738,15 +766,27 @@ class OrderExecutor:
 
     def get_positions_kite(self) -> Dict[str, Any]:
         self.last_error = None
-        if not self.kite:
+        if not self.kite or not getattr(settings, "PORTFOLIO_READS", True):
             return {}
-        try:
-            data = _retry_call(self.kite.positions, tries=2) or {}
-            return {p.get("tradingsymbol"): p for p in data.get("day", [])}
-        except BROKER_EXCEPTIONS as e:
-            self.last_error = f"positions: {e}"
-            log.error("positions() failed: %s", e)
+        data = _safe_kite_call(
+            lambda: _retry_call(self.kite.positions, tries=2) or {},
+            {},
+            "positions",
+            log,
+        )
+        return {p.get("tradingsymbol"): p for p in data.get("day", [])}
+
+    def get_margins_kite(self) -> Dict[str, Any]:
+        """Return account margin snapshot from Kite."""
+        self.last_error = None
+        if not self.kite or not getattr(settings, "PORTFOLIO_READS", True):
             return {}
+        return _safe_kite_call(
+            lambda: _retry_call(self.kite.margins, tries=2) or {},
+            {},
+            "margins",
+            log,
+        )
 
     # ----------- quotes diagnostics ----------
     def _fetch_quote(self, token: int) -> Dict[str, Any]:
