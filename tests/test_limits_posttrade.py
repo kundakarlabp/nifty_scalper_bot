@@ -1,7 +1,12 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
-def test_posttrade_updates_and_cooloff():
+def test_posttrade_updates_and_cooloff(monkeypatch):
+    mock_now = lambda self: datetime(2024, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    monkeypatch.setattr(RiskEngine, "_now", mock_now)
     cfg = LimitConfig(max_consec_losses=3, cooloff_minutes=60)
     eng = RiskEngine(cfg)
     eng.on_trade_closed(pnl_R=1.0)
@@ -29,6 +34,8 @@ def test_posttrade_updates_and_cooloff():
 
 
 def test_roll10_down(monkeypatch):
+    mock_now = lambda self: datetime(2024, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    monkeypatch.setattr(RiskEngine, "_now", mock_now)
     cfg = LimitConfig(roll10_pause_R=-0.2, roll10_pause_minutes=60, max_daily_dd_R=100.0)
     eng = RiskEngine(cfg)
     for _ in range(10):

@@ -7,7 +7,7 @@ from hypothesis import given, settings, strategies as st, assume
 
 
 def _sizer(
-    risk_per_trade: float = 0.01,
+    risk_per_trade: float | None = None,
     min_lots: int = 1,
     max_lots: int = 10,
     max_position_size_pct: float = 1.0,
@@ -15,13 +15,15 @@ def _sizer(
 ) -> PositionSizer:
     """Helper to create a ``PositionSizer`` with sensible defaults."""
 
-    return PositionSizer(
-        risk_per_trade=risk_per_trade,
+    kwargs = dict(
         min_lots=min_lots,
         max_lots=max_lots,
         max_position_size_pct=max_position_size_pct,
         exposure_basis=exposure_basis,
     )
+    if risk_per_trade is not None:
+        kwargs["risk_per_trade"] = risk_per_trade
+    return PositionSizer(**kwargs)
 
 
 def test_basic_sizing():
@@ -99,6 +101,13 @@ def test_min_lots_rescue_when_affordable():
     assert qty == 50
     assert lots == 1
     assert diag["block_reason"] == ""
+
+
+def test_default_risk_per_trade_is_safe(monkeypatch):
+    """When unspecified, risk_per_trade should default to 1%."""
+    monkeypatch.delenv("RISK__RISK_PER_TRADE_PCT", raising=False)
+    sizer = PositionSizer()
+    assert sizer.params.risk_per_trade == 0.01
 
 
 def test_underlying_basis_caps_by_spot():

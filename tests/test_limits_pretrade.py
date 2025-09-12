@@ -3,6 +3,11 @@ from zoneinfo import ZoneInfo
 
 from hypothesis import assume, given, settings, strategies as st, HealthCheck
 from unittest.mock import patch
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
@@ -22,10 +27,18 @@ def _basic_args():
     )
 
 
+@pytest.fixture(autouse=True)
+def _fixed_now(monkeypatch):
+    monkeypatch.setattr(RiskEngine, "_now", lambda self: FIXED_NOW)
+
+
+FIXED_NOW = datetime(2024, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+
 def test_daily_dd_blocks():
     cfg = LimitConfig(max_daily_dd_R=1.0)
     eng = RiskEngine(cfg)
-    eng.state.session_date = datetime.now(ZoneInfo(cfg.tz)).date().isoformat()
+    eng.state.session_date = FIXED_NOW.date().isoformat()
     eng.state.cum_R_today = -1.2
     ok, reason, _ = eng.pre_trade_check(**_basic_args())
     assert not ok and reason == "daily_dd_hit"
@@ -128,7 +141,7 @@ def test_notional_underlying_vs_premium():
 def test_daily_premium_loss_blocks():
     cfg = LimitConfig(max_daily_loss_rupees=100.0)
     eng = RiskEngine(cfg)
-    eng.state.session_date = datetime.now(ZoneInfo(cfg.tz)).date().isoformat()
+    eng.state.session_date = FIXED_NOW.date().isoformat()
     eng.state.cum_loss_rupees = -150.0
     ok, reason, _ = eng.pre_trade_check(**_basic_args())
     assert not ok and reason == "daily_premium_loss"

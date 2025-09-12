@@ -29,12 +29,12 @@ class SizingInputs:
 @dataclass(frozen=True)
 class SizingParams:
     """
-    risk_per_trade: fraction of equity to risk per trade (e.g., 0.30 = 30%, 0.006 = 0.6%)
+    risk_per_trade: fraction of equity to risk per trade (e.g., 0.01 = 1%, 0.006 = 0.6%)
     min_lots / max_lots: hard clamps on lots
     max_position_size_pct: cap notional exposure vs equity (0.10 = 10%)
     """
 
-    risk_per_trade: float = 0.30
+    risk_per_trade: float = 0.01
     min_lots: int = 1
     max_lots: int = 10
     max_position_size_pct: float = 0.10
@@ -97,7 +97,7 @@ class PositionSizer:
         risk_per_trade = float(
             risk_per_trade
             if risk_per_trade is not None
-            else os.getenv("RISK__RISK_PER_TRADE_PCT", 0.30)
+            else os.getenv("RISK__RISK_PER_TRADE_PCT", 0.01)
         )
         min_lots = int(min_lots if min_lots is not None else os.getenv("RISK__MIN_LOTS", 1))
         max_lots = int(max_lots if max_lots is not None else os.getenv("RISK__MAX_LOTS", 10))
