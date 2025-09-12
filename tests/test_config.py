@@ -62,6 +62,7 @@ def test_default_values():
     with mock.patch.dict(os.environ, test_env, clear=True):
         settings = AppSettings(_env_file=None)
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
+        assert settings.risk.risk_per_trade == 0.01  # Updated default
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True
         assert settings.portfolio_reads is True

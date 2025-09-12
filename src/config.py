@@ -255,7 +255,7 @@ class RiskSettings(BaseModel):
     min_equity_floor: float = 25000.0
     equity_refresh_seconds: int = 60
 
-    risk_per_trade: float = 0.30
+    risk_per_trade: float = 0.01
     max_trades_per_day: int = 12
     consecutive_loss_limit: int = 3
     max_daily_drawdown_pct: float = 0.04
@@ -838,6 +838,7 @@ def load_settings() -> AppSettings:
     cfg = AppSettings(
         zerodha=ZerodhaSettings.from_env(),
         telegram=TelegramSettings.from_env(),
+        portfolio_reads=True,
     )
     _apply_env_overrides(cfg)
     snap = cfg.model_dump()

@@ -101,6 +101,14 @@ def test_min_lots_rescue_when_affordable():
     assert diag["block_reason"] == ""
 
 
+def test_default_risk_per_trade(monkeypatch):
+    """PositionSizer should default to a 1% risk per trade."""
+    monkeypatch.delenv("RISK__RISK_PER_TRADE_PCT", raising=False)
+    monkeypatch.delenv("RISK__RISK_PER_TRADE", raising=False)
+    sizer = PositionSizer()
+    assert sizer.params.risk_per_trade == 0.01
+
+
 def test_underlying_basis_caps_by_spot():
     sizer = _sizer(max_position_size_pct=0.05, exposure_basis="underlying")
     qty, lots, diag = sizer.size_from_signal(
