@@ -287,8 +287,8 @@ class RiskSettings(BaseModel):
     @field_validator("risk_per_trade")
     @classmethod
     def _v_risk_pct(cls, v: float) -> float:
-        if not 0.0 < v <= 0.10:
-            raise ValueError("risk_per_trade must be within (0, 0.10]")
+        if not 0.0 < v <= 0.50:
+            raise ValueError("risk_per_trade must be within (0, 0.50]")
         return v
 
     @field_validator("max_daily_drawdown_pct")

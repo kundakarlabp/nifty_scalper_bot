@@ -46,8 +46,8 @@ def test_validation_error_on_invalid_data():
 
 def test_risk_per_trade_bounds() -> None:
     with pytest.raises(ValidationError) as e:
-        RiskSettings(risk_per_trade=0.5)
-    assert "risk_per_trade must be within (0, 0.10]" in str(e.value)
+        RiskSettings(risk_per_trade=0.6)
+    assert "risk_per_trade must be within (0, 0.50]" in str(e.value)
 
 def test_default_values():
     """Tests that default values are used when environment variables are not set."""
