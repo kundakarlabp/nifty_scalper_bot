@@ -117,6 +117,22 @@ def test_underlying_basis_caps_by_spot():
     assert diag["unit_notional"] * lots == 100.0 * 50 * 1
 
 
+def test_allow_min_one_lot_when_cap_small(monkeypatch):
+    monkeypatch.setenv("RISK__ALLOW_MIN_ONE_LOT", "1")
+    sizer = _sizer(max_position_size_pct=0.01)
+    qty, lots, diag = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=180.0,
+        lot_size=75,
+        equity=100_000.0,
+        spot_sl_points=20.0,
+        delta=0.5,
+    )
+    assert qty == 75
+    assert lots == 1
+    assert diag["block_reason"] == ""
+
+
 @given(
     entry=st.floats(min_value=50.0, max_value=500.0),
     stop=st.floats(min_value=1.0, max_value=500.0),
