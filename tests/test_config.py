@@ -64,6 +64,7 @@ def test_default_values():
         assert settings.risk.max_daily_drawdown_pct == 0.04  # Default value
         assert settings.log_level == "INFO"  # Default value
         assert settings.enable_live_trading is True
+        assert settings.portfolio_reads is True
         assert settings.system.log_buffer_capacity == 4000  # Default value
         assert settings.data.lookback_minutes == 15  # Updated default
         assert settings.data.lookback_padding_bars == 5  # Default padding
@@ -148,6 +149,18 @@ def test_historical_timeframe_alias():
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
     assert settings.data.timeframe == "5minute"
+
+
+def test_portfolio_reads_alias():
+    env = {
+        "TELEGRAM__ENABLED": "false",
+        "ENABLE_LIVE_TRADING": "false",
+        "PORTFOLIO_READS": "false",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.portfolio_reads is False
+    assert settings.PORTFOLIO_READS is False
 
 
 def test_enable_trading_alias():
