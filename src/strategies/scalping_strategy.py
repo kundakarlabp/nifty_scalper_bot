@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
-from typing import Any, Deque, Dict, Literal, Optional, Tuple
+from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -1040,8 +1040,10 @@ class EnhancedScalpingStrategy:
                     pct = (target - entry) / entry
                     return round(opt_entry * (1.0 + pct), 2)
 
-                lot_raw = plan.get("lot_size") or getattr(
-                    settings.instruments, "nifty_lot_size", 75
+                lot_raw = cast(
+                    float | int | str,
+                    plan.get("lot_size")
+                    or getattr(settings.instruments, "nifty_lot_size", 75),
                 )
                 lot_sz = int(float(lot_raw))
                 plan["opt_entry"] = opt_entry
