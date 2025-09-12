@@ -128,6 +128,11 @@ By default the bot pulls a small slice of historical candles from the broker to 
  - `DATA__CLAMP_TO_MARKET_OPEN` – avoid fetching pre‑open candles before `09:15`. Default `false`.
 Override the flag in your environment or `.env` file if you want to skip warmup.
 
+## Portfolio reads
+
+The bot fetches existing positions from the broker on startup. Set
+`PORTFOLIO_READS=false` to skip these reads during testing. Default `true`.
+
 ## Risk flags & kill switch
 
 Risk checks guard every trade.  The runner tracks:

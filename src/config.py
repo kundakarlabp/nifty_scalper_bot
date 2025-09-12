@@ -416,6 +416,9 @@ class AppSettings(BaseSettings):
     app_env: str = "production"
     ai_provider: str = ""
     openai_api_key: str = ""
+    portfolio_reads: bool = Field(
+        True, validation_alias=AliasChoices("PORTFOLIO_READS")
+    )
 
     # Live trading runs by default; set to ``false`` for paper trading.
     enable_live_trading: bool = Field(
@@ -446,6 +449,10 @@ class AppSettings(BaseSettings):
     max_place_retries: int = 2
     max_modify_retries: int = 2
     retry_backoff_ms: int = 200
+
+    @property
+    def PORTFOLIO_READS(self) -> bool:  # pragma: no cover - simple alias
+        return self.portfolio_reads
 
     # Data warmup
     warmup_bars: int = 15
@@ -859,3 +866,5 @@ class _SettingsProxy:
 
 # Public singleton used by the rest of the application
 settings = _SettingsProxy()
+
+__all__ = ["AppSettings", "load_settings", "settings"]
