@@ -99,8 +99,8 @@ class PositionSizer:
         )
         exposure_basis = exposure_basis or os.getenv("EXPOSURE_BASIS", "premium")
 
-        if risk_per_trade <= 0 or risk_per_trade > 0.10:
-            raise ValueError("risk_per_trade must be within (0, 0.10].")
+        if risk_per_trade <= 0 or risk_per_trade > 0.50:
+            raise ValueError("risk_per_trade must be within (0, 0.50].")
         if min_lots <= 0 or max_lots <= 0 or max_lots < min_lots:
             raise ValueError(
                 "min_lots and max_lots must be positive and max_lots >= min_lots.",
