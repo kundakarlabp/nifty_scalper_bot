@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """CLI entrypoint for running walk-forward backtests."""
+
+from __future__ import annotations
 
 import argparse
 import copy
@@ -62,7 +62,6 @@ def main() -> None:
 
     feed = SpotFeed.from_csv(args.data)
     cfg = try_load(resolve_config_path(), None)
-    risk = RiskEngine(LimitConfig(tz=cfg.tz))
     sim = SimConnector()
 
     train_w, test_w = map(int, args.wf.split(":"))

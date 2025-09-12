@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from src.logs.journal import Journal
 from src.execution.order_executor import OrderExecutor
 

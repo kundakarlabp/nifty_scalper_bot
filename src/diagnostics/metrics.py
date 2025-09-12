@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Deque, Dict, List
+from typing import Deque, Dict
 from zoneinfo import ZoneInfo
 
 from src.config import settings

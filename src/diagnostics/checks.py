@@ -10,7 +10,7 @@ import pandas as pd
 from src.config import settings
 from src.diagnostics.registry import CheckResult, register
 from src.execution.order_executor import OrderManager
-from src.execution.order_state import OrderSide, OrderState
+from src.execution.order_state import OrderState
 from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry

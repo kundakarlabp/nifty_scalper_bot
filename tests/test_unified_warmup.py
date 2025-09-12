@@ -1,8 +1,6 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-import pandas as pd
-
 from src.data.source import LiveKiteSource, MinuteBarBuilder
 from src.strategies.runner import StrategyRunner
 from src.config import settings

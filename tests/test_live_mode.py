@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from src import main as main_mod
 from src.config import settings
 from src.strategies.runner import StrategyRunner
-from src.boot import validate_env
 
 
 def _prep_live_env(monkeypatch):

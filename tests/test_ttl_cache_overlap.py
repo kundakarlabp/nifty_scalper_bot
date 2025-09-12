@@ -37,7 +37,6 @@ def test_overlapping_requests_hit_cache():
     end = datetime(2024, 1, 1, 9, 30)
     res1 = src.fetch_ohlc(123, start, end, "minute")
     assert res1.status is HistStatus.OK
-    df1 = res1.df
     assert kite.calls == 1
 
     start2 = datetime(2024, 1, 1, 9, 15)
