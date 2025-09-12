@@ -7,6 +7,7 @@ active trades, and risk limit enforcement.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -180,6 +181,42 @@ class TradingSession:
         return None
 
     # ------------------------------ helpers ---------------------------- #
+
+    def lots_for_trade(self, equity: float, premium_per_lot: float) -> int:
+        """Return lots to trade given equity and per-lot premium.
+
+        Applies the standard exposure cap. When ``RISK__ALLOW_MIN_ONE_LOT`` is
+        true and equity can cover one lot outright, returns ``1`` even if the
+        exposure cap is smaller than the premium per lot. Otherwise returns
+        ``0`` when the cap is insufficient.
+        """
+        cap = float(equity) * float(self.risk_config.max_position_size_pct)
+        cost_one_lot = float(premium_per_lot)
+        allow_min = os.getenv("RISK__ALLOW_MIN_ONE_LOT", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if cap < cost_one_lot:
+            if allow_min and equity >= cost_one_lot:
+                logger.info(
+                    "allow_min_one_lot enabled: cap %.2f < cost %.2f; sizing 1 lot",
+                    cap,
+                    cost_one_lot,
+                )
+                return 1
+            logger.info(
+                "exposure cap %.2f below cost %.2f; sizing 0 lots",
+                cap,
+                cost_one_lot,
+            )
+            return 0
+        logger.info(
+            "exposure cap %.2f allows cost %.2f; sizing 1 lot",
+            cap,
+            cost_one_lot,
+        )
+        return 1
 
     def _estimate_fees(self, quantity_contracts: int) -> float:
         """

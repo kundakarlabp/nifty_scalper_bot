@@ -134,3 +134,20 @@ def test_risk_limit_max_drawdown(risk_config: RiskSettings):
     result = session.check_risk_limits()
     assert result is not None, "Drawdown risk limit should be hit"
     assert "Max daily drawdown" in result
+
+
+def test_allow_min_one_lot(session: TradingSession, monkeypatch, caplog):
+    premium_per_lot = 15_000.0  # exceeds 10% cap of 100k equity
+    monkeypatch.delenv("RISK__ALLOW_MIN_ONE_LOT", raising=False)
+    with caplog.at_level("INFO"):
+        lots = session.lots_for_trade(session.current_equity, premium_per_lot)
+    assert lots == 0
+    assert "sizing 0 lots" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setenv("RISK__ALLOW_MIN_ONE_LOT", "true")
+    with caplog.at_level("INFO"):
+        lots = session.lots_for_trade(session.current_equity, premium_per_lot)
+    assert lots == 1
+    assert "allow_min_one_lot" in caplog.text
+
