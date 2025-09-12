@@ -44,6 +44,12 @@ class SizingParams:
             str(os.getenv("EXPOSURE_BASIS", "premium")),
         )
     )
+    allow_min_one_lot: bool = field(
+        default_factory=lambda: str(
+            os.getenv("RISK__ALLOW_MIN_ONE_LOT", "false")
+        ).lower()
+        in ("1", "true", "yes"),
+    )
 
 
 class PositionSizer:
@@ -230,15 +236,26 @@ class PositionSizer:
             else unit_notional
         )
         if sp.exposure_basis == "premium" and max_lots_exposure < 1:
-            lots = 0
-            block_reason = "too_small_for_one_lot"
-            logger.info(
-                "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                sp.exposure_basis,
-                unit_notional,
-                max_lots_exposure,
-                exposure_cap,
-            )
+            if sp.allow_min_one_lot and si.equity >= unit_notional:
+                lots = sp.min_lots
+                block_reason = ""
+                logger.info(
+                    "sizer allow_min_one_lot: basis=%s unit=%.2f cap=%.2f -> lots=%d",
+                    sp.exposure_basis,
+                    unit_notional,
+                    exposure_cap,
+                    lots,
+                )
+            else:
+                lots = 0
+                block_reason = "too_small_for_one_lot"
+                logger.info(
+                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                    sp.exposure_basis,
+                    unit_notional,
+                    max_lots_exposure,
+                    exposure_cap,
+                )
         else:
             if (
                 lots == 0
