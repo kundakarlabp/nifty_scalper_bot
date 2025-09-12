@@ -208,14 +208,12 @@ class PositionSizer:
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
 
-        exposure_cap = (
-            si.equity * sp.max_position_size_pct
-            if sp.max_position_size_pct > 0
-            else float("inf")
-        )
-        max_lots_exposure = (
-            int(exposure_cap // unit_notional) if unit_notional > 0 else 0
-        )
+        if sp.max_position_size_pct > 0 and unit_notional > 0:
+            exposure_cap = si.equity * sp.max_position_size_pct
+            max_lots_exposure = int(exposure_cap // unit_notional)
+        else:
+            exposure_cap = float("inf")
+            max_lots_exposure = int(1e12) if unit_notional > 0 else 0
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
         logger.info(
