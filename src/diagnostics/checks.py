@@ -15,6 +15,13 @@ from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 
+# Map ``reason_block`` codes to human‑readable descriptions used by
+# diagnostics endpoints like ``/why``.  Only codes that require custom
+# wording need to be present; unknown keys fall back to the raw code.
+REASON_MAP: Dict[str, str] = {
+    "cap_lt_one_lot": "premium cap too small for 1 lot",
+}
+
 
 def _ok(msg: str, *, name: str, **details: Any) -> CheckResult:
     """Helper to build a successful :class:`CheckResult`."""
