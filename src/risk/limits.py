@@ -7,49 +7,11 @@ from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Literal, cast
 from src.config import settings
 from zoneinfo import ZoneInfo
-import os
 import logging
+import os
+from src.risk.position_sizing import lots_from_premium_cap
 
 log = logging.getLogger(__name__)
-
-
-def _use_equity() -> bool:
-    """Return True if premium caps should follow account equity."""
-
-    v = os.getenv("RISK_PREMIUM_USE_EQUITY", "1").lower()
-    return v in {"1", "true", "yes", "on"}
-
-
-def _pct() -> float:
-    """Fraction of equity to treat as the premium exposure cap."""
-
-    try:
-        return float(os.getenv("RISK_PREMIUM_EQUITY_PCT", "1.0"))
-    except Exception:
-        return 1.0
-
-
-def _static_cap() -> float:
-    """Return static cap from ``EXPOSURE_CAP`` if set, else infinity."""
-
-    v = os.getenv("EXPOSURE_CAP", "")
-    try:
-        return float(v) if v else float("inf")
-    except Exception:
-        return float("inf")
-
-
-def _runner_equity(runner) -> float | None:
-    """Best-effort fetch of runner equity for convenience imports."""
-
-    try:
-        ss = runner.get_status_snapshot() if runner else None
-        eq = getattr(ss, "equity", None)
-        if eq is None:
-            eq = getattr(runner, "equity_snapshot", None)
-        return float(eq) if eq is not None else None
-    except Exception:
-        return None
 
 
 @dataclass
@@ -219,67 +181,48 @@ class RiskEngine:
             return False, "session_closed", {"cutoff": self.cfg.no_new_after_hhmm}
 
         current_lots = exposure.lots_by_symbol.get(intended_symbol, 0)
+        if current_lots >= self.cfg.max_lots_per_symbol:
+            return (
+                False,
+                "max_lots_symbol",
+                {"sym": intended_symbol, "lots": current_lots, "intended": intended_lots},
+            )
+        basis = self.cfg.exposure_basis
+        exposure_cap = self.cfg.max_notional_rupees
+
+        if basis == "premium":
+            available = self.cfg.max_lots_per_symbol - current_lots
+            lots_cap, unit_notional, cap = lots_from_premium_cap(
+                None,
+                quote or {"mid": option_mid_price if option_mid_price is not None else entry_price},
+                lot_size,
+                available,
+                equity=equity_rupees,
+            )
+            if lots_cap <= 0:
+                log.info(
+                    "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                    basis,
+                    unit_notional,
+                    lots_cap,
+                    cap,
+                )
+                return (
+                    False,
+                    "cap_lt_one_lot",
+                    {"unit_notional": round(unit_notional, 2), "cap": round(cap, 2)},
+                )
+            intended_lots = min(intended_lots, lots_cap)
+            plan["qty_lots"] = intended_lots
+        else:
+            unit_notional = spot_price * lot_size
+
         if current_lots + intended_lots > self.cfg.max_lots_per_symbol:
             return (
                 False,
                 "max_lots_symbol",
-                {
-                    "sym": intended_symbol,
-                    "lots": current_lots,
-                    "intended": intended_lots,
-                },
+                {"sym": intended_symbol, "lots": current_lots, "intended": intended_lots},
             )
-
-        exposure_cap = self.cfg.max_notional_rupees
-        basis = self.cfg.exposure_basis
-
-        def _mid_from_quote(q: Optional[Dict[str, float]], fallback: float) -> float:
-            if not q:
-                return fallback
-            if q.get("mid"):
-                return float(q["mid"])
-            bid = q.get("bid")
-            ask = q.get("ask")
-            if bid and ask:
-                return (float(bid) + float(ask)) / 2.0
-            return float(q.get("ltp", fallback))
-
-        if basis == "premium":
-            mid = _mid_from_quote(
-                quote, float(option_mid_price if option_mid_price is not None else entry_price)
-            )
-            unit_notional = mid * lot_size
-        else:
-            unit_notional = spot_price * lot_size
-        if basis == "premium":
-            pct_total = _pct()
-            static_cap = _static_cap()
-            equity = float(equity_rupees)
-            if _use_equity():
-                equity_cap = equity * pct_total
-                effective_cap = min(static_cap, equity_cap)
-            else:
-                effective_cap = static_cap
-            max_lots_by_cap = int(effective_cap // max(1e-9, unit_notional))
-            if max_lots_by_cap < 1:
-                min_eq_needed = unit_notional / max(1e-9, pct_total)
-                log.info(
-                    "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f equity=%s pct=%s",
-                    basis,
-                    unit_notional,
-                    max_lots_by_cap,
-                    effective_cap,
-                    f"{equity:.2f}",
-                    f"{pct_total:.2f}",
-                )
-                return (
-                    False,
-                    "too_small_for_one_lot",
-                    {
-                        "unit_notional": round(unit_notional, 2),
-                        "min_equity_needed": round(min_eq_needed, 2),
-                    },
-                )
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
             log.info(
