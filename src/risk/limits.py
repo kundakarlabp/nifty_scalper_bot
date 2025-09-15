@@ -13,6 +13,45 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def _use_equity() -> bool:
+    """Return True if premium caps should follow account equity."""
+
+    v = os.getenv("RISK_PREMIUM_USE_EQUITY", "1").lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+def _pct() -> float:
+    """Fraction of equity to treat as the premium exposure cap."""
+
+    try:
+        return float(os.getenv("RISK_PREMIUM_EQUITY_PCT", "1.0"))
+    except Exception:
+        return 1.0
+
+
+def _static_cap() -> float:
+    """Return static cap from ``EXPOSURE_CAP`` if set, else infinity."""
+
+    v = os.getenv("EXPOSURE_CAP", "")
+    try:
+        return float(v) if v else float("inf")
+    except Exception:
+        return float("inf")
+
+
+def _runner_equity(runner) -> float | None:
+    """Best-effort fetch of runner equity for convenience imports."""
+
+    try:
+        ss = runner.get_status_snapshot() if runner else None
+        eq = getattr(ss, "equity", None)
+        if eq is None:
+            eq = getattr(runner, "equity_snapshot", None)
+        return float(eq) if eq is not None else None
+    except Exception:
+        return None
+
+
 @dataclass
 class LimitConfig:
     """Configuration knobs for :class:`RiskEngine`."""
@@ -213,29 +252,34 @@ class RiskEngine:
         else:
             unit_notional = spot_price * lot_size
         if basis == "premium":
-            max_pos_pct = float(getattr(settings.risk, "max_position_size_pct", 1.0))
-            if max_pos_pct > 0:
-                exposure_cap_eq = equity_rupees * max_pos_pct
-                lots_exposure = (
-                    int(exposure_cap_eq // unit_notional) if unit_notional > 0 else 0
+            pct_total = _pct()
+            static_cap = _static_cap()
+            equity = float(equity_rupees)
+            if _use_equity():
+                equity_cap = equity * pct_total
+                effective_cap = min(static_cap, equity_cap)
+            else:
+                effective_cap = static_cap
+            max_lots_by_cap = int(effective_cap // max(1e-9, unit_notional))
+            if max_lots_by_cap < 1:
+                min_eq_needed = unit_notional / max(1e-9, pct_total)
+                log.info(
+                    "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f equity=%s pct=%s",
+                    basis,
+                    unit_notional,
+                    max_lots_by_cap,
+                    effective_cap,
+                    f"{equity:.2f}",
+                    f"{pct_total:.2f}",
                 )
-                if lots_exposure < 1:
-                    min_eq_needed = unit_notional / max_pos_pct
-                    log.info(
-                        "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                        basis,
-                        unit_notional,
-                        lots_exposure,
-                        exposure_cap_eq,
-                    )
-                    return (
-                        False,
-                        "too_small_for_one_lot",
-                        {
-                            "unit_notional": round(unit_notional, 2),
-                            "min_equity_needed": round(min_eq_needed, 2),
-                        },
-                    )
+                return (
+                    False,
+                    "too_small_for_one_lot",
+                    {
+                        "unit_notional": round(unit_notional, 2),
+                        "min_equity_needed": round(min_eq_needed, 2),
+                    },
+                )
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
             log.info(

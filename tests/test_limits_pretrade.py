@@ -92,6 +92,23 @@ def test_too_small_for_one_lot():
     assert details["min_equity_needed"] > 0
 
 
+def test_equity_based_premium_cap(monkeypatch):
+    cfg = LimitConfig(exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    ok, reason, _ = eng.pre_trade_check(
+        **{
+            **_basic_args(),
+            "equity_rupees": 40_000.0,
+            "intended_lots": 1,
+            "lot_size": 25,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    assert ok and reason == ""
+
+
 def test_gamma_mode_cap(monkeypatch):
     cfg = LimitConfig(max_gamma_mode_lots=1)
     eng = RiskEngine(cfg)
