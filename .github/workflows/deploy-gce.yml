@@ -6,45 +6,45 @@ on:
     branches: [main]
   workflow_dispatch:
 
-jobs:
-  deploy:
-    if: ${{ secrets.GCE_HOST && secrets.GCE_USER && secrets.GCE_SSH_KEY }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# jobs:
+#   deploy:
+#     if: ${{ secrets.GCE_HOST && secrets.GCE_USER && secrets.GCE_SSH_KEY }}
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
 
-      # (A) Ensure host key is known (prevents "host key verification failed")
-      - name: Add host to known_hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -p 22 ${{ secrets.GCE_HOST }} >> ~/.ssh/known_hosts
+#       # (A) Ensure host key is known (prevents "host key verification failed")
+#       - name: Add host to known_hosts
+#         run: |
+#           mkdir -p ~/.ssh
+#           ssh-keyscan -p 22 ${{ secrets.GCE_HOST }} >> ~/.ssh/known_hosts
 
-      # (B) SSH and deploy
-      - name: Deploy to GCE
-        uses: appleboy/ssh-action@v0.1.10
-        with:
-          host: ${{ secrets.GCE_HOST }}           # e.g. 34.x.x.x or your DNS
-          username: ${{ secrets.GCE_USER }}       # e.g. ubuntu, debian, or your user
-          key: ${{ secrets.GCE_SSH_KEY }}         # PRIVATE key (ed25519), single line, no quotes
-          passphrase: ${{ secrets.GCE_KEY_PASSPHRASE }}  # only if your key is encrypted
-          port: 22
-          script_stop: true
-          timeout: 60s
-          command_timeout: 30m
-          debug: true
-          script: |
-            set -euo pipefail
-            echo "Connected to $(hostname)"; whoami; uname -a
+#       # (B) SSH and deploy
+#       - name: Deploy to GCE
+#         uses: appleboy/ssh-action@v0.1.10
+#         with:
+#           host: ${{ secrets.GCE_HOST }}           # e.g. 34.x.x.x or your DNS
+#           username: ${{ secrets.GCE_USER }}       # e.g. ubuntu, debian, or your user
+#           key: ${{ secrets.GCE_SSH_KEY }}         # PRIVATE key (ed25519), single line, no quotes
+#           passphrase: ${{ secrets.GCE_KEY_PASSPHRASE }}  # only if your key is encrypted
+#           port: 22
+#           script_stop: true
+#           timeout: 60s
+#           command_timeout: 30m
+#           debug: true
+#           script: |
+#             set -euo pipefail
+#             echo "Connected to $(hostname)"; whoami; uname -a
 
-            cd /opt/nifty_scalper_bot || git clone https://github.com/${{ github.repository }}.git /opt/nifty_scalper_bot && cd /opt/nifty_scalper_bot
-            git fetch --all
-            git reset --hard origin/main
+#             cd /opt/nifty_scalper_bot || git clone https://github.com/${{ github.repository }}.git /opt/nifty_scalper_bot && cd /opt/nifty_scalper_bot
+#             git fetch --all
+#             git reset --hard origin/main
 
-            # Python deploy (adjust if you use Docker)
-            /usr/bin/python3 -m venv .venv
-            . .venv/bin/activate
-            pip install --upgrade pip
-            pip install -r requirements.txt
+#             # Python deploy (adjust if you use Docker)
+#             /usr/bin/python3 -m venv .venv
+#             . .venv/bin/activate
+#             pip install --upgrade pip
+#             pip install -r requirements.txt
 
-            sudo systemctl restart nifty-bot.service || true
-            systemctl --no-pager --full status nifty-bot.service || true
+#             sudo systemctl restart nifty-bot.service || true
+#             systemctl --no-pager --full status nifty-bot.service || true
