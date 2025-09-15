@@ -2,7 +2,7 @@
 
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
-from src.risk.position_sizing import PositionSizer
+from src.risk.position_sizing import PositionSizer, _mid_from_quote, lots_from_premium_cap
 from src.config import settings as cfg
 from hypothesis import given, settings, strategies as st, assume
 
@@ -25,6 +25,37 @@ def _sizer(
     if risk_per_trade is not None:
         kwargs["risk_per_trade"] = risk_per_trade
     return PositionSizer(**kwargs)
+
+
+def test_mid_from_quote_variants():
+    """_mid_from_quote should derive price from multiple quote shapes."""
+    assert _mid_from_quote({"mid": 100}) == 100.0
+    assert _mid_from_quote({"bid": 90, "ask": 110}) == 100.0
+    assert _mid_from_quote({"ltp": 123.45}) == 123.45
+    assert _mid_from_quote(None) == 0.0
+
+
+def test_lots_from_premium_cap(monkeypatch):
+    """lots_from_premium_cap respects equity and env based caps."""
+    # Equity based cap -> cap = equity * pct
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
+    lots, unit_notional, cap = lots_from_premium_cap(
+        None, {"mid": 100}, 25, 10, equity=10_000
+    )
+    assert unit_notional == 2_500
+    assert cap == 1_000
+    assert lots == 0
+
+    # Env based cap -> static value
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 3_000, raising=False)
+    lots, unit_notional, cap = lots_from_premium_cap(
+        None, {"mid": 100}, 25, 10, equity=10_000
+    )
+    assert unit_notional == 2_500
+    assert cap == 3_000
+    assert lots == 1
 
 
 def test_basic_sizing():
