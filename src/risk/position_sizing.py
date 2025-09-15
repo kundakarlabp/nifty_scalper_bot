@@ -22,33 +22,13 @@ def _mid_from_quote(q: Dict | None) -> float:
 
 
 def lots_from_premium_cap(
-    runner,
     quote: Dict | None,
     lot_size: int,
     max_lots: int,
-    *,
-    equity: float | None = None,
 ) -> Tuple[int, float, float]:
-    from src.config import settings as _settings
-
     price = _mid_from_quote(quote or {})
     unit_notional = price * float(lot_size)
-
-    cap: float | None = None
-    try:
-        if _settings.EXPOSURE_CAP_SOURCE == "equity":
-            eq = equity
-            if eq is None and runner is not None:
-                if hasattr(runner, "get_equity_amount"):
-                    eq = float(runner.get_equity_amount())
-                elif hasattr(runner, "equity_amount"):
-                    eq = float(getattr(runner, "equity_amount"))
-            if eq is not None:
-                cap = max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
-    except Exception:
-        cap = None
-    if cap is None:
-        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
+    cap = float(settings.PREMIUM_CAP_PER_TRADE)
 
     lots = 0 if unit_notional <= 0 else int(cap // unit_notional)
     lots = min(max_lots, lots)
@@ -245,18 +225,11 @@ class PositionSizer:
 
         if sp.exposure_basis == "premium":
             max_lots_exposure, unit_notional, exposure_cap = lots_from_premium_cap(
-                None,
                 {"mid": si.entry_price},
                 si.lot_size,
                 sp.max_lots,
-                equity=si.equity,
             )
-            min_eq_needed = (
-                unit_notional / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-                if settings.EXPOSURE_CAP_SOURCE == "equity"
-                and settings.EXPOSURE_CAP_PCT_OF_EQUITY > 0
-                else unit_notional
-            )
+            min_eq_needed = unit_notional
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
             if sp.max_position_size_pct > 0 and unit_notional > 0:
@@ -307,6 +280,7 @@ class PositionSizer:
                 lots == 0
                 and unit_notional <= exposure_cap
                 and sp.min_lots <= max_lots_limit
+                and si.equity >= unit_notional
             ):
                 lots = sp.min_lots
                 logger.info("sizer clamp to min lots=%d", lots)

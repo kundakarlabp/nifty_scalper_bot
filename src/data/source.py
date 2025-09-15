@@ -42,16 +42,18 @@ try:
         InputException,
         NetworkException,
         TokenException,
-        PermissionException,
+        PermissionException as _PermissionException,
     )
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
-    class PermissionException(Exception):
+    class _PermissionException(Exception):
         """Fallback used when kiteconnect is unavailable."""
 
     # Collapse to base Exception so retry wrapper still works in paper mode
     NetworkException = TokenException = InputException = DataException = GeneralException = Exception  # type: ignore
+
+PermissionException = _PermissionException
 
 
 class MinuteBarBuilder:

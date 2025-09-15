@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
+from src.config import settings as cfg
 
 
 def _basic_args():
@@ -73,9 +74,10 @@ def test_max_notional():
     assert not ok and reason == "max_notional"
 
 
-def test_cap_lt_one_lot():
-    cfg = LimitConfig(exposure_basis="premium")
-    eng = RiskEngine(cfg)
+def test_cap_lt_one_lot(monkeypatch):
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 1000, raising=False)
+    cfg_limits = LimitConfig(exposure_basis="premium")
+    eng = RiskEngine(cfg_limits)
     ok, reason, details = eng.pre_trade_check(
         **{
             **_basic_args(),
@@ -191,9 +193,11 @@ def test_mid_price_from_quote():
 )
 @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_notional):
-    cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
-    eng = RiskEngine(cfg)
-    with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
+    cfg_limits = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
+    eng = RiskEngine(cfg_limits)
+    with patch.object(cfg, "PREMIUM_CAP_PER_TRADE", 1_000_000), patch.object(
+        eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg_limits.tz))
+    ):
         exposure = Exposure(notional_rupees=current_notional)
         intended_notional = entry * lot_size * lots
         assume(current_notional + intended_notional <= max_notional)
@@ -222,9 +226,11 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
 )
 @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_notional):
-    cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
-    eng = RiskEngine(cfg)
-    with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
+    cfg_limits = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
+    eng = RiskEngine(cfg_limits)
+    with patch.object(cfg, "PREMIUM_CAP_PER_TRADE", 1_000_000), patch.object(
+        eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg_limits.tz))
+    ):
         exposure = Exposure(notional_rupees=current_notional)
         intended_notional = entry * lot_size * lots
         assume(current_notional + intended_notional > max_notional)

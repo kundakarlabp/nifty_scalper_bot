@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Literal, cast
-from src.config import settings
 from zoneinfo import ZoneInfo
 import logging
 import os
@@ -129,6 +128,7 @@ class RiskEngine:
 
         now = self._now()
         self.state.new_session_if_needed(now)
+        _ = equity_rupees
 
         details: Dict[str, float] = {}
 
@@ -193,11 +193,10 @@ class RiskEngine:
         if basis == "premium":
             available = self.cfg.max_lots_per_symbol - current_lots
             lots_cap, unit_notional, cap = lots_from_premium_cap(
-                None,
-                quote or {"mid": option_mid_price if option_mid_price is not None else entry_price},
+                quote
+                or {"mid": option_mid_price if option_mid_price is not None else entry_price},
                 lot_size,
                 available,
-                equity=equity_rupees,
             )
             if lots_cap <= 0:
                 log.info(

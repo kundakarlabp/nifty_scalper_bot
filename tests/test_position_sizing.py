@@ -41,7 +41,8 @@ def test_basic_sizing():
     assert lots == 1
 
 
-def test_max_lots_clamp():
+def test_max_lots_clamp(monkeypatch):
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 1_000_000, raising=False)
     sizer = _sizer(max_lots=5)
     qty, lots, _ = sizer.size_from_signal(
         entry_price=200.0,
@@ -68,14 +69,15 @@ def test_returns_zero_when_budget_insufficient():
     )
     assert qty == 0
     assert lots == 0
-    assert diag["block_reason"] == "cap_lt_one_lot"
+    assert diag["block_reason"] == "risk_cap"
     assert diag["min_equity_needed"] > diag["equity"]
     assert diag["basis"] == "premium"
     assert diag["lots"] == diag["lots_final"]
     assert diag["cap"] == diag["exposure_cap"]
 
 
-def test_min_lots_only_enforced_when_affordable():
+def test_min_lots_only_enforced_when_affordable(monkeypatch):
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 1_000_000, raising=False)
     sizer = _sizer(min_lots=3)
     qty, lots, _ = sizer.size_from_signal(
         entry_price=200.0,
@@ -111,11 +113,8 @@ def test_default_risk_per_trade_is_safe(monkeypatch):
     assert sizer.params.risk_per_trade == 0.01
 
 
-def test_static_cap_overrides_equity(monkeypatch):
-    monkeypatch.setenv("PREMIUM_CAP_PER_TRADE", "4000")
-    monkeypatch.setenv("EXPOSURE_CAP_SOURCE", "env")
+def test_premium_cap_enforced(monkeypatch):
     monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 4000, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
@@ -128,10 +127,7 @@ def test_static_cap_overrides_equity(monkeypatch):
     assert qty == 0
     assert lots == 0
     assert diag["block_reason"] == "cap_lt_one_lot"
-    monkeypatch.delenv("PREMIUM_CAP_PER_TRADE", raising=False)
-    monkeypatch.delenv("EXPOSURE_CAP_SOURCE", raising=False)
     monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 10000, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
 
 
 def test_underlying_basis_caps_by_spot():
@@ -152,7 +148,7 @@ def test_underlying_basis_caps_by_spot():
 
 def test_allow_min_one_lot_when_cap_small(monkeypatch):
     monkeypatch.setenv("RISK__ALLOW_MIN_ONE_LOT", "1")
-    monkeypatch.setenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.01")
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 1000, raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
