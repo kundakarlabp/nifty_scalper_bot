@@ -110,6 +110,23 @@ def test_default_risk_per_trade_is_safe(monkeypatch):
     assert sizer.params.risk_per_trade == 0.01
 
 
+def test_static_cap_overrides_equity(monkeypatch):
+    monkeypatch.setenv("EXPOSURE_CAP", "4000")
+    sizer = _sizer()
+    qty, lots, diag = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=180.0,
+        lot_size=25,
+        equity=40_000.0,
+        spot_sl_points=20.0,
+        delta=0.5,
+    )
+    assert qty == 0
+    assert lots == 0
+    assert diag["block_reason"] == "too_small_for_one_lot"
+    monkeypatch.delenv("EXPOSURE_CAP", raising=False)
+
+
 def test_underlying_basis_caps_by_spot():
     sizer = _sizer(max_position_size_pct=0.05, exposure_basis="underlying")
     qty, lots, diag = sizer.size_from_signal(

@@ -5,8 +5,19 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Literal, cast
 import os
 import logging
+from src.risk.limits import _use_equity, _pct
 
 logger = logging.getLogger(__name__)
+
+
+def _static_cap() -> float:
+    """Return static exposure cap from env or infinity."""
+
+    v = os.getenv("EXPOSURE_CAP", "")
+    try:
+        return float(v) if v else float("inf")
+    except Exception:
+        return float("inf")
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -212,15 +223,28 @@ class PositionSizer:
 
         if sp.exposure_basis == "premium":
             unit_notional = si.entry_price * si.lot_size
+            pct_total = sp.max_position_size_pct * _pct()
+            static_cap = _static_cap()
+            if _use_equity():
+                exposure_cap = min(static_cap, si.equity * pct_total)
+            else:
+                exposure_cap = static_cap
+            max_lots_exposure = int(exposure_cap // max(1e-9, unit_notional))
+            min_eq_needed = unit_notional / max(1e-9, pct_total)
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
+            if sp.max_position_size_pct > 0 and unit_notional > 0:
+                exposure_cap = si.equity * sp.max_position_size_pct
+                max_lots_exposure = int(exposure_cap // unit_notional)
+            else:
+                exposure_cap = float("inf")
+                max_lots_exposure = int(1e12) if unit_notional > 0 else 0
+            min_eq_needed = (
+                unit_notional / sp.max_position_size_pct
+                if sp.max_position_size_pct > 0
+                else unit_notional
+            )
 
-        if sp.max_position_size_pct > 0 and unit_notional > 0:
-            exposure_cap = si.equity * sp.max_position_size_pct
-            max_lots_exposure = int(exposure_cap // unit_notional)
-        else:
-            exposure_cap = float("inf")
-            max_lots_exposure = int(1e12) if unit_notional > 0 else 0
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
         logger.info(
@@ -231,11 +255,6 @@ class PositionSizer:
             calc_lots,
         )
         lots = calc_lots
-        min_eq_needed = (
-            unit_notional / sp.max_position_size_pct
-            if sp.max_position_size_pct > 0
-            else unit_notional
-        )
         if sp.exposure_basis == "premium" and max_lots_exposure < 1:
             if sp.allow_min_one_lot and si.equity >= unit_notional:
                 lots = sp.min_lots
