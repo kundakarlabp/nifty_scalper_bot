@@ -1947,6 +1947,7 @@ class StrategyRunner:
     ) -> Tuple[int, Dict]:
         risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
         sl_points = abs(float(entry) - float(stop))
+        sl_points = max(0.5, sl_points)
         rupee_risk_per_lot = sl_points * int(lot_size)
 
         if rupee_risk_per_lot <= 0:
