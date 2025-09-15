@@ -5,14 +5,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Literal, cast
 import os
 import logging
+from types import SimpleNamespace
 from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def _mid_from_quote(q: Dict | None) -> float:
-    mid = q.get("mid") if q else None
-    if mid is None and q:
+def _mid_from_quote(q: dict) -> float:
+    mid = q.get("mid")
+    if mid is None:
         b, a = q.get("bid"), q.get("ask")
         if b is not None and a is not None:
             mid = (float(b) + float(a)) / 2.0
@@ -23,33 +24,32 @@ def _mid_from_quote(q: Dict | None) -> float:
 
 def lots_from_premium_cap(
     runner,
-    quote: Dict | None,
+    quote: dict,
     lot_size: int,
     max_lots: int,
-    *,
-    equity: float | None = None,
 ) -> Tuple[int, float, float]:
     from src.config import settings as _settings
 
-    price = _mid_from_quote(quote or {})
-    unit_notional = price * float(lot_size)
-
-    eq = equity
-    if eq is None and runner is not None:
+    eq = None
+    if _settings.EXPOSURE_CAP_SOURCE == "equity" and runner is not None:
         if hasattr(runner, "get_equity_amount"):
             eq = float(runner.get_equity_amount())
         elif hasattr(runner, "equity_amount"):
             eq = float(getattr(runner, "equity_amount"))
-
     cap = (
         max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
-        if eq is not None
-        else 0.0
+        if _settings.EXPOSURE_CAP_SOURCE == "equity"
+        else float(_settings.PREMIUM_CAP_PER_TRADE)
     )
 
-    lots = 0 if unit_notional <= 0 else int(cap // unit_notional)
-    lots = min(max_lots, lots)
-    return lots, unit_notional, cap
+    price = float(_mid_from_quote(quote or {}))
+    if price <= 0:
+        return 0, 0.0, float(cap)
+
+    unit_notional = price * float(lot_size)
+    lots = 0 if unit_notional <= 0 else int(float(cap) // unit_notional)
+    lots = min(int(max_lots), max(0, lots))
+    return lots, unit_notional, float(cap)
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -240,12 +240,12 @@ class PositionSizer:
         )
 
         if sp.exposure_basis == "premium":
+            runner = SimpleNamespace(equity_amount=si.equity)
             max_lots_exposure, unit_notional, exposure_cap = lots_from_premium_cap(
-                None,
+                runner,
                 {"mid": si.entry_price},
                 si.lot_size,
                 sp.max_lots,
-                equity=si.equity,
             )
             min_eq_needed = (
                 unit_notional / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)

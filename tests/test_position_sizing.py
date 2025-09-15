@@ -2,7 +2,12 @@
 
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
-from src.risk.position_sizing import PositionSizer, _mid_from_quote, lots_from_premium_cap
+from types import SimpleNamespace
+from src.risk.position_sizing import (
+    PositionSizer,
+    _mid_from_quote,
+    lots_from_premium_cap,
+)
 from src.config import settings as cfg
 from hypothesis import given, settings, strategies as st, assume
 
@@ -32,14 +37,15 @@ def test_mid_from_quote_variants():
     assert _mid_from_quote({"mid": 100}) == 100.0
     assert _mid_from_quote({"bid": 90, "ask": 110}) == 100.0
     assert _mid_from_quote({"ltp": 123.45}) == 123.45
-    assert _mid_from_quote(None) == 0.0
+    assert _mid_from_quote({}) == 0.0
 
 
 def test_lots_from_premium_cap(monkeypatch):
     """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
+    runner = SimpleNamespace(equity_amount=10_000)
     lots, unit_notional, cap = lots_from_premium_cap(
-        None, {"mid": 100}, 25, 10, equity=10_000
+        runner, {"mid": 100}, 25, 10
     )
     assert unit_notional == 2_500
     assert cap == 1_000
