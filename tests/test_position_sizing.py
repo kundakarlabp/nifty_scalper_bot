@@ -32,7 +32,7 @@ def test_mid_from_quote_variants():
     assert _mid_from_quote({"mid": 100}) == 100.0
     assert _mid_from_quote({"bid": 90, "ask": 110}) == 100.0
     assert _mid_from_quote({"ltp": 123.45}) == 123.45
-    assert _mid_from_quote(None) == 0.0
+    assert _mid_from_quote({}) == 0.0
 
 
 def test_lots_from_premium_cap(monkeypatch):
@@ -40,8 +40,12 @@ def test_lots_from_premium_cap(monkeypatch):
     # Equity based cap -> cap = equity * pct
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
+    class DummyRunner:
+        def get_equity_amount(self):
+            return 10_000
+
     lots, unit_notional, cap = lots_from_premium_cap(
-        None, {"mid": 100}, 25, 10, equity=10_000
+        DummyRunner(), {"mid": 100}, 25, 10
     )
     assert unit_notional == 2_500
     assert cap == 1_000
@@ -51,7 +55,7 @@ def test_lots_from_premium_cap(monkeypatch):
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
     monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 3_000, raising=False)
     lots, unit_notional, cap = lots_from_premium_cap(
-        None, {"mid": 100}, 25, 10, equity=10_000
+        None, {"mid": 100}, 25, 10
     )
     assert unit_notional == 2_500
     assert cap == 3_000

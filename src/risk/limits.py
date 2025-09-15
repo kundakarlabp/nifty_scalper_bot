@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import logging
 import os
 from src.risk.position_sizing import lots_from_premium_cap
+from types import SimpleNamespace
 
 log = logging.getLogger(__name__)
 
@@ -192,8 +193,13 @@ class RiskEngine:
 
         if basis == "premium":
             available = self.cfg.max_lots_per_symbol - current_lots
+            runner = (
+                SimpleNamespace(equity_amount=float(equity_rupees))
+                if settings.EXPOSURE_CAP_SOURCE == "equity"
+                else None
+            )
             lots, unit_notional, cap = lots_from_premium_cap(
-                None,
+                runner,
                 quote
                 or {
                     "mid": option_mid_price
@@ -202,9 +208,6 @@ class RiskEngine:
                 },
                 lot_size,
                 available,
-                equity=equity_rupees
-                if settings.EXPOSURE_CAP_SOURCE == "equity"
-                else None,
             )
             if lots <= 0:
                 log.info(
