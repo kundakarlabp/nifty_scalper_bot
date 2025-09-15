@@ -28,6 +28,24 @@ def env_any(*names: str, default: str | None = None) -> str | None:
     return default
 
 
+# ----- exposure/risk getters with defaults -----
+
+def _get_exposure_basis() -> str:
+    return os.getenv("EXPOSURE_BASIS", "premium").lower()
+
+
+def _get_exposure_cap_source() -> str:
+    return os.getenv("EXPOSURE_CAP_SOURCE", "equity").lower()
+
+
+def _get_exposure_cap_pct_of_equity() -> float:
+    return float(os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.25"))
+
+
+def _get_premium_cap_per_trade() -> float:
+    return float(os.getenv("PREMIUM_CAP_PER_TRADE", "10000"))
+
+
 # ================= Sub-models =================
 
 
@@ -271,9 +289,16 @@ class RiskSettings(BaseModel):
         )
     )
     exposure_basis: Literal["underlying", "premium"] = Field(
-        default_factory=lambda: str(
-            env_any("EXPOSURE_BASIS", "RISK__EXPOSURE_BASIS") or "premium"
-        )
+        default_factory=_get_exposure_basis
+    )
+    exposure_cap_source: Literal["equity", "env"] = Field(
+        default_factory=_get_exposure_cap_source
+    )
+    exposure_cap_pct_of_equity: float = Field(
+        default_factory=_get_exposure_cap_pct_of_equity
+    )
+    premium_cap_per_trade: float = Field(
+        default_factory=_get_premium_cap_per_trade
     )
 
     @field_validator("exposure_basis", mode="before")
@@ -283,6 +308,23 @@ class RiskSettings(BaseModel):
         if val not in {"premium", "underlying"}:
             raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
         return val
+
+    @field_validator("exposure_cap_source", mode="before")
+    @classmethod
+    def _v_exposure_cap_source(cls, v: object) -> str:
+        val = str(v).lower()
+        if val not in {"equity", "env"}:
+            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        return val
+
+    @field_validator("exposure_cap_pct_of_equity")
+    @classmethod
+    def _v_exposure_cap_pct(cls, v: float) -> float:
+        if not 0.0 < float(v) <= 1.0:
+            raise ValueError(
+                "EXPOSURE_CAP_PCT_OF_EQUITY must be within (0, 1]"
+            )
+        return float(v)
 
     @field_validator("risk_per_trade")
     @classmethod
@@ -311,7 +353,10 @@ class RiskSettings(BaseModel):
         datetime.strptime(v, "%H:%M")
         return v
 
-    @field_validator("max_daily_loss_rupees", "max_notional_rupees", mode="before")
+    @field_validator(
+        "max_daily_loss_rupees", "max_notional_rupees", "premium_cap_per_trade",
+        mode="before",
+    )
     @classmethod
     def _v_positive_float(cls, v: float | None) -> float | None:
         if v is None:
@@ -431,17 +476,17 @@ class AppSettings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
     exposure_basis: Literal["premium", "underlying"] = Field(
-        default_factory=lambda: os.getenv("EXPOSURE_BASIS", "premium").lower()
+        default_factory=_get_exposure_basis
     )
     tp_basis: Literal["premium", "spot"] = "premium"
     EXPOSURE_CAP_SOURCE: str = Field(
-        default_factory=lambda: os.getenv("EXPOSURE_CAP_SOURCE", "equity").lower()
+        default_factory=_get_exposure_cap_source
     )
     EXPOSURE_CAP_PCT_OF_EQUITY: float = Field(
-        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.25"))
+        default_factory=_get_exposure_cap_pct_of_equity
     )
     PREMIUM_CAP_PER_TRADE: float = Field(
-        default_factory=lambda: float(os.getenv("PREMIUM_CAP_PER_TRADE", "10000"))
+        default_factory=_get_premium_cap_per_trade
     )
 
     @field_validator("exposure_basis", mode="before")
@@ -491,7 +536,7 @@ class AppSettings(BaseSettings):
     data: DataSettings = DataSettings()
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
-    risk: RiskSettings = RiskSettings()
+    risk: RiskSettings = Field(default_factory=RiskSettings)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
             entry_slippage_pct=0.25, exit_slippage_pct=0.25
@@ -636,6 +681,22 @@ class AppSettings(BaseSettings):
     @property
     def risk_max_notional_rupees(self) -> float:
         return self.risk.max_notional_rupees
+
+    @property
+    def risk_exposure_basis(self) -> str:
+        return self.risk.exposure_basis
+
+    @property
+    def risk_exposure_cap_source(self) -> str:
+        return self.risk.exposure_cap_source
+
+    @property
+    def risk_exposure_cap_pct_of_equity(self) -> float:
+        return self.risk.exposure_cap_pct_of_equity
+
+    @property
+    def risk_premium_cap_per_trade(self) -> float:
+        return self.risk.premium_cap_per_trade
 
     # Instruments (flat)
     @property
