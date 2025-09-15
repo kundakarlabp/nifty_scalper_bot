@@ -897,7 +897,7 @@ def load_settings() -> AppSettings:
     cfg = AppSettings(
         zerodha=ZerodhaSettings.from_env(),
         telegram=TelegramSettings.from_env(),
-    )
+    )  # type: ignore[call-arg]
     _apply_env_overrides(cfg)
     snap = cfg.model_dump()
     for k in ("api_key", "api_secret", "access_token"):

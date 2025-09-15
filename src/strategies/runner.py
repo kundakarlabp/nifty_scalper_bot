@@ -1426,6 +1426,7 @@ class StrategyRunner:
             ok, reason, det = self.risk_engine.pre_trade_check(
                 equity_rupees=self._active_equity(),
                 plan=plan,
+                runner=self,
                 exposure=exposure,
                 intended_symbol=str(sym),
                 intended_lots=qty_lots,
