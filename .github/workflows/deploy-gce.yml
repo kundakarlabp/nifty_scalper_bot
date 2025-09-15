@@ -1,10 +1,10 @@
----  # yamllint disable rule:truthy rule:line-length
-name: deploy-gce
+# ---  # yamllint disable rule:truthy rule:line-length
+# name: deploy-gce
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+# on:
+#   push:
+#     branches: [main]
+#   workflow_dispatch:
 
 # jobs:
 #   deploy:
