@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple, Literal, cast
 from zoneinfo import ZoneInfo
 import logging
 import os
+from types import SimpleNamespace
 from src.risk.position_sizing import lots_from_premium_cap
 
 log = logging.getLogger(__name__)
@@ -191,8 +192,9 @@ class RiskEngine:
 
         if basis == "premium":
             available = self.cfg.max_lots_per_symbol - current_lots
+            runner = SimpleNamespace(equity_amount=equity_rupees)
             lots, unit_notional, cap = lots_from_premium_cap(
-                None,
+                runner,
                 quote
                 or {
                     "mid": option_mid_price
@@ -201,7 +203,6 @@ class RiskEngine:
                 },
                 lot_size,
                 available,
-                equity=equity_rupees,
             )
             if lots <= 0:
                 log.info(

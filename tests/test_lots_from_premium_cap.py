@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from src.risk.position_sizing import lots_from_premium_cap, PositionSizer
 from src.config import settings as cfg
 
@@ -5,8 +6,9 @@ from src.config import settings as cfg
 def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
     """Returns at least one lot when equity-based cap allows it."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
+    runner = SimpleNamespace(equity_amount=30_000.0)
     lots, unit, cap = lots_from_premium_cap(
-        None, {"mid": 200.0}, lot_size=25, max_lots=5, equity=30_000.0
+        runner, {"mid": 200.0}, lot_size=25, max_lots=5
     )
     assert lots == 1
     assert unit == 200.0 * 25
@@ -16,8 +18,9 @@ def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
+    runner = SimpleNamespace(equity_amount=10_000.0)
     lots, unit, cap = lots_from_premium_cap(
-        None, {"mid": 200.0}, lot_size=25, max_lots=5, equity=10_000.0
+        runner, {"mid": 200.0}, lot_size=25, max_lots=5
     )
     assert lots == 0
     assert cap == 10_000.0 * 0.25
