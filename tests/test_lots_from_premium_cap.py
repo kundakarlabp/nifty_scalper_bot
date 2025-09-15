@@ -4,7 +4,6 @@ from src.config import settings as cfg
 
 def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
     """Returns at least one lot when equity-based cap allows it."""
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
     lots, unit, cap = lots_from_premium_cap(
         None, {"mid": 200.0}, lot_size=25, max_lots=5, equity=30_000.0
@@ -16,7 +15,6 @@ def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
 
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
     lots, unit, cap = lots_from_premium_cap(
         None, {"mid": 200.0}, lot_size=25, max_lots=5, equity=10_000.0

@@ -34,21 +34,18 @@ def lots_from_premium_cap(
     price = _mid_from_quote(quote or {})
     unit_notional = price * float(lot_size)
 
-    cap: float | None = None
-    try:
-        if _settings.EXPOSURE_CAP_SOURCE == "equity":
-            eq = equity
-            if eq is None and runner is not None:
-                if hasattr(runner, "get_equity_amount"):
-                    eq = float(runner.get_equity_amount())
-                elif hasattr(runner, "equity_amount"):
-                    eq = float(getattr(runner, "equity_amount"))
-            if eq is not None:
-                cap = max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
-    except Exception:
-        cap = None
-    if cap is None:
-        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
+    eq = equity
+    if eq is None and runner is not None:
+        if hasattr(runner, "get_equity_amount"):
+            eq = float(runner.get_equity_amount())
+        elif hasattr(runner, "equity_amount"):
+            eq = float(getattr(runner, "equity_amount"))
+
+    cap = (
+        max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
+        if eq is not None
+        else 0.0
+    )
 
     lots = 0 if unit_notional <= 0 else int(cap // unit_notional)
     lots = min(max_lots, lots)
@@ -253,8 +250,7 @@ class PositionSizer:
             )
             min_eq_needed = (
                 unit_notional / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-                if settings.EXPOSURE_CAP_SOURCE == "equity"
-                and settings.EXPOSURE_CAP_PCT_OF_EQUITY > 0
+                if settings.EXPOSURE_CAP_PCT_OF_EQUITY > 0
                 else unit_notional
             )
         else:
