@@ -328,6 +328,8 @@ class TelegramController:
 
     def _maybe_send_close_summary(self) -> None:
         """Emit a daily P&L summary at market close."""
+        if self._stop.is_set():
+            return
         tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
         now = datetime.now(tz)
         cutoff = dt_time(15, 29)

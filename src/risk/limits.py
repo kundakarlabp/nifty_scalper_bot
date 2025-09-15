@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional, Tuple, Literal, cast
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 import logging
 import os
 from types import SimpleNamespace
-from src.risk.position_sizing import lots_from_premium_cap
+
+from src.config import settings
+from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +113,7 @@ class RiskEngine:
         *,
         equity_rupees: float,
         plan: dict,
+        runner: Optional[Any] = None,
         exposure: Exposure,
         intended_symbol: str,
         intended_lots: int,
@@ -186,44 +189,50 @@ class RiskEngine:
                 "max_lots_symbol",
                 {"sym": intended_symbol, "lots": current_lots, "intended": intended_lots},
             )
-        basis = self.cfg.exposure_basis
+        basis_cfg = str(self.cfg.exposure_basis)
+        settings_basis = str(settings.EXPOSURE_BASIS)
+        use_premium_basis = (
+            settings_basis.lower() == "premium" and basis_cfg == "premium"
+        )
+        basis = "premium" if use_premium_basis else basis_cfg
         exposure_cap = self.cfg.max_notional_rupees
 
-        if basis == "premium":
-            available = self.cfg.max_lots_per_symbol - current_lots
-            runner = SimpleNamespace(equity_amount=equity_rupees)
+        if use_premium_basis:
+            available_lots = max(0, self.cfg.max_lots_per_symbol - current_lots)
+            quote_payload = quote or {
+                "mid": option_mid_price if option_mid_price is not None else entry_price
+            }
+            runner_for_cap = runner or SimpleNamespace(equity_amount=equity_rupees)
             lots, unit_notional, cap = lots_from_premium_cap(
-                runner,
-                quote
-                or {
-                    "mid": option_mid_price
-                    if option_mid_price is not None
-                    else entry_price
-                },
+                runner_for_cap,
+                quote_payload,
                 lot_size,
-                available,
+                available_lots,
             )
+            price_mid = float(_mid_from_quote(quote_payload))
             if lots <= 0:
                 log.info(
-                    "pretrade block: basis=%s unit=%.2f cap=%.2f lots=%d",
-                    basis,
+                    "pretrade block: basis=premium price=%.2f unit=%.2f cap=%.2f lots=%d",
+                    price_mid,
                     unit_notional,
                     cap,
                     lots,
                 )
-                plan["reason_block"] = "cap_lt_one_lot"
+                plan["qty_lots"] = 0
                 plan.setdefault("reasons", []).append("cap < 1 lot")
+                plan["reason_block"] = "cap_lt_one_lot"
                 return (
                     False,
                     "cap_lt_one_lot",
                     {
+                        "price": round(price_mid, 2),
                         "unit_notional": round(unit_notional, 2),
                         "cap": round(cap, 2),
-                        "lots": lots,
+                        "lots": int(lots),
                     },
                 )
-            plan["qty_lots"] = lots
-            intended_lots = min(intended_lots, lots)
+            plan["qty_lots"] = int(lots)
+            intended_lots = min(intended_lots, int(lots))
         else:
             unit_notional = spot_price * lot_size
 

@@ -30,14 +30,15 @@ def lots_from_premium_cap(
 ) -> Tuple[int, float, float]:
     from src.config import settings as _settings
 
-    eq = None
+    eq: float | None = None
     if _settings.EXPOSURE_CAP_SOURCE == "equity" and runner is not None:
         if hasattr(runner, "get_equity_amount"):
             eq = float(runner.get_equity_amount())
         elif hasattr(runner, "equity_amount"):
             eq = float(getattr(runner, "equity_amount"))
+    eq_value: float = float(eq) if eq is not None else 0.0
     cap = (
-        max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
+        max(0.0, eq_value * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
         if _settings.EXPOSURE_CAP_SOURCE == "equity"
         else float(_settings.PREMIUM_CAP_PER_TRADE)
     )
