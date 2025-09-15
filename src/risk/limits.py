@@ -24,8 +24,7 @@ class LimitConfig:
     max_notional_rupees: float = 1_500_000.0
     exposure_basis: Literal["underlying", "premium"] = field(
         default_factory=lambda: cast(
-            Literal["underlying", "premium"],
-            os.getenv("EXPOSURE_BASIS", "premium"),
+            Literal["underlying", "premium"], settings.EXPOSURE_BASIS
         )
     )
     max_gamma_mode_lots: int = 2

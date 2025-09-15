@@ -97,7 +97,7 @@ def _metrics_snapshot() -> Dict[str, Any]:
             plan = getattr(runner, "last_plan", {}) or {}
             runtime_metrics.set_delta(float(plan.get("delta") or 0.0))
             runtime_metrics.set_elasticity(float(plan.get("elasticity") or 0.0))
-            basis = getattr(runner.settings, "exposure_basis", "premium")
+            basis = getattr(runner.settings, "EXPOSURE_BASIS", "premium")
             runtime_metrics.set_exposure_basis(basis)
             lot = int(getattr(runner.settings.instruments, "nifty_lot_size", 75))
             entry = float(plan.get("opt_entry") or plan.get("entry") or 0.0)

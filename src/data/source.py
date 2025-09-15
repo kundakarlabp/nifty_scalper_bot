@@ -47,7 +47,7 @@ try:
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
-    class PermissionException(Exception):
+    class PermissionException(Exception):  # type: ignore[no-redef]
         """Fallback used when kiteconnect is unavailable."""
 
     # Collapse to base Exception so retry wrapper still works in paper mode
