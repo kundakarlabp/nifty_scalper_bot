@@ -36,9 +36,7 @@ def test_mid_from_quote_variants():
 
 
 def test_lots_from_premium_cap(monkeypatch):
-    """lots_from_premium_cap respects equity and env based caps."""
-    # Equity based cap -> cap = equity * pct
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
+    """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
     lots, unit_notional, cap = lots_from_premium_cap(
         None, {"mid": 100}, 25, 10, equity=10_000
@@ -46,16 +44,6 @@ def test_lots_from_premium_cap(monkeypatch):
     assert unit_notional == 2_500
     assert cap == 1_000
     assert lots == 0
-
-    # Env based cap -> static value
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
-    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 3_000, raising=False)
-    lots, unit_notional, cap = lots_from_premium_cap(
-        None, {"mid": 100}, 25, 10, equity=10_000
-    )
-    assert unit_notional == 2_500
-    assert cap == 3_000
-    assert lots == 1
 
 
 def test_basic_sizing():
@@ -140,29 +128,6 @@ def test_default_risk_per_trade_is_safe(monkeypatch):
     monkeypatch.delenv("RISK__RISK_PER_TRADE_PCT", raising=False)
     sizer = PositionSizer()
     assert sizer.params.risk_per_trade == 0.01
-
-
-def test_static_cap_overrides_equity(monkeypatch):
-    monkeypatch.setenv("PREMIUM_CAP_PER_TRADE", "4000")
-    monkeypatch.setenv("EXPOSURE_CAP_SOURCE", "env")
-    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 4000, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
-    sizer = _sizer()
-    qty, lots, diag = sizer.size_from_signal(
-        entry_price=200.0,
-        stop_loss=180.0,
-        lot_size=25,
-        equity=40_000.0,
-        spot_sl_points=20.0,
-        delta=0.5,
-    )
-    assert qty == 0
-    assert lots == 0
-    assert diag["block_reason"] == "cap_lt_one_lot"
-    monkeypatch.delenv("PREMIUM_CAP_PER_TRADE", raising=False)
-    monkeypatch.delenv("EXPOSURE_CAP_SOURCE", raising=False)
-    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 10000, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
 
 
 def test_underlying_basis_caps_by_spot():

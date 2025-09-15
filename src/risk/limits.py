@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Literal, cast
-from src.config import settings
 from zoneinfo import ZoneInfo
 import logging
 import os
@@ -202,9 +201,7 @@ class RiskEngine:
                 },
                 lot_size,
                 available,
-                equity=equity_rupees
-                if settings.EXPOSURE_CAP_SOURCE == "equity"
-                else None,
+                equity=equity_rupees,
             )
             if lots <= 0:
                 log.info(
