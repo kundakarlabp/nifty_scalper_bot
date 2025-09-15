@@ -192,28 +192,41 @@ class RiskEngine:
 
         if basis == "premium":
             available = self.cfg.max_lots_per_symbol - current_lots
-            lots_cap, unit_notional, cap = lots_from_premium_cap(
+            lots, unit_notional, cap = lots_from_premium_cap(
                 None,
-                quote or {"mid": option_mid_price if option_mid_price is not None else entry_price},
+                quote
+                or {
+                    "mid": option_mid_price
+                    if option_mid_price is not None
+                    else entry_price
+                },
                 lot_size,
                 available,
-                equity=equity_rupees,
+                equity=equity_rupees
+                if settings.EXPOSURE_CAP_SOURCE == "equity"
+                else None,
             )
-            if lots_cap <= 0:
+            if lots <= 0:
                 log.info(
-                    "pretrade block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                    "pretrade block: basis=%s unit=%.2f cap=%.2f lots=%d",
                     basis,
                     unit_notional,
-                    lots_cap,
                     cap,
+                    lots,
                 )
+                plan["reason_block"] = "cap_lt_one_lot"
+                plan.setdefault("reasons", []).append("cap < 1 lot")
                 return (
                     False,
                     "cap_lt_one_lot",
-                    {"unit_notional": round(unit_notional, 2), "cap": round(cap, 2)},
+                    {
+                        "unit_notional": round(unit_notional, 2),
+                        "cap": round(cap, 2),
+                        "lots": lots,
+                    },
                 )
-            intended_lots = min(intended_lots, lots_cap)
-            plan["qty_lots"] = intended_lots
+            plan["qty_lots"] = lots
+            intended_lots = min(intended_lots, lots)
         else:
             unit_notional = spot_price * lot_size
 

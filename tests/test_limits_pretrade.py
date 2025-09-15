@@ -76,9 +76,10 @@ def test_max_notional():
 def test_cap_lt_one_lot():
     cfg = LimitConfig(exposure_basis="premium")
     eng = RiskEngine(cfg)
-    ok, reason, details = eng.pre_trade_check(
-        **{
-            **_basic_args(),
+    args = _basic_args()
+    plan = args["plan"]
+    args.update(
+        {
             "equity_rupees": 0.0,
             "intended_lots": 1,
             "lot_size": 25,
@@ -87,17 +88,21 @@ def test_cap_lt_one_lot():
             "quote": {"mid": 200.0},
         }
     )
+    ok, reason, details = eng.pre_trade_check(**args)
     assert not ok and reason == "cap_lt_one_lot"
     assert details["unit_notional"] == 200.0 * 25
     assert details["cap"] <= details["unit_notional"]
+    assert plan["reason_block"] == "cap_lt_one_lot"
+    assert "cap < 1 lot" in plan.get("reasons", [])
 
 
 def test_equity_based_premium_cap(monkeypatch):
     cfg = LimitConfig(exposure_basis="premium")
     eng = RiskEngine(cfg)
-    ok, reason, _ = eng.pre_trade_check(
-        **{
-            **_basic_args(),
+    args = _basic_args()
+    plan = args["plan"]
+    args.update(
+        {
             "equity_rupees": 40_000.0,
             "intended_lots": 1,
             "lot_size": 25,
@@ -106,7 +111,9 @@ def test_equity_based_premium_cap(monkeypatch):
             "quote": {"mid": 200.0},
         }
     )
+    ok, reason, _ = eng.pre_trade_check(**args)
     assert ok and reason == ""
+    assert plan.get("qty_lots") == 2
 
 
 def test_gamma_mode_cap(monkeypatch):
