@@ -137,10 +137,23 @@ The bot fetches existing positions from the broker on startup. Set
 
 Risk checks guard every trade.  The runner tracks:
 
-- max trades per day
-- consecutive loss limit
-- daily drawdown percentage
-- equity floor
+ - max trades per day
+ - consecutive loss limit
+ - daily drawdown percentage
+ - equity floor
+ - premium cap per trade
+
+The per-trade premium cap can be driven by equity or a fixed rupee limit:
+
+```bash
+# equity-based (default): 25% of account equity
+EXPOSURE_CAP_SOURCE=equity
+EXPOSURE_CAP_PCT_OF_EQUITY=0.25  # ₹100k equity ⇒ ₹25k cap
+
+# static environment cap
+EXPOSURE_CAP_SOURCE=env
+PREMIUM_CAP_PER_TRADE=10000       # always ₹10k
+```
 
 Use the Telegram `/risk` command to inspect current limits.  Live trading is enabled by default; set `ENABLE_LIVE_TRADING=false` (alias `ENABLE_TRADING=false`) to run in paper mode or trigger the kill switch.  Premium‑based targets are used by default; set `TP_BASIS=spot` to revert to legacy spot‑based SL/TP.
 
