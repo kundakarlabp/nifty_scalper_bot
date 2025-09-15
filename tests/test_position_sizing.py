@@ -3,6 +3,7 @@
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
 from src.risk.position_sizing import PositionSizer
+from src.config import settings as cfg
 from hypothesis import given, settings, strategies as st, assume
 
 
@@ -67,7 +68,7 @@ def test_returns_zero_when_budget_insufficient():
     )
     assert qty == 0
     assert lots == 0
-    assert diag["block_reason"] == "too_small_for_one_lot"
+    assert diag["block_reason"] == "cap_lt_one_lot"
     assert diag["min_equity_needed"] > diag["equity"]
     assert diag["basis"] == "premium"
     assert diag["lots"] == diag["lots_final"]
@@ -111,7 +112,10 @@ def test_default_risk_per_trade_is_safe(monkeypatch):
 
 
 def test_static_cap_overrides_equity(monkeypatch):
-    monkeypatch.setenv("EXPOSURE_CAP", "4000")
+    monkeypatch.setenv("PREMIUM_CAP_PER_TRADE", "4000")
+    monkeypatch.setenv("EXPOSURE_CAP_SOURCE", "env")
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 4000, raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
@@ -123,8 +127,11 @@ def test_static_cap_overrides_equity(monkeypatch):
     )
     assert qty == 0
     assert lots == 0
-    assert diag["block_reason"] == "too_small_for_one_lot"
-    monkeypatch.delenv("EXPOSURE_CAP", raising=False)
+    assert diag["block_reason"] == "cap_lt_one_lot"
+    monkeypatch.delenv("PREMIUM_CAP_PER_TRADE", raising=False)
+    monkeypatch.delenv("EXPOSURE_CAP_SOURCE", raising=False)
+    monkeypatch.setattr(cfg, "PREMIUM_CAP_PER_TRADE", 10000, raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
 
 
 def test_underlying_basis_caps_by_spot():
@@ -145,7 +152,8 @@ def test_underlying_basis_caps_by_spot():
 
 def test_allow_min_one_lot_when_cap_small(monkeypatch):
     monkeypatch.setenv("RISK__ALLOW_MIN_ONE_LOT", "1")
-    sizer = _sizer(max_position_size_pct=0.01)
+    monkeypatch.setenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.01")
+    sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
         stop_loss=180.0,

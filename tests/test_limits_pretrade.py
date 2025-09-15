@@ -73,7 +73,7 @@ def test_max_notional():
     assert not ok and reason == "max_notional"
 
 
-def test_too_small_for_one_lot():
+def test_cap_lt_one_lot():
     cfg = LimitConfig(exposure_basis="premium")
     eng = RiskEngine(cfg)
     ok, reason, details = eng.pre_trade_check(
@@ -87,9 +87,9 @@ def test_too_small_for_one_lot():
             "quote": {"mid": 200.0},
         }
     )
-    assert not ok and reason == "too_small_for_one_lot"
+    assert not ok and reason == "cap_lt_one_lot"
     assert details["unit_notional"] == 200.0 * 25
-    assert details["min_equity_needed"] > 0
+    assert details["cap"] <= details["unit_notional"]
 
 
 def test_equity_based_premium_cap(monkeypatch):

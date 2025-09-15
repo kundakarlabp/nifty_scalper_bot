@@ -430,8 +430,19 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
-    exposure_basis: Literal["premium", "underlying"] = "premium"
+    exposure_basis: Literal["premium", "underlying"] = Field(
+        default_factory=lambda: os.getenv("EXPOSURE_BASIS", "premium").lower()
+    )
     tp_basis: Literal["premium", "spot"] = "premium"
+    EXPOSURE_CAP_SOURCE: str = Field(
+        default_factory=lambda: os.getenv("EXPOSURE_CAP_SOURCE", "equity").lower()
+    )
+    EXPOSURE_CAP_PCT_OF_EQUITY: float = Field(
+        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.25"))
+    )
+    PREMIUM_CAP_PER_TRADE: float = Field(
+        default_factory=lambda: float(os.getenv("PREMIUM_CAP_PER_TRADE", "10000"))
+    )
 
     @field_validator("exposure_basis", mode="before")
     @classmethod
@@ -440,6 +451,10 @@ class AppSettings(BaseSettings):
         if val not in {"premium", "underlying"}:
             raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
         return val
+
+    @property
+    def EXPOSURE_BASIS(self) -> str:  # pragma: no cover - alias for env-style access
+        return self.exposure_basis
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200

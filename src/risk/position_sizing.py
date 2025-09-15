@@ -5,19 +5,54 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Literal, cast
 import os
 import logging
-from src.risk.limits import _use_equity, _pct
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def _static_cap() -> float:
-    """Return static exposure cap from env or infinity."""
+def _mid_from_quote(q: Dict | None) -> float:
+    mid = q.get("mid") if q else None
+    if mid is None and q:
+        b, a = q.get("bid"), q.get("ask")
+        if b is not None and a is not None:
+            mid = (float(b) + float(a)) / 2.0
+        else:
+            mid = float(q.get("ltp") or 0.0)
+    return float(mid or 0.0)
 
-    v = os.getenv("EXPOSURE_CAP", "")
+
+def lots_from_premium_cap(
+    runner,
+    quote: Dict | None,
+    lot_size: int,
+    max_lots: int,
+    *,
+    equity: float | None = None,
+) -> Tuple[int, float, float]:
+    from src.config import settings as _settings
+
+    price = _mid_from_quote(quote or {})
+    unit_notional = price * float(lot_size)
+
+    cap: float | None = None
     try:
-        return float(v) if v else float("inf")
+        if _settings.EXPOSURE_CAP_SOURCE == "equity":
+            eq = equity
+            if eq is None and runner is not None:
+                if hasattr(runner, "get_equity_amount"):
+                    eq = float(runner.get_equity_amount())
+                elif hasattr(runner, "equity_amount"):
+                    eq = float(getattr(runner, "equity_amount"))
+            if eq is not None:
+                cap = max(0.0, float(eq) * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
     except Exception:
-        return float("inf")
+        cap = None
+    if cap is None:
+        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
+
+    lots = 0 if unit_notional <= 0 else int(cap // unit_notional)
+    lots = min(max_lots, lots)
+    return lots, unit_notional, cap
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -164,7 +199,7 @@ class PositionSizer:
         delta: float | None = None,
         quote: Dict | None = None,
     ) -> Tuple[int, int, Dict]:
-        mid = self._mid_from_quote(quote) if quote else float(entry_price)
+        mid = _mid_from_quote(quote) if quote else float(entry_price)
         sl_points_spot = (
             float(spot_sl_points)
             if spot_sl_points is not None
@@ -182,19 +217,6 @@ class PositionSizer:
         qty, lots, diag = self._compute_quantity(si, self.params)
         return qty, lots, diag
 
-    @staticmethod
-    def _mid_from_quote(q: Dict | None) -> float:
-        if not q:
-            return 0.0
-        mid = q.get("mid")
-        if mid is None:
-            bid = q.get("bid")
-            ask = q.get("ask")
-            if bid is not None and ask is not None:
-                mid = (bid + ask) / 2
-            else:
-                mid = q.get("ltp", 0.0)
-        return float(mid)
 
     @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
@@ -222,15 +244,19 @@ class PositionSizer:
         )
 
         if sp.exposure_basis == "premium":
-            unit_notional = si.entry_price * si.lot_size
-            pct_total = sp.max_position_size_pct * _pct()
-            static_cap = _static_cap()
-            if _use_equity():
-                exposure_cap = min(static_cap, si.equity * pct_total)
-            else:
-                exposure_cap = static_cap
-            max_lots_exposure = int(exposure_cap // max(1e-9, unit_notional))
-            min_eq_needed = unit_notional / max(1e-9, pct_total)
+            max_lots_exposure, unit_notional, exposure_cap = lots_from_premium_cap(
+                None,
+                {"mid": si.entry_price},
+                si.lot_size,
+                sp.max_lots,
+                equity=si.equity,
+            )
+            min_eq_needed = (
+                unit_notional / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
+                if settings.EXPOSURE_CAP_SOURCE == "equity"
+                and settings.EXPOSURE_CAP_PCT_OF_EQUITY > 0
+                else unit_notional
+            )
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
             if sp.max_position_size_pct > 0 and unit_notional > 0:
@@ -268,7 +294,7 @@ class PositionSizer:
                 )
             else:
                 lots = 0
-                block_reason = "too_small_for_one_lot"
+                block_reason = "cap_lt_one_lot"
                 logger.info(
                     "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
                     sp.exposure_basis,

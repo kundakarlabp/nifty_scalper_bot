@@ -204,7 +204,13 @@ def check_sizing() -> CheckResult:
     )
     expected = 100_000 * float(settings.risk.risk_per_trade)
     unit_expected = 200 * 50
-    min_eq_expected = unit_expected / float(settings.risk.max_position_size_pct)
+    if (
+        settings.EXPOSURE_CAP_SOURCE == "equity"
+        and float(settings.EXPOSURE_CAP_PCT_OF_EQUITY) > 0
+    ):
+        min_eq_expected = unit_expected / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
+    else:
+        min_eq_expected = unit_expected
     ok = (
         diag["risk_rupees"] == expected
         and diag["unit_notional"] == unit_expected
