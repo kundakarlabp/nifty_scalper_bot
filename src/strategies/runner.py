@@ -1437,6 +1437,7 @@ class StrategyRunner:
                 planned_delta_units=planned_delta_units,
                 portfolio_delta_units=portfolio_delta_units,
                 gamma_mode=gmode,
+                runner=self,
             )
             flow["portfolio_greeks"] = {
                 "delta_units": round(portfolio_delta_units, 1),

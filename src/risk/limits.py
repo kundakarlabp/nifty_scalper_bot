@@ -9,7 +9,7 @@ from src.config import settings
 from zoneinfo import ZoneInfo
 import logging
 import os
-from src.risk.position_sizing import lots_from_premium_cap
+from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +124,7 @@ class RiskEngine:
         planned_delta_units: Optional[float] = None,
         portfolio_delta_units: Optional[float] = None,
         gamma_mode: Optional[bool] = None,
+        runner: object | None = None,
     ) -> Tuple[bool, str, Dict]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
@@ -187,33 +188,26 @@ class RiskEngine:
                 "max_lots_symbol",
                 {"sym": intended_symbol, "lots": current_lots, "intended": intended_lots},
             )
-        basis = self.cfg.exposure_basis
+        basis = settings.EXPOSURE_BASIS
         exposure_cap = self.cfg.max_notional_rupees
-
         if basis == "premium":
             available = self.cfg.max_lots_per_symbol - current_lots
             lots, unit_notional, cap = lots_from_premium_cap(
-                None,
-                quote
-                or {
-                    "mid": option_mid_price
-                    if option_mid_price is not None
-                    else entry_price
-                },
+                runner,
+                quote,
                 lot_size,
                 available,
-                equity=equity_rupees
-                if settings.EXPOSURE_CAP_SOURCE == "equity"
-                else None,
             )
             if lots <= 0:
+                price = _mid_from_quote(quote)
                 log.info(
-                    "pretrade block: basis=%s unit=%.2f cap=%.2f lots=%d",
-                    basis,
+                    "pretrade block: basis=premium price=%.2f unit=%.2f cap=%.2f lots=%d",
+                    price,
                     unit_notional,
                     cap,
                     lots,
                 )
+                plan["qty_lots"] = 0
                 plan["reason_block"] = "cap_lt_one_lot"
                 plan.setdefault("reasons", []).append("cap < 1 lot")
                 return (
@@ -225,8 +219,8 @@ class RiskEngine:
                         "lots": lots,
                     },
                 )
-            plan["qty_lots"] = lots
-            intended_lots = min(intended_lots, lots)
+            plan["qty_lots"] = int(lots)
+            intended_lots = min(intended_lots, plan["qty_lots"])
         else:
             unit_notional = spot_price * lot_size
 

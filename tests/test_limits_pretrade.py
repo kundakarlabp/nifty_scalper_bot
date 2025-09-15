@@ -1,13 +1,12 @@
 from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from hypothesis import assume, given, settings, strategies as st, HealthCheck
 from unittest.mock import patch
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from pytest import MonkeyPatch
+from hypothesis import assume, given, settings, strategies as st, HealthCheck
 
+from src.config import settings as app_settings
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
@@ -73,14 +72,14 @@ def test_max_notional():
     assert not ok and reason == "max_notional"
 
 
-def test_cap_lt_one_lot():
-    cfg = LimitConfig(exposure_basis="premium")
+def test_cap_lt_one_lot(monkeypatch):
+    cfg = LimitConfig()
     eng = RiskEngine(cfg)
     args = _basic_args()
     plan = args["plan"]
+    monkeypatch.setattr(app_settings, "PREMIUM_CAP_PER_TRADE", 1000.0, raising=False)
     args.update(
         {
-            "equity_rupees": 0.0,
             "intended_lots": 1,
             "lot_size": 25,
             "entry_price": 200.0,
@@ -127,13 +126,15 @@ def test_gamma_mode_cap(monkeypatch):
     assert not ok and reason == "gamma_mode_lot_cap"
 
 
-def test_notional_underlying_vs_premium():
+def test_notional_underlying_vs_premium(monkeypatch):
     """Ensure notional is computed based on exposure basis."""
     spot = 60.0
     premium = 10.0
+
     exp_under = Exposure(notional_rupees=100.0)
-    cfg_under = LimitConfig(max_notional_rupees=150.0, exposure_basis="underlying")
+    cfg_under = LimitConfig(max_notional_rupees=150.0)
     eng_under = RiskEngine(cfg_under)
+    monkeypatch.setattr(app_settings, "EXPOSURE_BASIS", "underlying", raising=False)
     ok, reason, _ = eng_under.pre_trade_check(
         **{
             **_basic_args(),
@@ -147,8 +148,9 @@ def test_notional_underlying_vs_premium():
     assert not ok and reason == "max_notional"
 
     exp_prem = Exposure(notional_rupees=100.0)
-    cfg_prem = LimitConfig(max_notional_rupees=150.0, exposure_basis="premium")
+    cfg_prem = LimitConfig(max_notional_rupees=150.0)
     eng_prem = RiskEngine(cfg_prem)
+    monkeypatch.setattr(app_settings, "EXPOSURE_BASIS", "premium", raising=False)
     ok2, reason2, _ = eng_prem.pre_trade_check(
         **{
             **_basic_args(),
@@ -201,21 +203,23 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
     cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
     eng = RiskEngine(cfg)
     with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
-        exposure = Exposure(notional_rupees=current_notional)
-        intended_notional = entry * lot_size * lots
-        assume(current_notional + intended_notional <= max_notional)
-        ok, reason, details = eng.pre_trade_check(
-            **{
-                **_basic_args(),
-                "exposure": exposure,
-                "intended_lots": lots,
-                "lot_size": lot_size,
-                "entry_price": entry,
-                "option_mid_price": entry,
-                "spot_price": entry,
-                "quote": {"mid": entry},
-            }
-        )
+        with MonkeyPatch.context() as mp:
+            mp.setattr(app_settings, "EXPOSURE_BASIS", "underlying", raising=False)
+            exposure = Exposure(notional_rupees=current_notional)
+            intended_notional = entry * lot_size * lots
+            assume(current_notional + intended_notional <= max_notional)
+            ok, reason, details = eng.pre_trade_check(
+                **{
+                    **_basic_args(),
+                    "exposure": exposure,
+                    "intended_lots": lots,
+                    "lot_size": lot_size,
+                    "entry_price": entry,
+                    "option_mid_price": entry,
+                    "spot_price": entry,
+                    "quote": {"mid": entry},
+                }
+            )
         assert ok and reason == ""
         assert details.get("R_rupees_est") == round(abs(entry - 90.0) * lot_size * lots, 2)
 
@@ -232,19 +236,21 @@ def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_n
     cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
     eng = RiskEngine(cfg)
     with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
-        exposure = Exposure(notional_rupees=current_notional)
-        intended_notional = entry * lot_size * lots
-        assume(current_notional + intended_notional > max_notional)
-        ok, reason, _ = eng.pre_trade_check(
-            **{
-                **_basic_args(),
-                "exposure": exposure,
-                "intended_lots": lots,
-                "lot_size": lot_size,
-                "entry_price": entry,
-                "option_mid_price": entry,
-                "spot_price": entry,
-                "quote": {"mid": entry},
-            }
-        )
-        assert not ok and reason == "max_notional"
+        with MonkeyPatch.context() as mp:
+            mp.setattr(app_settings, "EXPOSURE_BASIS", "underlying", raising=False)
+            exposure = Exposure(notional_rupees=current_notional)
+            intended_notional = entry * lot_size * lots
+            assume(current_notional + intended_notional > max_notional)
+            ok, reason, _ = eng.pre_trade_check(
+                **{
+                    **_basic_args(),
+                    "exposure": exposure,
+                    "intended_lots": lots,
+                    "lot_size": lot_size,
+                    "entry_price": entry,
+                    "option_mid_price": entry,
+                    "spot_price": entry,
+                    "quote": {"mid": entry},
+                }
+            )
+            assert not ok and reason == "max_notional"
