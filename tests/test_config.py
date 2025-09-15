@@ -71,6 +71,38 @@ def test_default_values():
         assert settings.data.lookback_padding_bars == 5  # Default padding
         assert settings.strategy.min_bars_for_signal == 15  # Updated default
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
+        assert settings.EXPOSURE_BASIS == "premium"
+        assert settings.EXPOSURE_CAP_SOURCE == "equity"
+        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.25
+        assert settings.PREMIUM_CAP_PER_TRADE == 10000.0
+        assert settings.risk.exposure_basis == "premium"
+        assert settings.risk.exposure_cap_source == "equity"
+        assert settings.risk.exposure_cap_pct_of_equity == 0.25
+        assert settings.risk.premium_cap_per_trade == 10000.0
+
+
+def test_exposure_env_overrides():
+    env = {
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "b",
+        "TELEGRAM__CHAT_ID": "1",
+        "EXPOSURE_BASIS": "underlying",
+        "EXPOSURE_CAP_SOURCE": "env",
+        "EXPOSURE_CAP_PCT_OF_EQUITY": "0.5",
+        "PREMIUM_CAP_PER_TRADE": "5000",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+        assert settings.EXPOSURE_BASIS == "underlying"
+        assert settings.EXPOSURE_CAP_SOURCE == "env"
+        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.5
+        assert settings.PREMIUM_CAP_PER_TRADE == 5000.0
+        assert settings.risk.exposure_basis == "underlying"
+        assert settings.risk.exposure_cap_source == "env"
+        assert settings.risk.exposure_cap_pct_of_equity == 0.5
+        assert settings.risk.premium_cap_per_trade == 5000.0
 
 
 def test_load_settings_creates_validation_dir(tmp_path, monkeypatch):
