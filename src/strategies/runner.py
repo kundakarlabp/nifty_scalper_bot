@@ -647,10 +647,10 @@ class StrategyRunner:
         try:
             need = required_bars(self.strategy_cfg)
         except Exception:
-            need = getattr(self.strategy_cfg, "min_bars", 20)
+            need = getattr(self.strategy_cfg, "min_bars", 15)
         if hasattr(self.data_source, "ensure_history"):
             lookback_min = max(
-                getattr(self.strategy_cfg, "lookback_minutes", 20), int(need)
+                getattr(self.strategy_cfg, "lookback_minutes", 15), int(need)
             )
             try:
                 self.data_source.ensure_history(minutes=lookback_min)
@@ -2436,7 +2436,7 @@ class StrategyRunner:
                 "hint": (
                     f"age={int(age_s)}s "
                     f"token={int(getattr(settings.instruments,'instrument_token',0) or getattr(settings.instruments,'spot_token',0) or 0)} "
-                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',20))}m"
+                    f"tf={getattr(settings.data,'timeframe','minute')} lookback={int(getattr(settings.data,'lookback_minutes',15))}m"
                 ),
             }
         )
@@ -2444,13 +2444,13 @@ class StrategyRunner:
         # Strategy readiness (min bars)
         ready = isinstance(self._last_flow_debug, dict) and int(
             self._last_flow_debug.get("bars", 0)
-        ) >= int(getattr(settings.strategy, "min_bars_for_signal", 20))
+        ) >= int(getattr(settings.strategy, "min_bars_for_signal", 15))
         checks.append(
             {
                 "name": "Strategy readiness",
                 "ok": ready,
                 "detail": f"bars={int(self._last_flow_debug.get('bars', 0))}",
-                "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 20))}",
+                "hint": f"min_bars={int(getattr(settings.strategy, 'min_bars_for_signal', 15))}",
             }
         )
 
@@ -2572,7 +2572,7 @@ class StrategyRunner:
         broker_ok = (self.kite is not None) if live else True
         data_fresh = (time.time() - getattr(self, "_last_fetch_ts", 0.0)) < 120
         bars = int(flow.get("bars", 0) or 0)
-        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 20))
+        min_bars = int(getattr(settings.strategy, "min_bars_for_signal", 15))
         strat_ready = bars >= min_bars
         gates = (
             flow.get("risk_gates", RISK_GATES_SKIPPED)

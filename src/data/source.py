@@ -296,7 +296,7 @@ try:  # pragma: no cover - imported lazily to avoid circular dependency during s
     )
 except Exception:  # pragma: no cover
     # Fallback for early imports or missing settings
-    WARMUP_BARS = 20
+    WARMUP_BARS = 15
 
 
 @dataclass

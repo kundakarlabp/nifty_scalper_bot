@@ -135,7 +135,7 @@ class StrategyConfig:
             max_tick_lag_s=int(thresholds.get("max_tick_lag_s", 8)),
             max_bar_lag_s=int(thresholds.get("max_bar_lag_s", 75)),
             min_bars_required=int(
-                warm.get("min_bars", warm.get("min_bars_required", 20))
+                warm.get("min_bars", warm.get("min_bars_required", 15))
             ),
             lower_score_temp=bool(dbg.get("lower_score_temp", False)),
             source_path=path,

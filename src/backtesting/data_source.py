@@ -90,7 +90,7 @@ def load_and_prepare_data(csv_path: _PathLike) -> pd.DataFrame:
             )
             df.to_csv(p)
         else:
-            min_rows = int(getattr(settings.strategy, "min_bars_for_signal", 20))
+            min_rows = int(getattr(settings.strategy, "min_bars_for_signal", 15))
             if df.empty or len(df.columns) < 4 or len(df) < min_rows:
                 df = make_synth_1m(
                     start=(
