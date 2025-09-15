@@ -1463,6 +1463,7 @@ class StrategyRunner:
                 equity=self._active_equity(),
             )
             flow["sizing"] = diag
+            block_reason = diag.get("block_reason")
             flow["qty"] = int(qty)
             flow["equity"] = self._active_equity()
             flow["risk_rupees"] = round(
@@ -1473,11 +1474,14 @@ class StrategyRunner:
             flow["trades_today"] = self.risk.trades_today
             flow["consecutive_losses"] = self.risk.consecutive_losses
             if qty <= 0:
-                plan["reason_block"] = "qty_zero"
-                flow["reason_block"] = plan["reason_block"]
+                reason = block_reason or "qty_zero"
+                plan["reason_block"] = reason
+                flow["reason_block"] = reason
                 self._last_flow_debug = flow
                 self._record_plan(plan)
-                self.log.debug("Signal skipped: quantity %s <= 0", qty)
+                self.log.debug(
+                    "Signal skipped: quantity %s <= 0 reason=%s", qty, reason
+                )
                 return
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
