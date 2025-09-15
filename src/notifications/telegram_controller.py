@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from src.config import settings
-from src.diagnostics import checks  # noqa: F401
+from src.diagnostics import checks
 from src.diagnostics.registry import run, run_all
 from src.execution.micro_filters import micro_from_quote
 from src.execution.order_executor import fetch_quote_with_depth
@@ -1198,6 +1198,11 @@ class TelegramController:
                 sp = plan.get("spread_pct")
                 dp = plan.get("depth_ok")
                 reason_block = plan.get("reason_block") or "-"
+                reason_label = (
+                    checks.REASON_MAP.get(reason_block, "")
+                    if reason_block != "-"
+                    else ""
+                )
                 reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
                 if "auto_relax" in status.get("banners", []):
@@ -1257,20 +1262,25 @@ class TelegramController:
                     lines.append(
                         f"\u2022 Probe window: {plan['probe_window_from']} \u2192 {plan['probe_window_to']} (IST)"
                     )
-                lines.append(f"reason_block: {reason_block}")
+                if reason_label:
+                    lines.append(
+                        f"reason_block: {reason_block} ({reason_label})"
+                    )
+                else:
+                    lines.append(f"reason_block: {reason_block}")
                 if reasons:
                     lines.append("reasons: " + ", ".join(str(r) for r in reasons))
                 try:
                     from src.diagnostics.registry import run as diag_run
 
-                    checks = [
+                    diag_checks = [
                         "data_window",
                         "atr",
                         "regime",
                         "micro",
                         "risk_gates",
                     ]
-                    for r in (diag_run(c) for c in checks):
+                    for r in (diag_run(c) for c in diag_checks):
                         mark = "✅" if r.ok else "❌"
                         lines.append(f"{mark} {r.name}: {r.msg}")
                         if not r.ok and r.fix:

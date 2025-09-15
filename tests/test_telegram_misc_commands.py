@@ -43,6 +43,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
         "opt_atr": 0.4,
         "opt_atr_pct": 4.0,
         "opt_lot_cost": 750.0,
+        "reason_block": "cap_lt_one_lot",
     }
     status = {"within_window": True, "cooloff_until": "-", "daily_dd_hit": False}
     import src.diagnostics.registry as diag_registry
@@ -64,6 +65,7 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "window: PASS" in msg
     assert "micro:" in msg
     assert "Option → entry" in msg and "atr" in msg and "atr_pct" in msg
+    assert "premium cap too small for 1 lot" in msg
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch, tmp_path) -> None:
