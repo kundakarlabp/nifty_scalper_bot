@@ -625,9 +625,7 @@ class TelegramController:
                     tp2=plan.get("tp2"),
                 )
             )
-            basis = str(
-                getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
-            ).lower()
+            basis = str(settings.EXPOSURE_BASIS).lower()
             if basis == "premium":
                 lines.append(
                     "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
@@ -732,7 +730,7 @@ class TelegramController:
                 min_lots=settings.risk.min_lots,
                 max_lots=settings.risk.max_lots,
                 max_position_size_pct=settings.risk.max_position_size_pct,
-                exposure_basis=settings.risk.exposure_basis,
+                exposure_basis=settings.EXPOSURE_BASIS,
             )
             qty, lots, diag = ps.size_from_signal(
                 entry_price=200,
@@ -970,9 +968,7 @@ class TelegramController:
                     tp2=plan.get("tp2"),
                 )
             ]
-            basis = str(
-                getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
-            ).lower()
+            basis = str(settings.EXPOSURE_BASIS).lower()
             if basis == "premium":
                 lines.append(
                     "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
@@ -1225,9 +1221,7 @@ class TelegramController:
                         tp2=plan.get("tp2"),
                     )
                 )
-                basis = str(
-                    getattr(settings, "exposure_basis", getattr(settings.risk, "exposure_basis", "premium"))
-                ).lower()
+                basis = str(settings.EXPOSURE_BASIS).lower()
                 if basis == "premium":
                     lines.append(
                         "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc} atr {atr} atr_pct {atrp}".format(

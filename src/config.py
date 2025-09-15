@@ -26,26 +26,6 @@ def env_any(*names: str, default: str | None = None) -> str | None:
         if val:
             return val
     return default
-
-
-# ----- exposure/risk getters with defaults -----
-
-def _get_exposure_basis() -> str:
-    return os.getenv("EXPOSURE_BASIS", "premium").lower()
-
-
-def _get_exposure_cap_source() -> str:
-    return os.getenv("EXPOSURE_CAP_SOURCE", "equity").lower()
-
-
-def _get_exposure_cap_pct_of_equity() -> float:
-    return float(os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.25"))
-
-
-def _get_premium_cap_per_trade() -> float:
-    return float(os.getenv("PREMIUM_CAP_PER_TRADE", "10000"))
-
-
 # ================= Sub-models =================
 
 
@@ -288,18 +268,10 @@ class RiskSettings(BaseModel):
             or 1_500_000.0
         )
     )
-    exposure_basis: Literal["underlying", "premium"] = Field(
-        default_factory=_get_exposure_basis
-    )
-    exposure_cap_source: Literal["equity", "env"] = Field(
-        default_factory=_get_exposure_cap_source
-    )
-    exposure_cap_pct_of_equity: float = Field(
-        default_factory=_get_exposure_cap_pct_of_equity
-    )
-    premium_cap_per_trade: float = Field(
-        default_factory=_get_premium_cap_per_trade
-    )
+    exposure_basis: Literal["underlying", "premium"] = "premium"
+    exposure_cap_source: Literal["equity", "env"] = "equity"
+    exposure_cap_pct_of_equity: float = 0.25
+    premium_cap_per_trade: float = 10000.0
 
     @field_validator("exposure_basis", mode="before")
     @classmethod
@@ -475,21 +447,13 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
-    exposure_basis: Literal["premium", "underlying"] = Field(
-        default_factory=_get_exposure_basis
-    )
+    EXPOSURE_BASIS: Literal["premium", "underlying"] = "premium"
     tp_basis: Literal["premium", "spot"] = "premium"
-    EXPOSURE_CAP_SOURCE: str = Field(
-        default_factory=_get_exposure_cap_source
-    )
-    EXPOSURE_CAP_PCT_OF_EQUITY: float = Field(
-        default_factory=_get_exposure_cap_pct_of_equity
-    )
-    PREMIUM_CAP_PER_TRADE: float = Field(
-        default_factory=_get_premium_cap_per_trade
-    )
+    EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = "equity"
+    EXPOSURE_CAP_PCT_OF_EQUITY: float = 0.25
+    PREMIUM_CAP_PER_TRADE: float = 10000.0
 
-    @field_validator("exposure_basis", mode="before")
+    @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod
     def _v_app_exposure_basis(cls, v: object) -> str:
         val = str(v).lower()
@@ -497,9 +461,22 @@ class AppSettings(BaseSettings):
             raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
         return val
 
-    @property
-    def EXPOSURE_BASIS(self) -> str:  # pragma: no cover - alias for env-style access
-        return self.exposure_basis
+    @field_validator("EXPOSURE_CAP_SOURCE", mode="before")
+    @classmethod
+    def _v_app_exposure_cap_source(cls, v: object) -> str:
+        val = str(v).lower()
+        if val not in {"equity", "env"}:
+            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        return val
+
+    @field_validator("EXPOSURE_CAP_PCT_OF_EQUITY")
+    @classmethod
+    def _v_app_exposure_cap_pct(cls, v: float) -> float:
+        if not 0.0 < float(v) <= 1.0:
+            raise ValueError(
+                "EXPOSURE_CAP_PCT_OF_EQUITY must be within (0, 1]"
+            )
+        return float(v)
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
@@ -525,6 +502,12 @@ class AppSettings(BaseSettings):
     MAX_PORTFOLIO_DELTA_UNITS: int = 100
     MAX_PORTFOLIO_DELTA_UNITS_GAMMA: int = 60
     RISK_FREE_RATE: float = 0.065
+
+    def model_post_init(self, __context: object) -> None:  # pragma: no cover - sync risk
+        self.risk.exposure_basis = self.EXPOSURE_BASIS
+        self.risk.exposure_cap_source = self.EXPOSURE_CAP_SOURCE
+        self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
+        self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
     ROLL10_PAUSE_R: float = -0.2
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3

@@ -37,7 +37,7 @@ def test_notional_premium(monkeypatch) -> None:
     runner = StrategyRunner(telegram_controller=DummyTelegram())
     legs = [DummyLeg("A", 10.0, 5), DummyLeg("B", 20.0, 3)]
     runner.order_executor = DummyOE([DummyFsm(legs)])
-    monkeypatch.setattr(settings, "exposure_basis", "premium", raising=False)
+    monkeypatch.setattr(settings, "EXPOSURE_BASIS", "premium", raising=False)
     assert runner._notional_rupees() == 10.0 * 5 + 20.0 * 3
 
 
@@ -46,6 +46,6 @@ def test_notional_underlying(monkeypatch) -> None:
     legs = [DummyLeg("SYM", 10.0, 75), DummyLeg("SYM", 10.0, 75)]
     runner.order_executor = DummyOE([DummyFsm(legs)])
     runner.last_spot = 100.0
-    monkeypatch.setattr(settings, "exposure_basis", "underlying", raising=False)
+    monkeypatch.setattr(settings, "EXPOSURE_BASIS", "underlying", raising=False)
     monkeypatch.setattr(settings.instruments, "nifty_lot_size", 75, raising=False)
     assert runner._notional_rupees() == 100.0 * 75 * 2
