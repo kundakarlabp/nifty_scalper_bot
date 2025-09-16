@@ -1475,7 +1475,7 @@ class StrategyRunner:
             flow["trades_today"] = self.risk.trades_today
             flow["consecutive_losses"] = self.risk.consecutive_losses
             if qty <= 0:
-                reason = block_reason or plan.get("reason_block") or "qty_zero"
+                reason = plan.get("reason_block") or block_reason or "qty_zero"
                 if not plan.get("reason_block"):
                     plan["reason_block"] = reason
                 flow["reason_block"] = reason
