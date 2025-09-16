@@ -105,6 +105,148 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     assert runner.last_plan["atm_strike"] == 17000
 
 
+def test_pre_trade_cap_lt_one_lot_preserves_reason(monkeypatch) -> None:
+    runner = StrategyRunner(telegram_controller=DummyTelegram())
+
+    monkeypatch.setattr(runner, "_within_trading_window", lambda *a, **k: True)
+    now = pd.Timestamp("2024-01-01 10:00").to_pydatetime()
+    monkeypatch.setattr(runner, "_now_ist", lambda: now)
+    runner.event_guard_enabled = False
+    runner.event_cal = None
+
+    bars = pd.date_range(pd.Timestamp(now) - pd.Timedelta(minutes=59), periods=60, freq="1min")
+    ohlc_df = pd.DataFrame(
+        {
+            "open": [1.0] * 60,
+            "high": [1.0] * 60,
+            "low": [1.0] * 60,
+            "close": [1.0] * 60,
+            "volume": [0] * 60,
+        },
+        index=bars,
+    )
+    monkeypatch.setattr(runner, "_fetch_spot_ohlc", lambda: ohlc_df)
+    monkeypatch.setattr(runner, "_ensure_day_state", lambda: None)
+    monkeypatch.setattr(runner, "_refresh_equity_if_due", lambda: None)
+    monkeypatch.setattr(runner, "_maybe_emit_minute_diag", lambda plan: None)
+
+    monkeypatch.setattr(
+        runner.option_resolver,
+        "resolve_atm",
+        lambda *a, **k: {
+            "token": 42,
+            "expiry": "2024-01-04",
+            "lot_size": 50,
+            "strike": 17000,
+            "tradingsymbol": "NIFTY24JAN17000CE",
+        },
+    )
+
+    class _KiteStub:
+        def quote(self, symbols):  # pragma: no cover - simple stub
+            buy_entry = {"price": 100.0, "quantity": 75}
+            sell_entry = {"price": 101.0, "quantity": 75}
+            return {
+                symbols[0]: {
+                    "depth": {"buy": [buy_entry], "sell": [sell_entry]},
+                    "last_price": 100.5,
+                }
+            }
+
+    runner.kite = _KiteStub()
+    monkeypatch.setattr(runner, "_active_equity", lambda: 150000.0)
+
+    exec_stub = SimpleNamespace(
+        micro_ok=lambda **k: (True, {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD", "would_block": False}),
+        step_queue=lambda now: None,
+        on_order_timeout_check=lambda: None,
+        cb_orders=None,
+        cb_modify=None,
+    )
+    runner.order_executor = exec_stub
+    runner.executor = exec_stub
+    runner.data_source = SimpleNamespace(cb_hist=None, cb_quote=None, current_atm_strike=17000)
+
+    import src.strategies.runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod,
+        "evaluate_micro",
+        lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD", "would_block": False},
+    )
+    monkeypatch.setattr(runner_mod, "compute_score", lambda df, regime, cfg: (1.0, None))
+    monkeypatch.setattr(runner_mod, "atr_pct", lambda df, period=14: 0.03)
+    monkeypatch.setattr(runner_mod.risk_gates, "evaluate", lambda plan, acct, cfg: (True, []))
+
+    monkeypatch.setattr(
+        runner,
+        "_risk_gates_for",
+        lambda plan: {
+            "market_hours": True,
+            "equity_floor": True,
+            "daily_drawdown": True,
+            "loss_streak": True,
+            "trades_per_day": True,
+            "sl_valid": True,
+        },
+    )
+    monkeypatch.setattr(runner, "_lots_by_symbol", lambda: {})
+    monkeypatch.setattr(runner, "_notional_rupees", lambda: 0.0)
+    monkeypatch.setattr(runner, "_portfolio_delta_units", lambda: 0.0)
+    monkeypatch.setattr(runner, "_record_plan", lambda plan: setattr(runner, "last_plan", plan))
+    monkeypatch.setattr(runner, "_emit_diag", lambda plan, micro: None)
+    monkeypatch.setattr(runner.risk, "day_realized_loss", 0, raising=False)
+    monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
+    monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
+
+    runner.strategy_cfg = SimpleNamespace(
+        raw={},
+        delta_enable_score=999,
+        min_atr_pct_nifty=0.02,
+        min_atr_pct_banknifty=0.04,
+        min_score=0.35,
+    )
+
+    plan_reason = "existing_reason"
+    details = {"cap": 1.0, "equity": 150000.0}
+
+    def fake_pre_trade_check(**kwargs):
+        kwargs["plan"]["reason_block"] = plan_reason
+        return False, "cap_lt_one_lot", details
+
+    monkeypatch.setattr(runner.risk_engine, "pre_trade_check", fake_pre_trade_check)
+
+    def fake_signal(df, current_tick=None):
+        return {
+            "regime": "TREND",
+            "rr": 1.5,
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp1": 101.0,
+            "tp2": 102.0,
+            "score": 1.0,
+            "option_type": "CE",
+            "strike": "NIFTY24JAN17000CE",
+            "qty_lots": 1,
+            "reasons": ["seed"],
+            "side_hint": "CE",
+            "action": "BUY",
+        }
+
+    monkeypatch.setattr(runner.strategy, "generate_signal", fake_signal)
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+    plan = runner.last_plan
+
+    assert plan["reason_block"] == plan_reason
+    assert flow["reason_block"] == plan_reason
+    assert "cap_lt_one_lot" in flow.get("reason_details", {})
+    assert flow["reason_details"]["cap_lt_one_lot"] == details
+    assert flow["reason_details"]["cap_lt_one_lot"] is not details
+    assert f"risk:cap_lt_one_lot" in plan["reasons"]
+
 def test_nearest_strike_consistency():
     """Both resolvers should pick the same ATM strike for odd spot prices."""
     from datetime import datetime

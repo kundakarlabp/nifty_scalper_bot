@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import time
+from copy import deepcopy
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -1448,9 +1449,13 @@ class StrategyRunner:
 
             if not ok:
                 plan["has_signal"] = False
-                plan["reason_block"] = reason
+                if not plan.get("reason_block"):
+                    plan["reason_block"] = reason
                 plan.setdefault("reasons", []).append(f"risk:{reason}")
                 plan.setdefault("risk_details", det)
+                flow["reason_block"] = plan.get("reason_block") or reason
+                if reason == "cap_lt_one_lot":
+                    flow.setdefault("reason_details", {})["cap_lt_one_lot"] = deepcopy(det)
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.last_plan = plan
