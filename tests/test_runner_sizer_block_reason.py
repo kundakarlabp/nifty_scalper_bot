@@ -193,7 +193,7 @@ def test_qty_zero_adds_cap_reason_to_plan_reasons(monkeypatch):
 
 
 def test_risk_block_records_reason_details(monkeypatch):
-    detail = {"cap": 100000, "unit": 50000}
+    detail: Dict[str, int] = {"cap": 100000, "unit": 50000}
     runner = _setup_runner(
         monkeypatch,
         (0, {"rupee_risk_per_lot": 1, "lots_final": 0, "block_reason": None}),
@@ -207,6 +207,35 @@ def test_risk_block_records_reason_details(monkeypatch):
 
     assert flow["reason_block"] == "cap_lt_one_lot"
     assert plan["reason_block"] == "cap_lt_one_lot"
+    assert "risk:cap_lt_one_lot" in plan["reasons"]
+    assert flow.get("reason_details", {}).get("cap_lt_one_lot") == detail
+    assert plan.get("risk_details") == detail
+
+
+def test_risk_block_preserves_existing_reason(monkeypatch):
+    # Regression: a pre-trade cap block should not override upstream reasons.
+    detail: Dict[str, int] = {"cap": 50000, "unit": 75000, "lots": 1}
+    runner = _setup_runner(
+        monkeypatch,
+        (0, {"rupee_risk_per_lot": 1, "lots_final": 0, "block_reason": None}),
+        plan_extra={"reasons": ["signal:weak"]},
+        risk_result=(False, "cap_lt_one_lot", detail),
+    )
+
+    def _fake_pre_trade_check(**kwargs):
+        plan = kwargs.get("plan", {})
+        plan["reason_block"] = "preexisting"
+        return False, "cap_lt_one_lot", detail
+
+    monkeypatch.setattr(runner.risk_engine, "pre_trade_check", _fake_pre_trade_check)
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+    plan = runner.last_plan
+
+    assert flow["reason_block"] == "preexisting"
+    assert plan["reason_block"] == "preexisting"
     assert "risk:cap_lt_one_lot" in plan["reasons"]
     assert flow.get("reason_details", {}).get("cap_lt_one_lot") == detail
     assert plan.get("risk_details") == detail

@@ -1448,13 +1448,22 @@ class StrategyRunner:
 
             if not ok:
                 plan["has_signal"] = False
-                plan["reason_block"] = reason
-                reasons = plan.setdefault("reasons", [])
+                # Preserve any upstream block reason determined before risk checks.
+                existing_block_reason = plan.get("reason_block")
+                if not existing_block_reason:
+                    plan["reason_block"] = reason
+                # Snapshot reasons to avoid mutating shared references from upstream signals.
+                existing_reasons: List[str] = list(plan.get("reasons", []))
                 risk_reason = f"risk:{reason}" if reason else "risk"
-                if risk_reason not in reasons:
-                    reasons.append(risk_reason)
-                flow["reason_block"] = plan["reason_block"]
-                flow.setdefault("reason_details", {})[reason] = det
+                if risk_reason not in existing_reasons:
+                    existing_reasons.append(risk_reason)
+                plan["reasons"] = existing_reasons
+                flow["reason_block"] = plan.get("reason_block") or reason
+                reason_details = flow.setdefault("reason_details", {})
+                if reason:
+                    reason_details.setdefault(reason, det)
+                if reason == "cap_lt_one_lot":
+                    reason_details["cap_lt_one_lot"] = det
                 plan.setdefault("risk_details", det)
                 self._record_plan(plan)
                 self._last_flow_debug = flow
