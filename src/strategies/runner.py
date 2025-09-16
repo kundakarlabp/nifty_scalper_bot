@@ -1475,11 +1475,42 @@ class StrategyRunner:
             flow["trades_today"] = self.risk.trades_today
             flow["consecutive_losses"] = self.risk.consecutive_losses
             if qty <= 0:
-                reason = plan.get("reason_block") or block_reason or "qty_zero"
-                if not plan.get("reason_block"):
+                existing_reason = plan.get("reason_block")
+                reason = existing_reason or block_reason or "qty_zero"
+                if not existing_reason:
                     plan["reason_block"] = reason
-                plan.setdefault("reasons", []).append(reason)
-                flow["reason_block"] = reason
+                reasons = plan.setdefault("reasons", [])
+                if block_reason == "cap_lt_one_lot":
+                    cap_val = diag.get("cap")
+                    unit_val = diag.get("unit_notional")
+                    eq_val = diag.get("equity")
+                    cap_abs_val = diag.get("cap_abs")
+                    cap_msg_parts = [
+                        f"cap={cap_val}" if cap_val is not None else None,
+                        f"unit={unit_val}" if unit_val is not None else None,
+                        f"equity={eq_val}" if eq_val is not None else None,
+                    ]
+                    if cap_abs_val:
+                        cap_msg_parts.append(f"cap_abs={cap_abs_val}")
+                    cap_msg_detail = " ".join([p for p in cap_msg_parts if p])
+                    cap_msg = "sizer:cap_lt_one_lot"
+                    if cap_msg_detail:
+                        cap_msg = f"{cap_msg} ({cap_msg_detail})"
+                    if cap_msg not in reasons:
+                        reasons.append(cap_msg)
+                    flow.setdefault("reason_details", {})["cap_lt_one_lot"] = {
+                        "cap": cap_val,
+                        "unit": unit_val,
+                        "equity": eq_val,
+                        "cap_abs": cap_abs_val,
+                        "min_equity_needed": diag.get("min_equity_needed"),
+                    }
+                    reason = plan.get("reason_block") or block_reason or reason
+                else:
+                    if reason not in reasons:
+                        reasons.append(reason)
+                flow["reason_block"] = plan.get("reason_block") or reason
+                reason = flow["reason_block"]
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 self.log.debug(
