@@ -100,7 +100,8 @@ def test_exposure_env_overrides():
         assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.5
         assert settings.PREMIUM_CAP_PER_TRADE == 5000.0
         assert settings.risk.exposure_basis == "underlying"
-        assert settings.risk.exposure_cap_source == "env"
+        # ``env`` is normalized to ``absolute`` on the nested model.
+        assert settings.risk.exposure_cap_source == "absolute"
         assert settings.risk.exposure_cap_pct_of_equity == 0.5
         assert settings.risk.premium_cap_per_trade == 5000.0
 

@@ -7,7 +7,6 @@ active trades, and risk limit enforcement.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -192,11 +191,7 @@ class TradingSession:
         """
         cap = float(equity) * float(self.risk_config.max_position_size_pct)
         cost_one_lot = float(premium_per_lot)
-        allow_min = os.getenv("RISK__ALLOW_MIN_ONE_LOT", "false").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
+        allow_min = bool(getattr(self.risk_config, "allow_min_one_lot", False))
         if cap < cost_one_lot:
             if allow_min and equity >= cost_one_lot:
                 logger.info(
