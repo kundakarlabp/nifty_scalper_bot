@@ -73,11 +73,11 @@ def test_default_values():
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
         assert settings.EXPOSURE_BASIS == "premium"
         assert settings.EXPOSURE_CAP_SOURCE == "equity"
-        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.25
+        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.40
         assert settings.PREMIUM_CAP_PER_TRADE == 10000.0
         assert settings.risk.exposure_basis == "premium"
         assert settings.risk.exposure_cap_source == "equity"
-        assert settings.risk.exposure_cap_pct_of_equity == 0.25
+        assert settings.risk.exposure_cap_pct_of_equity == 0.40
         assert settings.risk.premium_cap_per_trade == 10000.0
 
 

@@ -37,11 +37,18 @@ def lots_from_premium_cap(
         elif hasattr(runner, "equity_amount"):
             eq = float(getattr(runner, "equity_amount"))
     eq_value: float = float(eq) if eq is not None else 0.0
-    cap = (
-        max(0.0, eq_value * float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY))
-        if _settings.EXPOSURE_CAP_SOURCE == "equity"
-        else float(_settings.PREMIUM_CAP_PER_TRADE)
-    )
+    cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
+    if _settings.EXPOSURE_CAP_SOURCE == "equity":
+        cap = max(0.0, eq_value * cap_pct)
+        if str(getattr(_settings, "EXPOSURE_BASIS", "premium")).lower() == "premium":
+            logger.info(
+                "lots_from_premium_cap: basis=premium source=equity eq=%.2f cap_pct=%.2f cap=%.2f",
+                eq_value,
+                cap_pct,
+                cap,
+            )
+    else:
+        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
 
     price = float(_mid_from_quote(quote or {}))
     if price <= 0:

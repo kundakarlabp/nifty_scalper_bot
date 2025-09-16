@@ -270,7 +270,7 @@ class RiskSettings(BaseModel):
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
     exposure_cap_source: Literal["equity", "env"] = "equity"
-    exposure_cap_pct_of_equity: float = 0.25
+    exposure_cap_pct_of_equity: float = 0.40
     premium_cap_per_trade: float = 10000.0
 
     @field_validator("exposure_basis", mode="before")
@@ -450,7 +450,7 @@ class AppSettings(BaseSettings):
     EXPOSURE_BASIS: Literal["premium", "underlying"] = "premium"
     tp_basis: Literal["premium", "spot"] = "premium"
     EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = "equity"
-    EXPOSURE_CAP_PCT_OF_EQUITY: float = 0.25
+    EXPOSURE_CAP_PCT_OF_EQUITY: float = 0.40
     PREMIUM_CAP_PER_TRADE: float = 10000.0
 
     @field_validator("EXPOSURE_BASIS", mode="before")

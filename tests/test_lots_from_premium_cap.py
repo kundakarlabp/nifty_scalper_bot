@@ -5,33 +5,37 @@ from src.config import settings as cfg
 
 def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
     """Returns at least one lot when equity-based cap allows it."""
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
-    runner = SimpleNamespace(equity_amount=30_000.0)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
+    runner = SimpleNamespace(equity_amount=40_000.0)
+    price = 112.8
+    lot_size = 75
     lots, unit, cap = lots_from_premium_cap(
-        runner, {"mid": 200.0}, lot_size=25, max_lots=5
+        runner, {"mid": price}, lot_size=lot_size, max_lots=5
     )
     assert lots == 1
-    assert unit == 200.0 * 25
-    assert cap == 30_000.0 * 0.25
+    assert unit == price * lot_size
+    assert cap == 40_000.0 * 0.40
 
 
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.25, raising=False)
-    runner = SimpleNamespace(equity_amount=10_000.0)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
+    runner = SimpleNamespace(equity_amount=20_000.0)
+    price = 112.8
+    lot_size = 75
     lots, unit, cap = lots_from_premium_cap(
-        runner, {"mid": 200.0}, lot_size=25, max_lots=5
+        runner, {"mid": price}, lot_size=lot_size, max_lots=5
     )
     assert lots == 0
-    assert cap == 10_000.0 * 0.25
+    assert cap == 20_000.0 * 0.40
     assert cap < unit
     sizer = PositionSizer()
     qty, sized_lots, diag = sizer.size_from_signal(
-        entry_price=200.0,
-        stop_loss=180.0,
-        lot_size=25,
-        equity=10_000.0,
-        spot_sl_points=20.0,
+        entry_price=price,
+        stop_loss=90.0,
+        lot_size=lot_size,
+        equity=20_000.0,
+        spot_sl_points=5.0,
         delta=0.5,
     )
     assert qty == 0 and sized_lots == 0
