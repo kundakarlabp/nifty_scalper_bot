@@ -14,6 +14,7 @@ def _setup_runner(
     monkeypatch,
     qty_diag: Tuple[int, Dict[str, Any]],
     plan_extra: Optional[Dict[str, Any]] = None,
+    risk_result: Optional[Tuple[bool, str, Dict[str, Any]]] = None,
 ) -> StrategyRunner:
     """Return a runner patched to reach sizing stage."""
 
@@ -102,7 +103,10 @@ def _setup_runner(
             "sl_valid": True,
         },
     )
-    monkeypatch.setattr(runner.risk_engine, "pre_trade_check", lambda **k: (True, "", {}))
+    if risk_result is None:
+        risk_result = (True, "", {})
+
+    monkeypatch.setattr(runner.risk_engine, "pre_trade_check", lambda **k: risk_result)
     monkeypatch.setattr(runner, "_lots_by_symbol", lambda: {})
     monkeypatch.setattr(runner, "_notional_rupees", lambda: 0)
     monkeypatch.setattr(runner, "_portfolio_delta_units", lambda: 0)
@@ -186,4 +190,24 @@ def test_qty_zero_adds_cap_reason_to_plan_reasons(monkeypatch):
     )
     assert runner.last_plan["reason_block"] == "cap_lt_one_lot"
     assert "cap_lt_one_lot" in flow.get("reason_details", {})
+
+
+def test_risk_block_records_reason_details(monkeypatch):
+    detail = {"cap": 100000, "unit": 50000}
+    runner = _setup_runner(
+        monkeypatch,
+        (0, {"rupee_risk_per_lot": 1, "lots_final": 0, "block_reason": None}),
+        risk_result=(False, "cap_lt_one_lot", detail),
+    )
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+    plan = runner.last_plan
+
+    assert flow["reason_block"] == "cap_lt_one_lot"
+    assert plan["reason_block"] == "cap_lt_one_lot"
+    assert "risk:cap_lt_one_lot" in plan["reasons"]
+    assert flow.get("reason_details", {}).get("cap_lt_one_lot") == detail
+    assert plan.get("risk_details") == detail
 
