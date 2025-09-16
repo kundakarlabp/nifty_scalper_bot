@@ -1836,9 +1836,26 @@ class TelegramController:
                 return self._send("runner not ready")
             now = datetime.now(timezone.utc)
             ds = runner.data_source
+            tick_dt = None
+            tick_attr = getattr(ds, "last_tick_ts", None)
+            if callable(tick_attr):
+                try:
+                    tick_dt = tick_attr()
+                except Exception:  # pragma: no cover - defensive log path
+                    tick_dt = None
+            if tick_dt is None:
+                tick_dt_accessor = getattr(ds, "last_tick_dt", None)
+                if callable(tick_dt_accessor):
+                    try:
+                        tick_dt = tick_dt_accessor()
+                    except Exception:  # pragma: no cover - defensive log path
+                        tick_dt = None
+            if tick_dt is None:
+                tick_dt = getattr(ds, "_last_tick_ts", None)
+
             fr = compute_freshness(
                 now=now,
-                last_tick_ts=ds.last_tick_ts(),
+                last_tick_ts=tick_dt,
                 last_bar_open_ts=ds.last_bar_open_ts(),
                 tf_seconds=ds.timeframe_seconds,
                 max_tick_lag_s=runner.strategy_cfg.max_tick_lag_s,

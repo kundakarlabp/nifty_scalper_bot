@@ -24,6 +24,28 @@ _status_callback: Optional[Callable[[], Dict[str, Any]]] = None
 _start_ts = time.time()
 
 
+def _resolve_last_tick_dt(ds: Any) -> Optional[datetime]:
+    """Return the latest tick timestamp as ``datetime`` if available."""
+
+    last_tick_dt: Optional[datetime] = None
+    tick_attr = getattr(ds, "last_tick_ts", None)
+    if callable(tick_attr):
+        try:
+            last_tick_dt = tick_attr()
+        except Exception:  # pragma: no cover - defensive diagnostic path
+            last_tick_dt = None
+    if last_tick_dt is None:
+        tick_dt_accessor = getattr(ds, "last_tick_dt", None)
+        if callable(tick_dt_accessor):
+            try:
+                last_tick_dt = tick_dt_accessor()
+            except Exception:  # pragma: no cover - defensive diagnostic path
+                last_tick_dt = None
+    if last_tick_dt is None:
+        last_tick_dt = getattr(ds, "_last_tick_ts", None)
+    return last_tick_dt
+
+
 @app.route("/live", methods=["GET"])
 def live() -> Tuple[Dict[str, Any], int]:
     """Liveness probe: returns 200 as long as the process is up."""
@@ -48,9 +70,11 @@ def ready() -> Tuple[Dict[str, Any], int]:
     if ds is None:
         return {"status": "down", "reason": "data"}, 503
 
+    last_tick_dt = _resolve_last_tick_dt(ds)
+
     fresh = compute_freshness(
         now=datetime.utcnow(),
-        last_tick_ts=ds.last_tick_ts(),
+        last_tick_ts=last_tick_dt,
         last_bar_open_ts=ds.last_bar_open_ts(),
         tf_seconds=ds.timeframe_seconds,
         max_tick_lag_s=int(getattr(runner.strategy_cfg, "max_tick_lag_s", 8)),
@@ -123,7 +147,7 @@ def _prometheus_metrics() -> str:
     if runner is not None:
         ds = getattr(runner, "data_source", None)
         if ds is not None:
-            last = getattr(ds, "last_tick_ts", lambda: None)()
+            last = _resolve_last_tick_dt(ds)
             if last:
                 tick_age = (datetime.utcnow() - last).total_seconds()
             try:

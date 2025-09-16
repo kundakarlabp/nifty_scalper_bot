@@ -683,6 +683,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
         self._last_tick_ts: Optional[datetime] = None
+        # Epoch timestamp (seconds) of the most recent tick heartbeat.
+        self._last_tick_epoch: float | None = None
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
@@ -706,6 +708,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._stale_tick_thresh = 3
         self._last_refresh_min: tuple[int, int] | None = None
         self._last_auth_warn = 0.0
+
+    @property
+    def last_tick_ts(self) -> float | None:
+        """Epoch seconds of the most recent tick heartbeat."""
+
+        return self._last_tick_epoch
+
+    @last_tick_ts.setter
+    def last_tick_ts(self, value: float | None) -> None:
+        self._last_tick_epoch = value
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -790,6 +802,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 delay = min(delay * 2.0, 60.0)
                 self._reconnect_backoff = delay
 
+    def reconnect_ws(self) -> None:
+        """Reconnect the streaming channel after a detected tick stall."""
+
+        self.reconnect_with_backoff()
+
     def maybe_refresh_session(self, now: datetime | None = None) -> None:
         now = now or datetime.now(TZ)
         key = (now.hour, now.minute)
@@ -798,6 +815,27 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._last_refresh_min = key
 
     def tick_watchdog(self, max_age_s: float = 3.0) -> bool:
+        """Return ``True`` when consecutive tick gaps exceed the watchdog threshold."""
+
+        heartbeat_ts = self.last_tick_ts
+        now = time.time()
+        tick_max_lag_s = float(
+            getattr(
+                settings,
+                "TICK_MAX_LAG_S",
+                getattr(getattr(settings, "strategy", None), "max_tick_lag_s", max_age_s),
+            )
+        )
+        if heartbeat_ts:
+            lag = now - heartbeat_ts
+            if lag > tick_max_lag_s:
+                log.warning("tick_stale", {"tick_lag": lag})
+                try:
+                    self.reconnect_ws()
+                    log.info("tick_reconnect_attempt", {"tick_lag": lag})
+                except Exception as exc:  # pragma: no cover - defensive reconnect guard
+                    log.error("tick_reconnect_error", {"err": str(exc), "tick_lag": lag})
+
         ts = self._last_tick_ts
         if ts is None:
             return False
@@ -838,6 +876,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             price = float(val) if isinstance(val, (int, float)) else None
             if price is not None:
                 self._last_tick_ts = datetime.utcnow()
+                self.last_tick_ts = time.time()
             return price
         except Exception as e:
             lat = int((time.monotonic() - t0) * 1000)
@@ -848,6 +887,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""
         self._last_tick_ts = datetime.utcnow()
+        self.last_tick_ts = time.time()
         if self.hist_mode == "live_warmup" and self.bar_builder:
             try:
                 self.bar_builder.on_tick(tick)
