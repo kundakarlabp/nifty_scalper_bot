@@ -3,11 +3,10 @@ from zoneinfo import ZoneInfo
 
 from hypothesis import assume, given, settings, strategies as st, HealthCheck
 from unittest.mock import patch
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pytest
 
+from src.config import settings as app_settings
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
@@ -55,7 +54,7 @@ def test_max_lots_symbol():
 
 
 def test_max_notional():
-    cfg = LimitConfig(max_notional_rupees=1000.0)
+    cfg = LimitConfig(max_notional_rupees=1000.0, exposure_basis="underlying")
     eng = RiskEngine(cfg)
     exp = Exposure(notional_rupees=900.0)
     ok, reason, _ = eng.pre_trade_check(
@@ -114,6 +113,33 @@ def test_equity_based_premium_cap(monkeypatch):
     ok, reason, _ = eng.pre_trade_check(**args)
     assert ok and reason == ""
     assert plan.get("qty_lots") == 3
+
+
+def test_equity_cap_limits_aggregate_exposure(monkeypatch):
+    cfg = LimitConfig(max_notional_rupees=1_000_000.0, exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    exposure = Exposure(notional_rupees=9_000.0)
+    args = _basic_args()
+    plan = args["plan"]
+    args.update(
+        {
+            "equity_rupees": 50_000.0,
+            "exposure": exposure,
+            "intended_lots": 1,
+            "lot_size": 50,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "spot_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert plan.get("qty_lots") == 1
+    assert not ok and reason == "max_notional"
+    assert details["cur"] == pytest.approx(exposure.notional_rupees)
+    assert details["add"] == pytest.approx(200.0 * 50)
 
 
 def test_gamma_mode_cap(monkeypatch):
@@ -179,6 +205,7 @@ def test_mid_price_from_quote():
     ok, reason, _ = eng.pre_trade_check(
         **{
             **_basic_args(),
+            "equity_rupees": 375.0,
             "exposure": exp,
             "quote": quote,
             "option_mid_price": None,
@@ -198,7 +225,11 @@ def test_mid_price_from_quote():
 )
 @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_notional):
-    cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
+    cfg = LimitConfig(
+        max_notional_rupees=max_notional,
+        max_lots_per_symbol=100,
+        exposure_basis="underlying",
+    )
     eng = RiskEngine(cfg)
     with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
         exposure = Exposure(notional_rupees=current_notional)
@@ -229,7 +260,11 @@ def test_pre_trade_notional_ok(current_notional, entry, lot_size, lots, max_noti
 )
 @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.filter_too_much])
 def test_pre_trade_notional_block(current_notional, entry, lot_size, lots, max_notional):
-    cfg = LimitConfig(max_notional_rupees=max_notional, max_lots_per_symbol=100)
+    cfg = LimitConfig(
+        max_notional_rupees=max_notional,
+        max_lots_per_symbol=100,
+        exposure_basis="underlying",
+    )
     eng = RiskEngine(cfg)
     with patch.object(eng, "_now", return_value=datetime(2024, 1, 1, tzinfo=ZoneInfo(cfg.tz))):
         exposure = Exposure(notional_rupees=current_notional)
