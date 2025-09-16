@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 import logging
 import os
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from src.config import settings
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,6 +61,31 @@ class Exposure:
 
     lots_by_symbol: Dict[str, int] = field(default_factory=dict)
     notional_rupees: float = 0.0
+
+
+@dataclass(frozen=True)
+class Block:
+    """Structured risk block result returned by :meth:`RiskEngine.pre_trade_check`."""
+
+    reason: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Allow tuple-style unpacking ``ok, reason, details = Block(...)``."""
+
+        yield False
+        yield self.reason
+        yield self.details
+
+    def __bool__(self) -> bool:
+        """A block result is always falsy to halt downstream execution."""
+
+        return False
+
+    def as_tuple(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Explicit tuple representation for legacy call sites and tests."""
+
+        return False, self.reason, self.details
 
 
 @dataclass
@@ -126,13 +151,13 @@ class RiskEngine:
         planned_delta_units: Optional[float] = None,
         portfolio_delta_units: Optional[float] = None,
         gamma_mode: Optional[bool] = None,
-    ) -> Tuple[bool, str, Dict]:
+    ) -> Block | Tuple[bool, str, Dict[str, Any]]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
         now = self._now()
         self.state.new_session_if_needed(now)
 
-        details: Dict[str, float] = {}
+        details: Dict[str, Any] = {}
 
         if self.state.cooloff_until and now < self.state.cooloff_until:
             return (
@@ -213,44 +238,46 @@ class RiskEngine:
             plan["eq_source"] = eq_source
             exposure_cap = cap
             price_mid = float(_mid_from_quote(quote_payload))
+            meta: Optional[Dict[str, Any]] = None
             if lots <= 0:
-                log.info(
-                    "pretrade block: basis=premium price=%.2f unit=%.2f cap=%.2f lots=%d",
-                    price_mid,
-                    unit_notional,
-                    cap,
-                    lots,
+                cap_abs_value = (
+                    round(cap_abs_setting, 2) if cap_abs_setting > 0 else None
                 )
-                plan["qty_lots"] = 0
-                cap_msg = (
-                    f"cap_lt_one_lot (cap={cap:.0f}, unit={unit_notional:.0f})"
-                )
-                if cap_abs_setting > 0 and cap_abs_setting <= unit_notional:
-                    cap_msg += f" cap_abs={cap_abs_setting:.0f}"
-                reasons = plan.setdefault("reasons", [])
-                if cap_msg not in reasons:
-                    reasons.append(cap_msg)
-                plan["reason_block"] = "cap_lt_one_lot"
-                return (
-                    False,
-                    "cap_lt_one_lot",
-                    {
-                        "price": round(price_mid, 2),
-                        "unit_notional": round(unit_notional, 2),
-                        "cap": round(cap, 2),
-                        "cap_abs": (
-                            round(cap_abs_setting, 2)
-                            if cap_abs_setting > 0
-                            else None
-                        ),
-                        "equity_cap_pct": round(
-                            float(getattr(settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.0)),
-                            4,
-                        ),
-                        "lots": int(lots),
-                        "eq_source": eq_source,
-                    },
-                )
+                meta = {
+                    "reason": "cap_lt_one_lot",
+                    "basis": basis,
+                    "price": round(price_mid, 2),
+                    "unit_notional": round(unit_notional, 2),
+                    "cap": round(cap, 2),
+                    "cap_abs": cap_abs_value,
+                    "equity_cap_pct": round(
+                        float(getattr(settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.0)),
+                        4,
+                    ),
+                    "lots": int(lots),
+                    "lot_size": int(lot_size),
+                    "equity": float(equity_rupees),
+                    "eq_source": eq_source,
+                    "available_lots": int(available_lots),
+                    "current_lots": int(current_lots),
+                    "max_lots_per_symbol": int(self.cfg.max_lots_per_symbol),
+                }
+                if cap_abs_value is None:
+                    meta["cap_abs"] = None
+            if settings_basis.lower() == "premium" and lots <= 0:
+                if meta and meta.get("reason") == "cap_lt_one_lot":
+                    logger.info("block_cap_lt_one_lot %s", meta)
+                    plan["qty_lots"] = 0
+                    plan["reason_block"] = "cap_lt_one_lot"
+                    cap_msg = (
+                        f"cap_lt_one_lot (cap={cap:.0f}, unit={unit_notional:.0f})"
+                    )
+                    if cap_abs_setting > 0 and cap_abs_setting <= unit_notional:
+                        cap_msg += f" cap_abs={cap_abs_setting:.0f}"
+                    reasons = plan.setdefault("reasons", [])
+                    if cap_msg not in reasons:
+                        reasons.append(cap_msg)
+                    return Block(reason="cap_lt_one_lot", details=meta)
             plan["qty_lots"] = int(lots)
             intended_lots = min(intended_lots, int(lots))
         else:
@@ -264,7 +291,7 @@ class RiskEngine:
             )
         intended_notional = unit_notional * intended_lots
         if exposure.notional_rupees + intended_notional > exposure_cap:
-            log.info(
+            logger.info(
                 "max_notional block: basis=%s unit_notional=%.2f calc_lots=%d cap=%.2f",
                 basis,
                 unit_notional,
