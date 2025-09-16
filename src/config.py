@@ -12,11 +12,13 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal, cast
 
 from dotenv import load_dotenv
 from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.utils.env import env_flag
 
 
 DEFAULT_EXPOSURE_CAP_PCT = 40.0
@@ -415,6 +417,129 @@ class RiskSettings(BaseModel):
         return v
 
 
+class GuardsSettings(BaseModel):
+    """Configuration for lightweight runtime guard rails.
+
+    Attributes:
+        max_orders_per_min: Maximum new orders allowed per minute.
+        daily_loss_cap: Absolute realised loss (₹) allowed for the trading day
+            before blocking further entries.
+        trading_start_hhmm: Earliest timestamp (HH:MM, 24h clock) when trading is
+            permitted.
+        trading_end_hhmm: Latest timestamp (HH:MM, 24h clock) when trading is
+            permitted.
+        kill_env: Boolean flag controlling the kill switch. String values are
+            interpreted using typical truthy/falsey semantics, and non-boolean
+            strings are treated as the name of an environment variable to
+            resolve.
+        kill_file: Optional path to a sentinel file; trading halts when the file
+            exists.
+    """
+
+    max_orders_per_min: int = Field(
+        30,
+        description="Maximum number of orders allowed per rolling minute.",
+        validation_alias=AliasChoices(
+            "GUARDS__MAX_ORDERS_PER_MIN",
+            "MAX_ORDERS_PER_MIN",
+        ),
+    )
+    daily_loss_cap: float = Field(
+        9_999_999.0,
+        description="Absolute realised loss guard for the current trading day.",
+        validation_alias=AliasChoices(
+            "GUARDS__DAILY_LOSS_CAP",
+            "DAILY_LOSS_CAP",
+        ),
+    )
+    trading_start_hhmm: str = Field(
+        "09:20",
+        description="Start of the permitted trading window (HH:MM).",
+        validation_alias=AliasChoices(
+            "GUARDS__TRADING_START_HHMM",
+            "TRADING_WINDOW_START",
+        ),
+    )
+    trading_end_hhmm: str = Field(
+        "15:25",
+        description="End of the permitted trading window (HH:MM).",
+        validation_alias=AliasChoices(
+            "GUARDS__TRADING_END_HHMM",
+            "TRADING_WINDOW_END",
+        ),
+    )
+    kill_env: bool | str = Field(
+        True,
+        description=(
+            "Kill switch control. Accepts booleans or the name of an environment "
+            "variable whose falsey value should halt trading."
+        ),
+        validation_alias=AliasChoices(
+            "GUARDS__KILL_ENV",
+            "ENABLE_TRADING",
+            "ENABLE_LIVE_TRADING",
+            "KILL_SWITCH",
+            "KILL_SWITCH_ENV",
+        ),
+    )
+    kill_file: str = Field(
+        "",
+        description="Optional sentinel file path to disable trading when present.",
+        validation_alias=AliasChoices(
+            "GUARDS__KILL_FILE",
+            "KILL_SWITCH_FILE",
+        ),
+    )
+
+    @field_validator("max_orders_per_min")
+    @classmethod
+    def _v_orders(cls, value: int) -> int:
+        if int(value) < 0:
+            raise ValueError("max_orders_per_min must be >= 0")
+        return int(value)
+
+    @field_validator("daily_loss_cap")
+    @classmethod
+    def _v_loss_cap(cls, value: float) -> float:
+        if float(value) < 0:
+            raise ValueError("daily_loss_cap must be >= 0")
+        return float(value)
+
+    @field_validator("trading_start_hhmm", "trading_end_hhmm")
+    @classmethod
+    def _v_hhmm(cls, value: str) -> str:
+        datetime.strptime(value, "%H:%M")
+        return value
+
+    @field_validator("kill_env", mode="before")
+    @classmethod
+    def _v_kill_env(cls, value: object) -> bool | str:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return True
+        text = str(value).strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return text
+
+    @field_validator("kill_file")
+    @classmethod
+    def _v_kill_file(cls, value: str) -> str:
+        return str(value or "").strip()
+
+    def resolve_kill_env(self) -> bool:
+        """Return the effective kill-switch flag as a boolean."""
+
+        if isinstance(self.kill_env, bool):
+            return self.kill_env
+        return env_flag(self.kill_env, True)
+
 class ExecutorSettings(BaseModel):
     exchange: str = "NFO"
     order_product: str = "NRML"
@@ -700,6 +825,9 @@ class AppSettings(BaseSettings):
     data: DataSettings = DataSettings()
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
+    guards: GuardsSettings = Field(
+        default_factory=cast("Callable[[], GuardsSettings]", GuardsSettings)
+    )
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
@@ -861,6 +989,51 @@ class AppSettings(BaseSettings):
     @property
     def risk_premium_cap_per_trade(self) -> float:
         return self.risk.premium_cap_per_trade
+
+    # Guards (flat)
+    @property
+    def guards_max_orders_per_min(self) -> int:
+        return self.guards.max_orders_per_min
+
+    @property
+    def guards_daily_loss_cap(self) -> float:
+        return self.guards.daily_loss_cap
+
+    @property
+    def guards_trading_start_hhmm(self) -> str:
+        return self.guards.trading_start_hhmm
+
+    @property
+    def guards_trading_end_hhmm(self) -> str:
+        return self.guards.trading_end_hhmm
+
+    @property
+    def guards_kill_env(self) -> bool:
+        return self.guards.resolve_kill_env()
+
+    @property
+    def guards_kill_file(self) -> str:
+        return self.guards.kill_file
+
+    @property
+    def MAX_ORDERS_PER_MIN(self) -> int:
+        return self.guards.max_orders_per_min
+
+    @property
+    def DAILY_LOSS_CAP(self) -> float:
+        return self.guards.daily_loss_cap
+
+    @property
+    def TRADING_WINDOW_START(self) -> str:
+        return self.guards.trading_start_hhmm
+
+    @property
+    def TRADING_WINDOW_END(self) -> str:
+        return self.guards.trading_end_hhmm
+
+    @property
+    def KILL_SWITCH_FILE(self) -> str:
+        return self.guards.kill_file
 
     # Instruments (flat)
     @property
@@ -1107,4 +1280,4 @@ class _SettingsProxy:
 # Public singleton used by the rest of the application
 settings = _SettingsProxy()
 
-__all__ = ["AppSettings", "load_settings", "settings"]
+__all__ = ["AppSettings", "GuardsSettings", "load_settings", "settings"]

@@ -4,27 +4,52 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+from src.config import settings
+from src.utils.env import env_flag
 from src.utils.reliability import RateLimiter
 
 
 @dataclass
 class RiskConfig:
-    """Configuration for :class:`RiskGuards`.
+    """Configuration for :class:`RiskGuards` sourced from ``settings.guards``."""
 
-    Environment variables provide defaults so behaviour can be tuned without
-    code changes. Passing zero or empty values disables the corresponding
-    checks.
-    """
+    max_orders_per_min: int = field(
+        default_factory=lambda: settings.guards.max_orders_per_min
+    )
+    daily_loss_cap: float = field(default_factory=lambda: settings.guards.daily_loss_cap)
+    trading_start_hm: str = field(
+        default_factory=lambda: settings.guards.trading_start_hhmm
+    )
+    trading_end_hm: str = field(
+        default_factory=lambda: settings.guards.trading_end_hhmm
+    )
+    kill_env: bool | str = field(default_factory=lambda: settings.guards.kill_env)
+    kill_file: str = field(default_factory=lambda: settings.guards.kill_file)
 
-    max_orders_per_min: int = int(os.getenv("MAX_ORDERS_PER_MIN", "30"))
-    daily_loss_cap: float = float(os.getenv("DAILY_LOSS_CAP", "9999999"))
-    trading_start_hm: str = os.getenv("TRADING_WINDOW_START", "09:20")
-    trading_end_hm: str = os.getenv("TRADING_WINDOW_END", "15:25")
-    kill_env: str = os.getenv("KILL_SWITCH_ENV", "ENABLE_TRADING")
-    kill_file: str = os.getenv("KILL_SWITCH_FILE", "")
+    def __post_init__(self) -> None:
+        self.max_orders_per_min = int(self.max_orders_per_min)
+        self.daily_loss_cap = float(self.daily_loss_cap)
+        self.trading_start_hm = str(self.trading_start_hm)
+        self.trading_end_hm = str(self.trading_end_hm)
+        self.kill_env = self._coerce_kill_flag(self.kill_env)
+        self.kill_file = str(self.kill_file or "")
+
+    @staticmethod
+    def _coerce_kill_flag(value: bool | str) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return env_flag(text, True)
 
 
 class RiskGuards:
@@ -45,11 +70,7 @@ class RiskGuards:
     def _kill_switch(self) -> bool:
         """Return ``True`` if trading should be halted."""
 
-        env_block = os.getenv(self.cfg.kill_env, "true").lower() in {
-            "false",
-            "0",
-            "no",
-        }
+        env_block = not self.cfg.kill_env
         file_block = bool(self.cfg.kill_file and os.path.exists(self.cfg.kill_file))
         return env_block or file_block
 

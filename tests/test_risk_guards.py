@@ -4,39 +4,54 @@ import time
 
 import pytest
 
+from src.config import GuardsSettings, settings
 from src.risk.guards import RiskConfig, RiskGuards
 
 
+def _set_guards(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
+    base = {
+        "max_orders_per_min": 30,
+        "daily_loss_cap": 9_999_999.0,
+        "trading_start_hhmm": "00:00",
+        "trading_end_hhmm": "23:59",
+        "kill_env": True,
+        "kill_file": "",
+    }
+    base.update(overrides)
+    monkeypatch.setattr(settings, "guards", GuardsSettings(**base))
+
+
 def test_rate_limit_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ENABLE_TRADING", "true")
-    cfg = RiskConfig(max_orders_per_min=2, trading_start_hm="00:00", trading_end_hm="23:59")
-    guards = RiskGuards(cfg)
+    _set_guards(monkeypatch, max_orders_per_min=2)
+    guards = RiskGuards(RiskConfig())
     assert guards.ok_to_trade()
     assert guards.ok_to_trade()
     assert not guards.ok_to_trade()
 
 
 def test_daily_loss_cap() -> None:
-    cfg = RiskConfig(daily_loss_cap=100, trading_start_hm="00:00", trading_end_hm="23:59")
-    guards = RiskGuards(cfg)
+    guards = RiskGuards(
+        RiskConfig(
+            daily_loss_cap=100,
+            trading_start_hm="00:00",
+            trading_end_hm="23:59",
+            kill_env=True,
+            kill_file="",
+        )
+    )
     guards.set_pnl_today(-150)
     assert not guards.ok_to_trade()
 
 
 def test_kill_switch_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = RiskConfig(kill_env="TEST_KILL", trading_start_hm="00:00", trading_end_hm="23:59")
-    guards = RiskGuards(cfg)
-    monkeypatch.setenv("TEST_KILL", "false")
-    try:
-        assert not guards.ok_to_trade()
-    finally:
-        monkeypatch.delenv("TEST_KILL", raising=False)
+    _set_guards(monkeypatch, kill_env=False)
+    guards = RiskGuards(RiskConfig())
+    assert not guards.ok_to_trade()
 
 
 def test_trading_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ENABLE_TRADING", "true")
-    cfg = RiskConfig(trading_start_hm="10:00", trading_end_hm="10:01")
-    guards = RiskGuards(cfg)
+    _set_guards(monkeypatch, trading_start_hhmm="10:00", trading_end_hhmm="10:01")
+    guards = RiskGuards(RiskConfig())
 
     def fake_strftime(fmt: str, ts: float) -> str:  # pragma: no cover - simple stub
         return "09:00"
