@@ -19,6 +19,9 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY = 0.40
+
+
 def env_any(*names: str, default: str | None = None) -> str | None:
     """Return the first non-empty environment variable from ``names``."""
     for name in names:
@@ -270,7 +273,7 @@ class RiskSettings(BaseModel):
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
     exposure_cap_source: Literal["equity", "env"] = "equity"
-    exposure_cap_pct_of_equity: float = 0.40
+    exposure_cap_pct_of_equity: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
     premium_cap_per_trade: float = 10000.0
 
     @field_validator("exposure_basis", mode="before")
@@ -450,7 +453,7 @@ class AppSettings(BaseSettings):
     EXPOSURE_BASIS: Literal["premium", "underlying"] = "premium"
     tp_basis: Literal["premium", "spot"] = "premium"
     EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = "equity"
-    EXPOSURE_CAP_PCT_OF_EQUITY: float = 0.40
+    EXPOSURE_CAP_PCT_OF_EQUITY: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
     PREMIUM_CAP_PER_TRADE: float = 10000.0
 
     @field_validator("EXPOSURE_BASIS", mode="before")
