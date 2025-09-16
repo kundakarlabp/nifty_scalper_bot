@@ -19,7 +19,8 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY = 0.40
+DEFAULT_EXPOSURE_CAP_PCT = 40.0
+DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
 
 
 def env_any(*names: str, default: str | None = None) -> str | None:
@@ -260,7 +261,7 @@ class RiskSettings(BaseModel):
         ),
     )
     default_equity: float = Field(
-        30000.0,
+        40000.0,
         validation_alias=AliasChoices(
             "RISK__DEFAULT_EQUITY",
             "RISK_DEFAULT_EQUITY",
@@ -288,12 +289,11 @@ class RiskSettings(BaseModel):
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = Field(
         default_factory=lambda: float(
-            env_any("EXPOSURE_CAP", "RISK__MAX_NOTIONAL_RUPEES")
-            or 1_500_000.0
+            env_any("EXPOSURE_CAP", "RISK__MAX_NOTIONAL_RUPEES") or 1_500_000.0
         )
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
-    exposure_cap_source: Literal["equity", "env"] = Field(
+    exposure_cap_source: Literal["equity", "absolute"] = Field(
         "equity",
         validation_alias=AliasChoices(
             "EXPOSURE_CAP_SOURCE",
@@ -301,7 +301,7 @@ class RiskSettings(BaseModel):
         ),
     )
     exposure_cap_pct_of_equity: float = Field(
-        DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY,
+        DEFAULT_EXPOSURE_CAP_RATIO,
         validation_alias=AliasChoices(
             "EXPOSURE_CAP_PCT_OF_EQUITY",
             "EXPOSURE_CAP_PCT",
@@ -329,8 +329,11 @@ class RiskSettings(BaseModel):
     @classmethod
     def _v_exposure_cap_source(cls, v: object) -> str:
         val = str(v).lower()
-        if val not in {"equity", "env"}:
-            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        if val == "env":
+            # Historical name mapped to the new 'absolute' option.
+            return "absolute"
+        if val not in {"equity", "absolute"}:
+            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'absolute'")
         return val
 
     @field_validator("exposure_cap_pct_of_equity")
@@ -506,37 +509,90 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
+    # Fallback notional equity (₹) when live equity fetch fails or is disabled.
+    RISK_DEFAULT_EQUITY: int = Field(
+        default_factory=lambda: int(os.getenv("RISK_DEFAULT_EQUITY", "40000")),
+        validation_alias=AliasChoices(
+            "RISK_DEFAULT_EQUITY",
+            "RISK__DEFAULT_EQUITY",
+            "DEFAULT_EQUITY",
+        ),
+    )
+    # Whether to pull live equity from the broker for risk calculations.
+    RISK_USE_LIVE_EQUITY: bool = Field(
+        default_factory=lambda: str(os.getenv("RISK_USE_LIVE_EQUITY", "true")).lower()
+        in {"true", "1", "yes", "on"},
+        validation_alias=AliasChoices(
+            "RISK_USE_LIVE_EQUITY",
+            "RISK__USE_LIVE_EQUITY",
+            "USE_LIVE_EQUITY",
+        ),
+    )
+    # Exposure calculations based on option premium or underlying notional.
     EXPOSURE_BASIS: Literal["premium", "underlying"] = Field(
-        "premium",
+        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium")).lower(),
         validation_alias=AliasChoices(
             "EXPOSURE_BASIS",
             "RISK__EXPOSURE_BASIS",
         ),
     )
     tp_basis: Literal["premium", "spot"] = "premium"
-    EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = Field(
-        "equity",
+    # Source used to cap exposure (percentage of equity or absolute rupees).
+    # Legacy value 'env' is treated as 'absolute' downstream for compatibility.
+    EXPOSURE_CAP_SOURCE: Literal["equity", "absolute", "env"] = Field(
+        default_factory=lambda: str(os.getenv("EXPOSURE_CAP_SOURCE", "equity")).lower(),
         validation_alias=AliasChoices(
             "EXPOSURE_CAP_SOURCE",
             "RISK__EXPOSURE_CAP_SOURCE",
         ),
     )
-    EXPOSURE_CAP_PCT_OF_EQUITY: float = Field(
-        DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY,
+    # Percent of equity allowed per trade (converted to ratio for risk model).
+    EXPOSURE_CAP_PCT: float = Field(
+        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))),
         validation_alias=AliasChoices(
-            "EXPOSURE_CAP_PCT_OF_EQUITY",
             "EXPOSURE_CAP_PCT",
+            "EXPOSURE_CAP_PCT_OF_EQUITY",
             "RISK__EXPOSURE_CAP_PCT",
         ),
     )
+    # Absolute rupee cap fallback when percentage-based cap is insufficient.
     EXPOSURE_CAP_ABS: float = Field(
-        0.0,
+        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_ABS", "0")),
         validation_alias=AliasChoices(
             "EXPOSURE_CAP_ABS",
             "RISK__EXPOSURE_CAP_ABS",
         ),
     )
+    # Hard cap on collected premium per trade (₹).
     PREMIUM_CAP_PER_TRADE: float = 10000.0
+    # Maximum tolerated lag for inbound ticks in seconds.
+    TICK_MAX_LAG_S: float = Field(
+        default_factory=lambda: float(os.getenv("TICK_MAX_LAG_S", "5")),
+        validation_alias=AliasChoices("TICK_MAX_LAG_S", "DATA__TICK_MAX_LAG_S"),
+    )
+    # Maximum tolerated lag for completed bars/candles in seconds.
+    BAR_MAX_LAG_S: float = Field(
+        default_factory=lambda: float(os.getenv("BAR_MAX_LAG_S", "2")),
+        validation_alias=AliasChoices("BAR_MAX_LAG_S", "DATA__BAR_MAX_LAG_S"),
+    )
+
+    @field_validator("RISK_DEFAULT_EQUITY", mode="before")
+    @classmethod
+    def _v_app_default_equity(cls, v: object) -> int:
+        try:
+            val = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("RISK_DEFAULT_EQUITY must be numeric") from exc
+        if val <= 0:
+            raise ValueError("RISK_DEFAULT_EQUITY must be > 0")
+        return val
+
+    @field_validator("RISK_USE_LIVE_EQUITY", mode="before")
+    @classmethod
+    def _v_app_live_equity(cls, v: object) -> bool:
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in {"1", "true", "yes", "on"}
 
     @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod
@@ -550,20 +606,22 @@ class AppSettings(BaseSettings):
     @classmethod
     def _v_app_exposure_cap_source(cls, v: object) -> str:
         val = str(v).lower()
-        if val not in {"equity", "env"}:
-            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        if val not in {"equity", "absolute", "env"}:
+            raise ValueError(
+                "EXPOSURE_CAP_SOURCE must be 'equity', 'absolute', or legacy 'env'"
+            )
         return val
 
-    @field_validator("EXPOSURE_CAP_PCT_OF_EQUITY")
+    @field_validator("EXPOSURE_CAP_PCT")
     @classmethod
     def _v_app_exposure_cap_pct(cls, v: float) -> float:
         pct = float(v)
-        if pct > 1.0:
-            pct = pct / 100.0
-        if not 0.0 < pct <= 1.0:
-            raise ValueError(
-                "EXPOSURE_CAP_PCT_OF_EQUITY must be within (0, 1]"
-            )
+        if pct <= 0:
+            raise ValueError("EXPOSURE_CAP_PCT must be > 0")
+        if pct <= 1.0:
+            pct *= 100.0
+        if pct > 100.0:
+            raise ValueError("EXPOSURE_CAP_PCT must be <= 100")
         return pct
 
     @field_validator("EXPOSURE_CAP_ABS")
@@ -573,6 +631,21 @@ class AppSettings(BaseSettings):
         if val < 0:
             raise ValueError("EXPOSURE_CAP_ABS must be >= 0")
         return val
+
+    @field_validator("TICK_MAX_LAG_S", "BAR_MAX_LAG_S")
+    @classmethod
+    def _v_lag_nonnegative(cls, v: float) -> float:
+        val = float(v)
+        if val < 0:
+            raise ValueError("lag thresholds must be >= 0 seconds")
+        return val
+
+    @property
+    def EXPOSURE_CAP_PCT_OF_EQUITY(self) -> float:
+        """Return the exposure cap as a ratio for legacy callers."""
+
+        pct = float(self.EXPOSURE_CAP_PCT)
+        return pct / 100.0
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
@@ -600,30 +673,22 @@ class AppSettings(BaseSettings):
     RISK_FREE_RATE: float = 0.065
 
     def model_post_init(self, __context: object) -> None:  # pragma: no cover - sync risk
+        self.risk.use_live_equity = bool(self.RISK_USE_LIVE_EQUITY)
+        self.risk.default_equity = float(self.RISK_DEFAULT_EQUITY)
         self.risk.exposure_basis = self.EXPOSURE_BASIS
-        self.risk.exposure_cap_source = self.EXPOSURE_CAP_SOURCE
+        cap_source = self.EXPOSURE_CAP_SOURCE
+        if cap_source == "env":
+            cap_source = "absolute"
+        self.risk.exposure_cap_source = cap_source
         self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
         self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
         self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
-        default_eq_env = env_any("RISK_DEFAULT_EQUITY", "DEFAULT_EQUITY")
-        if default_eq_env is not None:
-            try:
-                self.risk.default_equity = float(default_eq_env)
-            except ValueError:
-                pass
         min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")
         if min_floor_env is not None:
             try:
                 self.risk.min_equity_floor = float(min_floor_env)
             except ValueError:
                 pass
-        use_live_env = env_any("RISK_USE_LIVE_EQUITY", "USE_LIVE_EQUITY")
-        if use_live_env is not None:
-            self.risk.use_live_equity = str(use_live_env).lower() not in {
-                "0",
-                "false",
-                "no",
-            }
     ROLL10_PAUSE_R: float = -0.2
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3
