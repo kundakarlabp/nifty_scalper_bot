@@ -92,7 +92,7 @@ def test_cap_lt_one_lot():
     assert details["unit_notional"] == 200.0 * 25
     assert details["cap"] <= details["unit_notional"]
     assert plan["reason_block"] == "cap_lt_one_lot"
-    assert "cap < 1 lot" in plan.get("reasons", [])
+    assert "cap_lt_one_lot" in plan.get("reasons", [])
 
 
 def test_equity_based_premium_cap(monkeypatch):
@@ -110,6 +110,7 @@ def test_equity_based_premium_cap(monkeypatch):
             "quote": {"mid": 200.0},
         }
     )
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT", 40.0, raising=False)
     ok, reason, _ = eng.pre_trade_check(**args)
     assert ok and reason == ""
     assert plan.get("qty_lots") == 3
@@ -119,7 +120,7 @@ def test_equity_cap_limits_aggregate_exposure(monkeypatch):
     cfg = LimitConfig(max_notional_rupees=1_000_000.0, exposure_basis="premium")
     eng = RiskEngine(cfg)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
-    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT", 20.0, raising=False)
     exposure = Exposure(notional_rupees=9_000.0)
     args = _basic_args()
     plan = args["plan"]
@@ -197,11 +198,12 @@ def test_daily_premium_loss_blocks():
     assert not ok and reason == "daily_premium_loss"
 
 
-def test_mid_price_from_quote():
+def test_mid_price_from_quote(monkeypatch):
     cfg = LimitConfig(max_notional_rupees=150.0, exposure_basis="premium")
     eng = RiskEngine(cfg)
     exp = Exposure(notional_rupees=145.0)
     quote = {"bid": 9.0, "ask": 11.0}
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT", 100.0, raising=False)
     ok, reason, _ = eng.pre_trade_check(
         **{
             **_basic_args(),

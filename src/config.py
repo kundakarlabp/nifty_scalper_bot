@@ -272,7 +272,7 @@ class RiskSettings(BaseModel):
         )
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
-    exposure_cap_source: Literal["equity", "env"] = "equity"
+    exposure_cap_source: Literal["equity", "absolute"] = "equity"
     exposure_cap_pct_of_equity: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
     premium_cap_per_trade: float = 10000.0
 
@@ -288,8 +288,8 @@ class RiskSettings(BaseModel):
     @classmethod
     def _v_exposure_cap_source(cls, v: object) -> str:
         val = str(v).lower()
-        if val not in {"equity", "env"}:
-            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        if val not in {"equity", "absolute"}:
+            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'absolute'")
         return val
 
     @field_validator("exposure_cap_pct_of_equity")
@@ -450,9 +450,21 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
-    EXPOSURE_BASIS: Literal["premium", "underlying"] = "premium"
+    RISK_DEFAULT_EQUITY: int = int(os.getenv("RISK_DEFAULT_EQUITY", 40000))
+    RISK_USE_LIVE_EQUITY: bool = (
+        os.getenv("RISK_USE_LIVE_EQUITY", "true").lower() == "true"
+    )
+    EXPOSURE_BASIS: Literal["premium", "underlying"] = os.getenv(
+        "EXPOSURE_BASIS", "premium"
+    )
     tp_basis: Literal["premium", "spot"] = "premium"
-    EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = "equity"
+    EXPOSURE_CAP_SOURCE: Literal["equity", "absolute"] = os.getenv(
+        "EXPOSURE_CAP_SOURCE", "equity"
+    )
+    EXPOSURE_CAP_PCT: float = float(os.getenv("EXPOSURE_CAP_PCT", 4.0))
+    EXPOSURE_CAP_ABS: float = float(os.getenv("EXPOSURE_CAP_ABS", 0))
+    TICK_MAX_LAG_S: float = float(os.getenv("TICK_MAX_LAG_S", 5))
+    BAR_MAX_LAG_S: float = float(os.getenv("BAR_MAX_LAG_S", 2))
     EXPOSURE_CAP_PCT_OF_EQUITY: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
     PREMIUM_CAP_PER_TRADE: float = 10000.0
 
@@ -468,8 +480,8 @@ class AppSettings(BaseSettings):
     @classmethod
     def _v_app_exposure_cap_source(cls, v: object) -> str:
         val = str(v).lower()
-        if val not in {"equity", "env"}:
-            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'env'")
+        if val not in {"equity", "absolute"}:
+            raise ValueError("EXPOSURE_CAP_SOURCE must be 'equity' or 'absolute'")
         return val
 
     @field_validator("EXPOSURE_CAP_PCT_OF_EQUITY")

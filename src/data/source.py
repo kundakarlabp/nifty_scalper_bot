@@ -27,6 +27,7 @@ from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
 from src.utils.time_windows import TZ
 from src.utils.strike_selector import _nearest_strike
+from src.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -682,7 +683,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
-        self._last_tick_ts: Optional[datetime] = None
+        self._last_tick_ts: float | None = None
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
@@ -801,7 +802,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         ts = self._last_tick_ts
         if ts is None:
             return False
-        age = (datetime.utcnow() - ts).total_seconds()
+        age = time.time() - ts
         if age > max_age_s:
             self._stale_tick_checks += 1
         else:
@@ -810,8 +811,19 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
     def tick_watchdog_details(self) -> dict[str, float | int | None]:
         ts = self._last_tick_ts
-        age = (datetime.utcnow() - ts).total_seconds() if ts else None
+        age = (time.time() - ts) if ts else None
         return {"age": age, "checks": self._stale_tick_checks}
+
+    def heartbeat(self) -> None:
+        now = time.time()
+        lt = self._last_tick_ts
+        max_lag = float(getattr(settings, "TICK_MAX_LAG_S", 5.0))
+        if lt and (now - lt) > max_lag:
+            log.warning("tick_stale", {"tick_lag": now - lt})
+            try:
+                self.reconnect_with_backoff()
+            except Exception:
+                log.warning("reconnect_failed", exc_info=True)
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health for broker APIs."""
@@ -837,8 +849,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             val = v.get("last_price")
             price = float(val) if isinstance(val, (int, float)) else None
             if price is not None:
-                self._last_tick_ts = datetime.utcnow()
-            return price
+                self._last_tick_ts = time.time()
+                return price
         except Exception as e:
             lat = int((time.monotonic() - t0) * 1000)
             self.cb_quote.record_failure(lat, reason=str(e))
@@ -847,7 +859,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""
-        self._last_tick_ts = datetime.utcnow()
+        self._last_tick_ts = time.time()
         if self.hist_mode == "live_warmup" and self.bar_builder:
             try:
                 self.bar_builder.on_tick(tick)

@@ -1195,19 +1195,28 @@ class TelegramController:
                 )
                 sp = plan.get("spread_pct")
                 dp = plan.get("depth_ok")
-                reason_block = plan.get("reason_block") or "-"
+                reasons = plan.get("reasons") or []
+                reason_block = plan.get("reason_block")
+                if not reason_block:
+                    for r in reasons:
+                        if r in {"cap_lt_one_lot", "atr_out_of_band", "no_quote", "tick_stale"}:
+                            reason_block = r
+                            break
+                        if isinstance(r, str) and r.startswith("tick_lag"):
+                            reason_block = "tick_stale"
+                            break
+                reason_block = reason_block or "-"
                 reason_label = (
                     checks.REASON_MAP.get(reason_block, "")
                     if reason_block != "-"
                     else ""
                 )
-                reasons = plan.get("reasons") or []
                 lines = ["/why gates"]
                 if "auto_relax" in status.get("banners", []):
                     lines.append("auto_relax: active")
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
-                if reason_block in {"no_option_quote", "no_option_token"}:
+                if reason_block in {"no_quote", "no_option_token"}:
                     lines.append("micro: N/A (no_quote)")
                 else:
                     sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
