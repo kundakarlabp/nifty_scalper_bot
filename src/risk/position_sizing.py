@@ -28,7 +28,7 @@ def lots_from_premium_cap(
     quote: dict,
     lot_size: int,
     max_lots: int,
-) -> Tuple[int, float, float]:
+) -> Tuple[int, float, float, str]:
     from src.config import settings as _settings
 
     def _coerce_float(value: Any) -> float | None:
@@ -69,16 +69,14 @@ def lots_from_premium_cap(
             eq_value = max(eq_candidate, 0.0)
             eq_source = "live"
         else:
-            eq_value = fallback_equity
-            eq_source = "default"
-            if eq_value <= 0 and min_equity_floor > 0:
-                eq_value = min_equity_floor
-                eq_source = "floor"
-            if fallback_equity > 0:
-                eq_value = max(eq_value, fallback_equity)
-            if min_equity_floor > 0:
-                eq_value = max(eq_value, min_equity_floor)
-        eq_value = max(eq_value, 0.0)
+            candidates = [
+                ("default", max(fallback_equity, 0.0)),
+                ("floor", max(min_equity_floor, 0.0)),
+            ]
+            eq_source, eq_value = max(candidates, key=lambda item: item[1])
+            if eq_value <= 0.0:
+                eq_source = "default"
+            eq_value = max(eq_value, 0.0)
 
         cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
         cap_from_pct = max(0.0, eq_value * cap_pct)
@@ -98,15 +96,16 @@ def lots_from_premium_cap(
         cap = float(_settings.PREMIUM_CAP_PER_TRADE)
         if cap_abs_setting > 0:
             cap = min(cap, cap_abs_setting)
+        eq_source = str(getattr(_settings, "EXPOSURE_CAP_SOURCE", "env")) or "env"
 
     price = float(_mid_from_quote(quote or {}))
     if price <= 0:
-        return 0, 0.0, float(cap)
+        return 0, 0.0, float(cap), eq_source
 
     unit_notional = price * float(lot_size)
     lots = 0 if unit_notional <= 0 else int(float(cap) // unit_notional)
     lots = min(int(max_lots), max(0, lots))
-    return lots, unit_notional, float(cap)
+    return lots, unit_notional, float(cap), eq_source
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -300,7 +299,12 @@ class PositionSizer:
 
         if sp.exposure_basis == "premium":
             runner = SimpleNamespace(equity_amount=si.equity)
-            max_lots_exposure, unit_notional, exposure_cap = lots_from_premium_cap(
+            (
+                max_lots_exposure,
+                unit_notional,
+                exposure_cap,
+                eq_source,
+            ) = lots_from_premium_cap(
                 runner,
                 {"mid": si.entry_price},
                 si.lot_size,
@@ -327,6 +331,7 @@ class PositionSizer:
                 else unit_notional
             )
             cap_abs = 0.0
+            eq_source = "na"
 
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
@@ -398,6 +403,7 @@ class PositionSizer:
             calc_lots,
             min_eq_needed,
             block_reason,
+            eq_source=eq_source,
             cap_abs=cap_abs,
         )
         return quantity, lots, diag
@@ -418,6 +424,7 @@ class PositionSizer:
         min_equity_needed: float,
         block_reason: str,
         *,
+        eq_source: str | None = None,
         cap_abs: float = 0.0,
     ) -> Dict:
         unit_val = (
@@ -464,4 +471,5 @@ class PositionSizer:
             "min_equity_needed": min_eq_val,
             "block_reason": block_reason,
             "cap_abs": cap_abs_val,
+            "eq_source": eq_source,
         }

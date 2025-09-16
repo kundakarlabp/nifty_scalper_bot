@@ -204,12 +204,13 @@ class RiskEngine:
                 "mid": option_mid_price if option_mid_price is not None else entry_price
             }
             runner_for_cap = runner or SimpleNamespace(equity_amount=equity_rupees)
-            lots, unit_notional, cap = lots_from_premium_cap(
+            lots, unit_notional, cap, eq_source = lots_from_premium_cap(
                 runner_for_cap,
                 quote_payload,
                 lot_size,
                 available_lots,
             )
+            plan["eq_source"] = eq_source
             exposure_cap = cap
             price_mid = float(_mid_from_quote(quote_payload))
             if lots <= 0:
@@ -247,6 +248,7 @@ class RiskEngine:
                             4,
                         ),
                         "lots": int(lots),
+                        "eq_source": eq_source,
                     },
                 )
             plan["qty_lots"] = int(lots)

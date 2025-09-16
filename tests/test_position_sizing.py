@@ -44,12 +44,13 @@ def test_lots_from_premium_cap(monkeypatch):
     """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
     runner = SimpleNamespace(equity_amount=10_000)
-    lots, unit_notional, cap = lots_from_premium_cap(
+    lots, unit_notional, cap, eq_source = lots_from_premium_cap(
         runner, {"mid": 100}, 25, 10
     )
     assert unit_notional == 2_500
     assert cap == 1_000
     assert lots == 0
+    assert eq_source == "live"
 
 
 def test_basic_sizing():
