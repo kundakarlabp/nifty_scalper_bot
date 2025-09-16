@@ -20,9 +20,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
 
-from src.config import settings
+from src.config import OptionSelectorSettings, settings
 from src.risk.greeks import OptionType, bs_price_delta_gamma, implied_vol_newton
 from src.utils.expiry import next_tuesday_expiry
 from src.utils.market_time import IST, is_market_open as _market_is_open
@@ -62,16 +62,42 @@ _last_api_lock = threading.Lock()
 
 _instruments_cache: Optional[List[Dict[str, Any]]] = None
 _instruments_cache_ts: float = 0.0
-_INSTRUMENTS_TTL = 60.0  # seconds
 
 _ltp_cache: Dict[str, tuple[float, float]] = {}  # symbol -> (price, ts)
-_LTP_TTL = 2.0  # seconds
+
+_DEFAULT_SELECTOR: OptionSelectorSettings = OptionSelectorSettings()  # type: ignore[call-arg]
 
 
-def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
+_SelectorT = TypeVar("_SelectorT")
+
+
+def _selector_value(name: str, default: _SelectorT) -> _SelectorT:
+    """Return an ``option_selector`` setting, falling back to ``default``."""
+
+    cfg = getattr(settings, "option_selector", None)
+    source = cfg if cfg is not None else _DEFAULT_SELECTOR
+    try:
+        value = getattr(source, name)
+    except AttributeError:
+        return default
+    resolved = value if value is not None else default
+    return cast(_SelectorT, resolved)
+
+
+def _rate_limited(call_key: str, min_interval_sec: float | None = None) -> bool:
     """
     Returns True if we should WAIT (i.e., too soon), False if OK to call now.
     """
+    interval = (
+        float(min_interval_sec)
+        if min_interval_sec is not None
+        else float(
+            _selector_value(
+                "rate_limit_interval_seconds",
+                _DEFAULT_SELECTOR.rate_limit_interval_seconds,
+            )
+        )
+    )
     with _last_api_lock:
         now = time.time()
         last = _last_api_call.get(call_key, 0.0)
@@ -81,7 +107,7 @@ def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
         if now <= last:
             _last_api_call[call_key] = now
             return False
-        if now - last < min_interval_sec:
+        if now - last < interval:
             return True
         _last_api_call[call_key] = now
         return False
@@ -89,8 +115,13 @@ def _rate_limited(call_key: str, min_interval_sec: float = 0.25) -> bool:
 
 def _rate_call(fn, call_key: str, *args, **kwargs) -> Any:
     """Helper to rate-limit a function call."""
+    sleep_s = float(
+        _selector_value(
+            "rate_limit_sleep_seconds", _DEFAULT_SELECTOR.rate_limit_sleep_seconds
+        )
+    )
     while _rate_limited(call_key):
-        time.sleep(0.05)  # cooperative wait
+        time.sleep(sleep_s)  # cooperative wait
     return fn(*args, **kwargs)
 
 
@@ -115,10 +146,13 @@ def _fetch_instruments_nfo(
     now = time.time()
 
     # Return cached copy if fresh enough
-    if (
-        _instruments_cache is not None
-        and (now - _instruments_cache_ts) < _INSTRUMENTS_TTL
-    ):
+    ttl = float(
+        _selector_value(
+            "instruments_cache_ttl_seconds",
+            _DEFAULT_SELECTOR.instruments_cache_ttl_seconds,
+        )
+    )
+    if _instruments_cache is not None and (now - _instruments_cache_ts) < ttl:
         trade_symbol = str(
             getattr(getattr(settings, "instruments", object()), "trade_symbol", "")
         ).upper()
@@ -166,7 +200,12 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
 
     # cache hit?
     cached = _ltp_cache.get(symbol)
-    if cached and (now - cached[1]) < _LTP_TTL:
+    ttl = float(
+        _selector_value(
+            "ltp_cache_ttl_seconds", _DEFAULT_SELECTOR.ltp_cache_ttl_seconds
+        )
+    )
+    if cached and (now - cached[1]) < ttl:
         return float(cached[0])
 
     if not kite or kite is object:
@@ -211,13 +250,26 @@ def _infer_step(trade_symbol: str) -> int:
 
     s = (trade_symbol or "").upper()
     if "BANKNIFTY" in s:
-        return 100
-    return 50  # NIFTY / FINNIFTY / default
+        return int(
+            _selector_value(
+                "banknifty_strike_step", _DEFAULT_SELECTOR.banknifty_strike_step
+            )
+        )
+    return int(
+        _selector_value(
+            "fallback_strike_step", _DEFAULT_SELECTOR.fallback_strike_step
+        )
+    )
 
 
-def _nearest_strike(p: float, step: int = 50) -> int:
+def _nearest_strike(p: float, step: int | None = None) -> int:
     """Return the nearest strike rounded to ``step``."""
-    return int(step * round(float(p) / step))
+    target_step = int(step) if step is not None else int(
+        _selector_value(
+            "fallback_strike_step", _DEFAULT_SELECTOR.fallback_strike_step
+        )
+    )
+    return int(target_step * round(float(p) / target_step))
 
 
 def resolve_weekly_atm(
@@ -556,7 +608,7 @@ def set_option_info_fetcher(fn: Callable[[int], Optional[Dict[str, Any]]]) -> No
 
 
 def select_strike(
-    spot: float, score: int, allow_pm1_if_score_ge: int = 9
+    spot: float, score: int, allow_pm1_if_score_ge: Optional[int] = None
 ) -> Optional[StrikeInfo]:
     """Pick an ATM (or +/-1) strike subject to basic liquidity guards."""
     step = _infer_step(
@@ -564,8 +616,25 @@ def select_strike(
     )
     atm = int(round(float(spot) / step) * step)
     candidates = [atm]
-    if score >= int(allow_pm1_if_score_ge):
+    threshold = int(
+        allow_pm1_if_score_ge
+        if allow_pm1_if_score_ge is not None
+        else int(
+            _selector_value(
+                "allow_pm1_score_threshold",
+                _DEFAULT_SELECTOR.allow_pm1_score_threshold,
+            )
+        )
+    )
+    if score >= threshold:
         candidates.extend([atm - step, atm + step])
+
+    min_oi = float(
+        _selector_value("min_open_interest", _DEFAULT_SELECTOR.min_open_interest)
+    )
+    max_spread = float(
+        _selector_value("max_spread_pct", _DEFAULT_SELECTOR.max_spread_pct)
+    )
 
     for st in candidates:
         info = _option_info_fetcher(st) or {}
@@ -575,7 +644,7 @@ def select_strike(
             spread_pct = float(median([float(x) for x in spreads]))
         else:
             spread_pct = float(info.get("spread_pct", 999.0))
-        if oi >= 500_000 and spread_pct <= 0.35:
+        if oi >= min_oi and spread_pct <= max_spread:
             return StrikeInfo(strike=int(st), meta={"oi": oi, "spread_pct": spread_pct})
     return None
 
@@ -591,17 +660,44 @@ def select_strike_by_delta(
     """Pick a strike near ``target`` absolute delta from ``chain``."""
 
     cand: list[tuple[float, dict]] = []
+    iv_guess = float(
+        _selector_value("delta_iv_guess", _DEFAULT_SELECTOR.delta_iv_guess)
+    )
+    min_oi = float(
+        _selector_value("min_open_interest", _DEFAULT_SELECTOR.min_open_interest)
+    )
+    max_spread = float(
+        _selector_value("max_spread_pct", _DEFAULT_SELECTOR.max_spread_pct)
+    )
+    px_floor = float(
+        _selector_value(
+            "delta_min_option_price", _DEFAULT_SELECTOR.delta_min_option_price
+        )
+    )
+    px_pct = float(
+        _selector_value(
+            "delta_option_price_pct_of_spot",
+            _DEFAULT_SELECTOR.delta_option_price_pct_of_spot,
+        )
+    )
+    min_time = float(
+        _selector_value(
+            "delta_min_time_to_expiry_years",
+            _DEFAULT_SELECTOR.delta_min_time_to_expiry_years,
+        )
+    )
+
     for row in chain:
         K = row["strike"]
-        T = max(1 / 365, (expiry - datetime.now(IST)).days / 365)
-        px_est = max(1.0, spot * 0.005)
-        iv = implied_vol_newton(px_est, spot, K, T, 0.06, 0.0, opt, guess=0.20) or 0.20
+        T = max(min_time, (expiry - datetime.now(IST)).days / 365)
+        px_est = max(px_floor, spot * px_pct)
+        iv = implied_vol_newton(px_est, spot, K, T, 0.06, 0.0, opt, guess=iv_guess) or iv_guess
         _, d, _ = bs_price_delta_gamma(spot, K, T, 0.06, 0.0, iv, opt)
         if (
             d is not None
             and abs(abs(d) - target) <= band
-            and row.get("oi", 0) >= 500_000
-            and row.get("median_spread_pct", 1.0) <= 0.35
+            and row.get("oi", 0) >= min_oi
+            and row.get("median_spread_pct", 1.0) <= max_spread
         ):
             cand.append((abs(abs(d) - target), row))
     if not cand:
@@ -610,7 +706,7 @@ def select_strike_by_delta(
 
 
 def needs_reatm(
-    entry_spot: float, current_spot: float, drift_pct: float = 0.35
+    entry_spot: float, current_spot: float, drift_pct: float | None = None
 ) -> bool:
     """Return True if spot drift from entry exceeds ``drift_pct`` percent."""
     try:
@@ -618,6 +714,15 @@ def needs_reatm(
         curr = float(current_spot)
         if entry <= 0 or curr <= 0:
             return False
-        return abs(curr - entry) / entry * 100.0 >= float(drift_pct)
+        threshold = (
+            float(drift_pct)
+            if drift_pct is not None
+            else float(
+                _selector_value(
+                    "needs_reatm_pct", _DEFAULT_SELECTOR.needs_reatm_pct
+                )
+            )
+        )
+        return abs(curr - entry) / entry * 100.0 >= threshold
     except Exception:
         return False
