@@ -1478,6 +1478,8 @@ class StrategyRunner:
                 reason = block_reason or plan.get("reason_block") or "qty_zero"
                 if not plan.get("reason_block"):
                     plan["reason_block"] = reason
+                if reason:
+                    plan.setdefault("reasons", []).append(str(reason))
                 flow["reason_block"] = reason
                 self._last_flow_debug = flow
                 self._record_plan(plan)
