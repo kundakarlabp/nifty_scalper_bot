@@ -482,6 +482,167 @@ class ExecutorSettings(BaseModel):
         return v
 
 
+class OptionSelectorSettings(BaseModel):
+    """Strike selection caches and liquidity thresholds."""
+
+    instruments_cache_ttl_seconds: float = Field(
+        60.0,
+        description="Seconds to retain the NFO instrument dump before re-fetching.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__INSTRUMENTS_CACHE_TTL_SECONDS",
+            "STRIKE_SELECTOR__INSTRUMENTS_CACHE_TTL_SECONDS",
+        ),
+    )
+    ltp_cache_ttl_seconds: float = Field(
+        2.0,
+        description="Seconds to reuse cached spot LTP responses for strike selection.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__LTP_CACHE_TTL_SECONDS",
+            "STRIKE_SELECTOR__LTP_CACHE_TTL_SECONDS",
+        ),
+    )
+    rate_limit_interval_seconds: float = Field(
+        0.25,
+        description="Minimum spacing between broker API calls for strike helpers.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__RATE_LIMIT_INTERVAL_SECONDS",
+            "STRIKE_SELECTOR__RATE_LIMIT_INTERVAL_SECONDS",
+        ),
+    )
+    rate_limit_sleep_seconds: float = Field(
+        0.05,
+        description="Sleep duration when throttled by the strike helper rate limiter.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__RATE_LIMIT_SLEEP_SECONDS",
+            "STRIKE_SELECTOR__RATE_LIMIT_SLEEP_SECONDS",
+        ),
+    )
+    fallback_strike_step: int = Field(
+        50,
+        description="Default strike step when instruments configuration omits one.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__FALLBACK_STRIKE_STEP",
+            "STRIKE_SELECTOR__FALLBACK_STRIKE_STEP",
+        ),
+    )
+    banknifty_strike_step: int = Field(
+        100,
+        description="Strike step applied when the trade symbol contains BANKNIFTY.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__BANKNIFTY_STRIKE_STEP",
+            "STRIKE_SELECTOR__BANKNIFTY_STRIKE_STEP",
+        ),
+    )
+    allow_pm1_score_threshold: int = Field(
+        9,
+        description="Minimum score required before probing strikes one step from ATM.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__ALLOW_PM1_SCORE_THRESHOLD",
+            "STRIKE_SELECTOR__ALLOW_PM1_SCORE_THRESHOLD",
+        ),
+    )
+    min_open_interest: int = Field(
+        500_000,
+        description="Lowest acceptable open interest when selecting strikes.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__MIN_OPEN_INTEREST",
+            "STRIKE_SELECTOR__MIN_OPEN_INTEREST",
+        ),
+    )
+    max_spread_pct: float = Field(
+        0.35,
+        description="Maximum bid/ask spread percentage tolerated for strikes.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__MAX_SPREAD_PCT",
+            "STRIKE_SELECTOR__MAX_SPREAD_PCT",
+        ),
+    )
+    delta_iv_guess: float = Field(
+        0.20,
+        description="Initial implied volatility guess for delta-based strike picking.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__DELTA_IV_GUESS",
+            "STRIKE_SELECTOR__DELTA_IV_GUESS",
+        ),
+    )
+    delta_min_option_price: float = Field(
+        1.0,
+        description="Floor option price used when estimating IV for thin markets.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__DELTA_MIN_OPTION_PRICE",
+            "STRIKE_SELECTOR__DELTA_MIN_OPTION_PRICE",
+        ),
+    )
+    delta_option_price_pct_of_spot: float = Field(
+        0.005,
+        description="Fraction of spot used to estimate option price for IV guesses.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__DELTA_OPTION_PRICE_PCT_OF_SPOT",
+            "STRIKE_SELECTOR__DELTA_OPTION_PRICE_PCT_OF_SPOT",
+        ),
+    )
+    delta_min_time_to_expiry_years: float = Field(
+        1.0 / 365.0,
+        description="Minimum time to expiry in years when computing delta heuristics.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__DELTA_MIN_TIME_TO_EXPIRY_YEARS",
+            "STRIKE_SELECTOR__DELTA_MIN_TIME_TO_EXPIRY_YEARS",
+            "OPTION_SELECTOR__DELTA_MIN_TIME_TO_EXPIRY_DAYS",
+            "STRIKE_SELECTOR__DELTA_MIN_TIME_TO_EXPIRY_DAYS",
+        ),
+    )
+    needs_reatm_pct: float = Field(
+        0.35,
+        description="Percent drift in spot that should trigger ATM reselection.",
+        validation_alias=AliasChoices(
+            "OPTION_SELECTOR__NEEDS_REATM_PCT",
+            "STRIKE_SELECTOR__NEEDS_REATM_PCT",
+        ),
+    )
+
+    @field_validator(
+        "instruments_cache_ttl_seconds",
+        "ltp_cache_ttl_seconds",
+        "rate_limit_interval_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _v_nonnegative_float(cls, v: float) -> float:
+        val = float(v)
+        if val < 0:
+            raise ValueError("cache and interval values must be >= 0")
+        return val
+
+    @field_validator(
+        "rate_limit_sleep_seconds",
+        "max_spread_pct",
+        "delta_iv_guess",
+        "delta_min_option_price",
+        "delta_option_price_pct_of_spot",
+        "delta_min_time_to_expiry_years",
+        "needs_reatm_pct",
+        mode="before",
+    )
+    @classmethod
+    def _v_positive_float(cls, v: float) -> float:
+        val = float(v)
+        if val <= 0:
+            raise ValueError("values must be > 0")
+        return val
+
+    @field_validator(
+        "fallback_strike_step",
+        "banknifty_strike_step",
+        "allow_pm1_score_threshold",
+        "min_open_interest",
+    )
+    @classmethod
+    def _v_nonnegative_int(cls, v: int) -> int:
+        val = int(v)
+        if val < 0:
+            raise ValueError("integer settings must be >= 0")
+        return val
+
 class HealthSettings(BaseModel):
     enable_server: bool = True
     port: int = 8000
@@ -717,6 +878,9 @@ class AppSettings(BaseSettings):
         default_factory=lambda: ExecutorSettings(
             entry_slippage_pct=0.25, exit_slippage_pct=0.25
         )
+    )
+    option_selector: OptionSelectorSettings = Field(
+        default_factory=lambda: OptionSelectorSettings()  # type: ignore[call-arg]
     )
     health: HealthSettings = HealthSettings()
     system: SystemSettings = SystemSettings()
