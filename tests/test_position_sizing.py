@@ -3,6 +3,8 @@
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
 from types import SimpleNamespace
+
+import pytest
 from src.risk.position_sizing import (
     PositionSizer,
     _mid_from_quote,
@@ -10,6 +12,13 @@ from src.risk.position_sizing import (
 )
 from src.config import settings as cfg
 from hypothesis import given, settings, strategies as st, assume
+
+
+@pytest.fixture(autouse=True)
+def _reset_risk_per_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure module-level defaults use the canonical risk-per-trade."""
+
+    monkeypatch.setattr(cfg.risk, "risk_per_trade", 0.01, raising=False)
 
 
 def _sizer(
@@ -43,6 +52,9 @@ def test_mid_from_quote_variants():
 def test_lots_from_premium_cap(monkeypatch):
     """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
+    monkeypatch.setattr(
+        cfg.risk, "exposure_cap_pct_of_equity", 0.10, raising=False
+    )
     runner = SimpleNamespace(equity_amount=10_000)
     lots, unit_notional, cap, eq_source = lots_from_premium_cap(
         runner, {"mid": 100}, 25, 10
@@ -134,6 +146,10 @@ def test_min_lots_rescue_when_affordable():
 def test_cap_abs_in_diag(monkeypatch):
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 5_000.0, raising=False)
+    monkeypatch.setattr(
+        cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False
+    )
+    monkeypatch.setattr(cfg.risk, "exposure_cap_abs", 5_000.0, raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,
@@ -149,11 +165,11 @@ def test_cap_abs_in_diag(monkeypatch):
     assert diag["cap_abs"] == 5_000.0
 
 
-def test_default_risk_per_trade_is_safe(monkeypatch):
-    """When unspecified, risk_per_trade should default to 1%."""
-    monkeypatch.delenv("RISK__RISK_PER_TRADE_PCT", raising=False)
+def test_risk_per_trade_uses_settings(monkeypatch):
+    """The default sizing configuration should mirror the live settings object."""
+    monkeypatch.setattr(cfg.risk, "risk_per_trade", 0.0125, raising=False)
     sizer = PositionSizer()
-    assert sizer.params.risk_per_trade == 0.01
+    assert sizer.params.risk_per_trade == 0.0125
 
 
 def test_underlying_basis_caps_by_spot():
@@ -173,8 +189,9 @@ def test_underlying_basis_caps_by_spot():
 
 
 def test_allow_min_one_lot_when_cap_small(monkeypatch):
-    monkeypatch.setenv("RISK__ALLOW_MIN_ONE_LOT", "1")
-    monkeypatch.setenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.01")
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.01, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.01, raising=False)
+    monkeypatch.setattr(cfg.risk, "allow_min_one_lot", True, raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,

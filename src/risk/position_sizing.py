@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple, Literal, cast
-import math
-import os
 import logging
+import math
 from types import SimpleNamespace
+
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -39,23 +39,61 @@ def lots_from_premium_cap(
         except (TypeError, ValueError):
             return None
 
-    cap_abs_raw = _coerce_float(getattr(_settings, "EXPOSURE_CAP_ABS", 0.0))
-    cap_abs_setting = float(cap_abs_raw) if cap_abs_raw is not None else 0.0
     risk_cfg = getattr(_settings, "risk", None)
-    fallback_equity_raw = _coerce_float(getattr(risk_cfg, "default_equity", 0.0))
-    fallback_equity = (
-        float(fallback_equity_raw) if fallback_equity_raw is not None else 0.0
+
+    def _resolve(
+        attr: str,
+        alias: str | None = None,
+        default: Any = None,
+        *,
+        prefer_alias: bool = False,
+    ) -> Any:
+        risk_val = getattr(risk_cfg, attr, None) if risk_cfg is not None else None
+        alias_val = getattr(_settings, alias, None) if alias else None
+        if prefer_alias and alias_val is not None:
+            if risk_val is None or alias_val != risk_val:
+                return alias_val
+        if risk_val is not None:
+            return risk_val
+        if alias_val is not None:
+            return alias_val
+        return default
+
+    cap_abs_setting = float(
+        _coerce_float(
+            _resolve(
+                "exposure_cap_abs",
+                "EXPOSURE_CAP_ABS",
+                0.0,
+                prefer_alias=True,
+            )
+        )
+        or 0.0
     )
-    min_equity_floor_raw = _coerce_float(getattr(risk_cfg, "min_equity_floor", 0.0))
-    min_equity_floor = (
-        float(min_equity_floor_raw) if min_equity_floor_raw is not None else 0.0
+    fallback_equity = float(
+        _coerce_float(_resolve("default_equity", "RISK_DEFAULT_EQUITY", 0.0)) or 0.0
     )
-    use_live_equity = bool(getattr(risk_cfg, "use_live_equity", True))
+    min_equity_floor = float(
+        _coerce_float(_resolve("min_equity_floor", "RISK_MIN_EQUITY_FLOOR", 0.0))
+        or 0.0
+    )
+    use_live_equity = bool(_resolve("use_live_equity", "RISK_USE_LIVE_EQUITY", True))
+    cap_source = (
+        str(
+            _resolve(
+                "exposure_cap_source",
+                "EXPOSURE_CAP_SOURCE",
+                "equity",
+                prefer_alias=True,
+            )
+        )
+        or "equity"
+    )
 
     eq_value: float = fallback_equity
     eq_source = "default"
 
-    if _settings.EXPOSURE_CAP_SOURCE == "equity":
+    if cap_source == "equity":
         eq_candidate: float | None = None
         if runner is not None and use_live_equity:
             try:
@@ -78,12 +116,30 @@ def lots_from_premium_cap(
                 eq_source = "default"
             eq_value = max(eq_value, 0.0)
 
-        cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
+        cap_pct = float(
+            _coerce_float(
+                _resolve(
+                    "exposure_cap_pct_of_equity",
+                    "EXPOSURE_CAP_PCT_OF_EQUITY",
+                    0.0,
+                    prefer_alias=True,
+                )
+            )
+            or 0.0
+        )
         cap_from_pct = max(0.0, eq_value * cap_pct)
         cap = cap_from_pct
         if cap_abs_setting > 0:
             cap = min(cap_from_pct, cap_abs_setting)
-        if str(getattr(_settings, "EXPOSURE_BASIS", "premium")).lower() == "premium":
+        exposure_basis = str(
+            _resolve(
+                "exposure_basis",
+                "EXPOSURE_BASIS",
+                "premium",
+                prefer_alias=True,
+            )
+        ).lower()
+        if exposure_basis == "premium":
             logger.info(
                 "lots_from_premium_cap: basis=premium source=%s eq=%.2f cap_pct=%.2f cap=%.2f cap_abs=%.2f",
                 eq_source,
@@ -93,10 +149,20 @@ def lots_from_premium_cap(
                 cap_abs_setting,
             )
     else:
-        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
+        cap = float(
+            _coerce_float(
+                _resolve(
+                    "premium_cap_per_trade",
+                    "PREMIUM_CAP_PER_TRADE",
+                    0.0,
+                    prefer_alias=True,
+                )
+            )
+            or 0.0
+        )
         if cap_abs_setting > 0:
             cap = min(cap, cap_abs_setting)
-        eq_source = str(getattr(_settings, "EXPOSURE_CAP_SOURCE", "env")) or "env"
+        eq_source = cap_source
 
     price = float(_mid_from_quote(quote or {}))
     if price <= 0:
@@ -142,12 +208,7 @@ class SizingParams:
             Literal["underlying", "premium"], settings.EXPOSURE_BASIS
         )
     )
-    allow_min_one_lot: bool = field(
-        default_factory=lambda: str(
-            os.getenv("RISK__ALLOW_MIN_ONE_LOT", "false")
-        ).lower()
-        in ("1", "true", "yes"),
-    )
+    allow_min_one_lot: bool = False
 
 
 class PositionSizer:
@@ -179,6 +240,11 @@ class PositionSizer:
         with callers that previously passed the risk settings object directly.
         """
 
+        risk_cfg = getattr(settings, "risk", None)
+        inst_cfg = getattr(settings, "instruments", None)
+
+        allow_min_one_lot = bool(getattr(risk_cfg, "allow_min_one_lot", False))
+
         if (
             min_lots is None
             and max_lots is None
@@ -186,23 +252,29 @@ class PositionSizer:
             and hasattr(risk_per_trade, "risk_per_trade")
         ):
             rs = risk_per_trade
+            allow_min_one_lot = bool(getattr(rs, "allow_min_one_lot", allow_min_one_lot))
             risk_per_trade = getattr(rs, "risk_per_trade")
             min_lots = getattr(rs, "min_lots", None)
             max_lots = getattr(rs, "max_lots", None)
             max_position_size_pct = getattr(rs, "max_position_size_pct", None)
             exposure_basis = getattr(rs, "exposure_basis", None)
 
-        risk_per_trade = float(
-            risk_per_trade
-            if risk_per_trade is not None
-            else os.getenv("RISK__RISK_PER_TRADE_PCT", 0.01)
-        )
-        min_lots = int(min_lots if min_lots is not None else os.getenv("RISK__MIN_LOTS", 1))
-        max_lots = int(max_lots if max_lots is not None else os.getenv("RISK__MAX_LOTS", 10))
-        max_position_size_pct = float(
-            max_position_size_pct if max_position_size_pct is not None else 0.10
-        )
-        exposure_basis = exposure_basis or settings.EXPOSURE_BASIS
+        if risk_per_trade is None:
+            risk_per_trade = getattr(risk_cfg, "risk_per_trade", 0.01)
+        if min_lots is None:
+            min_lots = getattr(inst_cfg, "min_lots", 1)
+        if max_lots is None:
+            max_lots = getattr(inst_cfg, "max_lots", 10)
+        if max_position_size_pct is None:
+            max_position_size_pct = getattr(risk_cfg, "max_position_size_pct", 0.10)
+        if exposure_basis is None:
+            exposure_basis = getattr(risk_cfg, "exposure_basis", settings.EXPOSURE_BASIS)
+
+        risk_per_trade = float(risk_per_trade)
+        min_lots = int(min_lots)
+        max_lots = int(max_lots)
+        max_position_size_pct = float(max_position_size_pct)
+        exposure_basis = str(exposure_basis)
 
         if risk_per_trade <= 0 or risk_per_trade > 0.50:
             raise ValueError("risk_per_trade must be within (0, 0.50].")
@@ -218,7 +290,8 @@ class PositionSizer:
             min_lots=min_lots,
             max_lots=max_lots,
             max_position_size_pct=max_position_size_pct,
-            exposure_basis=cast(Literal["underlying", "premium"], str(exposure_basis)),
+            exposure_basis=cast(Literal["underlying", "premium"], exposure_basis),
+            allow_min_one_lot=allow_min_one_lot,
         )
     @classmethod
     def from_settings(
