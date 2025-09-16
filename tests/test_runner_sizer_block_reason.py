@@ -171,3 +171,16 @@ def test_qty_zero_keeps_plan_reason_when_sizer_blocks(monkeypatch):
     assert flow["reason_block"] == "preexisting"
     assert runner.last_plan["reason_block"] == "preexisting"
 
+
+def test_qty_zero_adds_cap_reason_to_plan_reasons(monkeypatch):
+    runner = _setup_runner(
+        monkeypatch,
+        (0, {"rupee_risk_per_lot": 1, "lots_final": 0, "block_reason": "cap_lt_one_lot"}),
+    )
+    runner.process_tick({})
+    flow = runner.get_last_flow_debug()
+
+    assert flow["reason_block"] == "cap_lt_one_lot"
+    assert "cap_lt_one_lot" in runner.last_plan["reasons"]
+    assert runner.last_plan["reason_block"] == "cap_lt_one_lot"
+
