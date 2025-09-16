@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from src.strategies.runner import StrategyRunner
@@ -22,20 +22,27 @@ class DummyTelegram:
 TZ = ZoneInfo("Asia/Kolkata")
 
 
+def _tz_datetime_for(hhmm: str) -> datetime:
+    hour, minute = map(int, hhmm.split(":"))
+    return datetime(2024, 1, 1, hour, minute, tzinfo=TZ)
+
+
 def test_no_entries_after_1520(monkeypatch) -> None:
     telegram = DummyTelegram()
     runner = StrategyRunner(telegram_controller=telegram)
     monkeypatch.setattr(settings, "enable_live_trading", True, raising=False)
 
+    cutoff_dt = _tz_datetime_for(settings.risk.no_new_after_hhmm)
     monkeypatch.setattr(
         runner,
         "_now_ist",
-        lambda: datetime(2024, 1, 1, 15, 21, tzinfo=TZ),
+        lambda: cutoff_dt + timedelta(minutes=1),
     )
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1520"
+    expected_tag = f"after_{cutoff_dt.strftime('%H%M')}"
+    assert flow["reason_block"] == expected_tag
 
 
 def test_eod_close_triggers(monkeypatch) -> None:
@@ -43,10 +50,11 @@ def test_eod_close_triggers(monkeypatch) -> None:
     runner = StrategyRunner(telegram_controller=telegram)
     monkeypatch.setattr(settings, "enable_live_trading", True, raising=False)
 
+    flatten_dt = _tz_datetime_for(settings.risk.eod_flatten_hhmm)
     monkeypatch.setattr(
         runner,
         "_now_ist",
-        lambda: datetime(2024, 1, 1, 15, 28, tzinfo=TZ),
+        lambda: flatten_dt,
     )
     monkeypatch.setattr(runner.order_executor, "open_count", 1, raising=False)
 
@@ -67,7 +75,8 @@ def test_eod_close_triggers(monkeypatch) -> None:
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1528"
+    expected_tag = f"after_{flatten_dt.strftime('%H%M')}"
+    assert flow["reason_block"] == expected_tag
     assert called["close"] == 1
     assert called["cancel"] == 1
     assert telegram.eod_calls == 1

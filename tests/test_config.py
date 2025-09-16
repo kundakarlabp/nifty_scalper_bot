@@ -28,6 +28,8 @@ def test_load_from_env():
         "RISK__MAX_DAILY_DRAWDOWN_PCT": "0.1",
         "RISK__RISK_PER_TRADE": "0.02",
         "ENABLE_LIVE_TRADING": "true",
+        "RISK__NO_NEW_AFTER_HHMM": "14:59",
+        "EOD_FLATTEN_HHMM": "15:27",
     }
     with mock.patch.dict(os.environ, test_env):
         settings = AppSettings()
@@ -36,6 +38,8 @@ def test_load_from_env():
         assert settings.risk.max_daily_drawdown_pct == 0.1
         assert settings.risk.risk_per_trade == 0.02
         assert settings.enable_live_trading is True
+        assert settings.risk.no_new_after_hhmm == "14:59"
+        assert settings.risk.eod_flatten_hhmm == "15:27"
 
 def test_validation_error_on_invalid_data():
     """Tests that Pydantic raises a ValidationError for out-of-bounds data."""
@@ -48,6 +52,13 @@ def test_risk_per_trade_bounds() -> None:
     with pytest.raises(ValidationError) as e:
         RiskSettings(risk_per_trade=0.6)
     assert "risk_per_trade must be within (0, 0.50]" in str(e.value)
+
+
+def test_risk_cutoff_time_validation() -> None:
+    with pytest.raises(ValidationError):
+        RiskSettings(no_new_after_hhmm="1520")
+    with pytest.raises(ValidationError):
+        RiskSettings(eod_flatten_hhmm="24:01")
 
 def test_default_values():
     """Tests that default values are used when environment variables are not set."""
@@ -79,6 +90,8 @@ def test_default_values():
         assert settings.risk.exposure_cap_source == "equity"
         assert settings.risk.exposure_cap_pct_of_equity == 0.40
         assert settings.risk.premium_cap_per_trade == 10000.0
+        assert settings.risk.no_new_after_hhmm == "15:20"
+        assert settings.risk.eod_flatten_hhmm == "15:28"
 
 
 def test_exposure_env_overrides():
@@ -100,7 +113,7 @@ def test_exposure_env_overrides():
         assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.5
         assert settings.PREMIUM_CAP_PER_TRADE == 5000.0
         assert settings.risk.exposure_basis == "underlying"
-        assert settings.risk.exposure_cap_source == "env"
+        assert settings.risk.exposure_cap_source == "absolute"
         assert settings.risk.exposure_cap_pct_of_equity == 0.5
         assert settings.risk.premium_cap_per_trade == 5000.0
 

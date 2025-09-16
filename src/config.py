@@ -285,6 +285,25 @@ class RiskSettings(BaseModel):
     max_position_size_pct: float = 0.10
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
+    # Intraday scheduler cutoffs (HH:MM) for new entries and forced exits.
+    no_new_after_hhmm: str = Field(
+        "15:20",
+        validation_alias=AliasChoices(
+            "no_new_after_hhmm",
+            "NO_NEW_AFTER_HHMM",
+            "RISK__NO_NEW_AFTER_HHMM",
+            "RISK_NO_NEW_AFTER_HHMM",
+        ),
+    )
+    eod_flatten_hhmm: str = Field(
+        "15:28",
+        validation_alias=AliasChoices(
+            "eod_flatten_hhmm",
+            "EOD_FLATTEN_HHMM",
+            "RISK__EOD_FLATTEN_HHMM",
+            "RISK_EOD_FLATTEN_HHMM",
+        ),
+    )
     max_daily_loss_rupees: float | None = None
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = Field(
@@ -377,7 +396,12 @@ class RiskSettings(BaseModel):
             raise ValueError("max_position_size_pct must be within (0, 1]")
         return v
 
-    @field_validator("trading_window_start", "trading_window_end")
+    @field_validator(
+        "trading_window_start",
+        "trading_window_end",
+        "no_new_after_hhmm",
+        "eod_flatten_hhmm",
+    )
     @classmethod
     def _v_time(cls, v: str) -> str:
         datetime.strptime(v, "%H:%M")
@@ -689,6 +713,24 @@ class AppSettings(BaseSettings):
                 self.risk.min_equity_floor = float(min_floor_env)
             except ValueError:
                 pass
+        def _ensure_hhmm(value: str) -> str:
+            datetime.strptime(value, "%H:%M")
+            return value
+
+        cutoff_env = env_any(
+            "RISK__NO_NEW_AFTER_HHMM",
+            "RISK_NO_NEW_AFTER_HHMM",
+            "NO_NEW_AFTER_HHMM",
+        )
+        if cutoff_env is not None:
+            self.risk.no_new_after_hhmm = _ensure_hhmm(cutoff_env)
+        flatten_env = env_any(
+            "RISK__EOD_FLATTEN_HHMM",
+            "RISK_EOD_FLATTEN_HHMM",
+            "EOD_FLATTEN_HHMM",
+        )
+        if flatten_env is not None:
+            self.risk.eod_flatten_hhmm = _ensure_hhmm(flatten_env)
     ROLL10_PAUSE_R: float = -0.2
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3
@@ -833,6 +875,14 @@ class AppSettings(BaseSettings):
     @property
     def risk_trading_window_end(self) -> str:
         return self.risk.trading_window_end
+
+    @property
+    def risk_no_new_after_hhmm(self) -> str:
+        return self.risk.no_new_after_hhmm
+
+    @property
+    def risk_eod_flatten_hhmm(self) -> str:
+        return self.risk.eod_flatten_hhmm
 
     @property
     def risk_max_daily_loss_rupees(self) -> float | None:

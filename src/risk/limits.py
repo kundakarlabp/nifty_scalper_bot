@@ -7,7 +7,6 @@ from datetime import datetime, time, timedelta
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 import logging
-import os
 from types import SimpleNamespace
 
 from src.config import settings
@@ -44,10 +43,10 @@ class LimitConfig:
     # Maximum realised loss in premium (rupee) terms before halting for the day.
     max_daily_loss_rupees: float = 1_000_000.0
     no_new_after_hhmm: str = field(
-        default_factory=lambda: os.getenv("NO_NEW_AFTER_HHMM", "15:20")
+        default_factory=lambda: settings.risk.no_new_after_hhmm
     )
     eod_flatten_hhmm: str = field(
-        default_factory=lambda: os.getenv("EOD_FLATTEN_HHMM", "15:28")
+        default_factory=lambda: settings.risk.eod_flatten_hhmm
     )
 
     def __post_init__(self) -> None:
