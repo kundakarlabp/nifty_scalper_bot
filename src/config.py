@@ -251,9 +251,30 @@ class StrategySettings(BaseModel):
 
 
 class RiskSettings(BaseModel):
-    use_live_equity: bool = True
-    default_equity: float = 30000.0
-    min_equity_floor: float = 25000.0
+    use_live_equity: bool = Field(
+        True,
+        validation_alias=AliasChoices(
+            "RISK__USE_LIVE_EQUITY",
+            "RISK_USE_LIVE_EQUITY",
+            "USE_LIVE_EQUITY",
+        ),
+    )
+    default_equity: float = Field(
+        30000.0,
+        validation_alias=AliasChoices(
+            "RISK__DEFAULT_EQUITY",
+            "RISK_DEFAULT_EQUITY",
+            "DEFAULT_EQUITY",
+        ),
+    )
+    min_equity_floor: float = Field(
+        25000.0,
+        validation_alias=AliasChoices(
+            "RISK__MIN_EQUITY_FLOOR",
+            "RISK_MIN_EQUITY_FLOOR",
+            "MIN_EQUITY_FLOOR",
+        ),
+    )
     equity_refresh_seconds: int = 60
 
     risk_per_trade: float = 0.01
@@ -272,8 +293,28 @@ class RiskSettings(BaseModel):
         )
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
-    exposure_cap_source: Literal["equity", "env"] = "equity"
-    exposure_cap_pct_of_equity: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
+    exposure_cap_source: Literal["equity", "env"] = Field(
+        "equity",
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_SOURCE",
+            "RISK__EXPOSURE_CAP_SOURCE",
+        ),
+    )
+    exposure_cap_pct_of_equity: float = Field(
+        DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY,
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_PCT_OF_EQUITY",
+            "EXPOSURE_CAP_PCT",
+            "RISK__EXPOSURE_CAP_PCT",
+        ),
+    )
+    exposure_cap_abs: float = Field(
+        0.0,
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_ABS",
+            "RISK__EXPOSURE_CAP_ABS",
+        ),
+    )
     premium_cap_per_trade: float = 10000.0
 
     @field_validator("exposure_basis", mode="before")
@@ -295,11 +336,22 @@ class RiskSettings(BaseModel):
     @field_validator("exposure_cap_pct_of_equity")
     @classmethod
     def _v_exposure_cap_pct(cls, v: float) -> float:
-        if not 0.0 < float(v) <= 1.0:
+        pct = float(v)
+        if pct > 1.0:
+            pct = pct / 100.0
+        if not 0.0 < pct <= 1.0:
             raise ValueError(
                 "EXPOSURE_CAP_PCT_OF_EQUITY must be within (0, 1]"
             )
-        return float(v)
+        return pct
+
+    @field_validator("exposure_cap_abs")
+    @classmethod
+    def _v_cap_abs(cls, v: float) -> float:
+        val = float(v)
+        if val < 0:
+            raise ValueError("EXPOSURE_CAP_ABS must be >= 0")
+        return val
 
     @field_validator("risk_per_trade")
     @classmethod
@@ -431,6 +483,10 @@ class SystemSettings(BaseModel):
 # ================= Root settings =================
 
 
+def _risk_settings_factory() -> RiskSettings:
+    return RiskSettings()  # type: ignore[call-arg]
+
+
 class AppSettings(BaseSettings):
     # General optional settings
     app_env: str = "production"
@@ -450,10 +506,36 @@ class AppSettings(BaseSettings):
     tz: str = "Asia/Kolkata"
     log_level: str = "INFO"
     log_json: bool = False
-    EXPOSURE_BASIS: Literal["premium", "underlying"] = "premium"
+    EXPOSURE_BASIS: Literal["premium", "underlying"] = Field(
+        "premium",
+        validation_alias=AliasChoices(
+            "EXPOSURE_BASIS",
+            "RISK__EXPOSURE_BASIS",
+        ),
+    )
     tp_basis: Literal["premium", "spot"] = "premium"
-    EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = "equity"
-    EXPOSURE_CAP_PCT_OF_EQUITY: float = DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY
+    EXPOSURE_CAP_SOURCE: Literal["equity", "env"] = Field(
+        "equity",
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_SOURCE",
+            "RISK__EXPOSURE_CAP_SOURCE",
+        ),
+    )
+    EXPOSURE_CAP_PCT_OF_EQUITY: float = Field(
+        DEFAULT_EXPOSURE_CAP_PCT_OF_EQUITY,
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_PCT_OF_EQUITY",
+            "EXPOSURE_CAP_PCT",
+            "RISK__EXPOSURE_CAP_PCT",
+        ),
+    )
+    EXPOSURE_CAP_ABS: float = Field(
+        0.0,
+        validation_alias=AliasChoices(
+            "EXPOSURE_CAP_ABS",
+            "RISK__EXPOSURE_CAP_ABS",
+        ),
+    )
     PREMIUM_CAP_PER_TRADE: float = 10000.0
 
     @field_validator("EXPOSURE_BASIS", mode="before")
@@ -475,11 +557,22 @@ class AppSettings(BaseSettings):
     @field_validator("EXPOSURE_CAP_PCT_OF_EQUITY")
     @classmethod
     def _v_app_exposure_cap_pct(cls, v: float) -> float:
-        if not 0.0 < float(v) <= 1.0:
+        pct = float(v)
+        if pct > 1.0:
+            pct = pct / 100.0
+        if not 0.0 < pct <= 1.0:
             raise ValueError(
                 "EXPOSURE_CAP_PCT_OF_EQUITY must be within (0, 1]"
             )
-        return float(v)
+        return pct
+
+    @field_validator("EXPOSURE_CAP_ABS")
+    @classmethod
+    def _v_app_cap_abs(cls, v: float) -> float:
+        val = float(v)
+        if val < 0:
+            raise ValueError("EXPOSURE_CAP_ABS must be >= 0")
+        return val
 
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
@@ -510,7 +603,27 @@ class AppSettings(BaseSettings):
         self.risk.exposure_basis = self.EXPOSURE_BASIS
         self.risk.exposure_cap_source = self.EXPOSURE_CAP_SOURCE
         self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
+        self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
         self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
+        default_eq_env = env_any("RISK_DEFAULT_EQUITY", "DEFAULT_EQUITY")
+        if default_eq_env is not None:
+            try:
+                self.risk.default_equity = float(default_eq_env)
+            except ValueError:
+                pass
+        min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")
+        if min_floor_env is not None:
+            try:
+                self.risk.min_equity_floor = float(min_floor_env)
+            except ValueError:
+                pass
+        use_live_env = env_any("RISK_USE_LIVE_EQUITY", "USE_LIVE_EQUITY")
+        if use_live_env is not None:
+            self.risk.use_live_equity = str(use_live_env).lower() not in {
+                "0",
+                "false",
+                "no",
+            }
     ROLL10_PAUSE_R: float = -0.2
     ROLL10_PAUSE_MIN: int = 60
     COOLOFF_LOSS_STREAK: int = 3
@@ -522,7 +635,7 @@ class AppSettings(BaseSettings):
     data: DataSettings = DataSettings()
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
-    risk: RiskSettings = Field(default_factory=RiskSettings)
+    risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
             entry_slippage_pct=0.25, exit_slippage_pct=0.25

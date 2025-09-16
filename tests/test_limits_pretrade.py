@@ -92,7 +92,10 @@ def test_cap_lt_one_lot():
     assert details["unit_notional"] == 200.0 * 25
     assert details["cap"] <= details["unit_notional"]
     assert plan["reason_block"] == "cap_lt_one_lot"
-    assert "cap < 1 lot" in plan.get("reasons", [])
+    assert any(
+        r.startswith("cap_lt_one_lot") for r in plan.get("reasons", [])
+    )
+    assert "cap_abs" in details
 
 
 def test_equity_based_premium_cap(monkeypatch):

@@ -98,6 +98,7 @@ def test_returns_zero_when_budget_insufficient():
     assert diag["basis"] == "premium"
     assert diag["lots"] == diag["lots_final"]
     assert diag["cap"] == diag["exposure_cap"]
+    assert diag["cap_abs"] is None
 
 
 def test_min_lots_only_enforced_when_affordable():
@@ -127,6 +128,24 @@ def test_min_lots_rescue_when_affordable():
     assert qty == 50
     assert lots == 1
     assert diag["block_reason"] == ""
+
+
+def test_cap_abs_in_diag(monkeypatch):
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 5_000.0, raising=False)
+    sizer = _sizer()
+    qty, lots, diag = sizer.size_from_signal(
+        entry_price=200.0,
+        stop_loss=180.0,
+        lot_size=50,
+        equity=200_000.0,
+        spot_sl_points=20.0,
+        delta=0.5,
+    )
+    assert qty == 0
+    assert lots == 0
+    assert diag["block_reason"] == "cap_lt_one_lot"
+    assert diag["cap_abs"] == 5_000.0
 
 
 def test_default_risk_per_trade_is_safe(monkeypatch):

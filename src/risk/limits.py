@@ -196,6 +196,7 @@ class RiskEngine:
         )
         basis = "premium" if use_premium_basis else basis_cfg
         exposure_cap = self.cfg.max_notional_rupees
+        cap_abs_setting = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
 
         if use_premium_basis:
             available_lots = max(0, self.cfg.max_lots_per_symbol - current_lots)
@@ -220,7 +221,14 @@ class RiskEngine:
                     lots,
                 )
                 plan["qty_lots"] = 0
-                plan.setdefault("reasons", []).append("cap < 1 lot")
+                cap_msg = (
+                    f"cap_lt_one_lot (cap={cap:.0f}, unit={unit_notional:.0f})"
+                )
+                if cap_abs_setting > 0 and cap_abs_setting <= unit_notional:
+                    cap_msg += f" cap_abs={cap_abs_setting:.0f}"
+                reasons = plan.setdefault("reasons", [])
+                if cap_msg not in reasons:
+                    reasons.append(cap_msg)
                 plan["reason_block"] = "cap_lt_one_lot"
                 return (
                     False,
@@ -229,6 +237,15 @@ class RiskEngine:
                         "price": round(price_mid, 2),
                         "unit_notional": round(unit_notional, 2),
                         "cap": round(cap, 2),
+                        "cap_abs": (
+                            round(cap_abs_setting, 2)
+                            if cap_abs_setting > 0
+                            else None
+                        ),
+                        "equity_cap_pct": round(
+                            float(getattr(settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.0)),
+                            4,
+                        ),
                         "lots": int(lots),
                     },
                 )

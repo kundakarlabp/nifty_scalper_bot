@@ -181,6 +181,9 @@ def test_qty_zero_adds_cap_reason_to_plan_reasons(monkeypatch):
     flow = runner.get_last_flow_debug()
 
     assert flow["reason_block"] == "cap_lt_one_lot"
-    assert "cap_lt_one_lot" in runner.last_plan["reasons"]
+    assert any(
+        r.startswith("sizer:cap_lt_one_lot") for r in runner.last_plan["reasons"]
+    )
     assert runner.last_plan["reason_block"] == "cap_lt_one_lot"
+    assert "cap_lt_one_lot" in flow.get("reason_details", {})
 
