@@ -40,12 +40,17 @@ logger = logging.getLogger(__name__)
 
 # --- 60s log throttle (avoid spam in deploy logs) ---
 _LOG_EVERY = 60.0
+# Tracks the last log timestamp for throttled log categories.
 _last_log_ts = {
     "drop_strict": 0.0,
     "drop_relaxed": 0.0,
     "auto_relax": 0.0,
     "generated": 0.0,
 }
+
+# Small tolerance to make ATR% band comparisons inclusive while guarding
+# against floating point noise on equality checks.
+ATR_BAND_EPSILON: float = 1e-9
 
 
 def _log_throttled(key: str, level: int, msg: str, *args) -> None:
@@ -731,14 +736,23 @@ class EnhancedScalpingStrategy:
             else:
                 return plan_block("regime_no_trade")
 
-            atr_pct = float((atr_val / price) * 100.0)
-            plan["atr_pct"] = round(atr_pct, 2)
+            atr_pct_raw = float((atr_val / price) * 100.0)
+            plan["atr_pct"] = round(atr_pct_raw, 2)
             self.last_atr_pct = float(plan["atr_pct"])
             atr_min = min(float(cfg.atr_min), _resolve_min_atr_pct())
             atr_max = float(cfg.atr_max)
-            atr_pct_val = float(plan["atr_pct"])
-            if not (atr_min <= atr_pct_val <= atr_max):
-                return plan_block("atr_out_of_band", atr_pct=plan["atr_pct"])
+            eps = ATR_BAND_EPSILON
+            atr_pct_val = atr_pct_raw
+            within_atr_band = (atr_min - eps) <= atr_pct_val <= (atr_max + eps)
+            if not within_atr_band:
+                return plan_block(
+                    "atr_out_of_band",
+                    atr_pct=plan["atr_pct"],
+                    atr_pct_raw=atr_pct_val,
+                    min=atr_min,
+                    max=atr_max,
+                    epsilon=eps,
+                )
 
             # ----- scoring -----
             regime_score = 2
@@ -777,7 +791,7 @@ class EnhancedScalpingStrategy:
             ):
                 structure_score += 1
 
-            vol_score = 1 if atr_min <= atr_pct_val <= atr_max else 0
+            vol_score = 1 if within_atr_band else 0
 
             ds = getattr(getattr(self, "runner", None), "data_source", None) or getattr(
                 self, "data_source", None
