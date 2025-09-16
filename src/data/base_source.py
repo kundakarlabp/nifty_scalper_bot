@@ -8,7 +8,7 @@ from datetime import datetime
 class BaseDataSource:
     """Mixin providing safe accessors for live data timestamps."""
 
-    def last_tick_ts(self) -> datetime | None:
+    def last_tick_dt(self) -> datetime | None:
         """UTC datetime of last tick; ``None`` if unknown."""
         return getattr(self, "_last_tick_ts", None)
 
