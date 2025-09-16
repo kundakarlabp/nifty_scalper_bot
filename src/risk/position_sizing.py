@@ -37,8 +37,9 @@ def lots_from_premium_cap(
         elif hasattr(runner, "equity_amount"):
             eq = float(getattr(runner, "equity_amount"))
     eq_value: float = float(eq) if eq is not None else 0.0
-    cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
     if _settings.EXPOSURE_CAP_SOURCE == "equity":
+        cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
+        logger.info("lots_from_premium_cap: using cap_pct=%s", f"{cap_pct:.2f}")
         cap = max(0.0, eq_value * cap_pct)
         if str(getattr(_settings, "EXPOSURE_BASIS", "premium")).lower() == "premium":
             logger.info(
