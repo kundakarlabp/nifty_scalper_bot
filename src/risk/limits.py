@@ -209,6 +209,7 @@ class RiskEngine:
                 lot_size,
                 available_lots,
             )
+            exposure_cap = cap
             price_mid = float(_mid_from_quote(quote_payload))
             if lots <= 0:
                 log.info(
