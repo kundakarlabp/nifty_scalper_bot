@@ -6,7 +6,6 @@ from typing import Any, Dict, Tuple, Literal, cast
 import math
 import os
 import logging
-from types import SimpleNamespace
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,89 +22,127 @@ def _mid_from_quote(q: dict) -> float:
     return float(mid or 0.0)
 
 
-def lots_from_premium_cap(
-    runner,
-    quote: dict,
-    lot_size: int,
-    max_lots: int,
-) -> Tuple[int, float, float, str]:
-    from src.config import settings as _settings
+def _coerce_float(value: Any) -> float | None:
+    """Safely coerce ``value`` to ``float`` when possible."""
 
-    def _coerce_float(value: Any) -> float | None:
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
+    try:
+        if value is None:
             return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
-    cap_abs_raw = _coerce_float(getattr(_settings, "EXPOSURE_CAP_ABS", 0.0))
-    cap_abs_setting = float(cap_abs_raw) if cap_abs_raw is not None else 0.0
-    risk_cfg = getattr(_settings, "risk", None)
-    fallback_equity_raw = _coerce_float(getattr(risk_cfg, "default_equity", 0.0))
-    fallback_equity = (
-        float(fallback_equity_raw) if fallback_equity_raw is not None else 0.0
+
+def _resolve_default_equity(settings_obj: Any) -> Tuple[float, str]:
+    """Resolve fallback equity and identify its source."""
+
+    best_val = 0.0
+    best_src = "default"
+    for attr in ("RISK_DEFAULT_EQUITY", "risk_default_equity"):
+        coerced = _coerce_float(getattr(settings_obj, attr, None))
+        if coerced is not None and coerced > best_val:
+            best_val = float(coerced)
+            best_src = "default"
+    risk_cfg = getattr(settings_obj, "risk", None)
+    if risk_cfg is not None:
+        default_val = _coerce_float(getattr(risk_cfg, "default_equity", None))
+        if default_val is not None and default_val > best_val:
+            best_val = float(default_val)
+            best_src = "default"
+        floor_val = _coerce_float(getattr(risk_cfg, "min_equity_floor", None))
+        if floor_val is not None and floor_val > best_val:
+            best_val = float(floor_val)
+            best_src = "floor"
+    if best_val > 0:
+        return best_val, best_src
+    return 0.0, "default"
+
+
+def _resolve_cap_pct(settings_obj: Any) -> float:
+    """Return the exposure cap percentage expressed as 0..100."""
+
+    candidates = (
+        getattr(settings_obj, "EXPOSURE_CAP_PCT", None),
+        getattr(settings_obj, "EXPOSURE_CAP_PCT_OF_EQUITY", None),
+        getattr(settings_obj, "risk_exposure_cap_pct_of_equity", None),
+        getattr(getattr(settings_obj, "risk", None), "exposure_cap_pct_of_equity", None),
     )
-    min_equity_floor_raw = _coerce_float(getattr(risk_cfg, "min_equity_floor", 0.0))
-    min_equity_floor = (
-        float(min_equity_floor_raw) if min_equity_floor_raw is not None else 0.0
-    )
-    use_live_equity = bool(getattr(risk_cfg, "use_live_equity", True))
+    for candidate in candidates:
+        pct = _coerce_float(candidate)
+        if pct is None:
+            continue
+        if pct <= 1.0:
+            pct *= 100.0
+        return max(0.0, float(pct))
+    return 0.0
 
-    eq_value: float = fallback_equity
-    eq_source = "default"
 
-    if _settings.EXPOSURE_CAP_SOURCE == "equity":
-        eq_candidate: float | None = None
-        if runner is not None and use_live_equity:
-            try:
-                if hasattr(runner, "get_equity_amount"):
-                    eq_candidate = _coerce_float(runner.get_equity_amount())
-                elif hasattr(runner, "equity_amount"):
-                    eq_candidate = _coerce_float(getattr(runner, "equity_amount"))
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.debug("lots_from_premium_cap: live equity fetch failed: %s", exc)
-        if eq_candidate is not None:
-            eq_value = max(eq_candidate, 0.0)
-            eq_source = "live"
-        else:
-            candidates = [
-                ("default", max(fallback_equity, 0.0)),
-                ("floor", max(min_equity_floor, 0.0)),
-            ]
-            eq_source, eq_value = max(candidates, key=lambda item: item[1])
-            if eq_value <= 0.0:
-                eq_source = "default"
-            eq_value = max(eq_value, 0.0)
+def _resolve_cap_abs(settings_obj: Any) -> float:
+    """Return absolute premium cap configured on ``settings`` if any."""
 
-        cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-        cap_from_pct = max(0.0, eq_value * cap_pct)
-        cap = cap_from_pct
-        if cap_abs_setting > 0:
-            cap = min(cap_from_pct, cap_abs_setting)
-        if str(getattr(_settings, "EXPOSURE_BASIS", "premium")).lower() == "premium":
-            logger.info(
-                "lots_from_premium_cap: basis=premium source=%s eq=%.2f cap_pct=%.2f cap=%.2f cap_abs=%.2f",
-                eq_source,
-                eq_value,
-                cap_pct,
-                cap,
-                cap_abs_setting,
-            )
+    cap_abs = _coerce_float(getattr(settings_obj, "EXPOSURE_CAP_ABS", None))
+    if cap_abs is not None:
+        return float(cap_abs)
+    cap_abs = _coerce_float(getattr(settings_obj, "risk_exposure_cap_abs", None))
+    if cap_abs is not None:
+        return float(cap_abs)
+    risk_cfg = getattr(settings_obj, "risk", None)
+    cap_abs = _coerce_float(getattr(risk_cfg, "exposure_cap_abs", None))
+    if cap_abs is not None:
+        return float(cap_abs)
+    return 0.0
+
+
+def lots_from_premium_cap(
+    premium: float,
+    lot_size: int,
+    settings_obj: Any,
+    live_equity: float | None,
+) -> Tuple[int, Dict[str, Any]]:
+    equity_source = "live"
+    equity_val = _coerce_float(live_equity) if live_equity is not None else None
+    if equity_val is not None:
+        equity = max(float(equity_val), 0.0)
     else:
-        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
-        if cap_abs_setting > 0:
-            cap = min(cap, cap_abs_setting)
-        eq_source = str(getattr(_settings, "EXPOSURE_CAP_SOURCE", "env")) or "env"
+        equity, equity_source = _resolve_default_equity(settings_obj)
 
-    price = float(_mid_from_quote(quote or {}))
-    if price <= 0:
-        return 0, 0.0, float(cap), eq_source
+    src_raw = getattr(settings_obj, "EXPOSURE_CAP_SOURCE", "equity") or "equity"
+    src = str(src_raw).lower()
 
-    unit_notional = price * float(lot_size)
-    lots = 0 if unit_notional <= 0 else int(float(cap) // unit_notional)
-    lots = min(int(max_lots), max(0, lots))
-    return lots, unit_notional, float(cap), eq_source
+    pct = _resolve_cap_pct(settings_obj)
+    abs_cap = _resolve_cap_abs(settings_obj)
+    if src == "equity":
+        cap = equity * pct / 100.0
+        if abs_cap > 0:
+            cap = min(cap, abs_cap)
+    else:
+        cap = abs_cap
+
+    unit_notional = float(premium) * float(lot_size)
+    lots = int(cap // unit_notional) if unit_notional > 0 else 0
+
+    meta: Dict[str, Any] = {
+        "basis": "premium",
+        "source": src,
+        "equity": float(equity),
+        "equity_source": equity_source,
+        "cap_pct": float(pct),
+        "cap": round(float(cap), 2),
+        "cap_abs": round(float(abs_cap), 2) if abs_cap > 0 else None,
+        "price": float(premium),
+        "lot_size": int(lot_size),
+        "unit_notional": round(float(unit_notional), 2),
+        "lots": int(lots),
+    }
+
+    if unit_notional <= 0:
+        meta["reason"] = "unit_notional_le_zero"
+        return 0, meta
+    if cap < unit_notional:
+        meta["reason"] = "cap_lt_one_lot"
+        return 0, meta
+
+    return max(lots, 1), meta
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -296,27 +333,37 @@ class PositionSizer:
         )
 
         cap_abs_setting = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
+        cap_meta: Dict[str, Any] | None = None
 
         if sp.exposure_basis == "premium":
-            runner = SimpleNamespace(equity_amount=si.equity)
-            (
-                max_lots_exposure,
-                unit_notional,
-                exposure_cap,
-                eq_source,
-            ) = lots_from_premium_cap(
-                runner,
-                {"mid": si.entry_price},
-                si.lot_size,
-                sp.max_lots,
+            max_lots_exposure, cap_meta = lots_from_premium_cap(
+                premium=si.entry_price,
+                lot_size=si.lot_size,
+                settings_obj=settings,
+                live_equity=si.equity,
             )
-            cap_pct = float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-            min_eq_needed = (
-                unit_notional / cap_pct if cap_pct > 0 else float("inf")
+            unit_notional = float(
+                cap_meta.get("unit_notional", si.entry_price * si.lot_size)
             )
-            if cap_abs_setting > 0 and unit_notional > cap_abs_setting:
-                min_eq_needed = float("inf")
-            cap_abs = cap_abs_setting
+            exposure_cap = float(cap_meta.get("cap", 0.0)) if cap_meta else 0.0
+            cap_pct = float(cap_meta.get("cap_pct", 0.0)) if cap_meta else 0.0
+            cap_abs_meta = _coerce_float(cap_meta.get("cap_abs")) if cap_meta else None
+            if cap_abs_meta is not None and cap_abs_meta > 0:
+                cap_abs = float(cap_abs_meta)
+            else:
+                cap_abs = cap_abs_setting if cap_abs_setting > 0 else 0.0
+            if (
+                cap_meta is not None
+                and cap_meta.get("source") == "equity"
+                and cap_pct > 0
+            ):
+                min_eq_needed = unit_notional * 100.0 / cap_pct
+                if cap_abs > 0 and cap_abs < unit_notional:
+                    min_eq_needed = float("inf")
+            else:
+                min_eq_needed = (
+                    float("inf") if exposure_cap < unit_notional else unit_notional
+                )
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
             if sp.max_position_size_pct > 0 and unit_notional > 0:
@@ -331,38 +378,57 @@ class PositionSizer:
                 else unit_notional
             )
             cap_abs = 0.0
-            eq_source = "na"
+            cap_meta = None
 
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
-        logger.info(
-            "sizer calc: exposure=%d risk=%d limit=%d -> calc=%d",
-            max_lots_exposure,
-            max_lots_risk,
-            max_lots_limit,
-            calc_lots,
-        )
+        if cap_meta:
+            logger.info(
+                "sizer calc: exposure=%d risk=%d limit=%d -> calc=%d meta=%s",
+                max_lots_exposure,
+                max_lots_risk,
+                max_lots_limit,
+                calc_lots,
+                cap_meta,
+            )
+        else:
+            logger.info(
+                "sizer calc: exposure=%d risk=%d limit=%d -> calc=%d",
+                max_lots_exposure,
+                max_lots_risk,
+                max_lots_limit,
+                calc_lots,
+            )
         lots = calc_lots
         if sp.exposure_basis == "premium" and max_lots_exposure < 1:
-            if sp.allow_min_one_lot and si.equity >= unit_notional:
+            reason = "cap_lt_one_lot"
+            if cap_meta is not None:
+                reason = str(cap_meta.get("reason", reason))
+            if (
+                sp.allow_min_one_lot
+                and si.equity >= unit_notional
+                and reason != "unit_notional_le_zero"
+            ):
                 lots = sp.min_lots
                 block_reason = ""
                 logger.info(
-                    "sizer allow_min_one_lot: basis=%s unit=%.2f cap=%.2f -> lots=%d",
+                    "sizer allow_min_one_lot: basis=%s unit=%.2f cap=%.2f -> lots=%d meta=%s",
                     sp.exposure_basis,
                     unit_notional,
                     exposure_cap,
                     lots,
+                    cap_meta,
                 )
             else:
                 lots = 0
-                block_reason = "cap_lt_one_lot"
+                block_reason = reason
                 logger.info(
-                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f meta=%s",
                     sp.exposure_basis,
                     unit_notional,
                     max_lots_exposure,
                     exposure_cap,
+                    cap_meta,
                 )
         else:
             if (
@@ -381,11 +447,12 @@ class PositionSizer:
                 else:
                     block_reason = "risk_cap"
                 logger.info(
-                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
+                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f meta=%s",
                     sp.exposure_basis,
                     unit_notional,
                     calc_lots,
                     exposure_cap,
+                    cap_meta,
                 )
 
         quantity = lots * si.lot_size
@@ -403,7 +470,7 @@ class PositionSizer:
             calc_lots,
             min_eq_needed,
             block_reason,
-            eq_source=eq_source,
+            cap_meta=cap_meta,
             cap_abs=cap_abs,
         )
         return quantity, lots, diag
@@ -424,7 +491,7 @@ class PositionSizer:
         min_equity_needed: float,
         block_reason: str,
         *,
-        eq_source: str | None = None,
+        cap_meta: Dict[str, Any] | None = None,
         cap_abs: float = 0.0,
     ) -> Dict:
         unit_val = (
@@ -447,6 +514,8 @@ class PositionSizer:
             cap_abs_val = (
                 round(cap_abs, 2) if math.isfinite(cap_abs) else float("inf")
             )
+        cap_meta = cap_meta or {}
+        eq_source = cap_meta.get("equity_source") or cap_meta.get("source")
         return {
             "entry_price": round(si.entry_price, 4),
             "equity": round(si.equity, 2),
@@ -472,4 +541,5 @@ class PositionSizer:
             "block_reason": block_reason,
             "cap_abs": cap_abs_val,
             "eq_source": eq_source,
+            "cap_meta": cap_meta,
         }

@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from src.risk.position_sizing import lots_from_premium_cap, PositionSizer
 from src.config import settings as cfg
 
@@ -6,33 +5,43 @@ from src.config import settings as cfg
 def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
     """Returns at least one lot when equity-based cap allows it."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
-    runner = SimpleNamespace(equity_amount=40_000.0)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     price = 112.8
     lot_size = 75
-    lots, unit, cap, eq_source = lots_from_premium_cap(
-        runner, {"mid": price}, lot_size=lot_size, max_lots=5
+    lots, meta = lots_from_premium_cap(
+        premium=price,
+        lot_size=lot_size,
+        settings_obj=cfg,
+        live_equity=40_000.0,
     )
     assert lots == 1
-    assert unit == price * lot_size
-    assert cap == 40_000.0 * 0.40
-    assert eq_source == "live"
+    assert meta["cap"] == 16_000.0
+    assert meta["unit_notional"] == round(price * lot_size, 2)
+    assert meta["cap_pct"] == 40.0
+    assert meta["source"] == "equity"
+    assert meta["equity_source"] == "live"
+    assert meta["cap_abs"] is None
+    assert meta.get("reason") is None
 
 
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
-    runner = SimpleNamespace(equity_amount=20_000.0)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     price = 112.8
     lot_size = 75
-    lots, unit, cap, eq_source = lots_from_premium_cap(
-        runner, {"mid": price}, lot_size=lot_size, max_lots=5
+    lots, meta = lots_from_premium_cap(
+        premium=price,
+        lot_size=lot_size,
+        settings_obj=cfg,
+        live_equity=20_000.0,
     )
     assert lots == 0
-    assert cap == 20_000.0 * 0.40
-    assert cap < unit
-    assert eq_source == "live"
+    assert meta["cap"] == 8_000.0
+    assert meta["unit_notional"] == round(price * lot_size, 2)
+    assert meta["reason"] == "cap_lt_one_lot"
+    assert meta["equity_source"] == "live"
+    assert meta["cap_abs"] is None
     sizer = PositionSizer()
     qty, sized_lots, diag = sizer.size_from_signal(
         entry_price=price,
@@ -45,62 +54,67 @@ def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     assert qty == 0 and sized_lots == 0
     assert diag["block_reason"] == "cap_lt_one_lot"
     assert diag["cap_abs"] is None
-    assert diag["eq_source"] == "live"
+    assert diag["cap_meta"]["reason"] == "cap_lt_one_lot"
 
 
 def test_lots_from_premium_cap_fallbacks_to_default_equity(monkeypatch):
-    """When live equity is unavailable, the default equity should be used."""
+    """When live equity is unavailable, the configured default should be used."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.50, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(cfg.risk, "default_equity", 40_000.0, raising=False)
-    monkeypatch.setattr(cfg.risk, "use_live_equity", False, raising=False)
-    runner = SimpleNamespace()
-    lots, _, cap, eq_source = lots_from_premium_cap(
-        runner, {"mid": 100.0}, lot_size=50, max_lots=5
+    monkeypatch.setattr(cfg.risk, "min_equity_floor", 20_000.0, raising=False)
+    lots, meta = lots_from_premium_cap(
+        premium=100.0,
+        lot_size=50,
+        settings_obj=cfg,
+        live_equity=None,
     )
-    assert cap == 40_000.0 * 0.50
+    assert meta["equity"] == 40_000.0
+    assert meta["cap"] == 20_000.0
     assert lots == 4
-    assert eq_source == "default"
+    assert meta["source"] == "equity"
+    assert meta["equity_source"] == "default"
+    assert meta["cap_abs"] is None
 
 
 def test_lots_from_premium_cap_respects_absolute_cap(monkeypatch):
-    """Absolute premium caps should clamp exposure even if equity allows more."""
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.80, raising=False)
+    """Absolute caps should clamp exposure when configured via ENV source."""
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "env", raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 5_000.0, raising=False)
-    runner = SimpleNamespace(equity_amount=100_000.0)
-    lots, unit, cap, eq_source = lots_from_premium_cap(
-        runner,
-        {"mid": 100.0},
+    lots, meta = lots_from_premium_cap(
+        premium=100.0,
         lot_size=50,
-        max_lots=10,
+        settings_obj=cfg,
+        live_equity=100_000.0,
     )
-    assert cap == 5_000.0
-    assert unit == 5_000.0
+    assert meta["cap"] == 5_000.0
+    assert meta["unit_notional"] == 5_000.0
+    assert meta["source"] == "env"
     assert lots == 1
-    assert eq_source == "live"
+    assert meta["cap_abs"] == 5_000.0
 
 
 def test_lots_from_premium_cap_uses_floor_equity(monkeypatch):
-    """When fallback equity is below the floor, the floor should drive sizing."""
+    """When defaults are zero, the floor should provide sizing."""
 
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.50, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(cfg.risk, "default_equity", 0.0, raising=False)
     monkeypatch.setattr(cfg.risk, "min_equity_floor", 25_000.0, raising=False)
-    monkeypatch.setattr(cfg.risk, "use_live_equity", False, raising=False)
-    runner = SimpleNamespace()
 
-    lots, unit, cap, eq_source = lots_from_premium_cap(
-        runner,
-        {"mid": 100.0},
+    lots, meta = lots_from_premium_cap(
+        premium=100.0,
         lot_size=25,
-        max_lots=10,
+        settings_obj=cfg,
+        live_equity=None,
     )
 
+    assert meta["equity"] == 25_000.0
+    assert meta["cap"] == 12_500.0
     assert lots == 5
-    assert unit == 2_500.0
-    assert cap == 12_500.0
-    assert eq_source == "floor"
+    assert meta.get("reason") is None
+    assert meta["equity_source"] == "floor"
+    assert meta["cap_abs"] is None
 
     sizer = PositionSizer()
     _, _, diag = sizer.size_from_signal(
@@ -111,5 +125,5 @@ def test_lots_from_premium_cap_uses_floor_equity(monkeypatch):
         spot_sl_points=10.0,
         delta=0.5,
     )
-    assert diag["eq_source"] == "floor"
+    assert diag["cap_meta"]["cap"] == 12_500.0
 

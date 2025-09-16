@@ -2,7 +2,6 @@
 
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
-from types import SimpleNamespace
 from src.risk.position_sizing import (
     PositionSizer,
     _mid_from_quote,
@@ -43,14 +42,17 @@ def test_mid_from_quote_variants():
 def test_lots_from_premium_cap(monkeypatch):
     """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
-    runner = SimpleNamespace(equity_amount=10_000)
-    lots, unit_notional, cap, eq_source = lots_from_premium_cap(
-        runner, {"mid": 100}, 25, 10
+    monkeypatch.setattr(cfg, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
+    lots, meta = lots_from_premium_cap(
+        premium=100.0,
+        lot_size=25,
+        settings_obj=cfg,
+        live_equity=10_000.0,
     )
-    assert unit_notional == 2_500
-    assert cap == 1_000
+    assert meta["unit_notional"] == 2_500.0
+    assert meta["cap"] == 1_000.0
+    assert meta["reason"] == "cap_lt_one_lot"
     assert lots == 0
-    assert eq_source == "live"
 
 
 def test_basic_sizing():
