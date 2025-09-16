@@ -20,6 +20,9 @@ from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 # wording need to be present; unknown keys fall back to the raw code.
 REASON_MAP: Dict[str, str] = {
     "cap_lt_one_lot": "premium cap too small for 1 lot",
+    "atr_out_of_band": "ATR% out of band",
+    "no_quote": "no option quote",
+    "tick_stale": "ticks stale",
 }
 
 

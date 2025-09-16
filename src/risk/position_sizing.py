@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Literal, cast
+import math
 import os
 import logging
-from types import SimpleNamespace
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,41 +23,55 @@ def _mid_from_quote(q: dict) -> float:
 
 
 def lots_from_premium_cap(
-    runner,
-    quote: dict,
+    premium: float,
     lot_size: int,
-    max_lots: int,
-) -> Tuple[int, float, float]:
-    from src.config import settings as _settings
+    settings: object,
+    live_equity: float | None,
+) -> tuple[int, dict]:
+    """Return lot count capped by premium exposure and associated metadata."""
 
-    eq: float | None = None
-    if _settings.EXPOSURE_CAP_SOURCE == "equity" and runner is not None:
-        if hasattr(runner, "get_equity_amount"):
-            eq = float(runner.get_equity_amount())
-        elif hasattr(runner, "equity_amount"):
-            eq = float(getattr(runner, "equity_amount"))
-    eq_value: float = float(eq) if eq is not None else 0.0
-    cap_pct = float(_settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-    if _settings.EXPOSURE_CAP_SOURCE == "equity":
-        cap = max(0.0, eq_value * cap_pct)
-        if str(getattr(_settings, "EXPOSURE_BASIS", "premium")).lower() == "premium":
-            logger.info(
-                "lots_from_premium_cap: basis=premium source=equity eq=%.2f cap_pct=%.2f cap=%.2f",
-                eq_value,
-                cap_pct,
-                cap,
-            )
+    use_live = bool(getattr(settings, "RISK_USE_LIVE_EQUITY", True))
+    default_equity = float(getattr(settings, "RISK_DEFAULT_EQUITY", 0) or 0.0)
+    equity = float(live_equity or 0.0) if use_live else 0.0
+    if equity <= 0:
+        equity = default_equity
+    equity = float(max(equity, 0.0))
+
+    cap = 0.0
+    source = str(getattr(settings, "EXPOSURE_CAP_SOURCE", "equity")).lower()
+    if source == "equity":
+        pct = max(0.0, float(getattr(settings, "EXPOSURE_CAP_PCT", 0.0)))
+        cap = equity * pct / 100.0
+    elif source == "absolute":
+        cap_abs = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
+        cap = cap_abs if cap_abs > 0 else float("inf")
+
+    unit_notional = float(premium) * float(lot_size)
+    if unit_notional > 0:
+        if math.isfinite(cap):
+            lots = int(cap // unit_notional)
+        else:
+            lots = int(1e9)
     else:
-        cap = float(_settings.PREMIUM_CAP_PER_TRADE)
-
-    price = float(_mid_from_quote(quote or {}))
-    if price <= 0:
-        return 0, 0.0, float(cap)
-
-    unit_notional = price * float(lot_size)
-    lots = 0 if unit_notional <= 0 else int(float(cap) // unit_notional)
-    lots = min(int(max_lots), max(0, lots))
-    return lots, unit_notional, float(cap)
+        lots = 0
+    meta = {
+        "basis": "premium",
+        "source": source,
+        "equity": equity,
+        "cap_pct": float(getattr(settings, "EXPOSURE_CAP_PCT", 0.0)),
+        "cap": round(cap, 2),
+        "price": float(premium),
+        "lot_size": int(lot_size),
+        "unit_notional": round(unit_notional, 2),
+        "lots": lots,
+        "default_equity": default_equity,
+        "use_live_equity": use_live,
+    }
+    if unit_notional <= 0:
+        return 0, {**meta, "reason": "unit_notional_le_zero"}
+    if cap < unit_notional:
+        return 0, {**meta, "reason": "cap_lt_one_lot"}
+    return max(lots, 1), meta
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -248,16 +262,14 @@ class PositionSizer:
         )
 
         if sp.exposure_basis == "premium":
-            runner = SimpleNamespace(equity_amount=si.equity)
-            max_lots_exposure, unit_notional, exposure_cap = lots_from_premium_cap(
-                runner,
-                {"mid": si.entry_price},
-                si.lot_size,
-                sp.max_lots,
+            max_lots_exposure, meta = lots_from_premium_cap(
+                si.entry_price, si.lot_size, settings, si.equity
             )
+            unit_notional = float(meta["unit_notional"])
+            exposure_cap = float(meta["cap"])
             min_eq_needed = (
-                unit_notional / float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
-                if settings.EXPOSURE_CAP_PCT_OF_EQUITY > 0
+                unit_notional * 100 / float(meta.get("cap_pct", 0.0))
+                if float(meta.get("cap_pct", 0.0)) > 0
                 else unit_notional
             )
         else:
@@ -298,13 +310,7 @@ class PositionSizer:
             else:
                 lots = 0
                 block_reason = "cap_lt_one_lot"
-                logger.info(
-                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                    sp.exposure_basis,
-                    unit_notional,
-                    max_lots_exposure,
-                    exposure_cap,
-                )
+                logger.info("sizer block: %s", meta)
         else:
             if (
                 lots == 0

@@ -737,8 +737,14 @@ class EnhancedScalpingStrategy:
             atr_min = min(float(cfg.atr_min), _resolve_min_atr_pct())
             atr_max = float(cfg.atr_max)
             atr_pct_val = float(plan["atr_pct"])
-            if not (atr_min <= atr_pct_val <= atr_max):
-                return plan_block("atr_out_of_band", atr_pct=plan["atr_pct"])
+            eps = 1e-9
+            if atr_pct_val < (atr_min - eps) or atr_pct_val > (atr_max + eps):
+                return plan_block(
+                    "atr_out_of_band",
+                    atr_pct=plan["atr_pct"],
+                    min=atr_min,
+                    max=atr_max,
+                )
 
             # ----- scoring -----
             regime_score = 2

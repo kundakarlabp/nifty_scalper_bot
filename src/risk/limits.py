@@ -7,9 +7,8 @@ from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 import logging
+import math
 import os
-from types import SimpleNamespace
-
 from src.config import settings
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
@@ -198,42 +197,38 @@ class RiskEngine:
         exposure_cap = self.cfg.max_notional_rupees
 
         if use_premium_basis:
-            available_lots = max(0, self.cfg.max_lots_per_symbol - current_lots)
             quote_payload = quote or {
                 "mid": option_mid_price if option_mid_price is not None else entry_price
             }
-            runner_for_cap = runner or SimpleNamespace(equity_amount=equity_rupees)
-            lots, unit_notional, cap = lots_from_premium_cap(
-                runner_for_cap,
-                quote_payload,
-                lot_size,
-                available_lots,
-            )
-            exposure_cap = cap
             price_mid = float(_mid_from_quote(quote_payload))
-            if lots <= 0:
+            lots, meta = lots_from_premium_cap(
+                price_mid, lot_size, settings, equity_rupees
+            )
+            exposure_cap = min(self.cfg.max_notional_rupees, float(meta["cap"]))
+            unit_notional = float(meta["unit_notional"])
+            lots_int = int(lots)
+            if lots_int <= 0:
                 log.info(
-                    "pretrade block: basis=premium price=%.2f unit=%.2f cap=%.2f lots=%d",
-                    price_mid,
-                    unit_notional,
-                    cap,
-                    lots,
+                    "pretrade block: basis=%s price=%.2f lot_size=%d unit_notional=%.2f equity=%.2f cap_pct=%.2f cap=%.2f lots=%d",
+                    meta["basis"],
+                    meta["price"],
+                    meta["lot_size"],
+                    meta["unit_notional"],
+                    meta["equity"],
+                    meta["cap_pct"],
+                    meta["cap"],
+                    meta["lots"],
                 )
                 plan["qty_lots"] = 0
-                plan.setdefault("reasons", []).append("cap < 1 lot")
+                plan.setdefault("reasons", []).append("cap_lt_one_lot")
                 plan["reason_block"] = "cap_lt_one_lot"
-                return (
-                    False,
-                    "cap_lt_one_lot",
-                    {
-                        "price": round(price_mid, 2),
-                        "unit_notional": round(unit_notional, 2),
-                        "cap": round(cap, 2),
-                        "lots": int(lots),
-                    },
-                )
-            plan["qty_lots"] = int(lots)
-            intended_lots = min(intended_lots, int(lots))
+                return False, "cap_lt_one_lot", meta
+            cap_value = float(meta.get("cap", 0.0))
+            if math.isfinite(cap_value):
+                plan["qty_lots"] = lots_int
+                intended_lots = min(intended_lots, lots_int)
+            else:
+                plan["qty_lots"] = intended_lots
         else:
             unit_notional = spot_price * lot_size
 

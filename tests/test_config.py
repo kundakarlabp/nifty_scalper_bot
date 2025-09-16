@@ -89,18 +89,18 @@ def test_exposure_env_overrides():
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "1",
         "EXPOSURE_BASIS": "underlying",
-        "EXPOSURE_CAP_SOURCE": "env",
+        "EXPOSURE_CAP_SOURCE": "absolute",
         "EXPOSURE_CAP_PCT_OF_EQUITY": "0.5",
         "PREMIUM_CAP_PER_TRADE": "5000",
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
         assert settings.EXPOSURE_BASIS == "underlying"
-        assert settings.EXPOSURE_CAP_SOURCE == "env"
+        assert settings.EXPOSURE_CAP_SOURCE == "absolute"
         assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.5
         assert settings.PREMIUM_CAP_PER_TRADE == 5000.0
         assert settings.risk.exposure_basis == "underlying"
-        assert settings.risk.exposure_cap_source == "env"
+        assert settings.risk.exposure_cap_source == "absolute"
         assert settings.risk.exposure_cap_pct_of_equity == 0.5
         assert settings.risk.premium_cap_per_trade == 5000.0
 
