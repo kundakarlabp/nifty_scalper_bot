@@ -85,6 +85,9 @@ except Exception:
     LiveKiteSource = None  # type: ignore
 
 
+logger = logging.getLogger(__name__)
+
+
 # =========================== Cadence controller ============================
 
 
@@ -796,6 +799,139 @@ class StrategyRunner:
             except Exception:
                 pass
 
+    def _prime_atm_quotes(self) -> tuple[bool, str | None, list[int]]:
+        """Ensure CE/PE quotes are primed before scoring and micro checks."""
+
+        if not bool(getattr(self.settings, "enable_live_trading", False)):
+            return True, None, []
+
+        ds = getattr(self, "data_source", None)
+        broker: Any | None = None
+        ce_token: int | None = None
+        pe_token: int | None = None
+
+        if ds is not None:
+            broker = getattr(ds, "kite", None) or getattr(ds, "broker", None)
+            tokens_raw = getattr(ds, "atm_tokens", None)
+            ensure_tokens = getattr(ds, "ensure_atm_tokens", None)
+            if (not tokens_raw or None in tokens_raw) and callable(ensure_tokens):
+                try:
+                    ensure_tokens()
+                except Exception:
+                    logger.debug("quote_prime_ensure_retry", exc_info=True)
+                tokens_raw = getattr(ds, "atm_tokens", None)
+            if isinstance(tokens_raw, (list, tuple)):
+                if len(tokens_raw) > 0 and tokens_raw[0]:
+                    ce_token = int(tokens_raw[0])
+                if len(tokens_raw) > 1 and tokens_raw[1]:
+                    pe_token = int(tokens_raw[1])
+
+        if broker is None:
+            broker = self.kite
+
+        needed_tokens: list[int] = [int(t) for t in (ce_token, pe_token) if t]
+        if not needed_tokens:
+            logger.info("quote_prime_fail", {"err": "tokens_missing"})
+            return False, "tokens_missing", []
+        if broker is None:
+            logger.info("quote_prime_fail", {"err": "broker_missing"})
+            return False, "broker_missing", needed_tokens
+
+        quotes: Any | None = None
+        errors: list[str] = []
+        payloads = (needed_tokens, [str(t) for t in needed_tokens])
+        for payload in payloads:
+            if not payload:
+                continue
+            if hasattr(broker, "quote"):
+                try:
+                    quotes = broker.quote(payload)
+                except Exception as exc:  # pragma: no cover - network failures
+                    errors.append(str(exc))
+                    quotes = None
+                else:
+                    if quotes:
+                        break
+            if hasattr(broker, "ltp"):
+                try:
+                    quotes = broker.ltp(payload)
+                except Exception as exc:  # pragma: no cover - network failures
+                    errors.append(str(exc))
+                    quotes = None
+                else:
+                    if quotes:
+                        break
+
+        if not quotes:
+            err_msg = ";".join(err for err in errors if err) or "quote_unavailable"
+            logger.info("quote_prime_fail", {"err": err_msg})
+            return False, err_msg, needed_tokens
+
+        missing_tokens = self._detect_missing_tokens(needed_tokens, quotes)
+        if missing_tokens:
+            err_msg = f"missing:{','.join(str(tok) for tok in missing_tokens)}"
+            logger.info("quote_prime_fail", {"err": err_msg})
+            return False, err_msg, needed_tokens
+
+        logger.debug("quote_prime_ok", {"n": len(needed_tokens)})
+        return True, None, needed_tokens
+
+    def _detect_missing_tokens(self, tokens: list[int], quote_payload: Any) -> list[int]:
+        """Identify which instrument tokens are absent from a quote payload."""
+
+        missing: list[int] = []
+        for token in tokens:
+            if not self._quote_has_token(quote_payload, token):
+                missing.append(int(token))
+        return missing
+
+    def _quote_has_token(self, payload: Any, token: int) -> bool:
+        """Recursively inspect a quote payload for a specific instrument token."""
+
+        if payload is None:
+            return False
+
+        try:
+            token_int = int(token)
+        except Exception:
+            token_int = token
+
+        if isinstance(payload, Mapping):
+            if token_int in payload or str(token_int) in payload:
+                return True
+            data_section = payload.get("data")
+            if data_section is not None and self._quote_has_token(data_section, token_int):
+                return True
+            for key, value in payload.items():
+                if key in {"instrument_token", "token", "instrument", "token_id"}:
+                    try:
+                        if value is not None and int(value) == token_int:
+                            return True
+                    except Exception:
+                        continue
+                if isinstance(value, (Mapping, list, tuple, set)):
+                    if self._quote_has_token(value, token_int):
+                        return True
+                elif isinstance(value, str):
+                    digits = "".join(ch for ch in value if ch.isdigit())
+                    if digits and digits == str(token_int):
+                        return True
+            return False
+
+        if isinstance(payload, (list, tuple, set)):
+            return any(self._quote_has_token(item, token_int) for item in payload)
+
+        if isinstance(payload, str):
+            if payload == str(token_int):
+                return True
+            digits = "".join(ch for ch in payload if ch.isdigit())
+            return bool(digits and digits == str(token_int))
+
+        try:
+            return int(payload) == token_int
+        except Exception:
+            return False
+
     def _record_plan(self, plan: Dict[str, Any]) -> None:
         micro = plan.get("micro") or {"spread_pct": 0.0, "depth_ok": False}
         changed = (
@@ -1106,6 +1242,36 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                return
+            prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
+            if not prime_ok:
+                reasons = plan.setdefault("reasons", [])
+                if "no_quote" not in reasons:
+                    reasons.append("no_quote")
+                if prime_err:
+                    detail = f"quote_prime:{prime_err}"
+                    if detail not in reasons:
+                        reasons.append(detail)
+                plan["reason_block"] = "no_quote"
+                plan["has_signal"] = False
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                plan["quote_prime_tokens"] = prime_tokens
+                if prime_err:
+                    plan["quote_prime_error"] = prime_err
+                self._record_plan(plan)
+                flow["reason_block"] = plan["reason_block"]
+                flow.setdefault("reason_details", {})["no_quote"] = {
+                    "tokens": prime_tokens,
+                    "error": prime_err,
+                }
+                self._last_flow_debug = flow
+                self.log.info(
+                    "Signal blocked: no_quote tokens=%s err=%s",
+                    prime_tokens,
+                    prime_err,
+                )
                 return
             score_val, details = compute_score(
                 df, plan.get("regime"), self.strategy_cfg
