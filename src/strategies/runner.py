@@ -1449,7 +1449,12 @@ class StrategyRunner:
             if not ok:
                 plan["has_signal"] = False
                 plan["reason_block"] = reason
-                plan.setdefault("reasons", []).append(f"risk:{reason}")
+                reasons = plan.setdefault("reasons", [])
+                risk_reason = f"risk:{reason}" if reason else "risk"
+                if risk_reason not in reasons:
+                    reasons.append(risk_reason)
+                flow["reason_block"] = plan["reason_block"]
+                flow.setdefault("reason_details", {})[reason] = det
                 plan.setdefault("risk_details", det)
                 self._record_plan(plan)
                 self._last_flow_debug = flow
