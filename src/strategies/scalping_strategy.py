@@ -758,7 +758,10 @@ class EnhancedScalpingStrategy:
             plan["atr_band"] = (atr_min, atr_max)
             eps = ATR_BAND_EPSILON
             atr_pct_val = atr_pct_raw
-            within_atr_band = (atr_min - eps) <= atr_pct_val <= (atr_max + eps)
+            atr_upper = float("inf") if atr_max <= 0 else max(atr_max, atr_min)
+            within_atr_band = (atr_min - eps) <= atr_pct_val and (
+                atr_upper == float("inf") or atr_pct_val <= (atr_upper + eps)
+            )
             if not within_atr_band:
                 ok, reason = check_atr_band(atr_pct_val, atr_min, atr_max)
                 if not ok:
