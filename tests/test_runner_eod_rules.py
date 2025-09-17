@@ -67,7 +67,7 @@ def test_eod_close_triggers(monkeypatch) -> None:
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1528"
+    assert flow["reason_block"] == "after_1520"
     assert called["close"] == 1
     assert called["cancel"] == 1
     assert telegram.eod_calls == 1

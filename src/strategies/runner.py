@@ -1118,12 +1118,6 @@ class StrategyRunner:
                         self.telegram.send_eod_summary()
                     except Exception:
                         pass
-                tag = self._flatten_time.strftime("after_%H%M")
-                flow["reason_block"] = tag
-                self.last_plan = {"reason_block": tag}
-                self._record_plan(self.last_plan)
-                self._last_flow_debug = flow
-                return
             if self._no_new_after and t >= self._no_new_after:
                 tag = self._no_new_after.strftime("after_%H%M")
                 flow["reason_block"] = tag
