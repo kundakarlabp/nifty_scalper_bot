@@ -271,6 +271,35 @@ class StrategySettings(BaseModel):
         return v
 
 
+class RegimeSettings(BaseModel):
+    """Thresholds controlling market regime classification."""
+
+    # TREND regime thresholds (greater-than-or-equal comparisons)
+    adx_trend: float = 18.0
+    di_delta_trend: float = 8.0
+    bb_width_trend: float = 3.0
+
+    # RANGE regime guardrails (upper bounds / minimum dispersion)
+    adx_range: float = 18.0
+    di_delta_range: float = 6.0
+    bb_width_range: float = 2.0
+
+    @field_validator(
+        "adx_trend",
+        "di_delta_trend",
+        "bb_width_trend",
+        "adx_range",
+        "di_delta_range",
+        "bb_width_range",
+    )
+    @classmethod
+    def _v_non_negative(cls, v: float) -> float:
+        value = float(v)
+        if value < 0:
+            raise ValueError("regime thresholds must be non-negative")
+        return value
+
+
 class RiskSettings(BaseModel):
     use_live_equity: bool = Field(
         True,
@@ -1009,6 +1038,7 @@ class AppSettings(BaseSettings):
     data: DataSettings = DataSettings()  # type: ignore[call-arg]
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
+    regime: RegimeSettings = RegimeSettings()
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
@@ -1431,4 +1461,4 @@ class _SettingsProxy:
 # Public singleton used by the rest of the application
 settings = _SettingsProxy()
 
-__all__ = ["AppSettings", "load_settings", "settings"]
+__all__ = ["AppSettings", "RegimeSettings", "load_settings", "settings"]
