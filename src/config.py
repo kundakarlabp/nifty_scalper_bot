@@ -241,37 +241,6 @@ class StrategySettings(BaseModel):
     rr_threshold: float | None = 1.5
     # Pick a tradable contract by default (prevents no_option_token on non-expiry days)
     option_expiry_mode: Literal["today", "nearest", "next"] = "nearest"
-    # ADX level that qualifies as a trending market.
-    adx_trend_threshold: float = Field(
-        18.0,
-        description="Minimum ADX value required before treating conditions as trending.",
-    )
-    # Minimum DI+/- separation to confirm trend strength.
-    di_delta_trend_threshold: float = Field(
-        8.0,
-        description="Minimum |DI+ - DI-| delta required to classify a trend.",
-    )
-    # Minimum Bollinger Band width percentage to consider price expansion.
-    bb_width_trend_threshold: float = Field(
-        3.0,
-        description="Lower bound on Bollinger Band width (percent) for trend trades.",
-    )
-    # ADX ceiling for range classification.
-    adx_range_threshold: float = Field(
-        18.0,
-        description="Upper bound on ADX before range setups are rejected.",
-    )
-    # DI+/- separation allowed within a range regime.
-    di_delta_range_threshold: float = Field(
-        6.0,
-        description="Maximum |DI+ - DI-| delta tolerated when range trading.",
-    )
-    # Minimum Bollinger Band width to avoid ultra-tight consolidations.
-    bb_width_range_threshold: float = Field(
-        2.0,
-        description="Minimum Bollinger Band width (percent) for range conditions.",
-    )
-
     @field_validator("confidence_threshold")
     @classmethod
     def _v_conf(cls, v: float) -> float:
@@ -300,6 +269,68 @@ class StrategySettings(BaseModel):
             raise ValueError("rr_min must be > 1.0")
         return v
 
+
+class RegimeSettings(BaseModel):
+    """Thresholds controlling market regime classification."""
+
+    # TREND regime thresholds (greater-than-or-equal comparisons)
+    adx_trend_threshold: float = Field(
+        default=18.0,
+        description="Minimum ADX value before treating conditions as trending.",
+        validation_alias=AliasChoices(
+            "REGIME__ADX_TREND_THRESHOLD",
+            "REGIME__ADX_TREND",
+            "ADX_TREND_THRESHOLD",
+        ),
+    )
+    di_delta_trend_threshold: float = Field(
+        default=8.0,
+        description="Minimum |DI+ - DI-| delta required to classify a trend.",
+        validation_alias=AliasChoices(
+            "REGIME__DI_DELTA_TREND_THRESHOLD",
+            "REGIME__DI_DELTA_TREND",
+            "DI_DELTA_TREND_THRESHOLD",
+        ),
+    )
+    bb_width_trend_threshold: float = Field(
+        default=3.0,
+        description="Lower bound on Bollinger Band width (percent) for trend trades.",
+        validation_alias=AliasChoices(
+            "REGIME__BB_WIDTH_TREND_THRESHOLD",
+            "REGIME__BB_WIDTH_TREND",
+            "BB_WIDTH_TREND_THRESHOLD",
+        ),
+    )
+
+    # RANGE regime guardrails (upper bounds / minimum dispersion)
+    adx_range_threshold: float = Field(
+        default=18.0,
+        description="Upper bound on ADX before range setups are rejected.",
+        validation_alias=AliasChoices(
+            "REGIME__ADX_RANGE_THRESHOLD",
+            "REGIME__ADX_RANGE",
+            "ADX_RANGE_THRESHOLD",
+        ),
+    )
+    di_delta_range_threshold: float = Field(
+        default=6.0,
+        description="Maximum |DI+ - DI-| delta tolerated when range trading.",
+        validation_alias=AliasChoices(
+            "REGIME__DI_DELTA_RANGE_THRESHOLD",
+            "REGIME__DI_DELTA_RANGE",
+            "DI_DELTA_RANGE_THRESHOLD",
+        ),
+    )
+    bb_width_range_threshold: float = Field(
+        default=2.0,
+        description="Minimum Bollinger Band width (percent) for range conditions.",
+        validation_alias=AliasChoices(
+            "REGIME__BB_WIDTH_RANGE_THRESHOLD",
+            "REGIME__BB_WIDTH_RANGE",
+            "BB_WIDTH_RANGE_THRESHOLD",
+        ),
+    )
+
     @field_validator(
         "adx_trend_threshold",
         "di_delta_trend_threshold",
@@ -313,37 +344,8 @@ class StrategySettings(BaseModel):
     def _v_non_negative(cls, value: float) -> float:
         val = float(value)
         if val < 0:
-            raise ValueError("strategy regime thresholds must be non-negative")
-        return val
-
-
-class RegimeSettings(BaseModel):
-    """Thresholds controlling market regime classification."""
-
-    # TREND regime thresholds (greater-than-or-equal comparisons)
-    adx_trend: float = 18.0
-    di_delta_trend: float = 8.0
-    bb_width_trend: float = 3.0
-
-    # RANGE regime guardrails (upper bounds / minimum dispersion)
-    adx_range: float = 18.0
-    di_delta_range: float = 6.0
-    bb_width_range: float = 2.0
-
-    @field_validator(
-        "adx_trend",
-        "di_delta_trend",
-        "bb_width_trend",
-        "adx_range",
-        "di_delta_range",
-        "bb_width_range",
-    )
-    @classmethod
-    def _v_non_negative(cls, v: float) -> float:
-        value = float(v)
-        if value < 0:
             raise ValueError("regime thresholds must be non-negative")
-        return value
+        return val
 
 
 class RiskSettings(BaseModel):
