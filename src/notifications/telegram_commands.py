@@ -106,6 +106,11 @@ class TelegramCommands:
             logger.exception("telegram send error")
 
     def _handle_cmd(self, cmd: str, arg: str) -> bool:
+        """Handle built-in commands when no external handler is wired."""
+
+        if self.on_cmd:
+            return False
+
         if cmd == "/pause":
             mins = 0
             if arg.endswith("m"):
