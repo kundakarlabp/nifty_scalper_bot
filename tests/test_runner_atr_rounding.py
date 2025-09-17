@@ -100,7 +100,12 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
 
     runner.process_tick({})
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] != "atr_low"
+    assert flow["reason_block"] != "atr_out_of_band"
+    reasons = runner.last_plan.get("reasons", [])
+    assert not any(
+        isinstance(reason, str) and reason.startswith("atr_out_of_band")
+        for reason in reasons
+    )
     assert runner.last_plan["option_token"] == 1
     assert runner.last_plan["atm_strike"] == 17000
 
