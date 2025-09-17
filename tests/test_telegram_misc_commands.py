@@ -58,6 +58,20 @@ def _make_runner(monkeypatch) -> StrategyRunner:
     return runner
 
 
+class _ResumeStubRunner:
+    def __init__(self) -> None:
+        self.journal = SimpleNamespace(rehydrate_open_legs=lambda: [])
+        self.order_executor = SimpleNamespace(
+            get_or_create_fsm=lambda trade_id: None,
+            attach_leg_from_journal=lambda fsm, leg: None,
+        )
+        self.reconciler = SimpleNamespace(step=lambda now: None)
+        self.now_ist = datetime.now()
+
+    def runner_tick(self) -> None:  # pragma: no cover - bound for __self__ lookup
+        return None
+
+
 def test_why_reports_gates_and_micro(monkeypatch) -> None:
     _prep_settings(monkeypatch)
     now = datetime.now()
@@ -106,6 +120,24 @@ def test_why_reports_gates_and_micro(monkeypatch) -> None:
     assert "micro:" in msg
     assert "Option → entry" in msg and "atr" in msg and "atr_pct" in msg
     assert "premium cap too small for 1 lot" in msg
+
+
+def test_start_resumes_runner_and_shows_help_hint(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    sent: list[str] = []
+    runner = _ResumeStubRunner()
+    resumed: list[bool] = []
+
+    tc = TelegramController(status_provider=lambda: {})
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._runner_resume = lambda: resumed.append(True)
+    tc._runner_tick = runner.runner_tick
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/start"}})
+
+    assert resumed == [True]
+    assert sent
+    assert "Use /help" in sent[-1]
 
 
 def test_emergency_stop_runs_shutdown(monkeypatch, tmp_path) -> None:

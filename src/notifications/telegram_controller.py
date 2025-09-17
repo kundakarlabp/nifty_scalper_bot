@@ -33,6 +33,28 @@ from src.diagnostics.metrics import daily_summary
 log = logging.getLogger(__name__)
 
 
+COMMAND_HELP_OVERRIDES: dict[str, str] = {
+    "/score": "Latest strategy score breakdown (debug)",
+    "/selftest": "Run component health checks",
+    "/shadow": "List shadow-mode blockers (no orders)",
+    "/sizer": "Show position sizer parameters",
+    "/slmult": "Set stop-loss ATR multiple",
+    "/smoketest": "Smoke-test status & controls",
+    "/start": "Resume runner if paused/stopped",
+    "/state": "Equity/trade counters & cooldowns",
+    "/status": "High-level bot status summary",
+    "/summary": "One-line performance summary",
+    "/tick": "Latest L1 quote for ATM option",
+    "/tpmult": "Get/Set take-profit ATR multiple",
+    "/trace": "Enable verbose trace logging",
+    "/traceoff": "Disable trace logging",
+    "/trend": "Adjust trend-mode TP/SL boosts",
+    "/warmup": "Warm-up status (historical bootstrap)",
+    "/watch": "Toggle pre-trade watch alerts",
+    "/why": "Explain last decision and gates",
+}
+
+
 def _kpis(trades: List[Dict[str, float]]) -> Dict[str, float]:
     """Compute basic KPIs from a list of trade dicts."""
     if not trades:
@@ -421,9 +443,40 @@ class TelegramController:
     def _help_text(self) -> str:
         cmds = self._list_commands()
         lines = ["🤖 Nifty Scalper Bot — commands", ""]
-        for i in range(0, len(cmds), 6):
-            lines.append(" · ".join(cmds[i : i + 6]))
+        for cmd in sorted(COMMAND_HELP_OVERRIDES):
+            if cmd in cmds:
+                lines.append(f"{cmd:<10} — {COMMAND_HELP_OVERRIDES[cmd]}")
+        other_cmds = [c for c in cmds if c not in COMMAND_HELP_OVERRIDES]
+        if other_cmds:
+            lines.append("")
+            lines.append("Other commands:")
+            for i in range(0, len(other_cmds), 6):
+                lines.append(" · ".join(other_cmds[i : i + 6]))
         return "\n".join(lines)
+
+    def _resume_entries(self) -> str:
+        rehydrated = 0
+        if self._runner_resume:
+            try:
+                self._runner_resume()
+            except Exception:  # pragma: no cover - defensive logging
+                log.exception("Runner resume callback failed")
+                return "Resume error. Check logs."
+        runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+        if runner and getattr(runner, "journal", None):
+            try:
+                rehydrated_legs = runner.journal.rehydrate_open_legs()
+                for leg in rehydrated_legs:
+                    fsm = runner.order_executor.get_or_create_fsm(leg["trade_id"])
+                    runner.order_executor.attach_leg_from_journal(fsm, leg)
+                runner.reconciler.step(runner.now_ist)
+                rehydrated = len(rehydrated_legs)
+            except Exception:  # pragma: no cover - defensive logging
+                log.debug("Failed to rehydrate legs after resume", exc_info=True)
+                rehydrated = 0
+        if rehydrated:
+            return f"▶️ Entries resumed. Rehydrated {rehydrated} legs."
+        return "▶️ Entries resumed."
 
     def _do_tick(self, *, dry: bool) -> str:
         if not self._runner_tick:
@@ -538,8 +591,16 @@ class TelegramController:
         cmd = parts[0].lower()
         args = parts[1:]
 
-        # HELP
-        if cmd in ("/start", "/help"):
+        # START / HELP
+        if cmd == "/start":
+            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            runner = runner or StrategyRunner.get_singleton()
+            if not self._runner_resume and runner is None:
+                return self._send("Runner not ready.")
+            msg = self._resume_entries()
+            return self._send(msg + "\n\nUse /help to list commands.")
+
+        if cmd == "/help":
             return self._send(self._help_text(), parse_mode="Markdown")
 
         # STATUS
@@ -1680,23 +1741,7 @@ class TelegramController:
                 return self._send("⏸️ Entries paused.")
             return self._send("Pause not wired.")
         if cmd == "/resume":
-            resumed = 0
-            if self._runner_resume:
-                self._runner_resume()
-            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
-            if runner and getattr(runner, "journal", None):
-                try:
-                    rehydrated = runner.journal.rehydrate_open_legs()
-                    for leg in rehydrated:
-                        fsm = runner.order_executor.get_or_create_fsm(leg["trade_id"])
-                        runner.order_executor.attach_leg_from_journal(fsm, leg)
-                    runner.reconciler.step(runner.now_ist)
-                    resumed = len(rehydrated)
-                except Exception:
-                    resumed = 0
-            if resumed:
-                return self._send(f"▶️ Entries resumed. Rehydrated {resumed} legs.")
-            return self._send("▶️ Entries resumed.")
+            return self._send(self._resume_entries())
 
         if cmd == "/emergency_stop":
             runner = StrategyRunner.get_singleton()
