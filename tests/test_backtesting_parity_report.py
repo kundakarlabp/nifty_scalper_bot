@@ -12,3 +12,11 @@ def test_parity_report_within_tolerance() -> None:
     assert rpt.mae < 0.2
     assert rpt.mfe > 0
     assert abs(rpt.slippage_bps) < 100
+
+
+def test_parity_report_zero_reference_slippage() -> None:
+    premium = pd.Series([0.0, 0.0])
+    live = pd.Series([0.0, 0.0])
+    rpt = parity_report(premium, live)
+    assert rpt.mae == 0
+    assert rpt.slippage_bps == 0.0

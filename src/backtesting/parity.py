@@ -34,5 +34,13 @@ def parity_report(premium: pd.Series, live: pd.Series) -> ParityReport:
     mae = float(diff.abs().mean())
     mfe = float(diff.max())
     ref = (premium + live) / 2.0
-    slippage_bps = float(((diff / ref).mean()) * 10_000)
+
+    # ``ref`` can be exactly zero for deep ITM/OTM legs. Pandas would emit
+    # ``inf`` for those divisions which then poisons the mean and results in a
+    # bogus slippage number.  We treat such points as contributing zero
+    # slippage instead of blowing up the metric.
+    mask = ref.abs() > 1e-9
+    with pd.option_context("mode.use_inf_as_na", True):
+        slippage_ratio = (diff[mask] / ref[mask]).dropna()
+    slippage_bps = float((slippage_ratio.mean() if not slippage_ratio.empty else 0.0) * 10_000)
     return ParityReport(mae=mae, mfe=mfe, slippage_bps=slippage_bps)
