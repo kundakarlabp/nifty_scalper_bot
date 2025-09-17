@@ -12,10 +12,17 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
-from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -779,6 +786,31 @@ class AppSettings(BaseSettings):
         default_factory=lambda: float(os.getenv("BAR_MAX_LAG_S", "2")),
         validation_alias=AliasChoices("BAR_MAX_LAG_S", "DATA__BAR_MAX_LAG_S"),
     )
+    # Runner cadence bounds (seconds) used to throttle evaluation frequency.
+    cadence_min_interval_s: float = Field(
+        0.3,
+        validation_alias=AliasChoices(
+            "CADENCE_MIN_INTERVAL_S",
+            "RUNNER__CADENCE_MIN_INTERVAL_S",
+        ),
+    )
+    # Longest pause between evaluations when the market is quiet or breaker is open.
+    cadence_max_interval_s: float = Field(
+        1.5,
+        validation_alias=AliasChoices(
+            "CADENCE_MAX_INTERVAL_S",
+            "RUNNER__CADENCE_MAX_INTERVAL_S",
+        ),
+    )
+    # Increment applied when ticks arrive slowly to gradually widen cadence.
+    cadence_interval_step_s: float = Field(
+        0.3,
+        validation_alias=AliasChoices(
+            "CADENCE_INTERVAL_STEP_S",
+            "RUNNER__CADENCE_INTERVAL_STEP_S",
+            "CADENCE_STEP_S",
+        ),
+    )
 
     @field_validator("RISK_DEFAULT_EQUITY", mode="before")
     @classmethod
@@ -843,6 +875,30 @@ class AppSettings(BaseSettings):
         if val < 0:
             raise ValueError("lag thresholds must be >= 0 seconds")
         return val
+
+    @field_validator(
+        "cadence_min_interval_s",
+        "cadence_max_interval_s",
+        "cadence_interval_step_s",
+        mode="before",
+    )
+    @classmethod
+    def _v_cadence_positive(cls, v: Any) -> float:
+        try:
+            val = float(v)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("cadence intervals must be numeric") from exc
+        if val <= 0:
+            raise ValueError("cadence intervals must be > 0")
+        return val
+
+    @model_validator(mode="after")
+    def _v_cadence_bounds(self) -> "AppSettings":
+        if self.cadence_min_interval_s > self.cadence_max_interval_s:
+            raise ValueError(
+                "cadence_min_interval_s must be less than or equal to cadence_max_interval_s"
+            )
+        return self
 
     @property
     def EXPOSURE_CAP_PCT_OF_EQUITY(self) -> float:
