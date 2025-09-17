@@ -98,6 +98,20 @@ class CadenceController:
     min_interval: float = 0.3
     max_interval: float = 1.5
     interval: float = 0.3
+    step: float = 0.3
+
+    def __post_init__(self) -> None:
+        self.min_interval = float(self.min_interval)
+        self.max_interval = float(self.max_interval)
+        self.interval = float(self.interval)
+        self.step = float(self.step)
+        if self.min_interval <= 0:
+            raise ValueError("min_interval must be > 0")
+        if self.max_interval < self.min_interval:
+            raise ValueError("max_interval must be >= min_interval")
+        if self.step <= 0:
+            raise ValueError("step must be > 0")
+        self.interval = max(self.min_interval, min(self.max_interval, self.interval))
 
     def update(self, atr_pct: float | None, tick_age: float, breaker_open: bool) -> float:
         """Return next evaluation interval."""
@@ -110,7 +124,7 @@ class CadenceController:
         norm = max(0.0, min(1.0, atr))
         self.interval = self.max_interval - norm * (self.max_interval - self.min_interval)
         if tick_age > 1.0:
-            self.interval = min(self.max_interval, self.interval + 0.3)
+            self.interval = min(self.max_interval, self.interval + self.step)
         self.interval = max(self.min_interval, min(self.max_interval, self.interval))
         return self.interval
 
@@ -147,7 +161,16 @@ class Orchestrator:
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._risk = guards.RiskGuards(risk_config)
-        self._cadence = CadenceController() if min_eval_interval_s > 0 else None
+        if self.min_eval_interval_s > 0:
+            self._cadence = CadenceController(
+                min_interval=settings.cadence_min_interval_s,
+                max_interval=settings.cadence_max_interval_s,
+                interval=settings.cadence_min_interval_s,
+                step=settings.cadence_interval_step_s,
+            )
+            self.min_eval_interval_s = self._cadence.interval
+        else:
+            self._cadence = None
 
     # ------------------------------------------------------------------
     def start(self) -> None:

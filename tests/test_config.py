@@ -79,6 +79,9 @@ def test_default_values():
         assert settings.risk.exposure_cap_source == "equity"
         assert settings.risk.exposure_cap_pct_of_equity == 0.40
         assert settings.risk.premium_cap_per_trade == 10000.0
+        assert settings.cadence_min_interval_s == pytest.approx(0.3)
+        assert settings.cadence_max_interval_s == pytest.approx(1.5)
+        assert settings.cadence_interval_step_s == pytest.approx(0.3)
 
 
 def test_exposure_env_overrides():
@@ -197,6 +200,39 @@ def test_warmup_bars_env():
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
     assert settings.warmup_bars == 40
+
+
+def test_cadence_env_overrides() -> None:
+    env = {
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "1",
+        "CADENCE_MIN_INTERVAL_S": "0.2",
+        "CADENCE_MAX_INTERVAL_S": "2.0",
+        "CADENCE_INTERVAL_STEP_S": "0.5",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        settings = AppSettings(_env_file=None)
+    assert settings.cadence_min_interval_s == pytest.approx(0.2)
+    assert settings.cadence_max_interval_s == pytest.approx(2.0)
+    assert settings.cadence_interval_step_s == pytest.approx(0.5)
+
+
+def test_cadence_min_not_greater_than_max() -> None:
+    env = {
+        "ZERODHA__API_KEY": "k",
+        "ZERODHA__API_SECRET": "s",
+        "ZERODHA__ACCESS_TOKEN": "t",
+        "TELEGRAM__BOT_TOKEN": "bot",
+        "TELEGRAM__CHAT_ID": "1",
+        "CADENCE_MIN_INTERVAL_S": "2.0",
+        "CADENCE_MAX_INTERVAL_S": "1.0",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValidationError):
+            AppSettings(_env_file=None)
 
 
 def test_historical_timeframe_alias():
