@@ -155,6 +155,10 @@ EXPOSURE_CAP_SOURCE=env
 PREMIUM_CAP_PER_TRADE=10000       # always ₹10k
 ```
 
+Session cut-offs are configurable as well: set `RISK__NO_NEW_AFTER_HHMM` to the
+last time new positions may be opened and `RISK__EOD_FLATTEN_HHMM` to the forced
+flatten time (both `HH:MM`, IST).
+
 Use the Telegram `/risk` command to inspect current limits.  Live trading is enabled by default; set `ENABLE_LIVE_TRADING=false` (alias `ENABLE_TRADING=false`) to run in paper mode or trigger the kill switch.  Premium‑based targets are used by default; set `TP_BASIS=spot` to revert to legacy spot‑based SL/TP.
 
 ## Telegram control
