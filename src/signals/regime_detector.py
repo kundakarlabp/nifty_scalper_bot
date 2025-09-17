@@ -68,6 +68,7 @@ def detect_market_regime(
     di_plus: Optional[pd.Series] = None,
     di_minus: Optional[pd.Series] = None,
     bb_width: Optional[pd.Series] = None,
+    regime_settings: RegimeSettings | None = None,
     adx_trend_threshold: float | None = None,
     di_delta_trend_threshold: float | None = None,
     bb_width_trend_threshold: float | None = None,
@@ -79,6 +80,8 @@ def detect_market_regime(
 
     Parameters are flexible; callers may pre‑compute indicator series and pass
     them explicitly, otherwise they will be sourced from ``df`` if available.
+    Thresholds can be overridden via ``regime_settings`` or individual keyword
+    arguments; when omitted the defaults from :mod:`src.config` are used.
 
     Returns
     -------
@@ -125,10 +128,13 @@ def detect_market_regime(
 
     di_delta = abs(dip - dim)
 
-    try:
-        regime_cfg = settings.regime
-    except AttributeError:  # pragma: no cover - defensive fallback
-        regime_cfg = RegimeSettings()
+    if regime_settings is not None:
+        regime_cfg = regime_settings
+    else:
+        try:
+            regime_cfg = settings.regime
+        except AttributeError:  # pragma: no cover - defensive fallback
+            regime_cfg = RegimeSettings()
 
     adx_trend_threshold = float(
         adx_trend_threshold

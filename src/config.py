@@ -864,6 +864,49 @@ class AppSettings(BaseSettings):
         default_factory=lambda: float(os.getenv("BAR_MAX_LAG_S", "2")),
         validation_alias=AliasChoices("BAR_MAX_LAG_S", "DATA__BAR_MAX_LAG_S"),
     )
+    # Market regime detection thresholds (ADX/DI/Bollinger band width).
+    REGIME_ADX_TREND: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_ADX_TREND", "18.0")),
+        validation_alias=AliasChoices(
+            "REGIME_ADX_TREND",
+            "REGIME__ADX_TREND",
+        ),
+    )
+    REGIME_DI_DELTA_TREND: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_DI_DELTA_TREND", "8.0")),
+        validation_alias=AliasChoices(
+            "REGIME_DI_DELTA_TREND",
+            "REGIME__DI_DELTA_TREND",
+        ),
+    )
+    REGIME_BB_WIDTH_TREND: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_BB_WIDTH_TREND", "3.0")),
+        validation_alias=AliasChoices(
+            "REGIME_BB_WIDTH_TREND",
+            "REGIME__BB_WIDTH_TREND",
+        ),
+    )
+    REGIME_ADX_RANGE: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_ADX_RANGE", "18.0")),
+        validation_alias=AliasChoices(
+            "REGIME_ADX_RANGE",
+            "REGIME__ADX_RANGE",
+        ),
+    )
+    REGIME_DI_DELTA_RANGE: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_DI_DELTA_RANGE", "6.0")),
+        validation_alias=AliasChoices(
+            "REGIME_DI_DELTA_RANGE",
+            "REGIME__DI_DELTA_RANGE",
+        ),
+    )
+    REGIME_BB_WIDTH_RANGE: float = Field(
+        default_factory=lambda: float(os.getenv("REGIME_BB_WIDTH_RANGE", "2.0")),
+        validation_alias=AliasChoices(
+            "REGIME_BB_WIDTH_RANGE",
+            "REGIME__BB_WIDTH_RANGE",
+        ),
+    )
     # Runner cadence bounds (seconds) used to throttle evaluation frequency.
     cadence_min_interval_s: float = Field(
         0.3,
@@ -914,6 +957,25 @@ class AppSettings(BaseSettings):
         val = str(v).lower()
         if val not in {"premium", "underlying"}:
             raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
+        return val
+
+    @field_validator(
+        "REGIME_ADX_TREND",
+        "REGIME_DI_DELTA_TREND",
+        "REGIME_BB_WIDTH_TREND",
+        "REGIME_ADX_RANGE",
+        "REGIME_DI_DELTA_RANGE",
+        "REGIME_BB_WIDTH_RANGE",
+        mode="before",
+    )
+    @classmethod
+    def _v_app_regime_thresholds(cls, v: object) -> float:
+        try:
+            val = float(v) if isinstance(v, (int, float)) else float(str(v))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("regime thresholds must be numeric") from exc
+        if val < 0:
+            raise ValueError("regime thresholds must be >= 0")
         return val
 
     @field_validator("EXPOSURE_CAP_SOURCE", mode="before")
@@ -1021,6 +1083,12 @@ class AppSettings(BaseSettings):
         self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
         self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
         self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
+        self.regime.adx_trend = float(self.REGIME_ADX_TREND)
+        self.regime.di_delta_trend = float(self.REGIME_DI_DELTA_TREND)
+        self.regime.bb_width_trend = float(self.REGIME_BB_WIDTH_TREND)
+        self.regime.adx_range = float(self.REGIME_ADX_RANGE)
+        self.regime.di_delta_range = float(self.REGIME_DI_DELTA_RANGE)
+        self.regime.bb_width_range = float(self.REGIME_BB_WIDTH_RANGE)
         min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")
         if min_floor_env is not None:
             try:
@@ -1432,6 +1500,7 @@ def load_settings() -> AppSettings:
     cfg = AppSettings(
         zerodha=ZerodhaSettings.from_env(),
         telegram=TelegramSettings.from_env(),
+        _env_file=None,
     )  # type: ignore[call-arg]
     _apply_env_overrides(cfg)
     snap = cfg.model_dump()
