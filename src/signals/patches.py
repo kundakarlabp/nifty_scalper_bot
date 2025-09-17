@@ -22,10 +22,17 @@ def check_atr_band(atr_pct: float, min_val: float, max_val: float) -> tuple[bool
         and configured limits.
     """
 
-    if atr_pct < min_val:
-        return False, f"atr_out_of_band: atr={atr_pct:.4f} < min={min_val}"
-    if atr_pct > max_val:
-        return False, f"atr_out_of_band: atr={atr_pct:.4f} > max={max_val}"
+    min_bound = float(min_val)
+    max_bound = float(max_val)
+    if max_bound <= 0:
+        max_bound = float("inf")
+    elif max_bound < min_bound:
+        max_bound = min_bound
+
+    if atr_pct < min_bound:
+        return False, f"atr_out_of_band: atr={atr_pct:.4f} < min={min_bound}"
+    if max_bound != float("inf") and atr_pct > max_bound:
+        return False, f"atr_out_of_band: atr={atr_pct:.4f} > max={max_bound}"
     return True, None
 
 
