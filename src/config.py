@@ -492,7 +492,7 @@ class RiskSettings(BaseModel):
     trading_window_end: str = "15:30"
     # Session guard: disallow new entries at or after this HH:MM (IST).
     no_new_after_hhmm: str | None = Field(
-        "15:20",
+        None,
         description=(
             "Latest IST timestamp (HH:MM) to initiate new positions before "
             "risk gates halt entries."

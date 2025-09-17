@@ -22,7 +22,7 @@ class DummyTelegram:
 TZ = ZoneInfo("Asia/Kolkata")
 
 
-def test_no_entries_after_1520(monkeypatch) -> None:
+def test_entries_allowed_after_1520(monkeypatch) -> None:
     telegram = DummyTelegram()
     runner = StrategyRunner(telegram_controller=telegram)
     monkeypatch.setattr(settings, "enable_live_trading", True, raising=False)
@@ -35,7 +35,7 @@ def test_no_entries_after_1520(monkeypatch) -> None:
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1520"
+    assert flow["reason_block"] != "after_1520"
 
 
 def test_eod_close_triggers(monkeypatch) -> None:
@@ -67,7 +67,7 @@ def test_eod_close_triggers(monkeypatch) -> None:
 
     runner.process_tick(None)
     flow = runner.get_last_flow_debug()
-    assert flow["reason_block"] == "after_1520"
+    assert flow["reason_block"] != "after_1520"
     assert called["close"] == 1
     assert called["cancel"] == 1
     assert telegram.eod_calls == 1
