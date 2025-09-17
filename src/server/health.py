@@ -247,16 +247,25 @@ def run(
             daemon=True,
         ).start()
 
-    Env overrides:
-      HEALTH_HOST (default "0.0.0.0")
-      HEALTH_PORT (default "8000")
+    Configuration order of precedence (highest first):
+      1. ``host``/``port`` arguments passed to ``run``
+      2. Environment variables ``HEALTH_HOST`` / ``HEALTH_PORT``
+      3. Values from ``settings.health`` (defaults to 0.0.0.0:8000)
     """
     global _status_callback, _start_ts
     _status_callback = callback
     _start_ts = time.time()
 
-    bind_host = host or os.environ.get("HEALTH_HOST", "0.0.0.0")
-    bind_port = int(port or int(os.environ.get("HEALTH_PORT", "8000")))
+    from src.config import settings
+
+    default_host = getattr(settings.health, "host", "0.0.0.0")
+    default_port = int(getattr(settings.health, "port", 8000))
+
+    env_host = os.environ.get("HEALTH_HOST")
+    env_port = os.environ.get("HEALTH_PORT")
+
+    bind_host = host or env_host or default_host
+    bind_port = int(port if port is not None else env_port or default_port)
 
     # Attempt to use a production-grade server if available
     try:
