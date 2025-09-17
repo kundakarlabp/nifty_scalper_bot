@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 import pandas as pd
 
-from src.config import RegimeSettings, settings
+from src.config import StrategySettings, settings
 
 
 @dataclass
@@ -126,39 +126,39 @@ def detect_market_regime(
     di_delta = abs(dip - dim)
 
     try:
-        regime_cfg = settings.regime
+        strategy_cfg = settings.strategy
     except AttributeError:  # pragma: no cover - defensive fallback
-        regime_cfg = RegimeSettings()
+        strategy_cfg = StrategySettings()  # type: ignore[call-arg]
 
     adx_trend_threshold = float(
         adx_trend_threshold
         if adx_trend_threshold is not None
-        else regime_cfg.adx_trend
+        else strategy_cfg.adx_trend_threshold
     )
     di_delta_trend_threshold = float(
         di_delta_trend_threshold
         if di_delta_trend_threshold is not None
-        else regime_cfg.di_delta_trend
+        else strategy_cfg.di_delta_trend_threshold
     )
     bb_width_trend_threshold = float(
         bb_width_trend_threshold
         if bb_width_trend_threshold is not None
-        else regime_cfg.bb_width_trend
+        else strategy_cfg.bb_width_trend_threshold
     )
     adx_range_threshold = float(
         adx_range_threshold
         if adx_range_threshold is not None
-        else regime_cfg.adx_range
+        else strategy_cfg.adx_range_threshold
     )
     di_delta_range_threshold = float(
         di_delta_range_threshold
         if di_delta_range_threshold is not None
-        else regime_cfg.di_delta_range
+        else strategy_cfg.di_delta_range_threshold
     )
     bb_width_range_threshold = float(
         bb_width_range_threshold
         if bb_width_range_threshold is not None
-        else regime_cfg.bb_width_range
+        else strategy_cfg.bb_width_range_threshold
     )
 
     if (

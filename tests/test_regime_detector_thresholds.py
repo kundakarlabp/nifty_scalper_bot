@@ -38,9 +38,9 @@ def test_indecisive_returns_no_trade() -> None:
 
 def test_settings_defaults_are_respected(monkeypatch) -> None:
     df = pd.DataFrame({"close": [100.0]})
-    monkeypatch.setattr(settings.regime, "adx_trend", 5.0)
-    monkeypatch.setattr(settings.regime, "di_delta_trend", 3.0)
-    monkeypatch.setattr(settings.regime, "bb_width_trend", 0.5)
+    monkeypatch.setattr(settings.strategy, "adx_trend_threshold", 5.0)
+    monkeypatch.setattr(settings.strategy, "di_delta_trend_threshold", 3.0)
+    monkeypatch.setattr(settings.strategy, "bb_width_trend_threshold", 0.5)
 
     res = detect_market_regime(
         df=df,
@@ -65,4 +65,35 @@ def test_threshold_overrides_parameter() -> None:
         bb_width_trend_threshold=0.5,
     )
     assert res.regime == "TREND"
+
+
+def test_range_threshold_defaults(monkeypatch) -> None:
+    df = pd.DataFrame({"close": [100.0]})
+    monkeypatch.setattr(settings.strategy, "adx_range_threshold", 30.0)
+    monkeypatch.setattr(settings.strategy, "di_delta_range_threshold", 20.0)
+    monkeypatch.setattr(settings.strategy, "bb_width_range_threshold", 5.0)
+
+    res = detect_market_regime(
+        df=df,
+        adx=_make_series(25.0),
+        di_plus=_make_series(20.0),
+        di_minus=_make_series(15.0),
+        bb_width=_make_series(4.0),
+    )
+    assert res.regime == "RANGE"
+
+
+def test_range_threshold_override() -> None:
+    df = pd.DataFrame({"close": [100.0]})
+    res = detect_market_regime(
+        df=df,
+        adx=_make_series(4.0),
+        di_plus=_make_series(14.0),
+        di_minus=_make_series(13.0),
+        bb_width=_make_series(0.4),
+        adx_range_threshold=5.0,
+        di_delta_range_threshold=1.0,
+        bb_width_range_threshold=0.5,
+    )
+    assert res.regime == "RANGE"
 

@@ -241,6 +241,36 @@ class StrategySettings(BaseModel):
     rr_threshold: float | None = 1.5
     # Pick a tradable contract by default (prevents no_option_token on non-expiry days)
     option_expiry_mode: Literal["today", "nearest", "next"] = "nearest"
+    # ADX level that qualifies as a trending market.
+    adx_trend_threshold: float = Field(
+        18.0,
+        description="Minimum ADX value required before treating conditions as trending.",
+    )
+    # Minimum DI+/- separation to confirm trend strength.
+    di_delta_trend_threshold: float = Field(
+        8.0,
+        description="Minimum |DI+ - DI-| delta required to classify a trend.",
+    )
+    # Minimum Bollinger Band width percentage to consider price expansion.
+    bb_width_trend_threshold: float = Field(
+        3.0,
+        description="Lower bound on Bollinger Band width (percent) for trend trades.",
+    )
+    # ADX ceiling for range classification.
+    adx_range_threshold: float = Field(
+        18.0,
+        description="Upper bound on ADX before range setups are rejected.",
+    )
+    # DI+/- separation allowed within a range regime.
+    di_delta_range_threshold: float = Field(
+        6.0,
+        description="Maximum |DI+ - DI-| delta tolerated when range trading.",
+    )
+    # Minimum Bollinger Band width to avoid ultra-tight consolidations.
+    bb_width_range_threshold: float = Field(
+        2.0,
+        description="Minimum Bollinger Band width (percent) for range conditions.",
+    )
 
     @field_validator("confidence_threshold")
     @classmethod
@@ -269,6 +299,22 @@ class StrategySettings(BaseModel):
         if v <= 1.0:
             raise ValueError("rr_min must be > 1.0")
         return v
+
+    @field_validator(
+        "adx_trend_threshold",
+        "di_delta_trend_threshold",
+        "bb_width_trend_threshold",
+        "adx_range_threshold",
+        "di_delta_range_threshold",
+        "bb_width_range_threshold",
+        mode="before",
+    )
+    @classmethod
+    def _v_non_negative(cls, value: float) -> float:
+        val = float(value)
+        if val < 0:
+            raise ValueError("strategy regime thresholds must be non-negative")
+        return val
 
 
 class RegimeSettings(BaseModel):
@@ -1037,7 +1083,7 @@ class AppSettings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()  # type: ignore[call-arg]
     instruments: InstrumentsSettings = InstrumentsSettings()
-    strategy: StrategySettings = StrategySettings()
+    strategy: StrategySettings = StrategySettings()  # type: ignore[call-arg]
     regime: RegimeSettings = RegimeSettings()
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
