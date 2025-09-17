@@ -157,3 +157,15 @@ def test_backtest_command_uses_runner() -> None:
     assert handled is True
     assert captured["path"] == "foo.csv"
     assert sent == ["ran"]
+
+
+def test_handle_cmd_delegates_when_external_handler_present() -> None:
+    calls: list[tuple[str, str]] = []
+
+    tc = TelegramCommands("t", "123", on_cmd=lambda cmd, arg: calls.append((cmd, arg)))
+
+    handled = tc._handle_cmd("/pause", "5m")
+
+    assert handled is False
+    assert calls == []
+    assert tc.paused_until == 0

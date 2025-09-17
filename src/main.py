@@ -193,11 +193,26 @@ def _make_cmd_handler(runner: StrategyRunner) -> Callable[[str, str], None]:
         "/pause": runner.pause,
         "/resume": runner.resume,
     }
+    log = logging.getLogger("main")
+
+    telegram = getattr(runner, "telegram_controller", None)
+    chat_id = getattr(telegram, "_chat_id", None)
+    handler = getattr(telegram, "_handle_update", None)
 
     def handle(cmd: str, _arg: str) -> None:
+        text = cmd if not _arg else f"{cmd} {_arg}"
+        if callable(handler) and chat_id:
+            try:
+                handler({"message": {"chat": {"id": chat_id}, "text": text}})
+            except Exception:
+                log.exception("Telegram controller command failed: %s", cmd)
+            return
         action = commands.get(cmd)
         if action:
-            action()
+            try:
+                action()
+            except Exception:
+                log.exception("Fallback command failed: %s", cmd)
 
     return handle
 
