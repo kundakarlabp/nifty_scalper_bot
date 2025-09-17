@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Optional
 import requests
 import time
 
@@ -138,3 +139,21 @@ def test_loop_recovers_from_network_error(monkeypatch) -> None:
     monkeypatch.setattr(requests, "get", fake_get)
     tc._loop()
     assert calls == [("/start", "")]
+
+
+def test_backtest_command_uses_runner() -> None:
+    captured: dict[str, Optional[str]] = {}
+
+    def runner(path: Optional[str]) -> str:
+        captured["path"] = path
+        return "ran"
+
+    tc = TelegramCommands("t", "123", backtest_runner=runner)
+    sent: list[str] = []
+    tc._send = lambda text: sent.append(text)
+
+    handled = tc._handle_cmd("/backtest", "foo.csv")
+
+    assert handled is True
+    assert captured["path"] == "foo.csv"
+    assert sent == ["ran"]
