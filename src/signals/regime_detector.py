@@ -19,20 +19,7 @@ from typing import Literal, Optional
 
 import pandas as pd
 
-# --------------------------- default thresholds ---------------------------
-
-# These constants are intentionally duplicated here rather than relying on the
-# global settings object so the function can be used in isolation during unit
-# tests.  Callers may still choose to parametrise via ``settings`` and pass the
-# values in explicitly.
-
-ADX_TREND = 18
-DI_DELTA_TREND = 8
-BB_WIDTH_TREND = 3.0
-
-ADX_RANGE = 18
-DI_DELTA_RANGE = 6
-BB_WIDTH_RANGE = 2.0
+from src.config import RegimeSettings, settings
 
 
 @dataclass
@@ -81,6 +68,12 @@ def detect_market_regime(
     di_plus: Optional[pd.Series] = None,
     di_minus: Optional[pd.Series] = None,
     bb_width: Optional[pd.Series] = None,
+    adx_trend_threshold: float | None = None,
+    di_delta_trend_threshold: float | None = None,
+    bb_width_trend_threshold: float | None = None,
+    adx_range_threshold: float | None = None,
+    di_delta_range_threshold: float | None = None,
+    bb_width_range_threshold: float | None = None,
 ) -> RegimeResult:
     """Classify the market regime using ADX/DI and Bollinger width.
 
@@ -132,19 +125,55 @@ def detect_market_regime(
 
     di_delta = abs(dip - dim)
 
+    try:
+        regime_cfg = settings.regime
+    except AttributeError:  # pragma: no cover - defensive fallback
+        regime_cfg = RegimeSettings()
+
+    adx_trend_threshold = float(
+        adx_trend_threshold
+        if adx_trend_threshold is not None
+        else regime_cfg.adx_trend
+    )
+    di_delta_trend_threshold = float(
+        di_delta_trend_threshold
+        if di_delta_trend_threshold is not None
+        else regime_cfg.di_delta_trend
+    )
+    bb_width_trend_threshold = float(
+        bb_width_trend_threshold
+        if bb_width_trend_threshold is not None
+        else regime_cfg.bb_width_trend
+    )
+    adx_range_threshold = float(
+        adx_range_threshold
+        if adx_range_threshold is not None
+        else regime_cfg.adx_range
+    )
+    di_delta_range_threshold = float(
+        di_delta_range_threshold
+        if di_delta_range_threshold is not None
+        else regime_cfg.di_delta_range
+    )
+    bb_width_range_threshold = float(
+        bb_width_range_threshold
+        if bb_width_range_threshold is not None
+        else regime_cfg.bb_width_range
+    )
+
     if (
-        adx_val >= ADX_TREND
-        and di_delta >= DI_DELTA_TREND
-        and bb_width_val >= BB_WIDTH_TREND
+        adx_val >= adx_trend_threshold
+        and di_delta >= di_delta_trend_threshold
+        and bb_width_val >= bb_width_trend_threshold
     ):
         return RegimeResult(
             "TREND", adx_val, dip, dim, bb_width_val, "trend_conditions"
         )
 
     if (
-        adx_val < ADX_RANGE
-        or bb_width_val < BB_WIDTH_RANGE
-        or di_delta < DI_DELTA_RANGE
+        adx_val < adx_range_threshold
+        or bb_width_val < bb_width_range_threshold
+        or di_delta < di_delta_range_threshold
     ):
         return RegimeResult(
             "RANGE", adx_val, dip, dim, bb_width_val, "range_conditions"
