@@ -1042,6 +1042,12 @@ class AppSettings(BaseSettings):
         pct = float(self.EXPOSURE_CAP_PCT)
         return pct / 100.0
 
+    instruments_csv: str = Field(
+        default_factory=lambda: str(
+            os.getenv("INSTRUMENTS__CSV") or os.getenv("INSTRUMENTS_CSV", "")
+        ),
+        validation_alias=AliasChoices("INSTRUMENTS_CSV", "INSTRUMENTS__CSV"),
+    )
     cb_error_rate: float = 0.10
     cb_p95_ms: int = 1200
     cb_min_samples: int = 30
@@ -1057,6 +1063,10 @@ class AppSettings(BaseSettings):
     @property
     def PORTFOLIO_READS(self) -> bool:  # pragma: no cover - simple alias
         return self.portfolio_reads
+
+    @property
+    def INSTRUMENTS_CSV(self) -> str:  # pragma: no cover - legacy alias
+        return self.instruments_csv
 
     # Data warmup
     warmup_bars: int = 15
