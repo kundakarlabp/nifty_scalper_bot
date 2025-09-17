@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.config import settings as app_settings
+from src.config import InstrumentConfig, settings as app_settings
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
@@ -198,6 +198,102 @@ def test_daily_premium_loss_blocks():
     eng.state.cum_loss_rupees = -150.0
     ok, reason, _ = eng.pre_trade_check(**_basic_args())
     assert not ok and reason == "daily_premium_loss"
+
+
+def test_volatility_loss_cap_blocks():
+    cfg = LimitConfig(
+        max_daily_loss_rupees=200.0,
+        volatility_ref_atr_pct=2.0,
+        volatility_loss_min_multiplier=0.3,
+        volatility_loss_max_multiplier=1.5,
+    )
+    eng = RiskEngine(cfg)
+    eng.state.session_date = FIXED_NOW.date().isoformat()
+    eng.state.cum_loss_rupees = -120.0
+    args = _basic_args()
+    args["plan"] = {"atr_pct": 5.0}
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "volatility_loss_cap"
+    assert details["threshold"] < abs(cfg.max_daily_loss_rupees)
+
+
+def test_instrument_specific_lot_cap(monkeypatch):
+    cfg = LimitConfig(max_lots_per_symbol=6)
+    eng = RiskEngine(cfg)
+    inst = InstrumentConfig(
+        symbol="BANKNIFTY",
+        spot_symbol="NSE:BANKNIFTY",
+        trade_symbol="BANKNIFTY",
+        trade_exchange="NFO",
+        instrument_token=999,
+        spot_token=999,
+        nifty_lot_size=15,
+        strike_range=200,
+        min_lots=1,
+        max_lots=2,
+    )
+    monkeypatch.setitem(app_settings.instruments.additional, "BANKNIFTY", inst)
+    args = _basic_args()
+    args.update({"intended_symbol": "BANKNIFTY"})
+    args["exposure"] = Exposure(lots_by_symbol={"BANKNIFTY": 2})
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "lot_cap"
+    assert details["cap"] == 2
+
+
+def test_regime_lot_clamp_blocks():
+    cfg = LimitConfig(max_lots_per_symbol=4, regime_lot_multipliers={"RANGE": 0.5})
+    eng = RiskEngine(cfg)
+    exp = Exposure(lots_by_symbol={"SYM": 1})
+    args = _basic_args()
+    args["plan"] = {"regime": "range"}
+    args["exposure"] = exp
+    args["intended_lots"] = 2
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "lot_cap"
+    assert details["cap"] == 2
+
+
+def test_regime_delta_cap_blocks():
+    cfg = LimitConfig(
+        max_portfolio_delta_units=100,
+        regime_delta_multipliers={"RANGE": 0.4},
+    )
+    eng = RiskEngine(cfg)
+    args = _basic_args()
+    args["plan"] = {"regime": "RANGE"}
+    args["portfolio_delta_units"] = 50.0
+    args["planned_delta_units"] = 0.0
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "delta_cap"
+    assert details["cap"] == 40
+
+
+def test_var_limit_blocks():
+    cfg = LimitConfig(var_lookback_trades=5, max_var_rupees=85.0, var_confidence=0.8)
+    eng = RiskEngine(cfg)
+    eng.state.session_date = FIXED_NOW.date().isoformat()
+    eng.state.pnl_history_rupees = [-30.0, -50.0, -80.0, -120.0, -60.0]
+    args = _basic_args()
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "var_limit"
+    assert details["threshold"] == pytest.approx(85.0)
+
+
+def test_cvar_limit_blocks():
+    cfg = LimitConfig(
+        var_lookback_trades=5,
+        max_var_rupees=500.0,
+        max_cvar_rupees=75.0,
+        cvar_confidence=0.6,
+    )
+    eng = RiskEngine(cfg)
+    eng.state.session_date = FIXED_NOW.date().isoformat()
+    eng.state.pnl_history_rupees = [-40.0, -60.0, -90.0, -120.0, -80.0]
+    args = _basic_args()
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "cvar_limit"
+    assert details["threshold"] == pytest.approx(75.0)
 
 
 def test_mid_price_from_quote():

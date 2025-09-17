@@ -13,7 +13,14 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppSettings, DataSettings, RiskSettings, load_settings
+from src.config import (
+    AppSettings,
+    DataSettings,
+    InstrumentConfig,
+    InstrumentsSettings,
+    RiskSettings,
+    load_settings,
+)
 from src.boot.validate_env import validate_critical_settings
 from src.data.types import HistResult, HistStatus
 
@@ -459,6 +466,39 @@ def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
         m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         # Should not raise
         validate_critical_settings()
+
+
+def test_instrument_settings_portfolio_lookup():
+    base = InstrumentsSettings()
+    inst = base.instrument()
+    assert inst.trade_symbol == base.trade_symbol
+    # Unknown symbols inherit the primary instrument
+    fallback = base.instrument("UNKNOWN")
+    assert fallback.trade_symbol == base.trade_symbol
+
+
+def test_instrument_settings_additional_resolution():
+    cfg = InstrumentsSettings(
+        additional={
+            "BANKNIFTY": InstrumentConfig(
+                symbol="BANKNIFTY",
+                trade_symbol="BANKNIFTY",
+                spot_symbol="NSE:BANKNIFTY",
+                trade_exchange="NFO",
+                instrument_token=123456,
+                spot_token=123456,
+                nifty_lot_size=25,
+                strike_range=4,
+                min_lots=1,
+                max_lots=3,
+            )
+        }
+    )
+    bank = cfg.instrument("BANKNIFTY")
+    assert bank.max_lots == 3
+    portfolio = cfg.portfolio()
+    assert "BANKNIFTY" in portfolio
+    assert portfolio["BANKNIFTY"].trade_symbol == "BANKNIFTY"
 
 
 def test_lookback_less_than_min_bars():
