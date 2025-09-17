@@ -164,6 +164,67 @@ def test_quotes_formats_micro(monkeypatch) -> None:
     assert "📈 *Quotes*" in msg and "quote: SYM" in msg
 
 
+def test_orders_invokes_provider(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    calls: list[str] = []
+
+    def provider() -> list[dict[str, object]]:
+        calls.append("orders")
+        return [
+            {
+                "trade": "T1",
+                "leg": "T1:ENTRY",
+                "sym": "NIFTY",
+                "state": "PENDING",
+                "qty": 50,
+                "filled": 0,
+                "avg": 0.0,
+                "status": "OPEN",
+                "age_s": 12,
+            }
+        ]
+
+    tc = TelegramController(status_provider=lambda: {}, open_trades_provider=provider)
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/orders"}})
+    assert calls == ["orders"]
+    msg = sent[0]
+    assert "Trade T1 [OPEN]" in msg
+    assert "age=12s" in msg
+
+
+def test_cancel_trade_wires_helper(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    cancelled: list[str] = []
+
+    def cancel_trade(trade_id: str) -> None:
+        cancelled.append(trade_id)
+
+    tc = TelegramController(status_provider=lambda: {}, cancel_trade=cancel_trade)
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/cancel T42"}})
+    assert cancelled == ["T42"]
+    assert sent[0] == "Cancel requested for T42."
+
+
+def test_reconcile_runs_once(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    calls: list[int] = []
+
+    def reconcile_once() -> int:
+        calls.append(1)
+        return 3
+
+    tc = TelegramController(status_provider=lambda: {}, reconcile_once=reconcile_once)
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/reconcile"}})
+    assert calls == [1]
+    assert sent[0] == "Reconciled 3 legs."
+
+
 def test_expiry_shows_dates(monkeypatch) -> None:
     _prep_settings(monkeypatch)
     monkeypatch.setattr(

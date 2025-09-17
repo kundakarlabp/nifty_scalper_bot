@@ -2686,6 +2686,29 @@ class StrategyRunner:
             "rr_threshold": getattr(self.strategy_cfg, "rr_threshold", None),
         }
 
+    def open_trades_provider(self) -> List[Dict[str, Any]]:
+        """Return a snapshot of open legs suitable for Telegram diagnostics."""
+
+        snapshot_fn = getattr(self.order_executor, "open_legs_snapshot", None)
+        if callable(snapshot_fn):
+            return snapshot_fn()
+        return []
+
+    def cancel_trade(self, trade_id: str) -> None:
+        """Forward a manual cancel request for the given trade id."""
+
+        canceller = getattr(self.order_executor, "cancel_trade", None)
+        if callable(canceller):
+            canceller(str(trade_id))
+
+    def reconcile_once(self) -> int:
+        """Run a single reconciliation step and return updated leg count."""
+
+        reconciler = getattr(self, "reconciler", None)
+        if reconciler is None:
+            return 0
+        return int(reconciler.step(self.now_ist))
+
     def _build_diag_bundle(self) -> Dict[str, Any]:
         """Health cards for /diag (compact) and /check (detailed)."""
         checks: List[Dict[str, Any]] = []
