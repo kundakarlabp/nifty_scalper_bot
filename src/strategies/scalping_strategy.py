@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
+import weakref
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
@@ -19,6 +21,7 @@ from src.execution.order_executor import fetch_quote_with_depth
 from src.diagnostics.metrics import runtime_metrics
 from src.signals.patches import check_atr_band
 from src.signals.regime_detector import detect_market_regime
+from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
 from src.strategies.patches import _resolve_min_atr_pct
@@ -117,8 +120,224 @@ class ScoreDetails:
     total: float
 
 
-def _trend_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
+@dataclass
+class IndicatorSnapshot:
+    """Snapshot of rolling indicator state used during scoring."""
+
+    ema_fast: float
+    ema_slow: float
+    atr: float
+    mean: float
+    std: float
+    close: float
+    atr_ready: bool
+    bollinger_ready: bool
+    samples: int
+
+    @property
+    def bandwidth(self) -> float:
+        return float(self.std * 2.0)
+
+    @property
+    def bollinger_percent(self) -> float:
+        band = self.bandwidth
+        if band <= 0:
+            return 0.5
+        lower = self.mean - (band / 2.0)
+        frac = (self.close - lower) / band
+        return _clamp(frac)
+
+
+class RollingIndicatorBundle:
+    """Maintain rolling EMA, Bollinger and ATR state for a dataframe."""
+
+    def __init__(self) -> None:
+        self.ema_fast_period = 0
+        self.ema_slow_period = 0
+        self.bb_period = 0
+        self.atr_period = 0
+        self._fast_alpha = 0.0
+        self._slow_alpha = 0.0
+        self._ema_fast: Optional[float] = None
+        self._ema_slow: Optional[float] = None
+        self._atr_value: Optional[float] = None
+        self._atr_ready = False
+        self._atr_buffer: Deque[float] = deque()
+        self._prev_close: Optional[float] = None
+        self._close_window: Deque[float] = deque()
+        self._sum_close = 0.0
+        self._sum_sq_close = 0.0
+        self._last_len = 0
+        self._has_hl = False
+
+    def _reset_state(self) -> None:
+        self._ema_fast = None
+        self._ema_slow = None
+        self._atr_value = None
+        self._atr_ready = False
+        self._atr_buffer = deque(maxlen=max(1, self.atr_period))
+        self._prev_close = None
+        self._close_window = deque(maxlen=max(1, self.bb_period))
+        self._sum_close = 0.0
+        self._sum_sq_close = 0.0
+        self._last_len = 0
+
+    def _configure(self, cfg: Any) -> None:
+        ema_fast = int(getattr(cfg, "ema_fast", 9))
+        ema_slow = int(getattr(cfg, "ema_slow", 21))
+        bb_period = int(getattr(cfg, "bb_period", 20))
+        atr_period = int(getattr(cfg, "atr_period", 14))
+        if (
+            ema_fast != self.ema_fast_period
+            or ema_slow != self.ema_slow_period
+            or bb_period != self.bb_period
+            or atr_period != self.atr_period
+        ):
+            self.ema_fast_period = ema_fast
+            self.ema_slow_period = ema_slow
+            self.bb_period = bb_period
+            self.atr_period = atr_period
+            self._fast_alpha = 2.0 / (self.ema_fast_period + 1.0)
+            self._slow_alpha = 2.0 / (self.ema_slow_period + 1.0)
+            self._reset_state()
+
+    def update(self, df: pd.DataFrame, cfg: Any) -> Optional[IndicatorSnapshot]:
+        if df is None or df.empty or "close" not in df.columns:
+            self._reset_state()
+            return None
+        self._configure(cfg)
+        self._has_hl = {"high", "low"}.issubset(df.columns)
+        length = len(df)
+        if length < self._last_len:
+            self._reset_state()
+        start = self._last_len if self._last_len else 0
+        rows = df.iloc[start:].itertuples(index=False)
+        updated = False
+        for row in rows:
+            close = float(getattr(row, "close", float("nan")))
+            if math.isnan(close):
+                continue
+            updated = True
+            self._update_ema(close)
+            self._update_bollinger(close)
+            if self._has_hl:
+                high = float(getattr(row, "high", close))
+                low = float(getattr(row, "low", close))
+                self._update_atr(high, low, close)
+        if not updated and self._last_len == 0:
+            for row in df.itertuples(index=False):
+                close = float(getattr(row, "close", float("nan")))
+                if math.isnan(close):
+                    continue
+                self._update_ema(close)
+                self._update_bollinger(close)
+                if self._has_hl:
+                    high = float(getattr(row, "high", close))
+                    low = float(getattr(row, "low", close))
+                    self._update_atr(high, low, close)
+        self._last_len = length
+        if self._ema_fast is None or self._ema_slow is None:
+            return None
+        close_val = float(df["close"].iloc[-1])
+        samples = len(self._close_window)
+        if samples:
+            mean = self._sum_close / samples
+            variance = max(self._sum_sq_close / samples - mean * mean, 0.0)
+            std = math.sqrt(variance)
+        else:
+            mean = close_val
+            std = 0.0
+        return IndicatorSnapshot(
+            ema_fast=float(self._ema_fast),
+            ema_slow=float(self._ema_slow),
+            atr=float(self._atr_value or 0.0),
+            mean=float(mean),
+            std=float(std),
+            close=float(close_val),
+            atr_ready=bool(self._atr_ready or "atr" in df.columns),
+            bollinger_ready=samples >= self.bb_period > 0,
+            samples=length,
+        )
+
+    def _update_ema(self, close: float) -> None:
+        if self._ema_fast is None:
+            self._ema_fast = close
+        else:
+            self._ema_fast = (
+                self._fast_alpha * close + (1.0 - self._fast_alpha) * self._ema_fast
+            )
+        if self._ema_slow is None:
+            self._ema_slow = close
+        else:
+            self._ema_slow = (
+                self._slow_alpha * close + (1.0 - self._slow_alpha) * self._ema_slow
+            )
+
+    def _update_bollinger(self, close: float) -> None:
+        if self.bb_period <= 0:
+            return
+        if len(self._close_window) == self.bb_period:
+            oldest = self._close_window.popleft()
+            self._sum_close -= oldest
+            self._sum_sq_close -= oldest * oldest
+        self._close_window.append(close)
+        self._sum_close += close
+        self._sum_sq_close += close * close
+
+    def _update_atr(self, high: float, low: float, close: float) -> None:
+        if self.atr_period <= 0:
+            return
+        if self._prev_close is None:
+            tr = abs(high - low)
+        else:
+            tr = max(
+                abs(high - low),
+                abs(high - self._prev_close),
+                abs(low - self._prev_close),
+            )
+        self._prev_close = close
+        if not self._atr_ready:
+            self._atr_buffer.append(tr)
+            if len(self._atr_buffer) >= self.atr_period:
+                self._atr_value = sum(self._atr_buffer) / self.atr_period
+                self._atr_ready = True
+        else:
+            assert self._atr_value is not None
+            self._atr_value = (
+                (self._atr_value * (self.atr_period - 1)) + tr
+            ) / self.atr_period
+
+
+class RollingIndicatorCache:
+    """Weak cache mapping dataframes to rolling indicator bundles."""
+
+    def __init__(self) -> None:
+        self._cache: "weakref.WeakKeyDictionary[pd.DataFrame, RollingIndicatorBundle]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def snapshot(self, df: pd.DataFrame, cfg: Any) -> Optional[IndicatorSnapshot]:
+        bundle = self._cache.get(df)
+        if bundle is None:
+            bundle = RollingIndicatorBundle()
+            self._cache[df] = bundle
+        return bundle.update(df, cfg)
+
+
+_INDICATOR_CACHE = RollingIndicatorCache()
+
+
+def _trend_score(
+    df: pd.DataFrame, cfg: Any, snap: Optional[IndicatorSnapshot] = None
+) -> Tuple[float, ScoreDetails]:
     """Compute trend-following score using EMA slope."""
+
+    if snap and snap.atr_ready:
+        atr_val = snap.atr or (df["atr"].iloc[-1] if "atr" in df.columns else 1e-9)
+        slope = (snap.ema_fast - snap.ema_slow) / (atr_val or 1e-9)
+        s = _clamp(abs(slope))
+        det = ScoreDetails("TREND", {"ema_slope": s}, s)
+        return s, det
 
     ema_fast = df["close"].ewm(span=getattr(cfg, "ema_fast", 9), adjust=False).mean()
     ema_slow = df["close"].ewm(span=getattr(cfg, "ema_slow", 21), adjust=False).mean()
@@ -128,10 +347,34 @@ def _trend_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
     return s, det
 
 
-def _range_score(df: pd.DataFrame, cfg: Any) -> Tuple[float, ScoreDetails]:
+def _range_score(
+    df: pd.DataFrame, cfg: Any, snap: Optional[IndicatorSnapshot] = None
+) -> Tuple[float, ScoreDetails]:
     """Compute mean‑reversion score for range‑bound markets."""
 
     period = getattr(cfg, "bb_period", 20)
+    if snap and snap.atr_ready and snap.bollinger_ready:
+        atr_val = snap.atr or (df["atr"].iloc[-1] if "atr" in df.columns else 1e-9)
+        bandw = snap.bandwidth or 1e-9
+        dist = abs(snap.close - snap.mean) / (atr_val or 1e-9)
+        raw = dist / ((bandw or 1e-9) / (atr_val or 1e-9))
+        s = _clamp(raw)
+        wide_pen = _clamp((snap.std / (snap.mean or 1e-9)) * 4.0)
+        bbp = snap.bollinger_percent
+        chop_pen = _clamp(1.0 - abs(bbp - 0.5) * 2.0)
+        s = _clamp(s * (1.0 - 0.5 * wide_pen) * (1.0 - 0.5 * chop_pen))
+        det = ScoreDetails(
+            "RANGE",
+            {
+                "mr_dist": s,
+                "wide_pen": wide_pen,
+                "chop_pen": chop_pen,
+                "bb_percent": bbp,
+            },
+            s,
+        )
+        return s, det
+
     mid = df["close"].rolling(period).mean()
     dev = df["close"].rolling(period).std(ddof=0)
     bandw = (dev.iloc[-1] * 2.0) or 1e-9
@@ -167,14 +410,23 @@ def compute_score(
 
     if df is None or len(df) < getattr(cfg, "warmup_bars_min", 15):
         return 0.0, None
-    if "atr" not in df.columns:
+
+    snap: Optional[IndicatorSnapshot]
+    try:
+        snap = _INDICATOR_CACHE.snapshot(df, cfg)
+    except Exception:
+        snap = None
+
+    need_atr = "atr" not in df.columns and (snap is None or not snap.atr_ready)
+    if need_atr:
         period = getattr(cfg, "atr_period", 14)
         df = df.copy()
         df.loc[:, "atr"] = compute_atr(df, period=period)
+
     if regime == "TREND":
-        return _trend_score(df, cfg)
+        return _trend_score(df, cfg, snap)
     if regime == "RANGE" and getattr(cfg, "enable_range_scoring", True):
-        return _range_score(df, cfg)
+        return _range_score(df, cfg, snap)
     return 0.0, None
 
 
@@ -208,25 +460,44 @@ class EnhancedScalpingStrategy:
     def __init__(
         self,
         *,
-        ema_fast: int = settings.strategy.ema_fast,
-        ema_slow: int = settings.strategy.ema_slow,
-        rsi_period: int = settings.strategy.rsi_period,
+        params: StrategyParameters | None = None,
+        ema_fast: Optional[int] = None,
+        ema_slow: Optional[int] = None,
+        rsi_period: Optional[int] = None,
         adx_period: int = 14,
         adx_trend_strength: int = 20,
-        atr_period: int = settings.strategy.atr_period,
-        min_bars_for_signal: int = settings.strategy.min_bars_for_signal,
-        confidence_threshold: float = settings.strategy.confidence_threshold,
-        min_signal_score: int = settings.strategy.min_signal_score,
-        atr_sl_multiplier: float = settings.strategy.atr_sl_multiplier,
-        atr_tp_multiplier: float = settings.strategy.atr_tp_multiplier,
+        atr_period: Optional[int] = None,
+        min_bars_for_signal: Optional[int] = None,
+        confidence_threshold: Optional[float] = None,
+        min_signal_score: Optional[int] = None,
+        atr_sl_multiplier: Optional[float] = None,
+        atr_tp_multiplier: Optional[float] = None,
     ) -> None:
-        # Core lookbacks
-        self.ema_fast = int(ema_fast)
-        self.ema_slow = int(ema_slow)
-        self.rsi_period = int(rsi_period)
+        base_params = params or StrategyParameters.from_settings()
+        overrides: Dict[str, Any] = {}
+        if ema_fast is not None:
+            overrides["ema_fast"] = int(ema_fast)
+        if ema_slow is not None:
+            overrides["ema_slow"] = int(ema_slow)
+        if atr_period is not None:
+            overrides["atr_period"] = int(atr_period)
+        if confidence_threshold is not None:
+            overrides["confidence_threshold"] = float(confidence_threshold)
+        if min_signal_score is not None:
+            overrides["min_signal_score"] = int(min_signal_score)
+        if atr_sl_multiplier is not None:
+            overrides["atr_sl_multiplier"] = float(atr_sl_multiplier)
+        if atr_tp_multiplier is not None:
+            overrides["atr_tp_multiplier"] = float(atr_tp_multiplier)
+        if overrides:
+            base_params = replace(base_params, **overrides)
+        validated = base_params.merge_into(settings.strategy)
+        self._apply_parameters(StrategyParameters.from_settings(validated))
+
+        # Core lookbacks outside of tuned set
+        self.rsi_period = int(rsi_period or settings.strategy.rsi_period)
         self.adx_period = int(adx_period)
         self.adx_trend_strength = int(adx_trend_strength)
-        self.atr_period = int(atr_period)
 
         # Regime shaping (add to multipliers; can be negative)
         self.trend_tp_boost = float(getattr(settings.strategy, "trend_tp_boost", 0.6))
@@ -239,22 +510,10 @@ class EnhancedScalpingStrategy:
         )
 
         # Bars threshold for validity
+        if min_bars_for_signal is None:
+            min_bars_for_signal = int(settings.strategy.min_bars_for_signal)
         self.min_bars_for_signal = int(min_bars_for_signal)
 
-        # Thresholds (normalize confidence scale)
-        # Config is typically 0..100; internal scoring below returns ~0..8
-        raw_conf = float(confidence_threshold)  # e.g., 55 (%)
-        raw_conf_rel = float(
-            getattr(
-                settings.strategy,
-                "confidence_threshold_relaxed",
-                max(0.0, raw_conf - 20),
-            )
-        )
-        self.min_conf_strict = raw_conf / 10.0  # 55 -> 5.5 on a 0..10-ish scale
-        self.min_conf_relaxed = raw_conf_rel / 10.0
-
-        self.min_score_strict = int(min_signal_score)
         self.auto_relax_enabled = bool(
             getattr(settings.strategy, "auto_relax_enabled", True)
         )
@@ -269,9 +528,7 @@ class EnhancedScalpingStrategy:
             )
         )
 
-        # ATR & confidence shaping
-        self.base_sl_mult = float(atr_sl_multiplier)
-        self.base_tp_mult = float(atr_tp_multiplier)
+        # ATR & confidence shaping extras
         self.sl_conf_adj = float(getattr(settings.strategy, "sl_confidence_adj", 0.2))
         self.tp_conf_adj = float(getattr(settings.strategy, "tp_confidence_adj", 0.3))
 
@@ -381,6 +638,38 @@ class EnhancedScalpingStrategy:
     # ---------- debug export ----------
     def get_debug(self) -> Dict[str, Any]:
         return dict(self._last_debug)
+
+    def get_parameters(self) -> StrategyParameters:
+        """Return the currently active parameter set."""
+
+        return self.params
+
+    def update_parameters(self, new_params: StrategyParameters) -> None:
+        """Replace the active parameter set and refresh derived fields."""
+
+        validated = new_params.merge_into(settings.strategy)
+        self._apply_parameters(StrategyParameters.from_settings(validated))
+
+    def _apply_parameters(self, params: StrategyParameters) -> None:
+        """Apply ``params`` to internal thresholds and multipliers."""
+
+        self.params = params
+        self.ema_fast = int(params.ema_fast)
+        self.ema_slow = int(params.ema_slow)
+        self.atr_period = int(params.atr_period)
+        raw_conf = float(params.confidence_threshold)
+        raw_conf_rel = float(
+            getattr(
+                settings.strategy,
+                "confidence_threshold_relaxed",
+                max(0.0, raw_conf - 20.0),
+            )
+        )
+        self.min_conf_strict = raw_conf / 10.0
+        self.min_conf_relaxed = raw_conf_rel / 10.0
+        self.min_score_strict = int(params.min_signal_score)
+        self.base_sl_mult = float(params.atr_sl_multiplier)
+        self.base_tp_mult = float(params.atr_tp_multiplier)
 
     # ---------- main ----------
     def generate_signal(
