@@ -46,7 +46,15 @@ def _wrap_gate(fn: Callable[..., Any]) -> Callable[..., Any]:
         if args or "band_low" in kwargs:
             band_low = kwargs.get("band_low", args[0] if args else None)
             if band_low is not None:
-                clamped = min(float(band_low), _resolve_min_atr_pct())
+                # ``gate_atr_band`` style helpers expect ``band_low`` to reflect the
+                # effective minimum ATR pct.  The configuration might provide a
+                # higher or lower raw bound, but we always want the guard to
+                # evaluate against the resolved minimum derived from runtime
+                # context (instrument, overrides, etc.).  When the resolved
+                # minimum is zero we fall back to the provided band so that
+                # environments with no lower limit behave unchanged.
+                resolved = float(_resolve_min_atr_pct())
+                clamped = float(band_low) if resolved <= 0 else resolved
                 if "band_low" in kwargs:
                     kwargs["band_low"] = clamped
                 else:
