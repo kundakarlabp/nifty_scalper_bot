@@ -51,6 +51,7 @@ from src.risk.greeks import (  # noqa: F401
     next_weekly_expiry_ist,
 )
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
+from src.signals.patches import check_atr_band
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
 from src.strategies.strategy_config import (
@@ -86,6 +87,23 @@ except Exception:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _gate_value(gates_cfg: object, key: str, default: float) -> float:
+    """Return ``key`` from ``gates_cfg`` if available, otherwise ``default``."""
+
+    if isinstance(gates_cfg, Mapping):
+        val = gates_cfg.get(key, None)
+    elif gates_cfg is not None:
+        val = getattr(gates_cfg, key, None)
+    else:
+        val = None
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+        return default
 
 
 # =========================== Cadence controller ============================
@@ -1247,26 +1265,64 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 return
             atr_val = atr_pct(df, period=atr_period)
-            plan["atr_pct"] = round(atr_val, 2) if atr_val is not None else None
-            sym = self.under_symbol.upper()
-            atr_min = (
-                self.strategy_cfg.min_atr_pct_banknifty
-                if "BANK" in sym
-                else self.strategy_cfg.min_atr_pct_nifty
+            plan["atr_pct_raw"] = float(atr_val) if atr_val is not None else None
+            plan["atr_pct"] = (
+                round(plan["atr_pct_raw"], 2) if plan["atr_pct_raw"] is not None else None
             )
+            gates_cfg = getattr(settings.strategy, "gates", None)
+            default_min = float(getattr(self.strategy_cfg, "atr_min", 0.0))
+            default_max = float(getattr(self.strategy_cfg, "atr_max", 0.0))
+            atr_min = _gate_value(gates_cfg, "atr_pct_min", default_min)
+            atr_max = _gate_value(gates_cfg, "atr_pct_max", default_max)
+            if not atr_min:
+                min_candidates = [
+                    getattr(self.strategy_cfg, "min_atr_pct_nifty", None),
+                    getattr(self.strategy_cfg, "min_atr_pct_banknifty", None),
+                ]
+                min_values = [float(val) for val in min_candidates if val is not None]
+                if min_values:
+                    atr_min = min(min_values)
+            if not atr_max:
+                max_candidates = [
+                    getattr(self.strategy_cfg, "atr_max", None),
+                    getattr(self.strategy_cfg, "atr_pct_max", None),
+                ]
+                max_values = [float(val) for val in max_candidates if val]
+                if max_values:
+                    atr_max = max(max_values)
+            if not atr_max or atr_max < atr_min:
+                atr_max = max(atr_min, 2.0)
             plan["atr_min"] = atr_min
-            if plan["atr_pct"] is None:
+            plan["atr_max"] = atr_max
+            plan["atr_band"] = (atr_min, atr_max)
+            if plan["atr_pct_raw"] is None:
                 plan["reasons"].append("atr_na")
                 plan["reason_block"] = "features"
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            if plan["atr_pct"] < atr_min:
-                plan["reasons"].append("atr_low")
-                plan["reason_block"] = "atr_low"
+            display_ok = False
+            display_val = plan.get("atr_pct")
+            if display_val is not None:
+                display_ok, _ = check_atr_band(display_val, atr_min, atr_max)
+            ok = display_ok
+            reason: str | None = None
+            if not ok:
+                ok, reason = check_atr_band(plan["atr_pct_raw"], atr_min, atr_max)
+            if not ok:
+                if reason and reason not in plan["reasons"]:
+                    plan["reasons"].append(reason)
+                plan["reason_block"] = "atr_out_of_band"
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
+                detail = flow.setdefault("reason_details", {})
+                detail["atr_out_of_band"] = {
+                    "reason": reason,
+                    "atr_pct": plan["atr_pct_raw"],
+                    "atr_pct_display": plan["atr_pct"],
+                    "band": (atr_min, atr_max),
+                }
                 self._last_flow_debug = flow
                 return
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()

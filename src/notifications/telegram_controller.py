@@ -1249,8 +1249,15 @@ class TelegramController:
                     f"reasons={','.join(plan.get('reasons', [])) or '-'}"
                 )
                 if atr is not None and atr_min is not None:
+                    atr_reasons = plan.get("reasons", [])
+                    atr_blocked = any(
+                        isinstance(reason, str)
+                        and reason.startswith("atr_out_of_band")
+                        for reason in atr_reasons
+                    )
+                    atr_max = plan.get("atr_max")
                     lines.append(
-                        f"ATR%: {round(atr,4)} (min {atr_min}) → {'PASS' if 'atr_low' not in plan.get('reasons', []) else 'FAIL'}"
+                        f"ATR%: {round(atr,4)} (band {atr_min}..{atr_max}) → {'PASS' if not atr_blocked else 'FAIL'}"
                     )
                 else:
                     lines.append("ATR%: N/A")
