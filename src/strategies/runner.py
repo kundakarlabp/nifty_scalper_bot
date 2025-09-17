@@ -420,7 +420,11 @@ class StrategyRunner:
             )
         )
 
-        self._no_new_after = self._parse_hhmm(self.risk_engine.cfg.no_new_after_hhmm)
+        cutoff_text = (self.risk_engine.cfg.no_new_after_hhmm or "").strip()
+        if cutoff_text and cutoff_text.lower() != "none":
+            self._no_new_after: Optional[dt_time] = self._parse_hhmm(cutoff_text)
+        else:
+            self._no_new_after = None
         self._flatten_time = self._parse_hhmm(self.risk_engine.cfg.eod_flatten_hhmm)
 
         self._risk_state = _RiskCheckState()
@@ -1120,7 +1124,7 @@ class StrategyRunner:
                 self._record_plan(self.last_plan)
                 self._last_flow_debug = flow
                 return
-            if t >= self._no_new_after:
+            if self._no_new_after and t >= self._no_new_after:
                 tag = self._no_new_after.strftime("after_%H%M")
                 flow["reason_block"] = tag
                 self.last_plan = {"reason_block": tag}
