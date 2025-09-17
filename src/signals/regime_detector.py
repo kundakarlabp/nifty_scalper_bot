@@ -19,20 +19,7 @@ from typing import Literal, Optional
 
 import pandas as pd
 
-# --------------------------- default thresholds ---------------------------
-
-# These constants are intentionally duplicated here rather than relying on the
-# global settings object so the function can be used in isolation during unit
-# tests.  Callers may still choose to parametrise via ``settings`` and pass the
-# values in explicitly.
-
-ADX_TREND = 18
-DI_DELTA_TREND = 8
-BB_WIDTH_TREND = 3.0
-
-ADX_RANGE = 18
-DI_DELTA_RANGE = 6
-BB_WIDTH_RANGE = 2.0
+from src.config import settings
 
 
 @dataclass
@@ -81,11 +68,19 @@ def detect_market_regime(
     di_plus: Optional[pd.Series] = None,
     di_minus: Optional[pd.Series] = None,
     bb_width: Optional[pd.Series] = None,
+    adx_trend: Optional[float] = None,
+    di_delta_trend: Optional[float] = None,
+    bb_width_trend: Optional[float] = None,
+    adx_range: Optional[float] = None,
+    di_delta_range: Optional[float] = None,
+    bb_width_range: Optional[float] = None,
 ) -> RegimeResult:
     """Classify the market regime using ADX/DI and Bollinger width.
 
     Parameters are flexible; callers may pre‑compute indicator series and pass
     them explicitly, otherwise they will be sourced from ``df`` if available.
+    Thresholds default to the configured strategy settings but can be
+    overridden per-call by supplying keyword arguments.
 
     Returns
     -------
@@ -132,19 +127,46 @@ def detect_market_regime(
 
     di_delta = abs(dip - dim)
 
+    adx_trend = float(
+        settings.strategy_regime_adx_trend if adx_trend is None else adx_trend
+    )
+    di_delta_trend = float(
+        settings.strategy_regime_di_delta_trend
+        if di_delta_trend is None
+        else di_delta_trend
+    )
+    bb_width_trend = float(
+        settings.strategy_regime_bb_width_trend
+        if bb_width_trend is None
+        else bb_width_trend
+    )
+    adx_range = float(
+        settings.strategy_regime_adx_range if adx_range is None else adx_range
+    )
+    di_delta_range = float(
+        settings.strategy_regime_di_delta_range
+        if di_delta_range is None
+        else di_delta_range
+    )
+    bb_width_range = float(
+        settings.strategy_regime_bb_width_range
+        if bb_width_range is None
+        else bb_width_range
+    )
+
     if (
-        adx_val >= ADX_TREND
-        and di_delta >= DI_DELTA_TREND
-        and bb_width_val >= BB_WIDTH_TREND
+        adx_val >= adx_trend
+        and di_delta >= di_delta_trend
+        and bb_width_val >= bb_width_trend
     ):
         return RegimeResult(
             "TREND", adx_val, dip, dim, bb_width_val, "trend_conditions"
         )
 
     if (
-        adx_val < ADX_RANGE
-        or bb_width_val < BB_WIDTH_RANGE
-        or di_delta < DI_DELTA_RANGE
+        adx_val < adx_range
+        or bb_width_val < bb_width_range
+        or di_delta < di_delta_range
     ):
         return RegimeResult(
             "RANGE", adx_val, dip, dim, bb_width_val, "range_conditions"

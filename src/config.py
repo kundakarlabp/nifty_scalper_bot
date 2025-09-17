@@ -241,6 +241,57 @@ class StrategySettings(BaseModel):
     rr_threshold: float | None = 1.5
     # Pick a tradable contract by default (prevents no_option_token on non-expiry days)
     option_expiry_mode: Literal["today", "nearest", "next"] = "nearest"
+    # Regime detection thresholds (can be tuned via env vars)
+    regime_adx_trend: float = Field(
+        18.0,
+        description="Minimum ADX required before classifying the market as TREND.",
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_ADX_TREND",
+            "REGIME_ADX_TREND",
+        ),
+    )
+    regime_di_delta_trend: float = Field(
+        8.0,
+        description=(
+            "Minimum |DI+ − DI−| spread required for TREND regime confirmation."
+        ),
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_DI_DELTA_TREND",
+            "REGIME_DI_DELTA_TREND",
+        ),
+    )
+    regime_bb_width_trend: float = Field(
+        3.0,
+        description="Minimum Bollinger band width percentage for TREND regime.",
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_BB_WIDTH_TREND",
+            "REGIME_BB_WIDTH_TREND",
+        ),
+    )
+    regime_adx_range: float = Field(
+        18.0,
+        description="ADX ceiling for considering RANGE regime conditions.",
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_ADX_RANGE",
+            "REGIME_ADX_RANGE",
+        ),
+    )
+    regime_di_delta_range: float = Field(
+        6.0,
+        description="Minimum |DI+ − DI−| spread tolerated in RANGE regime.",
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_DI_DELTA_RANGE",
+            "REGIME_DI_DELTA_RANGE",
+        ),
+    )
+    regime_bb_width_range: float = Field(
+        2.0,
+        description="Minimum Bollinger band width percentage to stay out of NO_TRADE.",
+        validation_alias=AliasChoices(
+            "STRATEGY__REGIME_BB_WIDTH_RANGE",
+            "REGIME_BB_WIDTH_RANGE",
+        ),
+    )
 
     @field_validator("confidence_threshold")
     @classmethod
@@ -269,6 +320,21 @@ class StrategySettings(BaseModel):
         if v <= 1.0:
             raise ValueError("rr_min must be > 1.0")
         return v
+
+    @field_validator(
+        "regime_adx_trend",
+        "regime_di_delta_trend",
+        "regime_bb_width_trend",
+        "regime_adx_range",
+        "regime_di_delta_range",
+        "regime_bb_width_range",
+    )
+    @classmethod
+    def _v_regime_thresholds(cls, v: float) -> float:
+        val = float(v)
+        if val < 0:
+            raise ValueError("regime thresholds must be >= 0")
+        return val
 
 
 class RiskSettings(BaseModel):
@@ -1008,7 +1074,7 @@ class AppSettings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()  # type: ignore[call-arg]
     instruments: InstrumentsSettings = InstrumentsSettings()
-    strategy: StrategySettings = StrategySettings()
+    strategy: StrategySettings = StrategySettings()  # type: ignore[call-arg]
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
@@ -1100,6 +1166,30 @@ class AppSettings(BaseSettings):
     @property
     def strategy_rr_threshold(self) -> float | None:
         return self.strategy.rr_threshold
+
+    @property
+    def strategy_regime_adx_trend(self) -> float:
+        return self.strategy.regime_adx_trend
+
+    @property
+    def strategy_regime_di_delta_trend(self) -> float:
+        return self.strategy.regime_di_delta_trend
+
+    @property
+    def strategy_regime_bb_width_trend(self) -> float:
+        return self.strategy.regime_bb_width_trend
+
+    @property
+    def strategy_regime_adx_range(self) -> float:
+        return self.strategy.regime_adx_range
+
+    @property
+    def strategy_regime_di_delta_range(self) -> float:
+        return self.strategy.regime_di_delta_range
+
+    @property
+    def strategy_regime_bb_width_range(self) -> float:
+        return self.strategy.regime_bb_width_range
 
     # Risk (flat)
     @property

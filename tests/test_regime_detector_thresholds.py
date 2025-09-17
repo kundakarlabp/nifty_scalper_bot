@@ -34,3 +34,19 @@ def test_indecisive_returns_no_trade() -> None:
     )
     assert res.regime == "NO_TRADE"
 
+
+def test_threshold_overrides_are_honoured() -> None:
+    df = pd.DataFrame({"close": [100.0]})
+    res = detect_market_regime(
+        df=df,
+        adx=_make_series(30.0),
+        di_plus=_make_series(40.0),
+        di_minus=_make_series(10.0),
+        bb_width=_make_series(3.5),
+        adx_trend=50.0,
+        di_delta_trend=35.0,
+        bb_width_trend=6.0,
+        adx_range=45.0,
+    )
+    assert res.regime == "RANGE"
+
