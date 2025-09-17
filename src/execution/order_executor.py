@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from src.logs.journal import Journal
@@ -1839,6 +1839,15 @@ class OrderExecutor:
         snap: List[Dict[str, Any]] = []
         for fsm in self._fsms.values():
             for leg in fsm.open_legs():
+                created = leg.created_at
+                age_s: Optional[int] = None
+                if isinstance(created, datetime):
+                    if created.tzinfo is not None:
+                        ref = datetime.utcnow().replace(tzinfo=timezone.utc)
+                        delta = ref - created.astimezone(timezone.utc)
+                    else:
+                        delta = datetime.utcnow() - created
+                    age_s = max(0, int(delta.total_seconds()))
                 snap.append(
                     {
                         "trade": leg.trade_id,
@@ -1848,9 +1857,126 @@ class OrderExecutor:
                         "qty": leg.qty,
                         "filled": leg.filled_qty,
                         "avg": leg.avg_price,
+                        "status": fsm.status,
+                        "age_s": age_s,
                     }
                 )
         return snap
+
+    def cancel_trade(self, trade_id: str) -> None:
+        """Cancel all live legs and associated broker artefacts for ``trade_id``."""
+
+        fsm = self._fsms.get(trade_id)
+        if not fsm:
+            return
+
+        cancelled_ids: Set[str] = set()
+        records: List[Tuple[str, _OrderRecord]] = []
+        with self._lock:
+            for rid, rec in self._active.items():
+                for leg in fsm.legs.values():
+                    if self._record_matches_leg(rec, leg):
+                        records.append((rid, rec))
+                        break
+        for rid, rec in records:
+            cancelled_ids.update(self._cancel_record_orders(rec))
+        if records:
+            with self._lock:
+                for rid, _ in records:
+                    self._active.pop(rid, None)
+
+        for leg in fsm.legs.values():
+            if leg.state in TERMINAL_STATES:
+                continue
+
+            queue = self._queues.get(leg.symbol)
+            if queue:
+                new_q: Deque[_QueueItem] = deque()
+                for qi in queue:
+                    if qi.leg_id != leg.leg_id:
+                        new_q.append(qi)
+                        continue
+                    order_id = str(qi.placed_order_id) if qi.placed_order_id else ""
+                    if order_id and order_id not in cancelled_ids:
+                        res = self._cancel_with_cb(order_id)
+                        if not res.get("ok"):
+                            log.debug(
+                                "Cancel failed for queued leg %s: %s",
+                                leg.leg_id,
+                                res.get("reason"),
+                            )
+                        cancelled_ids.add(order_id)
+                        if leg.symbol in self._inflight_symbols:
+                            self._inflight_symbols[leg.symbol] = max(
+                                0, self._inflight_symbols.get(leg.symbol, 0) - 1
+                            )
+                    if qi.idempotency_key:
+                        self._idemp_map.pop(qi.idempotency_key, None)
+                self._queues[leg.symbol] = new_q
+
+            if leg.idempotency_key:
+                self._idemp_map.pop(leg.idempotency_key, None)
+
+            broker_id = str(leg.broker_order_id) if leg.broker_order_id else ""
+            if broker_id and broker_id not in cancelled_ids:
+                res = self._cancel_with_cb(broker_id)
+                if not res.get("ok"):
+                    log.debug(
+                        "Cancel failed for leg %s: %s",
+                        leg.leg_id,
+                        res.get("reason"),
+                    )
+                else:
+                    cancelled_ids.add(broker_id)
+                if leg.symbol in self._inflight_symbols:
+                    self._inflight_symbols[leg.symbol] = max(
+                        0, self._inflight_symbols.get(leg.symbol, 0) - 1
+                    )
+
+            leg.on_cancel("manual_cancel")
+
+        fsm.close_if_done()
+
+    def _record_matches_leg(self, rec: _OrderRecord, leg: OrderLeg) -> bool:
+        if leg.idempotency_key and rec.client_oid == leg.idempotency_key:
+            return True
+        if leg.broker_order_id:
+            if rec.order_id == leg.broker_order_id:
+                return True
+            if leg.broker_order_id in rec.child_order_ids:
+                return True
+        return False
+
+    def _cancel_record_orders(self, rec: _OrderRecord) -> Set[str]:
+        cancelled: Set[str] = set()
+        for oid in (
+            rec.tp1_order_id,
+            rec.tp2_order_id,
+            *rec.child_order_ids,
+        ):
+            if not oid:
+                continue
+            order_id = str(oid)
+            res = self._cancel_with_cb(order_id, variety=rec.variety)
+            if not res.get("ok"):
+                log.debug(
+                    "Cancel failed for record order %s: %s",
+                    order_id,
+                    res.get("reason"),
+                )
+            cancelled.add(order_id)
+        if self.kite and rec.sl_gtt_id:
+            try:
+                _retry_call(self.kite.cancel_gtt, rec.sl_gtt_id, tries=2)
+            except BROKER_EXCEPTIONS as e:
+                log.debug(
+                    "Failed to cancel SL GTT %s: %s",
+                    rec.sl_gtt_id,
+                    e,
+                    exc_info=True,
+                )
+        rec.is_open = False
+        return cancelled
 
     def _compute_pnl_R(self, fsm: TradeFSM) -> float:
         """Estimate trade PnL in R units for the given FSM."""

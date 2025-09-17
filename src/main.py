@@ -153,6 +153,9 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         runner_resume=getattr(runner, "resume", None),
         runner_tick=getattr(runner, "runner_tick", None),
         cancel_all=getattr(runner.executor, "cancel_all_orders", None),
+        open_trades_provider=getattr(runner, "open_trades_provider", None),
+        cancel_trade=getattr(runner, "cancel_trade", None),
+        reconcile_once=getattr(runner, "reconcile_once", None),
         # strategy/bot mutators
         set_live_mode=runner.set_live_mode,
         set_min_score=getattr(runner, "set_min_score", None),
