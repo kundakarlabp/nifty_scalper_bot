@@ -135,6 +135,7 @@ class RiskEngine:
     def pre_trade_check(
         self,
         *,
+        now: datetime | None = None,
         equity_rupees: float,
         plan: dict,
         runner: Optional[Any] = None,
@@ -153,7 +154,14 @@ class RiskEngine:
     ) -> Block | Tuple[bool, str, Dict[str, Any]]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
-        now = self._now()
+        when = now
+        if when is None:
+            when = self._now()
+        elif when.tzinfo is None:
+            when = when.replace(tzinfo=self.tz)
+        else:
+            when = when.astimezone(self.tz)
+        now = when
         self.state.new_session_if_needed(now)
 
         details: Dict[str, Any] = {}
