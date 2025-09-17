@@ -64,6 +64,7 @@ class BacktestEngine:
         strategy = ScalpingStrategy()
 
         for ts, o, h, low, c, v in bars.iter_bars():
+            ts_local = ts.replace(tzinfo=self.feed.tz) if ts.tzinfo is None else ts
             plan = strategy.evaluate_from_backtest(ts, o, h, low, c, v)
             if plan is None:
                 continue
@@ -86,7 +87,7 @@ class BacktestEngine:
                 spot=c,
                 strike=K,
                 opt_type=opt,
-                now=ts,
+                now=ts_local,
                 atr_pct=plan["atr_pct"],
             )
             spread = ob["ask"] - ob["bid"]
@@ -103,6 +104,7 @@ class BacktestEngine:
                 stop_loss_price=plan.get("sl") or max(0.5, mid - (spread * 2)),
                 spot_price=c,
                 quote={"mid": mid},
+                now=ts_local,
             )
             if not ok:
                 plan["has_signal"] = False
