@@ -235,6 +235,7 @@ class TelegramController:
         self._started = False
         self._last_update_id: Optional[int] = None
         self._last_summary_date: Optional[date] = None
+        self._last_eod_summary_date: Optional[date] = None
 
         # allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
@@ -340,6 +341,8 @@ class TelegramController:
         """Send end-of-day flatten notice with daily stats."""
         tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
         now = datetime.now(tz)
+        if self._last_eod_summary_date == now.date():
+            return
         stats = daily_summary(now)
         text = (
             f"\U0001F514 EOD flat R={stats['R']} "
@@ -347,6 +350,7 @@ class TelegramController:
             f"Slip={stats['slippage_bps']}bps"
         )
         self._send(text)
+        self._last_eod_summary_date = now.date()
 
     def _maybe_send_close_summary(self) -> None:
         """Emit a daily P&L summary at market close."""
