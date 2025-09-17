@@ -8,15 +8,19 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 import random
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 from src.risk.greeks import OptionType
 from src.risk.limits import Exposure, RiskEngine
 from src.strategies.strategy_config import StrategyConfig
 from src.utils import strike_selector
+from src.strategies.parameters import StrategyParameters
 
 from .data_feed import SpotFeed
 from .sim_connector import SimConnector
+
+if TYPE_CHECKING:  # pragma: no cover
+    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 
 
 @dataclass
@@ -40,6 +44,11 @@ class BacktestEngine:
         risk: RiskEngine,
         sim: SimConnector,
         outdir: str,
+        *,
+        strategy_factory: Optional[
+            Callable[[Optional[StrategyParameters]], "EnhancedScalpingStrategy"]
+        ] = None,
+        write_results: bool = True,
     ) -> None:
         self.feed = feed
         self.cfg = cfg
@@ -50,18 +59,20 @@ class BacktestEngine:
         self.trades: list[dict[str, Any]] = []
         self.equity = 100_000.0
         self.equity_curve: list[tuple[str, float]] = []
+        self._strategy_factory = strategy_factory
+        self.write_results = write_results
 
     def run(
         self,
         start: str | None = None,
         end: str | None = None,
+        *,
+        params: Optional[StrategyParameters] = None,
     ) -> dict[str, float]:
         """Execute the backtest between ``start`` and ``end`` timestamps."""
 
         bars = self.feed.window(start, end)
-        from src.strategies.scalping_strategy import ScalpingStrategy
-
-        strategy = ScalpingStrategy()
+        strategy = self._build_strategy(params)
 
         for ts, o, h, low, c, v in bars.iter_bars():
             ts_local = ts.replace(tzinfo=self.feed.tz) if ts.tzinfo is None else ts
@@ -193,36 +204,37 @@ class BacktestEngine:
             )
             self.risk.on_trade_closed(pnl_R=pnl_R)
 
-        trades_csv = os.path.join(self.outdir, "trades.csv")
-        with open(trades_csv, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=(
-                    list(self.trades[0].keys())
-                    if self.trades
-                    else [
-                        "ts_entry",
-                        "ts_exit",
-                        "side",
-                        "strike",
-                        "qty",
-                        "entry",
-                        "exit",
-                        "exit_reason",
-                        "R",
-                        "pnl_R",
-                        "pnl_rupees",
-                    ]
-                ),
-            )
-            writer.writeheader()
-            for t in self.trades:
-                writer.writerow(t)
-        eq_path = os.path.join(self.outdir, "equity_curve.csv")
-        with open(eq_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["ts", "equity"])
-            w.writerows(self.equity_curve)
+        if self.write_results:
+            trades_csv = os.path.join(self.outdir, "trades.csv")
+            with open(trades_csv, "w", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=(
+                        list(self.trades[0].keys())
+                        if self.trades
+                        else [
+                            "ts_entry",
+                            "ts_exit",
+                            "side",
+                            "strike",
+                            "qty",
+                            "entry",
+                            "exit",
+                            "exit_reason",
+                            "R",
+                            "pnl_R",
+                            "pnl_rupees",
+                        ]
+                    ),
+                )
+                writer.writeheader()
+                for t in self.trades:
+                    writer.writerow(t)
+            eq_path = os.path.join(self.outdir, "equity_curve.csv")
+            with open(eq_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["ts", "equity"])
+                w.writerows(self.equity_curve)
 
         summary: dict[str, Any] = self._summary_metrics(self.trades)
         by_regime: dict[str, list[float]] = {"TREND": [], "RANGE": []}
@@ -284,10 +296,11 @@ class BacktestEngine:
             }
 
         summary["by_bucket"] = bucket_report
-        with open(os.path.join(self.outdir, "summary.json"), "w") as f:
-            json.dump(summary, f, indent=2)
-        with open(os.path.join(self.outdir, "bucket_report.json"), "w") as f:
-            json.dump(bucket_report, f, indent=2)
+        if self.write_results:
+            with open(os.path.join(self.outdir, "summary.json"), "w") as f:
+                json.dump(summary, f, indent=2)
+            with open(os.path.join(self.outdir, "bucket_report.json"), "w") as f:
+                json.dump(bucket_report, f, indent=2)
         return summary
 
     def _summary_metrics(self, trades: list[dict[str, Any]]) -> dict[str, float]:
@@ -327,3 +340,14 @@ class BacktestEngine:
         """Return a dummy exposure snapshot (flat)."""
 
         return Exposure()
+
+    def _build_strategy(
+        self, params: Optional[StrategyParameters]
+    ) -> "EnhancedScalpingStrategy":
+        if self._strategy_factory is not None:
+            return self._strategy_factory(params)
+        from src.strategies.scalping_strategy import ScalpingStrategy
+
+        if params is None:
+            return ScalpingStrategy()
+        return ScalpingStrategy(params=params)
