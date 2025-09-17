@@ -19,6 +19,7 @@ from pydantic import (
     AliasChoices,
     BaseModel,
     Field,
+    FieldValidationInfo,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -490,6 +491,78 @@ class RiskSettings(BaseModel):
     max_position_size_pct: float = 0.10
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
+    loss_cooldown_minutes: int = Field(
+        45,
+        description=(
+            "Base cool-down duration (minutes) applied after a loss streak. "
+            "Set to 0 to disable the adaptive cool-down logic."
+        ),
+        validation_alias=AliasChoices(
+            "loss_cooldown_minutes",
+            "RISK__LOSS_COOLDOWN_MINUTES",
+            "LOSS_COOLDOWN_MINUTES",
+        ),
+    )
+    loss_cooldown_backoff: float = Field(
+        1.6,
+        description="Multiplier applied every time the cool-down triggers again in the same session.",
+        validation_alias=AliasChoices(
+            "loss_cooldown_backoff",
+            "RISK__LOSS_COOLDOWN_BACKOFF",
+            "LOSS_COOLDOWN_BACKOFF",
+        ),
+    )
+    loss_cooldown_relax_multiplier: float = Field(
+        0.6,
+        description="Factor used to relax the cool-down severity after profitable trades.",
+        validation_alias=AliasChoices(
+            "loss_cooldown_relax_multiplier",
+            "RISK__LOSS_COOLDOWN_RELAX_MULTIPLIER",
+            "LOSS_COOLDOWN_RELAX_MULTIPLIER",
+        ),
+    )
+    loss_cooldown_max_minutes: int = Field(
+        240,
+        description="Upper bound for the adaptive cool-down window in minutes.",
+        validation_alias=AliasChoices(
+            "loss_cooldown_max_minutes",
+            "RISK__LOSS_COOLDOWN_MAX_MINUTES",
+            "LOSS_COOLDOWN_MAX_MINUTES",
+        ),
+    )
+    loss_cooldown_trigger_after_losses: int | None = Field(
+        None,
+        description=(
+            "Optional override for the loss streak length that triggers the adaptive cool-down. "
+            "Defaults to the consecutive loss limit when unset."
+        ),
+        validation_alias=AliasChoices(
+            "loss_cooldown_trigger_after_losses",
+            "RISK__LOSS_COOLDOWN_TRIGGER_AFTER_LOSSES",
+            "LOSS_COOLDOWN_TRIGGER_AFTER_LOSSES",
+        ),
+    )
+    loss_cooldown_drawdown_pct: float = Field(
+        0.5,
+        description=(
+            "Fraction of the daily loss cap after which the cool-down is immediately triggered, "
+            "even if the streak threshold is not hit."
+        ),
+        validation_alias=AliasChoices(
+            "loss_cooldown_drawdown_pct",
+            "RISK__LOSS_COOLDOWN_DRAWDOWN_PCT",
+            "LOSS_COOLDOWN_DRAWDOWN_PCT",
+        ),
+    )
+    loss_cooldown_drawdown_scale: float = Field(
+        1.5,
+        description="How aggressively to extend the cool-down when the drawdown threshold is exceeded.",
+        validation_alias=AliasChoices(
+            "loss_cooldown_drawdown_scale",
+            "RISK__LOSS_COOLDOWN_DRAWDOWN_SCALE",
+            "LOSS_COOLDOWN_DRAWDOWN_SCALE",
+        ),
+    )
     # Session guard: disallow new entries at or after this HH:MM (IST).
     no_new_after_hhmm: str | None = Field(
         "15:20",
@@ -619,6 +692,59 @@ class RiskSettings(BaseModel):
         if not 0.0 < v <= 1.0:
             raise ValueError("max_position_size_pct must be within (0, 1]")
         return v
+
+    @field_validator("loss_cooldown_minutes", "loss_cooldown_max_minutes")
+    @classmethod
+    def _v_cooldown_minutes(cls, v: int) -> int:
+        minutes = int(v)
+        if minutes < 0:
+            raise ValueError("Loss cool-down minutes must be >= 0")
+        return minutes
+
+    @field_validator("loss_cooldown_backoff")
+    @classmethod
+    def _v_cooldown_backoff(cls, v: float) -> float:
+        val = float(v)
+        if val < 1.0:
+            raise ValueError("loss_cooldown_backoff must be >= 1.0")
+        return val
+
+    @field_validator("loss_cooldown_relax_multiplier")
+    @classmethod
+    def _v_cooldown_relax(cls, v: float) -> float:
+        val = float(v)
+        if not 0.0 <= val <= 1.0:
+            raise ValueError("loss_cooldown_relax_multiplier must be within [0, 1]")
+        return val
+
+    @field_validator("loss_cooldown_trigger_after_losses")
+    @classmethod
+    def _v_cooldown_trigger(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        val = int(v)
+        if val < 1:
+            raise ValueError("loss_cooldown_trigger_after_losses must be >= 1 or None")
+        return val
+
+    @field_validator("loss_cooldown_drawdown_pct")
+    @classmethod
+    def _v_cooldown_drawdown_pct(cls, v: float) -> float:
+        pct = float(v)
+        if pct < 0.0:
+            raise ValueError("loss_cooldown_drawdown_pct must be >= 0")
+        if pct > 1.0:
+            pct = pct / 100.0
+        return min(1.0, pct)
+
+    @field_validator("loss_cooldown_max_minutes")
+    @classmethod
+    def _v_cooldown_bounds(cls, v: int, info: ValidationInfo) -> int:
+        minutes = int(v)
+        base = info.data.get("loss_cooldown_minutes", 0)
+        if base and minutes < base:
+            raise ValueError("loss_cooldown_max_minutes must be >= loss_cooldown_minutes")
+        return minutes
 
     @field_validator(
         "trading_window_start",

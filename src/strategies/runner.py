@@ -46,6 +46,7 @@ from src.logs.journal import Journal
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.risk import guards, risk_gates
+from src.risk.cooldown import LossCooldownManager
 from src.risk.greeks import (  # noqa: F401
     estimate_greeks_from_mid,
     next_weekly_expiry_ist,
@@ -630,6 +631,7 @@ class StrategyRunner:
 
         # Risk + equity cache
         self.risk = RiskState(trading_day=self._today_ist())
+        self._loss_cooldown = LossCooldownManager(settings.risk)
         self._equity_last_refresh_ts: float = 0.0
         self._equity_cached_value: float = float(settings.risk.default_equity)
         loss_cap = getattr(settings.risk, "max_daily_loss_rupees", None)
@@ -2172,20 +2174,17 @@ class StrategyRunner:
             gates["daily_drawdown"] = False
         # loss streak cooldown logic
         now = self._now_ist()
-        if self.risk.loss_cooldown_until:
-            if now < self.risk.loss_cooldown_until:
-                gates["loss_streak"] = False
-            else:
-                # Cool-off finished; reset counters
-                self.risk.loss_cooldown_until = None
+        cooldown_until = self._loss_cooldown.active_until(now)
+        if cooldown_until is not None:
+            self.risk.loss_cooldown_until = cooldown_until
+            gates["loss_streak"] = False
+        else:
+            if self.risk.loss_cooldown_until is not None:
                 self.risk.consecutive_losses = 0
+            self.risk.loss_cooldown_until = None
         limit = int(settings.risk.consecutive_loss_limit)
         if gates.get("loss_streak", True) and self.risk.consecutive_losses >= limit:
             gates["loss_streak"] = False
-            tomorrow = (now + timedelta(days=1)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            self.risk.loss_cooldown_until = tomorrow
         if self.risk.trades_today >= int(settings.risk.max_trades_per_day):
             gates["trades_per_day"] = False
         entry = signal.get("entry") or signal.get("entry_price")
@@ -2309,7 +2308,16 @@ class StrategyRunner:
             self.risk.consecutive_losses = 0
         self.risk.day_realized_pnl += pnl
         self.risk.trades_today += 1
-        self._last_trade_time = self.now_ist
+        now = self.now_ist
+        self._last_trade_time = now
+        cooldown_until = self._loss_cooldown.register_trade(
+            now=now,
+            pnl=pnl,
+            streak=self.risk.consecutive_losses,
+            day_loss=self.risk.day_realized_loss,
+            max_daily_loss=self._max_daily_loss_rupees,
+        )
+        self.risk.loss_cooldown_until = cooldown_until
         self._auto_relax_active = False
         try:
             self.risk_engine.on_trade_closed(pnl_R=pnl)
@@ -2529,6 +2537,7 @@ class StrategyRunner:
         today = self._today_ist()
         if today.date() != self.risk.trading_day.date():
             self.risk = RiskState(trading_day=today)
+            self._loss_cooldown.reset_for_new_day()
             self._notify("🔁 New trading day — risk counters reset")
 
     def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
@@ -2970,6 +2979,7 @@ class StrategyRunner:
                 if self.risk.loss_cooldown_until
                 else "-"
             ),
+            "cooloff_severity": round(float(self._loss_cooldown.severity), 2),
             "paused": self._paused,
             "trades_today": self.risk.trades_today,
             "consecutive_losses": self.risk.consecutive_losses,
