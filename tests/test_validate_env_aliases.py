@@ -35,3 +35,18 @@ def test_runtime_env_accepts_legacy_zerodha_env_names(monkeypatch):
 
         monkeypatch.setattr(validate_env, "KiteConnect", DummyKite)
         validate_env.validate_runtime_env(AppSettings(_env_file=None))
+
+
+def test_runtime_env_accepts_nested_instruments_csv(tmp_path):
+    csv_path = tmp_path / "instruments.csv"
+    csv_path.write_text("token\n", encoding="utf-8")
+    env = {
+        "TELEGRAM__ENABLED": "false",
+        "ENABLE_LIVE_TRADING": "false",
+        "INSTRUMENTS__CSV": str(csv_path),
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+        validate_env = _reload_validate_env()
+        settings = AppSettings(_env_file=None)
+        assert settings.INSTRUMENTS_CSV == str(csv_path)
+        validate_env.validate_runtime_env(settings)

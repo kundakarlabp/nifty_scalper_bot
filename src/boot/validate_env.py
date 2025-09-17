@@ -55,6 +55,10 @@ ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = (
     "ZERODHA_ACCESS_TOKEN",
     "KITE_ACCESS_TOKEN",
 )
+INSTRUMENTS_CSV_ALIASES: tuple[str, ...] = (
+    "INSTRUMENTS__CSV",
+    "INSTRUMENTS_CSV",
+)
 
 API_KEY = env_any(*ZERODHA_API_KEY_ALIASES)
 API_SECRET = env_any(*ZERODHA_API_SECRET_ALIASES)
@@ -308,7 +312,9 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
                 errors.append("/".join(keys) + " must be set in the environment")
 
     # --- instrument CSV path ---
-    csv_path = Path(os.environ.get("INSTRUMENTS_CSV", "data/nifty_ohlc.csv"))
+    csv_env = env_any(*INSTRUMENTS_CSV_ALIASES)
+    csv_path_value = getattr(cfg, "INSTRUMENTS_CSV", "") or csv_env
+    csv_path = Path(csv_path_value or "data/nifty_ohlc.csv")
     if not csv_path.exists():
         errors.append(f"Instrument CSV not found: {csv_path}")
 
