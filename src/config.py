@@ -285,6 +285,32 @@ class RiskSettings(BaseModel):
     max_position_size_pct: float = 0.10
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
+    # Session guard: disallow new entries at or after this HH:MM (IST).
+    no_new_after_hhmm: str = Field(
+        "15:20",
+        description=(
+            "Latest IST timestamp (HH:MM) to initiate new positions before "
+            "risk gates halt entries."
+        ),
+        validation_alias=AliasChoices(
+            "RISK__NO_NEW_AFTER_HHMM",
+            "RISK_NO_NEW_AFTER_HHMM",
+            "NO_NEW_AFTER_HHMM",
+        ),
+    )
+    # Hard EOD flatten: force-close any open positions at or after this HH:MM (IST).
+    eod_flatten_hhmm: str = Field(
+        "15:28",
+        description=(
+            "IST timestamp (HH:MM) after which all open positions are "
+            "flattened and orders cancelled."
+        ),
+        validation_alias=AliasChoices(
+            "RISK__EOD_FLATTEN_HHMM",
+            "RISK_EOD_FLATTEN_HHMM",
+            "EOD_FLATTEN_HHMM",
+        ),
+    )
     max_daily_loss_rupees: float | None = None
     max_lots_per_symbol: int = 5
     max_notional_rupees: float = Field(
@@ -389,7 +415,12 @@ class RiskSettings(BaseModel):
             raise ValueError("max_position_size_pct must be within (0, 1]")
         return v
 
-    @field_validator("trading_window_start", "trading_window_end")
+    @field_validator(
+        "trading_window_start",
+        "trading_window_end",
+        "no_new_after_hhmm",
+        "eod_flatten_hhmm",
+    )
     @classmethod
     def _v_time(cls, v: str) -> str:
         datetime.strptime(v, "%H:%M")
@@ -1009,6 +1040,14 @@ class AppSettings(BaseSettings):
     @property
     def risk_trading_window_end(self) -> str:
         return self.risk.trading_window_end
+
+    @property
+    def risk_no_new_after_hhmm(self) -> str:
+        return self.risk.no_new_after_hhmm
+
+    @property
+    def risk_eod_flatten_hhmm(self) -> str:
+        return self.risk.eod_flatten_hhmm
 
     @property
     def risk_max_daily_loss_rupees(self) -> float | None:

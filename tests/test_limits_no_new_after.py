@@ -1,6 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from src.config import settings
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 
 
@@ -27,3 +28,13 @@ def test_no_new_after_blocks(monkeypatch):
     monkeypatch.setattr(eng, "_now", lambda: dt)
     ok, reason, _ = eng.pre_trade_check(**_args())
     assert not ok and reason == "session_closed"
+
+
+def test_limit_config_defaults_from_settings(monkeypatch):
+    monkeypatch.setattr(settings.risk, "no_new_after_hhmm", "11:00", raising=False)
+    monkeypatch.setattr(settings.risk, "eod_flatten_hhmm", "11:15", raising=False)
+
+    cfg = LimitConfig()
+
+    assert cfg.no_new_after_hhmm == "11:00"
+    assert cfg.eod_flatten_hhmm == "11:15"

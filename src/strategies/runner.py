@@ -1057,7 +1057,10 @@ class StrategyRunner:
             t = now_ist.time()
             if t >= self._flatten_time:
                 if getattr(self.order_executor, "open_count", 0) > 0:
-                    self.log.info("eod_close")
+                    self.log.info(
+                        "eod_close (RISK__EOD_FLATTEN_HHMM=%s)",
+                        self.risk_engine.cfg.eod_flatten_hhmm,
+                    )
                     getattr(self.order_executor, "cancel_all_orders", lambda: None)()
                     getattr(
                         self.order_executor, "close_all_positions_eod", lambda: None

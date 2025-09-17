@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
-import logging
-import os
-from types import SimpleNamespace
 
 from src.config import settings
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
@@ -44,10 +43,10 @@ class LimitConfig:
     # Maximum realised loss in premium (rupee) terms before halting for the day.
     max_daily_loss_rupees: float = 1_000_000.0
     no_new_after_hhmm: str = field(
-        default_factory=lambda: os.getenv("NO_NEW_AFTER_HHMM", "15:20")
+        default_factory=lambda: str(settings.risk.no_new_after_hhmm)
     )
     eod_flatten_hhmm: str = field(
-        default_factory=lambda: os.getenv("EOD_FLATTEN_HHMM", "15:28")
+        default_factory=lambda: str(settings.risk.eod_flatten_hhmm)
     )
 
     def __post_init__(self) -> None:
@@ -205,7 +204,14 @@ class RiskEngine:
             self.cfg.no_new_after_hhmm, "%H:%M"
         ).time()
         if now.time() >= cutoff:
-            return False, "session_closed", {"cutoff": self.cfg.no_new_after_hhmm}
+            return (
+                False,
+                "session_closed",
+                {
+                    "cutoff": self.cfg.no_new_after_hhmm,
+                    "config_key": "RISK__NO_NEW_AFTER_HHMM",
+                },
+            )
 
         current_lots = exposure.lots_by_symbol.get(intended_symbol, 0)
         if current_lots >= self.cfg.max_lots_per_symbol:
