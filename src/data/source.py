@@ -248,6 +248,10 @@ _INTERVAL_MAP: Dict[str, str] = {
     "10m": "10minute",
     "15minute": "15minute",
     "15m": "15minute",
+    "day": "day",
+    "1day": "day",
+    "1d": "day",
+    "daily": "day",
 }
 
 # Map intervals to their minute counts and pandas frequency strings
