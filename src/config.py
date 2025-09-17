@@ -136,6 +136,18 @@ class DataSettings(BaseModel):
     # Historical backfill (optional; runner/feeds can ignore if unsupported)
     history_days: int = 3  # 0 = off; otherwise backfill N days before now
     history_max_candles: int = 0  # 0 = unlimited within broker constraints
+    hist_warn_ratelimit_seconds: int = Field(
+        300,
+        description=(
+            "Seconds to suppress repeated historical data warnings per token and"
+            " globally after authentication failures."
+        ),
+        validation_alias=AliasChoices(
+            "HIST_WARN_RATELIMIT_S",
+            "DATA__HIST_WARN_RATELIMIT_S",
+            "DATA__HIST_WARN_RATELIMIT_SECONDS",
+        ),
+    )
 
     @field_validator("time_filter_start", "time_filter_end")
     @classmethod
@@ -164,6 +176,7 @@ class DataSettings(BaseModel):
         "cache_ttl_seconds",
         "history_days",
         "history_max_candles",
+        "hist_warn_ratelimit_seconds",
     )
     @classmethod
     def _v_nonneg(cls, v: int) -> int:
@@ -531,6 +544,15 @@ class OptionSelectorSettings(BaseModel):
             "STRIKE_SELECTOR__INSTRUMENTS_CACHE_TTL_SECONDS",
         ),
     )
+    instruments_refresh_minutes: int = Field(
+        15,
+        description="Minutes to wait before refreshing the broker-supplied NFO instrument list.",
+        validation_alias=AliasChoices(
+            "INSTRUMENTS_REFRESH_MINUTES",
+            "OPTION_SELECTOR__INSTRUMENTS_REFRESH_MINUTES",
+            "STRIKE_SELECTOR__INSTRUMENTS_REFRESH_MINUTES",
+        ),
+    )
     ltp_cache_ttl_seconds: float = Field(
         2.0,
         description="Seconds to reuse cached spot LTP responses for strike selection.",
@@ -561,6 +583,24 @@ class OptionSelectorSettings(BaseModel):
         validation_alias=AliasChoices(
             "OPTION_SELECTOR__FALLBACK_STRIKE_STEP",
             "STRIKE_SELECTOR__FALLBACK_STRIKE_STEP",
+        ),
+    )
+    weekly_expiry_weekday: int = Field(
+        2,
+        description="ISO weekday (1=Monday..7=Sunday) used to pick the weekly option expiry.",
+        validation_alias=AliasChoices(
+            "WEEKLY_EXPIRY_WEEKDAY",
+            "OPTION_SELECTOR__WEEKLY_EXPIRY_WEEKDAY",
+            "STRIKE_SELECTOR__WEEKLY_EXPIRY_WEEKDAY",
+        ),
+    )
+    prefer_monthly_expiry: bool = Field(
+        False,
+        description="Prefer the monthly expiry when it falls on the configured weekly expiry weekday.",
+        validation_alias=AliasChoices(
+            "PREFER_MONTHLY_EXPIRY",
+            "OPTION_SELECTOR__PREFER_MONTHLY_EXPIRY",
+            "STRIKE_SELECTOR__PREFER_MONTHLY_EXPIRY",
         ),
     )
     banknifty_strike_step: int = Field(
@@ -669,6 +709,7 @@ class OptionSelectorSettings(BaseModel):
         return val
 
     @field_validator(
+        "instruments_refresh_minutes",
         "fallback_strike_step",
         "banknifty_strike_step",
         "allow_pm1_score_threshold",
@@ -680,6 +721,14 @@ class OptionSelectorSettings(BaseModel):
         if val < 0:
             raise ValueError("integer settings must be >= 0")
         return val
+
+    @field_validator("weekly_expiry_weekday")
+    @classmethod
+    def _v_weekday(cls, v: int) -> int:
+        day = int(v)
+        if not 1 <= day <= 7:
+            raise ValueError("weekly_expiry_weekday must be between 1 and 7 (ISO weekday)")
+        return day
 
 class HealthSettings(BaseModel):
     enable_server: bool = True
@@ -957,7 +1006,7 @@ class AppSettings(BaseSettings):
 
     zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
-    data: DataSettings = DataSettings()
+    data: DataSettings = DataSettings()  # type: ignore[call-arg]
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)

@@ -19,6 +19,7 @@ from src.boot.validate_env import (
     data_warmup_backfill_min,
     data_warmup_disable,
 )
+from src.config import settings
 from src.data.base_source import BaseDataSource
 from src.data.types import HistResult, HistStatus
 from src.utils.atr_helper import compute_atr
@@ -587,7 +588,6 @@ def _synthetic_ohlc(
     return pd.DataFrame(data, index=idx)
 
 
-HIST_WARN_RATELIMIT_S = int(os.getenv("HIST_WARN_RATELIMIT_S", "300"))
 _HIST_WARN_TS: Dict[int, float] = {}
 _GLOBAL_AUTH_WARN = 0.0
 
@@ -598,7 +598,14 @@ def _hist_warn(
     global _GLOBAL_AUTH_WARN
     now = time.monotonic()
     last = _HIST_WARN_TS.get(token, 0.0)
-    if now - last < HIST_WARN_RATELIMIT_S or now - _GLOBAL_AUTH_WARN < HIST_WARN_RATELIMIT_S:
+    data_cfg = getattr(settings, "data", None)
+    ratelimit = getattr(data_cfg, "hist_warn_ratelimit_seconds", 300)
+    try:
+        ratelimit_sec = max(0, int(ratelimit))
+    except (TypeError, ValueError):
+        ratelimit_sec = 300
+
+    if now - last < ratelimit_sec or now - _GLOBAL_AUTH_WARN < ratelimit_sec:
         return
     _HIST_WARN_TS[token] = now
     sym = getattr(settings.instruments, "trade_symbol", token)
@@ -1361,9 +1368,11 @@ def _refresh_instruments_nfo(broker: Any) -> list[dict]:
     """Return cached NFO instruments, refreshing periodically."""
     global _instruments_cache
     now = time.time()
+    opt_cfg = getattr(settings, "option_selector", None)
+    mins_val = getattr(opt_cfg, "instruments_refresh_minutes", 15)
     try:
-        mins = int(os.getenv("INSTRUMENTS_REFRESH_MINUTES", "15"))
-    except Exception:
+        mins = max(0, int(mins_val))
+    except (TypeError, ValueError):
         mins = 15
     if (
         _instruments_cache["items"] and now - _instruments_cache["ts"] < mins * 60
@@ -1384,8 +1393,14 @@ def _pick_expiry(
     items: list[dict], underlying: str, today: dt.date
 ) -> Optional[dt.date]:
     """Pick weekly expiry for ``underlying`` on/after ``today``."""
-    week_wd = int(os.getenv("WEEKLY_EXPIRY_WEEKDAY", "2")) - 1
-    prefer_monthly = os.getenv("PREFER_MONTHLY_EXPIRY", "false").lower() == "true"
+    opt_cfg = getattr(settings, "option_selector", None)
+    weekday_val = getattr(opt_cfg, "weekly_expiry_weekday", 2)
+    prefer_monthly = bool(getattr(opt_cfg, "prefer_monthly_expiry", False))
+    try:
+        week_wd = int(weekday_val) - 1
+    except (TypeError, ValueError):
+        week_wd = 1
+    week_wd = max(0, min(6, week_wd))
 
     dates: list[dt.date] = []
     for it in items:
