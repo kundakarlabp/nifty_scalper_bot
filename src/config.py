@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from pydantic import (
@@ -185,14 +185,15 @@ class DataSettings(BaseModel):
         return v
 
 
-class InstrumentsSettings(BaseModel):
+class InstrumentConfig(BaseModel):
+    """Configuration for a tradable underlying or derivative complex."""
+
+    symbol: str | None = None
     spot_symbol: str = "NSE:NIFTY 50"
     trade_symbol: str = "NIFTY"
     trade_exchange: str = "NFO"
-    instrument_token: int = 256265  # primary token (spot preferred for OHLC)
-    spot_token: int = (
-        256265  # optional explicit spot token (helps with logs/diagnostics)
-    )
+    instrument_token: int = 256265
+    spot_token: int = 256265
     nifty_lot_size: int = 75
     strike_range: int = 0
     min_lots: int = 1
@@ -223,6 +224,113 @@ class InstrumentsSettings(BaseModel):
         if "min_lots" in info.data and v < info.data["min_lots"]:
             raise ValueError("max_lots must be >= min_lots")
         return v
+
+    @property
+    def lot_size(self) -> int:
+        """Return the canonical lot size alias used across the codebase."""
+
+        return self.nifty_lot_size
+
+    def key(self) -> str:
+        """Return a normalized key representing the instrument."""
+
+        candidate = self.symbol or self.trade_symbol or self.spot_symbol
+        return str(candidate).upper()
+
+
+class InstrumentsSettings(BaseModel):
+    spot_symbol: str = "NSE:NIFTY 50"
+    trade_symbol: str = "NIFTY"
+    trade_exchange: str = "NFO"
+    instrument_token: int = 256265  # primary token (spot preferred for OHLC)
+    spot_token: int = (
+        256265  # optional explicit spot token (helps with logs/diagnostics)
+    )
+    nifty_lot_size: int = 75
+    strike_range: int = 0
+    min_lots: int = 1
+    max_lots: int = 10
+    additional: Dict[str, InstrumentConfig] = Field(
+        default_factory=dict,
+        description="Optional portfolio of additional tradable instruments keyed by alias.",
+    )
+
+    @field_validator("instrument_token", mode="before")
+    @classmethod
+    def _v_token(cls, v: object) -> int:
+        try:
+            token = int(float(str(v)))
+        except (TypeError, ValueError) as e:
+            raise ValueError("instrument_token must be numeric") from e
+        if token <= 0:
+            raise ValueError("instrument_token must be a positive integer")
+        return token
+
+    @field_validator("min_lots", "max_lots", "nifty_lot_size")
+    @classmethod
+    def _v_lots_pos(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Lot sizes must be positive")
+        return v
+
+    @field_validator("max_lots")
+    @classmethod
+    def _v_lots_order(cls, v: int, info: ValidationInfo) -> int:
+        if "min_lots" in info.data and v < info.data["min_lots"]:
+            raise ValueError("max_lots must be >= min_lots")
+        return v
+
+    def _primary(self) -> InstrumentConfig:
+        """Return the primary instrument configuration."""
+
+        return InstrumentConfig(
+            symbol=self.trade_symbol,
+            spot_symbol=self.spot_symbol,
+            trade_symbol=self.trade_symbol,
+            trade_exchange=self.trade_exchange,
+            instrument_token=self.instrument_token,
+            spot_token=self.spot_token,
+            nifty_lot_size=self.nifty_lot_size,
+            strike_range=self.strike_range,
+            min_lots=self.min_lots,
+            max_lots=self.max_lots,
+        )
+
+    def portfolio(self) -> Dict[str, InstrumentConfig]:
+        """Return a dictionary of all configured instruments keyed by normalized symbol."""
+
+        items: Dict[str, InstrumentConfig] = {}
+        primary = self._primary()
+        items[primary.key()] = primary
+        for alias, inst in self.additional.items():
+            key = inst.key() if isinstance(inst, InstrumentConfig) else str(alias).upper()
+            if not isinstance(inst, InstrumentConfig):
+                # Pydantic already validated, but guard for defensive callers.
+                continue
+            items[key] = inst
+            # Ensure alternative aliases map to the same object for lookup convenience.
+            alt_keys = {
+                str(alias).upper(),
+                str(inst.trade_symbol).upper(),
+                str(inst.spot_symbol).upper(),
+            }
+            for alt in alt_keys:
+                items.setdefault(alt, inst)
+        return items
+
+    def instrument(self, symbol: str | None = None) -> InstrumentConfig:
+        """Return configuration for ``symbol`` or fall back to the primary instrument."""
+
+        if symbol is None:
+            return self._primary()
+        lookup = symbol.upper()
+        portfolio = self.portfolio()
+        inst = portfolio.get(lookup)
+        if inst is None:
+            # Unknown symbols inherit the primary configuration to preserve
+            # backwards compatibility with single-instrument deployments.
+            return self._primary()
+        return inst
 
 
 class StrategySettings(BaseModel):
@@ -1572,4 +1680,11 @@ class _SettingsProxy:
 # Public singleton used by the rest of the application
 settings = _SettingsProxy()
 
-__all__ = ["AppSettings", "RegimeSettings", "load_settings", "settings"]
+__all__ = [
+    "AppSettings",
+    "RegimeSettings",
+    "InstrumentConfig",
+    "InstrumentsSettings",
+    "load_settings",
+    "settings",
+]
