@@ -265,8 +265,8 @@ def main() -> int:
         target=health.run,
         kwargs={
             "callback": runner.health_check,
-            "host": "0.0.0.0",
-            "port": int(os.getenv("HEALTH_PORT", "8000")),
+            "host": settings.health_host,
+            "port": settings.health_port,
         },
         daemon=True,
     ).start()

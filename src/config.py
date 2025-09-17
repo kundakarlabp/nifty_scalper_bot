@@ -809,7 +809,16 @@ class OptionSelectorSettings(BaseModel):
 
 class HealthSettings(BaseModel):
     enable_server: bool = True
-    port: int = 8000
+    host: str = Field(
+        "0.0.0.0",
+        validation_alias=AliasChoices("HEALTH_HOST"),
+        description="Bind address for the optional health server.",
+    )
+    port: int = Field(
+        8000,
+        validation_alias=AliasChoices("HEALTH_PORT"),
+        description="Port used by the optional health server.",
+    )
 
 
 class SystemSettings(BaseModel):
@@ -1041,6 +1050,9 @@ class AppSettings(BaseSettings):
     max_place_retries: int = 2
     max_modify_retries: int = 2
     retry_backoff_ms: int = 200
+    diag_interval_seconds: int = 60
+    min_preview_score: float = 8.0
+    plan_stale_sec: int = 20
 
     @property
     def PORTFOLIO_READS(self) -> bool:  # pragma: no cover - simple alias
@@ -1096,7 +1108,7 @@ class AppSettings(BaseSettings):
     option_selector: OptionSelectorSettings = Field(
         default_factory=lambda: OptionSelectorSettings()  # type: ignore[call-arg]
     )
-    health: HealthSettings = HealthSettings()
+    health: HealthSettings = HealthSettings()  # type: ignore[call-arg]
     system: SystemSettings = SystemSettings()
 
     @field_validator("warmup_bars")
@@ -1409,6 +1421,10 @@ class AppSettings(BaseSettings):
         return self.health.enable_server
 
     @property
+    def health_host(self) -> str:
+        return self.health.host
+
+    @property
     def health_port(self) -> int:
         return self.health.port
 
@@ -1431,38 +1447,75 @@ class AppSettings(BaseSettings):
 
 def _apply_env_overrides(cfg: AppSettings) -> None:
     """Apply environment-based overrides to the loaded settings."""
+    def _bool_env(name: str, default: bool) -> bool:
+        val = os.getenv(name)
+        if val is None:
+            return default
+        return str(val).lower() in {"1", "true", "yes", "on"}
+
+    def _int_env(name: str, default: int) -> int:
+        val = os.getenv(name)
+        return int(val) if val is not None else default
+
+    def _float_env(name: str, default: float) -> float:
+        val = os.getenv(name)
+        return float(val) if val is not None else default
+
     cfg.data.timeframe = os.getenv("HISTORICAL_TIMEFRAME", cfg.data.timeframe)
     object.__setattr__(
         cfg,
         "ENABLE_SIGNAL_DEBUG",
-        str(os.getenv("ENABLE_SIGNAL_DEBUG", "false")).lower() in ("1", "true", "yes"),
+        _bool_env(
+            "ENABLE_SIGNAL_DEBUG",
+            bool(getattr(cfg, "ENABLE_SIGNAL_DEBUG", False)),
+        ),
     )
     object.__setattr__(
         cfg,
         "TELEGRAM__PRETRADE_ALERTS",
-        str(os.getenv("TELEGRAM__PRETRADE_ALERTS", "false")).lower()
-        in ("1", "true", "yes"),
+        _bool_env(
+            "TELEGRAM__PRETRADE_ALERTS",
+            bool(getattr(cfg, "TELEGRAM__PRETRADE_ALERTS", False)),
+        ),
     )
     object.__setattr__(
-        cfg, "DIAG_INTERVAL_SECONDS", int(os.getenv("DIAG_INTERVAL_SECONDS", "60"))
+        cfg,
+        "DIAG_INTERVAL_SECONDS",
+        _int_env("DIAG_INTERVAL_SECONDS", cfg.diag_interval_seconds),
     )
     object.__setattr__(
-        cfg, "MIN_PREVIEW_SCORE", float(os.getenv("MIN_PREVIEW_SCORE", "8"))
-    )
-    object.__setattr__(cfg, "ACK_TIMEOUT_MS", int(os.getenv("ACK_TIMEOUT_MS", "1500")))
-    object.__setattr__(
-        cfg, "FILL_TIMEOUT_MS", int(os.getenv("FILL_TIMEOUT_MS", "10000"))
+        cfg,
+        "MIN_PREVIEW_SCORE",
+        _float_env("MIN_PREVIEW_SCORE", cfg.min_preview_score),
     )
     object.__setattr__(
-        cfg, "RETRY_BACKOFF_MS", int(os.getenv("RETRY_BACKOFF_MS", "200"))
+        cfg, "ACK_TIMEOUT_MS", _int_env("ACK_TIMEOUT_MS", cfg.executor.ack_timeout_ms)
     )
     object.__setattr__(
-        cfg, "MAX_PLACE_RETRIES", int(os.getenv("MAX_PLACE_RETRIES", "2"))
+        cfg,
+        "FILL_TIMEOUT_MS",
+        _int_env("FILL_TIMEOUT_MS", cfg.executor.fill_timeout_ms),
     )
     object.__setattr__(
-        cfg, "MAX_MODIFY_RETRIES", int(os.getenv("MAX_MODIFY_RETRIES", "2"))
+        cfg,
+        "RETRY_BACKOFF_MS",
+        _int_env("RETRY_BACKOFF_MS", cfg.retry_backoff_ms),
     )
-    object.__setattr__(cfg, "PLAN_STALE_SEC", int(os.getenv("PLAN_STALE_SEC", "20")))
+    object.__setattr__(
+        cfg,
+        "MAX_PLACE_RETRIES",
+        _int_env("MAX_PLACE_RETRIES", cfg.max_place_retries),
+    )
+    object.__setattr__(
+        cfg,
+        "MAX_MODIFY_RETRIES",
+        _int_env("MAX_MODIFY_RETRIES", cfg.max_modify_retries),
+    )
+    object.__setattr__(
+        cfg,
+        "PLAN_STALE_SEC",
+        _int_env("PLAN_STALE_SEC", cfg.plan_stale_sec),
+    )
 
 
 def load_settings() -> AppSettings:
