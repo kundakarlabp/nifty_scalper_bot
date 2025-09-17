@@ -383,7 +383,7 @@ class RiskSettings(BaseModel):
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
     # Session guard: disallow new entries at or after this HH:MM (IST).
-    no_new_after_hhmm: str = Field(
+    no_new_after_hhmm: str | None = Field(
         "15:20",
         description=(
             "Latest IST timestamp (HH:MM) to initiate new positions before "
@@ -1237,7 +1237,7 @@ class AppSettings(BaseSettings):
         return self.risk.trading_window_end
 
     @property
-    def risk_no_new_after_hhmm(self) -> str:
+    def risk_no_new_after_hhmm(self) -> str | None:
         return self.risk.no_new_after_hhmm
 
     @property

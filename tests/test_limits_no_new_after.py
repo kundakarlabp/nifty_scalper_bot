@@ -30,6 +30,15 @@ def test_no_new_after_blocks(monkeypatch):
     assert not ok and reason == "session_closed"
 
 
+def test_no_new_after_disabled(monkeypatch):
+    cfg = LimitConfig(no_new_after_hhmm=None)
+    eng = RiskEngine(cfg)
+    dt = datetime(2024, 1, 1, 23, 0, tzinfo=ZoneInfo(cfg.tz))
+    monkeypatch.setattr(eng, "_now", lambda: dt)
+    ok, reason, _ = eng.pre_trade_check(**_args())
+    assert ok and not reason
+
+
 def test_limit_config_defaults_from_settings(monkeypatch):
     monkeypatch.setattr(settings.risk, "no_new_after_hhmm", "11:00", raising=False)
     monkeypatch.setattr(settings.risk, "eod_flatten_hhmm", "11:15", raising=False)

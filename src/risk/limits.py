@@ -42,8 +42,8 @@ class LimitConfig:
     skip_next_open_after_two_daily_caps: bool = True
     # Maximum realised loss in premium (rupee) terms before halting for the day.
     max_daily_loss_rupees: float = 1_000_000.0
-    no_new_after_hhmm: str = field(
-        default_factory=lambda: str(settings.risk.no_new_after_hhmm)
+    no_new_after_hhmm: Optional[str] = field(
+        default_factory=lambda: settings.risk.no_new_after_hhmm
     )
     eod_flatten_hhmm: str = field(
         default_factory=lambda: str(settings.risk.eod_flatten_hhmm)
@@ -208,18 +208,18 @@ class RiskEngine:
                 {"trades_today": self.state.trades_today},
             )
 
-        cutoff = datetime.strptime(
-            self.cfg.no_new_after_hhmm, "%H:%M"
-        ).time()
-        if now.time() >= cutoff:
-            return (
-                False,
-                "session_closed",
-                {
-                    "cutoff": self.cfg.no_new_after_hhmm,
-                    "config_key": "RISK__NO_NEW_AFTER_HHMM",
-                },
-            )
+        cutoff_cfg = (self.cfg.no_new_after_hhmm or "").strip()
+        if cutoff_cfg and cutoff_cfg.lower() != "none":
+            cutoff = datetime.strptime(cutoff_cfg, "%H:%M").time()
+            if now.time() >= cutoff:
+                return (
+                    False,
+                    "session_closed",
+                    {
+                        "cutoff": cutoff_cfg,
+                        "config_key": "RISK__NO_NEW_AFTER_HHMM",
+                    },
+                )
 
         current_lots = exposure.lots_by_symbol.get(intended_symbol, 0)
         if current_lots >= self.cfg.max_lots_per_symbol:
