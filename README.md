@@ -164,14 +164,13 @@ Use the Telegram `/risk` command to inspect current limits.  Live trading is ena
 
 ## Telegram control
 
-The bot can react to simple commands sent to the configured chat:
+The Telegram bot is the primary control surface for day‑to‑day operations.  Run `/help` in the chat to see the live list straight from the handler.  For convenience the currently wired commands are mirrored below (and kept in sync by `tests/test_telegram_help.py`):
 
-* `/start` – begin a real‑time trading session.  The bot will connect to Kite, subscribe to market data and start evaluating signals.
-* `/stop` – halt streaming and cancel any open subscriptions.  Existing positions will continue to be managed by the execution layer.
-* `/status` – return a summary of the current trading state including uptime, streaming status, active positions, instruments and risk metrics.
-* `/summary` – report realised P&L for the day, the number of trades taken and the current drawdown.
-* `/pause` – temporarily stop processing ticks and generating new orders.
-* `/resume` – resume processing after a pause.
+```
+/active /apihealth /atm /atrmin /atrp /audit /backtest /bars /cancel /cancel_all /cb /check /components /conf /config /depthmin /diag /emergency_stop /eventguard /events /expiry /filecheck /force_eval /fresh /greeks /hb /health /healthjson /help /l1 /lastplan /lasttrades /limits /logs /logtail /micro /microcap /micromode /minscore /mode /nextevent /orders /pause /plan /positions /probe /quotes /range /reconcile /reload /resume /risk /riskresettoday /router /score /selftest /shadow /sizer /slmult /smoketest /start /state /status /summary /tick /tpmult /trace /traceoff /trend /warmup /watch /why
+```
+
+The most common actions are pausing/resuming the runner during maintenance windows, checking `/status` for a quick health readout and inspecting `/risk` or `/limits` when tweaking exposure.
 
 ## Troubleshooting
 
