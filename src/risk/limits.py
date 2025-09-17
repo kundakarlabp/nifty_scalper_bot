@@ -427,7 +427,16 @@ class RiskEngine:
             settings_basis.lower() == "premium" and basis_cfg == "premium"
         )
         basis = "premium" if use_premium_basis else basis_cfg
-        exposure_cap = self.cfg.max_notional_rupees
+        exposure_cap: Optional[float] = None
+        exposure_cap_cfg = self.cfg.max_notional_rupees
+        if exposure_cap_cfg is not None:
+            try:
+                exposure_cap_val = float(exposure_cap_cfg)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if exposure_cap_val >= 0.0:
+                    exposure_cap = exposure_cap_val
         cap_abs_setting = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
 
         if use_premium_basis:
@@ -443,7 +452,7 @@ class RiskEngine:
                 available_lots,
             )
             plan["eq_source"] = eq_source
-            exposure_cap = cap
+            exposure_cap = float(cap)
             price_mid = float(_mid_from_quote(quote_payload))
             meta: Optional[Dict[str, Any]] = None
             if lots <= 0:
@@ -502,7 +511,10 @@ class RiskEngine:
                 },
             )
         intended_notional = unit_notional * intended_lots
-        if exposure.notional_rupees + intended_notional > exposure_cap:
+        if (
+            exposure_cap is not None
+            and exposure.notional_rupees + intended_notional > exposure_cap
+        ):
             logger.info(
                 "max_notional block: basis=%s unit_notional=%.2f calc_lots=%d cap=%.2f",
                 basis,

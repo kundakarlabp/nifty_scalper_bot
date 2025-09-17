@@ -191,6 +191,28 @@ def test_notional_underlying_vs_premium():
     assert ok2 and reason2 == ""
 
 
+def test_notional_cap_disabled_when_none():
+    cfg = LimitConfig(
+        max_notional_rupees=None,
+        max_lots_per_symbol=100,
+        exposure_basis="underlying",
+    )
+    eng = RiskEngine(cfg)
+    ok, reason, details = eng.pre_trade_check(
+        **{
+            **_basic_args(),
+            "exposure": Exposure(notional_rupees=2_000_000.0),
+            "intended_lots": 10,
+            "lot_size": 50,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "spot_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    assert ok and reason == ""
+
+
 def test_daily_premium_loss_blocks():
     cfg = LimitConfig(max_daily_loss_rupees=100.0)
     eng = RiskEngine(cfg)
