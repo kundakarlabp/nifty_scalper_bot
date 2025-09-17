@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -16,6 +17,45 @@ def _prep_settings(monkeypatch) -> None:
         "telegram",
         SimpleNamespace(bot_token="t", chat_id=1, enabled=True, extra_admin_ids=[]),
     )
+
+
+def _make_runner(monkeypatch) -> StrategyRunner:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner.log = logging.getLogger("StrategyRunnerTest")
+    runner.strategy_cfg = SimpleNamespace(
+        raw={"strategy": {}},
+        min_signal_score=4,
+        min_signal_score_relaxed=3,
+    )
+    runner.strategy = SimpleNamespace(
+        min_score_strict=4,
+        min_score_relaxed=3,
+        min_conf_strict=5.5,
+        min_conf_relaxed=3.5,
+        atr_period=14,
+        base_sl_mult=1.3,
+        base_tp_mult=2.2,
+        trend_tp_boost=0.6,
+        trend_sl_relax=0.2,
+        range_tp_tighten=-0.4,
+        range_sl_tighten=-0.2,
+    )
+    monkeypatch.setattr(settings.strategy, "min_signal_score", 4, raising=False)
+    monkeypatch.setattr(settings.strategy, "confidence_threshold", 55.0, raising=False)
+    monkeypatch.setattr(settings.strategy, "atr_period", 14, raising=False)
+    monkeypatch.setattr(settings.strategy, "atr_sl_multiplier", 1.3, raising=False)
+    monkeypatch.setattr(settings.strategy, "atr_tp_multiplier", 2.2, raising=False)
+
+    def _set_extra(name: str, value: object) -> None:
+        monkeypatch.setitem(settings.strategy.__dict__, name, value)
+
+    _set_extra("min_signal_score_relaxed", 3)
+    _set_extra("confidence_threshold_relaxed", 35.0)
+    _set_extra("trend_tp_boost", 0.6)
+    _set_extra("trend_sl_relax", 0.2)
+    _set_extra("range_tp_tighten", -0.4)
+    _set_extra("range_sl_tighten", -0.2)
+    return runner
 
 
 def test_why_reports_gates_and_micro(monkeypatch) -> None:
@@ -455,3 +495,78 @@ def test_healthjson_outputs_json(monkeypatch) -> None:
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/healthjson"}})
     data = json.loads(sent[0])
     assert data[0]["name"] == "check"
+
+
+def test_strategy_mutator_commands_adjust_runtime(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = _make_runner(monkeypatch)
+    tc = TelegramController(
+        status_provider=lambda: {},
+        set_min_score=runner.set_min_score,
+        set_conf_threshold=runner.set_conf_threshold,
+        set_atr_period=runner.set_atr_period,
+        set_sl_mult=runner.set_sl_mult,
+        set_tp_mult=runner.set_tp_mult,
+        set_trend_boosts=runner.set_trend_boosts,
+        set_range_tighten=runner.set_range_tighten,
+    )
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/minscore 6"}})
+    assert sent[-1] == "Min signal score set to 6."
+    assert runner.strategy.min_score_strict == 6
+    assert runner.strategy.min_score_relaxed == 5
+    assert settings.strategy.min_signal_score == 6
+    assert getattr(settings.strategy, "min_signal_score_relaxed") == 5
+    assert runner.strategy_cfg.min_signal_score == 6
+    assert runner.strategy_cfg.min_signal_score_relaxed == 5
+    assert runner.strategy_cfg.raw["strategy"]["min_signal_score"] == 6
+    assert runner.strategy_cfg.raw["strategy"]["min_signal_score_relaxed"] == 5
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/conf 60"}})
+    assert sent[-1] == "Confidence threshold set to 60.00."
+    assert settings.strategy.confidence_threshold == 60.0
+    assert getattr(settings.strategy, "confidence_threshold_relaxed") == 40.0
+    assert runner.strategy.min_conf_strict == 6.0
+    assert runner.strategy.min_conf_relaxed == 4.0
+    assert runner.strategy_cfg.raw["strategy"]["confidence_threshold"] == 60.0
+    assert (
+        runner.strategy_cfg.raw["strategy"]["confidence_threshold_relaxed"] == 40.0
+    )
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/atrp 21"}})
+    assert sent[-1] == "ATR period set to 21."
+    assert settings.strategy.atr_period == 21
+    assert runner.strategy.atr_period == 21
+    assert runner.strategy_cfg.raw["strategy"]["atr_period"] == 21
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/slmult 1.4"}})
+    assert sent[-1] == "SL ATR multiplier set to 1.40."
+    assert settings.strategy.atr_sl_multiplier == 1.4
+    assert runner.strategy.base_sl_mult == 1.4
+    assert runner.strategy_cfg.raw["strategy"]["atr_sl_multiplier"] == 1.4
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/tpmult 2.6"}})
+    assert sent[-1] == "TP ATR multiplier set to 2.60."
+    assert settings.strategy.atr_tp_multiplier == 2.6
+    assert runner.strategy.base_tp_mult == 2.6
+    assert runner.strategy_cfg.raw["strategy"]["atr_tp_multiplier"] == 2.6
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/trend 0.7 0.3"}})
+    assert sent[-1] == "Trend boosts: tp+0.7, sl+0.3"
+    assert getattr(settings.strategy, "trend_tp_boost") == 0.7
+    assert getattr(settings.strategy, "trend_sl_relax") == 0.3
+    assert runner.strategy.trend_tp_boost == 0.7
+    assert runner.strategy.trend_sl_relax == 0.3
+    assert runner.strategy_cfg.raw["strategy"]["trend_tp_boost"] == 0.7
+    assert runner.strategy_cfg.raw["strategy"]["trend_sl_relax"] == 0.3
+
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/range -0.5 -0.3"}})
+    assert sent[-1] == "Range tighten: tp-0.5, sl-0.3"
+    assert getattr(settings.strategy, "range_tp_tighten") == -0.5
+    assert getattr(settings.strategy, "range_sl_tighten") == -0.3
+    assert runner.strategy.range_tp_tighten == -0.5
+    assert runner.strategy.range_sl_tighten == -0.3
+    assert runner.strategy_cfg.raw["strategy"]["range_tp_tighten"] == -0.5
+    assert runner.strategy_cfg.raw["strategy"]["range_sl_tighten"] == -0.3

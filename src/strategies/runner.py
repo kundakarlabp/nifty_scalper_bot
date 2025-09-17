@@ -3143,6 +3143,218 @@ class StrategyRunner:
     def resume(self) -> None:
         self._paused = False
 
+    # ---------------- strategy tuning helpers ----------------
+    def _strategy_raw_section(self) -> dict[str, Any]:
+        raw = getattr(self.strategy_cfg, "raw", None)
+        if isinstance(raw, dict):
+            return raw.setdefault("strategy", {})
+        return {}
+
+    def _strategy_cfg_set(self, key: str, value: Any) -> None:
+        cfg = getattr(self, "strategy_cfg", None)
+        if cfg is None:
+            return
+        try:
+            setattr(cfg, key, value)
+        except Exception:
+            self.log.debug("Failed to set strategy_cfg.%s", key, exc_info=True)
+
+    def _set_strategy_setting(self, key: str, value: Any) -> None:
+        target = getattr(settings, "strategy", None)
+        if target is None:
+            return
+        try:
+            setattr(target, key, value)
+        except (AttributeError, ValueError):
+            try:
+                object.__setattr__(target, key, value)
+            except Exception:
+                self.log.debug("Unable to set settings.strategy.%s", key, exc_info=True)
+
+    def set_min_score(self, value: int) -> None:
+        """Adjust the strict and relaxed signal score thresholds at runtime."""
+
+        try:
+            score = int(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("min score must be an integer") from exc
+        if not 0 <= score <= 10:
+            raise ValueError("min score must be between 0 and 10")
+        relaxed_default = max(2, score - 1)
+        relaxed = min(score, relaxed_default)
+
+        self._set_strategy_setting("min_signal_score", score)
+        self._set_strategy_setting("min_signal_score_relaxed", relaxed)
+
+        if getattr(self, "strategy", None):
+            self.strategy.min_score_strict = score
+            self.strategy.min_score_relaxed = relaxed
+
+        self._strategy_cfg_set("min_signal_score", score)
+        self._strategy_cfg_set("min_signal_score_relaxed", relaxed)
+        raw = self._strategy_raw_section()
+        raw["min_signal_score"] = score
+        raw["min_signal_score_relaxed"] = relaxed
+        self.log.info("min_signal_score -> %s (relaxed=%s)", score, relaxed)
+
+    def set_conf_threshold(self, value: float) -> None:
+        """Update the confidence thresholds (strict + relaxed) used by the strategy."""
+
+        try:
+            strict = float(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("confidence threshold must be numeric") from exc
+        if not 0.0 <= strict <= 100.0:
+            raise ValueError("confidence threshold must be within 0..100")
+
+        current_strict = float(getattr(settings.strategy, "confidence_threshold", 55.0))
+        current_relaxed = float(
+            getattr(
+                settings.strategy,
+                "confidence_threshold_relaxed",
+                max(0.0, current_strict - 20.0),
+            )
+        )
+        gap = max(0.0, current_strict - current_relaxed)
+        relaxed = max(0.0, strict - gap)
+        relaxed = min(strict, relaxed)
+
+        self._set_strategy_setting("confidence_threshold", strict)
+        self._set_strategy_setting("confidence_threshold_relaxed", relaxed)
+
+        if getattr(self, "strategy", None):
+            self.strategy.min_conf_strict = strict / 10.0
+            self.strategy.min_conf_relaxed = relaxed / 10.0
+
+        self._strategy_cfg_set("confidence_threshold", strict)
+        self._strategy_cfg_set("confidence_threshold_relaxed", relaxed)
+        raw = self._strategy_raw_section()
+        raw["confidence_threshold"] = strict
+        raw["confidence_threshold_relaxed"] = relaxed
+        self.log.info(
+            "confidence_threshold -> %.2f (relaxed=%.2f)", strict, relaxed
+        )
+
+    def set_atr_period(self, value: int) -> None:
+        """Change the ATR lookback period used by the signal engine."""
+
+        try:
+            period = int(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("ATR period must be an integer") from exc
+        if not 1 <= period <= 200:
+            raise ValueError("ATR period must be between 1 and 200")
+
+        self._set_strategy_setting("atr_period", period)
+
+        if getattr(self, "strategy", None):
+            self.strategy.atr_period = period
+
+        self._strategy_cfg_set("atr_period", period)
+        raw = self._strategy_raw_section()
+        raw["atr_period"] = period
+        self.log.info("atr_period -> %s", period)
+
+    def set_sl_mult(self, value: float) -> None:
+        """Adjust the ATR stop-loss multiplier with validation against TP."""
+
+        try:
+            sl_mult = float(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("SL multiplier must be numeric") from exc
+        if not 0.1 <= sl_mult <= 10.0:
+            raise ValueError("SL multiplier must be between 0.1 and 10.0")
+
+        tp_mult = float(
+            getattr(settings.strategy, "atr_tp_multiplier", getattr(self.strategy, "base_tp_mult", 2.0))
+        )
+        if sl_mult >= tp_mult:
+            raise ValueError("SL multiplier must be less than TP multiplier")
+
+        self._set_strategy_setting("atr_sl_multiplier", sl_mult)
+
+        if getattr(self, "strategy", None):
+            self.strategy.base_sl_mult = sl_mult
+
+        self._strategy_cfg_set("atr_sl_multiplier", sl_mult)
+        raw = self._strategy_raw_section()
+        raw["atr_sl_multiplier"] = sl_mult
+        self.log.info("atr_sl_multiplier -> %.2f", sl_mult)
+
+    def set_tp_mult(self, value: float) -> None:
+        """Adjust the ATR take-profit multiplier keeping it above SL."""
+
+        try:
+            tp_mult = float(value)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("TP multiplier must be numeric") from exc
+        if not 0.1 <= tp_mult <= 15.0:
+            raise ValueError("TP multiplier must be between 0.1 and 15.0")
+
+        sl_mult = float(
+            getattr(settings.strategy, "atr_sl_multiplier", getattr(self.strategy, "base_sl_mult", 1.0))
+        )
+        if tp_mult <= sl_mult:
+            raise ValueError("TP multiplier must be greater than SL multiplier")
+
+        self._set_strategy_setting("atr_tp_multiplier", tp_mult)
+
+        if getattr(self, "strategy", None):
+            self.strategy.base_tp_mult = tp_mult
+
+        self._strategy_cfg_set("atr_tp_multiplier", tp_mult)
+        raw = self._strategy_raw_section()
+        raw["atr_tp_multiplier"] = tp_mult
+        self.log.info("atr_tp_multiplier -> %.2f", tp_mult)
+
+    def set_trend_boosts(self, tp_boost: float, sl_relax: float) -> None:
+        """Tune trend regime adjustments for TP and SL multipliers."""
+
+        tp_adj = float(tp_boost)
+        sl_adj = float(sl_relax)
+        if not -5.0 <= tp_adj <= 5.0:
+            raise ValueError("trend TP boost must be between -5.0 and 5.0")
+        if not -5.0 <= sl_adj <= 5.0:
+            raise ValueError("trend SL relax must be between -5.0 and 5.0")
+
+        self._set_strategy_setting("trend_tp_boost", tp_adj)
+        self._set_strategy_setting("trend_sl_relax", sl_adj)
+
+        if getattr(self, "strategy", None):
+            self.strategy.trend_tp_boost = tp_adj
+            self.strategy.trend_sl_relax = sl_adj
+
+        self._strategy_cfg_set("trend_tp_boost", tp_adj)
+        self._strategy_cfg_set("trend_sl_relax", sl_adj)
+        raw = self._strategy_raw_section()
+        raw["trend_tp_boost"] = tp_adj
+        raw["trend_sl_relax"] = sl_adj
+        self.log.info("trend boosts -> tp=%+.2f sl=%+.2f", tp_adj, sl_adj)
+
+    def set_range_tighten(self, tp_tighten: float, sl_tighten: float) -> None:
+        """Tune range regime tightening factors for TP and SL."""
+
+        tp_adj = float(tp_tighten)
+        sl_adj = float(sl_tighten)
+        if not -5.0 <= tp_adj <= 5.0:
+            raise ValueError("range TP tighten must be between -5.0 and 5.0")
+        if not -5.0 <= sl_adj <= 5.0:
+            raise ValueError("range SL tighten must be between -5.0 and 5.0")
+
+        self._set_strategy_setting("range_tp_tighten", tp_adj)
+        self._set_strategy_setting("range_sl_tighten", sl_adj)
+
+        if getattr(self, "strategy", None):
+            self.strategy.range_tp_tighten = tp_adj
+            self.strategy.range_sl_tighten = sl_adj
+
+        self._strategy_cfg_set("range_tp_tighten", tp_adj)
+        self._strategy_cfg_set("range_sl_tighten", sl_adj)
+        raw = self._strategy_raw_section()
+        raw["range_tp_tighten"] = tp_adj
+        raw["range_sl_tighten"] = sl_adj
+        self.log.info("range tighten -> tp=%+.2f sl=%+.2f", tp_adj, sl_adj)
+
     # ---------------- live-mode wiring ----------------
     def _create_kite_from_settings(self):
         """Create a KiteConnect session from settings.
