@@ -291,6 +291,7 @@ def main() -> int:
             settings.telegram.bot_token,  # pragma: no cover
             str(settings.telegram.chat_id),  # pragma: no cover
             on_cmd=_make_cmd_handler(runner),  # pragma: no cover
+            backtest_runner=getattr(runner, "run_backtest", None),  # pragma: no cover
         )
         cmd_listener.start()  # pragma: no cover
 

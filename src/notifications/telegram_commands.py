@@ -18,10 +18,12 @@ class TelegramCommands:
         bot_token: Optional[str],
         chat_id: Optional[str],
         on_cmd: Optional[Callable[[str, str], None]] = None,
+        backtest_runner: Optional[Callable[[Optional[str]], str]] = None,
     ) -> None:
         self.token = bot_token or ""
         self.chat = str(chat_id or "")
         self.on_cmd = on_cmd
+        self._backtest_runner = backtest_runner
         self._offset: Optional[int] = None
         self._running = False
         self._th: Optional[threading.Thread] = None
@@ -137,5 +139,18 @@ class TelegramCommands:
                 f"lots={self.lots} caps={self.caps}"
             )
             self._send(msg)
+            return True
+        if cmd == "/backtest":
+            if not self._backtest_runner:
+                self._send("Backtest not available.")
+                return True
+            path = arg.strip() or None
+            try:
+                result = self._backtest_runner(path)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("backtest runner failed")
+                result = f"Backtest error: {exc}"
+            if result:
+                self._send(result)
             return True
         return False
