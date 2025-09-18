@@ -439,6 +439,7 @@ class RiskEngine:
                     exposure_cap = exposure_cap_val
         cap_abs_setting = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
 
+        allow_min_override = False
         if use_premium_basis:
             available_lots = max(0, self.cfg.max_lots_per_symbol - current_lots)
             quote_payload = quote or {
@@ -459,6 +460,30 @@ class RiskEngine:
             cap = cap_from_equity
             price_mid = float(_mid_from_quote(quote_payload))
             meta: Optional[Dict[str, Any]] = None
+            allow_min_config = bool(
+                getattr(settings, "risk_allow_min_one_lot", False)
+            )
+            if (
+                lots <= 0
+                and allow_min_config
+                and available_lots > 0
+                and unit_notional > 0
+                and float(equity_rupees) >= unit_notional
+                and not (cap_abs_setting > 0 and unit_notional > cap_abs_setting)
+                and (
+                    exposure_cap_cfg is None
+                    or float(exposure_cap_cfg) >= unit_notional
+                )
+            ):
+                lots = 1
+                allow_min_override = True
+                exposure_cap = max(exposure_cap or 0.0, unit_notional)
+                cap = exposure_cap
+                logger.info(
+                    "allow_min_one_lot override: unit_notional=%.2f cap=%.2f",
+                    unit_notional,
+                    cap,
+                )
             if lots <= 0:
                 cap_abs_value = (
                     round(cap_abs_setting, 2) if cap_abs_setting > 0 else None
@@ -499,6 +524,10 @@ class RiskEngine:
                         reasons.append(cap_msg)
                     return Block(reason="cap_lt_one_lot", details=meta)
             plan["qty_lots"] = int(lots)
+            if allow_min_override:
+                reasons = plan.setdefault("reasons", [])
+                if "allow_min_one_lot" not in reasons:
+                    reasons.append("allow_min_one_lot")
             intended_lots = min(intended_lots, int(lots))
         else:
             unit_notional = spot_price * lot_size
@@ -609,6 +638,8 @@ class RiskEngine:
             r_per_contract = abs(entry_price - stop_loss_price)
             r_rupees = r_per_contract * lot_size * intended_lots
             details["R_rupees_est"] = round(r_rupees, 2)
+        if allow_min_override:
+            details["allow_min_one_lot"] = True
 
         return True, "", details
 

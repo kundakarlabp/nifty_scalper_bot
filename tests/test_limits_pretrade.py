@@ -118,6 +118,54 @@ def test_equity_based_premium_cap(monkeypatch):
     assert plan.get("qty_lots") == 4
 
 
+def test_allow_min_one_lot_override(monkeypatch):
+    cfg = LimitConfig(exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_ABS", 0.0, raising=False)
+    monkeypatch.setattr(app_settings.risk, "allow_min_one_lot", True, raising=False)
+    args = _basic_args()
+    plan = args["plan"]
+    args.update(
+        {
+            "equity_rupees": 40_000.0,
+            "intended_lots": 3,
+            "lot_size": 50,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert ok and reason == ""
+    assert plan.get("qty_lots") == 1
+    assert details.get("allow_min_one_lot") is True
+
+
+def test_allow_min_one_lot_disabled_blocks(monkeypatch):
+    cfg = LimitConfig(exposure_basis="premium")
+    eng = RiskEngine(cfg)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "EXPOSURE_CAP_ABS", 0.0, raising=False)
+    monkeypatch.setattr(app_settings.risk, "allow_min_one_lot", False, raising=False)
+    args = _basic_args()
+    plan = args["plan"]
+    args.update(
+        {
+            "equity_rupees": 40_000.0,
+            "intended_lots": 2,
+            "lot_size": 50,
+            "entry_price": 200.0,
+            "option_mid_price": 200.0,
+            "quote": {"mid": 200.0},
+        }
+    )
+    ok, reason, details = eng.pre_trade_check(**args)
+    assert not ok and reason == "cap_lt_one_lot"
+    assert plan["reason_block"] == "cap_lt_one_lot"
+    assert "unit_notional" in details
+
+
 def test_equity_cap_limits_aggregate_exposure(monkeypatch):
     cfg = LimitConfig(max_notional_rupees=1_000_000.0, exposure_basis="premium")
     eng = RiskEngine(cfg)
