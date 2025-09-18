@@ -8,6 +8,7 @@ ATM upkeep helpers on data sources run during strategy evaluation.
 """
 
 import logging
+from math import isfinite
 from importlib import import_module
 from typing import Any, Callable
 
@@ -43,23 +44,72 @@ def _wrap_gate(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Return a wrapper that clamps ``band_low`` via call arguments."""
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if args or "band_low" in kwargs:
-            band_low = kwargs.get("band_low", args[0] if args else None)
-            if band_low is not None:
-                # ``gate_atr_band`` style helpers expect ``band_low`` to reflect the
-                # effective minimum ATR pct.  The configuration might provide a
-                # higher or lower raw bound, but we always want the guard to
-                # evaluate against the resolved minimum derived from runtime
-                # context (instrument, overrides, etc.).  When the resolved
-                # minimum is zero we fall back to the provided band so that
-                # environments with no lower limit behave unchanged.
-                resolved = float(_resolve_min_atr_pct())
-                clamped = float(band_low) if resolved <= 0 else resolved
+        band_arg_index = 1 if len(args) > 1 else None
+        band_low_original: float | None = None
+        resolved_min: float | None = None
+        args_out = args
+
+        if "band_low" in kwargs:
+            try:
+                band_low_original = float(kwargs["band_low"])
+            except (TypeError, ValueError):
+                band_low_original = None
+        elif band_arg_index is not None:
+            try:
+                band_low_original = float(args[band_arg_index])
+            except (TypeError, ValueError):
+                band_low_original = None
+
+        if band_low_original is not None:
+            resolved_min = float(_resolve_min_atr_pct())
+            if resolved_min > 0:
+                new_band_low = max(band_low_original, resolved_min)
                 if "band_low" in kwargs:
-                    kwargs["band_low"] = clamped
-                else:
-                    args = (clamped, *args[1:])
-        return fn(*args, **kwargs)
+                    kwargs["band_low"] = new_band_low
+                elif band_arg_index is not None:
+                    args_out = (
+                        *args[:band_arg_index],
+                        new_band_low,
+                        *args[band_arg_index + 1 :],
+                    )
+
+        result = fn(*args_out, **kwargs)
+
+        if resolved_min is None:
+            resolved_min = float(_resolve_min_atr_pct())
+
+        if not isinstance(result, tuple) or len(result) < 4 or resolved_min <= 0:
+            return result
+
+        try:
+            current_min = float(result[2])
+            current_max = float(result[3])
+        except (TypeError, ValueError):
+            return result
+
+        new_min = max(current_min, resolved_min)
+        if new_min == current_min:
+            return result
+
+        try:
+            atr_value = float(args[0])
+        except (IndexError, TypeError, ValueError):
+            atr_value = new_min
+
+        effective_max = float("inf") if current_max <= 0 else max(current_max, new_min)
+        ok = bool(result[0]) and (new_min <= atr_value <= effective_max)
+        reason = result[1]
+        if not ok:
+            if atr_value < new_min:
+                reason = f"atr_out_of_band: atr={atr_value:.4f} < min={new_min}"
+            else:
+                bound = effective_max if isfinite(effective_max) else current_max
+                reason = f"atr_out_of_band: atr={atr_value:.4f} > max={bound}"
+
+        updated = (ok, reason, new_min, current_max)
+        if len(result) > 4:
+            updated += result[4:]
+        return updated
 
     return wrapped
 
