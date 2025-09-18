@@ -819,6 +819,11 @@ class ExecutorSettings(BaseModel):
     # microstructure execution guards
     max_spread_pct: float = 0.0035  # 0.35%
     depth_multiplier: float = 5.0  # top-5 depth >= mult * order size
+    depth_min_lots: float = Field(
+        5.0,
+        description="Minimum number of lots that must be available in depth when depth checks are enabled.",
+        validation_alias=AliasChoices("EXECUTOR__DEPTH_MIN_LOTS"),
+    )
     micro_retry_limit: int = 3
     require_depth: bool = False
     default_spread_pct_est: float = 0.25
@@ -1346,7 +1351,9 @@ class AppSettings(BaseSettings):
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
-            entry_slippage_pct=0.25, exit_slippage_pct=0.25
+            entry_slippage_pct=0.25,
+            exit_slippage_pct=0.25,
+            depth_min_lots=5.0,
         )
     )
     option_selector: OptionSelectorSettings = Field(
