@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -22,6 +23,18 @@ from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 REASON_MAP: Dict[str, str] = {
     "cap_lt_one_lot": "premium cap too small for 1 lot",
 }
+
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _as_aware_ist(ts: Any) -> pd.Timestamp:
+    """Return the timestamp as an aware ``Asia/Kolkata`` instance."""
+
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None or ts.tz is None:
+        return ts.tz_localize(IST)
+    return ts.tz_convert(IST)
 
 
 def _ok(msg: str, *, name: str, **details: Any) -> CheckResult:
@@ -85,7 +98,8 @@ def check_data_window() -> CheckResult:
             "no bars", name="data_window", fix="enable backfill or broker history"
         )
     last_ts = df.index[-1]
-    lag_s = (r.now_ist - last_ts).total_seconds()
+    last_ts_ist = _as_aware_ist(last_ts)
+    lag_s = (r.now_ist - last_ts_ist).total_seconds()
     tf_s = 60  # timeframe is minute
     ok = lag_s <= 3 * tf_s
     msg = "fresh" if ok else "stale"
@@ -96,7 +110,7 @@ def check_data_window() -> CheckResult:
         msg=msg,
         details={
             "bars": len(df),
-            "last_bar_ts": str(last_ts),
+            "last_bar_ts": str(last_ts_ist),
             "lag_s": lag_s,
             "tf_s": tf_s,
         },
