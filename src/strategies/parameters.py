@@ -11,7 +11,7 @@ the guard rails already enforced by the live configuration models.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Sequence
+from typing import Any, Dict, Iterable, Mapping, Sequence, cast
 
 import numpy as np
 
@@ -187,11 +187,13 @@ class StrategyParameterSpace:
         self._rng = np.random.default_rng(seed)
 
     def sample(self) -> StrategyParameters:
-        candidate = {}
+        candidate: Dict[str, float | int] = {}
         for bound in self._bounds:
             val = bound.sample(self._rng)
             candidate[bound.name] = int(val) if bound.is_int else val
-        return self.ensure_valid(StrategyParameters(**candidate))
+        return self.ensure_valid(
+            StrategyParameters(**cast(Dict[str, Any], candidate))
+        )
 
     def ensure_valid(self, params: StrategyParameters) -> StrategyParameters:
         data = dict(self._base_dump)
@@ -237,11 +239,11 @@ class StrategyParameterSpace:
                 if tp_bound is not None:
                     tp = min(max(tp, tp_bound.low), tp_bound.high)
                 clipped["atr_tp_multiplier"] = float(tp)
-            safe_kwargs = {}
+            safe_kwargs: Dict[str, float | int] = {}
             for bound in self._bounds:
                 val = clipped.get(bound.name, getattr(params, bound.name))
                 safe_kwargs[bound.name] = int(val) if bound.is_int else float(val)
-            safe = StrategyParameters(**safe_kwargs)
+            safe = StrategyParameters(**cast(Dict[str, Any], safe_kwargs))
             data.update(safe.as_settings_update())
             validated = StrategySettings(**data)
         return StrategyParameters.from_settings(validated)
@@ -258,5 +260,5 @@ class StrategyParameterSpace:
         for bound, frac in zip(self._bounds, vec):
             denorm = bound.denormalize(float(frac))
             values[bound.name] = int(denorm) if bound.is_int else denorm
-        return self.ensure_valid(StrategyParameters(**values))
+        return self.ensure_valid(StrategyParameters(**cast(Dict[str, Any], values)))
 

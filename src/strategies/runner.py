@@ -1515,6 +1515,30 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
+            prime_price: float | None = None
+            prime_src: str | None = None
+            prime_ts: int | None = None
+            prime_fn = getattr(ds, "prime_option_quote", None)
+            require_prime = bool(getattr(self.settings, "enable_live_trading", False))
+            if callable(prime_fn):
+                try:
+                    prime_price, prime_src, prime_ts = prime_fn(token)
+                except Exception:
+                    self.log.debug("prime_option_quote failed", exc_info=True)
+                    prime_price = None
+                    prime_src = None
+                    prime_ts = None
+            plan["prime_quote_price"] = prime_price
+            plan["prime_quote_src"] = prime_src
+            plan["prime_quote_ts"] = prime_ts
+            if require_prime and not prime_price:
+                plan["reason_block"] = "no_quote"
+                plan.setdefault("reasons", []).append("no_quote")
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.log.info("no_quote token=%s", token)
+                return
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
                 try:

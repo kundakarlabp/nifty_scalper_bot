@@ -6,9 +6,9 @@ import csv
 import json
 import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import random
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, cast
 
 from src.risk.greeks import OptionType
 from src.risk.limits import Exposure, RiskEngine
@@ -21,6 +21,15 @@ from .sim_connector import SimConnector
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+
+
+class BacktestStrategy(Protocol):
+    """Minimal interface required by the backtest engine."""
+
+    def evaluate_from_backtest(
+        self, ts: datetime, o: float, h: float, low: float, c: float, v: float
+    ) -> dict[str, Any] | None:
+        ...
 
 
 @dataclass
@@ -46,7 +55,7 @@ class BacktestEngine:
         outdir: str,
         *,
         strategy_factory: Optional[
-            Callable[[Optional[StrategyParameters]], "EnhancedScalpingStrategy"]
+            Callable[[Optional[StrategyParameters]], BacktestStrategy]
         ] = None,
         write_results: bool = True,
     ) -> None:
@@ -343,7 +352,7 @@ class BacktestEngine:
 
     def _build_strategy(
         self, params: Optional[StrategyParameters]
-    ) -> "EnhancedScalpingStrategy":
+    ) -> BacktestStrategy:
         if self._strategy_factory is not None:
             return self._strategy_factory(params)
         from src.strategies.scalping_strategy import ScalpingStrategy
