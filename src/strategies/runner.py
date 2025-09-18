@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import time
+from decimal import Decimal
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -916,6 +917,28 @@ class StrategyRunner:
                 missing.append(int(token))
         return missing
 
+    @staticmethod
+    def _format_two_decimals(value: Any) -> Any:
+        """Format numeric values with two decimal places when possible."""
+
+        if value is None or isinstance(value, bool):
+            return value
+
+        if isinstance(value, Decimal):
+            return f"{float(value):.2f}"
+
+        if isinstance(value, (int, float)):
+            return f"{float(value):.2f}"
+
+        if isinstance(value, str):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return value
+            return f"{number:.2f}"
+
+        return value
+
     def _quote_has_token(self, payload: Any, token: int) -> bool:
         """Recursively inspect a quote payload for a specific instrument token."""
 
@@ -970,26 +993,38 @@ class StrategyRunner:
             or plan.get("reason_block") != self._last_reason_block
         )
         if (not self._log_signal_changes_only) or changed:
+            strike = self._format_two_decimals(plan.get("strike"))
+            atm_strike = self._format_two_decimals(plan.get("atm_strike"))
+            score = self._format_two_decimals(plan.get("score"))
+            atr_pct = self._format_two_decimals(plan.get("atr_pct") or 0.0)
+            spread_pct = self._format_two_decimals(micro.get("spread_pct") or 0.0)
+            rr = self._format_two_decimals(plan.get("rr") or 0.0)
+            sl = self._format_two_decimals(plan.get("sl"))
+            tp1 = self._format_two_decimals(plan.get("tp1"))
+            tp2 = self._format_two_decimals(plan.get("tp2"))
+            opt_sl = self._format_two_decimals(plan.get("opt_sl"))
+            opt_tp1 = self._format_two_decimals(plan.get("opt_tp1"))
+            opt_tp2 = self._format_two_decimals(plan.get("opt_tp2"))
             self.log.info(
-                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%.2f spread%%=%.2f depth=%s rr=%.2f sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s reason_block=%s",
+                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%s spread%%=%s depth=%s rr=%s sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s reason_block=%s",
                 plan.get("action"),
                 plan.get("option_type"),
-                plan.get("strike"),
-                plan.get("atm_strike"),
+                strike,
+                atm_strike,
                 plan.get("option_token"),
                 plan.get("qty_lots"),
                 plan.get("regime"),
-                plan.get("score"),
-                float(plan.get("atr_pct") or 0.0),
-                float(micro.get("spread_pct") or 0.0),
+                score,
+                atr_pct,
+                spread_pct,
                 micro.get("depth_ok"),
-                float(plan.get("rr") or 0.0),
-                plan.get("sl"),
-                plan.get("tp1"),
-                plan.get("tp2"),
-                plan.get("opt_sl"),
-                plan.get("opt_tp1"),
-                plan.get("opt_tp2"),
+                rr,
+                sl,
+                tp1,
+                tp2,
+                opt_sl,
+                opt_tp1,
+                opt_tp2,
                 plan.get("reason_block"),
             )
         plan["eval_count"] = self.eval_count
