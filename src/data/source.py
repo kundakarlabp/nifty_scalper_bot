@@ -360,14 +360,14 @@ class DataSource:
 
     def prime_option_quote(
         self, token: int | str
-    ) -> tuple[float | None, str | None, int | None]:
+    ) -> Optional[Dict[str, Any]]:
         """Return the best-effort price snapshot for ``token``.
 
         The default implementation indicates absence of a quote. Live data
         sources should override this to surface the latest option book state.
         """
 
-        return None, None, None
+        return None
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health metrics if available."""
@@ -1218,24 +1218,32 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:  # pragma: no cover - defensive
                 log.debug("bar_builder.on_tick failed", exc_info=True)
 
-    def prime_option_quote(
+    def get_cached_full_quote(
         self, token: int | str
-    ) -> tuple[float | None, str | None, int | None]:
+    ) -> dict[str, Any] | None:
+        """Return a copy of the last cached quote for ``token`` if available."""
+
         try:
             token_i = int(token)
         except Exception:
-            return None, None, None
+            return None
+
+        cached = self._option_quote_cache.get(token_i)
+        if not cached:
+            return None
+        return dict(cached)
+
+    def prime_option_quote(
+        self, token: int | str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
 
         cached = self._option_quote_cache.get(token_i)
         if cached:
-            ts_ms_cached = cached.get("ts_ms")
-            ts_ms = ts_ms_cached if isinstance(ts_ms_cached, int) else _to_epoch_ms(cached.get("timestamp"))
-            for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
-                val = cached.get(key)
-                if isinstance(val, (int, float)) and val > 0:
-                    if ts_ms is None:
-                        ts_ms = int(time.time() * 1000)
-                    return float(val), f"ws_{label}", ts_ms
+            return dict(cached)
 
         quote_payload: dict[str, Any] | None = None
         if self.kite:
@@ -1254,18 +1262,20 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         break
                 if entry is not None:
                     quote_payload = dict(entry)
+
         if not quote_payload:
             ltp_price = self.get_last_price(token_i)
             if isinstance(ltp_price, (int, float)) and ltp_price > 0:
                 ts_ms = int(time.time() * 1000)
-                self._option_quote_cache[token_i] = {
+                payload = {
                     "ltp": float(ltp_price),
                     "ts_ms": ts_ms,
                     "source": "rest",
                     "mode": "rest_ltp",
                 }
-                return float(ltp_price), "rest_ltp", ts_ms
-            return None, None, None
+                self._option_quote_cache[token_i] = payload
+                return dict(payload)
+            return None
 
         quote_payload.setdefault("source", "kite")
         fetch_ltp = getattr(self, "get_last_price", None)
@@ -1275,7 +1285,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             fetch_ltp=fetch_ltp,
         )
         if not quote_dict:
-            return None, None, None
+            return None
 
         ts_ms = _to_epoch_ms(quote_dict.get("timestamp")) or int(time.time() * 1000)
         quote_dict["mode"] = mode
@@ -1283,19 +1293,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         quote_dict.setdefault("source", quote_payload.get("source", "kite"))
         self._option_quote_cache[token_i] = quote_dict
 
-        for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
-            val = quote_dict.get(key)
-            if isinstance(val, (int, float)) and val > 0:
-                if label == "ltp" and mode == "rest_ltp":
-                    source_label = "rest_ltp"
-                else:
-                    source_label = label
-                return float(val), source_label, ts_ms
-
-        ltp_val = quote_dict.get("ltp")
-        if isinstance(ltp_val, (int, float)) and ltp_val > 0:
-            return float(ltp_val), mode or "ltp", ts_ms
-        return None, mode, ts_ms
+        return dict(quote_dict)
 
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"

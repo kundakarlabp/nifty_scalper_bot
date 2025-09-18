@@ -72,6 +72,7 @@ __all__ = [
     "OrderExecutor",
     "OrderReconciler",
     "micro_ok",
+    "micro_decision",
     "fetch_quote_with_depth",
     "OrderManager",
 ]
@@ -961,6 +962,28 @@ class OrderExecutor:
 
         return micro_ok(
             quote=quote,
+            qty_lots=qty_lots,
+            lot_size=lot_size,
+            max_spread_pct=max_spread_pct,
+            depth_mult=depth_mult,
+            side=side,
+        )
+
+    def micro_decision(
+        self,
+        *,
+        quote: Dict[str, Any],
+        qty_lots: int,
+        lot_size: int,
+        max_spread_pct: float,
+        depth_mult: int,
+        side: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Evaluate microstructure gating using the provided quote payload."""
+
+        payload = dict(quote) if isinstance(quote, Mapping) else {}
+        return micro_ok(
+            quote=payload,
             qty_lots=qty_lots,
             lot_size=lot_size,
             max_spread_pct=max_spread_pct,

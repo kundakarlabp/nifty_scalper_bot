@@ -52,8 +52,12 @@ def _setup_runner(
     )
     monkeypatch.setattr(runner, "_active_equity", lambda: 100000)
 
+    def _micro_stub(**_: Any) -> tuple[bool, Dict[str, Any]]:
+        return True, {"spread_pct": 0.1, "depth_ok": True}
+
     exec_stub = SimpleNamespace(
-        micro_ok=lambda **k: (True, {"spread_pct": 0.1, "depth_ok": True}),
+        micro_ok=_micro_stub,
+        micro_decision=_micro_stub,
         step_queue=lambda now: None,
         on_order_timeout_check=lambda: None,
         cb_orders=None,
