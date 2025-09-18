@@ -5,7 +5,7 @@ from src.strategies.strategy_config import StrategyConfig
 
 def test_strategy_yaml_defaults(tmp_path):
     cfg = StrategyConfig.load("config/strategy.yaml")
-    assert cfg.atr_min == 0.025
+    assert cfg.atr_min == 0.02
     assert cfg.gamma_after.hour == 14
 
     data = yaml.safe_load(Path("config/strategy.yaml").read_text())
