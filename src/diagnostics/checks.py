@@ -13,6 +13,7 @@ from src.execution.order_executor import OrderManager
 from src.execution.order_state import OrderState
 from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
+from src.signals.patches import resolve_atr_band
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 
 # Map ``reason_block`` codes to human‑readable descriptions used by
@@ -122,17 +123,17 @@ def check_atr() -> CheckResult:
             bars=len(df) if df is not None else 0,
         )
     atrp = atr_pct(df, period=atr_period) or 0.0
-    minp = (
-        r.strategy_cfg.min_atr_pct_banknifty
-        if r.under_symbol == "BANKNIFTY"
-        else r.strategy_cfg.min_atr_pct_nifty
-    )
+    minp, maxp = resolve_atr_band(r.strategy_cfg, r.under_symbol)
     ok = atrp >= float(minp)
     return CheckResult(
         name="atr",
         ok=ok,
         msg=f"atr%={atrp:.4f} (min {minp})",
-        details={"atr_pct": atrp, "min_atr_pct": float(minp)},
+        details={
+            "atr_pct": atrp,
+            "min_atr_pct": float(minp),
+            "atr_band": (float(minp), float(maxp)),
+        },
         fix=None if ok else "lower MIN_ATR_PCT temporarily or wait for volatility",
     )
 

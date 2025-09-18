@@ -2,8 +2,10 @@ import smoke  # noqa: F401
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import src.strategies.scalping_strategy as ss
+from src.signals.patches import resolve_atr_band
 from src.strategies.strategy_config import resolve_config_path
 from tests.test_strategy import create_test_dataframe
 
@@ -36,6 +38,9 @@ def test_strategy_allows_clamped_min_atr(monkeypatch):
     )
     strat.runner = SimpleNamespace(under_symbol="NIFTY")
     plan = strat.generate_signal(df, current_price=100.0)
+    band = resolve_atr_band(cfg, "NIFTY")
+    assert plan["atr_band"][0] == pytest.approx(band[0])
+    assert plan["atr_band"][1] == pytest.approx(band[1])
     assert plan.get("reason_block") != "atr_out_of_band"
 
 
@@ -83,5 +88,8 @@ def test_strategy_allows_unbounded_atr_max(monkeypatch):
     )
     strat.runner = SimpleNamespace(under_symbol="NIFTY")
     plan = strat.generate_signal(df, current_price=100.0)
+    band = resolve_atr_band(cfg, "NIFTY")
+    assert plan["atr_band"][0] == pytest.approx(band[0])
+    assert plan["atr_band"][1] == pytest.approx(band[1])
     assert plan.get("reason_block") != "atr_out_of_band"
     assert plan.get("atr_max") == 0.0

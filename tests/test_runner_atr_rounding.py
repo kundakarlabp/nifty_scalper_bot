@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import src.strategies.patches as patches_mod
+from src.signals.patches import resolve_atr_band
 from src.strategies.runner import StrategyRunner
 
 
@@ -123,6 +123,9 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
         isinstance(reason, str) and reason.startswith("atr_out_of_band")
         for reason in reasons
     )
+    band = resolve_atr_band(runner.strategy_cfg, runner.under_symbol)
+    assert runner.last_plan["atr_band"][0] == pytest.approx(band[0])
+    assert runner.last_plan["atr_band"][1] == pytest.approx(band[1])
     assert runner.last_plan["option_token"] == 1
     assert runner.last_plan["atm_strike"] == 17000
 
@@ -215,12 +218,10 @@ def test_process_tick_honors_measured_atr_pct(monkeypatch):
     monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
     monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
 
-    monkeypatch.setattr(patches_mod, "_resolve_min_atr_pct", lambda: 0.05)
-
     runner.strategy_cfg = SimpleNamespace(
         raw={
             "thresholds": {
-                "min_atr_pct_nifty": 0.02,
+                "min_atr_pct_nifty": 0.05,
                 "min_atr_pct_banknifty": 0.02,
             },
             "gates": {
@@ -229,7 +230,7 @@ def test_process_tick_honors_measured_atr_pct(monkeypatch):
             },
         },
         delta_enable_score=999,
-        min_atr_pct_nifty=0.02,
+        min_atr_pct_nifty=0.05,
         min_atr_pct_banknifty=0.02,
     )
 
@@ -258,11 +259,14 @@ def test_process_tick_honors_measured_atr_pct(monkeypatch):
     assert plan["reason_block"] == "atr_out_of_band"
     assert plan["atr_pct_raw"] == pytest.approx(0.03)
     assert plan["atr_pct"] == pytest.approx(0.03)
-    assert plan["atr_min"] == pytest.approx(0.05)
-    assert plan["atr_band"][0] == pytest.approx(0.05)
+    band = resolve_atr_band(runner.strategy_cfg, runner.under_symbol)
+    assert band[0] == pytest.approx(0.05)
+    assert plan["atr_min"] == pytest.approx(band[0])
+    assert plan["atr_band"][0] == pytest.approx(band[0])
+    assert plan["atr_band"][1] == pytest.approx(band[1])
     detail = flow["reason_details"]["atr_out_of_band"]
     assert detail["atr_pct"] == pytest.approx(0.03)
-    assert detail["band"][0] == pytest.approx(0.05)
+    assert detail["band"][0] == pytest.approx(band[0])
 
 
 def test_atr_pct_float_noise_does_not_block(monkeypatch):
