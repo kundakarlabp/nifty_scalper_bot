@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict, Optional, Tuple
@@ -11,12 +10,12 @@ from src.config import settings
 # ---------------------------------------------------------------------------
 # Configurable microstructure guards
 # ---------------------------------------------------------------------------
-# These caps are intentionally lightweight and can be overridden via
-# environment variables at runtime. Values are expressed in percentage points
-# (0.35 => 0.35%).
-MICRO_SPREAD_CAP: float = float(os.getenv("MICRO_SPREAD_CAP", "0.35"))
+# These caps are intentionally lightweight and sourced from ``settings.micro``.
+# Values are expressed in percentage points (0.35 => 0.35%).
+_MICRO_CFG = getattr(settings, "micro", None)
+MICRO_SPREAD_CAP: float = float(getattr(_MICRO_CFG, "spread_cap_pct", 0.35))
 # Maximum time (seconds) to wait for acceptable microstructure before aborting entry.
-ENTRY_WAIT_S: float = float(os.getenv("ENTRY_WAIT_S", "8"))
+ENTRY_WAIT_S: float = float(getattr(_MICRO_CFG, "entry_wait_seconds", 8.0))
 
 __all__ = [
     "MICRO_SPREAD_CAP",

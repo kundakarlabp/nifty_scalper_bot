@@ -13,22 +13,24 @@ from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
 
 def _setup_logging() -> None:  # pragma: no cover
     try:
-        setup_logging(level=settings.log_level, json=settings.log_json)
+        env_log_path = os.environ.get("LOG_PATH") or os.environ.get("LOG_FILE")
+        log_path = settings.log_path
+        if log_path is None and env_log_path:
+            log_path = env_log_path
+        setup_logging(
+            level=settings.log_level,
+            log_file=str(log_path) if log_path else None,
+            json=settings.log_json,
+        )
         install_warmup_filters()
         root = logging.getLogger()
         root.addFilter(RateLimitFilter(interval=120.0))
-        if log_buffer_handler not in root.handlers:
-            root.addHandler(log_buffer_handler)
-        log_file = os.environ.get("LOG_FILE")
-        if log_file:
-            fh = logging.FileHandler(log_file)
-            fh.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                    "%Y-%m-%d %H:%M:%S",
-                )
-            )
-            root.addHandler(fh)
+        if settings.log_ring_enabled:
+            if log_buffer_handler not in root.handlers:
+                root.addHandler(log_buffer_handler)
+        else:
+            if log_buffer_handler in root.handlers:
+                root.removeHandler(log_buffer_handler)
         _log_cred_presence()
         logging.getLogger("urllib3").setLevel(logging.WARNING)
     except Exception as exc:

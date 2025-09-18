@@ -1348,6 +1348,7 @@ class OrderExecutor:
             qty_lots = qty // self.lot_size if self.lot_size > 0 else qty
             deadline = time.monotonic() + ENTRY_WAIT_S
             waited = False
+            attempts = 0
             while True:
                 mid = (float(bid) + float(ask)) / 2.0
                 spread = float(ask) - float(bid)
@@ -1363,7 +1364,10 @@ class OrderExecutor:
                     price = _round_to_tick(price, self.tick_size)
                     self.last_error = "micro_wait" if waited else None
                     break
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or (
+                    self.micro_retry_limit > 0
+                    and attempts >= int(self.micro_retry_limit)
+                ):
                     self.last_error = "micro_block"
                     log.info(
                         "entry blocked: micro_block spread%%=%.2f depth_lots=%.2f qty_lots=%s",
@@ -1374,6 +1378,7 @@ class OrderExecutor:
                     return None
                 waited = True
                 self.last_error = "micro_wait"
+                attempts += 1
                 log.info(
                     "waiting for micro: spread%%=%.2f depth_lots=%.2f qty_lots=%s",
                     spread_pct,
