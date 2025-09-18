@@ -16,6 +16,10 @@ def test_place_with_retry_and_breaker() -> None:
     assert res["order_id"] == "OID123"
     assert kite.place_order.call_count == 3
     assert ex.cb_orders.health()["n"] >= 3
+    assert res["attempts"] == 3
+    assert res["retries"] == 2
+    assert isinstance(res["retry_delays_ms"], list)
+    assert len(res["retry_delays_ms"]) == 2
 
     ex.cb_orders.force_open(30)
     kite.place_order.reset_mock()
@@ -23,3 +27,6 @@ def test_place_with_retry_and_breaker() -> None:
     assert not res2["ok"]
     assert res2["reason"] == "api_breaker_open"
     assert kite.place_order.call_count == 0
+    assert res2["attempts"] == 1
+    assert res2["retries"] == 0
+    assert res2["retry_delays_ms"] is None

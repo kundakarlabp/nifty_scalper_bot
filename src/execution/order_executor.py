@@ -766,6 +766,7 @@ class _OrderRecord:
     tick_size: float = 0.05
 
     client_oid: Optional[str] = None
+    trace_id: Optional[str] = None
     is_open: bool = True
     filled_qty: int = 0
 
@@ -800,6 +801,7 @@ class _OrderRecord:
 
     # children
     child_order_ids: List[str] = field(default_factory=list)
+    sizing: Optional[Dict[str, Any]] = None
 
     @property
     def record_id(self) -> str:
@@ -959,6 +961,8 @@ class OrderExecutor:
         self.on_trade_closed = on_trade_closed
         self._closed_trades: Set[str] = set()
         self.journal = journal
+        self._event_lock = threading.Lock()
+        self._order_events: Deque[Dict[str, Any]] = deque(maxlen=500)
 
     def micro_ok(
         self,
@@ -1033,6 +1037,59 @@ class OrderExecutor:
             depth_mult=depth_mult,
             side=side,
         )
+
+    # ----------- event helpers ----------
+    @staticmethod
+    def _sanitize_event_value(value: Any, *, depth: int = 0) -> Any:
+        if depth >= 4:
+            return str(value)
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Mapping):
+            out: Dict[str, Any] = {}
+            for idx, (key, val) in enumerate(value.items()):
+                if idx >= 20:
+                    break
+                out[str(key)] = OrderExecutor._sanitize_event_value(
+                    val, depth=depth + 1
+                )
+            return out
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            items: List[Any] = []
+            for idx, item in enumerate(value):
+                if idx >= 20:
+                    break
+                items.append(OrderExecutor._sanitize_event_value(item, depth=depth + 1))
+            return items
+        return str(value)
+
+    def _emit_order_event(self, event: str, **fields: Any) -> None:
+        record: Dict[str, Any] = {
+            "event": event,
+            "ts": datetime.utcnow().isoformat(),
+        }
+        for key, value in fields.items():
+            record[key] = self._sanitize_event_value(value)
+        with self._event_lock:
+            self._order_events.append(record)
+
+    def get_order_events(self) -> List[Dict[str, Any]]:
+        """Return a snapshot of recently emitted order events."""
+
+        with self._event_lock:
+            return list(self._order_events)
+
+    def drain_order_events(self) -> List[Dict[str, Any]]:
+        """Return and clear the buffered order events."""
+
+        with self._event_lock:
+            events = list(self._order_events)
+            self._order_events.clear()
+        return events
 
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
@@ -1283,6 +1340,16 @@ class OrderExecutor:
         }
         """
         self.last_error = None
+        trace_id_raw = payload.get("trace_id")
+        trace_id = (
+            str(trace_id_raw)
+            if trace_id_raw not in (None, "")
+            else None
+        )
+        sizing_raw = payload.get("sizing")
+        sizing_snapshot = (
+            self._sanitize_event_value(sizing_raw) if sizing_raw is not None else None
+        )
 
         action = str(payload.get("action", "")).upper()
         qty = int(payload.get("quantity", 0))
@@ -1333,6 +1400,14 @@ class OrderExecutor:
             ):
                 self.last_error = "duplicate_symbol_open"
                 log.warning("Open record exists on %s; skip new entry.", norm_symbol)
+                self._emit_order_event(
+                    "duplicate_symbol_open",
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                    symbol=norm_symbol,
+                    sizing=sizing_raw,
+                    active_records=sum(1 for rec in self._active.values() if rec.is_open),
+                )
                 return None
 
         if (bid is None or ask is None) and self.kite:
@@ -1384,6 +1459,29 @@ class OrderExecutor:
                     bid, ask, depth = refresh_cb()
                 time.sleep(2)
 
+        mode = "live" if self.kite else "paper"
+        if self.kite:
+            parts = _chunks(
+                qty,
+                self.freeze_qty if self.exchange.upper() == "NFO" else qty,
+            )
+        else:
+            parts = [qty] if qty > 0 else []
+        self._emit_order_event(
+            "order_build",
+            trace_id=trace_id,
+            client_oid=client_oid or None,
+            symbol=symbol,
+            action=action,
+            qty=qty,
+            price=float(price),
+            mode=mode,
+            order_type=self.entry_order_type.upper(),
+            child_order_qtys=parts,
+            sizing=sizing_raw,
+            instrument_token=token,
+        )
+
         if not self.kite:
             # PAPER MODE: create a synthetic record so the rest of the flow works
             rid = f"PAPER-{int(time.time() * 1000)}"
@@ -1395,6 +1493,8 @@ class OrderExecutor:
                 quantity=qty,
                 entry_price=float(price),
                 tick_size=self.tick_size,
+                client_oid=client_oid or None,
+                trace_id=trace_id,
                 exchange=self.exchange,
                 product=self.product,
                 variety=self.variety,
@@ -1409,6 +1509,7 @@ class OrderExecutor:
                 trail_atr_mult=float(payload.get("trail_atr_mult", self.trailing_mult)),
                 r_value=abs(float(price) - float(payload.get("stop_loss", 0.0))),
                 child_order_ids=[],
+                sizing=sizing_snapshot,
             )
             with self._lock:
                 self._active[rec.record_id] = rec
@@ -1417,14 +1518,31 @@ class OrderExecutor:
             log.info(
                 "Paper entry recorded: %s %s qty=%d @%s", symbol, action, qty, price
             )
+            self._emit_order_event(
+                "order_submitted",
+                trace_id=trace_id,
+                client_oid=client_oid or None,
+                symbol=symbol,
+                action=action,
+                qty=qty,
+                price=float(price),
+                order_id=rid,
+                child_index=0,
+                child_count=len(parts),
+                mode=mode,
+                attempts=1,
+                retries=0,
+                latency_ms=None,
+                sizing=sizing_raw,
+                child_order_ids=[rid],
+            )
             return rec.record_id
 
         # LIVE MODE
-        parts = _chunks(qty, self.freeze_qty if self.exchange.upper() == "NFO" else qty)
         child_ids: List[str] = []
         record_id: Optional[str] = None
 
-        for q in parts:
+        for idx, q in enumerate(parts):
             params = dict(
                 variety=self.variety,
                 exchange=self.exchange,
@@ -1443,6 +1561,26 @@ class OrderExecutor:
             if not res.get("ok"):
                 self.last_error = f"place_order: {res.get('reason')}"
                 log.error("place_order failed: %s", res.get("reason"))
+                self._emit_order_event(
+                    "order_submit_fail",
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                    symbol=symbol,
+                    action=action,
+                    qty=int(q),
+                    price=params.get("price"),
+                    child_index=idx,
+                    child_count=len(parts),
+                    reason=res.get("reason"),
+                    attempts=res.get("attempts"),
+                    retries=res.get("retries"),
+                    retry_delays_ms=res.get("retry_delays_ms"),
+                    latency_ms=res.get("lat_ms"),
+                    sizing=sizing_raw,
+                    params=params,
+                    cb=res.get("cb"),
+                    mode=mode,
+                )
                 continue
             oid = res.get("order_id")
             if not oid:
@@ -1457,6 +1595,25 @@ class OrderExecutor:
                 params.get("price"),
                 oid,
             )
+            self._emit_order_event(
+                "order_submitted",
+                trace_id=trace_id,
+                client_oid=client_oid or None,
+                symbol=symbol,
+                action=action,
+                qty=int(q),
+                price=params.get("price"),
+                order_id=oid,
+                child_index=idx,
+                child_count=len(parts),
+                attempts=res.get("attempts"),
+                retries=res.get("retries"),
+                retry_delays_ms=res.get("retry_delays_ms"),
+                latency_ms=res.get("lat_ms"),
+                sizing=sizing_raw,
+                params=params,
+                mode=mode,
+            )
 
         if not record_id:
             return None
@@ -1469,6 +1626,8 @@ class OrderExecutor:
             quantity=qty,
             entry_price=float(price),
             tick_size=self.tick_size,
+            client_oid=client_oid or None,
+            trace_id=trace_id,
             exchange=self.exchange,
             product=self.product,
             variety=self.variety,
@@ -1483,6 +1642,7 @@ class OrderExecutor:
             trail_atr_mult=float(payload.get("trail_atr_mult", self.trailing_mult)),
             r_value=abs(float(price) - float(payload.get("stop_loss", 0.0))),
             child_order_ids=child_ids,
+            sizing=sizing_snapshot,
         )
         with self._lock:
             self._active[rec.record_id] = rec
@@ -1590,6 +1750,9 @@ class OrderExecutor:
         else:
             q_tp1, q_tp2 = 0, qty
 
+        res1: Dict[str, Any] = {}
+        res2: Dict[str, Any] = {}
+
         if q_tp1 > 0:
             res1 = self._place_with_cb(
                 {
@@ -1629,6 +1792,59 @@ class OrderExecutor:
         rec.tp_price = tp_price
 
         self._refresh_sl_gtt(rec, sl_price=sl_price, qty=qty)
+
+        def _tp_attempt_meta(
+            quantity: int,
+            order_id: Optional[str],
+            res: Optional[Dict[str, Any]],
+        ) -> Dict[str, Any]:
+            meta: Dict[str, Any] = {
+                "qty": int(quantity),
+                "order_id": order_id,
+            }
+            if res:
+                meta.update(
+                    ok=res.get("ok"),
+                    reason=res.get("reason"),
+                    attempts=res.get("attempts"),
+                    retries=res.get("retries"),
+                    retry_delays_ms=res.get("retry_delays_ms"),
+                    latency_ms=res.get("lat_ms"),
+                )
+            else:
+                meta.update(
+                    ok=None,
+                    reason=None,
+                    attempts=0,
+                    retries=0,
+                    retry_delays_ms=None,
+                    latency_ms=None,
+                )
+            return meta
+
+        tp_meta = {
+            "tp1": _tp_attempt_meta(q_tp1, rec.tp1_order_id, res1 if res1 else None),
+            "tp2": _tp_attempt_meta(q_tp2, rec.tp2_order_id, res2 if res2 else None),
+        }
+
+        mode = "live" if self.kite else "paper"
+        self._emit_order_event(
+            "postfill_setup",
+            trace_id=rec.trace_id,
+            client_oid=rec.client_oid,
+            record_id=rec.record_id,
+            symbol=rec.symbol,
+            side=rec.side,
+            qty=int(qty),
+            tp_price=tp_price,
+            sl_price=sl_price,
+            tp_meta=tp_meta,
+            tp_order_ids=[rec.tp1_order_id, rec.tp2_order_id],
+            sl_gtt_id=rec.sl_gtt_id,
+            mode=mode,
+            sizing=rec.sizing,
+            partial_enabled=rec.partial_enabled,
+        )
 
     def _refresh_sl_gtt(self, rec: _OrderRecord, *, sl_price: float, qty: int) -> None:
         """(Re)create SL GTT as single-leg order."""
@@ -2133,6 +2349,16 @@ class OrderExecutor:
         action = str(payload.get("action")) or str(payload.get("side", "BUY"))
         qty = int(payload.get("quantity") or payload.get("qty") or 0)
         price = float(payload.get("entry_price") or payload.get("price") or 0.0)
+        trace_id_raw = payload.get("trace_id")
+        trace_id = (
+            str(trace_id_raw)
+            if trace_id_raw not in (None, "")
+            else None
+        )
+        sizing_raw = payload.get("sizing")
+        sizing_snapshot = (
+            self._sanitize_event_value(sizing_raw) if sizing_raw is not None else None
+        )
         rec = _OrderRecord(
             order_id=client_oid,
             instrument_token=int(payload.get("instrument_token", 0)),
@@ -2142,6 +2368,7 @@ class OrderExecutor:
             entry_price=price,
             tick_size=self.tick_size,
             client_oid=client_oid,
+            trace_id=trace_id,
             sl_price=float(payload.get("stop_loss", 0.0)) or None,
             tp_price=float(payload.get("take_profit", 0.0)) or None,
             partial_enabled=bool(payload.get("partial_tp_enable", self.partial_enable)),
@@ -2152,6 +2379,7 @@ class OrderExecutor:
             trail_atr_mult=float(payload.get("trail_atr_mult", payload.get("trailing_atr_mult", self.trailing_mult))),
             r_value=abs(price - float(payload.get("stop_loss", 0.0))),
             child_order_ids=[],
+            sizing=sizing_snapshot,
         )
         with self._lock:
             self._active[rec.record_id] = rec
@@ -2546,7 +2774,12 @@ class OrderExecutor:
     def _place_with_cb(self, req: Dict[str, Any]) -> Dict[str, Any]:
         """Place order via broker with circuit breaker and retries."""
 
+        attempts = 0
+        retry_delays: List[int] = []
+
         def single() -> Dict[str, Any]:
+            nonlocal attempts
+            attempts += 1
             if not self.cb_orders.allow():
                 return {
                     "ok": False,
@@ -2571,16 +2804,24 @@ class OrderExecutor:
                 return {"ok": False, "reason": str(e), "lat_ms": lat}
 
         res = single()
-        attempt = 0
+        retry_idx = 0
         while (
             not res.get("ok")
             and self._is_transient(str(res.get("reason", "")))
-            and attempt < self.max_place_retries
+            and retry_idx < self.max_place_retries
         ):
-            delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
-            time.sleep(delay + random.uniform(0, 0.025))
-            attempt += 1
+            base_delay_ms = self.retry_backoff_ms * (2**retry_idx)
+            jitter = random.uniform(0, 0.025)
+            wait_s = base_delay_ms / 1000.0 + jitter
+            retry_delays.append(int(wait_s * 1000))
+            time.sleep(wait_s)
+            retry_idx += 1
             res = single()
+        if "lat_ms" not in res:
+            res["lat_ms"] = None
+        res["attempts"] = attempts
+        res["retries"] = max(0, attempts - 1)
+        res["retry_delays_ms"] = retry_delays if retry_delays else None
         return res
 
     def _modify_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
