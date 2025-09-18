@@ -1,6 +1,9 @@
 import smoke  # noqa: F401
 from types import SimpleNamespace
 
+import pytest
+
+from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 
 
@@ -33,6 +36,9 @@ def test_check_atr_allows_minimum_threshold():
     """ATR exactly on the configured minimum should pass the gate."""
 
     cfg = _make_cfg(min_nifty=0.05, gate_min=0.02, gate_max=0.9)
+    band = resolve_atr_band(cfg, "NIFTY")
+    assert band[0] == pytest.approx(0.05)
+    assert band[1] == pytest.approx(0.9)
     ok, reason, min_val, max_val = check_atr(0.05, cfg, "NIFTY")
     assert ok
     assert reason is None
@@ -44,7 +50,19 @@ def test_check_atr_prefers_threshold_over_gate():
     """Threshold minimums must override lower gate bounds."""
 
     cfg = _make_cfg(min_nifty=0.05, gate_min=0.02, gate_max=0.9)
+    band = resolve_atr_band(cfg, "NIFTY")
+    assert band[0] == pytest.approx(0.05)
+    assert band[1] == pytest.approx(0.9)
     ok, reason, min_val, _ = check_atr(0.04, cfg, "NIFTY")
     assert not ok
     assert min_val == 0.05
     assert isinstance(reason, str) and "< min=0.05" in reason
+
+
+def test_resolve_atr_band_uses_gate_when_threshold_missing():
+    """Gate minimums should apply when thresholds are absent."""
+
+    cfg = _make_cfg(min_nifty=None, gate_min=0.03, gate_max=0.8)
+    band = resolve_atr_band(cfg, "NIFTY")
+    assert band[0] == pytest.approx(0.03)
+    assert band[1] == pytest.approx(0.8)

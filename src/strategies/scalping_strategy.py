@@ -22,6 +22,7 @@ from src.signals.regime_detector import detect_market_regime
 from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
+from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
@@ -1025,7 +1026,10 @@ class EnhancedScalpingStrategy:
             self.last_atr_pct = float(plan["atr_pct"])
             atr_pct_val = atr_pct_raw
             symbol = getattr(getattr(self, "runner", None), "under_symbol", None)
-            ok, reason, atr_min, atr_max = check_atr(atr_pct_val, cfg, symbol)
+            band = resolve_atr_band(cfg, symbol)
+            ok, reason, atr_min, atr_max = check_atr(
+                atr_pct_val, cfg, symbol, band=band
+            )
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
