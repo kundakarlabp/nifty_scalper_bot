@@ -142,13 +142,14 @@ Risk checks guard every trade.  The runner tracks:
  - daily drawdown percentage
  - equity floor
  - premium cap per trade
+  - one-lot override when cash covers the full premium (`RISK__ALLOW_MIN_ONE_LOT`, default `true`)
 
 The per-trade premium cap can be driven by equity or a fixed rupee limit:
 
 ```bash
-# equity-based (default): 40% of account equity
+# equity-based (default): 55% of account equity
 EXPOSURE_CAP_SOURCE=equity
-EXPOSURE_CAP_PCT_OF_EQUITY=0.40  # ₹100k equity ⇒ ₹40k cap
+EXPOSURE_CAP_PCT_OF_EQUITY=0.55  # ₹100k equity ⇒ ₹55k cap
 
 # static environment cap
 EXPOSURE_CAP_SOURCE=env

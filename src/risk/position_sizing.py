@@ -196,19 +196,19 @@ class SizingParams:
     """
     risk_per_trade: fraction of equity to risk per trade (e.g., 0.01 = 1%, 0.006 = 0.6%)
     min_lots / max_lots: hard clamps on lots
-    max_position_size_pct: cap notional exposure vs equity (0.10 = 10%)
+    max_position_size_pct: cap notional exposure vs equity (0.55 = 55%)
     """
 
     risk_per_trade: float = 0.01
     min_lots: int = 1
     max_lots: int = 10
-    max_position_size_pct: float = 0.10
+    max_position_size_pct: float = 0.55
     exposure_basis: Literal["underlying", "premium"] = field(
         default_factory=lambda: cast(
             Literal["underlying", "premium"], settings.EXPOSURE_BASIS
         )
     )
-    allow_min_one_lot: bool = False
+    allow_min_one_lot: bool = True
 
 
 class PositionSizer:
@@ -243,7 +243,7 @@ class PositionSizer:
         risk_cfg = getattr(settings, "risk", None)
         inst_cfg = getattr(settings, "instruments", None)
 
-        allow_min_one_lot = bool(getattr(risk_cfg, "allow_min_one_lot", False))
+        allow_min_one_lot = bool(getattr(risk_cfg, "allow_min_one_lot", True))
 
         if (
             min_lots is None
@@ -266,7 +266,7 @@ class PositionSizer:
         if max_lots is None:
             max_lots = getattr(inst_cfg, "max_lots", 10)
         if max_position_size_pct is None:
-            max_position_size_pct = getattr(risk_cfg, "max_position_size_pct", 0.10)
+            max_position_size_pct = getattr(risk_cfg, "max_position_size_pct", 0.55)
         if exposure_basis is None:
             exposure_basis = getattr(risk_cfg, "exposure_basis", settings.EXPOSURE_BASIS)
 

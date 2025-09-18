@@ -20,7 +20,7 @@ def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
 
 
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
-    """Blocks when cap derived from equity is below one lot."""
+    """Falls back to the allow-min-one-lot override when equity cap is tighter."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     runner = SimpleNamespace(equity_amount=20_000.0)
@@ -42,10 +42,11 @@ def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
         spot_sl_points=5.0,
         delta=0.5,
     )
-    assert qty == 0 and sized_lots == 0
-    assert diag["block_reason"] == "cap_lt_one_lot"
+    assert qty == lot_size and sized_lots == 1
+    assert diag["block_reason"] == ""
     assert diag["cap_abs"] is None
     assert diag["eq_source"] == "live"
+    assert diag["lots_final"] == 1
 
 
 def test_lots_from_premium_cap_fallbacks_to_default_equity(monkeypatch):

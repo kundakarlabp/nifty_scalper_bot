@@ -191,7 +191,7 @@ class TradingSession:
         """
         cap = float(equity) * float(self.risk_config.max_position_size_pct)
         cost_one_lot = float(premium_per_lot)
-        allow_min = bool(getattr(self.risk_config, "allow_min_one_lot", False))
+        allow_min = bool(getattr(self.risk_config, "allow_min_one_lot", True))
         if cap < cost_one_lot:
             if allow_min and equity >= cost_one_lot:
                 logger.info(

@@ -159,9 +159,9 @@ def test_cap_abs_in_diag(monkeypatch):
         spot_sl_points=20.0,
         delta=0.5,
     )
-    assert qty == 0
-    assert lots == 0
-    assert diag["block_reason"] == "cap_lt_one_lot"
+    assert qty == 50
+    assert lots == 1
+    assert diag["block_reason"] == ""
     assert diag["cap_abs"] == 5_000.0
 
 

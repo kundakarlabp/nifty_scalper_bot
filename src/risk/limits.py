@@ -438,6 +438,7 @@ class RiskEngine:
                 if exposure_cap_val >= 0.0:
                     exposure_cap = exposure_cap_val
         cap_abs_setting = float(getattr(settings, "EXPOSURE_CAP_ABS", 0.0) or 0.0)
+        cap_from_cfg = exposure_cap
 
         if use_premium_basis:
             available_lots = max(0, self.cfg.max_lots_per_symbol - current_lots)
@@ -452,7 +453,11 @@ class RiskEngine:
                 available_lots,
             )
             plan["eq_source"] = eq_source
-            exposure_cap = float(cap)
+            cap = float(cap)
+            if cap_from_cfg is not None:
+                exposure_cap = min(cap_from_cfg, cap)
+            else:
+                exposure_cap = cap
             price_mid = float(_mid_from_quote(quote_payload))
             meta: Optional[Dict[str, Any]] = None
             if lots <= 0:
