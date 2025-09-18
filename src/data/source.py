@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,178 @@ log = logging.getLogger(__name__)
 
 # Warn only once when historical data access is denied
 _warn_perm_once = False
+
+
+def _as_float(val: Any) -> float:
+    try:
+        num = float(val)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(num):
+        return 0.0
+    return num
+
+
+def _as_int(val: Any) -> int:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_option_quote_safe(
+    *,
+    option: Mapping[str, Any] | None,
+    quote: Mapping[str, Any] | None,
+    fetch_ltp: Callable[[Any], Optional[float]] | None = None,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Return a normalized option quote with sensible fallbacks.
+
+    Parameters
+    ----------
+    option:
+        Metadata for the option. Only ``token``/``instrument_token`` and
+        ``tradingsymbol`` keys are consulted when a REST LTP fallback is needed.
+    quote:
+        Raw quote payload from the broker. The helper tolerates partially
+        populated dictionaries (missing depth/bid/ask fields).
+    fetch_ltp:
+        Callable used to fetch a fresh LTP if depth/bid/ask data is unavailable.
+        Invoked at most once.
+
+    Returns
+    -------
+    tuple
+        ``(quote_dict, mode)`` where ``quote_dict`` contains ``bid``, ``ask``,
+        ``mid``, ``ltp`` and depth metrics. ``mode`` indicates which source was
+        used for pricing (``"depth"``, ``"ltp"``, ``"bid"``, ``"ask"``,
+        ``"rest_ltp"``). When a usable price cannot be determined the function
+        returns ``(None, "no_quote")``.
+    """
+
+    if not option:
+        return None, "no_quote"
+
+    data: Mapping[str, Any] = quote or {}
+    depth = data.get("depth")
+    if not isinstance(depth, Mapping):
+        depth = {}
+
+    buy_levels = depth.get("buy") if isinstance(depth, Mapping) else None
+    sell_levels = depth.get("sell") if isinstance(depth, Mapping) else None
+    buy_levels = buy_levels if isinstance(buy_levels, list) else []
+    sell_levels = sell_levels if isinstance(sell_levels, list) else []
+
+    bid = _as_float(data.get("bid"))
+    ask = _as_float(data.get("ask"))
+
+    if (bid <= 0.0 or ask <= 0.0) and buy_levels:
+        lvl = buy_levels[0] if isinstance(buy_levels[0], Mapping) else {}
+        bid = _as_float(lvl.get("price")) if bid <= 0.0 else bid
+    if (bid <= 0.0 or ask <= 0.0) and sell_levels:
+        lvl = sell_levels[0] if isinstance(sell_levels[0], Mapping) else {}
+        ask = _as_float(lvl.get("price")) if ask <= 0.0 else ask
+
+    bid_qty = _as_int(data.get("bid_qty"))
+    ask_qty = _as_int(data.get("ask_qty"))
+    if bid_qty <= 0 and buy_levels:
+        lvl = buy_levels[0] if isinstance(buy_levels[0], Mapping) else {}
+        bid_qty = _as_int(lvl.get("quantity"))
+    if ask_qty <= 0 and sell_levels:
+        lvl = sell_levels[0] if isinstance(sell_levels[0], Mapping) else {}
+        ask_qty = _as_int(lvl.get("quantity"))
+
+    bid5 = _as_int(data.get("bid5_qty"))
+    ask5 = _as_int(data.get("ask5_qty"))
+    if bid5 <= 0 and buy_levels:
+        total = 0
+        for lvl in buy_levels[:5]:
+            total += _as_int(lvl.get("quantity") if isinstance(lvl, Mapping) else 0)
+        bid5 = total
+    if ask5 <= 0 and sell_levels:
+        total = 0
+        for lvl in sell_levels[:5]:
+            total += _as_int(lvl.get("quantity") if isinstance(lvl, Mapping) else 0)
+        ask5 = total
+
+    ltp = _as_float(data.get("last_price")) or _as_float(data.get("ltp"))
+
+    mode = "depth"
+    mid = 0.0
+    if bid > 0.0 and ask > 0.0:
+        mid = (bid + ask) / 2.0
+    else:
+        mode = "ltp"
+        if ltp > 0.0:
+            mid = ltp
+        elif bid > 0.0:
+            mode = "bid"
+            mid = bid
+            if ltp <= 0.0:
+                ltp = bid
+        elif ask > 0.0:
+            mode = "ask"
+            mid = ask
+            if ltp <= 0.0:
+                ltp = ask
+        else:
+            mode = "rest_ltp"
+            identifier: Any | None = option.get("token") or option.get(
+                "instrument_token"
+            )
+            if identifier is None:
+                ident_sym = option.get("tradingsymbol") or option.get("symbol")
+                if isinstance(ident_sym, str) and ident_sym.strip():
+                    sym = ident_sym.strip()
+                    identifier = sym if ":" in sym else f"NFO:{sym}"
+            fetched = None
+            if fetch_ltp is not None and identifier is not None:
+                try:
+                    fetched = fetch_ltp(identifier)
+                except Exception:
+                    fetched = None
+            if fetched and fetched > 0.0:
+                mid = float(fetched)
+                ltp = mid
+            else:
+                return None, "no_quote"
+
+    if mid <= 0.0:
+        return None, "no_quote"
+
+    if ltp <= 0.0:
+        ltp = mid
+
+    ts_val = data.get("timestamp") or data.get("last_trade_time")
+    if isinstance(ts_val, datetime):
+        timestamp: Optional[str] = ts_val.isoformat()
+    elif isinstance(ts_val, str):
+        timestamp = ts_val
+    else:
+        timestamp = None
+
+    result: Dict[str, Any] = {
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "ltp": ltp,
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "bid5_qty": bid5,
+        "ask5_qty": ask5,
+        "source": data.get("source", "kite"),
+    }
+
+    if timestamp is not None:
+        result["timestamp"] = timestamp
+
+    if "oi" in data:
+        result["oi"] = data.get("oi")
+
+    if buy_levels or sell_levels:
+        result["depth"] = {"buy": buy_levels, "sell": sell_levels}
+
+    return result, mode
 
 # Optional broker SDK (keep imports tolerant so paper mode works)
 try:

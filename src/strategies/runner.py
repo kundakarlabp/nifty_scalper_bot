@@ -84,9 +84,12 @@ except Exception:
 
 # Optional live data source (graceful if not present)
 try:
-    from src.data.source import LiveKiteSource  # type: ignore
-except Exception:
+    from src.data.source import LiveKiteSource, get_option_quote_safe  # type: ignore
+except Exception:  # pragma: no cover - defensive import guard
     LiveKiteSource = None  # type: ignore
+
+    def get_option_quote_safe(*args: Any, **kwargs: Any) -> tuple[None, str]:  # type: ignore
+        return None, "no_quote"
 
 
 logger = logging.getLogger(__name__)
@@ -1468,44 +1471,28 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
-            q = None
+            raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
                 try:
                     ts = opt["tradingsymbol"]
-                    q = self.kite.quote([f"NFO:{ts}"]).get(f"NFO:{ts}")  # type: ignore[attr-defined]
+                    resp = self.kite.quote([f"NFO:{ts}"])  # type: ignore[attr-defined]
+                    raw = resp.get(f"NFO:{ts}") if isinstance(resp, dict) else None
+                    if isinstance(raw, dict):
+                        raw_quote = dict(raw)
+                        raw_quote.setdefault("source", "kite")
                 except Exception:
-                    q = None
-            if not q or "depth" not in q:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                return
-            try:
-                b = q["depth"]["buy"][0]
-                s = q["depth"]["sell"][0]
-                bid = float(b.get("price", 0.0))
-                ask = float(s.get("price", 0.0))
-                mid = (bid + ask) / 2.0 if bid and ask else 0.0
-                quote_dict = {
-                    "bid": bid,
-                    "ask": ask,
-                    "mid": mid,
-                    "ltp": float(q.get("last_price") or q.get("ltp") or 0.0),
-                    "bid_qty": int(b.get("quantity", 0)),
-                    "ask_qty": int(s.get("quantity", 0)),
-                    "bid5_qty": int(
-                        sum(d.get("quantity", 0) for d in q["depth"]["buy"][:5])
-                    ),
-                    "ask5_qty": int(
-                        sum(d.get("quantity", 0) for d in q["depth"]["sell"][:5])
-                    ),
-                }
-            except Exception:
+                    raw_quote = None
+
+            fetch_ltp = None
+            if hasattr(self.data_source, "get_last_price"):
+                fetch_ltp = getattr(self.data_source, "get_last_price")
+
+            quote_dict, quote_mode = get_option_quote_safe(
+                option=opt,
+                quote=raw_quote,
+                fetch_ltp=fetch_ltp,
+            )
+            if not quote_dict:
                 plan["reason_block"] = "no_option_quote"
                 plan.setdefault("reasons", []).append("no_option_quote")
                 plan["spread_pct"] = None
@@ -1524,8 +1511,17 @@ class StrategyRunner:
             plan["spread_pct"] = micro.get("spread_pct")
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
-            plan["quote_src"] = "kite"
+            plan["quote_src"] = quote_dict.get("source", "kite")
+            plan["quote_mode"] = quote_mode
             plan["quote"] = quote_dict
+            self.log.debug(
+                "quote=ok mid=%.2f bid=%.2f ask=%.2f mode=%s src=%s",
+                float(quote_dict.get("mid", 0.0)),
+                float(quote_dict.get("bid", 0.0)),
+                float(quote_dict.get("ask", 0.0)),
+                quote_mode,
+                plan["quote_src"],
+            )
             if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
                 plan["reason_block"] = "no_option_quote"
                 plan.setdefault("reasons", []).append("no_option_quote")
