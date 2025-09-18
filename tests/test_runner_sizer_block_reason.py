@@ -164,6 +164,20 @@ def test_qty_zero_uses_existing_reason(monkeypatch):
     assert runner.last_plan["reason_block"] == "preexisting"
 
 
+def test_runner_blocks_when_levels_missing(monkeypatch):
+    runner = _setup_runner(
+        monkeypatch,
+        (1, {"rupee_risk_per_lot": 1, "lots_final": 1, "block_reason": None}),
+    )
+
+    runner.kite.quote = lambda symbols: {symbols[0]: {"last_price": 101.0}}
+
+    runner.process_tick({})
+    flow = runner.get_last_flow_debug()
+    assert flow["reason_block"] == "no_quote"
+    assert runner.last_plan["reason_block"] == "no_quote"
+
+
 def test_qty_zero_keeps_plan_reason_when_sizer_blocks(monkeypatch):
     runner = _setup_runner(
         monkeypatch,

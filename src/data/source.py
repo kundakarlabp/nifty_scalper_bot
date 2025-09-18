@@ -1292,6 +1292,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     source_label = label
                 return float(val), source_label, ts_ms
 
+        rest_ltp: float | None = None
+        if mode != "rest_ltp":
+            try:
+                fetched = self.get_last_price(token_i)
+            except Exception:  # pragma: no cover - defensive fetch guard
+                fetched = None
+            if isinstance(fetched, (int, float)) and fetched > 0:
+                rest_ltp = float(fetched)
+
+        if rest_ltp is not None:
+            ts_ms = int(time.time() * 1000)
+            merged = dict(quote_dict)
+            merged["ltp"] = rest_ltp
+            merged.setdefault("mid", rest_ltp)
+            merged["mode"] = "rest_ltp"
+            merged["ts_ms"] = ts_ms
+            merged.setdefault("source", "rest")
+            self._option_quote_cache[token_i] = merged
+            return rest_ltp, "rest_ltp", ts_ms
+
         ltp_val = quote_dict.get("ltp")
         if isinstance(ltp_val, (int, float)) and ltp_val > 0:
             return float(ltp_val), mode or "ltp", ts_ms
@@ -1905,6 +1925,26 @@ def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
     return False
 
 
+def ensure_token_subscribed(self: Any, token: int | str) -> bool:
+    """Ensure ``token`` is subscribed in FULL mode via the underlying broker."""
+
+    try:
+        token_i = int(token)
+    except Exception:
+        return False
+
+    if token_i <= 0:
+        return False
+
+    if _subscribe_tokens(self, [token_i]):
+        return True
+
+    broker = getattr(self, "kite", None) or getattr(self, "broker", None)
+    if broker and _subscribe_tokens(broker, [token_i]):
+        return True
+    return False
+
+
 def _have_quote(obj: Any, token: int) -> bool:
     for name in ("get_l1", "ltp", "get_quote", "quote"):
         fn = getattr(obj, name, None)
@@ -2059,3 +2099,4 @@ def auto_resubscribe_atm(self: Any) -> None:
 # Bind helpers to DataSource for easy access
 DataSource.auto_resubscribe_atm = auto_resubscribe_atm  # type: ignore[attr-defined]
 DataSource.ensure_atm_tokens = ensure_atm_tokens  # type: ignore[attr-defined]
+DataSource.ensure_token_subscribed = ensure_token_subscribed  # type: ignore[attr-defined]

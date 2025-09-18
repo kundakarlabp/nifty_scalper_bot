@@ -1564,6 +1564,12 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
+            ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
+            if callable(ensure_subscribe):
+                try:
+                    ensure_subscribe(token)
+                except Exception:
+                    self.log.debug("ensure_token_subscribed failed", exc_info=True)
             prime_price: float | None = None
             prime_src: str | None = None
             prime_ts: int | None = None
@@ -1618,6 +1624,46 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                return
+            def _positive_number(value: Any) -> bool:
+                return isinstance(value, (int, float)) and value > 0
+
+            have_price = any(
+                _positive_number(quote_dict.get(key))
+                for key in ("mid", "ltp", "bid", "ask")
+            )
+            have_levels = any(
+                _positive_number(quote_dict.get(key))
+                for key in ("bid", "ask", "bid_qty", "ask_qty", "bid5_qty", "ask5_qty")
+            )
+            if not have_levels:
+                depth_payload = quote_dict.get("depth")
+                if isinstance(depth_payload, Mapping):
+                    for side in ("buy", "sell"):
+                        levels = depth_payload.get(side)
+                        if isinstance(levels, list) and levels:
+                            first = levels[0]
+                            if isinstance(first, Mapping) and (
+                                _positive_number(first.get("price"))
+                                or _positive_number(first.get("quantity"))
+                            ):
+                                have_levels = True
+                                break
+            if not have_price or not have_levels:
+                plan["reason_block"] = "no_quote"
+                plan.setdefault("reasons", []).append("no_quote")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.log.info(
+                    "no_quote token=%s missing_price=%s missing_levels=%s",
+                    token,
+                    not have_price,
+                    not have_levels,
+                )
                 return
             micro = evaluate_micro(
                 q=quote_dict,
