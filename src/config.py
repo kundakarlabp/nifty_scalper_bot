@@ -27,7 +27,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-DEFAULT_EXPOSURE_CAP_PCT = 40.0
+DEFAULT_EXPOSURE_CAP_PCT = 55.0
 DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
 
 
@@ -488,7 +488,7 @@ class RiskSettings(BaseModel):
     max_trades_per_day: int = 12
     consecutive_loss_limit: int = 3
     max_daily_drawdown_pct: float = 0.04
-    max_position_size_pct: float = 0.10
+    max_position_size_pct: float = 0.55
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
     loss_cooldown_minutes: int = Field(
@@ -621,7 +621,7 @@ class RiskSettings(BaseModel):
     )
     premium_cap_per_trade: float = 10000.0
     allow_min_one_lot: bool = Field(
-        False,
+        True,
         description=(
             "Permit one-lot trades when the equity-funded premium exceeds the "
             "exposure cap by itself."

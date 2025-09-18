@@ -80,12 +80,13 @@ def test_default_values():
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
         assert settings.EXPOSURE_BASIS == "premium"
         assert settings.EXPOSURE_CAP_SOURCE == "equity"
-        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.40
+        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.55
         assert settings.PREMIUM_CAP_PER_TRADE == 10000.0
         assert settings.risk.exposure_basis == "premium"
         assert settings.risk.exposure_cap_source == "equity"
-        assert settings.risk.exposure_cap_pct_of_equity == 0.40
+        assert settings.risk.exposure_cap_pct_of_equity == 0.55
         assert settings.risk.premium_cap_per_trade == 10000.0
+        assert settings.risk.allow_min_one_lot is True
         assert settings.cadence_min_interval_s == pytest.approx(0.3)
         assert settings.cadence_max_interval_s == pytest.approx(1.5)
         assert settings.cadence_interval_step_s == pytest.approx(0.3)
@@ -123,7 +124,7 @@ def test_exposure_cap_aliases(monkeypatch):
         "ZERODHA__ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "1",
-        "EXPOSURE_CAP_PCT": "40",
+        "EXPOSURE_CAP_PCT": "55",
         "EXPOSURE_CAP_ABS": "15000",
         "RISK_DEFAULT_EQUITY": "40000",
         "RISK_MIN_EQUITY_FLOOR": "1000",
@@ -132,9 +133,9 @@ def test_exposure_cap_aliases(monkeypatch):
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
 
-    assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == pytest.approx(0.40)
+    assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == pytest.approx(0.55)
     assert settings.EXPOSURE_CAP_ABS == 15_000.0
-    assert settings.risk.exposure_cap_pct_of_equity == pytest.approx(0.40)
+    assert settings.risk.exposure_cap_pct_of_equity == pytest.approx(0.55)
     assert settings.risk.exposure_cap_abs == 15_000.0
     assert settings.risk.default_equity == 40_000.0
     assert settings.risk.min_equity_floor == 1_000.0

@@ -150,6 +150,7 @@ def test_cap_abs_in_diag(monkeypatch):
         cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False
     )
     monkeypatch.setattr(cfg.risk, "exposure_cap_abs", 5_000.0, raising=False)
+    monkeypatch.setattr(cfg.risk, "allow_min_one_lot", False, raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
         entry_price=200.0,

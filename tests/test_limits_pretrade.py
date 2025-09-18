@@ -115,7 +115,7 @@ def test_equity_based_premium_cap(monkeypatch):
     )
     ok, reason, _ = eng.pre_trade_check(**args)
     assert ok and reason == ""
-    assert plan.get("qty_lots") == 3
+    assert plan.get("qty_lots") == 4
 
 
 def test_equity_cap_limits_aggregate_exposure(monkeypatch):

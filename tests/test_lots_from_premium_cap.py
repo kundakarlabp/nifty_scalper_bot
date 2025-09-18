@@ -23,6 +23,7 @@ def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
+    monkeypatch.setattr(cfg.risk, "allow_min_one_lot", False, raising=False)
     runner = SimpleNamespace(equity_amount=20_000.0)
     price = 112.8
     lot_size = 75
