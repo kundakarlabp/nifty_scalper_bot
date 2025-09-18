@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Dict, Iterable, Optional, Tuple
+import math
+from typing import Dict, Iterable, Optional, Tuple, Any
 
 from src.utils.expiry import next_tuesday_expiry
 
@@ -11,6 +12,20 @@ except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
 Key = Tuple[str, str, int, str]
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    """Return ``int(value)`` if it can be safely parsed, otherwise ``None``."""
+
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return int(number)
 
 
 class InstrumentsCache:
@@ -40,11 +55,17 @@ class InstrumentsCache:
                 )
             else:
                 expiry = str(exp_raw)
-            strike = int(float(ins.get("strike", 0)))
+            strike = _safe_int(ins.get("strike"))
+            if strike is None:
+                continue
             kind = str(ins.get("instrument_type", "")).upper()
-            token = int(ins.get("instrument_token", 0))
+            token = _safe_int(ins.get("instrument_token"))
+            if token is None:
+                continue
             tsym = str(ins.get("tradingsymbol", ""))
-            lot = int(ins.get("lot_size", 0))
+            lot = _safe_int(ins.get("lot_size"))
+            if lot is None:
+                continue
             if name and expiry and strike and kind and token:
                 key = (name, expiry, strike, kind)
                 self._by_key[key] = {
