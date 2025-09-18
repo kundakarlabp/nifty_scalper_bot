@@ -369,6 +369,13 @@ class DataSource:
 
         return None, None, None
 
+    def get_cached_full_quote(
+        self, token: int | str
+    ) -> Dict[str, Any] | None:  # pragma: no cover - base default
+        """Return the most recent cached quote payload if available."""
+
+        return None
+
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health metrics if available."""
         return {}
@@ -1247,7 +1254,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             if isinstance(data, Mapping):
                 data_map = cast(Mapping[Any, Any], data)
                 entry: Mapping[str, Any] | None = None
-                for key in (token_i, str(token_i), f"NFO:{token_i}"):
+                lookup_keys: tuple[Any, ...] = (
+                    token_i,
+                    str(token_i),
+                    f"NFO:{token_i}",
+                )
+                for key in lookup_keys:
                     candidate = data_map.get(key)
                     if isinstance(candidate, Mapping):
                         entry = cast(Mapping[str, Any], candidate)
@@ -1296,6 +1308,19 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if isinstance(ltp_val, (int, float)) and ltp_val > 0:
             return float(ltp_val), mode or "ltp", ts_ms
         return None, mode, ts_ms
+
+    def get_cached_full_quote(self, token: int | str) -> dict[str, Any] | None:
+        """Return a shallow copy of the latest cached quote for ``token``."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
+
+        cached = self._option_quote_cache.get(token_i)
+        if isinstance(cached, dict):
+            return dict(cached)
+        return None
 
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"

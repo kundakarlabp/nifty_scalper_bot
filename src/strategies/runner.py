@@ -1747,6 +1747,84 @@ class StrategyRunner:
                 self.last_plan = plan
                 return
 
+            # ---- quote handoff to executor
+            ds = getattr(self, "data_source", None)
+            token_val = plan.get("option_token") or plan.get("token")
+            quote_payload: Dict[str, Any] | None = None
+            existing_quote = plan.get("quote")
+            if isinstance(existing_quote, Mapping):
+                quote_payload = dict(existing_quote)
+
+            if ds and token_val:
+                get_cached = getattr(ds, "get_cached_full_quote", None)
+                if callable(get_cached):
+                    try:
+                        cached_quote = get_cached(token_val)
+                    except Exception:
+                        self.log.debug("get_cached_full_quote failed", exc_info=True)
+                        cached_quote = None
+                    if isinstance(cached_quote, Mapping):
+                        quote_payload = dict(cached_quote)
+
+                if not quote_payload:
+                    prime_fn = getattr(ds, "prime_option_quote", None)
+                    if callable(prime_fn):
+                        try:
+                            prime_res = prime_fn(token_val)
+                        except Exception:
+                            self.log.debug("prime_option_quote fetch failed", exc_info=True)
+                            prime_res = None
+                        else:
+                            if isinstance(prime_res, Mapping):
+                                quote_payload = dict(prime_res)
+                            elif isinstance(prime_res, tuple):
+                                price = prime_res[0] if len(prime_res) > 0 else None
+                                source_raw = prime_res[1] if len(prime_res) > 1 else None
+                                ts_raw = prime_res[2] if len(prime_res) > 2 else None
+                                source_val: Optional[str] = None
+                                if isinstance(source_raw, bytes):
+                                    try:
+                                        source_val = source_raw.decode()
+                                    except Exception:
+                                        source_val = str(source_raw)
+                                elif source_raw is not None:
+                                    source_val = str(source_raw)
+                                ts_ms = (
+                                    int(ts_raw)
+                                    if isinstance(ts_raw, (int, float))
+                                    else None
+                                )
+                                if isinstance(price, (int, float)) and price > 0:
+                                    quote_payload = {
+                                        "ltp": float(price),
+                                        "source": source_val,
+                                        "ts_ms": ts_ms,
+                                    }
+                                    if callable(get_cached):
+                                        try:
+                                            cached_quote = get_cached(token_val)
+                                        except Exception:
+                                            self.log.debug(
+                                                "get_cached_full_quote after prime failed",
+                                                exc_info=True,
+                                            )
+                                            cached_quote = None
+                                        if isinstance(cached_quote, Mapping):
+                                            quote_payload = dict(cached_quote)
+
+            if not quote_payload:
+                plan.setdefault("reasons", [])
+                if "no_quote" not in plan["reasons"]:
+                    plan["reasons"].append("no_quote")
+                if not plan.get("reason_block"):
+                    plan["reason_block"] = "no_quote"
+                flow["reason_block"] = plan.get("reason_block")
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
+
+            plan["quote"] = dict(quote_payload)
+
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
                 entry=float(plan.get("entry")),
@@ -1814,24 +1892,44 @@ class StrategyRunner:
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
             plan["qty_lots"] = planned_lots
-            quote = {
-                "bid": tick.get("bid") if tick else 0.0,
-                "ask": tick.get("ask") if tick else 0.0,
-                "bid_qty": tick.get("bid_qty") if tick else 0,
-                "ask_qty": tick.get("ask_qty") if tick else 0,
-                "bid_qty_top5": tick.get("bid_qty_top5") if tick else 0,
-                "ask_qty_top5": tick.get("ask_qty_top5") if tick else 0,
-            }
-            ok_micro, micro = self.executor.micro_ok(
-                quote=quote,
-                qty_lots=planned_lots,
-                lot_size=int(settings.instruments.nifty_lot_size),
-                max_spread_pct=float(
-                    getattr(settings.executor, "max_spread_pct", 0.35)
-                ),
-                depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
-                side=str(plan.get("action") or ""),
-            )
+            quote_payload: Dict[str, Any]
+            plan_quote = plan.get("quote")
+            if isinstance(plan_quote, Mapping):
+                quote_payload = dict(plan_quote)
+            else:
+                quote_payload = {
+                    "bid": tick.get("bid") if tick else 0.0,
+                    "ask": tick.get("ask") if tick else 0.0,
+                    "bid_qty": tick.get("bid_qty") if tick else 0,
+                    "ask_qty": tick.get("ask_qty") if tick else 0,
+                    "bid_qty_top5": tick.get("bid_qty_top5") if tick else 0,
+                    "ask_qty_top5": tick.get("ask_qty_top5") if tick else 0,
+                }
+                plan["quote"] = dict(quote_payload)
+
+            micro_fn = getattr(self.executor, "micro_decision", None)
+            if callable(micro_fn):
+                ok_micro, micro = micro_fn(
+                    quote=quote_payload,
+                    qty_lots=planned_lots,
+                    lot_size=int(settings.instruments.nifty_lot_size),
+                    max_spread_pct=float(
+                        getattr(settings.executor, "max_spread_pct", 0.35)
+                    ),
+                    depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
+                    side=str(plan.get("action") or ""),
+                )
+            else:
+                ok_micro, micro = self.executor.micro_ok(
+                    quote=quote_payload,
+                    qty_lots=planned_lots,
+                    lot_size=int(settings.instruments.nifty_lot_size),
+                    max_spread_pct=float(
+                        getattr(settings.executor, "max_spread_pct", 0.35)
+                    ),
+                    depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
+                    side=str(plan.get("action") or ""),
+                )
             plan["micro"] = micro
             if micro:
                 spread_detail = f"spread={micro.get('spread_pct')}%<=cap={micro.get('cap_pct')}%"
