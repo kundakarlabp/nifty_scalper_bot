@@ -4,11 +4,78 @@ from __future__ import annotations
 
 import logging
 from math import isfinite
+from threading import Lock
+
 from src.signals.patches import resolve_atr_band
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATR_PCT: float = 2.0
+
+_THROTTLE_LOCK: Lock = Lock()
+_LAST_LOG_STATE: dict[str, tuple[bool, float, float | None, float]] = {}
+
+
+def _normalise_log_state(
+    symbol: str | None,
+    *,
+    atr_value: float,
+    min_val: float,
+    max_bound: float,
+    ok: bool,
+) -> tuple[str, tuple[bool, float, float | None, float]]:
+    """Return a hashable representation of the current log state.
+
+    Repeated calls with the same inputs produce identical keys which enables
+    throttling for the very chatty ATR gate logger. ATR values are rounded to
+    four decimal places to avoid noisy floating point jitter while still
+    surfacing meaningful changes.
+    """
+
+    key = symbol or "__default__"
+    max_marker: float | None
+    if isfinite(max_bound):
+        max_marker = round(max_bound, 4)
+    else:
+        max_marker = None
+    state = (
+        ok,
+        round(min_val, 4),
+        max_marker,
+        round(atr_value, 4),
+    )
+    return key, state
+
+
+def _should_log_info(
+    symbol: str | None,
+    *,
+    atr_value: float,
+    min_val: float,
+    max_bound: float,
+    ok: bool,
+) -> bool:
+    """Return ``True`` when the throttled info log should fire."""
+
+    key, state = _normalise_log_state(
+        symbol, atr_value=atr_value, min_val=min_val, max_bound=max_bound, ok=ok
+    )
+    with _THROTTLE_LOCK:
+        previous = _LAST_LOG_STATE.get(key)
+        if previous != state:
+            _LAST_LOG_STATE[key] = state
+            return True
+    return False
+
+
+def _reset_log_throttle_state() -> None:
+    """Clear the memoised log state.
+
+    This is primarily intended for test isolation.
+    """
+
+    with _THROTTLE_LOCK:
+        _LAST_LOG_STATE.clear()
 def check_atr(
     atr_pct: float,
     cfg: object,
@@ -81,7 +148,16 @@ def check_atr(
     else:
         max_repr = "inf"
 
-    logger.info(
+    info_log = _should_log_info(
+        symbol,
+        atr_value=atr_value,
+        min_val=min_val,
+        max_bound=effective_max,
+        ok=ok,
+    )
+
+    log_fn = logger.info if info_log or not ok else logger.debug
+    log_fn(
         "ATR gate: atr_pct=%.4f min=%.4f max=%s result=%s",
         atr_value,
         min_val,
