@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any
 
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 
@@ -89,3 +90,84 @@ def test_evaluate_micro_requires_top_of_book():
     assert result["spread_pct"] is None
     assert result["depth_ok"] is None
     assert result["would_block"] is True
+
+
+def _capture_events(monkeypatch: Any) -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _emit(event: str, **fields: Any) -> None:
+        events.append((event, fields))
+
+    monkeypatch.setattr(
+        "src.execution.micro_filters.structured_log",
+        SimpleNamespace(event=_emit),
+    )
+    return events
+
+
+def test_evaluate_micro_logs_wait(monkeypatch: Any) -> None:
+    cfg = _cfg()
+    events = _capture_events(monkeypatch)
+    evaluate_micro(
+        None,
+        lot_size=50,
+        atr_pct=0.03,
+        cfg=cfg,
+        side="BUY",
+        trace_id="trace-wait",
+    )
+    assert [e[0] for e in events] == ["micro_eval", "micro_wait"]
+    payload = events[0][1]
+    assert payload["trace_id"] == "trace-wait"
+    assert payload["reason"] == "no_quote"
+    assert payload["would_block"] is True
+
+
+def test_evaluate_micro_logs_pass(monkeypatch: Any) -> None:
+    cfg = _cfg()
+    events = _capture_events(monkeypatch)
+    quote = {
+        "bid": 155.0,
+        "ask": 156.0,
+        "bid5_qty": [120, 110, 100, 90, 80],
+        "ask5_qty": [120, 110, 100, 90, 80],
+    }
+    evaluate_micro(
+        quote,
+        lot_size=50,
+        atr_pct=0.03,
+        cfg=cfg,
+        side="BUY",
+        trace_id="trace-pass",
+    )
+    assert [e[0] for e in events] == ["micro_eval", "micro_pass"]
+    payload = events[-1][1]
+    assert payload["trace_id"] == "trace-pass"
+    assert payload["would_block"] is False
+    assert payload["depth_available"] >= payload["required_qty"]
+    assert payload.get("spread_block") is False
+
+
+def test_evaluate_micro_logs_block(monkeypatch: Any) -> None:
+    cfg = _cfg()
+    events = _capture_events(monkeypatch)
+    shallow = {
+        "bid": 155.0,
+        "ask": 156.35,
+        "bid5_qty": [40, 40, 40, 40, 40],
+        "ask5_qty": [40, 40, 40, 40, 40],
+    }
+    evaluate_micro(
+        shallow,
+        lot_size=50,
+        atr_pct=0.03,
+        cfg=cfg,
+        side="BUY",
+        trace_id="trace-block",
+    )
+    assert [e[0] for e in events] == ["micro_eval", "micro_block"]
+    payload = events[-1][1]
+    assert payload["trace_id"] == "trace-block"
+    assert payload["raw_block"] is True
+    assert payload["would_block"] is True
+    assert payload["reason"] in {"depth", "spread"}

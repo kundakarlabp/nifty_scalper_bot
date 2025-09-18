@@ -1,0 +1,65 @@
+"""Lightweight structured logging helpers used across the bot."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import logging
+from typing import Any, Mapping, MutableMapping, Sequence
+
+__all__ = ["StructuredLogger", "structured_log"]
+
+
+def _normalize(value: Any) -> Any:
+    """Best-effort conversion of values to JSON-serialisable primitives."""
+
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _normalize(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_normalize(v) for v in value]
+    for attr in ("__float__", "__int__"):
+        if hasattr(value, attr):
+            try:
+                return getattr(value, attr)()
+            except Exception:  # pragma: no cover - extremely defensive
+                continue
+    return str(value)
+
+
+@dataclass
+class StructuredLogger:
+    """Structured logger that serialises events as JSON strings."""
+
+    name: str = "structured"
+    defaults: MutableMapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        self._logger = logging.getLogger(self.name)
+        self._defaults: dict[str, Any] = {}
+        if self.defaults:
+            self._defaults.update({k: _normalize(v) for k, v in self.defaults.items()})
+
+    def bind(self, **fields: Any) -> "StructuredLogger":
+        """Return a child logger with ``fields`` included on every event."""
+
+        combined = dict(self._defaults)
+        combined.update({k: _normalize(v) for k, v in fields.items()})
+        return StructuredLogger(name=self.name, defaults=combined)
+
+    def event(self, event: str, /, **fields: Any) -> None:
+        """Emit ``event`` with ``fields`` merged with defaults."""
+
+        payload = {"event": event, **self._defaults}
+        for key, value in fields.items():
+            payload[key] = _normalize(value)
+        try:
+            message = json.dumps(payload, sort_keys=True)
+        except (TypeError, ValueError):  # pragma: no cover - double safety
+            safe_payload = {k: _normalize(v) for k, v in payload.items()}
+            message = json.dumps(safe_payload, sort_keys=True)
+        self._logger.info(message)
+
+
+structured_log = StructuredLogger()

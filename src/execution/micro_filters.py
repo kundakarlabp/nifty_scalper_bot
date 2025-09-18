@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import os
 import math
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict, Optional, Tuple
 
 from src.config import settings
+from src.logs import structured_log
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,7 @@ def evaluate_micro(
     lots: Optional[int] = None,
     depth_multiplier: Optional[float] = None,
     require_depth: Optional[bool] = None,
+    trace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate microstructure metrics and gating conditions.
 
@@ -174,45 +176,6 @@ def evaluate_micro(
     micro_cfg = _micro_cfg(cfg)
     mode = str(micro_cfg.get("mode", "HARD")).upper()
     hard = mode == "HARD"
-
-    if not q:
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": hard,
-        }
-
-    bid5 = _top5_quantities(q.get("bid5_qty"), [])
-    ask5 = _top5_quantities(q.get("ask5_qty"), [])
-
-    if not bid5 or not ask5:
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": hard,
-        }
-
-    bid = _as_float(q.get("bid"))
-    ask = _as_float(q.get("ask"))
-
-    if bid <= 0.0 or ask <= 0.0:
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": hard,
-        }
-
-    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
-    spread_pct = (
-        (ask - bid) / ((bid + ask) / 2.0) * 100.0 if bid > 0 and ask > 0 else None
-    )
-    cap = cap_for_mid(mid or 0.0, cfg)
     side_norm = str(side).upper() if side else None
 
     lots_val: int
@@ -248,6 +211,116 @@ def evaluate_micro(
             )
         )
     )
+    required_units = int(math.ceil(need_units * depth_mult)) if need_units else 0
+
+    base_context: Dict[str, Any] = {
+        "trace_id": trace_id,
+        "mode": mode,
+        "side": side_norm,
+        "need_lots": lots_val,
+        "lot_size": lot_units,
+        "need_units": need_units,
+        "depth_multiplier": depth_mult,
+        "require_depth": require_depth_flag,
+        "atr_pct": float(atr_pct) if atr_pct is not None else None,
+    }
+    cap_default = float(micro_cfg.get("max_spread_pct", 1.0))
+
+    def emit(event: str, **fields: Any) -> None:
+        payload = dict(base_context)
+        payload.update(fields)
+        structured_log.event(event, **payload)
+
+    def log_outcome(outcome: str, **fields: Any) -> None:
+        metrics = dict(fields)
+        metrics.setdefault("required_qty", required_units)
+        emit("micro_eval", **metrics)
+        emit(outcome, **metrics)
+
+    if not q:
+        log_outcome(
+            "micro_wait",
+            reason="no_quote",
+            spread_pct=None,
+            cap_pct=cap_default,
+            depth_ok=None,
+            depth_available=None,
+            available_bid_qty=None,
+            available_ask_qty=None,
+            spread_block=None,
+            depth_block=None,
+            raw_block=True,
+            would_block=hard,
+        )
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": hard,
+        }
+
+    bid5 = _top5_quantities(q.get("bid5_qty"), [])
+    ask5 = _top5_quantities(q.get("ask5_qty"), [])
+
+    bid = _as_float(q.get("bid"))
+    ask = _as_float(q.get("ask"))
+
+    if not bid5 or not ask5:
+        log_outcome(
+            "micro_wait",
+            reason="no_quote",
+            spread_pct=None,
+            cap_pct=cap_default,
+            depth_ok=None,
+            depth_available=None,
+            available_bid_qty=sum(bid5),
+            available_ask_qty=sum(ask5),
+            spread_block=None,
+            depth_block=None,
+            raw_block=True,
+            would_block=hard,
+            bid=bid,
+            ask=ask,
+        )
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": hard,
+        }
+
+    if bid <= 0.0 or ask <= 0.0:
+        log_outcome(
+            "micro_wait",
+            reason="no_quote",
+            spread_pct=None,
+            cap_pct=cap_default,
+            depth_ok=None,
+            depth_available=None,
+            available_bid_qty=sum(bid5),
+            available_ask_qty=sum(ask5),
+            spread_block=None,
+            depth_block=None,
+            raw_block=True,
+            would_block=hard,
+            bid=bid,
+            ask=ask,
+        )
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": hard,
+        }
+
+    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
+    spread_pct = (
+        (ask - bid) / ((bid + ask) / 2.0) * 100.0 if bid > 0 and ask > 0 else None
+    )
+    cap = cap_for_mid(mid or 0.0, cfg)
 
     available_bid = sum(bid5)
     available_ask = sum(ask5)
@@ -258,14 +331,35 @@ def evaluate_micro(
     else:
         depth_available = min(available_bid, available_ask)
 
-    required_units = int(math.ceil(need_units * depth_mult)) if need_units else 0
     if require_depth_flag:
         depth_ok = depth_available >= required_units
     else:
         depth_ok = True
 
     spread_block = spread_pct is None or (spread_pct > cap)
-    would_block = (spread_block or (not depth_ok))
+    depth_block = depth_ok is False
+    raw_block = spread_block or depth_block
+    final_block = raw_block if hard else False
+    reason = "spread" if spread_block else "depth" if depth_block else "ok"
+
+    log_outcome(
+        "micro_block" if final_block else "micro_pass",
+        reason=reason,
+        spread_pct=spread_pct,
+        cap_pct=cap,
+        depth_ok=depth_ok,
+        depth_available=depth_available,
+        available_bid_qty=available_bid,
+        available_ask_qty=available_ask,
+        spread_block=spread_block,
+        depth_block=depth_block,
+        raw_block=raw_block,
+        would_block=final_block,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+    )
+
     return {
         "mid": mid,
         "spread_pct": spread_pct,
@@ -283,7 +377,7 @@ def evaluate_micro(
         "depth_multiplier": depth_mult,
         "require_depth": require_depth_flag,
         "mode": mode,
-        "would_block": would_block if hard else False,
+        "would_block": final_block,
     }
 
 
