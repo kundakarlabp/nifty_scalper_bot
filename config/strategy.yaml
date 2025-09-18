@@ -23,7 +23,7 @@ windows:
       end:   "15:30"
 
 gates:
-  atr_pct_min: 0.025
+  atr_pct_min: 0.02
   atr_pct_max: 2.00
   mtf_confirm: true
   iv_percentile_limit: 85   # block if IVpct > limit AND score below trend min+1
