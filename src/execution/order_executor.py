@@ -493,6 +493,7 @@ def micro_ok(
     depth_mult: int,
     *,
     side: str | None = None,
+    depth_min_lots: float | int = 0.0,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Evaluate microstructure guard for an option quote."""
 
@@ -554,7 +555,7 @@ def micro_ok(
         meta_no_quote = {
             "spread_pct": None,
             "cap_pct": round(max_spread_cap * 100.0, 3),
-            "spread_ok": False,
+            "spread_ok": None,
             "depth_ok": None,
             "bid5": 0,
             "ask5": 0,
@@ -571,7 +572,9 @@ def micro_ok(
             "order_qty": 0,
             "depth_missing": True,
             "has_quote": False,
-            "block_reason": "no_quote",
+            "block_reason": None,
+            "skipped": True,
+            "skip_reason": "no_quote",
             "ts_ms": ts_ms,
             "timestamp": ts_val,
         }
@@ -581,11 +584,11 @@ def micro_ok(
             qty_lots_i,
             order_units,
             max_spread_cap * 100.0,
-            False,
-            "no_quote",
+            True,
+            "skip:no_quote",
             source,
         )
-        return False, meta_no_quote
+        return True, meta_no_quote
 
     if bid <= 0.0 or ask <= 0.0:
         return _log_no_quote()
@@ -600,7 +603,9 @@ def micro_ok(
         spread_frac * 100.0 if math.isfinite(spread_frac) else None
     )
 
-    required_units = int(order_units * depth_multiplier)
+    depth_min_lots_f = max(float(depth_min_lots), 0.0)
+    min_depth_units = int(depth_min_lots_f * lot_size_i) if lot_size_i > 0 else 0
+    required_units = max(int(order_units * depth_multiplier), min_depth_units)
 
     bid_depth_values = _depth_values(_get(quote, "bid5_qty", []))
     ask_depth_values = _depth_values(_get(quote, "ask5_qty", []))
@@ -615,6 +620,53 @@ def micro_ok(
 
     available_bid = sum(bid_depth_values)
     available_ask = sum(ask_depth_values)
+
+    if available_bid <= 0 and available_ask <= 0 and spread_ok:
+        meta_no_depth = {
+            "spread_pct": round(spread_pct_value, 3)
+            if spread_pct_value is not None
+            else None,
+            "cap_pct": round(max_spread_cap * 100.0, 3),
+            "spread_ok": spread_ok,
+            "depth_ok": None,
+            "bid5": available_bid,
+            "ask5": available_ask,
+            "bid": bid,
+            "ask": ask,
+            "ltp": ltp,
+            "source": source,
+            "required_qty": 0,
+            "available_bid_qty": available_bid,
+            "available_ask_qty": available_ask,
+            "side": side_norm,
+            "depth_available": 0,
+            "depth_multiplier": depth_multiplier,
+            "order_qty": order_units,
+            "depth_missing": True,
+            "has_quote": bid > 0.0 and ask > 0.0,
+            "block_reason": None,
+            "skipped": True,
+            "skip_reason": "no_depth",
+            "ts_ms": ts_ms,
+            "timestamp": ts_val,
+        }
+        spread_for_log = (
+            meta_no_depth["spread_pct"]
+            if meta_no_depth["spread_pct"] is not None
+            else float("nan")
+        )
+        log.info(
+            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth=0 ok=%s reason=%s src=%s",
+            side_norm or "BOTH",
+            qty_lots_i,
+            order_units,
+            spread_for_log,
+            meta_no_depth["cap_pct"],
+            True,
+            "skip:no_depth",
+            source,
+        )
+        return True, meta_no_depth
 
     if side_norm == "BUY":
         depth_available = available_ask
@@ -857,6 +909,7 @@ class OrderExecutor:
         # microstructure constraints
         self.max_spread_pct = float(getattr(ex, "max_spread_pct", 0.0035))
         self.depth_multiplier = float(getattr(ex, "depth_multiplier", 5.0))
+        self.depth_min_lots = float(getattr(ex, "depth_min_lots", 5.0))
         self.micro_retry_limit = int(getattr(ex, "micro_retry_limit", 3))
 
         # track last notification to throttle duplicates
@@ -917,16 +970,48 @@ class OrderExecutor:
         depth_mult: int,
         side: Optional[str] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
-        """Delegate to the module-level :func:`micro_ok` helper for compatibility."""
+        """Evaluate the option microstructure with a single retry on thin depth."""
 
-        return micro_ok(
-            quote=quote,
-            qty_lots=qty_lots,
-            lot_size=lot_size,
-            max_spread_pct=max_spread_pct,
-            depth_mult=depth_mult,
-            side=side,
-        )
+        attempts = 0
+        local_quote: Dict[str, Any] = dict(quote)
+        symbol = None
+        if isinstance(local_quote, Mapping):
+            symbol = (
+                local_quote.get("tradingsymbol")
+                or local_quote.get("symbol")
+                or local_quote.get("tsym")
+            )
+        last_ok: bool = False
+        last_meta: Dict[str, Any] = {}
+
+        while attempts < 2:
+            ok, meta = micro_ok(
+                quote=local_quote,
+                qty_lots=qty_lots,
+                lot_size=lot_size,
+                max_spread_pct=max_spread_pct,
+                depth_mult=depth_mult,
+                side=side,
+                depth_min_lots=self.depth_min_lots,
+            )
+            last_ok, last_meta = ok, meta
+            if ok or meta.get("depth_ok") is not False or not meta.get("spread_ok"):
+                return ok, meta
+
+            attempts += 1
+            if attempts >= 2:
+                break
+
+            self.logger.warning(
+                "micro depth thin despite tight spread for %s; retrying once",
+                symbol or "instrument",
+            )
+            if self.kite and symbol:
+                refreshed = fetch_quote_with_depth(self.kite, symbol, self.cb_orders)
+                if refreshed:
+                    local_quote = {**local_quote, **refreshed}
+
+        return last_ok, last_meta
 
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
@@ -1101,6 +1186,7 @@ class OrderExecutor:
                 lot_size=lot,
                 max_spread_pct=self.max_spread_pct,
                 depth_mult=int(self.depth_multiplier),
+                depth_min_lots=self.depth_min_lots,
                 side="BUY",
             )
             bid = float(q.get("bid") or 0.0)
@@ -1148,6 +1234,7 @@ class OrderExecutor:
             lot_size=lot,
             max_spread_pct=self.max_spread_pct,
             depth_mult=int(self.depth_multiplier),
+            depth_min_lots=self.depth_min_lots,
             side="BUY",
         )
         steps = []
