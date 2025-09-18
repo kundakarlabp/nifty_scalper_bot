@@ -1954,18 +1954,20 @@ class StrategyRunner:
             plan["qty_lots"] = planned_lots
 
             plan_token = plan.get("token") or plan.get("option_token")
-            quote_snapshot = self._get_cached_full_quote(plan_token)
-            if not quote_snapshot and plan_token:
-                ds_local = getattr(self, "data_source", None)
-                prime_fn_local = getattr(ds_local, "prime_option_quote", None)
-                if callable(prime_fn_local):
-                    try:
-                        prime_fn_local(plan_token)
-                    except Exception:
-                        self.log.debug(
-                            "prime_option_quote refresh failed", exc_info=True
-                        )
+            quote_snapshot: Mapping[str, Any] | None = None
+            if plan_token:
                 quote_snapshot = self._get_cached_full_quote(plan_token)
+                if not quote_snapshot:
+                    ds_local = getattr(self, "data_source", None)
+                    prime_fn_local = getattr(ds_local, "prime_option_quote", None)
+                    if callable(prime_fn_local):
+                        try:
+                            prime_fn_local(plan_token)
+                        except Exception:
+                            self.log.debug(
+                                "prime_option_quote refresh failed", exc_info=True
+                            )
+                    quote_snapshot = self._get_cached_full_quote(plan_token)
 
             def _as_float(val: Any) -> float:
                 try:
@@ -1996,7 +1998,7 @@ class StrategyRunner:
             plan["quote"] = quote_snapshot
             plan["quote_src"] = quote_snapshot.get("source")
 
-            ok_micro, micro = self.executor.micro_ok(
+            ok_micro, micro = self.executor.micro_decision(
                 quote=quote_snapshot,
                 qty_lots=planned_lots,
                 lot_size=int(settings.instruments.nifty_lot_size),
