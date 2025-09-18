@@ -43,22 +43,35 @@ def _wrap_gate(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Return a wrapper that clamps ``band_low`` via call arguments."""
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if args or "band_low" in kwargs:
-            band_low = kwargs.get("band_low", args[0] if args else None)
-            if band_low is not None:
-                # ``gate_atr_band`` style helpers expect ``band_low`` to reflect the
-                # effective minimum ATR pct.  The configuration might provide a
-                # higher or lower raw bound, but we always want the guard to
-                # evaluate against the resolved minimum derived from runtime
-                # context (instrument, overrides, etc.).  When the resolved
-                # minimum is zero we fall back to the provided band so that
-                # environments with no lower limit behave unchanged.
-                resolved = float(_resolve_min_atr_pct())
-                clamped = float(band_low) if resolved <= 0 else resolved
-                if "band_low" in kwargs:
-                    kwargs["band_low"] = clamped
+        """Clamp the ``band_low`` argument while preserving ATR inputs."""
+
+        has_kwarg = "band_low" in kwargs
+        band_arg = kwargs.get("band_low") if has_kwarg else (args[1] if len(args) > 1 else None)
+        resolved_min: float | None = None
+        if band_arg is not None or has_kwarg or len(args) > 1:
+            resolved_min = float(_resolve_min_atr_pct())
+
+        new_band: float | None = None
+        if band_arg is not None:
+            try:
+                band_val = float(band_arg)
+            except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+                band_val = None
+            if band_val is not None:
+                if resolved_min and resolved_min > 0:
+                    new_band = max(band_val, resolved_min)
                 else:
-                    args = (clamped, *args[1:])
+                    new_band = band_val
+            elif resolved_min and resolved_min > 0:
+                new_band = resolved_min
+        elif resolved_min and resolved_min > 0:
+            new_band = resolved_min
+
+        if new_band is not None:
+            if has_kwarg:
+                kwargs["band_low"] = new_band
+            elif len(args) > 1:
+                args = (*args[:1], new_band, *args[2:])
         return fn(*args, **kwargs)
 
     return wrapped
