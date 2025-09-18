@@ -19,6 +19,16 @@ try:
 except ValueError:
     MIN_INTERVAL_S = 60.0
 
+try:
+    # Bucket ATR readings while the gate is satisfied to avoid log spam caused
+    # by tiny fluctuations. The default 0.1 bucket keeps precision without
+    # logging every tick.
+    OK_ATR_BUCKET: float = float(os.getenv("ATR_LOG_OK_BUCKET", "0.1"))
+    if OK_ATR_BUCKET <= 0:
+        raise ValueError
+except ValueError:
+    OK_ATR_BUCKET = 0.1
+
 _THROTTLE_LOCK: Lock = Lock()
 _LAST_LOG_STATE: dict[str, tuple[bool, float, float | None, float]] = {}
 _LAST_ATR_LOG_TS: float = 0.0
@@ -32,6 +42,15 @@ def _should_log_atr(now: float, min_interval_s: float) -> bool:
         _LAST_ATR_LOG_TS = now
         return True
     return False
+
+
+def _bucket_ok_value(value: float) -> float:
+    """Return a bucketed ATR reading for ``ok`` states."""
+
+    if OK_ATR_BUCKET <= 0:
+        return round(value, 4)
+    bucket = round(value / OK_ATR_BUCKET) * OK_ATR_BUCKET
+    return round(bucket, 4)
 
 
 def _normalise_log_state(
@@ -56,11 +75,16 @@ def _normalise_log_state(
         max_marker = round(max_bound, 4)
     else:
         max_marker = None
+    if ok:
+        atr_marker = _bucket_ok_value(atr_value)
+    else:
+        atr_marker = round(atr_value, 4)
+
     state = (
         ok,
         round(min_val, 4),
         max_marker,
-        round(atr_value, 4),
+        atr_marker,
     )
     return key, state
 
