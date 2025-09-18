@@ -1088,6 +1088,15 @@ class EnhancedScalpingStrategy:
             )
             quote_id: Any | None = None
             option_token = None
+            token_map: Dict[str, int | None] = {}
+            option_type_key = str(option_type or "").upper()
+
+            def _normalize_token(value: Any) -> int | None:
+                try:
+                    token_val = int(value)
+                except (TypeError, ValueError):
+                    return None
+                return token_val or None
             lot_sz = int(
                 getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75)
             )
@@ -1112,16 +1121,24 @@ class EnhancedScalpingStrategy:
                             logger.debug("ensure_atm_tokens failed", exc_info=True)
                         strike_ds = getattr(ds, "current_atm_strike", strike_ds)
                 tokens_ds = getattr(ds, "atm_tokens", None)
-                if (
-                    isinstance(tokens_ds, (list, tuple))
-                    and len(tokens_ds) == 2
-                    and tokens_ds[idx] is not None
-                ):
-                    option_token = tokens_ds[idx]
-                    quote_id = option_token
-                    res = _token_to_symbol_and_lot(
-                        getattr(settings, "kite", None), option_token
-                    )
+                if isinstance(tokens_ds, (list, tuple)) and len(tokens_ds) == 2:
+                    raw_ce = tokens_ds[0]
+                    raw_pe = tokens_ds[1]
+                    normalized_token: int | None = None
+                    if tokens_ds[idx] is not None:
+                        option_token = tokens_ds[idx]
+                        quote_id = option_token
+                        normalized_token = _normalize_token(option_token)
+                    token_map = {
+                        "CE": _normalize_token(raw_ce),
+                        "PE": _normalize_token(raw_pe),
+                    }
+                    if normalized_token is not None:
+                        res = _token_to_symbol_and_lot(
+                            getattr(settings, "kite", None), normalized_token
+                        )
+                    else:
+                        res = None
                     if res:
                         _, lot_sz = res
                 else:
@@ -1135,6 +1152,12 @@ class EnhancedScalpingStrategy:
                 if strike_ds is not None:
                     plan["atm_strike"] = int(strike_ds)
             plan["option_token"] = option_token
+            plan["token"] = token_map.get(option_type_key)
+            if plan["token"] is None and option_token is not None:
+                try:
+                    plan["token"] = int(option_token)
+                except (TypeError, ValueError):
+                    plan["token"] = None
 
             if quote_id is None:
                 atm = resolve_weekly_atm(price)
