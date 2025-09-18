@@ -84,8 +84,16 @@ def check_data_window() -> CheckResult:
         return _bad(
             "no bars", name="data_window", fix="enable backfill or broker history"
         )
-    last_ts = df.index[-1]
-    lag_s = (r.now_ist - last_ts).total_seconds()
+    now = r.now_ist
+    last_ts_raw = pd.Timestamp(df.index[-1])
+    last_dt = last_ts_raw.to_pydatetime()
+    if last_dt.tzinfo is None and now.tzinfo is not None:
+        last_dt = last_dt.replace(tzinfo=now.tzinfo)
+    elif last_dt.tzinfo is not None and now.tzinfo is not None:
+        last_dt = last_dt.astimezone(now.tzinfo)
+    elif last_dt.tzinfo is not None and now.tzinfo is None:
+        last_dt = last_dt.astimezone(last_dt.tzinfo).replace(tzinfo=None)
+    lag_s = (now - last_dt).total_seconds()
     tf_s = 60  # timeframe is minute
     ok = lag_s <= 3 * tf_s
     msg = "fresh" if ok else "stale"
@@ -96,7 +104,7 @@ def check_data_window() -> CheckResult:
         msg=msg,
         details={
             "bars": len(df),
-            "last_bar_ts": str(last_ts),
+            "last_bar_ts": last_dt.isoformat(),
             "lag_s": lag_s,
             "tf_s": tf_s,
         },
