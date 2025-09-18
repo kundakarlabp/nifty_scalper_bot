@@ -508,12 +508,26 @@ def micro_ok(
         except (TypeError, ValueError):
             return 0
 
-    def _depth_list(val: Any) -> List[int]:
-        if isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray)):
-            return [_as_int(v) for v in val]
-        if val in (None, ""):
+    def _depth_values(raw: Any) -> List[int]:
+        if raw in (None, ""):
             return []
-        return [_as_int(val)]
+        if isinstance(raw, Mapping):
+            values: List[int] = []
+            for item in raw.values():
+                if isinstance(item, Mapping):
+                    values.append(_as_int(item.get("quantity")))
+                else:
+                    values.append(_as_int(item))
+            return [max(v, 0) for v in values if v]
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+            values = []
+            for item in list(raw)[:5]:
+                if isinstance(item, Mapping):
+                    values.append(_as_int(item.get("quantity")))
+                else:
+                    values.append(_as_int(item))
+            return [max(v, 0) for v in values if v]
+        return [max(_as_int(raw), 0)]
 
     def _get(obj: Any, key: str, default: Any = None) -> Any:
         if isinstance(obj, Mapping):
@@ -527,13 +541,17 @@ def micro_ok(
     source = _get(quote, "source")
     ts_ms = _get(quote, "ts_ms")
     ts_val = _get(quote, "timestamp")
-    has_quote = bid > 0.0 and ask > 0.0
 
     ms = float(max_spread_pct)
     max_spread_cap = ms if ms <= 1.0 else ms / 100.0
 
-    if bid <= 0.0 or ask <= 0.0:
-        meta = {
+    qty_lots_i = max(int(qty_lots), 0)
+    lot_size_i = max(int(lot_size), 0)
+    order_units = qty_lots_i * lot_size_i
+    depth_multiplier = max(float(depth_mult), 0.0)
+
+    def _log_no_quote() -> Tuple[bool, Dict[str, Any]]:
+        meta_no_quote = {
             "spread_pct": None,
             "cap_pct": round(max_spread_cap * 100.0, 3),
             "spread_ok": False,
@@ -549,64 +567,70 @@ def micro_ok(
             "available_ask_qty": 0,
             "side": side_norm,
             "depth_available": 0,
-            "depth_multiplier": float(depth_mult),
+            "depth_multiplier": depth_multiplier,
             "order_qty": 0,
             "depth_missing": True,
-            "has_quote": has_quote,
+            "has_quote": False,
             "block_reason": "no_quote",
             "ts_ms": ts_ms,
             "timestamp": ts_val,
         }
         log.info(
-            "micro_decision side=%s lots=%d units=%d spread%%=na cap%%=%.3f depth_req=%d "
-            "avail_bid=%d avail_ask=%d ok=%s reason=%s src=%s",
+            "micro_decision side=%s lots=%d units=%d spread%%=na cap%%=%.3f depth=na ok=%s reason=%s src=%s",
             side_norm or "BOTH",
-            int(qty_lots),
-            int(qty_lots) * int(lot_size),
+            qty_lots_i,
+            order_units,
             max_spread_cap * 100.0,
-            0,
-            0,
-            0,
             False,
             "no_quote",
             source,
         )
-        return False, meta
+        return False, meta_no_quote
+
+    if bid <= 0.0 or ask <= 0.0:
+        return _log_no_quote()
 
     mid = (bid + ask) / 2.0
-    spread_frac = (ask - bid) / mid if mid > 0 else float("inf")
-    spread_ok = spread_frac <= max_spread_cap and math.isfinite(spread_frac)
-    if math.isfinite(spread_frac):
-        spread_pct_value: Optional[float] = spread_frac * 100.0
-    else:
-        spread_pct_value = None
+    if mid <= 0.0:
+        return _log_no_quote()
 
-    qty_lots_i = max(int(qty_lots), 0)
-    lot_size_i = max(int(lot_size), 0)
-    order_units = qty_lots_i * lot_size_i
-    depth_multiplier = max(float(depth_mult), 0.0)
+    spread_frac = (ask - bid) / mid if mid > 0 else float("inf")
+    spread_ok = math.isfinite(spread_frac) and spread_frac <= max_spread_cap
+    spread_pct_value: Optional[float] = (
+        spread_frac * 100.0 if math.isfinite(spread_frac) else None
+    )
+
     required_units = int(order_units * depth_multiplier)
 
-    bid_depth = _depth_list(_get(quote, "bid5_qty", []))
-    ask_depth = _depth_list(_get(quote, "ask5_qty", []))
-    available_bid = sum(bid_depth)
-    available_ask = sum(ask_depth)
+    bid_depth_values = _depth_values(_get(quote, "bid5_qty", []))
+    ask_depth_values = _depth_values(_get(quote, "ask5_qty", []))
+    if not bid_depth_values:
+        fallback_bid = _as_int(_get(quote, "bid_qty", 0))
+        if fallback_bid > 0:
+            bid_depth_values = [fallback_bid]
+    if not ask_depth_values:
+        fallback_ask = _as_int(_get(quote, "ask_qty", 0))
+        if fallback_ask > 0:
+            ask_depth_values = [fallback_ask]
+
+    available_bid = sum(bid_depth_values)
+    available_ask = sum(ask_depth_values)
 
     if side_norm == "BUY":
         depth_available = available_ask
     elif side_norm == "SELL":
         depth_available = available_bid
     else:
-        depth_available = min(available_bid, available_ask) if order_units else max(available_bid, available_ask)
+        depth_available = (
+            min(available_bid, available_ask)
+            if order_units
+            else max(available_bid, available_ask)
+        )
 
     require_depth_flag = bool(getattr(settings.executor, "require_depth", False))
-    depth_ok: Optional[bool]
-    if require_depth_flag and required_units > 0:
-        depth_ok = depth_available >= required_units
-    elif require_depth_flag:
-        depth_ok = True
-    else:
-        depth_ok = None
+    depth_ok: Optional[bool] = None
+    if require_depth_flag:
+        depth_ok = depth_available >= int(required_units)
 
     depth_missing = available_bid <= 0 and available_ask <= 0
 
@@ -636,31 +660,44 @@ def micro_ok(
         "depth_multiplier": depth_multiplier,
         "order_qty": order_units,
         "depth_missing": depth_missing,
-        "has_quote": has_quote,
+        "has_quote": True,
         "block_reason": block_reason,
         "ts_ms": ts_ms,
         "timestamp": ts_val,
     }
 
-    log.info(
-        "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth_req=%d "
-        "avail_bid=%d avail_ask=%d ok=%s reason=%s src=%s",
-        side_norm or "BOTH",
-        qty_lots_i,
-        order_units,
-        meta["spread_pct"] if meta["spread_pct"] is not None else float("nan"),
-        meta["cap_pct"],
-        required_units,
-        available_bid,
-        available_ask,
-        ok,
-        block_reason,
-        source,
+    spread_for_log = (
+        meta["spread_pct"] if meta["spread_pct"] is not None else float("nan")
     )
 
-    if depth_ok is False:
-        return False, meta
-    if not spread_ok:
+    if require_depth_flag:
+        log.info(
+            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth_req=%d depth_avail=%d ok=%s reason=%s src=%s",
+            side_norm or "BOTH",
+            qty_lots_i,
+            order_units,
+            spread_for_log,
+            meta["cap_pct"],
+            required_units,
+            depth_available,
+            ok,
+            block_reason,
+            source,
+        )
+    else:
+        log.info(
+            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth=na ok=%s reason=%s src=%s",
+            side_norm or "BOTH",
+            qty_lots_i,
+            order_units,
+            spread_for_log,
+            meta["cap_pct"],
+            ok,
+            block_reason,
+            source,
+        )
+
+    if depth_ok is False or not spread_ok:
         return False, meta
     return True, meta
 
