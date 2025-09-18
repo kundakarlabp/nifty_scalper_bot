@@ -789,6 +789,46 @@ class RiskSettings(BaseModel):
         return v
 
 
+class MicroSettings(BaseModel):
+    """Microstructure execution guard configuration."""
+
+    spread_cap_pct: float = Field(
+        0.35,
+        description="Maximum acceptable bid/ask spread percentage for entries.",
+        validation_alias=AliasChoices("MICRO_SPREAD_CAP"),
+    )
+    entry_wait_seconds: float = Field(
+        8.0,
+        description="Seconds to wait for microstructure to improve before aborting.",
+        validation_alias=AliasChoices("ENTRY_WAIT_S"),
+    )
+
+    @field_validator("spread_cap_pct", "entry_wait_seconds", mode="before")
+    @classmethod
+    def _v_float(cls, v: Any) -> float:
+        return float(v)
+
+    @field_validator("spread_cap_pct")
+    @classmethod
+    def _v_nonnegative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("micro spread cap must be >= 0")
+        return v
+
+    @field_validator("entry_wait_seconds")
+    @classmethod
+    def _v_wait(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("entry wait seconds must be >= 0")
+        return v
+
+    @property
+    def spread_cap_ratio(self) -> float:
+        """Return spread cap as ratio (0.0035 for 0.35%)."""
+
+        return float(self.spread_cap_pct) / 100.0
+
+
 class ExecutorSettings(BaseModel):
     exchange: str = "NFO"
     order_product: str = "NRML"
@@ -818,13 +858,23 @@ class ExecutorSettings(BaseModel):
     max_place_retries: int = 2
     # microstructure execution guards
     max_spread_pct: float = 0.0035  # 0.35%
-    depth_multiplier: float = 5.0  # top-5 depth >= mult * order size
+    depth_multiplier: float = Field(
+        5.0,
+        description="Depth multiplier applied when checking market liquidity.",
+        validation_alias=AliasChoices("EXECUTOR_DEPTH_MULTIPLIER"),
+    )
     depth_min_lots: float = Field(
         5.0,
         description="Minimum number of lots that must be available in depth when depth checks are enabled.",
-        validation_alias=AliasChoices("EXECUTOR__DEPTH_MIN_LOTS"),
+        validation_alias=AliasChoices(
+            "EXECUTOR__DEPTH_MIN_LOTS", "EXECUTOR_DEPTH_MIN_LOTS"
+        ),
     )
-    micro_retry_limit: int = 3
+    micro_retry_limit: int = Field(
+        3,
+        description="Maximum refresh attempts when waiting for microstructure.",
+        validation_alias=AliasChoices("EXECUTOR_MICRO_RETRY_LIMIT"),
+    )
     require_depth: bool = False
     default_spread_pct_est: float = 0.25
 
@@ -841,11 +891,12 @@ class ExecutorSettings(BaseModel):
         "ack_timeout_ms",
         "fill_timeout_ms",
         "max_place_retries",
+        "micro_retry_limit",
     )
     @classmethod
     def _v_nonneg_int(cls, v: int) -> int:
         if v < 0:
-            raise ValueError("tick counts must be >= 0")
+            raise ValueError("values must be >= 0")
         return v
 
 
@@ -1071,6 +1122,12 @@ class SystemSettings(BaseModel):
 # ================= Root settings =================
 
 
+def _micro_settings_factory() -> MicroSettings:
+    """Return default ``MicroSettings`` instance with validated defaults."""
+
+    return MicroSettings.model_validate({})
+
+
 def _risk_settings_factory() -> RiskSettings:
     return RiskSettings()  # type: ignore[call-arg]
 
@@ -1091,9 +1148,31 @@ class AppSettings(BaseSettings):
     )
     allow_offhours_testing: bool = False
     enable_time_windows: bool = True
-    tz: str = "Asia/Kolkata"
-    log_level: str = "INFO"
-    log_json: bool = False
+    tz: str = Field(
+        "Asia/Kolkata", validation_alias=AliasChoices("LOG_TZ", "TZ")
+    )
+    log_level: str = Field("INFO", validation_alias=AliasChoices("LOG_LEVEL"))
+    log_json: bool = Field(False, validation_alias=AliasChoices("LOG_JSON"))
+    log_path: Path | None = Field(
+        None,
+        validation_alias=AliasChoices("LOG_PATH", "LOG_FILE"),
+        description="Optional log file path for structured logging output.",
+    )
+    log_ring_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("LOG_RING_ENABLED"),
+        description="Toggle the in-memory log ring buffer used for /logs.",
+    )
+    diag_ring_size: int = Field(
+        4000,
+        validation_alias=AliasChoices("DIAG_RING_SIZE"),
+        description="Capacity of the diagnostic log ring buffer.",
+    )
+    diag_trace_events: bool = Field(
+        False,
+        validation_alias=AliasChoices("DIAG_TRACE_EVENTS"),
+        description="Enable verbose diagnostic event tracing.",
+    )
     # Fallback notional equity (₹) when live equity fetch fails or is disabled.
     RISK_DEFAULT_EQUITY: int = Field(
         default_factory=lambda: int(os.getenv("RISK_DEFAULT_EQUITY", "40000")),
@@ -1320,6 +1399,10 @@ class AppSettings(BaseSettings):
     RISK_FREE_RATE: float = 0.065
 
     def model_post_init(self, __context: object) -> None:  # pragma: no cover - sync risk
+        try:
+            self.system.log_buffer_capacity = int(self.diag_ring_size)
+        except Exception:
+            pass
         self.risk.use_live_equity = bool(self.RISK_USE_LIVE_EQUITY)
         self.risk.default_equity = float(self.RISK_DEFAULT_EQUITY)
         self.risk.exposure_basis = self.EXPOSURE_BASIS
@@ -1348,12 +1431,15 @@ class AppSettings(BaseSettings):
     instruments: InstrumentsSettings = InstrumentsSettings()
     strategy: StrategySettings = StrategySettings()  # type: ignore[call-arg]
     regime: RegimeSettings = RegimeSettings()
+    micro: MicroSettings = Field(default_factory=_micro_settings_factory)
     risk: RiskSettings = Field(default_factory=_risk_settings_factory)
     executor: ExecutorSettings = Field(
         default_factory=lambda: ExecutorSettings(
             entry_slippage_pct=0.25,
             exit_slippage_pct=0.25,
             depth_min_lots=5.0,
+            depth_multiplier=5.0,
+            micro_retry_limit=3,
         )
     )
     option_selector: OptionSelectorSettings = Field(
@@ -1368,6 +1454,32 @@ class AppSettings(BaseSettings):
         if v < 0:
             raise ValueError("warmup_bars must be >= 0")
         return v
+
+    @field_validator("log_level")
+    @classmethod
+    def _v_log_level(cls, v: str) -> str:
+        return str(v or "INFO").upper()
+
+    @field_validator("log_path", mode="before")
+    @classmethod
+    def _v_log_path(cls, v: object) -> Path | None:
+        if v is None:
+            return None
+        if isinstance(v, Path):
+            return v
+        if isinstance(v, str):
+            if not v.strip():
+                return None
+            return Path(v.strip())
+        raise TypeError("log_path must be a string or Path")
+
+    @field_validator("diag_ring_size")
+    @classmethod
+    def _v_diag_ring(cls, v: int) -> int:
+        val = int(v)
+        if val <= 0:
+            raise ValueError("diag_ring_size must be > 0")
+        return val
 
     @field_validator("data", mode="before")
     @classmethod
@@ -1389,6 +1501,14 @@ class AppSettings(BaseSettings):
     )
 
     # -------- Flat alias properties (read-only) --------
+    @property
+    def TZ(self) -> str:  # pragma: no cover - simple alias
+        return self.tz
+
+    @property
+    def LOG_PATH(self) -> Path | None:  # pragma: no cover - simple alias
+        return self.log_path
+
     # Strategy (flat)
     @property
     def strategy_min_signal_score(self) -> int:
@@ -1818,6 +1938,7 @@ __all__ = [
     "RegimeSettings",
     "InstrumentConfig",
     "InstrumentsSettings",
+    "MicroSettings",
     "load_settings",
     "settings",
 ]
