@@ -1498,6 +1498,55 @@ class StrategyRunner:
             plan["option_token"] = token
             ds = getattr(self, "data_source", None)
             plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
+
+            def _coerce_token(value: Any) -> int | None:
+                try:
+                    coerced = int(value)
+                except (TypeError, ValueError):
+                    return None
+                return coerced or None
+
+            ce_token: int | None = None
+            pe_token: int | None = None
+            if ds is not None:
+                tokens_raw = getattr(ds, "atm_tokens", None)
+                if isinstance(tokens_raw, (list, tuple)):
+                    if len(tokens_raw) > 0:
+                        ce_token = _coerce_token(tokens_raw[0])
+                    if len(tokens_raw) > 1:
+                        pe_token = _coerce_token(tokens_raw[1])
+
+            option_type = str(plan.get("option_type") or plan.get("side_hint") or "").upper()
+            token_map: dict[str, int | None] = {"CE": ce_token, "PE": pe_token}
+            plan["token"] = token_map.get(option_type)
+            if plan["token"] is None and token is not None:
+                try:
+                    plan["token"] = int(token)
+                except (TypeError, ValueError):
+                    plan["token"] = None
+
+            logger.info(
+                "picked option: type=%s ce=%s pe=%s chosen=%s",
+                option_type,
+                ce_token,
+                pe_token,
+                plan["token"],
+            )
+            if (
+                option_type == "PE"
+                and pe_token is not None
+                and plan.get("token") != pe_token
+            ) or (
+                option_type == "CE"
+                and ce_token is not None
+                and plan.get("token") != ce_token
+            ):
+                plan["reason_block"] = "token_mismatch"
+                plan.setdefault("reasons", []).append("token_mismatch")
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
             self._last_option = opt
             if not token:
                 plan["reason_block"] = "no_option_token"
