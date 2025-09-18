@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
+from src.data.source import get_option_quote_safe
 from src.logs.journal import Journal
 from src.state import StateStore
 from src.utils.broker_errors import (
@@ -173,29 +174,84 @@ def fetch_quote_with_depth(
             "timestamp": None,
             "source": "none",
         }
+    symbol_key = f"NFO:{tsym}"
+    option_stub: Dict[str, Any] = {"tradingsymbol": tsym}
+    ltp_cache: Dict[str, Optional[float]] = {}
+
+    def _fetch_rest(identifier: Any) -> Optional[float]:
+        key = str(identifier)
+        if key in ltp_cache:
+            return ltp_cache[key]
+        if not kite:
+            ltp_cache[key] = None
+            return None
+        try:
+            data = _retry_call(kite.ltp, [identifier], tries=2)
+        except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
+            if _QUOTE_ERR_RL.allow():
+                log.warning("ltp() failed for %s: %s", identifier, e)
+            ltp_cache[key] = None
+            return None
+        price: Optional[float] = None
+        if isinstance(data, dict):
+            entry = data.get(identifier)
+            if entry is None:
+                entry = data.get(key)
+            if isinstance(entry, dict):
+                raw_price = entry.get("last_price")
+                try:
+                    price = float(raw_price) if raw_price is not None else None
+                except (TypeError, ValueError):
+                    price = None
+        ltp_cache[key] = price
+        return price
+
     bid = ask = 0.0
     bid_qty = ask_qty = 0
     bid5 = ask5 = 0
     ltp = 0.0
     oi = ts = None
+    quote_dict: Dict[str, Any] | None = None
+    mode = "no_quote"
     for attempt in range(2):
         try:
-            data = _retry_call(kite.quote, [f"NFO:{tsym}"], tries=2)
-            info = data.get(f"NFO:{tsym}", {}) if isinstance(data, dict) else {}
-            depth = info.get("depth", {}) if isinstance(info, dict) else {}
-            bids = depth.get("buy", []) if isinstance(depth, dict) else []
-            asks = depth.get("sell", []) if isinstance(depth, dict) else []
-            bid = float(bids[0]["price"]) if bids else 0.0
-            ask = float(asks[0]["price"]) if asks else 0.0
-            bid_qty = int(bids[0].get("quantity", 0)) if bids else 0
-            ask_qty = int(asks[0].get("quantity", 0)) if asks else 0
-            bid5 = sum(int(b.get("quantity", 0)) for b in bids[:5]) if bids else 0
-            ask5 = sum(int(a.get("quantity", 0)) for a in asks[:5]) if asks else 0
-            ltp = float(info.get("last_price") or 0.0)
-            oi = info.get("oi")
-            ts = info.get("timestamp") or info.get("last_trade_time")
-            if bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0:
-                break
+            data = _retry_call(kite.quote, [symbol_key], tries=2)
+            info = data.get(symbol_key, {}) if isinstance(data, dict) else {}
+            info = info if isinstance(info, dict) else {}
+            info.setdefault("source", "quote")
+            token = info.get("instrument_token")
+            if token is not None:
+                option_stub["token"] = token
+                option_stub["instrument_token"] = token
+            quote_dict, mode = get_option_quote_safe(
+                option=option_stub,
+                quote=info,
+                fetch_ltp=_fetch_rest,
+            )
+            if quote_dict:
+                bid = float(quote_dict.get("bid", 0.0))
+                ask = float(quote_dict.get("ask", 0.0))
+                bid_qty = int(quote_dict.get("bid_qty", 0))
+                ask_qty = int(quote_dict.get("ask_qty", 0))
+                bid5 = int(quote_dict.get("bid5_qty", 0))
+                ask5 = int(quote_dict.get("ask5_qty", 0))
+                ltp = float(quote_dict.get("ltp", 0.0))
+                if "oi" not in quote_dict and "oi" in info:
+                    quote_dict["oi"] = info.get("oi")
+                ts_val = info.get("timestamp") or info.get("last_trade_time")
+                if ts_val and "timestamp" not in quote_dict:
+                    if isinstance(ts_val, datetime):
+                        quote_dict["timestamp"] = ts_val.isoformat()
+                    else:
+                        quote_dict["timestamp"] = ts_val
+                if "depth" not in quote_dict and isinstance(info.get("depth"), dict):
+                    quote_dict["depth"] = info["depth"]
+                quote_dict["source"] = "ltp" if mode == "rest_ltp" else info.get(
+                    "source", "quote"
+                )
+                with _CACHE_LOCK:
+                    _QUOTE_CACHE[tsym] = quote_dict
+                return quote_dict
             time.sleep(0.25)
         except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
             kind = classify_broker_error(e)
@@ -219,7 +275,7 @@ def fetch_quote_with_depth(
                 if _QUOTE_ERR_RL.allow():
                     log.warning("broker subscription error: %s", e)
             break
-    if bid <= 0 or ask <= 0 or bid_qty <= 0 or ask_qty <= 0:
+    if not quote_dict:
         with _CACHE_LOCK:
             cached = _QUOTE_CACHE.get(tsym)
         if cached:
@@ -229,13 +285,8 @@ def fetch_quote_with_depth(
             out.setdefault("bid_qty", out.get("bid5_qty", 0))
             out.setdefault("ask_qty", out.get("ask5_qty", 0))
             return out
-        ltp = 0.0
-        try:
-            data = _retry_call(kite.ltp, [f"NFO:{tsym}"], tries=2)
-            ltp = float((data or {}).get(f"NFO:{tsym}", {}).get("last_price", 0.0))
-        except BROKER_EXCEPTIONS as e:
-            log.warning("ltp() failed for %s: %s", tsym, e)
-        if ltp <= 0.0 and yf is not None:  # pragma: no cover - best effort
+        ltp = _fetch_rest(symbol_key) or 0.0
+        if (ltp is None or ltp <= 0.0) and yf is not None:  # pragma: no cover
             try:
                 tkr = yf.Ticker(f"{tsym}.NS")
                 hist = tkr.history(period="1d", interval="1m")
@@ -266,22 +317,7 @@ def fetch_quote_with_depth(
         with _CACHE_LOCK:
             _QUOTE_CACHE[tsym] = quote
         return quote
-    quote = {
-        "ltp": ltp,
-        "bid": bid,
-        "ask": ask,
-        "bid_qty": bid_qty,
-        "ask_qty": ask_qty,
-        "bid5_qty": bid5,
-        "ask5_qty": ask5,
-        "oi": oi,
-        "timestamp": ts,
-        "source": "quote",
-    }
-    if ltp > 0:
-        with _CACHE_LOCK:
-            _QUOTE_CACHE[tsym] = quote
-    return quote
+    return quote_dict or {}
 
 
 class KiteOrderConnector:
