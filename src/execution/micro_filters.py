@@ -198,6 +198,16 @@ def evaluate_micro(
 
     bid = _as_float(q.get("bid"))
     ask = _as_float(q.get("ask"))
+
+    if bid <= 0.0 or ask <= 0.0:
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": hard,
+        }
+
     mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
     spread_pct = (
         (ask - bid) / ((bid + ask) / 2.0) * 100.0 if bid > 0 and ask > 0 else None

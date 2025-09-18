@@ -1481,6 +1481,7 @@ class StrategyRunner:
                 plan["option"] = {}
                 plan["expiry"] = None
                 plan["option_token"] = None
+                plan["token"] = None
                 plan["spread_pct"] = None
                 plan["depth_ok"] = None
                 plan["micro"] = {"spread_pct": None, "depth_ok": None}
@@ -1496,6 +1497,7 @@ class StrategyRunner:
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
             plan["option_token"] = token
+            plan["token"] = token
             ds = getattr(self, "data_source", None)
             plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
 
@@ -1551,6 +1553,7 @@ class StrategyRunner:
             if not token:
                 plan["reason_block"] = "no_option_token"
                 plan.setdefault("reasons", []).append("no_option_token")
+                plan["token"] = None
                 self.log.warning(
                     "No option token: expiry=%s strike=%s kind=%s",
                     opt.get("expiry"),
@@ -1575,9 +1578,10 @@ class StrategyRunner:
             prime_ts: int | None = None
             prime_fn = getattr(ds, "prime_option_quote", None)
             require_prime = bool(getattr(self.settings, "enable_live_trading", False))
-            if callable(prime_fn):
+            token_for_quote = plan.get("token")
+            if callable(prime_fn) and token_for_quote:
                 try:
-                    prime_price, prime_src, prime_ts = prime_fn(token)
+                    prime_price, prime_src, prime_ts = prime_fn(token_for_quote)
                 except Exception:
                     self.log.debug("prime_option_quote failed", exc_info=True)
                     prime_price = None
@@ -1586,13 +1590,13 @@ class StrategyRunner:
             plan["prime_quote_price"] = prime_price
             plan["prime_quote_src"] = prime_src
             plan["prime_quote_ts"] = prime_ts
-            if require_prime and not prime_price:
+            if require_prime and token_for_quote and not prime_price:
                 plan["reason_block"] = "no_quote"
                 plan.setdefault("reasons", []).append("no_quote")
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                self.log.info("no_quote token=%s", token)
+                self.log.info("no_quote token=%s", token_for_quote)
                 return
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):

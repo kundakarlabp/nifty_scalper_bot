@@ -74,3 +74,18 @@ def test_evaluate_micro_requires_top5_arrays():
     result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
     assert result["reason"] == "no_quote"
     assert result["would_block"] is True
+
+
+def test_evaluate_micro_requires_top_of_book():
+    cfg = _cfg()
+    quote = {
+        "bid": 0.0,
+        "ask": 156.0,
+        "bid5_qty": [100, 80, 60, 40, 20],
+        "ask5_qty": [120, 100, 80, 60, 40],
+    }
+    result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
+    assert result["reason"] == "no_quote"
+    assert result["spread_pct"] is None
+    assert result["depth_ok"] is None
+    assert result["would_block"] is True
