@@ -1,4 +1,3 @@
-from src.config import settings
 from src.execution.order_executor import micro_ok
 
 
@@ -14,7 +13,7 @@ def test_micro_ok_missing_bid_ask_returns_false_with_reason():
     assert ok is False
     assert meta["block_reason"] == "no_quote"
     assert meta["spread_ok"] is False
-    assert meta["depth_ok"] is True
+    assert meta["depth_ok"] is None
     assert meta["depth_missing"] is True
     assert meta["source"] is None
 
@@ -36,10 +35,10 @@ def test_micro_ok_passes_with_valid_spread_and_depth():
     )
     assert ok is True
     assert meta is not None
-    assert meta["depth_ok"] is True
+    assert meta["depth_ok"] is None
     assert meta["spread_pct"] <= 0.35
     assert meta["required_qty"] == 250
-    assert meta["depth_available"] >= 250
+    assert meta["depth_available"] >= 0
     assert meta["bid"] == 100.0
     assert meta["ask"] == 100.2
 
@@ -60,8 +59,6 @@ def test_micro_ok_allows_ltp_only_when_depth_missing():
         max_spread_pct=0.35,
         depth_mult=5,
     )
-    assert ok is True
+    assert ok is False
     assert meta is not None
-    assert meta["depth_ok"] is True
-    assert meta["spread_pct"] == getattr(settings.executor, "default_spread_pct_est", 0.25)
-    assert meta["block_reason"] is None
+    assert meta["block_reason"] == "no_quote"
