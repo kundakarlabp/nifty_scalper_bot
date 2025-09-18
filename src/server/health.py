@@ -10,11 +10,12 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from flask import Flask, Response
+from flask import Flask, Response, request
 
-from src.strategies.runner import StrategyRunner
-from src.utils.freshness import compute as compute_freshness
 from src.diagnostics.metrics import metrics as core_metrics, runtime_metrics
+from src.strategies.runner import StrategyRunner
+from src.utils import ringlog
+from src.utils.freshness import compute as compute_freshness
 
 app = Flask(__name__)
 log = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ log = logging.getLogger(__name__)
 # Filled by run(callback=...)
 _status_callback: Optional[Callable[[], Dict[str, Any]]] = None
 _start_ts = time.time()
+
+_DEFAULT_DIAG_TAIL = 50
 
 
 def _resolve_last_tick_dt(ds: Any) -> Optional[datetime]:
@@ -173,6 +176,23 @@ def _prometheus_metrics() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _parse_tail_limit(raw: Optional[str]) -> Optional[int]:
+    """Return sanitized tail limit from query params."""
+
+    if raw is None:
+        return _DEFAULT_DIAG_TAIL
+    raw = raw.strip().lower()
+    if not raw:
+        return _DEFAULT_DIAG_TAIL
+    if raw in {"all", "*", "full"}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_DIAG_TAIL
+    return max(value, 0)
+
+
 @app.route("/health", methods=["GET"])
 def health_get() -> Tuple[Dict[str, Any], int]:
     """Return lightweight health status."""
@@ -194,6 +214,26 @@ def health_get() -> Tuple[Dict[str, Any], int]:
             "error": str(e),
             "metrics": _metrics_snapshot(),
         }, 500
+
+
+@app.route("/diag/last", methods=["GET"])
+def diag_last() -> Tuple[Dict[str, Any], int]:
+    """Return the most recent diagnostics records from the structured log ring."""
+
+    try:
+        limit = _parse_tail_limit(request.args.get("limit"))
+        records = ringlog.tail(None if limit is None else limit)
+        resp: Dict[str, Any] = {
+            "ok": ringlog.enabled(),
+            "limit": limit,
+            "count": len(records),
+            "capacity": ringlog.capacity(),
+            "records": records,
+        }
+        return resp, 200
+    except Exception as exc:  # pragma: no cover - defensive guard
+        log.exception("Diag tail error: %s", exc)
+        return {"ok": False, "error": str(exc)}, 500
 
 
 @app.route("/status", methods=["GET"])
