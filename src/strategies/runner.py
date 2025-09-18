@@ -702,7 +702,16 @@ class StrategyRunner:
             f"reasons={','.join(plan.get('reasons', []))}"
         )
         if micro:
-            msg += f" micro={{spread%:{micro.get('spread_pct')}, depth_ok:{micro.get('depth_ok')}}}"
+            msg += (
+                " micro={spread%:%s cap%%:%s depth_ok:%s req:%s avail:%s side:%s}" % (
+                    micro.get("spread_pct"),
+                    micro.get("cap_pct"),
+                    micro.get("depth_ok"),
+                    micro.get("required_qty"),
+                    micro.get("depth_available"),
+                    micro.get("side"),
+                )
+            )
         self.log.info(msg)
         if getattr(self.settings, "TELEGRAM__PRETRADE_ALERTS", False):
             try:
@@ -1797,8 +1806,19 @@ class StrategyRunner:
                     getattr(settings.executor, "max_spread_pct", 0.35)
                 ),
                 depth_mult=int(getattr(settings.executor, "depth_multiplier", 5)),
+                side=str(plan.get("action") or ""),
             )
             plan["micro"] = micro
+            if micro:
+                spread_detail = f"spread={micro.get('spread_pct')}%<=cap={micro.get('cap_pct')}%"
+                depth_detail = (
+                    f"req={micro.get('required_qty')} avail={micro.get('depth_available')}"
+                )
+                micro_msg = (
+                    f"micro side={micro.get('side') or 'BOTH'} lots={planned_lots} "
+                    f"{spread_detail} depth_ok={micro.get('depth_ok')} ({depth_detail})"
+                )
+                self.log.info(micro_msg)
             self._preview_candidate(plan, micro)
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
@@ -1823,6 +1843,15 @@ class StrategyRunner:
                 plan["has_signal"] = False
                 if plan.get("reason_block") in ("", None) and not ok_micro:
                     plan["reason_block"] = "microstructure"
+                    if micro:
+                        reasons = plan.setdefault("reasons", [])
+                        block_reason = micro.get("block_reason") or "fail"
+                        detail = (
+                            f"micro:{block_reason} req={micro.get('required_qty')}"
+                            f" avail={micro.get('depth_available')}"
+                        )
+                        if detail not in reasons:
+                            reasons.append(detail)
                 flow["reason_block"] = flow.get("reason_block") or plan.get(
                     "reason_block"
                 )
