@@ -452,7 +452,11 @@ class RiskEngine:
                 available_lots,
             )
             plan["eq_source"] = eq_source
-            exposure_cap = float(cap)
+            cap_from_equity = float(cap)
+            if exposure_cap is not None:
+                cap_from_equity = min(exposure_cap, cap_from_equity)
+            exposure_cap = cap_from_equity
+            cap = cap_from_equity
             price_mid = float(_mid_from_quote(quote_payload))
             meta: Optional[Dict[str, Any]] = None
             if lots <= 0:
