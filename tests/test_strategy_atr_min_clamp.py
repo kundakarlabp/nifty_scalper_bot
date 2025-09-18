@@ -9,9 +9,9 @@ from tests.test_strategy import create_test_dataframe
 
 def test_strategy_allows_clamped_min_atr(monkeypatch):
     """Strategy should not block when ATR matches resolved minimum."""
-    monkeypatch.setattr(ss, "_resolve_min_atr_pct", lambda: 0.05)
     cfg = ss.StrategyConfig.load(resolve_config_path())
     cfg.atr_min = 0.30
+    cfg.raw.setdefault("thresholds", {})["min_atr_pct_nifty"] = 0.05
     cfg.raw.setdefault("strategy", {})["min_score"] = 0.0
     monkeypatch.setattr(ss.StrategyConfig, "load", classmethod(lambda cls, path: cfg))
 
@@ -34,6 +34,7 @@ def test_strategy_allows_clamped_min_atr(monkeypatch):
         atr_sl_multiplier=1.5,
         atr_tp_multiplier=3.0,
     )
+    strat.runner = SimpleNamespace(under_symbol="NIFTY")
     plan = strat.generate_signal(df, current_price=100.0)
     assert plan.get("reason_block") != "atr_out_of_band"
 
@@ -41,10 +42,11 @@ def test_strategy_allows_clamped_min_atr(monkeypatch):
 def test_strategy_allows_unbounded_atr_max(monkeypatch):
     """Zero ``atr_max`` should disable the upper guard instead of blocking."""
 
-    monkeypatch.setattr(ss, "_resolve_min_atr_pct", lambda: 0.02)
     cfg = ss.StrategyConfig.load(resolve_config_path())
     cfg.atr_min = 0.20
     cfg.atr_max = 0.0
+    cfg.raw.setdefault("thresholds", {})["min_atr_pct_nifty"] = 0.02
+    cfg.raw.setdefault("gates", {})["atr_pct_max"] = 0.0
     cfg.raw.setdefault("strategy", {})["min_score"] = 0.0
     monkeypatch.setattr(ss.StrategyConfig, "load", classmethod(lambda cls, path: cfg))
 
@@ -79,6 +81,7 @@ def test_strategy_allows_unbounded_atr_max(monkeypatch):
         atr_sl_multiplier=1.5,
         atr_tp_multiplier=3.0,
     )
+    strat.runner = SimpleNamespace(under_symbol="NIFTY")
     plan = strat.generate_signal(df, current_price=100.0)
     assert plan.get("reason_block") != "atr_out_of_band"
     assert plan.get("atr_max") == 0.0
