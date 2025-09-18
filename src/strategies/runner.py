@@ -917,6 +917,39 @@ class StrategyRunner:
         logger.debug("quote_prime_ok", {"n": len(needed_tokens)})
         return True, None, needed_tokens
 
+    def _get_cached_full_quote(
+        self, token: int | str | None
+    ) -> dict[str, Any] | None:
+        """Return a detached copy of the cached FULL quote for ``token``."""
+
+        if token in (None, ""):
+            return None
+
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return None
+
+        getter = getattr(ds, "get_cached_full_quote", None)
+        if callable(getter):
+            try:
+                quote = getter(token)
+            except Exception:
+                self.log.debug("get_cached_full_quote failed", exc_info=True)
+            else:
+                if isinstance(quote, Mapping):
+                    return dict(quote)
+
+        cache = getattr(ds, "_option_quote_cache", None)
+        if isinstance(cache, Mapping):
+            try:
+                token_i = int(token)  # type: ignore[arg-type]
+            except Exception:
+                return None
+            raw = cache.get(token_i)
+            if isinstance(raw, Mapping):
+                return dict(raw)
+        return None
+
     def _detect_missing_tokens(self, tokens: list[int], quote_payload: Any) -> list[int]:
         """Identify which instrument tokens are absent from a quote payload."""
 
@@ -1919,16 +1952,52 @@ class StrategyRunner:
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
             plan["qty_lots"] = planned_lots
-            quote = {
-                "bid": tick.get("bid") if tick else 0.0,
-                "ask": tick.get("ask") if tick else 0.0,
-                "bid_qty": tick.get("bid_qty") if tick else 0,
-                "ask_qty": tick.get("ask_qty") if tick else 0,
-                "bid_qty_top5": tick.get("bid_qty_top5") if tick else 0,
-                "ask_qty_top5": tick.get("ask_qty_top5") if tick else 0,
-            }
+
+            plan_token = plan.get("token") or plan.get("option_token")
+            quote_snapshot = self._get_cached_full_quote(plan_token)
+            if not quote_snapshot and plan_token:
+                ds_local = getattr(self, "data_source", None)
+                prime_fn_local = getattr(ds_local, "prime_option_quote", None)
+                if callable(prime_fn_local):
+                    try:
+                        prime_fn_local(plan_token)
+                    except Exception:
+                        self.log.debug(
+                            "prime_option_quote refresh failed", exc_info=True
+                        )
+                quote_snapshot = self._get_cached_full_quote(plan_token)
+
+            def _as_float(val: Any) -> float:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            if not quote_snapshot or (
+                _as_float(quote_snapshot.get("bid")) <= 0.0
+                and _as_float(quote_snapshot.get("ask")) <= 0.0
+            ):
+                plan.setdefault("reasons", [])
+                if "no_quote" not in plan["reasons"]:
+                    plan["reasons"].append("no_quote")
+                plan["reason_block"] = "no_quote"
+                plan["micro"] = {
+                    "block_reason": "no_quote",
+                    "spread_pct": None,
+                    "depth_ok": None,
+                }
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.log.info("micro precheck: no_quote token=%s", plan_token)
+                return
+
+            quote_snapshot = dict(quote_snapshot)
+            plan["quote"] = quote_snapshot
+            plan["quote_src"] = quote_snapshot.get("source")
+
             ok_micro, micro = self.executor.micro_ok(
-                quote=quote,
+                quote=quote_snapshot,
                 qty_lots=planned_lots,
                 lot_size=int(settings.instruments.nifty_lot_size),
                 max_spread_pct=float(
@@ -2043,6 +2112,8 @@ class StrategyRunner:
                     "option_type": plan["option_type"],
                     "client_oid": client_oid,
                 }
+                if plan.get("quote"):
+                    exec_payload["quote"] = dict(plan["quote"])
                 placed_ok = bool(self.order_manager.submit(exec_payload))
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
                     try:

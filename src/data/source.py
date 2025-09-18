@@ -1204,6 +1204,21 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         self._option_quote_cache[token] = payload
 
+    def get_cached_full_quote(
+        self, token: int | str
+    ) -> dict[str, Any] | None:
+        """Return a copy of the cached FULL quote for ``token`` if available."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
+
+        cached = self._option_quote_cache.get(token_i)
+        if not isinstance(cached, Mapping):
+            return None
+        return dict(cached)
+
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""
         try:
@@ -1888,40 +1903,71 @@ def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
     if not seen:
         return False
     payload = list(seen)
-    for name in ("subscribe_tokens", "subscribe", "subscribe_l1"):
-        fn = getattr(obj, name, None)
-        if callable(fn):
-            try:
-                fn(payload)
-                subscribed = True
-            except Exception:
-                subscribed = False
-            else:
-                break
-    else:
-        subscribed = False
 
+    def _iter_targets(source: Any) -> list[Any]:
+        targets: list[Any] = []
+        seen_ids: set[int] = set()
+
+        def _append(candidate: Any) -> None:
+            if candidate is None:
+                return
+            ident = id(candidate)
+            if ident in seen_ids:
+                return
+            seen_ids.add(ident)
+            targets.append(candidate)
+
+        _append(source)
+        for attr in ("kws", "ticker", "ws", "stream", "client"):
+            _append(getattr(source, attr, None))
+        return targets
+
+    subscribed = False
     mode_applied = False
-    for attr in ("set_mode", "set_mode_full"):
-        mode_fn = getattr(obj, attr, None)
-        if callable(mode_fn):
-            mode = getattr(obj, "MODE_FULL", "full")
-            try:
-                if attr == "set_mode":
-                    mode_fn(mode, payload)
+
+    for target in _iter_targets(obj):
+        for name in ("subscribe_tokens", "subscribe", "subscribe_l1"):
+            fn = getattr(target, name, None)
+            if callable(fn):
+                try:
+                    fn(payload)
+                    subscribed = True
+                except Exception:
+                    continue
                 else:
-                    mode_fn(payload)
-                mode_applied = True
+                    break
+        for attr in ("set_mode", "set_mode_full"):
+            mode_fn = getattr(target, attr, None)
+            if callable(mode_fn):
+                mode = getattr(target, "MODE_FULL", getattr(obj, "MODE_FULL", "full"))
+                try:
+                    if attr == "set_mode":
+                        mode_fn(mode, payload)
+                    else:
+                        mode_fn(payload)
+                    mode_applied = True
+                except Exception:
+                    continue
+                else:
+                    break
+        hook = getattr(target, "on_reconnect", None)
+        if callable(hook):
+            try:
+                hook(lambda t=target, p=payload: _subscribe_tokens(t, p))
             except Exception:
-                continue
-            else:
-                break
+                log.debug("subscribe_tokens: reconnect hook failed", exc_info=True)
 
     if subscribed or mode_applied:
         return True
+
     broker = getattr(obj, "broker", None)
-    if broker:
-        return _subscribe_tokens(broker, tokens)
+    if broker and _subscribe_tokens(broker, tokens):
+        return True
+
+    kite = getattr(obj, "kite", None)
+    if kite and _subscribe_tokens(kite, tokens):
+        return True
+
     return False
 
 
