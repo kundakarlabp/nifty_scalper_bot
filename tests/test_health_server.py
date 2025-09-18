@@ -6,9 +6,11 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+from src.config import settings
+from src.diagnostics.metrics import runtime_metrics
 from src.server import health as health_module
 from src.strategies import runner as runner_module
-from src.diagnostics.metrics import runtime_metrics
+from src.utils import ringlog
 
 
 def _runner_with_tick(ts: datetime) -> SimpleNamespace:
@@ -181,3 +183,22 @@ def test_metrics_endpoint(monkeypatch) -> None:
     assert resp.status_code == 200
     body = resp.data.decode()
     assert "slippage_bps" in body and "micro_wait_ratio" in body
+
+
+def test_diag_last_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "LOG_RING_ENABLED", True, raising=False)
+    ringlog.clear()
+    ringlog.append({"event": "first", "comp": "tests"})
+    ringlog.append({"event": "second", "comp": "tests"})
+
+    client = health_module.app.test_client()
+    resp = client.get("/diag/last?limit=1")
+    assert resp.status_code == 200
+
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["limit"] == 1
+    assert payload["count"] == 1
+    assert payload["records"][0]["event"] == "second"
+
+    ringlog.clear()
