@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,33 @@ def _as_int(val: Any) -> int:
         return int(val)
     except (TypeError, ValueError):
         return 0
+
+
+def _to_epoch_ms(value: Any) -> int | None:
+    """Best-effort conversion of ``value`` to epoch milliseconds."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        val = float(value)
+        if val >= 1e12:
+            return int(val)
+        if val >= 1e9:
+            return int(val * 1000.0)
+        return int(val)
+    if isinstance(value, datetime):
+        return int(value.timestamp() * 1000.0)
+    if isinstance(value, str):
+        try:
+            normalized = value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+        except Exception:
+            try:
+                parsed = pd.to_datetime(value).to_pydatetime()
+            except Exception:
+                return None
+        return int(parsed.timestamp() * 1000.0)
+    return None
 
 
 def get_option_quote_safe(
@@ -330,6 +357,17 @@ class DataSource:
     def get_last_price(self, symbol_or_token: Any) -> Optional[float]:
         """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or instrument token."""
         raise NotImplementedError
+
+    def prime_option_quote(
+        self, token: int | str
+    ) -> tuple[float | None, str | None, int | None]:
+        """Return the best-effort price snapshot for ``token``.
+
+        The default implementation indicates absence of a quote. Live data
+        sources should override this to surface the latest option book state.
+        """
+
+        return None, None, None
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health metrics if available."""
@@ -891,6 +929,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._stale_tick_thresh = 3
         self._last_refresh_min: tuple[int, int] | None = None
         self._last_auth_warn = 0.0
+        self._option_quote_cache: dict[int, dict[str, Any]] = {}
+        self._atm_reconnect_hook_set = False
 
     @property
     def last_tick_ts(self) -> float | None:
@@ -939,6 +979,21 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
                     )
                     self._last_auth_warn = time.time()
+            tokens_now = [int(t) for t in getattr(self, "atm_tokens", ()) if t]
+            if tokens_now:
+                if not _subscribe_tokens(self, tokens_now):
+                    log.debug("LiveKiteSource connect: subscribe ATM tokens failed")
+                if not self._atm_reconnect_hook_set:
+                    hook = getattr(self.kite, "on_reconnect", None)
+                    if callable(hook):
+                        try:
+                            hook(lambda: _subscribe_tokens(self, tokens_now))
+                        except Exception:
+                            log.debug(
+                                "LiveKiteSource connect: on_reconnect hook failed", exc_info=True
+                            )
+                        else:
+                            self._atm_reconnect_hook_set = True
 
         warmup_disabled = data_warmup_disable()
         warmup_failed = False
@@ -1067,8 +1122,94 @@ class LiveKiteSource(DataSource, BaseDataSource):
             log.debug("get_last_price failed for %s: %s", symbol_or_token, e)
             return None
 
+    def _ingest_option_tick(self, tick: Mapping[str, Any]) -> None:
+        token_raw = tick.get("instrument_token") or tick.get("token")
+        if token_raw is None:
+            return
+        try:
+            token = int(token_raw)
+        except Exception:
+            return
+        tokens = getattr(self, "atm_tokens", ())
+        if tokens and token not in tokens:
+            return
+
+        depth_raw = tick.get("depth") if isinstance(tick, Mapping) else None
+        depth = depth_raw if isinstance(depth_raw, Mapping) else {}
+        buy_levels_raw = depth.get("buy") if isinstance(depth, Mapping) else None
+        sell_levels_raw = depth.get("sell") if isinstance(depth, Mapping) else None
+        buy_levels = buy_levels_raw if isinstance(buy_levels_raw, Sequence) else []
+        sell_levels = sell_levels_raw if isinstance(sell_levels_raw, Sequence) else []
+
+        def _sum_levels(levels: Sequence[Any]) -> int:
+            total = 0
+            for lvl in levels[:5]:
+                if isinstance(lvl, Mapping):
+                    total += _as_int(lvl.get("quantity"))
+                else:
+                    total += _as_int(getattr(lvl, "quantity", 0))
+            return total
+
+        bid = _as_float(
+            buy_levels[0].get("price") if buy_levels and isinstance(buy_levels[0], Mapping) else 0.0
+        )
+        ask = _as_float(
+            sell_levels[0].get("price") if sell_levels and isinstance(sell_levels[0], Mapping) else 0.0
+        )
+
+        bid_qty = _as_int(
+            buy_levels[0].get("quantity")
+            if buy_levels and isinstance(buy_levels[0], Mapping)
+            else tick.get("total_buy_quantity")
+        )
+        ask_qty = _as_int(
+            sell_levels[0].get("quantity")
+            if sell_levels and isinstance(sell_levels[0], Mapping)
+            else tick.get("total_sell_quantity")
+        )
+
+        bid5 = _sum_levels(buy_levels) if buy_levels else _as_int(tick.get("total_buy_quantity"))
+        ask5 = _sum_levels(sell_levels) if sell_levels else _as_int(tick.get("total_sell_quantity"))
+
+        ltp = _as_float(
+            tick.get("last_price")
+            or tick.get("ltp")
+            or tick.get("close")
+            or tick.get("close_price")
+        )
+        mid = (bid + ask) / 2.0 if bid > 0.0 and ask > 0.0 else 0.0
+        ts_val = (
+            tick.get("timestamp")
+            or tick.get("last_trade_time")
+            or tick.get("exchange_timestamp")
+        )
+        ts_ms = _to_epoch_ms(ts_val) or int(time.time() * 1000)
+
+        payload: dict[str, Any] = {
+            "bid": bid,
+            "ask": ask,
+            "ltp": ltp,
+            "mid": mid if mid > 0.0 else 0.0,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+            "bid5_qty": bid5,
+            "ask5_qty": ask5,
+            "timestamp": ts_val,
+            "ts_ms": ts_ms,
+            "source": "ws",
+            "mode": "mid" if mid > 0.0 else ("ltp" if ltp > 0.0 else "bid" if bid > 0.0 else "ask"),
+        }
+        if isinstance(depth_raw, Mapping):
+            payload["depth"] = depth_raw
+
+        self._option_quote_cache[token] = payload
+
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""
+        try:
+            self._ingest_option_tick(tick)
+        except Exception:  # pragma: no cover - defensive
+            log.debug("option_tick_ingest_failed", exc_info=True)
         self._last_tick_ts = datetime.utcnow()
         self.last_tick_ts = time.time()
         if self.hist_mode == "live_warmup" and self.bar_builder:
@@ -1076,6 +1217,85 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.bar_builder.on_tick(tick)
             except Exception:  # pragma: no cover - defensive
                 log.debug("bar_builder.on_tick failed", exc_info=True)
+
+    def prime_option_quote(
+        self, token: int | str
+    ) -> tuple[float | None, str | None, int | None]:
+        try:
+            token_i = int(token)
+        except Exception:
+            return None, None, None
+
+        cached = self._option_quote_cache.get(token_i)
+        if cached:
+            ts_ms_cached = cached.get("ts_ms")
+            ts_ms = ts_ms_cached if isinstance(ts_ms_cached, int) else _to_epoch_ms(cached.get("timestamp"))
+            for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
+                val = cached.get(key)
+                if isinstance(val, (int, float)) and val > 0:
+                    if ts_ms is None:
+                        ts_ms = int(time.time() * 1000)
+                    return float(val), f"ws_{label}", ts_ms
+
+        quote_payload: dict[str, Any] | None = None
+        if self.kite:
+            try:
+                data = self.kite.quote([token_i])
+            except Exception as exc:  # pragma: no cover - broker errors
+                log.debug("prime_option_quote: quote failed token=%s err=%s", token_i, exc)
+                data = None
+            if isinstance(data, Mapping):
+                data_map = cast(Mapping[Any, Any], data)
+                entry: Mapping[str, Any] | None = None
+                for key in (token_i, str(token_i), f"NFO:{token_i}"):
+                    candidate = data_map.get(key)
+                    if isinstance(candidate, Mapping):
+                        entry = cast(Mapping[str, Any], candidate)
+                        break
+                if entry is not None:
+                    quote_payload = dict(entry)
+        if not quote_payload:
+            ltp_price = self.get_last_price(token_i)
+            if isinstance(ltp_price, (int, float)) and ltp_price > 0:
+                ts_ms = int(time.time() * 1000)
+                self._option_quote_cache[token_i] = {
+                    "ltp": float(ltp_price),
+                    "ts_ms": ts_ms,
+                    "source": "rest",
+                    "mode": "rest_ltp",
+                }
+                return float(ltp_price), "rest_ltp", ts_ms
+            return None, None, None
+
+        quote_payload.setdefault("source", "kite")
+        fetch_ltp = getattr(self, "get_last_price", None)
+        quote_dict, mode = get_option_quote_safe(
+            option={"token": token_i},
+            quote=quote_payload,
+            fetch_ltp=fetch_ltp,
+        )
+        if not quote_dict:
+            return None, None, None
+
+        ts_ms = _to_epoch_ms(quote_dict.get("timestamp")) or int(time.time() * 1000)
+        quote_dict["mode"] = mode
+        quote_dict["ts_ms"] = ts_ms
+        quote_dict.setdefault("source", quote_payload.get("source", "kite"))
+        self._option_quote_cache[token_i] = quote_dict
+
+        for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
+            val = quote_dict.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                if label == "ltp" and mode == "rest_ltp":
+                    source_label = "rest_ltp"
+                else:
+                    source_label = label
+                return float(val), source_label, ts_ms
+
+        ltp_val = quote_dict.get("ltp")
+        if isinstance(ltp_val, (int, float)) and ltp_val > 0:
+            return float(ltp_val), mode or "ltp", ts_ms
+        return None, mode, ts_ms
 
     def ensure_backfill(
         self, *, required_bars: int, token: int = 256265, timeframe: str = "minute"
@@ -1642,14 +1862,43 @@ def _to_date(val: Any) -> dt.date:
 
 
 def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
+    if not tokens:
+        return False
+    seen: set[int] = {int(t) for t in tokens if t is not None}
+    if not seen:
+        return False
+    payload = list(seen)
     for name in ("subscribe_tokens", "subscribe", "subscribe_l1"):
         fn = getattr(obj, name, None)
         if callable(fn):
             try:
-                fn(tokens)
-                return True
+                fn(payload)
+                subscribed = True
             except Exception:
-                pass
+                subscribed = False
+            else:
+                break
+    else:
+        subscribed = False
+
+    mode_applied = False
+    for attr in ("set_mode", "set_mode_full"):
+        mode_fn = getattr(obj, attr, None)
+        if callable(mode_fn):
+            mode = getattr(obj, "MODE_FULL", "full")
+            try:
+                if attr == "set_mode":
+                    mode_fn(mode, payload)
+                else:
+                    mode_fn(payload)
+                mode_applied = True
+            except Exception:
+                continue
+            else:
+                break
+
+    if subscribed or mode_applied:
+        return True
     broker = getattr(obj, "broker", None)
     if broker:
         return _subscribe_tokens(broker, tokens)

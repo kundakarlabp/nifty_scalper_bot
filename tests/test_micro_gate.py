@@ -13,13 +13,20 @@ def test_micro_ok_missing_bid_ask_returns_false_with_reason():
     )
     assert ok is False
     assert meta["block_reason"] == "no_quote"
-    assert meta["spread_ok"] is True
-    assert meta["depth_ok"] is False
+    assert meta["spread_ok"] is False
+    assert meta["depth_ok"] is True
     assert meta["depth_missing"] is True
+    assert meta["source"] is None
 
 
 def test_micro_ok_passes_with_valid_spread_and_depth():
-    quote = {"bid": 100.0, "ask": 100.2, "bid5_qty": 1000, "ask5_qty": 1000}
+    quote = {
+        "bid": 100.0,
+        "ask": 100.2,
+        "bid5_qty": 1000,
+        "ask5_qty": 1000,
+        "source": "ws_mid",
+    }
     ok, meta = micro_ok(
         quote,
         qty_lots=1,
@@ -38,7 +45,14 @@ def test_micro_ok_passes_with_valid_spread_and_depth():
 
 
 def test_micro_ok_allows_ltp_only_when_depth_missing():
-    quote = {"bid": 0.0, "ask": 0.0, "bid5_qty": 0, "ask5_qty": 0, "ltp": 100.0}
+    quote = {
+        "bid": 0.0,
+        "ask": 0.0,
+        "bid5_qty": 0,
+        "ask5_qty": 0,
+        "ltp": 100.0,
+        "source": "ws_ltp",
+    }
     ok, meta = micro_ok(
         quote,
         qty_lots=1,

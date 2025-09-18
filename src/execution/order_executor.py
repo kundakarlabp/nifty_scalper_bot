@@ -542,6 +542,9 @@ def micro_ok(
     ms = float(max_spread_pct)
     max_spread_frac = ms / 100.0 if ms > 1.0 else ms
     side_norm = str(side).upper() if side else None
+    source = _get(quote, "source", None)
+    ts_ms = _get(quote, "ts_ms", None)
+    ts_val = _get(quote, "timestamp", None)
 
     bid = _as_float(_get(quote, "bid", 0.0))
     ask = _as_float(_get(quote, "ask", 0.0))
@@ -574,7 +577,7 @@ def micro_ok(
         ask_qty = ask_qty or _as_int(_get(sell_levels[0], "quantity", 0))
         ask5 = max(ask5, _sum_depth(sell_levels))
 
-    has_quote = bid > 0 or ask > 0 or ltp > 0
+    has_quote = bool(source) and (bid > 0 or ask > 0 or ltp > 0)
     if bid <= 0 or ask <= 0:
         default_spread = getattr(settings.executor, "default_spread_pct_est", 0.25)
         if ltp <= 0.0:
@@ -608,12 +611,59 @@ def micro_ok(
 
     depth_missing = available_bid <= 0 and available_ask <= 0
     require_depth = bool(getattr(settings.executor, "require_depth", False))
-    if required_units <= 0:
+    if not require_depth:
         depth_ok = True
-    elif depth_missing and ltp > 0 and not require_depth:
+    elif required_units <= 0:
         depth_ok = True
     else:
         depth_ok = depth_available >= required_units
+
+    if not source:
+        spread_val = float(getattr(settings.executor, "default_spread_pct_est", 0.25))
+        meta: Dict[str, Any] = {
+            "spread_pct": None,
+            "cap_pct": round(max_spread_frac * 100.0, 2),
+            "spread_ok": False,
+            "depth_ok": depth_ok,
+            "bid5": available_bid,
+            "ask5": available_ask,
+            "bid": bid,
+            "ask": ask,
+            "ltp": ltp,
+            "source": source,
+            "required_qty": required_units,
+            "available_bid_qty": available_bid,
+            "available_ask_qty": available_ask,
+            "side": side_norm,
+            "depth_available": depth_available,
+            "depth_multiplier": float(depth_mult),
+            "order_qty": qty_contracts,
+            "depth_missing": depth_missing,
+            "has_quote": False,
+            "block_reason": "no_quote",
+            "ts_ms": ts_ms,
+            "timestamp": ts_val,
+        }
+        log.info(
+            "micro_decision side=%s lots=%s units=%s spread%%=%s cap%%=%.2f depth_req=%s "
+            "avail_bid=%s avail_ask=%s depth_avail=%s depth_mult=%.2f spread_ok=%s depth_ok=%s ok=%s reason=%s src=%s",
+            side_norm or "BOTH",
+            qty_lots_i,
+            qty_contracts,
+            "na",
+            meta["cap_pct"],
+            required_units,
+            available_bid,
+            available_ask,
+            depth_available,
+            float(depth_mult),
+            False,
+            depth_ok,
+            False,
+            "no_quote",
+            source,
+        )
+        return False, meta
 
     spread_val = float(spread_pct) if spread_pct is not None else float(
         getattr(settings.executor, "default_spread_pct_est", 0.25)
@@ -643,7 +693,7 @@ def micro_ok(
         "bid": bid,
         "ask": ask,
         "ltp": ltp,
-        "source": _get(quote, "source", None),
+        "source": source,
         "required_qty": required_units,
         "available_bid_qty": available_bid,
         "available_ask_qty": available_ask,
@@ -654,12 +704,14 @@ def micro_ok(
         "depth_missing": depth_missing,
         "has_quote": has_quote,
         "block_reason": block_reason,
+        "ts_ms": ts_ms,
+        "timestamp": ts_val,
     }
 
     spread_str = f"{meta['spread_pct']:.2f}" if spread_pct is not None else "na"
     log.info(
         "micro_decision side=%s lots=%s units=%s spread%%=%s cap%%=%.2f depth_req=%s "
-        "avail_bid=%s avail_ask=%s depth_used=%s spread_ok=%s depth_ok=%s ok=%s reason=%s src=%s",
+        "avail_bid=%s avail_ask=%s depth_avail=%s depth_mult=%.2f spread_ok=%s depth_ok=%s ok=%s reason=%s src=%s",
         side_norm or "BOTH",
         qty_lots_i,
         qty_contracts,
@@ -669,6 +721,7 @@ def micro_ok(
         available_bid,
         available_ask,
         depth_available,
+        float(depth_mult),
         spread_ok,
         depth_ok,
         ok,
