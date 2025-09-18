@@ -358,6 +358,11 @@ class DataSource:
         """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or instrument token."""
         raise NotImplementedError
 
+    def get_cached_full_quote(self, token: int | str) -> Optional[Dict[str, Any]]:
+        """Return the most recent option quote snapshot if available."""
+
+        return None
+
     def prime_option_quote(
         self, token: int | str
     ) -> tuple[float | None, str | None, int | None]:
@@ -1217,6 +1222,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.bar_builder.on_tick(tick)
             except Exception:  # pragma: no cover - defensive
                 log.debug("bar_builder.on_tick failed", exc_info=True)
+
+    def get_cached_full_quote(self, token: int | str) -> Optional[Dict[str, Any]]:
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
+        cached = self._option_quote_cache.get(token_i)
+        if isinstance(cached, Mapping):
+            return dict(cached)
+        return None
 
     def prime_option_quote(
         self, token: int | str

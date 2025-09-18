@@ -891,6 +891,37 @@ class OrderExecutor:
             side=side,
         )
 
+    def micro_decision(
+        self,
+        *,
+        quote: Mapping[str, Any] | None,
+        qty_lots: int,
+        lot_size: int | None = None,
+        max_spread_pct: float | None = None,
+        depth_mult: int | None = None,
+        side: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Evaluate microstructure using the provided quote snapshot only."""
+
+        payload = dict(quote) if isinstance(quote, Mapping) else {}
+        lot_size_val = int(lot_size) if lot_size is not None else self.lot_size
+        max_spread_val = (
+            float(max_spread_pct)
+            if max_spread_pct is not None
+            else float(self.max_spread_pct)
+        )
+        depth_multiplier = (
+            int(depth_mult) if depth_mult is not None else int(self.depth_multiplier)
+        )
+        return micro_ok(
+            quote=payload,
+            qty_lots=qty_lots,
+            lot_size=lot_size_val,
+            max_spread_pct=max_spread_val,
+            depth_mult=depth_multiplier,
+            side=side,
+        )
+
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
         return int(time.monotonic() * 1000)
