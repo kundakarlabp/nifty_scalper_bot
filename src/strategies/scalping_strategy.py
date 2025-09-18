@@ -7,7 +7,6 @@ import time
 import weakref
 from collections import deque
 from dataclasses import dataclass, replace
-from collections.abc import Mapping
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
 from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
@@ -19,12 +18,11 @@ from src.config import settings
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 from src.execution.order_executor import fetch_quote_with_depth
 from src.diagnostics.metrics import runtime_metrics
-from src.signals.patches import check_atr_band
+from src.signals.patches import check_atr_band, resolve_atr_band
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
-from src.strategies.patches import _resolve_min_atr_pct
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_adx,
@@ -1030,18 +1028,10 @@ class EnhancedScalpingStrategy:
             atr_pct_raw = float((atr_val / price) * 100.0)
             plan["atr_pct"] = round(atr_pct_raw, 2)
             self.last_atr_pct = float(plan["atr_pct"])
+            runner_ref = getattr(self, "runner", None)
+            symbol = getattr(runner_ref, "under_symbol", None)
             gates_cfg = getattr(settings.strategy, "gates", None)
-            atr_min_cfg = float(getattr(cfg, "atr_min", 0.0))
-            atr_max_cfg = float(getattr(cfg, "atr_max", 0.0))
-            if isinstance(gates_cfg, Mapping):
-                atr_min_cfg = float(gates_cfg.get("atr_pct_min", atr_min_cfg))
-                atr_max_cfg = float(gates_cfg.get("atr_pct_max", atr_max_cfg))
-            elif gates_cfg is not None:
-                atr_min_cfg = float(getattr(gates_cfg, "atr_pct_min", atr_min_cfg))
-                atr_max_cfg = float(getattr(gates_cfg, "atr_pct_max", atr_max_cfg))
-            resolved_min = float(_resolve_min_atr_pct())
-            atr_min = min(atr_min_cfg, resolved_min) if resolved_min > 0 else atr_min_cfg
-            atr_max = atr_max_cfg
+            atr_min, atr_max = resolve_atr_band(cfg, symbol=symbol, gates=gates_cfg)
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)

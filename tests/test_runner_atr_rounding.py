@@ -1,6 +1,7 @@
 import pandas as pd
 from types import SimpleNamespace
 
+from src.signals.patches import resolve_atr_band
 from src.strategies.runner import StrategyRunner
 
 
@@ -79,7 +80,17 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     monkeypatch.setattr(runner.risk, "day_realized_loss", 0, raising=False)
     monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
     monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
-    runner.strategy_cfg = SimpleNamespace(raw={}, delta_enable_score=999, min_atr_pct_nifty=0.02, min_atr_pct_banknifty=0.04)
+    runner.strategy_cfg = SimpleNamespace(
+        raw={
+            "thresholds": {"min_atr_pct_nifty": 0.02},
+            "gates": {"atr_pct_min": 0.05, "atr_pct_max": 0.9},
+        },
+        delta_enable_score=999,
+        min_atr_pct_nifty=0.02,
+        min_atr_pct_banknifty=0.04,
+        atr_min=0.05,
+        atr_max=0.9,
+    )
 
     def fake_signal(df, current_tick=None):
         return {
@@ -105,6 +116,12 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     assert not any(
         isinstance(reason, str) and reason.startswith("atr_out_of_band")
         for reason in reasons
+    )
+    assert runner.last_plan["atr_min"] == 0.02
+    assert runner.last_plan["atr_band"] == (0.02, 0.9)
+    assert resolve_atr_band(runner.strategy_cfg, symbol=runner.under_symbol) == (
+        0.02,
+        0.9,
     )
     assert runner.last_plan["option_token"] == 1
     assert runner.last_plan["atm_strike"] == 17000
@@ -189,10 +206,15 @@ def test_atr_pct_float_noise_does_not_block(monkeypatch):
     monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
     monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
     runner.strategy_cfg = SimpleNamespace(
-        raw={},
+        raw={
+            "thresholds": {"min_atr_pct_nifty": 0.04},
+            "gates": {"atr_pct_min": 0.02, "atr_pct_max": 0.9},
+        },
         delta_enable_score=999,
         min_atr_pct_nifty=0.04,
         min_atr_pct_banknifty=0.05,
+        atr_min=0.02,
+        atr_max=0.9,
     )
 
     def fake_signal(df, current_tick=None):

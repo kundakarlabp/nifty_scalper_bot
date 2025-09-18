@@ -11,6 +11,8 @@ import logging
 from importlib import import_module
 from typing import Any, Callable
 
+from src.signals.patches import resolve_atr_band
+
 
 def _resolve_min_atr_pct() -> float:
     """Resolve the minimum ATR percentage from config or runner."""
@@ -32,11 +34,8 @@ def _resolve_min_atr_pct() -> float:
             return 0.0
 
     sym = getattr(runner, "under_symbol", "")
-    if "BANK" in str(sym).upper():
-        return float(
-            getattr(cfg, "min_atr_pct_banknifty", getattr(cfg, "atr_min", 0.0))
-        )
-    return float(getattr(cfg, "min_atr_pct_nifty", getattr(cfg, "atr_min", 0.0)))
+    min_pct, _ = resolve_atr_band(cfg, symbol=sym)
+    return float(min_pct)
 
 
 def _wrap_gate(fn: Callable[..., Any]) -> Callable[..., Any]:

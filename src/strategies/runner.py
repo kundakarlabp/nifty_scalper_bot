@@ -52,7 +52,7 @@ from src.risk.greeks import (  # noqa: F401
     next_weekly_expiry_ist,
 )
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
-from src.signals.patches import check_atr_band
+from src.signals.patches import check_atr_band, resolve_atr_band
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
 from src.strategies.strategy_config import (
@@ -88,25 +88,6 @@ except Exception:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _gate_value(gates_cfg: object, key: str, default: float) -> float:
-    """Return ``key`` from ``gates_cfg`` if available, otherwise ``default``."""
-
-    if isinstance(gates_cfg, Mapping):
-        val = gates_cfg.get(key, None)
-    elif gates_cfg is not None:
-        val = getattr(gates_cfg, key, None)
-    else:
-        val = None
-    if val is None:
-        return default
-    try:
-        return float(val)
-    except (TypeError, ValueError):  # pragma: no cover - defensive fallback
-        return default
-
-
 # =========================== Cadence controller ============================
 
 
@@ -1258,28 +1239,9 @@ class StrategyRunner:
                 round(plan["atr_pct_raw"], 2) if plan["atr_pct_raw"] is not None else None
             )
             gates_cfg = getattr(settings.strategy, "gates", None)
-            default_min = float(getattr(self.strategy_cfg, "atr_min", 0.0))
-            default_max = float(getattr(self.strategy_cfg, "atr_max", 0.0))
-            atr_min = _gate_value(gates_cfg, "atr_pct_min", default_min)
-            atr_max = _gate_value(gates_cfg, "atr_pct_max", default_max)
-            if not atr_min:
-                min_candidates = [
-                    getattr(self.strategy_cfg, "min_atr_pct_nifty", None),
-                    getattr(self.strategy_cfg, "min_atr_pct_banknifty", None),
-                ]
-                min_values = [float(val) for val in min_candidates if val is not None]
-                if min_values:
-                    atr_min = min(min_values)
-            if not atr_max:
-                max_candidates = [
-                    getattr(self.strategy_cfg, "atr_max", None),
-                    getattr(self.strategy_cfg, "atr_pct_max", None),
-                ]
-                max_values = [float(val) for val in max_candidates if val]
-                if max_values:
-                    atr_max = max(max_values)
-            if not atr_max or atr_max < atr_min:
-                atr_max = max(atr_min, 2.0)
+            atr_min, atr_max = resolve_atr_band(
+                self.strategy_cfg, symbol=self.under_symbol, gates=gates_cfg
+            )
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
