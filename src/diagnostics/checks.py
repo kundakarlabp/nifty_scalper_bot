@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -15,6 +16,18 @@ from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
 from src.signals.patches import resolve_atr_band
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
+
+# Indian Standard Time is the canonical timezone for bot diagnostics.
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _as_aware_ist(ts: Any) -> pd.Timestamp:
+    """Normalize ``ts`` into an aware :class:`~pandas.Timestamp` in IST."""
+
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None or stamp.tz is None:
+        return stamp.tz_localize(IST)
+    return stamp.tz_convert(IST)
 
 # Map ``reason_block`` codes to human‑readable descriptions used by
 # diagnostics endpoints like ``/why``.  Only codes that require custom
@@ -84,16 +97,9 @@ def check_data_window() -> CheckResult:
         return _bad(
             "no bars", name="data_window", fix="enable backfill or broker history"
         )
-    now = r.now_ist
-    last_ts_raw = pd.Timestamp(df.index[-1])
-    last_dt = last_ts_raw.to_pydatetime()
-    if last_dt.tzinfo is None and now.tzinfo is not None:
-        last_dt = last_dt.replace(tzinfo=now.tzinfo)
-    elif last_dt.tzinfo is not None and now.tzinfo is not None:
-        last_dt = last_dt.astimezone(now.tzinfo)
-    elif last_dt.tzinfo is not None and now.tzinfo is None:
-        last_dt = last_dt.astimezone(last_dt.tzinfo).replace(tzinfo=None)
-    lag_s = (now - last_dt).total_seconds()
+    now_ist = _as_aware_ist(r.now_ist)
+    last_ts_ist = _as_aware_ist(df.index[-1])
+    lag_s = (now_ist - last_ts_ist).total_seconds()
     tf_s = 60  # timeframe is minute
     ok = lag_s <= 3 * tf_s
     msg = "fresh" if ok else "stale"
@@ -104,7 +110,7 @@ def check_data_window() -> CheckResult:
         msg=msg,
         details={
             "bars": len(df),
-            "last_bar_ts": last_dt.isoformat(),
+            "last_bar_ts": last_ts_ist.isoformat(),
             "lag_s": lag_s,
             "tf_s": tf_s,
         },
