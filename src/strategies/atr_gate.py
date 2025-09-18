@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from math import isfinite
 from threading import Lock
 
@@ -11,9 +13,24 @@ from src.signals.patches import resolve_atr_band
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATR_PCT: float = 2.0
+try:
+    MIN_INTERVAL_S: float = float(os.getenv("ATR_LOG_INTERVAL_S", "10"))
+except ValueError:
+    MIN_INTERVAL_S = 10.0
 
 _THROTTLE_LOCK: Lock = Lock()
 _LAST_LOG_STATE: dict[str, tuple[bool, float, float | None, float]] = {}
+_LAST_ATR_LOG_TS: float = 0.0
+
+
+def _should_log_atr(now: float, min_interval_s: float) -> bool:
+    """Return ``True`` when the ATR info log should fire based on time."""
+
+    global _LAST_ATR_LOG_TS
+    if now - _LAST_ATR_LOG_TS >= min_interval_s:
+        _LAST_ATR_LOG_TS = now
+        return True
+    return False
 
 
 def _normalise_log_state(
@@ -57,13 +74,18 @@ def _should_log_info(
 ) -> bool:
     """Return ``True`` when the throttled info log should fire."""
 
+    global _LAST_ATR_LOG_TS
     key, state = _normalise_log_state(
         symbol, atr_value=atr_value, min_val=min_val, max_bound=max_bound, ok=ok
     )
     with _THROTTLE_LOCK:
         previous = _LAST_LOG_STATE.get(key)
+        now = time.time()
         if previous != state:
             _LAST_LOG_STATE[key] = state
+            _LAST_ATR_LOG_TS = now
+            return True
+        if _should_log_atr(now, MIN_INTERVAL_S):
             return True
     return False
 
@@ -74,8 +96,12 @@ def _reset_log_throttle_state() -> None:
     This is primarily intended for test isolation.
     """
 
+    global _LAST_ATR_LOG_TS
     with _THROTTLE_LOCK:
         _LAST_LOG_STATE.clear()
+        _LAST_ATR_LOG_TS = 0.0
+
+
 def check_atr(
     atr_pct: float,
     cfg: object,
