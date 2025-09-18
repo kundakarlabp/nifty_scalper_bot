@@ -127,6 +127,20 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         runner.telegram = runner.telegram_controller
         return
 
+    def _safe_limits_snapshot() -> dict[str, Any]:
+        """Return the current risk limit configuration if available."""
+
+        engine = getattr(runner, "risk_engine", None)
+        if engine is None:
+            return {}
+        try:
+            return asdict(engine.cfg)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logging.getLogger("main").warning(
+                "Unable to snapshot risk limits: %s", exc, exc_info=True
+            )
+            return {}
+
     tg = cast(Any, TelegramController).create(
         # providers
         status_provider=getattr(runner, "get_status_snapshot", lambda: {"ok": False}),
@@ -135,7 +149,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         diag_provider=getattr(runner, "build_diag", None),
         compact_diag_provider=getattr(runner, "get_compact_diag_summary", None),
         risk_provider=getattr(runner, "risk_snapshot", None),
-        limits_provider=lambda: asdict(runner.risk_engine.cfg),
+        limits_provider=_safe_limits_snapshot,
         risk_reset_today=getattr(runner, "risk_reset_today", None),
         logs_provider=get_recent_logs,
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
