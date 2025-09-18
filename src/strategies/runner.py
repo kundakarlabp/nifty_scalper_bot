@@ -85,12 +85,19 @@ except Exception:
 
 # Optional live data source (graceful if not present)
 try:
-    from src.data.source import LiveKiteSource, get_option_quote_safe  # type: ignore
+    from src.data.source import (  # type: ignore
+        LiveKiteSource,
+        _subscribe_tokens,
+        get_option_quote_safe,
+    )
 except Exception:  # pragma: no cover - defensive import guard
     LiveKiteSource = None  # type: ignore
 
     def get_option_quote_safe(*args: Any, **kwargs: Any) -> tuple[None, str]:  # type: ignore
         return None, "no_quote"
+    
+    def _subscribe_tokens(*args: Any, **kwargs: Any) -> bool:  # type: ignore
+        return False
 
 
 logger = logging.getLogger(__name__)
@@ -1492,14 +1499,61 @@ class StrategyRunner:
                 self._last_option = None
                 self.log.exception("Failed to resolve ATM option")
                 return
+            option_type = str(plan.get("option_type") or plan.get("side_hint") or "").upper()
             token = opt.get("token")
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
-            plan["option_token"] = token
             ds = getattr(self, "data_source", None)
+            ce_token: int | None = None
+            pe_token: int | None = None
+            if ds is not None:
+                tokens_raw = getattr(ds, "atm_tokens", None)
+                if isinstance(tokens_raw, (list, tuple)):
+                    if len(tokens_raw) > 0 and tokens_raw[0]:
+                        try:
+                            ce_token = int(tokens_raw[0])
+                        except (TypeError, ValueError):
+                            ce_token = None
+                    if len(tokens_raw) > 1 and tokens_raw[1]:
+                        try:
+                            pe_token = int(tokens_raw[1])
+                        except (TypeError, ValueError):
+                            pe_token = None
+            token_int: int | None
+            try:
+                token_int = int(token)
+            except (TypeError, ValueError):
+                token_int = None
+            plan["option_token"] = token_int if token_int is not None else token
+            plan["token"] = token_int
             plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
             self._last_option = opt
-            if not token:
+            logger.info(
+                "picked option: type=%s ce=%s pe=%s chosen=%s",
+                option_type,
+                ce_token,
+                pe_token,
+                plan.get("token"),
+            )
+            expected_token = pe_token if option_type == "PE" else ce_token
+            if (
+                expected_token
+                and plan.get("token")
+                and int(plan["token"]) != int(expected_token)
+            ):
+                plan["reason_block"] = "token_mismatch"
+                plan.setdefault("reasons", []).append("token_mismatch")
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
+            if ds is not None and token_int:
+                try:
+                    _subscribe_tokens(ds, [int(token_int)])
+                except Exception:
+                    self.log.debug("option_token_subscribe_failed", exc_info=True)
+            if not token_int:
                 plan["reason_block"] = "no_option_token"
                 plan.setdefault("reasons", []).append("no_option_token")
                 self.log.warning(
@@ -1522,7 +1576,7 @@ class StrategyRunner:
             require_prime = bool(getattr(self.settings, "enable_live_trading", False))
             if callable(prime_fn):
                 try:
-                    prime_price, prime_src, prime_ts = prime_fn(token)
+                    prime_price, prime_src, prime_ts = prime_fn(token_int)
                 except Exception:
                     self.log.debug("prime_option_quote failed", exc_info=True)
                     prime_price = None
@@ -1537,7 +1591,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                self.log.info("no_quote token=%s", token)
+                self.log.info("no_quote token=%s", token_int)
                 return
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
@@ -1570,6 +1624,48 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
+            plan["quote"] = quote_dict
+            bid_val = float(quote_dict.get("bid", 0.0) or 0.0)
+            ask_val = float(quote_dict.get("ask", 0.0) or 0.0)
+            bid_qty_val = int(float(quote_dict.get("bid_qty", 0) or 0))
+            ask_qty_val = int(float(quote_dict.get("ask_qty", 0) or 0))
+            bid5_val = int(
+                float(
+                    quote_dict.get("bid_qty_top5")
+                    or quote_dict.get("bid5_qty")
+                    or bid_qty_val
+                )
+                or 0
+            )
+            ask5_val = int(
+                float(
+                    quote_dict.get("ask_qty_top5")
+                    or quote_dict.get("ask5_qty")
+                    or ask_qty_val
+                )
+                or 0
+            )
+            has_top = any(
+                v > 0
+                for v in (
+                    bid_val,
+                    ask_val,
+                    bid_qty_val,
+                    ask_qty_val,
+                    bid5_val,
+                    ask5_val,
+                )
+            )
+            if not has_top:
+                plan["reason_block"] = plan.get("reason_block") or "no_quote"
+                if "no_quote" not in plan.setdefault("reasons", []):
+                    plan["reasons"].append("no_quote")
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.log.info("no_quote token=%s top_book_missing", token_int)
+                return
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -1581,7 +1677,6 @@ class StrategyRunner:
             plan["micro"] = micro
             plan["quote_src"] = quote_dict.get("source", "kite")
             plan["quote_mode"] = quote_mode
-            plan["quote"] = quote_dict
             self.log.debug(
                 "quote=ok mid=%.2f bid=%.2f ask=%.2f mode=%s src=%s",
                 float(quote_dict.get("mid", 0.0)),
@@ -1814,13 +1909,65 @@ class StrategyRunner:
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
             plan["qty_lots"] = planned_lots
+            quote_source = plan.get("quote") if isinstance(plan.get("quote"), Mapping) else {}
+            quote_payload = dict(quote_source) if isinstance(quote_source, Mapping) else {}
+            token_for_micro = plan.get("token")
+            ds_for_micro = getattr(self, "data_source", None)
+            cache_tick: Mapping[str, Any] | None = None
+            if token_for_micro and ds_for_micro is not None:
+                cache = getattr(ds_for_micro, "_option_quote_cache", None)
+                if isinstance(cache, Mapping):
+                    try:
+                        cache_tick = cache.get(int(token_for_micro))
+                    except Exception:
+                        cache_tick = None
+            if isinstance(cache_tick, Mapping):
+                for key, value in cache_tick.items():
+                    existing = quote_payload.get(key)
+                    if existing in (None, 0, 0.0, ""):
+                        quote_payload[key] = value
+            quote_payload.setdefault("token", token_for_micro)
+            bid_top = float(quote_payload.get("bid", 0.0) or 0.0)
+            ask_top = float(quote_payload.get("ask", 0.0) or 0.0)
+            bid_qty_top = int(float(quote_payload.get("bid_qty", 0) or 0))
+            ask_qty_top = int(float(quote_payload.get("ask_qty", 0) or 0))
+            bid_top5 = int(
+                float(
+                    quote_payload.get("bid_qty_top5")
+                    or quote_payload.get("bid5_qty")
+                    or bid_qty_top
+                )
+                or 0
+            )
+            ask_top5 = int(
+                float(
+                    quote_payload.get("ask_qty_top5")
+                    or quote_payload.get("ask5_qty")
+                    or ask_qty_top
+                )
+                or 0
+            )
+            if not any(v > 0 for v in (bid_top, ask_top, bid_qty_top, ask_qty_top, bid_top5, ask_top5)):
+                plan["reason_block"] = plan.get("reason_block") or "no_quote"
+                reasons = plan.setdefault("reasons", [])
+                if "no_quote" not in reasons:
+                    reasons.append("no_quote")
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self.log.info("no_quote token=%s micro_depth_missing", token_for_micro)
+                return
             quote = {
-                "bid": tick.get("bid") if tick else 0.0,
-                "ask": tick.get("ask") if tick else 0.0,
-                "bid_qty": tick.get("bid_qty") if tick else 0,
-                "ask_qty": tick.get("ask_qty") if tick else 0,
-                "bid_qty_top5": tick.get("bid_qty_top5") if tick else 0,
-                "ask_qty_top5": tick.get("ask_qty_top5") if tick else 0,
+                "bid": bid_top,
+                "ask": ask_top,
+                "bid_qty": bid_qty_top,
+                "ask_qty": ask_qty_top,
+                "bid_qty_top5": bid_top5,
+                "ask_qty_top5": ask_top5,
+                "source": quote_payload.get("source"),
+                "timestamp": quote_payload.get("timestamp"),
+                "ts_ms": quote_payload.get("ts_ms"),
             }
             ok_micro, micro = self.executor.micro_ok(
                 quote=quote,

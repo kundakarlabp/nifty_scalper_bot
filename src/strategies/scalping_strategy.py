@@ -721,6 +721,7 @@ class EnhancedScalpingStrategy:
             "tp1_qty_ratio": None,
             "atm_strike": None,
             "option_token": None,
+            "token": None,
             "opt_entry": None,
             "opt_sl": None,
             "opt_tp1": None,
@@ -1091,8 +1092,10 @@ class EnhancedScalpingStrategy:
             lot_sz = int(
                 getattr(getattr(settings, "instruments", object()), "nifty_lot_size", 75)
             )
+            ce_token: int | None = None
+            pe_token: int | None = None
+            option_side = str(option_type).upper()
             if ds is not None:
-                idx = 0 if str(option_type).upper() == "CE" else 1
                 strike_ds = getattr(ds, "current_atm_strike", None)
                 need_resolve = strike_ds is None or abs(price - float(strike_ds)) >= 75
                 now_dt = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -1112,12 +1115,21 @@ class EnhancedScalpingStrategy:
                             logger.debug("ensure_atm_tokens failed", exc_info=True)
                         strike_ds = getattr(ds, "current_atm_strike", strike_ds)
                 tokens_ds = getattr(ds, "atm_tokens", None)
-                if (
-                    isinstance(tokens_ds, (list, tuple))
-                    and len(tokens_ds) == 2
-                    and tokens_ds[idx] is not None
-                ):
-                    option_token = tokens_ds[idx]
+                if isinstance(tokens_ds, (list, tuple)):
+                    if len(tokens_ds) > 0 and tokens_ds[0]:
+                        try:
+                            ce_token = int(tokens_ds[0])
+                        except (TypeError, ValueError):
+                            ce_token = None
+                    if len(tokens_ds) > 1 and tokens_ds[1]:
+                        try:
+                            pe_token = int(tokens_ds[1])
+                        except (TypeError, ValueError):
+                            pe_token = None
+                token_map: dict[str, int | None] = {"CE": ce_token, "PE": pe_token}
+                chosen_token = token_map.get(option_side)
+                if chosen_token:
+                    option_token = int(chosen_token)
                     quote_id = option_token
                     res = _token_to_symbol_and_lot(
                         getattr(settings, "kite", None), option_token
@@ -1129,12 +1141,33 @@ class EnhancedScalpingStrategy:
                     if (
                         isinstance(symbols_ds, (list, tuple))
                         and len(symbols_ds) == 2
-                        and symbols_ds[idx]
                     ):
-                        quote_id = symbols_ds[idx]
+                        if option_side == "CE" and symbols_ds[0]:
+                            quote_id = symbols_ds[0]
+                        elif option_side == "PE" and symbols_ds[1]:
+                            quote_id = symbols_ds[1]
                 if strike_ds is not None:
                     plan["atm_strike"] = int(strike_ds)
             plan["option_token"] = option_token
+            plan["token"] = option_token
+
+            logger.info(
+                "picked option: type=%s ce=%s pe=%s chosen=%s",
+                option_type,
+                ce_token,
+                pe_token,
+                plan.get("token"),
+            )
+            expected_token = pe_token if option_side == "PE" else ce_token
+            if (
+                expected_token
+                and plan.get("token")
+                and int(plan["token"]) != int(expected_token)
+            ):
+                plan["reason_block"] = "token_mismatch"
+                plan.setdefault("reasons", []).append("token_mismatch")
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                return plan_block("token_mismatch", micro=plan["micro"])
 
             if quote_id is None:
                 atm = resolve_weekly_atm(price)
