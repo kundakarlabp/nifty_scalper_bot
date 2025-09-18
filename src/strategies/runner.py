@@ -1416,12 +1416,30 @@ class StrategyRunner:
                     under_ltp = float(df["close"].iloc[-1])
                 except Exception:
                     under_ltp = 0.0
-            opt = self.option_resolver.resolve_atm(
-                self.under_symbol,
-                under_ltp,
-                plan.get("side_hint", "CE"),
-                self._now_ist(),
-            )
+            try:
+                opt = self.option_resolver.resolve_atm(
+                    self.under_symbol,
+                    under_ltp,
+                    plan.get("side_hint", "CE"),
+                    self._now_ist(),
+                )
+            except Exception:
+                plan["reason_block"] = "no_option_token"
+                plan.setdefault("reasons", []).append("no_option_token")
+                plan["option"] = {}
+                plan["expiry"] = None
+                plan["option_token"] = None
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                ds = getattr(self, "data_source", None)
+                plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self._last_option = None
+                self.log.exception("Failed to resolve ATM option")
+                return
             token = opt.get("token")
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
