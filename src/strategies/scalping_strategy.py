@@ -1172,7 +1172,13 @@ class EnhancedScalpingStrategy:
                 plan["opt_atr"] = None
                 plan["opt_atr_pct"] = None
             cap_pct = cap_for_mid(mid, cfg)
-            micro = evaluate_micro(q, lot_size=lot_sz, atr_pct=atr_pct_val, cfg=cfg)
+            micro = evaluate_micro(
+                q,
+                lot_size=lot_sz,
+                atr_pct=atr_pct_val,
+                cfg=cfg,
+                side=side,
+            )
             if not isinstance(micro, dict):
                 micro = {}
             micro["cap_pct"] = cap_pct

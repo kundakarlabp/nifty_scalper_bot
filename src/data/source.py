@@ -1247,8 +1247,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             if isinstance(data, Mapping):
                 data_map = cast(Mapping[Any, Any], data)
                 entry: Mapping[str, Any] | None = None
-                for key in (token_i, str(token_i), f"NFO:{token_i}"):
-                    candidate = data_map.get(key)
+                for candidate_key in (token_i, str(token_i), f"NFO:{token_i}"):
+                    candidate = data_map.get(candidate_key)
                     if isinstance(candidate, Mapping):
                         entry = cast(Mapping[str, Any], candidate)
                         break

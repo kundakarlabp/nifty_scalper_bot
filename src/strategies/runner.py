@@ -1575,6 +1575,12 @@ class StrategyRunner:
                 lot_size=opt.get("lot_size", self.lot_size),
                 atr_pct=plan.get("atr_pct"),
                 cfg=self.strategy_cfg.raw,
+                side=plan.get("action"),
+                lots=plan.get("qty_lots"),
+                depth_multiplier=float(
+                    getattr(settings.executor, "depth_multiplier", 1.0)
+                ),
+                require_depth=bool(getattr(settings.executor, "require_depth", False)),
             )
             plan["spread_pct"] = micro.get("spread_pct")
             plan["depth_ok"] = micro.get("depth_ok")
