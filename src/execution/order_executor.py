@@ -530,14 +530,13 @@ def micro_ok(
             return obj.get(key, default)
         return getattr(obj, key, default)
 
+    def _level_qty(level: Any) -> int:
+        if isinstance(level, Mapping):
+            return _as_int(level.get("quantity"))
+        return _as_int(getattr(level, "quantity", 0))
+
     def _sum_depth(levels: Sequence[Any]) -> int:
-        total = 0
-        for lvl in levels[:5]:
-            if isinstance(lvl, Mapping):
-                total += _as_int(lvl.get("quantity"))
-            else:
-                total += _as_int(getattr(lvl, "quantity", 0))
-        return total
+        return sum(_level_qty(lvl) for lvl in levels[:5])
 
     ms = float(max_spread_pct)
     max_spread_frac = ms / 100.0 if ms > 1.0 else ms
@@ -560,6 +559,9 @@ def micro_ok(
             buy_levels = buy_levels_raw
         if isinstance(sell_levels_raw, Sequence):
             sell_levels = sell_levels_raw
+
+    bid5_levels = [_level_qty(level) for level in buy_levels[:5]]
+    ask5_levels = [_level_qty(level) for level in sell_levels[:5]]
 
     bid_qty = _as_int(_get(quote, "bid_qty", 0))
     ask_qty = _as_int(_get(quote, "ask_qty", 0))
@@ -599,6 +601,7 @@ def micro_ok(
     lot_size_i = max(int(lot_size), 0)
     qty_contracts = qty_lots_i * lot_size_i
     required_units = int(math.ceil(max(depth_mult, 0) * qty_contracts))
+    need_units = qty_contracts
 
     available_bid = max(bid5, bid_qty)
     available_ask = max(ask5, ask_qty)
@@ -644,21 +647,22 @@ def micro_ok(
             "ts_ms": ts_ms,
             "timestamp": ts_val,
         }
+        spread_display = "na"
+        max_spread_pct = max_spread_frac * 100.0
+        depth_req = int(need_units * max(depth_mult, 0))
+        avail_bid_depth = sum(bid5_levels or [])
+        avail_ask_depth = sum(ask5_levels or [])
         log.info(
-            "micro_decision side=%s lots=%s units=%s spread%%=%s cap%%=%.2f depth_req=%s "
-            "avail_bid=%s avail_ask=%s depth_avail=%s depth_mult=%.2f spread_ok=%s depth_ok=%s ok=%s reason=%s src=%s",
+            "micro_decision side=%s lots=%d units=%d spread%%=%s cap%%=%.2f depth_req=%d "
+            "avail_bid=%d avail_ask=%d ok=%s reason=%s src=%s",
             side_norm or "BOTH",
             qty_lots_i,
             qty_contracts,
-            "na",
-            meta["cap_pct"],
-            required_units,
-            available_bid,
-            available_ask,
-            depth_available,
-            float(depth_mult),
-            False,
-            depth_ok,
+            spread_display,
+            max_spread_pct,
+            depth_req,
+            avail_bid_depth,
+            avail_ask_depth,
             False,
             "no_quote",
             source,
@@ -708,22 +712,28 @@ def micro_ok(
         "timestamp": ts_val,
     }
 
-    spread_str = f"{meta['spread_pct']:.2f}" if spread_pct is not None else "na"
+    try:
+        spread_ratio = float(spread_pct) / 100.0 if spread_pct is not None else None
+    except (TypeError, ValueError):
+        spread_ratio = None
+    spread_str = (
+        f"{spread_ratio * 100.0:.2f}" if spread_ratio is not None else "na"
+    )
+    max_spread_pct = max_spread_frac * 100.0
+    depth_req = int(need_units * max(depth_mult, 0))
+    avail_bid_depth = sum(bid5_levels or [])
+    avail_ask_depth = sum(ask5_levels or [])
     log.info(
-        "micro_decision side=%s lots=%s units=%s spread%%=%s cap%%=%.2f depth_req=%s "
-        "avail_bid=%s avail_ask=%s depth_avail=%s depth_mult=%.2f spread_ok=%s depth_ok=%s ok=%s reason=%s src=%s",
+        "micro_decision side=%s lots=%d units=%d spread%%=%s cap%%=%.2f depth_req=%d "
+        "avail_bid=%d avail_ask=%d ok=%s reason=%s src=%s",
         side_norm or "BOTH",
         qty_lots_i,
         qty_contracts,
         spread_str,
-        meta["cap_pct"],
-        required_units,
-        available_bid,
-        available_ask,
-        depth_available,
-        float(depth_mult),
-        spread_ok,
-        depth_ok,
+        max_spread_pct,
+        depth_req,
+        avail_bid_depth,
+        avail_ask_depth,
         ok,
         block_reason,
         meta["source"],

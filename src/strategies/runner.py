@@ -1834,15 +1834,33 @@ class StrategyRunner:
             )
             plan["micro"] = micro
             if micro:
-                spread_detail = f"spread={micro.get('spread_pct')}%<=cap={micro.get('cap_pct')}%"
-                depth_detail = (
-                    f"req={micro.get('required_qty')} avail={micro.get('depth_available')}"
+                spread_val = micro.get("spread_pct")
+                try:
+                    spread_ratio = (
+                        float(spread_val) / 100.0 if spread_val is not None else None
+                    )
+                except (TypeError, ValueError):
+                    spread_ratio = None
+                plan_token = getattr(plan, "token", None)
+                if plan_token is None:
+                    plan_token = plan.get("option_token") or plan.get("token")
+                quote_obj = plan.get("quote") or {}
+                quote_src = None
+                if isinstance(quote_obj, Mapping):
+                    quote_src = quote_obj.get("source")
+                quote_src = quote_src or plan.get("quote_src")
+                side_val = plan.get("action") or plan.get("side") or ""
+                spread_for_log = (
+                    (spread_ratio if spread_ratio is not None else math.nan) * 100.0
                 )
-                micro_msg = (
-                    f"micro side={micro.get('side') or 'BOTH'} lots={planned_lots} "
-                    f"{spread_detail} depth_ok={micro.get('depth_ok')} ({depth_detail})"
+                self.log.info(
+                    "micro precheck: token=%s side=%s lots=%d quote_src=%s spread=%.2f%%",
+                    plan_token,
+                    side_val,
+                    planned_lots,
+                    quote_src,
+                    spread_for_log,
                 )
-                self.log.info(micro_msg)
             self._preview_candidate(plan, micro)
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
