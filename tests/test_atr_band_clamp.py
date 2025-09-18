@@ -1,9 +1,11 @@
 import smoke  # noqa: F401
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from src.signals.patches import resolve_atr_band
+from src.strategies import atr_gate
 from src.strategies.atr_gate import check_atr
 
 
@@ -66,3 +68,47 @@ def test_resolve_atr_band_uses_gate_when_threshold_missing():
     band = resolve_atr_band(cfg, "NIFTY")
     assert band[0] == pytest.approx(0.03)
     assert band[1] == pytest.approx(0.8)
+
+
+def test_check_atr_throttles_repeated_info_logs(caplog):
+    """Repeated ATR values should emit info logs only once."""
+
+    atr_gate._reset_log_throttle_state()
+    cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
+
+    with caplog.at_level(logging.DEBUG, logger="src.strategies.atr_gate"):
+        check_atr(0.05, cfg, "NIFTY")
+        check_atr(0.05, cfg, "NIFTY")
+
+    info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
+    debug_logs = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert len(info_logs) == 1
+    assert len(debug_logs) == 1
+
+
+def test_check_atr_logs_when_value_changes(caplog):
+    """Changing ATR values should produce a fresh info log."""
+
+    atr_gate._reset_log_throttle_state()
+    cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
+
+    with caplog.at_level(logging.INFO, logger="src.strategies.atr_gate"):
+        check_atr(0.05, cfg, "NIFTY")
+        check_atr(0.051, cfg, "NIFTY")
+
+    info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
+    assert len(info_logs) == 2
+
+
+def test_check_atr_out_of_band_always_logs(caplog):
+    """Out-of-band readings should not be throttled."""
+
+    atr_gate._reset_log_throttle_state()
+    cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
+
+    with caplog.at_level(logging.INFO, logger="src.strategies.atr_gate"):
+        check_atr(0.005, cfg, "NIFTY")
+        check_atr(0.005, cfg, "NIFTY")
+
+    info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
+    assert len(info_logs) == 2
