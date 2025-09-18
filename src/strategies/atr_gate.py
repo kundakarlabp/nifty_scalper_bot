@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATR_PCT: float = 2.0
 try:
-    MIN_INTERVAL_S: float = float(os.getenv("ATR_LOG_INTERVAL_S", "10"))
+    # Default to logging no more than once every 30 seconds to reduce noise.
+    MIN_INTERVAL_S: float = float(os.getenv("ATR_LOG_INTERVAL_S", "30"))
 except ValueError:
-    MIN_INTERVAL_S = 10.0
+    MIN_INTERVAL_S = 30.0
 
 _THROTTLE_LOCK: Lock = Lock()
 _LAST_LOG_STATE: dict[str, tuple[bool, float, float | None, float]] = {}
