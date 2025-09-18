@@ -656,6 +656,7 @@ class StrategyRunner:
         self._last_signal_hash: tuple | None = None
 
         self.within_window: bool = False
+        self._option_l1_cache: Dict[int, Dict[str, Any]] = {}
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -927,6 +928,261 @@ class StrategyRunner:
         return missing
 
     @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        """Best-effort conversion of ``value`` to ``int``."""
+
+        if value is None:
+            return None
+        try:
+            if isinstance(value, Decimal):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return None
+                return int(float(stripped))
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return None
+
+    def _update_option_tick_cache(self, tick: Mapping[str, Any]) -> None:
+        """Store the latest L1 payload for each option token."""
+
+        token = self._extract_token_from_payload(tick)
+        if token is None:
+            return
+        try:
+            token_int = int(token)
+        except Exception:
+            return
+        try:
+            self._option_l1_cache[token_int] = dict(tick)
+        except Exception:
+            self._option_l1_cache[token_int] = {
+                k: tick.get(k) for k in ("bid", "ask", "bid_qty", "ask_qty") if k in tick
+            }
+
+    def _extract_token_from_payload(self, payload: Mapping[str, Any]) -> int | None:
+        for key in ("instrument_token", "token", "instrument_id"):
+            token = self._coerce_int(payload.get(key))
+            if token is not None:
+                return token
+        raw = payload.get("raw")
+        if isinstance(raw, Mapping):
+            token = self._extract_token_from_payload(raw)
+            if token is not None:
+                return token
+        return None
+
+    def _extract_quote_payload(
+        self,
+        response: Any,
+        token: int | None,
+        option: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any] | None:
+        if not isinstance(response, Mapping):
+            return None
+
+        keys: list[Any] = []
+        if token is not None:
+            keys.extend([token, str(token)])
+        tradingsymbol = None
+        if option:
+            tradingsymbol = option.get("tradingsymbol") or option.get("symbol")
+        if isinstance(tradingsymbol, str) and tradingsymbol.strip():
+            ts = tradingsymbol.strip()
+            keys.append(ts)
+            if ":" not in ts:
+                keys.append(f"NFO:{ts}")
+
+        for key in keys:
+            candidate = response.get(key)
+            if candidate is None and isinstance(key, int):
+                candidate = response.get(str(key))
+            if isinstance(candidate, Mapping):
+                return candidate
+
+        data_field = response.get("data")
+        if isinstance(data_field, Mapping):
+            nested = self._extract_quote_payload(data_field, token, option)
+            if nested:
+                return nested
+        if isinstance(data_field, list):
+            for item in data_field:
+                if isinstance(item, Mapping):
+                    nested = self._extract_quote_payload(item, token, option)
+                    if nested:
+                        return nested
+        return None
+
+    def _ensure_option_subscription(self, token: int | None) -> None:
+        tok = self._coerce_int(token)
+        if tok is None:
+            return
+        tokens = [int(tok)]
+        targets: list[Any] = []
+        ds = getattr(self, "data_source", None)
+        if ds:
+            targets.append(ds)
+            broker = getattr(ds, "kite", None) or getattr(ds, "broker", None)
+            if broker:
+                targets.append(broker)
+        if self.kite and self.kite not in targets:
+            targets.append(self.kite)
+
+        seen_modes: set[tuple[int, str]] = set()
+        for obj in targets:
+            sub_fn = getattr(obj, "subscribe", None)
+            if callable(sub_fn):
+                try:
+                    sub_fn(tokens)
+                except Exception:
+                    pass
+            mode_fn = getattr(obj, "set_mode", None)
+            if callable(mode_fn):
+                full_mode = getattr(obj, "MODE_FULL", "full")
+                key = (id(mode_fn), str(full_mode))
+                if key in seen_modes:
+                    continue
+                try:
+                    mode_fn(full_mode, tokens)
+                except Exception:
+                    pass
+                else:
+                    seen_modes.add(key)
+
+    def _prime_option_quote(
+        self,
+        *,
+        token: int | None,
+        option: Mapping[str, Any] | None = None,
+        tick: Mapping[str, Any] | None = None,
+    ) -> tuple[Optional[Dict[str, Any]], str]:
+        option_meta: Dict[str, Any] = dict(option or {})
+        fallback_token = self._coerce_int(option_meta.get("token"))
+        token_int = self._coerce_int(token) or fallback_token
+        if token_int is not None:
+            option_meta["token"] = int(token_int)
+
+        tradingsymbol = option_meta.get("tradingsymbol") or option_meta.get("symbol")
+        if isinstance(tradingsymbol, str) and tradingsymbol.strip():
+            option_meta["tradingsymbol"] = tradingsymbol.strip()
+
+        fetch_ltp: Callable[[Any], Optional[float]] | None = None
+        if hasattr(self.data_source, "get_last_price"):
+            fetch_ltp = getattr(self.data_source, "get_last_price")
+
+        def _use_candidate(raw: Mapping[str, Any], source: str) -> tuple[Optional[Dict[str, Any]], str]:
+            raw_map = dict(raw)
+            if source:
+                raw_map.setdefault("source", source)
+            if option_meta:
+                option_payload: Mapping[str, Any] | None = option_meta
+            elif token_int is not None:
+                option_payload = {"token": token_int}
+            else:
+                option_payload = None
+            quote_dict, mode = get_option_quote_safe(
+                option=option_payload,
+                quote=raw_map,
+                fetch_ltp=fetch_ltp,
+            )
+            if quote_dict:
+                if token_int is not None:
+                    self._option_l1_cache[token_int] = dict(quote_dict)
+                return quote_dict, mode
+            return None, mode
+
+        if isinstance(tick, Mapping):
+            tick_token = self._extract_token_from_payload(tick)
+            if token_int is None and tick_token is not None:
+                token_int = tick_token
+                option_meta["token"] = int(token_int)
+            if token_int is not None and tick_token == token_int:
+                quote, mode = _use_candidate(tick, tick.get("source", "ws"))
+                if quote:
+                    return quote, mode
+
+        if token_int is not None:
+            cached = self._option_l1_cache.get(token_int)
+            if isinstance(cached, Mapping):
+                quote, mode = _use_candidate(cached, cached.get("source", "cache"))
+                if quote:
+                    return quote, mode
+
+        ds = getattr(self, "data_source", None)
+        if ds and token_int is not None:
+            for name in ("get_l1", "get_quote", "quote"):
+                fn = getattr(ds, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    resp = fn(token_int) if name == "get_l1" else fn([token_int])
+                except Exception:
+                    continue
+                raw = self._extract_quote_payload(resp, token_int, option_meta)
+                if isinstance(raw, Mapping):
+                    quote, mode = _use_candidate(raw, raw.get("source", name))
+                    if quote:
+                        return quote, mode
+
+        broker: Any | None = None
+        if ds:
+            broker = getattr(ds, "kite", None) or getattr(ds, "broker", None)
+        if broker is None:
+            broker = self.kite
+
+        if broker and token_int is not None:
+            payloads = ([token_int], [str(token_int)])
+            for payload in payloads:
+                if hasattr(broker, "quote"):
+                    try:
+                        resp = broker.quote(payload)
+                    except Exception:
+                        resp = None
+                    if resp:
+                        raw = self._extract_quote_payload(resp, token_int, option_meta)
+                        if isinstance(raw, Mapping):
+                            quote, mode = _use_candidate(raw, raw.get("source", "kite"))
+                            if quote:
+                                return quote, mode
+                if hasattr(broker, "ltp"):
+                    try:
+                        resp = broker.ltp(payload)
+                    except Exception:
+                        resp = None
+                    if resp:
+                        raw = self._extract_quote_payload(resp, token_int, option_meta)
+                        if isinstance(raw, Mapping):
+                            quote, mode = _use_candidate(raw, raw.get("source", "kite"))
+                            if quote:
+                                return quote, mode
+
+        if option_meta:
+            option_payload = option_meta
+        elif token_int is not None:
+            option_payload = {"token": token_int}
+        else:
+            option_payload = None
+        quote_dict, mode = get_option_quote_safe(
+            option=option_payload,
+            quote=None,
+            fetch_ltp=fetch_ltp,
+        )
+        if quote_dict:
+            if "source" not in quote_dict:
+                quote_dict["source"] = "rest"
+            if token_int is not None:
+                self._option_l1_cache[token_int] = dict(quote_dict)
+            return quote_dict, mode
+        return None, "no_quote"
+
+    @staticmethod
     def _format_two_decimals(value: Any) -> Any:
         """Format numeric values with two decimal places when possible."""
 
@@ -1084,6 +1340,8 @@ class StrategyRunner:
             "reason_block": None,
         }
         self._last_error = None
+        if isinstance(tick, Mapping):
+            self._update_option_tick_cache(tick)
         warm_min = int(
             getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
         )
@@ -1499,6 +1757,55 @@ class StrategyRunner:
             ds = getattr(self, "data_source", None)
             plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
             self._last_option = opt
+            tokens_raw = getattr(ds, "atm_tokens", None)
+            ce_token: int | None = None
+            pe_token: int | None = None
+            if isinstance(tokens_raw, (list, tuple)):
+                if len(tokens_raw) > 0:
+                    ce_token = self._coerce_int(tokens_raw[0])
+                if len(tokens_raw) > 1:
+                    pe_token = self._coerce_int(tokens_raw[1])
+            option_type = str(
+                plan.get("option_type")
+                or plan.get("side_hint")
+                or opt.get("option_type")
+                or ""
+            ).upper()
+            chosen_token: int | None = None
+            if option_type == "CE":
+                chosen_token = ce_token
+            elif option_type == "PE":
+                chosen_token = pe_token
+            fallback_token = self._coerce_int(token)
+            plan_token = chosen_token or fallback_token
+            if plan_token is not None:
+                plan["token"] = plan_token
+            else:
+                plan["token"] = None
+            logger.info(
+                "picked option: type=%s ce=%s pe=%s chosen=%s",
+                option_type,
+                ce_token,
+                pe_token,
+                plan.get("token"),
+            )
+            mismatch = False
+            if option_type == "CE" and ce_token and plan.get("token") != ce_token:
+                mismatch = True
+            if option_type == "PE" and pe_token and plan.get("token") != pe_token:
+                mismatch = True
+            if mismatch:
+                plan["reason_block"] = "token_mismatch"
+                reasons = plan.setdefault("reasons", [])
+                if "token_mismatch" not in reasons:
+                    reasons.append("token_mismatch")
+                plan["spread_pct"] = None
+                plan["depth_ok"] = None
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                return
             if not token:
                 plan["reason_block"] = "no_option_token"
                 plan.setdefault("reasons", []).append("no_option_token")
@@ -1515,33 +1822,36 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 return
-            raw_quote: dict[str, Any] | None = None
-            if self.kite is not None and opt.get("tradingsymbol"):
-                try:
-                    ts = opt["tradingsymbol"]
-                    resp = self.kite.quote([f"NFO:{ts}"])  # type: ignore[attr-defined]
-                    raw = resp.get(f"NFO:{ts}") if isinstance(resp, dict) else None
-                    if isinstance(raw, dict):
-                        raw_quote = dict(raw)
-                        raw_quote.setdefault("source", "kite")
-                except Exception:
-                    raw_quote = None
+            if plan.get("token") is None and fallback_token is not None:
+                plan["token"] = fallback_token
+            self._ensure_option_subscription(plan.get("token"))
 
-            fetch_ltp = None
-            if hasattr(self.data_source, "get_last_price"):
-                fetch_ltp = getattr(self.data_source, "get_last_price")
-
-            quote_dict, quote_mode = get_option_quote_safe(
-                option=opt,
-                quote=raw_quote,
-                fetch_ltp=fetch_ltp,
+            quote_dict, quote_mode = self._prime_option_quote(
+                token=plan.get("token"), option=opt, tick=tick if isinstance(tick, Mapping) else None
             )
-            if not quote_dict:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
+            bid_val = 0.0
+            ask_val = 0.0
+            if quote_dict:
+                try:
+                    bid_val = float(quote_dict.get("bid", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    bid_val = 0.0
+                try:
+                    ask_val = float(quote_dict.get("ask", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    ask_val = 0.0
+            if not quote_dict or bid_val <= 0.0 or ask_val <= 0.0:
+                plan["reason_block"] = "no_quote"
+                reasons = plan.setdefault("reasons", [])
+                if "no_quote" not in reasons:
+                    reasons.append("no_quote")
                 plan["spread_pct"] = None
                 plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                plan["micro"] = {"spread_pct": None, "depth_ok": None, "reason": "no_quote"}
+                if quote_dict:
+                    plan["quote_src"] = quote_dict.get("source", "kite")
+                    plan["quote_mode"] = quote_mode
+                    plan["quote"] = quote_dict
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
@@ -1790,14 +2100,19 @@ class StrategyRunner:
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
             plan["qty_lots"] = planned_lots
-            quote = {
-                "bid": tick.get("bid") if tick else 0.0,
-                "ask": tick.get("ask") if tick else 0.0,
-                "bid_qty": tick.get("bid_qty") if tick else 0,
-                "ask_qty": tick.get("ask_qty") if tick else 0,
-                "bid_qty_top5": tick.get("bid_qty_top5") if tick else 0,
-                "ask_qty_top5": tick.get("ask_qty_top5") if tick else 0,
-            }
+            quote = plan.get("quote") or {}
+            bid = float(quote.get("bid") or 0.0)
+            ask = float(quote.get("ask") or 0.0)
+            if bid <= 0.0 or ask <= 0.0:
+                reasons = plan.setdefault("reasons", [])
+                if "no_quote" not in reasons:
+                    reasons.append("no_quote")
+                plan["reason_block"] = plan.get("reason_block") or "no_quote"
+                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                self._record_plan(plan)
+                return
             ok_micro, micro = self.executor.micro_ok(
                 quote=quote,
                 qty_lots=planned_lots,
