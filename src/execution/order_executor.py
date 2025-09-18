@@ -1013,6 +1013,27 @@ class OrderExecutor:
 
         return last_ok, last_meta
 
+    def micro_decision(
+        self,
+        *,
+        quote: Dict[str, Any],
+        qty_lots: int,
+        lot_size: int,
+        max_spread_pct: float,
+        depth_mult: int,
+        side: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Evaluate microstructure using a pre-supplied quote snapshot."""
+
+        return micro_ok(
+            quote=quote,
+            qty_lots=qty_lots,
+            lot_size=lot_size,
+            max_spread_pct=max_spread_pct,
+            depth_mult=depth_mult,
+            side=side,
+        )
+
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
         return int(time.monotonic() * 1000)
