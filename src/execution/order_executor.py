@@ -711,6 +711,25 @@ class OrderExecutor:
         self._closed_trades: Set[str] = set()
         self.journal = journal
 
+    def micro_ok(
+        self,
+        *,
+        quote: Dict[str, Any],
+        qty_lots: int,
+        lot_size: int,
+        max_spread_pct: float,
+        depth_mult: int,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Delegate to the module-level :func:`micro_ok` helper for compatibility."""
+
+        return micro_ok(
+            quote=quote,
+            qty_lots=qty_lots,
+            lot_size=lot_size,
+            max_spread_pct=max_spread_pct,
+            depth_mult=depth_mult,
+        )
+
     # ----------- router helpers ----------
     def _now_ms(self) -> int:
         return int(time.monotonic() * 1000)
