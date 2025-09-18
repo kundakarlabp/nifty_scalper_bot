@@ -46,6 +46,7 @@ from src.logs.journal import Journal
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.risk import guards, risk_gates
+from src.risk.position_sizing import PositionSizer
 from src.risk.cooldown import LossCooldownManager
 from src.risk.greeks import (  # noqa: F401
     estimate_greeks_from_mid,
@@ -379,6 +380,8 @@ class StrategyRunner:
         self.instruments = InstrumentsCache(self.kite)
         self.option_resolver = OptionResolver(self.instruments, self.kite)
         self._last_option: Optional[dict] = None
+
+        self._position_sizer = PositionSizer()
 
         self.risk_engine = RiskEngine(
             LimitConfig(
@@ -1684,6 +1687,9 @@ class StrategyRunner:
                 stop=float(plan.get("sl")),
                 lot_size=int(settings.instruments.nifty_lot_size),
                 equity=self._active_equity(),
+                spot_price=float(getattr(self, "last_spot", plan.get("entry", 0.0)) or 0.0),
+                delta=plan.get("delta"),
+                quote=plan.get("quote"),
             )
             flow["sizing"] = diag
             block_reason = diag.get("block_reason")
@@ -2200,61 +2206,59 @@ class StrategyRunner:
         return base
 
     def _calculate_quantity_diag(
-        self, *, entry: float, stop: float, lot_size: int, equity: float
+        self,
+        *,
+        entry: float,
+        stop: float,
+        lot_size: int,
+        equity: float,
+        spot_price: float | None = None,
+        delta: float | None = None,
+        quote: Dict | None = None,
     ) -> Tuple[int, Dict]:
-        risk_rupees = float(equity) * float(settings.risk.risk_per_trade)
-        sl_points = abs(float(entry) - float(stop))
-        sl_points = max(0.5, sl_points)
-        rupee_risk_per_lot = sl_points * int(lot_size)
+        entry_f = float(entry)
+        stop_f = float(stop)
+        lot_size_i = int(lot_size)
+        equity_f = float(equity)
 
-        if rupee_risk_per_lot <= 0:
-            return 0, {
-                "entry": entry,
-                "stop": stop,
-                "equity": equity,
-                "risk_per_trade": settings.risk.risk_per_trade,
-                "sl_points": sl_points,
-                "rupee_risk_per_lot": rupee_risk_per_lot,
-                "lots_raw": 0,
-                "lots_final": 0,
-                "exposure_notional_est": 0.0,
-                "max_notional_cap": 0.0,
-            }
+        if spot_price is None:
+            spot_price = getattr(self, "last_spot", None)
+        spot_price_f = float(spot_price) if spot_price is not None else entry_f
 
-        lots_raw = int(risk_rupees // rupee_risk_per_lot)
-        lots = max(lots_raw, int(settings.instruments.min_lots))
-        lots = min(lots, int(settings.instruments.max_lots))
+        sl_points_entry = max(0.5, abs(entry_f - stop_f))
 
-        basis = getattr(self.settings, "EXPOSURE_BASIS", "premium")
-        if basis == "premium":
-            unit_notional = float(entry) * int(lot_size)
+        qty, lots, diag = self._position_sizer.size_from_signal(
+            entry_price=entry_f,
+            stop_loss=stop_f,
+            lot_size=lot_size_i,
+            equity=equity_f,
+            spot_price=spot_price_f,
+            spot_sl_points=sl_points_entry,
+            delta=None if delta is None else float(delta),
+            quote=quote,
+        )
+
+        diag_aug = dict(diag)
+        diag_aug["rupee_risk_per_lot"] = float(diag.get("risk_per_lot", 0.0))
+        diag_aug["lots_raw"] = int(diag.get("calc_lots", lots))
+        diag_aug["lots_final"] = int(diag.get("lots_final", diag.get("lots", lots)))
+        unit_notional = float(diag.get("unit_notional", 0.0))
+        exposure_est = unit_notional * diag_aug["lots_final"]
+        diag_aug["exposure_notional_est"] = (
+            round(exposure_est, 2) if math.isfinite(exposure_est) else float("inf")
+        )
+        cap_val = diag.get("cap", diag.get("exposure_cap", 0.0))
+        if isinstance(cap_val, (int, float)):
+            cap_f = float(cap_val)
+            diag_aug["max_notional_cap"] = (
+                round(cap_f, 2) if math.isfinite(cap_f) else cap_f
+            )
         else:
-            spot = float(getattr(self, "last_spot", entry) or entry)
-            unit_notional = spot * int(lot_size)
-
-        notional = unit_notional * lots
-        max_notional = float(equity) * float(settings.risk.max_position_size_pct)
-        if max_notional > 0 and notional > max_notional:
-            denom = unit_notional
-            lots_cap = int(max_notional // denom) if denom > 0 else 0
-            lots = max(min(lots_cap, lots), 0)
-            notional = unit_notional * lots
-
-        qty = lots * int(lot_size)
-        diag = {
-            "entry": round(entry, 4),
-            "stop": round(stop, 4),
-            "equity": round(float(equity), 2),
-            "risk_per_trade": float(settings.risk.risk_per_trade),
-            "lot_size": int(lot_size),
-            "sl_points": round(sl_points, 4),
-            "rupee_risk_per_lot": round(rupee_risk_per_lot, 2),
-            "lots_raw": int(lots_raw),
-            "lots_final": int(lots),
-            "exposure_notional_est": round(notional, 2),
-            "max_notional_cap": round(max_notional, 2),
-        }
-        return int(qty), diag
+            diag_aug["max_notional_cap"] = 0.0
+        diag_aug["sl_points"] = round(sl_points_entry, 4)
+        diag_aug["entry"] = round(entry_f, 4)
+        diag_aug["stop"] = round(stop_f, 4)
+        return int(qty), diag_aug
 
     def _on_trade_closed(self, pnl: float) -> None:
         """Update risk state and forward realised PnL to risk engine."""
