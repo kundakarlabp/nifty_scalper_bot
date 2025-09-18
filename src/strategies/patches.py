@@ -71,6 +71,7 @@ def _patch_atr_band() -> None:
     modules = [
         "src.strategies.runner",
         "src.strategies.scalping_strategy",
+        "src.strategies.atr_gate",
         "src.diagnostics.checks",
     ]
     for name in candidates:

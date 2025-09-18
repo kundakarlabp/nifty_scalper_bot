@@ -79,7 +79,21 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
     monkeypatch.setattr(runner.risk, "day_realized_loss", 0, raising=False)
     monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
     monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
-    runner.strategy_cfg = SimpleNamespace(raw={}, delta_enable_score=999, min_atr_pct_nifty=0.02, min_atr_pct_banknifty=0.04)
+    runner.strategy_cfg = SimpleNamespace(
+        raw={
+            "thresholds": {
+                "min_atr_pct_nifty": 0.02,
+                "min_atr_pct_banknifty": 0.04,
+            },
+            "gates": {
+                "atr_pct_min": 0.02,
+                "atr_pct_max": 0.90,
+            },
+        },
+        delta_enable_score=999,
+        min_atr_pct_nifty=0.02,
+        min_atr_pct_banknifty=0.04,
+    )
 
     def fake_signal(df, current_tick=None):
         return {
