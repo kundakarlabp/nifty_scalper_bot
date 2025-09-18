@@ -52,6 +52,7 @@ from src.risk.greeks import (  # noqa: F401
     next_weekly_expiry_ist,
 )
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
+from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
@@ -1246,12 +1247,13 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 return
-            ok, reason, atr_min, atr_max = check_atr(
-                plan["atr_pct_raw"], self.strategy_cfg, self.under_symbol
-            )
+            atr_min, atr_max = resolve_atr_band(self.strategy_cfg, self.under_symbol)
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
+            ok, reason, _, _ = check_atr(
+                plan["atr_pct_raw"], self.strategy_cfg, self.under_symbol
+            )
             if not ok:
                 if reason and reason not in plan["reasons"]:
                     plan["reasons"].append(reason)

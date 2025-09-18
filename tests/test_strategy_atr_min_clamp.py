@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 import src.strategies.scalping_strategy as ss
+from src.signals.patches import resolve_atr_band
 from src.strategies.strategy_config import resolve_config_path
 from tests.test_strategy import create_test_dataframe
 
@@ -37,6 +38,7 @@ def test_strategy_allows_clamped_min_atr(monkeypatch):
     strat.runner = SimpleNamespace(under_symbol="NIFTY")
     plan = strat.generate_signal(df, current_price=100.0)
     assert plan.get("reason_block") != "atr_out_of_band"
+    assert plan.get("atr_band") == resolve_atr_band(cfg, "NIFTY")
 
 
 def test_strategy_allows_unbounded_atr_max(monkeypatch):
@@ -85,3 +87,44 @@ def test_strategy_allows_unbounded_atr_max(monkeypatch):
     plan = strat.generate_signal(df, current_price=100.0)
     assert plan.get("reason_block") != "atr_out_of_band"
     assert plan.get("atr_max") == 0.0
+    assert plan.get("atr_band") == resolve_atr_band(cfg, "NIFTY")
+
+
+def test_strategy_prefers_threshold_over_gate(monkeypatch):
+    """Threshold minimum should override gate minimum for ATR checks."""
+
+    cfg = ss.StrategyConfig.load(resolve_config_path())
+    cfg.raw.setdefault("thresholds", {})["min_atr_pct_nifty"] = 0.05
+    cfg.raw.setdefault("gates", {})["atr_pct_min"] = 0.03
+    cfg.raw.setdefault("gates", {})["atr_pct_max"] = 10.0
+    cfg.raw.setdefault("strategy", {})["min_score"] = 0.0
+    monkeypatch.setattr(ss.StrategyConfig, "load", classmethod(lambda cls, path: cfg))
+
+    df = create_test_dataframe(trending_up=True)
+    monkeypatch.setattr(ss, "latest_atr_value", lambda *a, **k: 5.0)
+    monkeypatch.setattr(
+        ss,
+        "compute_atr",
+        lambda *a, **k: pd.Series([5.0] * len(df), index=df.index),
+    )
+
+    monkeypatch.setattr(ss, "fetch_quote_with_depth", lambda *a, **k: {"bid": 100.0, "ask": 100.0})
+    monkeypatch.setattr(ss, "evaluate_micro", lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True})
+    monkeypatch.setattr(ss, "resolve_weekly_atm", lambda price: {"ce": ("SYMCE", 1), "pe": ("SYMPE", 1)})
+    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 0.0)
+    monkeypatch.setattr(ss, "select_strike", lambda price, score: ("SYM", 100))
+    monkeypatch.setattr(ss, "detect_market_regime", lambda **k: SimpleNamespace(regime="TREND"))
+    monkeypatch.setattr(ss, "compute_score", lambda df, regime, cfg: (1.0, None))
+
+    strat = ss.EnhancedScalpingStrategy(
+        min_signal_score=0.0,
+        confidence_threshold=0.0,
+        atr_period=14,
+        atr_sl_multiplier=1.5,
+        atr_tp_multiplier=3.0,
+    )
+    strat.runner = SimpleNamespace(under_symbol="NIFTY")
+    plan = strat.generate_signal(df, current_price=100.0)
+    assert plan.get("reason_block") != "atr_out_of_band"
+    assert plan.get("atr_min") == 0.05
+    assert plan.get("atr_band") == resolve_atr_band(cfg, "NIFTY")

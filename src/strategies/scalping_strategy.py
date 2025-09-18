@@ -18,6 +18,7 @@ from src.config import settings
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 from src.execution.order_executor import fetch_quote_with_depth
 from src.diagnostics.metrics import runtime_metrics
+from src.signals.patches import resolve_atr_band
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
@@ -1025,10 +1026,11 @@ class EnhancedScalpingStrategy:
             self.last_atr_pct = float(plan["atr_pct"])
             atr_pct_val = atr_pct_raw
             symbol = getattr(getattr(self, "runner", None), "under_symbol", None)
-            ok, reason, atr_min, atr_max = check_atr(atr_pct_val, cfg, symbol)
+            atr_min, atr_max = resolve_atr_band(cfg, symbol)
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
+            ok, reason, _, _ = check_atr(atr_pct_val, cfg, symbol)
             if not ok:
                 if reason and reason not in reasons:
                     reasons.append(reason)
