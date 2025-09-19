@@ -1217,6 +1217,80 @@ class StrategyRunner:
         except Exception:
             return False
 
+    @staticmethod
+    def _sync_atm_state(
+        ds: Any,
+        *,
+        option_type: str,
+        token: Any,
+        strike: Any,
+        expiry: Any,
+    ) -> None:
+        """Update data source ATM metadata with the latest resolved option."""
+
+        if ds is None:
+            return
+
+        if strike is not None:
+            try:
+                setattr(ds, "current_atm_strike", strike)
+            except Exception:
+                pass
+
+        if expiry is not None:
+            try:
+                setattr(ds, "current_atm_expiry", expiry)
+            except Exception:
+                pass
+
+        option_key = str(option_type or "").upper()
+        idx_map = {"CE": 0, "PE": 1}
+        idx = idx_map.get(option_key)
+        if idx is None:
+            return
+
+        try:
+            coerced_token = int(token)
+        except Exception:
+            coerced_token = None
+        if coerced_token in (None, 0):
+            return
+
+        existing = getattr(ds, "atm_tokens", None)
+        if isinstance(existing, (list, tuple)):
+            tokens: list[int | None] = []
+            for raw in list(existing)[:2]:
+                try:
+                    coerced = int(raw)
+                except Exception:
+                    coerced = None
+                if coerced in (None, 0):
+                    tokens.append(None)
+                else:
+                    tokens.append(coerced)
+        else:
+            tokens = [None, None]
+
+        while len(tokens) < 2:
+            tokens.append(None)
+
+        if tokens[idx] == coerced_token:
+            return
+
+        tokens[idx] = coerced_token
+        try:
+            setattr(ds, "atm_tokens", tuple(tokens))
+        except Exception:
+            # Fallback for data sources storing tokens as mutable sequences
+            try:
+                current = list(getattr(ds, "atm_tokens", []))
+                while len(current) < 2:
+                    current.append(None)
+                current[idx] = coerced_token
+                setattr(ds, "atm_tokens", tuple(current))
+            except Exception:
+                pass
+
     def _record_plan(self, plan: Dict[str, Any]) -> None:
         micro = plan.get("micro") or {"spread_pct": 0.0, "depth_ok": False}
         changed = (
@@ -1725,7 +1799,14 @@ class StrategyRunner:
             plan["option_token"] = token
             plan["token"] = token
             ds = getattr(self, "data_source", None)
-            plan["atm_strike"] = getattr(ds, "current_atm_strike", None)
+            atm_strike = getattr(ds, "current_atm_strike", None)
+            if atm_strike is None:
+                atm_strike = opt.get("strike")
+            atm_expiry = getattr(ds, "current_atm_expiry", None)
+            if atm_expiry is None:
+                atm_expiry = opt.get("expiry")
+            plan["atm_strike"] = atm_strike
+            plan["atm_expiry"] = atm_expiry
 
             def _coerce_token(value: Any) -> int | None:
                 try:
@@ -1752,6 +1833,15 @@ class StrategyRunner:
                     plan["token"] = int(token)
                 except (TypeError, ValueError):
                     plan["token"] = None
+
+            if ds is not None:
+                self._sync_atm_state(
+                    ds,
+                    option_type=option_type,
+                    token=plan.get("token"),
+                    strike=plan.get("atm_strike"),
+                    expiry=plan.get("atm_expiry"),
+                )
 
             logger.info(
                 "picked option: type=%s ce=%s pe=%s chosen=%s",
