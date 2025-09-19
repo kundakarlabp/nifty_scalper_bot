@@ -360,6 +360,41 @@ class DataSource:
         """Return LTP for a trading symbol (e.g., 'NSE:NIFTY 50') or instrument token."""
         raise NotImplementedError
 
+    def current_tokens(self) -> tuple[int | None, int | None]:
+        """Return the currently tracked ATM CE/PE instrument tokens if known."""
+
+        tokens = getattr(self, "atm_tokens", None)
+        if isinstance(tokens, (list, tuple)):
+            values = list(tokens)
+            if len(values) >= 2:
+                ce, pe = values[0], values[1]
+                try:
+                    ce = int(ce) if ce is not None else None
+                except Exception:
+                    ce = ce if isinstance(ce, int) else None
+                try:
+                    pe = int(pe) if pe is not None else None
+                except Exception:
+                    pe = pe if isinstance(pe, int) else None
+                return ce, pe
+        return None, None
+
+    def quote_snapshot(self, token: int | str | None) -> dict[str, Any] | None:
+        """Return a cached quote snapshot for ``token`` when available."""
+
+        if token in (None, ""):
+            return None
+        getter = getattr(self, "get_cached_full_quote", None)
+        if not callable(getter):
+            return None
+        try:
+            snapshot = getter(token)
+        except Exception:
+            return None
+        if isinstance(snapshot, Mapping):
+            return dict(snapshot)
+        return None
+
     def prime_option_quote(
         self, token: int | str
     ) -> tuple[float | None, str | None, int | None]:
@@ -1423,6 +1458,76 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if not isinstance(cached, Mapping):
             return None
         return dict(cached)
+
+    def quote_snapshot(self, token: int | str | None) -> dict[str, Any] | None:
+        """Return a sanitized snapshot of the cached quote for ``token``."""
+
+        base = super().quote_snapshot(token)
+        if not isinstance(base, Mapping):
+            return None
+
+        def _safe_float(value: Any) -> float | None:
+            try:
+                val = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(val):  # type: ignore[attr-defined]
+                return None
+            return val
+
+        def _safe_int(value: Any) -> int | None:
+            try:
+                if isinstance(value, bool):
+                    return int(value)
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        bid = _safe_float(base.get("bid"))
+        ask = _safe_float(base.get("ask"))
+        mid = _safe_float(base.get("mid"))
+        ltp = _safe_float(base.get("ltp"))
+        if mid is None and bid is not None and ask is not None:
+            mid = (bid + ask) / 2.0
+        spread = None
+        spread_pct = base.get("spread_pct")
+        if bid is not None and ask is not None:
+            spread = ask - bid
+            if mid:
+                try:
+                    spread_pct = (spread / mid) * 100.0
+                except Exception:
+                    pass
+
+        ts_ms = base.get("ts_ms")
+        ts_ms_int: int | None
+        if isinstance(ts_ms, (int, float)):
+            ts_ms_int = int(ts_ms)
+        else:
+            ts_ms_int = _to_epoch_ms(ts_ms)
+
+        snapshot: dict[str, Any] = {
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "ltp": ltp,
+            "mode": base.get("mode"),
+            "source": base.get("source"),
+            "bid_qty": _safe_int(base.get("bid_qty")),
+            "ask_qty": _safe_int(base.get("ask_qty")),
+            "spread": spread,
+            "spread_pct": _safe_float(spread_pct),
+            "ts_ms": ts_ms_int,
+        }
+
+        try:
+            snapshot["token"] = int(token) if token is not None else None
+        except Exception:
+            snapshot["token"] = token
+
+        return snapshot
 
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""

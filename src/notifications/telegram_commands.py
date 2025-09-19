@@ -1,11 +1,70 @@
-from __future__ import annotations
-
 """Telegram command listener using HTTP polling."""
 
+from __future__ import annotations
+
+import json
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+
+from src.config import settings
+
+
+def _json_default(value: Any) -> Any:
+    """Return a JSON-serializable representation of ``value``."""
+
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_default(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_default(v) for v in value]
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()  # type: ignore[attr-defined]
+        except Exception:
+            return str(value)
+        return _json_default(dumped)
+    if hasattr(value, "__dict__"):
+        try:
+            return {
+                str(k): _json_default(v)
+                for k, v in vars(value).items()
+                if not k.startswith("_")
+            }
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def prettify(value: Any) -> str:
+    """Return a prettified JSON representation of ``value``."""
+
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=_json_default)
+    except Exception:
+        return json.dumps(_json_default(value), ensure_ascii=False, indent=2)
+
+
+def format_block(value: Any, *, max_lines: int = 60) -> str:
+    """Format ``value`` as a Telegram-friendly code block."""
+
+    text = prettify(value)
+    lines = text.splitlines()
+    if max_lines > 0 and len(lines) > max_lines:
+        remaining = len(lines) - max_lines
+        truncated = lines[:max_lines]
+        truncated.append(f"… ({remaining} lines truncated)")
+        lines = truncated
+    body = "\n".join(lines)
+    if body.startswith("```"):
+        return body
+    return f"```json\n{body}\n```"
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +78,9 @@ class TelegramCommands:
         chat_id: Optional[str],
         on_cmd: Optional[Callable[[str, str], None]] = None,
         backtest_runner: Optional[Callable[[Optional[str]], str]] = None,
+        *,
+        settings_obj: Any | None = None,
+        source: Any | None = None,
     ) -> None:
         self.token = bot_token or ""
         self.chat = str(chat_id or "")
@@ -35,6 +97,34 @@ class TelegramCommands:
         self.risk_pct = 0.0
         self.exposure_mode = "premium"
         self.paused_until = 0.0
+        self.settings = settings_obj or settings
+        self.source = source
+        self._diag_until_ts = 0.0
+        self._trace_until_ts = 0.0
+
+    # --- diagnostic windows -------------------------------------------------
+    def _enable_window(self, kind: str, seconds: int) -> float:
+        """Enable a temporary logging window for ``seconds`` seconds."""
+
+        try:
+            seconds_i = int(seconds)
+        except Exception:
+            seconds_i = 0
+        seconds_i = max(seconds_i, 0)
+        until = time.time() + seconds_i
+        if kind == "diag":
+            self._diag_until_ts = until
+        elif kind == "trace":
+            self._trace_until_ts = until
+        return until
+
+    def _window_active(self, kind: str) -> bool:
+        """Return ``True`` if the requested window is still active."""
+
+        now = time.time()
+        if kind == "trace":
+            return self._trace_until_ts > now
+        return self._diag_until_ts > now
 
     def start(self) -> None:
         """Start polling for commands."""
@@ -110,6 +200,88 @@ class TelegramCommands:
 
         if self.on_cmd:
             return False
+
+        def reply(text: str) -> None:
+            self._send(text)
+
+        if cmd == "/logs":
+            args = arg.split()
+            if not args or args[0].lower() == "off":
+                self._diag_until_ts = 0.0
+                self._trace_until_ts = 0.0
+                reply("✅ Logging windows disabled (back to baseline).")
+                return True
+            default_sec = int(getattr(self.settings, "LOG_DIAG_DEFAULT_SEC", 60))
+            candidate = default_sec
+            target = args[1] if len(args) > 1 and args[0].lower() == "on" else args[0]
+            try:
+                candidate = int(float(target))
+            except Exception:
+                candidate = default_sec
+            candidate = max(candidate, 0)
+            until = self._enable_window("diag", candidate)
+            reply(
+                f"🟢 Logging window enabled for {candidate}s (diag) until {int(until)}."
+            )
+            return True
+        if cmd == "/trace":
+            default_sec = int(getattr(self.settings, "LOG_TRACE_DEFAULT_SEC", 30))
+            try:
+                seconds = int(float(arg.strip())) if arg.strip() else default_sec
+            except Exception:
+                seconds = default_sec
+            seconds = max(seconds, 0)
+            self._enable_window("trace", seconds)
+            reply(f"🟠 TRACE window enabled for {seconds}s. Expect more DEBUG logs.")
+            return True
+        if cmd == "/diag":
+            try:
+                from src.diagnostics.healthkit import snapshot_pipeline
+
+                snap = snapshot_pipeline()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("diagnostic snapshot failed")
+                reply(f"⚠️ diagnostic snapshot failed: {exc}")
+                return True
+            max_lines = int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 120))
+            reply(format_block(snap, max_lines=max_lines))
+            return True
+        if cmd == "/micro":
+            source = getattr(self, "source", None)
+            if source is None:
+                reply("⚠️ Data source unavailable.")
+                return True
+            tokens_fn = getattr(source, "current_tokens", None)
+            try:
+                ce_token, pe_token = tokens_fn() if callable(tokens_fn) else (None, None)
+            except Exception:
+                ce_token, pe_token = (None, None)
+            micro = {}
+            getter = getattr(source, "get_micro_state", None)
+            if callable(getter):
+                micro["CE"] = getter(ce_token) if ce_token else None
+                micro["PE"] = getter(pe_token) if pe_token else None
+            max_lines = int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 120))
+            reply(format_block(micro, max_lines=max_lines))
+            return True
+        if cmd == "/quotes":
+            source = getattr(self, "source", None)
+            if source is None:
+                reply("⚠️ Data source unavailable.")
+                return True
+            tokens_fn = getattr(source, "current_tokens", None)
+            try:
+                ce_token, pe_token = tokens_fn() if callable(tokens_fn) else (None, None)
+            except Exception:
+                ce_token, pe_token = (None, None)
+            snapshots: dict[str, Any] = {}
+            snap_fn = getattr(source, "quote_snapshot", None)
+            if callable(snap_fn):
+                snapshots["CE"] = snap_fn(ce_token) if ce_token else None
+                snapshots["PE"] = snap_fn(pe_token) if pe_token else None
+            max_lines = int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 120))
+            reply(format_block(snapshots, max_lines=max_lines))
+            return True
 
         if cmd == "/pause":
             mins = 0

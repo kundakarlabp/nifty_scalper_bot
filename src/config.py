@@ -1185,6 +1185,21 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("LOG_RING_ENABLED"),
         description="Toggle the in-memory log ring buffer used for /logs.",
     )
+    LOG_DIAG_DEFAULT_SEC: int = Field(
+        120,
+        validation_alias=AliasChoices("LOG_DIAG_DEFAULT_SEC"),
+        description="Default duration for diagnostic logging windows triggered via /logs.",
+    )
+    LOG_TRACE_DEFAULT_SEC: int = Field(
+        45,
+        validation_alias=AliasChoices("LOG_TRACE_DEFAULT_SEC"),
+        description="Default duration for /trace very-verbose windows.",
+    )
+    LOG_MAX_LINES_REPLY: int = Field(
+        120,
+        validation_alias=AliasChoices("LOG_MAX_LINES_REPLY"),
+        description="Maximum number of lines returned in Telegram debug replies.",
+    )
     diag_ring_size: int = Field(
         4000,
         validation_alias=AliasChoices("DIAG_RING_SIZE"),
@@ -1304,6 +1319,19 @@ class AppSettings(BaseSettings):
         if isinstance(v, bool):
             return v
         return str(v).lower() in {"1", "true", "yes", "on"}
+
+    @field_validator(
+        "LOG_DIAG_DEFAULT_SEC", "LOG_TRACE_DEFAULT_SEC", "LOG_MAX_LINES_REPLY"
+    )
+    @classmethod
+    def _v_log_windows(cls, v: object) -> int:
+        try:
+            val = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("log window values must be numeric") from exc
+        if val < 0:
+            raise ValueError("log window values must be >= 0")
+        return val
 
     @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod

@@ -896,7 +896,7 @@ class RiskEngine:
         return snapshot
 
 
-def pretrade_micro_checks(
+def pretrade_quote_checks(
     source: Any,
     token: Any,
     cfg: Any,
@@ -920,7 +920,7 @@ def pretrade_micro_checks(
             ensure_subscribe(token)
         except Exception:  # pragma: no cover - defensive logging guard
             logger.debug(
-                "pretrade_micro_checks ensure_token_subscribed failed",
+                "pretrade_quote_checks ensure_token_subscribed failed",
                 exc_info=True,
             )
 
@@ -933,7 +933,7 @@ def pretrade_micro_checks(
             price, prime_source, prime_ts = prime_fn(token)
         except Exception:  # pragma: no cover - defensive logging guard
             logger.debug(
-                "pretrade_micro_checks prime_option_quote failed",
+                "pretrade_quote_checks prime_option_quote failed",
                 exc_info=True,
             )
             price = None
@@ -950,7 +950,7 @@ def pretrade_micro_checks(
             raw_quote = getter(token)
         except Exception:  # pragma: no cover - defensive logging guard
             logger.debug(
-                "pretrade_micro_checks get_cached_full_quote failed",
+                "pretrade_quote_checks get_cached_full_quote failed",
                 exc_info=True,
             )
             raw_quote = None
