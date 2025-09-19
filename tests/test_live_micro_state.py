@@ -18,11 +18,16 @@ class Clock:
 
 @pytest.fixture()
 def patched_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Gate:
+        def should_emit(self, key: str, force: bool = False) -> bool:
+            return True
+
     settings_stub = SimpleNamespace(
         micro=SimpleNamespace(depth_min_lots=1, max_spread_pct=5.0),
         instruments=SimpleNamespace(nifty_lot_size=50),
         TICK_MAX_LAG_S=5.0,
         TICK_STALE_SECONDS=0.75,
+        build_log_gate=lambda interval_s=None: _Gate(),
     )
     monkeypatch.setattr("src.data.source.settings", settings_stub, raising=False)
 
@@ -59,7 +64,7 @@ def test_micro_state_updates_on_full_tick(
 def test_micro_state_marks_stale_once(
     patched_settings: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.INFO, LiveKiteSource.__name__)
+    caplog.set_level(logging.DEBUG, LiveKiteSource.__name__)
     clock = Clock(2_000.0)
     monkeypatch.setattr("src.data.source.time.time", clock.time)
     src = LiveKiteSource(kite=None)
@@ -69,4 +74,21 @@ def test_micro_state_marks_stale_once(
     state = src.get_micro_state(222)
     assert state["stale"] is True
     assert any(record.message == "data.tick_stale" for record in caplog.records)
+
+
+def test_quote_snapshot_returns_latest_depth(
+    patched_settings: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock(5_000.0)
+    monkeypatch.setattr("src.data.source.time.time", clock.time)
+    src = LiveKiteSource(kite=None)
+    src._on_tick(_make_full_tick(token=333))
+
+    snap = src.quote_snapshot(333)
+    assert snap is not None
+    assert snap["bid"] == pytest.approx(100.0)
+    assert snap["ask_qty"] == 200
+    assert snap["has_depth"] is True
+    assert snap["age_sec"] == pytest.approx(0.0)
+    assert src.quote_snapshot(99999) is None
 

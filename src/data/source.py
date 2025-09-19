@@ -10,7 +10,19 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 import numpy as np
 import pandas as pd
@@ -28,8 +40,11 @@ from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
-from src.utils.time_windows import TZ
 from src.utils.strike_selector import _nearest_strike
+from src.utils.time_windows import TZ
+
+if TYPE_CHECKING:
+    from src.utils.log_gate import LogGate
 
 log = logging.getLogger(__name__)
 
@@ -915,6 +930,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def __init__(self, kite: Optional["KiteConnect"]) -> None:
         self.kite = kite
         self.log = logging.getLogger(self.__class__.__name__)
+        self.telegram = getattr(self, "telegram", None)
+        self._gate = cast("LogGate", settings.build_log_gate())
         self.kite_ticker = getattr(kite, "ticker", None)
         self._quotes: dict[int, QuoteState] = {}
         self._full_depth_tokens: set[int] = set()
@@ -1062,6 +1079,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.hist_mode = "live_warmup"
             if self.bar_builder is None:
                 self.bar_builder = MinuteBarBuilder(max_bars=120)
+
+    def _trace_force(self) -> bool:
+        telegram = getattr(self, "telegram", None)
+        if telegram is None:
+            return False
+        checker = getattr(telegram, "_window_active", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker("trace"))
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     def _subscribe_tokens_full(self, tokens: list[int]) -> None:
         if not tokens:
@@ -1382,10 +1411,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._quotes[token] = state
         self._stale_tokens.discard(token)
         if has_depth:
+            force_trace = self._trace_force()
             if token not in self._full_depth_tokens:
                 self._full_depth_tokens.add(token)
-                self.log.info(
-                    "data.tick_full_ready",
+                key_ready = f"tick_full_ready:{token}"
+                if self._gate.should_emit(key_ready, force=force_trace):
+                    self.log.debug(
+                        "data.tick_full_ready",
+                        extra={
+                            "token": token,
+                            "bid": bid,
+                            "ask": ask,
+                            "bid_qty": bid_qty,
+                            "ask_qty": ask_qty,
+                            "spread_pct": spread_pct,
+                        },
+                    )
+            key = f"tick_full:{token}"
+            if self._gate.should_emit(key, force=force_trace):
+                self.log.debug(
+                    "data.tick_full",
                     extra={
                         "token": token,
                         "bid": bid,
@@ -1395,17 +1440,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         "spread_pct": spread_pct,
                     },
                 )
-            self.log.debug(
-                "data.tick_full",
-                extra={
-                    "token": token,
-                    "bid": bid,
-                    "ask": ask,
-                    "bid_qty": bid_qty,
-                    "ask_qty": ask_qty,
-                    "spread_pct": spread_pct,
-                },
-            )
         else:
             self.log.debug("data.tick_ltp_only", extra={"token": token})
 
@@ -1481,10 +1515,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if stale:
             if token_i not in self._stale_tokens:
                 self._stale_tokens.add(token_i)
-                self.log.info(
-                    "data.tick_stale",
-                    extra={"token": token_i, "age": round(age, 3), "threshold": tick_stale},
-                )
+                key = f"tick_stale:{token_i}"
+                if self._gate.should_emit(key, force=self._trace_force()):
+                    self.log.debug(
+                        "data.tick_stale",
+                        extra={
+                            "token": token_i,
+                            "age": round(age, 3),
+                            "threshold": tick_stale,
+                        },
+                    )
         else:
             self._stale_tokens.discard(token_i)
         return {
@@ -1500,6 +1540,28 @@ class LiveKiteSource(DataSource, BaseDataSource):
             "bid_qty": q.bid_qty,
             "ask_qty": q.ask_qty,
             "last_tick_ts": q.ts,
+        }
+
+    def quote_snapshot(self, token: int | str) -> dict[str, Any] | None:
+        """Return a lightweight quote summary for Telegram diagnostics."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
+        q = self._quotes.get(token_i)
+        if not q:
+            return None
+        age = max(time.time() - q.ts, 0.0)
+        return {
+            "token": token_i,
+            "bid": q.bid,
+            "ask": q.ask,
+            "bid_qty": q.bid_qty,
+            "ask_qty": q.ask_qty,
+            "spread_pct": q.spread_pct,
+            "has_depth": q.has_depth,
+            "age_sec": round(age, 3),
         }
 
     def prime_option_quote(

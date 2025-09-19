@@ -3,6 +3,11 @@ from types import SimpleNamespace
 from src.data.source import LiveKiteSource, WARMUP_BARS
 
 
+class _Gate:
+    def should_emit(self, key: str, force: bool = False) -> bool:
+        return True
+
+
 def test_connect_subscribes_and_backfills(monkeypatch):
     calls = {}
 
@@ -21,7 +26,10 @@ def test_connect_subscribes_and_backfills(monkeypatch):
         calls["backfill"] = (required_bars, token, timeframe)
 
     monkeypatch.setattr(LiveKiteSource, "ensure_backfill", fake_backfill, raising=False)
-    settings_stub = SimpleNamespace(instruments=SimpleNamespace(spot_token=1, instrument_token=1))
+    settings_stub = SimpleNamespace(
+        instruments=SimpleNamespace(spot_token=1, instrument_token=1),
+        build_log_gate=lambda interval_s=None: _Gate(),
+    )
     monkeypatch.setattr("src.data.source.settings", settings_stub, raising=False)
 
     src.connect()
@@ -39,7 +47,10 @@ def test_connect_without_kite(monkeypatch):
 
     src = LiveKiteSource(kite=None)
     monkeypatch.setattr(LiveKiteSource, "ensure_backfill", fake_backfill, raising=False)
-    settings_stub = SimpleNamespace(instruments=SimpleNamespace(spot_token=2, instrument_token=2))
+    settings_stub = SimpleNamespace(
+        instruments=SimpleNamespace(spot_token=2, instrument_token=2),
+        build_log_gate=lambda interval_s=None: _Gate(),
+    )
     monkeypatch.setattr("src.data.source.settings", settings_stub, raising=False)
 
     src.connect()
