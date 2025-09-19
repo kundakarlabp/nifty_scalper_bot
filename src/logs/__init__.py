@@ -54,6 +54,7 @@ class StructuredLogger:
         payload = {"event": event, **self._defaults}
         for key, value in fields.items():
             payload[key] = _normalize(value)
+        _ensure_sections(payload)
         try:
             message = json.dumps(payload, sort_keys=True)
         except (TypeError, ValueError):  # pragma: no cover - double safety
@@ -63,3 +64,32 @@ class StructuredLogger:
 
 
 structured_log = StructuredLogger()
+
+
+def _ensure_sections(payload: MutableMapping[str, Any]) -> None:
+    """Ensure deploy log payloads expose expected nested keys."""
+
+    def _coerce_mapping(value: Any) -> dict[str, Any]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        if value is None:
+            return {}
+        return {"value": _normalize(value)}
+
+    def _apply(name: str, keys: Sequence[str]) -> None:
+        section = _coerce_mapping(payload.get(name))
+        for key in keys:
+            section.setdefault(key, None)
+        payload[name] = section
+
+    _apply(
+        "data",
+        (
+            "subscribe",
+            "tokens_resolved",
+            "tick_full",
+            "tick_ltp_only",
+        ),
+    )
+    _apply("signal", ("block_micro", "block_size"))
+    _apply("trade", ("ctx",))
