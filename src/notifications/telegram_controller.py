@@ -46,7 +46,9 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
     "/summary": "One-line performance summary",
     "/tick": "Latest L1 quote for ATM option",
     "/tpmult": "Get/Set take-profit ATR multiple",
-    "/trace": "Enable verbose trace logging",
+    "/diag": "Show recent trace diagnostics",
+    "/trace": "Inspect trace or enable tracing",
+    "/traceon": "Enable verbose trace logging",
     "/traceoff": "Disable trace logging",
     "/trend": "Adjust trend-mode TP/SL boosts",
     "/warmup": "Warm-up status (historical bootstrap)",
@@ -110,6 +112,21 @@ def _fmt_micro(
         f"depth={depth_ok if depth_ok is not None else 'N/A'} "
         f"last_bar_ts={last_bar_ts} lag_s={lag_s}"
     )
+
+
+def _format_trace_block(events: List[dict[str, Any]]) -> str:
+    """Serialize *events* as a Telegram-safe multi-line JSON code block."""
+
+    lines: list[str] = []
+    for event in events:
+        try:
+            lines.append(json.dumps(event, sort_keys=True, default=str))
+        except Exception:
+            lines.append(str(event))
+    block = "\n".join(lines)
+    if len(block) > 3500:
+        block = block[-3500:]
+    return block
 
 
 class TelegramController:
@@ -896,115 +913,22 @@ class TelegramController:
                     return self._send(f"Breaker {name} forced OPEN {secs}s")
                 return self._send("Unknown breaker name")
 
-        # DIAG – detailed status + last signal
+        # DIAG – ring buffer of trace events
         if cmd == "/diag":
             try:
-                status = self._status_provider() if self._status_provider else {}
-                plan = (
-                    self._last_signal_provider() if self._last_signal_provider else {}
+                try:
+                    limit = int(args[0]) if args else 10
+                except Exception:
+                    limit = 10
+                limit = max(1, min(100, limit))
+                events = checks.trace_tail(limit)
+                if not events:
+                    return self._send("No trace events recorded.")
+                block = _format_trace_block(events[-limit:])
+                return self._send(
+                    "```json\n" + block + "\n```",
+                    parse_mode="Markdown",
                 )
-                verbose = os.getenv("DIAG_VERBOSE", "true").lower() != "false"
-
-                def be(val: Any) -> str:
-                    return "✅" if val else "❌"
-
-                lines: List[str] = ["📊 Status"]
-                lines.append(f"• Market Open: {be(status.get('market_open'))}")
-                lines.append(f"• Within Window: {be(status.get('within_window'))}")
-                lines.append(f"• Daily DD Hit: {be(status.get('daily_dd_hit'))}")
-                lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
-                lines.append(f"• Trades Today: {status.get('trades_today')}")
-                lines.append(
-                    f"• Consecutive Losses: {status.get('consecutive_losses')}"
-                )
-                lines.append("")
-                lines.append("📈 Signal")
-                reason_block = plan.get("reason_block") or "-"
-                if verbose:
-                    micro = plan.get("micro", {})
-                    lines.append(
-                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
-                            a=plan.get("action"),
-                            o=plan.get("option_type"),
-                            s=plan.get("strike"),
-                            q=plan.get("qty_lots"),
-                        )
-                    )
-                    lines.append(f"• Expiry: {plan.get('expiry')}")
-                    lines.append(
-                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
-                            r=plan.get("regime"),
-                            sc=plan.get("score"),
-                            rr=plan.get("rr"),
-                        )
-                    )
-                    lines.append(
-                        "• ATR%: {a} | Spread%: {sp} | Depth OK: {d}".format(
-                            a=plan.get("atr_pct"),
-                            sp=micro.get("spread_pct"),
-                            d=be(micro.get("depth_ok")),
-                        )
-                    )
-                    lines.append(
-                        "• Entry: {e} | SL: {sl} | TP1: {tp1} | TP2: {tp2}".format(
-                            e=plan.get("entry"),
-                            sl=plan.get("sl"),
-                            tp1=plan.get("tp1"),
-                            tp2=plan.get("tp2"),
-                        )
-                    )
-                    lines.append(
-                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP1: {tp1} | Opt TP2: {tp2}".format(
-                            e=plan.get("opt_entry"),
-                            sl=plan.get("opt_sl"),
-                            tp1=plan.get("opt_tp1"),
-                            tp2=plan.get("opt_tp2"),
-                        )
-                    )
-                    lines.append(f"• Block: {reason_block}")
-                    reasons = plan.get("reasons") or []
-                    if reasons:
-                        lines.append("• Reasons:")
-                        for r in reasons[:4]:
-                            lines.append(f"  - {r}")
-                    else:
-                        lines.append("• Reasons: -")
-                    lines.append(f"• TS: {plan.get('ts')}")
-                    lines.append(f"• Eval Count: {plan.get('eval_count')}")
-                    lines.append(f"• Last Eval: {plan.get('last_eval_ts')}")
-                else:
-                    lines.append(
-                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
-                            a=plan.get("action"),
-                            o=plan.get("option_type"),
-                            s=plan.get("strike"),
-                            q=plan.get("qty_lots"),
-                        )
-                    )
-                    lines.append(f"• Expiry: {plan.get('expiry')}")
-                    lines.append(
-                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
-                            r=plan.get("regime"),
-                            sc=plan.get("score"),
-                            rr=plan.get("rr"),
-                        )
-                    )
-                    lines.append(
-                        "• Entry: {e} | SL: {sl} | TP2: {tp2}".format(
-                            e=plan.get("entry"),
-                            sl=plan.get("sl"),
-                            tp2=plan.get("tp2"),
-                        )
-                    )
-                    lines.append(
-                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP2: {tp2}".format(
-                            e=plan.get("opt_entry"),
-                            sl=plan.get("opt_sl"),
-                            tp2=plan.get("opt_tp2"),
-                        )
-                    )
-                    lines.append(f"• Block: {reason_block}")
-                return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
 
@@ -1399,15 +1323,49 @@ class TelegramController:
             except Exception as e:
                 return self._send(f"Quotes error: {e}")
 
-        if cmd == "/trace":
+        if cmd in ("/trace", "/traceon"):
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+            if cmd == "/traceon":
+                if not runner:
+                    return self._send("Runner unavailable.")
+                try:
+                    n = int(args[0]) if args else 5
+                except Exception:
+                    n = 5
+                runner.trace_ticks_remaining = max(1, min(50, n))
+                return self._send(f"Tracing next {runner.trace_ticks_remaining} evals.")
+            if args:
+                try:
+                    n = int(args[0])
+                except Exception:
+                    trace_id = args[0]
+                    events = checks.trace_for_id(trace_id)
+                    if not events:
+                        return self._send(f"No events recorded for trace {trace_id}.")
+                    limit = None
+                    if len(args) > 1:
+                        try:
+                            limit = int(args[1])
+                        except Exception:
+                            limit = None
+                    if limit is not None:
+                        limit = max(1, min(100, limit))
+                        events = events[-limit:]
+                    block = _format_trace_block(events)
+                    return self._send(
+                        "```json\n" + block + "\n```",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    if not runner:
+                        return self._send("Runner unavailable.")
+                    runner.trace_ticks_remaining = max(1, min(50, n))
+                    return self._send(
+                        f"Tracing next {runner.trace_ticks_remaining} evals."
+                    )
             if not runner:
                 return self._send("Runner unavailable.")
-            try:
-                n = int(args[0]) if args else 5
-            except Exception:
-                n = 5
-            runner.trace_ticks_remaining = max(1, min(50, n))
+            runner.trace_ticks_remaining = 5
             return self._send(f"Tracing next {runner.trace_ticks_remaining} evals.")
 
         if cmd == "/traceoff":

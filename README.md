@@ -169,7 +169,7 @@ Use the Telegram `/risk` command to inspect current limits.  Live trading is ena
 The Telegram bot is the primary control surface for day‑to‑day operations.  Run `/help` in the chat to see the live list straight from the handler.  For convenience the currently wired commands are mirrored below (and kept in sync by `tests/test_telegram_help.py`):
 
 ```
-/active /apihealth /atm /atrmin /atrp /audit /backtest /bars /cancel /cancel_all /cb /check /components /conf /config /depthmin /diag /emergency_stop /eventguard /events /expiry /filecheck /force_eval /fresh /greeks /hb /health /healthjson /help /l1 /lastplan /lasttrades /limits /logs /logtail /micro /microcap /micromode /minscore /mode /nextevent /orders /pause /plan /positions /probe /quotes /range /reconcile /reload /resume /risk /riskresettoday /router /score /selftest /shadow /sizer /slmult /smoketest /start /state /status /summary /tick /tpmult /trace /traceoff /trend /warmup /watch /why
+/active /apihealth /atm /atrmin /atrp /audit /backtest /bars /cancel /cancel_all /cb /check /components /conf /config /depthmin /diag /emergency_stop /eventguard /events /expiry /filecheck /force_eval /fresh /greeks /hb /health /healthjson /help /l1 /lastplan /lasttrades /limits /logs /logtail /micro /microcap /micromode /minscore /mode /nextevent /orders /pause /plan /positions /probe /quotes /range /reconcile /reload /resume /risk /riskresettoday /router /score /selftest /shadow /sizer /slmult /smoketest /start /state /status /summary /tick /tpmult /trace /traceoff /traceon /trend /warmup /watch /why
 ```
 
 The most common actions are pausing/resuming the runner during maintenance windows, checking `/status` for a quick health readout and inspecting `/risk` or `/limits` when tweaking exposure.

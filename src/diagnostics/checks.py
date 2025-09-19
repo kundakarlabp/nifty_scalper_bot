@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from typing import Any, Deque, Dict, List
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,6 +20,65 @@ from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 
 # Indian Standard Time is the canonical timezone for bot diagnostics.
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _trace_capacity() -> int:
+    size = getattr(settings, "diag_ring_size", 4000)
+    try:
+        value = int(size)
+    except (TypeError, ValueError):
+        return 4000
+    return max(1, value)
+
+
+def _trace_enabled() -> bool:
+    flag = getattr(settings, "diag_trace_events", False)
+    return bool(flag)
+
+
+_TRACE_EVENTS: Deque[Dict[str, Any]] = deque(maxlen=_trace_capacity())
+
+
+def record_trace_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Append *event* to the diagnostics trace ring buffer.
+
+    A shallow copy is stored to avoid accidental external mutation.  The
+    current UTC timestamp is injected when missing so consumers always receive
+    a ``ts`` field even if the producer omits it.
+    """
+
+    if not _trace_enabled():
+        return event
+    payload = dict(event)
+    payload.setdefault("ts", datetime.now(timezone.utc).isoformat())
+    _TRACE_EVENTS.append(payload)
+    return payload
+
+
+def trace_tail(limit: int | None = None) -> List[Dict[str, Any]]:
+    """Return the newest ``limit`` diagnostic trace events."""
+
+    items = list(_TRACE_EVENTS)
+    if limit is None or limit >= len(items):
+        return items
+    if limit <= 0:
+        return []
+    return items[-limit:]
+
+
+def trace_for_id(trace_id: str) -> List[Dict[str, Any]]:
+    """Return all events associated with *trace_id* in chronological order."""
+
+    needle = str(trace_id)
+    if not needle:
+        return []
+    return [event for event in _TRACE_EVENTS if str(event.get("trace_id")) == needle]
+
+
+def clear_traces() -> None:
+    """Remove all stored diagnostic trace events."""
+
+    _TRACE_EVENTS.clear()
 
 
 def _as_aware_ist(ts: Any) -> pd.Timestamp:

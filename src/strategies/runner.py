@@ -37,6 +37,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
+from src.diagnostics import checks
 from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -730,6 +731,64 @@ class StrategyRunner:
             self._last_diag_emit_ts = now
             self._emit_diag(plan)
 
+    def _log_decisive_event(
+        self,
+        *,
+        stage: str,
+        decision: str,
+        reason_codes: Iterable[str] | None = None,
+        plan: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Log a structured DECISION event and record it in the trace buffer."""
+
+        plan_data = dict(plan or {})
+        micro = plan_data.get("micro") or {}
+        payload: Dict[str, Any] = {
+            "stage": stage,
+            "decision": decision,
+            "reason_codes": list(reason_codes or []),
+            "reason_block": plan_data.get("reason_block"),
+            "reasons": list(plan_data.get("reasons") or []),
+            "action": plan_data.get("action"),
+            "option_type": plan_data.get("option_type"),
+            "qty_lots": plan_data.get("qty_lots"),
+            "symbol": plan_data.get("symbol"),
+            "atr_pct": plan_data.get("atr_pct"),
+            "atr_pct_raw": plan_data.get("atr_pct_raw"),
+            "rr": plan_data.get("rr"),
+            "entry": plan_data.get("entry"),
+            "sl": plan_data.get("sl"),
+            "tp1": plan_data.get("tp1"),
+            "tp2": plan_data.get("tp2"),
+            "spread_pct": micro.get("spread_pct"),
+            "depth_ok": micro.get("depth_ok"),
+            "stage_metrics": dict(metrics or {}),
+            "eval_count": getattr(self, "eval_count", None),
+            "last_eval_ts": getattr(self, "last_eval_ts", None),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        trace_id = plan_data.get("trace_id")
+        if trace_id:
+            payload["trace_id"] = trace_id
+        signal_id = plan_data.get("signal_id")
+        if signal_id is not None:
+            payload["signal_id"] = signal_id
+
+        def _json_default(value: Any) -> Any:
+            if isinstance(value, Decimal):
+                return float(value)
+            if isinstance(value, datetime):
+                return value.isoformat()
+            return str(value)
+
+        text = json.dumps(payload, sort_keys=True, default=_json_default)
+        self.log.info("DECISION %s", text)
+
+        event = dict(payload)
+        event.setdefault("event", "DECISION")
+        checks.record_trace_event(event)
+
     def _shadow_blockers(self, plan: Dict[str, Any]) -> list[str]:
         """Non-fatal conditions that would block if score passed."""
 
@@ -1084,7 +1143,7 @@ class StrategyRunner:
             self._last_hb_ts = now
 
     # ---------------- main loop entry ----------------
-    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
+    def _process_tick_core(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
@@ -2214,6 +2273,48 @@ class StrategyRunner:
                     p.get("reasons"),
                 )
                 self.trace_ticks_remaining -= 1
+
+    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:  # type: ignore[override]
+        """Wrapper that logs decisive events after each evaluation."""
+
+        flow_before = dict(getattr(self, "_last_flow_debug", {}))
+        try:
+            self._process_tick_core(tick)
+        except Exception as exc:
+            plan = self.last_plan or flow_before.get("plan") or {}
+            self._log_decisive_event(
+                stage="exception",
+                decision="error",
+                reason_codes=[exc.__class__.__name__],
+                plan=plan,
+                metrics={"error": str(exc)},
+            )
+            raise
+
+        flow = getattr(self, "_last_flow_debug", {})
+        plan = self.last_plan or flow.get("plan") or {}
+        reason = flow.get("reason_block")
+        decision = "blocked" if reason else "ok"
+        reason_codes: list[str] = []
+        if reason:
+            reason_codes.append(str(reason))
+        metrics: Dict[str, Any] = {}
+        if isinstance(flow.get("risk_gates"), dict):
+            metrics["risk_gates"] = flow["risk_gates"]
+        if isinstance(flow.get("sizing"), dict):
+            metrics["sizing"] = flow["sizing"]
+        micro = plan.get("micro") if isinstance(plan, dict) else None
+        if isinstance(micro, dict):
+            metrics["micro"] = micro
+        stage = flow.get("stage") or ("execution" if decision == "ok" else "guard")
+        self._log_decisive_event(
+            stage=stage,
+            decision=decision,
+            reason_codes=reason_codes,
+            plan=plan if isinstance(plan, Mapping) else {},
+            metrics=metrics,
+        )
+        return None
 
     # one-shot tick used by Telegram
     def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:

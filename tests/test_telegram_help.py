@@ -85,6 +85,7 @@ EXPECTED_COMMANDS = {
     "/tick",
     "/tpmult",
     "/trace",
+    "/traceon",
     "/traceoff",
     "/trend",
     "/warmup",
