@@ -1951,6 +1951,29 @@ class _SettingsProxy:
     def __getattr__(self, item: str):  # pragma: no cover - passthrough
         return getattr(self._load(), item)
 
+    def build_log_gate(self, interval_s: float | None = None):
+        """Return a ``LogGate`` instance honouring optional overrides."""
+
+        from src.utils.log_gate import LogGate
+
+        cfg = self._load()
+        base = interval_s
+        if base is None:
+            raw = getattr(cfg, "log_gate_interval_s", None)
+            if raw is None:
+                env_val = os.getenv("LOG_GATE_INTERVAL_S")
+                if env_val:
+                    try:
+                        raw = float(env_val)
+                    except ValueError:  # pragma: no cover - defensive
+                        raw = None
+            base = raw if raw is not None else 1.0
+        try:
+            interval = float(base)
+        except Exception:  # pragma: no cover - defensive
+            interval = 1.0
+        return LogGate(interval_s=interval)
+
 
 # Public singleton used by the rest of the application
 settings = _SettingsProxy()
