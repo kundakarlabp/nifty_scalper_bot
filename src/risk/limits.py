@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 from src.config import settings
+from src.logs import structured_log
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
 logger = logging.getLogger(__name__)
@@ -312,15 +313,58 @@ class RiskEngine:
         if dynamic_loss_cap is not None:
             details["dynamic_loss_cap"] = round(dynamic_loss_cap, 2)
 
+        summary_keys = [
+            "lot_cap",
+            "lot_cap_source",
+            "delta_cap",
+            "delta_cap_source",
+            "var_estimate",
+            "cvar_estimate",
+            "R_rupees_est",
+            "dynamic_loss_cap",
+            "allow_min_one_lot",
+        ]
+
+        def _summary_from_details() -> Dict[str, Any]:
+            return {
+                key: details[key]
+                for key in summary_keys
+                if key in details
+            }
+
+        def _block_payload(reason: str, detail: Dict[str, Any]) -> Dict[str, Any]:
+            payload = {
+                "reason": reason,
+                "details": detail,
+                "symbol": intended_symbol,
+                "intended_lots": int(intended_lots),
+                "current_lots": int(
+                    exposure.lots_by_symbol.get(intended_symbol, 0)
+                ),
+                "equity_rupees": float(equity_rupees),
+                "regime": regime or None,
+            }
+            summary = _summary_from_details()
+            if summary:
+                payload["summary"] = summary
+            return payload
+
+        def _emit_block(reason: str, detail: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+            structured_log.event("risk_block", **_block_payload(reason, detail))
+            return False, reason, detail
+
+        def _emit_block_obj(reason: str, detail: Dict[str, Any]) -> Block:
+            structured_log.event("risk_block", **_block_payload(reason, detail))
+            return Block(reason=reason, details=detail)
+
         if self.state.cooloff_until and now < self.state.cooloff_until:
-            return (
-                False,
+            return _emit_block(
                 "loss_cooloff",
                 {"until": self.state.cooloff_until.isoformat()},
             )
 
         if self.state.skip_next_open_date == now.date().isoformat():
-            return False, "skip_next_open", {}
+            return _emit_block("skip_next_open", {})
 
         if self.state.cum_R_today <= -self.cfg.max_daily_dd_R:
             sd = self.state.session_date or ""
@@ -334,8 +378,7 @@ class RiskEngine:
                 self.state.skip_next_open_date = (
                     now.date() + timedelta(days=1)
                 ).isoformat()
-            return (
-                False,
+            return _emit_block(
                 "daily_dd_hit",
                 {"cum_R_today": round(self.state.cum_R_today, 2)},
             )
@@ -346,8 +389,7 @@ class RiskEngine:
             loss_threshold = -abs(dynamic_loss_cap)
             loss_reason = "volatility_loss_cap"
         if self.state.cum_loss_rupees <= loss_threshold:
-            return (
-                False,
+            return _emit_block(
                 loss_reason,
                 {
                     "cum_loss_rupees": round(self.state.cum_loss_rupees, 2),
@@ -361,8 +403,7 @@ class RiskEngine:
             details["var_estimate"] = round(var_metrics["var"], 2)
             details["cvar_estimate"] = round(var_metrics["cvar"], 2)
             if var_threshold is not None and var_metrics["var"] >= var_threshold:
-                return (
-                    False,
+                return _emit_block(
                     "var_limit",
                     {
                         "estimate": round(var_metrics["var"], 2),
@@ -370,8 +411,7 @@ class RiskEngine:
                     },
                 )
             if cvar_threshold is not None and var_metrics["cvar"] >= cvar_threshold:
-                return (
-                    False,
+                return _emit_block(
                     "cvar_limit",
                     {
                         "estimate": round(var_metrics["cvar"], 2),
@@ -380,8 +420,7 @@ class RiskEngine:
                 )
 
         if self.state.trades_today >= self.cfg.max_trades_per_session:
-            return (
-                False,
+            return _emit_block(
                 "max_trades_session",
                 {"trades_today": self.state.trades_today},
             )
@@ -390,8 +429,7 @@ class RiskEngine:
         if cutoff_cfg and cutoff_cfg.lower() != "none":
             cutoff = datetime.strptime(cutoff_cfg, "%H:%M").time()
             if now.time() >= cutoff:
-                return (
-                    False,
+                return _emit_block(
                     "session_closed",
                     {
                         "cutoff": cutoff_cfg,
@@ -404,15 +442,13 @@ class RiskEngine:
         details["lot_cap"] = lot_cap
         details["lot_cap_source"] = lot_source
         if lot_cap <= 0:
-            return (
-                False,
+            return _emit_block(
                 "lot_cap",
                 {"sym": intended_symbol, "lots": current_lots, "cap": lot_cap},
             )
         if current_lots >= lot_cap:
             reason = "max_lots_symbol" if lot_source == "global" else "lot_cap"
-            return (
-                False,
+            return _emit_block(
                 reason,
                 {
                     "sym": intended_symbol,
@@ -522,7 +558,7 @@ class RiskEngine:
                     reasons = plan.setdefault("reasons", [])
                     if cap_msg not in reasons:
                         reasons.append(cap_msg)
-                    return Block(reason="cap_lt_one_lot", details=meta)
+                    return _emit_block_obj("cap_lt_one_lot", meta)
             plan["qty_lots"] = int(lots)
             if allow_min_override:
                 reasons = plan.setdefault("reasons", [])
@@ -533,8 +569,7 @@ class RiskEngine:
             unit_notional = spot_price * lot_size
 
         if current_lots + intended_lots > lot_cap:
-            return (
-                False,
+            return _emit_block(
                 "lot_cap" if lot_source != "global" else "max_lots_symbol",
                 {
                     "sym": intended_symbol,
@@ -555,8 +590,7 @@ class RiskEngine:
                 intended_lots,
                 exposure_cap,
             )
-            return (
-                False,
+            return _emit_block(
                 "max_notional",
                 {
                     "cur": exposure.notional_rupees,
@@ -567,8 +601,7 @@ class RiskEngine:
         gmode = gamma_mode if gamma_mode is not None else self._is_gamma_mode(now)
 
         if gmode and intended_lots > self.cfg.max_gamma_mode_lots:
-            return (
-                False,
+            return _emit_block(
                 "gamma_mode_lot_cap",
                 {
                     "intended": intended_lots,
@@ -581,14 +614,12 @@ class RiskEngine:
         if cap_source:
             details["delta_cap_source"] = cap_source
         if cap <= 0:
-            return (
-                False,
+            return _emit_block(
                 "delta_cap",
                 {"cap": cap, "source": cap_source or "config"},
             )
         if portfolio_delta_units is not None and abs(portfolio_delta_units) > cap:
-            return (
-                False,
+            return _emit_block(
                 "delta_cap",
                 {
                     "portfolio_delta_units": round(portfolio_delta_units, 1),
@@ -598,8 +629,7 @@ class RiskEngine:
             )
         if planned_delta_units is not None and portfolio_delta_units is not None:
             if abs(portfolio_delta_units + planned_delta_units) > cap:
-                return (
-                    False,
+                return _emit_block(
                     "delta_cap_on_add",
                     {
                         "would_be": round(
@@ -617,8 +647,7 @@ class RiskEngine:
                 self.state.cooloff_until = now + timedelta(
                     minutes=self.cfg.roll10_pause_minutes
                 )
-                return (
-                    False,
+                return _emit_block(
                     "roll10_down",
                     {
                         "avg10R": round(avg10, 3),
@@ -628,8 +657,7 @@ class RiskEngine:
 
         if self.state.consecutive_losses >= self.cfg.max_consec_losses:
             self.state.cooloff_until = now + timedelta(minutes=self.cfg.cooloff_minutes)
-            return (
-                False,
+            return _emit_block(
                 "loss_cooloff",
                 {"until": self.state.cooloff_until.isoformat()},
             )
@@ -640,6 +668,18 @@ class RiskEngine:
             details["R_rupees_est"] = round(r_rupees, 2)
         if allow_min_override:
             details["allow_min_one_lot"] = True
+
+        event_summary = _summary_from_details()
+        structured_log.event(
+            "pretrade_limits",
+            status="ok",
+            symbol=intended_symbol,
+            intended_lots=int(intended_lots),
+            current_lots=int(exposure.lots_by_symbol.get(intended_symbol, 0)),
+            equity_rupees=float(equity_rupees),
+            regime=regime or None,
+            summary=event_summary,
+        )
 
         return True, "", details
 
