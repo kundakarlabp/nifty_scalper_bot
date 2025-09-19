@@ -668,6 +668,9 @@ class StrategyRunner:
         self.hb_enabled: bool = True
         self._gate = _LogGate()
         self._prev_score_bucket: str | None = None
+        self._last_regime: Optional[str] = None
+        self._last_atr_state: Optional[str] = None
+        self._last_confidence_zone: Optional[str] = None
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -800,6 +803,129 @@ class StrategyRunner:
                 extra={"score": round(score_f, 3), "bucket": bucket},
             )
         self._prev_score_bucket = bucket
+
+    def _log_regime_state(self, plan: Mapping[str, Any]) -> None:
+        regime = plan.get("regime")
+        if not regime:
+            return
+        regime_str = str(regime)
+        if self._last_regime == regime_str:
+            return
+        extras: dict[str, Any] = {"regime": regime_str}
+        if self._last_regime is not None:
+            extras["prev_regime"] = self._last_regime
+        self.log.info("state.regime_change", extra=extras)
+        self._last_regime = regime_str
+
+    def _log_atr_band_state(self, plan: Mapping[str, Any]) -> None:
+        def _coerce(value: Any) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        atr_raw = _coerce(plan.get("atr_pct_raw"))
+        atr_value = atr_raw if atr_raw is not None else _coerce(plan.get("atr_pct"))
+        if atr_value is None:
+            return
+
+        band = plan.get("atr_band")
+        min_val = _coerce(plan.get("atr_min"))
+        max_val = _coerce(plan.get("atr_max"))
+        if isinstance(band, (list, tuple)) and band:
+            if min_val is None and len(band) > 0:
+                min_val = _coerce(band[0])
+            if max_val is None and len(band) > 1:
+                max_val = _coerce(band[1])
+
+        state = "in_band"
+        if min_val is not None and atr_value < min_val:
+            state = "below_band"
+
+        effective_max = max_val
+        if effective_max is not None and effective_max <= 0:
+            effective_max = None
+        if effective_max is not None and atr_value > effective_max:
+            state = "above_band"
+
+        if state == self._last_atr_state:
+            return
+
+        extras: dict[str, Any] = {
+            "state": state,
+            "atr_pct": round(atr_value, 4),
+            "min": min_val,
+            "max": effective_max,
+        }
+        if self._last_atr_state is not None:
+            extras["prev_state"] = self._last_atr_state
+        self.log.info("state.atr_band", extra=extras)
+        self._last_atr_state = state
+
+    def _log_confidence_state(self, plan: Mapping[str, Any]) -> None:
+        def _coerce(value: Any) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        confidence = _coerce(plan.get("confidence"))
+        if confidence is None:
+            score_val = _coerce(plan.get("score"))
+            confidence = score_val / 10.0 if score_val is not None else None
+        if confidence is None:
+            return
+
+        strict_raw = _coerce(getattr(self.strategy_cfg, "confidence_threshold", None))
+        if strict_raw is None:
+            strict_raw = _coerce(getattr(settings.strategy, "confidence_threshold", None))
+        relaxed_raw = _coerce(
+            getattr(self.strategy_cfg, "confidence_threshold_relaxed", None)
+        )
+        if relaxed_raw is None:
+            relaxed_raw = _coerce(
+                getattr(settings.strategy, "confidence_threshold_relaxed", None)
+            )
+
+        if strict_raw is None and relaxed_raw is None:
+            return
+
+        base_raw = strict_raw if strict_raw is not None else relaxed_raw
+        if base_raw is None:
+            return
+
+        strict = (strict_raw if strict_raw is not None else base_raw) / 10.0
+        relaxed = (
+            (relaxed_raw / 10.0)
+            if relaxed_raw is not None
+            else strict
+        )
+        if relaxed > strict:
+            relaxed = strict
+
+        zone = "below"
+        if confidence >= strict:
+            zone = "strict"
+        elif confidence >= relaxed:
+            zone = "relaxed"
+
+        if zone == self._last_confidence_zone:
+            return
+
+        extras: dict[str, Any] = {
+            "zone": zone,
+            "confidence": round(confidence, 3),
+            "strict_threshold": round(strict, 3),
+            "relaxed_threshold": round(relaxed, 3),
+        }
+        if self._last_confidence_zone is not None:
+            extras["prev_zone"] = self._last_confidence_zone
+        self.log.info("state.confidence_zone", extra=extras)
+        self._last_confidence_zone = zone
 
     @staticmethod
     def _score_bucket_label(score: float) -> str:
@@ -1401,6 +1527,8 @@ class StrategyRunner:
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
+            self._log_regime_state(plan)
+            self._log_atr_band_state(plan)
             if not ok:
                 if reason and reason not in plan["reasons"]:
                     plan["reasons"].append(reason)
@@ -2157,6 +2285,7 @@ class StrategyRunner:
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
             self._log_score_state(score_val)
+            self._log_confidence_state(plan)
             min_score = self._min_score_threshold()
             if score_val < min_score and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"

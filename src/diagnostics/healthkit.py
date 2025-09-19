@@ -4,9 +4,12 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.config import settings
+
+if TYPE_CHECKING:
+    from src.strategies.runner import StrategyRunner
 
 
 @dataclass
@@ -193,3 +196,48 @@ def snapshot_pipeline() -> Dict[str, Any]:
     snapshot["latency"]["bar_lag"] = bar_lag
 
     return snapshot
+
+
+def trace_active() -> bool:
+    """Return ``True`` when trace logging should emit at INFO level."""
+
+    runner_cls: type["StrategyRunner"] | None
+    try:
+        from src.strategies.runner import StrategyRunner as _StrategyRunner
+    except Exception:  # pragma: no cover - defensive import guard
+        runner_cls = None
+    else:
+        runner_cls = _StrategyRunner
+
+    runner: Optional["StrategyRunner"]
+    if runner_cls is None:
+        runner = None
+    else:
+        try:
+            runner = runner_cls.get_singleton()
+        except Exception:  # pragma: no cover - defensive
+            runner = None
+
+    if runner is None:
+        return False
+
+    if getattr(runner, "trace_ticks_remaining", 0) > 0:
+        return True
+
+    controller = getattr(runner, "telegram_controller", None)
+    checker = getattr(controller, "_window_active", None)
+    if callable(checker):
+        try:
+            if checker("trace"):
+                return True
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    runner_checker = getattr(runner, "_window_active", None)
+    if callable(runner_checker):
+        try:
+            return bool(runner_checker("trace"))
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    return False

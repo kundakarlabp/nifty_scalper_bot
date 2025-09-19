@@ -360,10 +360,16 @@ def main() -> int:
             metrics.set_queue_depth(qd)
             flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
             if isinstance(flow, dict):
-                if flow.get("signal_ok"):
-                    log.info("Signal generated: %s", flow.get("signal"))
+                plan_payload = flow.get("plan") or flow.get("signal")
+                reason = flow.get("reason_block")
+                if flow.get("signal_ok") and plan_payload and not reason:
+                    log.info("Signal generated: %s", plan_payload)
+                elif flow.get("signal_ok"):
+                    log.debug(
+                        "Signal candidate blocked: %s plan=%s", reason, plan_payload
+                    )
                 else:
-                    log.debug("No signal generated: %s", flow.get("reason_block"))
+                    log.debug("No signal generated: %s", reason)
             runner.health_check()
             now = time.time()
             if (now - last_hb) >= 15 * 60:
