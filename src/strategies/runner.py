@@ -96,6 +96,7 @@ except Exception:  # pragma: no cover - defensive import guard
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # =========================== Cadence controller ============================
 
@@ -365,6 +366,7 @@ class StrategyRunner:
         strategy_cfg_path: str | None = None,
     ) -> None:
         self.log = logging.getLogger(self.__class__.__name__)
+        self.log.setLevel(logging.DEBUG)
         self.kite = kite
 
         if telegram_controller is None:
@@ -814,7 +816,7 @@ class StrategyRunner:
         extras: dict[str, Any] = {"regime": regime_str}
         if self._last_regime is not None:
             extras["prev_regime"] = self._last_regime
-        self.log.info("state.regime_change", extra=extras)
+        self.log.debug("state.regime_change", extra=extras)
         self._last_regime = regime_str
 
     def _log_atr_band_state(self, plan: Mapping[str, Any]) -> None:
@@ -861,7 +863,7 @@ class StrategyRunner:
         }
         if self._last_atr_state is not None:
             extras["prev_state"] = self._last_atr_state
-        self.log.info("state.atr_band", extra=extras)
+        self.log.debug("state.atr_band", extra=extras)
         self._last_atr_state = state
 
     def _log_confidence_state(self, plan: Mapping[str, Any]) -> None:
@@ -924,7 +926,7 @@ class StrategyRunner:
         }
         if self._last_confidence_zone is not None:
             extras["prev_zone"] = self._last_confidence_zone
-        self.log.info("state.confidence_zone", extra=extras)
+        self.log.debug("state.confidence_zone", extra=extras)
         self._last_confidence_zone = zone
 
     @staticmethod
@@ -1061,10 +1063,10 @@ class StrategyRunner:
 
         needed_tokens: list[int] = [int(t) for t in (ce_token, pe_token) if t]
         if not needed_tokens:
-            logger.info("quote_prime_fail", {"err": "tokens_missing"})
+            logger.debug("quote_prime_fail", {"err": "tokens_missing"})
             return False, "tokens_missing", []
         if broker is None:
-            logger.info("quote_prime_fail", {"err": "broker_missing"})
+            logger.debug("quote_prime_fail", {"err": "broker_missing"})
             return False, "broker_missing", needed_tokens
 
         quotes: Any | None = None
@@ -1094,13 +1096,13 @@ class StrategyRunner:
 
         if not quotes:
             err_msg = ";".join(err for err in errors if err) or "quote_unavailable"
-            logger.info("quote_prime_fail", {"err": err_msg})
+            logger.debug("quote_prime_fail", {"err": err_msg})
             return False, err_msg, needed_tokens
 
         missing_tokens = self._detect_missing_tokens(needed_tokens, quotes)
         if missing_tokens:
             err_msg = f"missing:{','.join(str(tok) for tok in missing_tokens)}"
-            logger.info("quote_prime_fail", {"err": err_msg})
+            logger.debug("quote_prime_fail", {"err": err_msg})
             return False, err_msg, needed_tokens
 
         logger.debug("quote_prime_ok", {"n": len(needed_tokens)})
@@ -1753,7 +1755,7 @@ class StrategyRunner:
                 except (TypeError, ValueError):
                     plan["token"] = None
 
-            logger.info(
+            logger.debug(
                 "picked option: type=%s ce=%s pe=%s chosen=%s",
                 option_type,
                 ce_token,
@@ -2103,7 +2105,7 @@ class StrategyRunner:
                 )
                 extras = dict(micro_guard)
                 extras["token"] = plan_token
-                self.log.info("signal.block_micro", extra=extras)
+                self.log.debug("signal.block_micro", extra=extras)
                 reasons = plan.setdefault("reasons", [])
                 if reason_micro and reason_micro not in reasons:
                     reasons.append(reason_micro)
@@ -2145,7 +2147,7 @@ class StrategyRunner:
             }
             diagnostics.log_trade_context(self.log, size_ctx)
             if qty <= 0:
-                self.log.info("signal.block_size", extra=size_ctx)
+                self.log.debug("signal.block_size", extra=size_ctx)
                 existing_reason = plan.get("reason_block")
                 reason = (
                     existing_reason

@@ -9,6 +9,7 @@ import re
 import statistics as stats
 import threading
 import time
+from collections import deque
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -1740,11 +1741,13 @@ class TelegramController:
             if not self._logs_provider:
                 return self._send("Logs provider not wired.")
             try:
-                n = int(args[0]) if args else 30
-                lines = self._logs_provider(max(5, min(200, n))) or []
-                if not lines:
+                n = int(args[0]) if args else 20
+                limit = max(5, min(200, n))
+                lines = self._logs_provider(limit) or []
+                window = deque(lines, maxlen=limit)
+                if not window:
                     return self._send("No logs available.")
-                block = "\n".join(lines[-n:])
+                block = "\n".join(window)
                 if len(block) > 3500:
                     block = block[-3500:]
                 return self._send("```text\n" + block + "\n```", parse_mode="Markdown")

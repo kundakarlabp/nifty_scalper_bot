@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
 
@@ -151,7 +152,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         risk_provider=getattr(runner, "risk_snapshot", None),
         limits_provider=_safe_limits_snapshot,
         risk_reset_today=getattr(runner, "risk_reset_today", None),
-        logs_provider=get_recent_logs,
+        logs_provider=partial(get_recent_logs, min_level=logging.DEBUG),
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
         bars_provider=getattr(runner, "get_recent_bars", None),
         quotes_provider=getattr(runner.executor, "quote_diagnostics", None),
@@ -339,6 +340,10 @@ def main() -> int:
         return 1
 
     last_hb = time.time()
+    periodic_logs_enabled = bool(getattr(settings, "TELEGRAM__PERIODIC_LOGS", False))
+    periodic_interval = 300.0
+    last_periodic_log_ts = 0.0
+
     try:
         while not _stop_flag:
             start_ts = time.perf_counter()
@@ -387,6 +392,29 @@ def main() -> int:
                 except Exception as e:
                     log.debug("Heartbeat telegram failed: %s", e, exc_info=True)
                 last_hb = now
+
+            if periodic_logs_enabled and settings.telegram.enabled:
+                if (now - last_periodic_log_ts) >= periodic_interval:
+                    try:
+                        lines = get_recent_logs(20, min_level=logging.DEBUG)
+                    except Exception as exc:
+                        log.debug("Periodic log fetch failed: %s", exc, exc_info=True)
+                        last_periodic_log_ts = now
+                    else:
+                        if lines:
+                            block = "\n".join(lines[-20:])
+                            if len(block) > 3500:
+                                block = block[-3500:]
+                            try:
+                                runner.telegram_controller.send_message(
+                                    "```text\n" + block + "\n```",
+                                    parse_mode="Markdown",
+                                )
+                            except Exception as exc:
+                                log.debug(
+                                    "Periodic log push failed: %s", exc, exc_info=True
+                                )
+                        last_periodic_log_ts = now
             time.sleep(5)
     finally:
         try:

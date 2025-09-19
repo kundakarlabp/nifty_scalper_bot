@@ -1893,6 +1893,14 @@ def _apply_env_overrides(cfg: AppSettings) -> None:
     )
     object.__setattr__(
         cfg,
+        "TELEGRAM__PERIODIC_LOGS",
+        _bool_env(
+            "TELEGRAM__PERIODIC_LOGS",
+            bool(getattr(cfg, "TELEGRAM__PERIODIC_LOGS", False)),
+        ),
+    )
+    object.__setattr__(
+        cfg,
         "DIAG_INTERVAL_SECONDS",
         _int_env("DIAG_INTERVAL_SECONDS", cfg.diag_interval_seconds),
     )
