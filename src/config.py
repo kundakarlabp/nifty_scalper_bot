@@ -663,10 +663,10 @@ class RiskSettings(BaseModel):
     )
     premium_cap_per_trade: float = 10000.0
     allow_min_one_lot: bool = Field(
-        True,
+        False,
         description=(
             "Permit one-lot trades when the equity-funded premium exceeds the "
-            "exposure cap by itself."
+            "exposure cap by itself. Disabled by default."
         ),
         validation_alias=AliasChoices(
             "RISK__ALLOW_MIN_ONE_LOT",
