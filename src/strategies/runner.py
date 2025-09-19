@@ -37,6 +37,7 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
+from src import diagnostics
 from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -53,6 +54,7 @@ from src.risk.greeks import (  # noqa: F401
     estimate_greeks_from_mid,
     next_weekly_expiry_ist,
 )
+from src.risk import limits
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
 from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
@@ -468,6 +470,7 @@ class StrategyRunner:
         except Exception:
             pass
         self.data_source = self.components.data_provider
+        self.source = self.components.data_provider
         if hasattr(self.data_source, "connect"):
             try:
                 self.data_source.connect()
@@ -1885,6 +1888,41 @@ class StrategyRunner:
                 self.last_plan = plan
                 return
 
+            plan_token = plan_token or plan.get("token") or plan.get("option_token")
+            micro_guard: Dict[str, Any] = {}
+            micro_ok = True
+            if plan_token is not None:
+                try:
+                    micro_ok, micro_guard = limits.pretrade_micro_checks(
+                        getattr(self, "source", None),
+                        plan_token,
+                        self.settings,
+                    )
+                except Exception:
+                    micro_ok = True
+                    micro_guard = {}
+                    self.log.debug("pretrade_micro_checks failed", exc_info=True)
+            else:
+                micro_guard = {"reason": "no_token"}
+            flow["pretrade_micro"] = micro_guard
+            if not micro_ok:
+                reason_micro = (
+                    micro_guard.get("reason")
+                    or micro_guard.get("block_reason")
+                    or "micro"
+                )
+                extras = dict(micro_guard)
+                extras["token"] = plan_token
+                self.log.info("signal.block_micro", extra=extras)
+                reasons = plan.setdefault("reasons", [])
+                if reason_micro and reason_micro not in reasons:
+                    reasons.append(reason_micro)
+                plan["reason_block"] = plan.get("reason_block") or reason_micro
+                flow["reason_block"] = plan["reason_block"]
+                self._last_flow_debug = flow
+                self._record_plan(plan)
+                return
+
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
                 entry=float(plan.get("entry")),
@@ -1906,9 +1944,25 @@ class StrategyRunner:
             )
             flow["trades_today"] = self.risk.trades_today
             flow["consecutive_losses"] = self.risk.consecutive_losses
+            size_ctx = {
+                "token": plan_token,
+                "entry_price": float(entry or 0.0),
+                "lot_size": lot_size,
+                "cap_info": diag.get("cap_info"),
+                "micro": micro_guard,
+                "reason": diag.get("reason")
+                or ("ok" if qty > 0 else block_reason or "qty_zero"),
+            }
+            diagnostics.log_trade_context(self.log, size_ctx)
             if qty <= 0:
+                self.log.info("signal.block_size", extra=size_ctx)
                 existing_reason = plan.get("reason_block")
-                reason = existing_reason or block_reason or "qty_zero"
+                reason = (
+                    existing_reason
+                    or size_ctx.get("reason")
+                    or block_reason
+                    or "qty_zero"
+                )
                 if not existing_reason:
                     plan["reason_block"] = reason
                 reasons = plan.setdefault("reasons", [])
@@ -2540,6 +2594,17 @@ class StrategyRunner:
         diag_aug["sl_points"] = round(sl_points_entry, 4)
         diag_aug["entry"] = round(entry_f, 4)
         diag_aug["stop"] = round(stop_f, 4)
+        diag_aug["cap_info"] = {
+            "cap": diag_aug.get("cap"),
+            "cap_abs": diag_aug.get("cap_abs"),
+            "unit_notional": diag_aug.get("unit_notional"),
+            "max_lots_exposure": diag_aug.get("max_lots_exposure"),
+            "max_lots_risk": diag_aug.get("max_lots_risk"),
+            "min_equity_needed": diag_aug.get("min_equity_needed"),
+        }
+        diag_aug["reason"] = (
+            "ok" if int(qty) > 0 else diag_aug.get("block_reason") or "qty_zero"
+        )
         return int(qty), diag_aug
 
     def _on_trade_closed(self, pnl: float) -> None:

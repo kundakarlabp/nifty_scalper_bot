@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 from src.config import settings
@@ -739,3 +739,101 @@ class RiskEngine:
             snapshot["var_estimate"] = round(metrics["var"], 2)
             snapshot["cvar_estimate"] = round(metrics["cvar"], 2)
         return snapshot
+
+
+def pretrade_micro_checks(
+    source: Any,
+    token: Any,
+    cfg: Any,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Ensure a fresh quote is available before sizing and execution."""
+
+    info: Dict[str, Any] = {"reason": "ok"}
+
+    if token in (None, ""):
+        info["reason"] = "no_token"
+        info["block_reason"] = "no_token"
+        return False, info
+
+    if source is None:
+        info["source"] = "missing"
+        return True, info
+
+    ensure_subscribe = getattr(source, "ensure_token_subscribed", None)
+    if callable(ensure_subscribe):
+        try:
+            ensure_subscribe(token)
+        except Exception:  # pragma: no cover - defensive logging guard
+            logger.debug(
+                "pretrade_micro_checks ensure_token_subscribed failed",
+                exc_info=True,
+            )
+
+    price: float | None = None
+    prime_source: str | None = None
+    prime_ts: int | None = None
+    prime_fn = getattr(source, "prime_option_quote", None)
+    if callable(prime_fn):
+        try:
+            price, prime_source, prime_ts = prime_fn(token)
+        except Exception:  # pragma: no cover - defensive logging guard
+            logger.debug(
+                "pretrade_micro_checks prime_option_quote failed",
+                exc_info=True,
+            )
+            price = None
+            prime_source = None
+            prime_ts = None
+    info["prime_price"] = price
+    info["prime_source"] = prime_source
+    info["prime_ts"] = prime_ts
+
+    quote_payload: Mapping[str, Any] | None = None
+    getter = getattr(source, "get_cached_full_quote", None)
+    if callable(getter):
+        try:
+            raw_quote = getter(token)
+        except Exception:  # pragma: no cover - defensive logging guard
+            logger.debug(
+                "pretrade_micro_checks get_cached_full_quote failed",
+                exc_info=True,
+            )
+            raw_quote = None
+        if isinstance(raw_quote, Mapping):
+            quote_payload = dict(raw_quote)
+
+    if quote_payload is None:
+        cache = getattr(source, "_option_quote_cache", None)
+        if isinstance(cache, Mapping):
+            try:
+                cached = cache.get(int(token))
+            except Exception:
+                cached = None
+            if isinstance(cached, Mapping):
+                quote_payload = dict(cached)
+
+    quote_ok = False
+    quote_src: str | None = None
+    if isinstance(quote_payload, Mapping):
+        quote_src = quote_payload.get("source")
+        for key in ("bid", "ask", "mid", "ltp"):
+            value = quote_payload.get(key)
+            try:
+                if value is not None and float(value) > 0:
+                    quote_ok = True
+                    break
+            except (TypeError, ValueError):
+                continue
+
+    info["quote_ok"] = quote_ok
+    if quote_src:
+        info["quote_source"] = quote_src
+
+    live_trading = bool(getattr(cfg, "enable_live_trading", False))
+    if live_trading and not quote_ok:
+        info["reason"] = "no_quote"
+        info["block_reason"] = "no_quote"
+        return False, info
+
+    info.setdefault("reason", "ok")
+    return True, info
