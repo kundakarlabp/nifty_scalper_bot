@@ -31,6 +31,28 @@ DEFAULT_EXPOSURE_CAP_PCT = 55.0
 DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
 
 
+# --- Environment toggles (flat reads for legacy modules) ---
+ALLOW_NO_DEPTH: bool = os.getenv("ALLOW_NO_DEPTH", "false").lower() == "true"
+TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 2.5))
+DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
+SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
+
+EXPOSURE_BASIS: str = os.getenv("EXPOSURE_BASIS", "premium")
+EXPOSURE_CAP_SOURCE: str = os.getenv("EXPOSURE_CAP_SOURCE", "equity")
+EXPOSURE_CAP_PCT: float = float(os.getenv("EXPOSURE_CAP_PCT", 4.0))
+EXPOSURE_CAP_STATIC: float = float(os.getenv("EXPOSURE_CAP_STATIC", 0.0))
+RISK_USE_LIVE_EQUITY: bool = os.getenv("RISK_USE_LIVE_EQUITY", "true").lower() == "true"
+RISK_DEFAULT_EQUITY: int = int(os.getenv("RISK_DEFAULT_EQUITY", 40000))
+
+
+def get_equity_for_cap(equity_live: float | None) -> float:
+    """Return the equity reference used when applying exposure caps."""
+
+    if RISK_USE_LIVE_EQUITY and equity_live and equity_live > 0:
+        return equity_live
+    return float(RISK_DEFAULT_EQUITY)
+
+
 def env_any(*names: str, default: str | None = None) -> str | None:
     """Return the first non-empty environment variable from ``names``."""
     for name in names:
