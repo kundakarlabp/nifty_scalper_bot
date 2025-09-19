@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 from src.config import settings
@@ -15,6 +15,29 @@ from src.logs import structured_log
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
 logger = logging.getLogger(__name__)
+
+
+def pretrade_micro_checks(source: Any, token: Any, settings_mod: Any) -> Tuple[bool, Dict[str, Any]]:
+    """Return (ok, meta) evaluating cached microstructure state for a token."""
+
+    meta: Dict[str, Any]
+    try:
+        meta = source.get_micro_state(token)
+    except AttributeError:
+        return True, {"reason": "unavailable"}
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("micro_state fetch failed: %s", exc, exc_info=True)
+        return True, {"reason": "error"}
+
+    if meta.get("stale"):
+        return False, {"reason": "stale_tick", **meta}
+    if not (meta.get("has_depth") or getattr(settings_mod, "ALLOW_NO_DEPTH", False)):
+        return False, {"reason": "no_quote", **meta}
+    if not meta.get("depth_ok") and not getattr(settings_mod, "ALLOW_NO_DEPTH", False):
+        return False, {"reason": "depth_fail", **meta}
+    if not meta.get("spread_ok") and not getattr(settings_mod, "ALLOW_NO_DEPTH", False):
+        return False, {"reason": "spread_wide", **meta}
+    return True, {"reason": "ok", **meta}
 
 
 @dataclass
@@ -356,6 +379,138 @@ class RiskEngine:
         def _emit_block_obj(reason: str, detail: Dict[str, Any]) -> Block:
             structured_log.event("risk_block", **_block_payload(reason, detail))
             return Block(reason=reason, details=detail)
+
+        def _plan_reason_detail(reason: str) -> Dict[str, Any]:
+            detail: Dict[str, Any] = {}
+            plan_reason_details = plan.get("reason_details")
+            if isinstance(plan_reason_details, Mapping):
+                maybe_detail = plan_reason_details.get(reason)
+                if isinstance(maybe_detail, Mapping):
+                    detail = dict(maybe_detail)
+            if not detail and reason in {"cap_zero", "cap_lt_one_lot"}:
+                for key in (
+                    "cap",
+                    "cap_abs",
+                    "unit_notional",
+                    "equity",
+                    "qty_lots",
+                    "available_lots",
+                ):
+                    if key in plan:
+                        try:
+                            detail[key] = plan[key]
+                        except Exception:  # pragma: no cover - defensive guard
+                            continue
+            detail.setdefault("source", "plan")
+            return detail
+
+        def _normalize_micro_reason(raw: Any) -> Optional[str]:
+            if raw is None:
+                return None
+            text = str(raw).strip().lower()
+            if not text:
+                return None
+            if text.startswith("skip:"):
+                text = text.split(":", 1)[1]
+            mapping = {
+                "no_quote": "no_quote",
+                "no depth": "depth_fail",
+                "no_depth": "depth_fail",
+                "depth": "depth_fail",
+                "depth_fail": "depth_fail",
+                "depth_thin": "depth_fail",
+                "spread": "spread_wide",
+                "spread_wide": "spread_wide",
+                "stale": "stale_tick",
+                "stale_tick": "stale_tick",
+            }
+            return mapping.get(text)
+
+        def _micro_detail(meta: Mapping[str, Any], origin: str) -> Dict[str, Any]:
+            allowed_keys = {
+                "reason",
+                "block_reason",
+                "skip_reason",
+                "spread_pct",
+                "cap_pct",
+                "depth_ok",
+                "depth_available",
+                "required_qty",
+                "available_bid_qty",
+                "available_ask_qty",
+                "mode",
+                "side",
+                "would_block",
+                "has_depth",
+                "spread_ok",
+                "stale",
+            }
+            detail = {key: meta.get(key) for key in allowed_keys if key in meta}
+            detail["origin"] = origin
+            return detail
+
+        def _maybe_block_micro() -> Optional[Tuple[str, Dict[str, Any]]]:
+            reason_detail: Optional[str] = None
+            meta_detail: Dict[str, Any] = {}
+            micro_meta = plan.get("micro")
+            if isinstance(micro_meta, Mapping):
+                origin = "plan"
+                meta_detail = _micro_detail(micro_meta, origin)
+                raw_reason = (
+                    micro_meta.get("reason")
+                    or micro_meta.get("block_reason")
+                    or micro_meta.get("skip_reason")
+                )
+                reason_detail = _normalize_micro_reason(raw_reason)
+                if reason_detail is None:
+                    if micro_meta.get("skipped"):
+                        reason_detail = _normalize_micro_reason(
+                            micro_meta.get("skip_reason")
+                        )
+                    elif micro_meta.get("would_block"):
+                        reason_detail = _normalize_micro_reason(
+                            micro_meta.get("block_reason") or micro_meta.get("reason")
+                        )
+                if reason_detail:
+                    meta_detail["reason"] = reason_detail
+                    return "microstructure", meta_detail
+
+            token = plan.get("token") or plan.get("option_token")
+            if runner and token:
+                source_obj = getattr(runner, "data_source", None)
+                if source_obj and hasattr(source_obj, "get_micro_state"):
+                    try:
+                        ok_micro, meta = pretrade_micro_checks(
+                            source_obj, token, settings
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        logger.debug(
+                            "pretrade_micro_checks error for token %s: %s", token, exc
+                        )
+                    else:
+                        if not ok_micro:
+                            reason_detail = _normalize_micro_reason(meta.get("reason"))
+                            meta_detail = _micro_detail(meta, "data_source")
+                            if reason_detail:
+                                meta_detail["reason"] = reason_detail
+                            meta_detail.setdefault("token", token)
+                            return "microstructure", meta_detail
+            return None
+
+        upstream_reason = str(plan.get("reason_block") or "").strip()
+        if upstream_reason in {"cap_zero", "cap_lt_one_lot"}:
+            return _emit_block_obj(upstream_reason, _plan_reason_detail(upstream_reason))
+
+        micro_block = _maybe_block_micro()
+        if micro_block is not None:
+            block_reason, block_detail = micro_block
+            if block_detail.get("reason") in {
+                "no_quote",
+                "stale_tick",
+                "depth_fail",
+                "spread_wide",
+            }:
+                return _emit_block_obj(block_reason, block_detail)
 
         if self.state.cooloff_until and now < self.state.cooloff_until:
             return _emit_block(
