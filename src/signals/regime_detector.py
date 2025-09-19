@@ -20,6 +20,7 @@ from typing import Literal, Optional
 import pandas as pd
 
 from src.config import RegimeSettings, settings
+from src.logs import structured_log
 
 
 @dataclass
@@ -44,6 +45,22 @@ class RegimeResult:
     di_minus: float
     bb_width_pct: float
     reason: str
+
+
+def _emit_regime_event(result: RegimeResult, thresholds: dict[str, float]) -> None:
+    try:
+        structured_log.event(
+            "regime_eval",
+            regime=result.regime,
+            adx=float(result.adx),
+            di_plus=float(result.di_plus),
+            di_minus=float(result.di_minus),
+            bb_width_pct=float(result.bb_width_pct),
+            reason=result.reason,
+            thresholds=thresholds,
+        )
+    except Exception:  # pragma: no cover - defensive logging guard
+        pass
 
 
 def _pick_col(df: pd.DataFrame, base: str) -> Optional[pd.Series]:
@@ -86,8 +103,42 @@ def detect_market_regime(
         Dataclass containing the detected regime and diagnostic values.
     """
 
+    try:
+        regime_cfg = settings.regime
+    except AttributeError:  # pragma: no cover - defensive fallback
+        regime_cfg = RegimeSettings()  # type: ignore[call-arg]
+
+    def _resolve(value: float | None, default: float) -> float:
+        return float(value if value is not None else default)
+
+    adx_trend_threshold = _resolve(adx_trend_threshold, regime_cfg.adx_trend_threshold)
+    di_delta_trend_threshold = _resolve(
+        di_delta_trend_threshold, regime_cfg.di_delta_trend_threshold
+    )
+    bb_width_trend_threshold = _resolve(
+        bb_width_trend_threshold, regime_cfg.bb_width_trend_threshold
+    )
+    adx_range_threshold = _resolve(adx_range_threshold, regime_cfg.adx_range_threshold)
+    di_delta_range_threshold = _resolve(
+        di_delta_range_threshold, regime_cfg.di_delta_range_threshold
+    )
+    bb_width_range_threshold = _resolve(
+        bb_width_range_threshold, regime_cfg.bb_width_range_threshold
+    )
+
+    thresholds = {
+        "trend_adx": adx_trend_threshold,
+        "trend_di_delta": di_delta_trend_threshold,
+        "trend_bb_width": bb_width_trend_threshold,
+        "range_adx": adx_range_threshold,
+        "range_di_delta": di_delta_range_threshold,
+        "range_bb_width": bb_width_range_threshold,
+    }
+
     if df is None or df.empty:
-        return RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "empty_df")
+        result = RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "empty_df")
+        _emit_regime_event(result, thresholds)
+        return result
 
     # Pull series from df if not explicitly provided
     adx = adx if adx is not None else _pick_col(df, "adx")
@@ -121,65 +172,37 @@ def detect_market_regime(
             or 0.0
         )
     except Exception:
-        return RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "bad_inputs")
+        result = RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "bad_inputs")
+        _emit_regime_event(result, thresholds)
+        return result
 
     di_delta = abs(dip - dim)
-
-    try:
-        regime_cfg = settings.regime
-    except AttributeError:  # pragma: no cover - defensive fallback
-        regime_cfg = RegimeSettings()  # type: ignore[call-arg]
-
-    adx_trend_threshold = float(
-        adx_trend_threshold
-        if adx_trend_threshold is not None
-        else regime_cfg.adx_trend_threshold
-    )
-    di_delta_trend_threshold = float(
-        di_delta_trend_threshold
-        if di_delta_trend_threshold is not None
-        else regime_cfg.di_delta_trend_threshold
-    )
-    bb_width_trend_threshold = float(
-        bb_width_trend_threshold
-        if bb_width_trend_threshold is not None
-        else regime_cfg.bb_width_trend_threshold
-    )
-    adx_range_threshold = float(
-        adx_range_threshold
-        if adx_range_threshold is not None
-        else regime_cfg.adx_range_threshold
-    )
-    di_delta_range_threshold = float(
-        di_delta_range_threshold
-        if di_delta_range_threshold is not None
-        else regime_cfg.di_delta_range_threshold
-    )
-    bb_width_range_threshold = float(
-        bb_width_range_threshold
-        if bb_width_range_threshold is not None
-        else regime_cfg.bb_width_range_threshold
-    )
 
     if (
         adx_val >= adx_trend_threshold
         and di_delta >= di_delta_trend_threshold
         and bb_width_val >= bb_width_trend_threshold
     ):
-        return RegimeResult(
+        result = RegimeResult(
             "TREND", adx_val, dip, dim, bb_width_val, "trend_conditions"
         )
+        _emit_regime_event(result, thresholds)
+        return result
 
     if (
         adx_val < adx_range_threshold
         or bb_width_val < bb_width_range_threshold
         or di_delta < di_delta_range_threshold
     ):
-        return RegimeResult(
+        result = RegimeResult(
             "RANGE", adx_val, dip, dim, bb_width_val, "range_conditions"
         )
+        _emit_regime_event(result, thresholds)
+        return result
 
-    return RegimeResult("NO_TRADE", adx_val, dip, dim, bb_width_val, "indecisive")
+    result = RegimeResult("NO_TRADE", adx_val, dip, dim, bb_width_val, "indecisive")
+    _emit_regime_event(result, thresholds)
+    return result
 
 
 __all__ = ["RegimeResult", "detect_market_regime"]

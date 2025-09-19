@@ -17,6 +17,7 @@ import pandas as pd
 from src.config import settings
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 from src.execution.order_executor import fetch_quote_with_depth
+from src.logs import structured_log
 from src.diagnostics.metrics import runtime_metrics
 from src.signals.regime_detector import detect_market_regime
 from src.strategies.parameters import StrategyParameters
@@ -743,6 +744,9 @@ class EnhancedScalpingStrategy:
         plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
 
         dbg: Dict[str, Any] = {"reason_block": None}
+        gate_checks: Dict[str, Any] = {}
+        plan["gates"] = gate_checks
+        strategy_name = getattr(self, "strategy_name", self.__class__.__name__)
 
         def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
             sd = plan.setdefault(
@@ -790,6 +794,24 @@ class EnhancedScalpingStrategy:
             dbg["score"] = plan.get("score")
             dbg["score_dbg"] = plan.get("score_dbg")
             self._last_debug = dbg
+            plan["gates"] = gate_checks
+            try:
+                structured_log.event(
+                    "score_block",
+                    strategy=str(strategy_name),
+                    reason=reason,
+                    score=plan.get("score"),
+                    thresholds={
+                        "strict": float(self.min_score_strict),
+                        "relaxed": float(self.min_score_relaxed),
+                    },
+                    features=plan.get("features"),
+                    gates=gate_checks,
+                    score_dbg=plan.get("score_dbg"),
+                    context=extra,
+                )
+            except Exception:  # pragma: no cover - defensive logging guard
+                pass
             return plan
 
         try:
@@ -835,6 +857,12 @@ class EnhancedScalpingStrategy:
                 }
             except Exception:
                 pass
+            gate_checks["warmup"] = {
+                "ok": bool(w.ok),
+                "have_bars": int(have_bars),
+                "need_bars": int(required_bars),
+                "reasons": list(w.reasons),
+            }
             if not w.ok:
                 try:
                     if hasattr(self, "data_source") and hasattr(
@@ -854,6 +882,12 @@ class EnhancedScalpingStrategy:
                                 "reasons": w.reasons,
                                 "have_bars": have_bars,
                                 "need_bars": required_bars,
+                            }
+                            gate_checks["warmup"] = {
+                                "ok": bool(w.ok),
+                                "have_bars": int(have_bars),
+                                "need_bars": int(required_bars),
+                                "reasons": list(w.reasons),
                             }
                         else:
                             return plan_block(
@@ -944,6 +978,11 @@ class EnhancedScalpingStrategy:
             if reg.regime == "RANGE" and adx_series is None:
                 reg.regime = "TREND"  # fallback when ADX not available
             plan["regime"] = reg.regime
+            gate_checks["regime"] = {
+                "ok": reg.regime != "NO_TRADE",
+                "regime": reg.regime,
+                "reason": getattr(reg, "reason", None),
+            }
             if reg.regime == "NO_TRADE":
                 return plan_block("regime_no_trade")
 
@@ -1033,6 +1072,15 @@ class EnhancedScalpingStrategy:
             plan["atr_min"] = atr_min
             plan["atr_max"] = atr_max
             plan["atr_band"] = (atr_min, atr_max)
+            gate_checks["atr_band"] = {
+                "ok": bool(ok),
+                "atr_pct": plan.get("atr_pct"),
+                "atr_band": (
+                    float(atr_min) if atr_min is not None else None,
+                    float(atr_max) if atr_max is not None else None,
+                ),
+                "reason": reason,
+            }
             if not ok:
                 if reason and reason not in reasons:
                     reasons.append(reason)
@@ -1212,6 +1260,13 @@ class EnhancedScalpingStrategy:
             depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
             over_spread = bool(sp is not None and cap is not None and sp > cap)
             ok_micro = not (over_spread or not depth_ok)
+            gate_checks["microstructure"] = {
+                "ok": bool(ok_micro),
+                "mode": micro.get("mode"),
+                "spread_pct": sp,
+                "cap_pct": cap,
+                "depth_ok": depth_ok,
+            }
             if micro.get("mode") == "HARD" and not ok_micro:
                 return plan_block("microstructure", micro=micro)
 
@@ -1260,10 +1315,19 @@ class EnhancedScalpingStrategy:
             min_score_cfg = self._normalize_min_score(
                 float(strat_cfg.get("min_score", 0.35))
             )
+            gate_checks["score_threshold"] = {
+                "ok": bool(final_score >= min_score_cfg),
+                "score": round(final_score, 4),
+                "threshold": round(min_score_cfg, 4),
+            }
             if final_score < min_score_cfg:
                 return plan_block("score_low", score=final_score, need=min_score_cfg)
 
             rej = self._iv_adx_reject_reason(plan, price)
+            gate_checks["iv_adx"] = {
+                "ok": rej is None,
+                "reason": rej[0] if isinstance(rej, tuple) else None,
+            }
             if rej:
                 reason, extra = rej
                 return plan_block(reason, **extra)
@@ -1395,6 +1459,26 @@ class EnhancedScalpingStrategy:
             runtime_metrics.set_delta(float(plan.get("delta") or 0.0))
             runtime_metrics.set_elasticity(float(plan.get("elasticity") or 0.0))
             plan["tp1_qty_ratio"] = cfg.tp1_partial
+
+            try:
+                structured_log.event(
+                    "strategy_score",
+                    strategy=str(strategy_name),
+                    score=float(score),
+                    confidence=float(plan.get("confidence", 0.0)),
+                    regime=reg.regime,
+                    thresholds={
+                        "strict": float(self.min_score_strict),
+                        "relaxed": float(self.min_score_relaxed),
+                    },
+                    features=plan.get("features"),
+                    gates=gate_checks,
+                    score_dbg=plan.get("score_dbg"),
+                    reasons=list(reasons),
+                    micro=plan.get("micro"),
+                )
+            except Exception:  # pragma: no cover - defensive logging guard
+                pass
 
             self._last_debug = {
                 "score": score,

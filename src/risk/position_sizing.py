@@ -8,6 +8,7 @@ import math
 from types import SimpleNamespace
 
 from src.config import settings
+from src.logs import structured_log
 
 logger = logging.getLogger(__name__)
 
@@ -346,15 +347,33 @@ class PositionSizer:
     @staticmethod
     def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
         if si.entry_price <= 0 or si.lot_size <= 0 or si.equity <= 0:
-            return 0, 0, PositionSizer._diag(
+            diag = PositionSizer._diag(
                 si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "invalid"
             )
+            try:
+                structured_log.event(
+                    "sizing_fail",
+                    reason="invalid_inputs",
+                    diag=diag,
+                )
+            except Exception:  # pragma: no cover - defensive logging guard
+                pass
+            return 0, 0, diag
 
         spot_sl_points = abs(si.spot_sl_points)
         if spot_sl_points <= 0:
-            return 0, 0, PositionSizer._diag(
+            diag = PositionSizer._diag(
                 si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "no_sl"
             )
+            try:
+                structured_log.event(
+                    "sizing_fail",
+                    reason="no_stop_loss",
+                    diag=diag,
+                )
+            except Exception:  # pragma: no cover - defensive logging guard
+                pass
+            return 0, 0, diag
 
         delta = si.delta if si.delta is not None else 0.5
         delta = max(0.25, min(0.75, delta))
@@ -479,6 +498,17 @@ class PositionSizer:
             eq_source=eq_source,
             cap_abs=cap_abs,
         )
+        event_name = "sizing_calc" if lots > 0 else "sizing_fail"
+        try:
+            structured_log.event(
+                event_name,
+                lots=int(lots),
+                quantity=int(quantity),
+                block_reason=diag.get("block_reason"),
+                diag=diag,
+            )
+        except Exception:  # pragma: no cover - defensive logging guard
+            pass
         return quantity, lots, diag
 
     @staticmethod

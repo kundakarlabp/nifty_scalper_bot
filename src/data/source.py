@@ -22,6 +22,7 @@ from src.boot.validate_env import (
 from src.config import settings
 from src.data.base_source import BaseDataSource
 from src.data.types import HistResult, HistStatus
+from src.logs import structured_log
 from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.indicators import calculate_vwap
@@ -1082,7 +1083,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._stale_tick_checks += 1
         else:
             self._stale_tick_checks = 0
-        return self._stale_tick_checks >= self._stale_tick_thresh
+        if self._stale_tick_checks >= self._stale_tick_thresh:
+            structured_log.event(
+                "stale_block",
+                age_s=round(age, 3) if age is not None else None,
+                checks=int(self._stale_tick_checks),
+                threshold_checks=int(self._stale_tick_thresh),
+                max_age_s=float(max_age_s),
+            )
+            return True
+        return False
 
     def tick_watchdog_details(self) -> dict[str, float | int | None]:
         ts = self._last_tick_ts
@@ -1241,7 +1251,31 @@ class LiveKiteSource(DataSource, BaseDataSource):
         except Exception:
             return None, None, None
 
-        cached = self._option_quote_cache.get(token_i)
+        def _emit_snapshot(
+            *,
+            price: float,
+            source: str,
+            ts_ms: int | None,
+            mode: str | None,
+        ) -> None:
+            age_ms: int | None = None
+            if ts_ms is not None:
+                now_ms = int(time.time() * 1000)
+                age_ms = int(max(0, now_ms - int(ts_ms)))
+            structured_log.event(
+                "market_data_snapshot",
+                token=int(token_i),
+                price=float(price),
+                source=str(source),
+                ts_ms=ts_ms,
+                age_ms=age_ms,
+                mode=mode,
+            )
+
+        try:
+            cached = self._option_quote_cache.get(token_i)
+        except Exception:
+            cached = None
         if cached:
             ts_ms_cached = cached.get("ts_ms")
             ts_ms = ts_ms_cached if isinstance(ts_ms_cached, int) else _to_epoch_ms(cached.get("timestamp"))
@@ -1250,7 +1284,20 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 if isinstance(val, (int, float)) and val > 0:
                     if ts_ms is None:
                         ts_ms = int(time.time() * 1000)
-                    return float(val), f"ws_{label}", ts_ms
+                    source_label = f"ws_{label}"
+                    cached_mode = cached.get("mode")
+                    mode_str = (
+                        str(cached_mode)
+                        if cached_mode is not None and cached_mode != ""
+                        else None
+                    )
+                    _emit_snapshot(
+                        price=float(val),
+                        source=source_label,
+                        ts_ms=ts_ms,
+                        mode=mode_str,
+                    )
+                    return float(val), source_label, ts_ms
 
         quote_payload: dict[str, Any] | None = None
         if self.kite:
@@ -1279,6 +1326,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     "source": "rest",
                     "mode": "rest_ltp",
                 }
+                _emit_snapshot(
+                    price=float(ltp_price),
+                    source="rest_ltp",
+                    ts_ms=ts_ms,
+                    mode="rest_ltp",
+                )
                 return float(ltp_price), "rest_ltp", ts_ms
             return None, None, None
 
@@ -1305,6 +1358,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     source_label = "rest_ltp"
                 else:
                     source_label = label
+                mode_val = mode if isinstance(mode, str) else str(mode) if mode else None
+                _emit_snapshot(
+                    price=float(val),
+                    source=source_label,
+                    ts_ms=ts_ms,
+                    mode=mode_val,
+                )
                 return float(val), source_label, ts_ms
 
         rest_ltp: float | None = None
@@ -1325,11 +1385,25 @@ class LiveKiteSource(DataSource, BaseDataSource):
             merged["ts_ms"] = ts_ms
             merged.setdefault("source", "rest")
             self._option_quote_cache[token_i] = merged
+            _emit_snapshot(
+                price=float(rest_ltp),
+                source="rest_ltp",
+                ts_ms=ts_ms,
+                mode="rest_ltp",
+            )
             return rest_ltp, "rest_ltp", ts_ms
 
         ltp_val = quote_dict.get("ltp")
         if isinstance(ltp_val, (int, float)) and ltp_val > 0:
-            return float(ltp_val), mode or "ltp", ts_ms
+            mode_val = mode if isinstance(mode, str) else str(mode) if mode else "ltp"
+            source_label = mode_val or "ltp"
+            _emit_snapshot(
+                price=float(ltp_val),
+                source=source_label,
+                ts_ms=ts_ms,
+                mode=mode_val,
+            )
+            return float(ltp_val), source_label, ts_ms
         return None, mode, ts_ms
 
     def ensure_backfill(
