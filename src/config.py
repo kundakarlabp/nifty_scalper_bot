@@ -12,7 +12,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from pydantic import (
@@ -37,6 +37,14 @@ TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 2.5))
 DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
 SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
 
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+STRUCTURED_LOGS: bool = os.getenv("STRUCTURED_LOGS", "true").lower() == "true"
+LOG_SAMPLE_RATE: float = float(os.getenv("LOG_SAMPLE_RATE", 0.05))
+LOG_MIN_INTERVAL_SEC: float = float(os.getenv("LOG_MIN_INTERVAL_SEC", 3.0))
+LOG_DIAG_DEFAULT_SEC: int = int(os.getenv("LOG_DIAG_DEFAULT_SEC", 60))
+LOG_TRACE_DEFAULT_SEC: int = int(os.getenv("LOG_TRACE_DEFAULT_SEC", 30))
+LOG_MAX_LINES_REPLY: int = int(os.getenv("LOG_MAX_LINES_REPLY", 30))
+
 EXPOSURE_BASIS: str = os.getenv("EXPOSURE_BASIS", "premium")
 EXPOSURE_CAP_SOURCE: str = os.getenv("EXPOSURE_CAP_SOURCE", "equity")
 EXPOSURE_CAP_PCT: float = float(os.getenv("EXPOSURE_CAP_PCT", 4.0))
@@ -60,6 +68,18 @@ def env_any(*names: str, default: str | None = None) -> str | None:
         if val:
             return val
     return default
+
+
+if TYPE_CHECKING:
+    from src.server.logging_utils import LogGate
+
+
+def build_log_gate() -> "LogGate":
+    """Return a ``LogGate`` configured with the global sampling knobs."""
+
+    from src.server.logging_utils import LogGate
+
+    return LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)
 # ================= Sub-models =================
 
 

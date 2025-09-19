@@ -896,7 +896,7 @@ class RiskEngine:
         return snapshot
 
 
-def pretrade_micro_checks(
+def pretrade_micro_checks(  # type: ignore[no-redef]
     source: Any,
     token: Any,
     cfg: Any,
