@@ -35,6 +35,7 @@ from src.boot.validate_env import (
 from src.config import settings
 from src.data.base_source import BaseDataSource
 from src.data.types import HistResult, HistStatus
+from src.diagnostics import healthkit
 from src.logs import structured_log
 from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
@@ -1111,6 +1112,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
         except Exception:  # pragma: no cover - defensive
             return False
 
+    def _emit_tick_log(self, event: str, payload: dict[str, Any]) -> None:
+        if healthkit.trace_active():
+            self.log.info(event, extra=payload)
+        else:
+            self.log.debug(event, extra=payload)
+
     def _subscribe_tokens_full(self, tokens: list[int]) -> None:
         if not tokens:
             return
@@ -1448,9 +1455,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     )
             key = f"tick_full:{token}"
             if self._gate.should_emit(key, force=force_trace):
-                self.log.debug(
+                self._emit_tick_log(
                     "data.tick_full",
-                    extra={
+                    {
                         "token": token,
                         "bid": bid,
                         "ask": ask,
@@ -1460,7 +1467,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     },
                 )
         else:
-            self.log.debug("data.tick_ltp_only", extra={"token": token})
+            self._emit_tick_log("data.tick_ltp_only", {"token": token})
 
     def get_cached_full_quote(
         self, token: int | str

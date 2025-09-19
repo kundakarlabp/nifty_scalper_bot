@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Any, Mapping, MutableMapping, Sequence
 
+from src.diagnostics import healthkit
+
 __all__ = ["StructuredLogger", "structured_log"]
 
 
@@ -26,6 +28,9 @@ def _normalize(value: Any) -> Any:
             except Exception:  # pragma: no cover - extremely defensive
                 continue
     return str(value)
+
+
+_TRACE_GATED_EVENTS = {"market_data_snapshot", "regime_eval", "micro_eval"}
 
 
 @dataclass
@@ -60,7 +65,11 @@ class StructuredLogger:
         except (TypeError, ValueError):  # pragma: no cover - double safety
             safe_payload = {k: _normalize(v) for k, v in payload.items()}
             message = json.dumps(safe_payload, sort_keys=True)
-        self._logger.info(message)
+
+        if event in _TRACE_GATED_EVENTS and not healthkit.trace_active():
+            self._logger.debug(message)
+        else:
+            self._logger.info(message)
 
 
 structured_log = StructuredLogger()
