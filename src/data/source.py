@@ -386,6 +386,25 @@ class DataSource:
 
         return None, None, None
 
+    def current_tokens(self) -> tuple[int | None, int | None]:
+        """Return the currently tracked CE/PE instrument tokens if available."""
+
+        tokens = getattr(self, "atm_tokens", None)
+        if isinstance(tokens, (list, tuple)) and tokens:
+            ce = tokens[0] if len(tokens) > 0 else None
+            pe = tokens[1] if len(tokens) > 1 else None
+
+            def _coerce(value: Any) -> int | None:
+                if value in (None, "", 0):
+                    return None
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+
+            return _coerce(ce), _coerce(pe)
+        return None, None
+
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health metrics if available."""
         return {}
