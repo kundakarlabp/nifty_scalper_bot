@@ -2,13 +2,53 @@ from __future__ import annotations
 
 import logging
 import os
-from collections import deque
+import random
+import time
+from collections import defaultdict, deque
+from typing import DefaultDict
 
 from src.boot.validate_env import _log_cred_presence
 from src.config import settings
 from src.utils.log_filters import install_warmup_filters
 from src.utils.logger_setup import setup_logging
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
+
+
+class LogGate:
+    """Rate limit and sample log emission on a per-key basis."""
+
+    def __init__(self, min_interval_sec: float, sample_rate: float) -> None:
+        self.min_interval = float(min_interval_sec)
+        self.sample_rate = float(sample_rate)
+        self._last_emit: DefaultDict[str, float] = defaultdict(lambda: 0.0)
+
+    def should_emit(self, key: str, *, force: bool = False) -> bool:
+        """Return ``True`` if the log entry identified by ``key`` should emit."""
+
+        if force:
+            self._last_emit[key] = time.time()
+            return True
+
+        if self.sample_rate < 1.0 and random.random() > self.sample_rate:
+            return False
+
+        now = time.time()
+        last = self._last_emit[key]
+        if (now - last) < self.min_interval:
+            return False
+
+        self._last_emit[key] = now
+        return True
+
+
+_LOG_GATE = LogGate(min_interval_sec=0.0, sample_rate=1.0)
+
+
+def should_emit_log(key: str, *, force: bool = False, gate: LogGate | None = None) -> bool:
+    """Convenience helper for keyed, rate-limited log emission."""
+
+    target = gate or _LOG_GATE
+    return target.should_emit(key, force=force)
 
 
 def _setup_logging() -> None:  # pragma: no cover
