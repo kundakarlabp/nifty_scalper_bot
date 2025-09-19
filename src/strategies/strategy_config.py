@@ -88,7 +88,9 @@ class StrategyConfig:
         meta = data.get("meta", {})
         windows = data.get("windows", {})
         gates = data.get("gates", {})
-        micro = data.get("micro", {})
+        micro_data = data.get("micro") or {}
+        micro = dict(micro_data)
+        micro.setdefault("mode", "HARD")
         thresholds = data.get("thresholds", {})
         options = data.get("options", {})
         lc = data.get("lifecycle", {})

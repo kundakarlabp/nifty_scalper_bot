@@ -54,6 +54,22 @@ def test_evaluate_micro_flags_depth():
     assert micro2["would_block"] is True
 
 
+def test_evaluate_micro_blocks_spread_even_in_soft_mode():
+    cfg = _cfg()
+    cfg.micro["mode"] = "SOFT"
+    quote = {
+        "bid": 150.0,
+        "ask": 153.5,
+        "bid5_qty": [200, 200, 200, 200, 200],
+        "ask5_qty": [200, 200, 200, 200, 200],
+    }
+    result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
+    assert result["mode"] == "SOFT"
+    assert result["depth_ok"] is True
+    assert result["spread_pct"] > result["cap_pct"]
+    assert result["would_block"] is True
+
+
 def test_evaluate_micro_uses_side_for_depth():
     cfg = _cfg()
     quote = {

@@ -173,6 +173,74 @@ def test_missing_micro_quotes_neutral_score(strategy_config: StrategySettings, m
     assert plan.get("reason_block") != "microstructure"
 
 
+@pytest.mark.parametrize(
+    "micro_payload",
+    [
+        {
+            "mode": "SOFT",
+            "spread_pct": 5.0,
+            "depth_ok": True,
+            "would_block": True,
+        },
+        {
+            "mode": "SOFT",
+            "spread_pct": 0.5,
+            "depth_ok": False,
+            "would_block": True,
+        },
+    ],
+    ids=["spread", "depth"],
+)
+def test_micro_failures_block_trade_even_in_soft_mode(
+    strategy_config: StrategySettings,
+    monkeypatch: pytest.MonkeyPatch,
+    micro_payload: dict,
+) -> None:
+    """Trades must be blocked when spread or depth guards fail."""
+
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    df = create_test_dataframe(trending_up=True)
+
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.resolve_weekly_atm",
+        lambda price: {"ce": ("TESTCE", 50), "pe": ("TESTPE", 50)},
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.fetch_quote_with_depth",
+        lambda *args, **kwargs: {
+            "bid": 100.0,
+            "ask": 100.5,
+            "bid5_qty": [200, 200, 200, 200, 200],
+            "ask5_qty": [200, 200, 200, 200, 200],
+        },
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.select_strike",
+        lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
+    )
+    monkeypatch.setattr(
+        "src.strategies.scalping_strategy.cap_for_mid", lambda mid, cfg: 1.0
+    )
+
+    def _micro(*args: object, **kwargs: object) -> dict:
+        payload = dict(micro_payload)
+        payload.setdefault("cap_pct", 1.0)
+        return payload
+
+    monkeypatch.setattr("src.strategies.scalping_strategy.evaluate_micro", _micro)
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    assert plan.get("reason_block") == "microstructure"
+    assert plan.get("micro", {}).get("would_block") is True
+
+
 def test_uses_data_source_atm_tokens(
     strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

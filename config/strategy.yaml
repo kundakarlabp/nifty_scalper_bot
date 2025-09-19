@@ -30,7 +30,7 @@ gates:
   adx_min_trend: 18         # require ADX≥18 in TREND regime
 
 micro:
-  mode: "SOFT"            # HARD | SOFT
+  mode: "HARD"            # HARD | SOFT
   dynamic: true
   max_spread_pct: 1.0     # static fallback cap
   depth_min_lots: 1
