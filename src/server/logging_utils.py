@@ -61,6 +61,12 @@ def _setup_logging() -> None:  # pragma: no cover
             log_file=str(log_path) if log_path else None,
             json=settings.log_json,
         )
+        level_name = getattr(settings, "LOG_LEVEL", None) or settings.log_level
+        try:
+            level_value = getattr(logging, str(level_name).upper(), logging.INFO)
+        except Exception:
+            level_value = logging.INFO
+        logging.getLogger().setLevel(level_value)
         install_warmup_filters()
         root = logging.getLogger()
         root.addFilter(RateLimitFilter(interval=120.0))
