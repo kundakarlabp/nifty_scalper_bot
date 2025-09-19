@@ -250,14 +250,14 @@ def evaluate_micro(
             spread_block=None,
             depth_block=None,
             raw_block=True,
-            would_block=hard,
+            would_block=True,
         )
         return {
             "spread_pct": None,
             "depth_ok": None,
             "mode": mode,
             "reason": "no_quote",
-            "would_block": hard,
+            "would_block": True,
         }
 
     bid5 = _top5_quantities(q.get("bid5_qty"), [])
@@ -279,7 +279,7 @@ def evaluate_micro(
             spread_block=None,
             depth_block=None,
             raw_block=True,
-            would_block=hard,
+            would_block=True,
             bid=bid,
             ask=ask,
         )
@@ -288,7 +288,7 @@ def evaluate_micro(
             "depth_ok": None,
             "mode": mode,
             "reason": "no_quote",
-            "would_block": hard,
+            "would_block": True,
         }
 
     if bid <= 0.0 or ask <= 0.0:
@@ -304,7 +304,7 @@ def evaluate_micro(
             spread_block=None,
             depth_block=None,
             raw_block=True,
-            would_block=hard,
+            would_block=True,
             bid=bid,
             ask=ask,
         )
@@ -313,7 +313,7 @@ def evaluate_micro(
             "depth_ok": None,
             "mode": mode,
             "reason": "no_quote",
-            "would_block": hard,
+            "would_block": True,
         }
 
     mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
@@ -339,7 +339,7 @@ def evaluate_micro(
     spread_block = spread_pct is None or (spread_pct > cap)
     depth_block = depth_ok is False
     raw_block = spread_block or depth_block
-    final_block = raw_block if hard else False
+    final_block = raw_block
     reason = "spread" if spread_block else "depth" if depth_block else "ok"
 
     log_outcome(

@@ -1267,7 +1267,9 @@ class EnhancedScalpingStrategy:
                 "cap_pct": cap,
                 "depth_ok": depth_ok,
             }
-            if micro.get("mode") == "HARD" and not ok_micro:
+            if not ok_micro and (
+                micro.get("mode") == "HARD" or micro.get("would_block")
+            ):
                 return plan_block("microstructure", micro=micro)
 
             comps = {
