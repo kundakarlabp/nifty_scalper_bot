@@ -86,7 +86,7 @@ def test_default_values():
         assert settings.risk.exposure_cap_source == "equity"
         assert settings.risk.exposure_cap_pct_of_equity == 0.55
         assert settings.risk.premium_cap_per_trade == 10000.0
-        assert settings.risk.allow_min_one_lot is True
+        assert settings.risk.allow_min_one_lot is False
         assert settings.cadence_min_interval_s == pytest.approx(0.3)
         assert settings.cadence_max_interval_s == pytest.approx(1.5)
         assert settings.cadence_interval_step_s == pytest.approx(0.3)

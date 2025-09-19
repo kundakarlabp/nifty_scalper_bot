@@ -187,7 +187,8 @@ class TradingSession:
         Applies the standard exposure cap. When ``RISK__ALLOW_MIN_ONE_LOT`` is
         true and equity can cover one lot outright, returns ``1`` even if the
         exposure cap is smaller than the premium per lot. Otherwise returns
-        ``0`` when the cap is insufficient.
+        ``0`` when the cap is insufficient. The override is disabled by default
+        and must be explicitly enabled in configuration.
         """
         cap = float(equity) * float(self.risk_config.max_position_size_pct)
         cost_one_lot = float(premium_per_lot)

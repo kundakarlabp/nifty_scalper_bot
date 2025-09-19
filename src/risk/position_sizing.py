@@ -155,7 +155,7 @@ class SizingParams:
             Literal["underlying", "premium"], settings.EXPOSURE_BASIS
         )
     )
-    allow_min_one_lot: bool = True
+    allow_min_one_lot: bool = False
 
 
 class PositionSizer:
@@ -190,7 +190,7 @@ class PositionSizer:
         risk_cfg = getattr(settings, "risk", None)
         inst_cfg = getattr(settings, "instruments", None)
 
-        allow_min_one_lot = bool(getattr(risk_cfg, "allow_min_one_lot", True))
+        allow_min_one_lot = bool(getattr(risk_cfg, "allow_min_one_lot", False))
 
         if (
             min_lots is None
