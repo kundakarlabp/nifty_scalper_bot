@@ -325,6 +325,27 @@ class _RiskCheckState:
 RISK_GATES_SKIPPED = object()
 
 
+class _LogGate:
+    """Simple per-key emission gate for throttling log noise."""
+
+    def __init__(self, default_interval: float = 0.0) -> None:
+        self.default_interval = float(default_interval)
+        self._last_emit: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def should_emit(self, key: str, *, interval: float | None = None) -> bool:
+        """Return ``True`` when ``key`` may be emitted again."""
+
+        window = float(self.default_interval if interval is None else interval)
+        now = time.time()
+        with self._lock:
+            last = self._last_emit.get(key)
+            if window <= 0.0 or last is None or (now - last) >= window:
+                self._last_emit[key] = now
+                return True
+            return False
+
+
 # ============================== Runner =================================
 
 
@@ -645,6 +666,8 @@ class StrategyRunner:
         self.last_eval_ts: Optional[str] = None
         self.trace_ticks_remaining: int = 0
         self.hb_enabled: bool = True
+        self._gate = _LogGate()
+        self._prev_score_bucket: str | None = None
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -752,6 +775,43 @@ class StrategyRunner:
         if rr_thresh and plan.get("rr", 0.0) < rr_thresh:
             shadows.append(f"rr_low {plan.get('rr')}")
         return shadows
+
+    def _window_active(self, name: str) -> bool:
+        checker = getattr(self.telegram, "_window_active", None)
+        if callable(checker):
+            try:
+                return bool(checker(name))
+            except Exception:
+                return False
+        return False
+
+    def _log_score_state(self, score: float) -> None:
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            score_f = 0.0
+        bucket = self._score_bucket_label(score_f)
+        prev = self._prev_score_bucket
+        diag_active = self._window_active("diag")
+        changed = (prev != bucket) or diag_active
+        if changed and self._gate.should_emit("runner:score_bucket"):
+            self.log.info(
+                "runner.score",
+                extra={"score": round(score_f, 3), "bucket": bucket},
+            )
+        self._prev_score_bucket = bucket
+
+    @staticmethod
+    def _score_bucket_label(score: float) -> str:
+        if not math.isfinite(score):
+            return "nan"
+        step = 0.5
+        lower = max(0.0, min(score, 15.0))
+        start = math.floor(lower / step) * step
+        end = min(15.0, start + step)
+        if math.isclose(start, end):
+            return f"{start:.1f}"
+        return f"{start:.1f}-{end:.1f}"
 
     def emit_heartbeat(self) -> None:
         """Emit a compact heartbeat log with current signal context."""
@@ -1038,40 +1098,41 @@ class StrategyRunner:
             or plan.get("reason_block") != self._last_reason_block
         )
         if (not self._log_signal_changes_only) or changed:
-            strike = self._format_two_decimals(plan.get("strike"))
-            atm_strike = self._format_two_decimals(plan.get("atm_strike"))
-            score = self._format_two_decimals(plan.get("score"))
-            atr_pct = self._format_two_decimals(plan.get("atr_pct") or 0.0)
-            spread_pct = self._format_two_decimals(micro.get("spread_pct") or 0.0)
-            rr = self._format_two_decimals(plan.get("rr") or 0.0)
-            sl = self._format_two_decimals(plan.get("sl"))
-            tp1 = self._format_two_decimals(plan.get("tp1"))
-            tp2 = self._format_two_decimals(plan.get("tp2"))
-            opt_sl = self._format_two_decimals(plan.get("opt_sl"))
-            opt_tp1 = self._format_two_decimals(plan.get("opt_tp1"))
-            opt_tp2 = self._format_two_decimals(plan.get("opt_tp2"))
-            self.log.info(
-                "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%s spread%%=%s depth=%s rr=%s sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s reason_block=%s",
-                plan.get("action"),
-                plan.get("option_type"),
-                strike,
-                atm_strike,
-                plan.get("option_token"),
-                plan.get("qty_lots"),
-                plan.get("regime"),
-                score,
-                atr_pct,
-                spread_pct,
-                micro.get("depth_ok"),
-                rr,
-                sl,
-                tp1,
-                tp2,
-                opt_sl,
-                opt_tp1,
-                opt_tp2,
-                plan.get("reason_block"),
-            )
+            if changed or self._gate.should_emit("runner:plan_debug", interval=5.0):
+                strike = self._format_two_decimals(plan.get("strike"))
+                atm_strike = self._format_two_decimals(plan.get("atm_strike"))
+                score = self._format_two_decimals(plan.get("score"))
+                atr_pct = self._format_two_decimals(plan.get("atr_pct") or 0.0)
+                spread_pct = self._format_two_decimals(micro.get("spread_pct") or 0.0)
+                rr = self._format_two_decimals(plan.get("rr") or 0.0)
+                sl = self._format_two_decimals(plan.get("sl"))
+                tp1 = self._format_two_decimals(plan.get("tp1"))
+                tp2 = self._format_two_decimals(plan.get("tp2"))
+                opt_sl = self._format_two_decimals(plan.get("opt_sl"))
+                opt_tp1 = self._format_two_decimals(plan.get("opt_tp1"))
+                opt_tp2 = self._format_two_decimals(plan.get("opt_tp2"))
+                self.log.debug(
+                    "Signal plan: action=%s %s strike=%s atm_strike=%s token=%s qty=%s regime=%s score=%s atr%%=%s spread%%=%s depth=%s rr=%s sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s reason_block=%s",
+                    plan.get("action"),
+                    plan.get("option_type"),
+                    strike,
+                    atm_strike,
+                    plan.get("option_token"),
+                    plan.get("qty_lots"),
+                    plan.get("regime"),
+                    score,
+                    atr_pct,
+                    spread_pct,
+                    micro.get("depth_ok"),
+                    rr,
+                    sl,
+                    tp1,
+                    tp2,
+                    opt_sl,
+                    opt_tp1,
+                    opt_tp2,
+                    plan.get("reason_block"),
+                )
         plan["eval_count"] = self.eval_count
         plan["last_eval_ts"] = self.last_eval_ts
         self._last_reason_block = plan.get("reason_block")
@@ -1397,6 +1458,7 @@ class StrategyRunner:
                 self._score_total = None
             self._last_signal_debug = getattr(self.strategy, "get_debug", lambda: {})()
             score_val = float(plan.get("score") or 0.0)
+            self._log_score_state(score_val)
             if score_val == 0.0:
                 bar_count = int(plan.get("bar_count") or 0)
                 regime = plan.get("regime")
@@ -2094,6 +2156,7 @@ class StrategyRunner:
             self._preview_candidate(plan, micro)
             score_val = float(plan.get("score") or 0.0)
             plan["score"] = score_val
+            self._log_score_state(score_val)
             min_score = self._min_score_threshold()
             if score_val < min_score and not plan.get("reason_block"):
                 plan["reason_block"] = "score_low"
