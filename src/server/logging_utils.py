@@ -4,18 +4,20 @@ import logging
 import os
 import random
 import time
-from collections import deque
+from collections import defaultdict, deque
 from typing import Callable
 
 from src.boot.validate_env import _log_cred_presence
-from src.config import LOG_LEVEL, settings
+from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
 from src.utils.log_filters import install_warmup_filters
 from src.utils.logger_setup import setup_logging
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
 
 
 class LogGate:
-    """Simple time/sample gate for noisy log statements."""
+    """Keyed rate limiter with optional sampling for noisy log statements."""
+
+    _DEFAULT_KEY = "__default__"
 
     def __init__(
         self,
@@ -33,21 +35,58 @@ class LogGate:
         self._sample_rate = float(sample_rate)
         self._clock = clock or time.monotonic
         self._rng = rng or random.Random()
-        self._last_emitted: float | None = None
+        self._last_emitted: defaultdict[str, float] = defaultdict(lambda: 0.0)
 
-    def allow(self) -> bool:
-        """Return ``True`` when the caller should emit a log."""
+    @property
+    def min_interval(self) -> float:
+        return self._min_interval
 
-        now = self._clock()
-        if self._last_emitted is None or now - self._last_emitted >= self._min_interval:
-            self._last_emitted = now
+    @property
+    def sample_rate(self) -> float:
+        return self._sample_rate
+
+    def should_emit(self, key: str, *, force: bool = False) -> bool:
+        """Return ``True`` when ``key`` should be emitted."""
+
+        if force:
+            self._last_emitted[key] = self._clock()
             return True
-        return self._rng.random() < self._sample_rate
+        if self._sample_rate < 1.0 and self._rng.random() > self._sample_rate:
+            return False
+        now = self._clock()
+        last_emit = self._last_emitted[key]
+        if (now - last_emit) < self._min_interval:
+            return False
+        self._last_emitted[key] = now
+        return True
 
-    def reset(self) -> None:
-        """Reset the gate, forcing the next ``allow`` to pass."""
+    def allow(self, *, force: bool = False) -> bool:
+        """Backward-compatible wrapper for non-keyed callers."""
 
-        self._last_emitted = None
+        return self.should_emit(self._DEFAULT_KEY, force=force)
+
+    def reset(self, key: str | None = None) -> None:
+        """Reset the stored timestamps for ``key`` or all keys."""
+
+        if key is None:
+            self._last_emitted.clear()
+        else:
+            self._last_emitted.pop(key, None)
+
+
+_GLOBAL_LOG_GATE = LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)
+
+
+def should_emit_log(
+    key: str,
+    *,
+    force: bool = False,
+    gate: LogGate | None = None,
+) -> bool:
+    """Return ``True`` when a log for ``key`` should be emitted."""
+
+    current_gate = gate or _GLOBAL_LOG_GATE
+    return current_gate.should_emit(key, force=force)
 
 
 def _setup_logging() -> None:  # pragma: no cover
