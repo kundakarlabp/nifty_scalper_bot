@@ -16,6 +16,7 @@ from src.features.indicators import atr_pct
 from src.risk.position_sizing import PositionSizer
 from src.signals.patches import resolve_atr_band
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
+from src.utils import ringlog
 
 # Indian Standard Time is the canonical timezone for bot diagnostics.
 IST = ZoneInfo("Asia/Kolkata")
@@ -35,6 +36,9 @@ def _as_aware_ist(ts: Any) -> pd.Timestamp:
 REASON_MAP: Dict[str, str] = {
     "cap_lt_one_lot": "premium cap too small for 1 lot",
 }
+
+# Shared diagnostics ring buffer used by multiple components.
+TRACE_RING = ringlog
 
 
 def _ok(msg: str, *, name: str, **details: Any) -> CheckResult:

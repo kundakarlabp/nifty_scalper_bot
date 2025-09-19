@@ -28,7 +28,6 @@ from src.strategies.warmup import check as warmup_check
 from src.utils import strike_selector
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 from src.utils.freshness import compute as compute_freshness
-from src.utils import ringlog
 from src.diagnostics.metrics import daily_summary
 
 log = logging.getLogger(__name__)
@@ -47,9 +46,10 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
     "/summary": "One-line performance summary",
     "/tick": "Latest L1 quote for ATM option",
     "/tpmult": "Get/Set take-profit ATR multiple",
+    "/diag": "Recent diagnostic trace events",
     "/diagstatus": "Compact diagnostic status summary",
     "/diagtrace": "Structured diagnostic trace events",
-    "/trace": "Enable verbose trace logging",
+    "/trace": "Show trace details or enable tracing",
     "/traceoff": "Disable trace logging",
     "/trend": "Adjust trend-mode TP/SL boosts",
     "/warmup": "Warm-up status (historical bootstrap)",
@@ -140,6 +140,63 @@ def _sanitize_json(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_sanitize_json(v) for v in value]
     return str(value)
+
+
+def _normalize_trace_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a sanitized, compact representation of a trace record."""
+
+    item: dict[str, Any] = {}
+    for key in ("ts", "level", "comp", "event", "trace_id", "symbol", "side"):
+        val = record.get(key)
+        if val not in (None, ""):
+            item[key] = _sanitize_json(val)
+    msg = record.get("msg") or record.get("message")
+    if msg not in (None, ""):
+        item["msg"] = _sanitize_json(msg)
+    extras = {
+        k: _sanitize_json(v)
+        for k, v in record.items()
+        if k not in item and k not in {"msg", "message"} and v not in (None, "")
+    }
+    if extras:
+        item["data"] = extras
+    return item
+
+
+def _format_trace_summary_line(record: dict[str, Any]) -> str:
+    """Format ``record`` for human-readable Telegram output."""
+
+    normalized = dict(_normalize_trace_record(record))
+    parts: list[str] = []
+    ts = normalized.pop("ts", None)
+    level = normalized.pop("level", None)
+    comp = normalized.pop("comp", None)
+    event = normalized.pop("event", None)
+    trace_id = normalized.pop("trace_id", None)
+    msg = normalized.pop("msg", None)
+    data = normalized.pop("data", None)
+    if ts is not None:
+        parts.append(str(ts))
+    if level is not None:
+        parts.append(str(level))
+    if comp and event:
+        parts.append(f"{comp}.{event}")
+    else:
+        if comp:
+            parts.append(str(comp))
+        if event:
+            parts.append(str(event))
+    if trace_id is not None:
+        parts.append(f"trace={trace_id}")
+    if msg is not None:
+        parts.append(str(msg))
+    for key in sorted(normalized):
+        parts.append(f"{key}={normalized[key]}")
+    if data:
+        parts.append(
+            "data=" + json.dumps(data, ensure_ascii=False, sort_keys=True)
+        )
+    return " ".join(str(p) for p in parts if str(p))
 
 
 class TelegramController:
@@ -926,117 +983,32 @@ class TelegramController:
                     return self._send(f"Breaker {name} forced OPEN {secs}s")
                 return self._send("Unknown breaker name")
 
-        # DIAG – detailed status + last signal
+        # DIAG – recent trace events from the diagnostics ring buffer
         if cmd == "/diag":
+            ring = getattr(checks, "TRACE_RING", None)
+            limit_cfg = _diag_trace_limit()
+            if ring is None or limit_cfg <= 0:
+                return self._send("Diagnostic trace capture disabled.")
+            enabled_fn = getattr(ring, "enabled", None)
+            if not enabled_fn or not enabled_fn():
+                return self._send("Diagnostic trace capture disabled.")
             try:
-                status = self._status_provider() if self._status_provider else {}
-                plan = (
-                    self._last_signal_provider() if self._last_signal_provider else {}
-                )
-                verbose = os.getenv("DIAG_VERBOSE", "true").lower() != "false"
-
-                def be(val: Any) -> str:
-                    return "✅" if val else "❌"
-
-                lines: List[str] = ["📊 Status"]
-                lines.append(f"• Market Open: {be(status.get('market_open'))}")
-                lines.append(f"• Within Window: {be(status.get('within_window'))}")
-                lines.append(f"• Daily DD Hit: {be(status.get('daily_dd_hit'))}")
-                lines.append(f"• Cooloff Until: {status.get('cooloff_until', '-')}")
-                lines.append(f"• Trades Today: {status.get('trades_today')}")
-                lines.append(
-                    f"• Consecutive Losses: {status.get('consecutive_losses')}"
-                )
-                lines.append("")
-                lines.append("📈 Signal")
-                reason_block = plan.get("reason_block") or "-"
-                if verbose:
-                    micro = plan.get("micro", {})
-                    lines.append(
-                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
-                            a=plan.get("action"),
-                            o=plan.get("option_type"),
-                            s=plan.get("strike"),
-                            q=plan.get("qty_lots"),
-                        )
-                    )
-                    lines.append(f"• Expiry: {plan.get('expiry')}")
-                    lines.append(
-                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
-                            r=plan.get("regime"),
-                            sc=plan.get("score"),
-                            rr=plan.get("rr"),
-                        )
-                    )
-                    lines.append(
-                        "• ATR%: {a} | Spread%: {sp} | Depth OK: {d}".format(
-                            a=plan.get("atr_pct"),
-                            sp=micro.get("spread_pct"),
-                            d=be(micro.get("depth_ok")),
-                        )
-                    )
-                    lines.append(
-                        "• Entry: {e} | SL: {sl} | TP1: {tp1} | TP2: {tp2}".format(
-                            e=plan.get("entry"),
-                            sl=plan.get("sl"),
-                            tp1=plan.get("tp1"),
-                            tp2=plan.get("tp2"),
-                        )
-                    )
-                    lines.append(
-                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP1: {tp1} | Opt TP2: {tp2}".format(
-                            e=plan.get("opt_entry"),
-                            sl=plan.get("opt_sl"),
-                            tp1=plan.get("opt_tp1"),
-                            tp2=plan.get("opt_tp2"),
-                        )
-                    )
-                    lines.append(f"• Block: {reason_block}")
-                    reasons = plan.get("reasons") or []
-                    if reasons:
-                        lines.append("• Reasons:")
-                        for r in reasons[:4]:
-                            lines.append(f"  - {r}")
-                    else:
-                        lines.append("• Reasons: -")
-                    lines.append(f"• TS: {plan.get('ts')}")
-                    lines.append(f"• Eval Count: {plan.get('eval_count')}")
-                    lines.append(f"• Last Eval: {plan.get('last_eval_ts')}")
-                else:
-                    lines.append(
-                        "• Action: {a} | Option: {o} | Strike: {s} | Qty: {q}".format(
-                            a=plan.get("action"),
-                            o=plan.get("option_type"),
-                            s=plan.get("strike"),
-                            q=plan.get("qty_lots"),
-                        )
-                    )
-                    lines.append(f"• Expiry: {plan.get('expiry')}")
-                    lines.append(
-                        "• Regime: {r} | Score: {sc} | RR: {rr}".format(
-                            r=plan.get("regime"),
-                            sc=plan.get("score"),
-                            rr=plan.get("rr"),
-                        )
-                    )
-                    lines.append(
-                        "• Entry: {e} | SL: {sl} | TP2: {tp2}".format(
-                            e=plan.get("entry"),
-                            sl=plan.get("sl"),
-                            tp2=plan.get("tp2"),
-                        )
-                    )
-                    lines.append(
-                        "• Opt Entry: {e} | Opt SL: {sl} | Opt TP2: {tp2}".format(
-                            e=plan.get("opt_entry"),
-                            sl=plan.get("opt_sl"),
-                            tp2=plan.get("opt_tp2"),
-                        )
-                    )
-                    lines.append(f"• Block: {reason_block}")
-                return self._send("\n".join(lines), parse_mode="Markdown")
-            except Exception as e:
-                return self._send(f"Diag error: {e}")
+                records = ring.tail(None)
+            except Exception as exc:
+                return self._send(f"Diag error: {exc}")
+            if not records:
+                return self._send("No diagnostic events captured.")
+            limit = limit_cfg
+            if args:
+                try:
+                    requested = int(args[0])
+                except (TypeError, ValueError):
+                    return self._send("Usage: /diag [count]")
+                limit = max(1, min(requested, limit_cfg))
+            tail = records[-limit:]
+            lines = [_format_trace_summary_line(rec) for rec in tail]
+            text = "\n".join(lines)
+            return self._send(f"```text\n{text}\n```", parse_mode="Markdown")
 
         if cmd == "/diagstatus":
             if not self._compact_diag_provider:
@@ -1057,40 +1029,30 @@ class TelegramController:
 
         if cmd == "/diagtrace":
             limit = _diag_trace_limit()
-            if limit <= 0 or not ringlog.enabled():
+            ring = getattr(checks, "TRACE_RING", None)
+            if limit <= 0 or ring is None:
+                return self._send("Diagnostic trace capture disabled.")
+            enabled_fn = getattr(ring, "enabled", None)
+            if not enabled_fn or not enabled_fn():
                 return self._send("Diagnostic trace capture disabled.")
             try:
-                records = ringlog.tail(None)
+                records = ring.tail(None)
             except Exception as exc:
                 return self._send(f"Diag trace error: {exc}")
             if not records:
                 return self._send("No diagnostic events captured.")
             target_trace = args[0].strip() if args else ""
-            filtered = (
+            filtered_records = (
                 [r for r in records if str(r.get("trace_id")) == target_trace]
                 if target_trace
                 else records
             )
-            if not filtered:
+            if not filtered_records:
                 return self._send(f"No events found for trace {target_trace}.")
-            payload: List[Dict[str, Any]] = []
-            for rec in filtered[-limit:]:
-                item: Dict[str, Any] = {}
-                for key in ("ts", "level", "comp", "event", "trace_id", "symbol", "side"):
-                    val = rec.get(key)
-                    if val not in (None, ""):
-                        item[key] = _sanitize_json(val)
-                msg = rec.get("msg") or rec.get("message")
-                if msg:
-                    item["msg"] = _sanitize_json(msg)
-                extras = {
-                    k: _sanitize_json(v)
-                    for k, v in rec.items()
-                    if k not in item and k not in {"msg"} and v not in (None, "")
-                }
-                if extras:
-                    item["data"] = extras
-                payload.append(item)
+            payload = [
+                _normalize_trace_record(rec)
+                for rec in filtered_records[-limit:]
+            ]
             text = json.dumps(payload, ensure_ascii=False, indent=2)
             return self._send(f"```json\n{text}\n```", parse_mode="Markdown")
 
@@ -1486,17 +1448,53 @@ class TelegramController:
                 return self._send(f"Quotes error: {e}")
 
         if cmd == "/trace":
-            runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
-            if not runner:
-                return self._send("Runner unavailable.")
+            trace_setter: Optional[Callable[[int], None]] = None
+            if self._trace_provider:
+                trace_setter = self._trace_provider
+            else:
+                runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+                if runner is not None:
+                    trace_setter = lambda n: setattr(
+                        runner, "trace_ticks_remaining", max(1, min(50, n))
+                    )
+            if args:
+                try:
+                    requested = int(args[0])
+                except (TypeError, ValueError):
+                    requested = None
+                if trace_setter and requested is not None:
+                    count = max(1, min(50, requested))
+                    trace_setter(count)
+                    return self._send(f"Tracing next {count} evals.")
+            if not args:
+                return self._send("Usage: /trace <trace_id>")
+            trace_id = args[0].strip()
+            if not trace_id:
+                return self._send("Usage: /trace <trace_id>")
+            ring = getattr(checks, "TRACE_RING", None)
+            if ring is None:
+                return self._send("Diagnostic trace capture disabled.")
+            enabled_fn = getattr(ring, "enabled", None)
+            if not enabled_fn or not enabled_fn():
+                return self._send("Diagnostic trace capture disabled.")
             try:
-                n = int(args[0]) if args else 5
-            except Exception:
-                n = 5
-            runner.trace_ticks_remaining = max(1, min(50, n))
-            return self._send(f"Tracing next {runner.trace_ticks_remaining} evals.")
+                records = ring.tail(None)
+            except Exception as exc:
+                return self._send(f"Trace error: {exc}")
+            filtered = [r for r in records if str(r.get("trace_id")) == trace_id]
+            if not filtered:
+                return self._send(f"No events found for trace {trace_id}.")
+            payload = [_normalize_trace_record(rec) for rec in filtered]
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            return self._send(f"```json\n{text}\n```", parse_mode="Markdown")
 
         if cmd == "/traceoff":
+            if self._trace_provider:
+                try:
+                    self._trace_provider(0)
+                except Exception as exc:
+                    return self._send(f"Trace off error: {exc}")
+                return self._send("Trace off.")
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
                 return self._send("Runner unavailable.")
