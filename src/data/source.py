@@ -390,21 +390,29 @@ class DataSource:
     def current_tokens(self) -> tuple[int | None, int | None]:
         """Return the currently tracked CE/PE instrument tokens if available."""
 
+        def _coerce(value: Any) -> int | None:
+            if value in (None, "", 0):
+                return None
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        ce_pref = getattr(self, "_current_ce_token", None)
+        pe_pref = getattr(self, "_current_pe_token", None)
+
         tokens = getattr(self, "atm_tokens", None)
         if isinstance(tokens, (list, tuple)) and tokens:
-            ce = tokens[0] if len(tokens) > 0 else None
-            pe = tokens[1] if len(tokens) > 1 else None
+            ce_fallback = tokens[0] if len(tokens) > 0 else None
+            pe_fallback = tokens[1] if len(tokens) > 1 else None
+        else:
+            ce_fallback = None
+            pe_fallback = None
 
-            def _coerce(value: Any) -> int | None:
-                if value in (None, "", 0):
-                    return None
-                try:
-                    return int(value)
-                except Exception:
-                    return None
+        ce = _coerce(ce_pref if ce_pref not in (None, "", 0) else ce_fallback)
+        pe = _coerce(pe_pref if pe_pref not in (None, "", 0) else pe_fallback)
 
-            return _coerce(ce), _coerce(pe)
-        return None, None
+        return ce, pe
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health metrics if available."""
