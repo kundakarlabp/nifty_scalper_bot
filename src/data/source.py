@@ -9,6 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
@@ -523,6 +524,18 @@ class _CacheEntry:
     requested_window: Tuple[datetime, datetime]
 
 
+@dataclass(slots=True)
+class QuoteState:
+    token: int
+    ts: float
+    bid: float | None
+    ask: float | None
+    bid_qty: int | None
+    ask_qty: int | None
+    spread_pct: float | None
+    has_depth: bool
+
+
 class _TTLCache:
     """
     Extremely simple per‑(token,interval) cache to soften historical_data pressure
@@ -901,6 +914,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
     def __init__(self, kite: Optional["KiteConnect"]) -> None:
         self.kite = kite
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.kite_ticker = getattr(kite, "ticker", None)
+        self._quotes: dict[int, QuoteState] = {}
+        self._full_depth_tokens: set[int] = set()
+        self._stale_tokens: set[int] = set()
+        self.settings = self._build_micro_settings()
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
         self.cb_quote = CircuitBreaker("quote")
@@ -932,6 +951,35 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_auth_warn = 0.0
         self._option_quote_cache: dict[int, dict[str, Any]] = {}
         self._atm_reconnect_hook_set = False
+
+    def _build_micro_settings(self) -> SimpleNamespace:
+        try:
+            tick_stale = float(
+                getattr(settings, "TICK_STALE_SECONDS", getattr(settings, "TICK_MAX_LAG_S", 5.0))
+            )
+        except Exception:
+            tick_stale = 5.0
+        micro_cfg = getattr(settings, "micro", None)
+        try:
+            spread_max = float(
+                getattr(micro_cfg, "max_spread_pct", getattr(micro_cfg, "spread_cap_pct", 1.0))
+            ) if micro_cfg is not None else 1.0
+        except Exception:
+            spread_max = 1.0
+        try:
+            lot_size = int(getattr(getattr(settings, "instruments", None), "nifty_lot_size", 0) or 0)
+        except Exception:
+            lot_size = 0
+        try:
+            depth_min_lots = float(getattr(micro_cfg, "depth_min_lots", 0) or 0) if micro_cfg is not None else 0.0
+        except Exception:
+            depth_min_lots = 0.0
+        depth_min_qty = int(max(depth_min_lots, 0.0) * max(lot_size, 0))
+        return SimpleNamespace(
+            TICK_STALE_SECONDS=max(tick_stale, 0.0),
+            DEPTH_MIN_QTY=max(depth_min_qty, 0),
+            SPREAD_MAX_PCT=max(spread_max, 0.0),
+        )
 
     @property
     def last_tick_ts(self) -> float | None:
@@ -982,13 +1030,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     self._last_auth_warn = time.time()
             tokens_now = [int(t) for t in getattr(self, "atm_tokens", ()) if t]
             if tokens_now:
-                if not _subscribe_tokens(self, tokens_now):
-                    log.debug("LiveKiteSource connect: subscribe ATM tokens failed")
+                self._subscribe_tokens_full(tokens_now)
                 if not self._atm_reconnect_hook_set:
                     hook = getattr(self.kite, "on_reconnect", None)
                     if callable(hook):
                         try:
-                            hook(lambda: _subscribe_tokens(self, tokens_now))
+                            hook(lambda: self._subscribe_tokens_full(tokens_now))
                         except Exception:
                             log.debug(
                                 "LiveKiteSource connect: on_reconnect hook failed", exc_info=True
@@ -1015,6 +1062,59 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.hist_mode = "live_warmup"
             if self.bar_builder is None:
                 self.bar_builder = MinuteBarBuilder(max_bars=120)
+
+    def _subscribe_tokens_full(self, tokens: list[int]) -> None:
+        if not tokens:
+            return
+        payload: list[int] = []
+        for token in tokens:
+            if token is None:
+                continue
+            try:
+                payload.append(int(token))
+            except Exception:
+                continue
+        if not payload:
+            return
+        ordered_payload: list[int] = []
+        seen: set[int] = set()
+        for token in payload:
+            if token in seen:
+                continue
+            seen.add(token)
+            ordered_payload.append(token)
+        subscribed = False
+        mode_applied = False
+        candidates = [
+            getattr(self, "kite_ticker", None),
+            getattr(self, "kws", None),
+            getattr(self, "ticker", None),
+            getattr(self.kite, "ticker", None) if self.kite else None,
+            self.kite,
+        ]
+        for target in candidates:
+            if target is None:
+                continue
+            subscribe = getattr(target, "subscribe", None)
+            if callable(subscribe):
+                try:
+                    subscribe(ordered_payload)
+                    subscribed = True
+                except Exception:
+                    continue
+            set_mode = getattr(target, "set_mode", None)
+            if callable(set_mode):
+                mode = getattr(target, "MODE_FULL", getattr(self.kite, "MODE_FULL", "full"))
+                try:
+                    set_mode(mode, ordered_payload)
+                    mode_applied = True
+                except Exception:
+                    continue
+            if subscribed and mode_applied:
+                break
+        if not (subscribed and mode_applied):
+            _subscribe_tokens(self, ordered_payload)
+        self.log.info("data.subscribe", extra={"mode": "FULL", "tokens": ordered_payload})
 
     def disconnect(self) -> None:
         """Close the underlying Kite session if available."""
@@ -1214,6 +1314,101 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         self._option_quote_cache[token] = payload
 
+    def _on_tick(self, tick: Mapping[str, Any]) -> None:
+        token_raw = tick.get("instrument_token") or tick.get("token")
+        if token_raw is None:
+            return
+        try:
+            token = int(token_raw)
+        except Exception:
+            return
+        now = time.time()
+        depth = tick.get("depth") if isinstance(tick, Mapping) else None
+        bid = ask = None
+        bid_qty = ask_qty = None
+        has_depth = False
+        if isinstance(depth, Mapping):
+            buy = depth.get("buy")
+            sell = depth.get("sell")
+            if isinstance(buy, Sequence) and isinstance(sell, Sequence) and buy and sell:
+                try:
+                    best_buy = buy[0]
+                    best_sell = sell[0]
+                    bid_val = (
+                        best_buy.get("price")
+                        if isinstance(best_buy, Mapping)
+                        else getattr(best_buy, "price", None)
+                    )
+                    ask_val = (
+                        best_sell.get("price")
+                        if isinstance(best_sell, Mapping)
+                        else getattr(best_sell, "price", None)
+                    )
+                    bid_qty_val = (
+                        best_buy.get("quantity")
+                        if isinstance(best_buy, Mapping)
+                        else getattr(best_buy, "quantity", None)
+                    )
+                    ask_qty_val = (
+                        best_sell.get("quantity")
+                        if isinstance(best_sell, Mapping)
+                        else getattr(best_sell, "quantity", None)
+                    )
+                    bid = float(bid_val) if bid_val is not None else None
+                    ask = float(ask_val) if ask_val is not None else None
+                    bid_qty = int(bid_qty_val) if bid_qty_val is not None else None
+                    ask_qty = int(ask_qty_val) if ask_qty_val is not None else None
+                    has_depth = bool(
+                        bid is not None and ask is not None and bid > 0.0 and ask > 0.0
+                    )
+                except Exception:
+                    has_depth = False
+        spread_pct = None
+        if bid is not None and ask is not None and ask > 0 and bid > 0:
+            try:
+                spread_pct = abs(ask - bid) / ((ask + bid) / 2.0) * 100.0
+            except Exception:
+                spread_pct = None
+        state = QuoteState(
+            token=token,
+            ts=now,
+            bid=bid,
+            ask=ask,
+            bid_qty=bid_qty,
+            ask_qty=ask_qty,
+            spread_pct=spread_pct,
+            has_depth=bool(has_depth),
+        )
+        self._quotes[token] = state
+        self._stale_tokens.discard(token)
+        if has_depth:
+            if token not in self._full_depth_tokens:
+                self._full_depth_tokens.add(token)
+                self.log.info(
+                    "data.tick_full_ready",
+                    extra={
+                        "token": token,
+                        "bid": bid,
+                        "ask": ask,
+                        "bid_qty": bid_qty,
+                        "ask_qty": ask_qty,
+                        "spread_pct": spread_pct,
+                    },
+                )
+            self.log.debug(
+                "data.tick_full",
+                extra={
+                    "token": token,
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_qty": bid_qty,
+                    "ask_qty": ask_qty,
+                    "spread_pct": spread_pct,
+                },
+            )
+        else:
+            self.log.debug("data.tick_ltp_only", extra={"token": token})
+
     def get_cached_full_quote(
         self, token: int | str
     ) -> dict[str, Any] | None:
@@ -1232,6 +1427,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Handle incoming tick by updating warmup bar builder."""
         try:
+            self._on_tick(tick)
+        except Exception:
+            self.log.debug("data.tick_state_error", exc_info=True)
+        try:
             self._ingest_option_tick(tick)
         except Exception:  # pragma: no cover - defensive
             log.debug("option_tick_ingest_failed", exc_info=True)
@@ -1242,6 +1441,66 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.bar_builder.on_tick(tick)
             except Exception:  # pragma: no cover - defensive
                 log.debug("bar_builder.on_tick failed", exc_info=True)
+
+    def get_micro_state(self, token: int) -> dict[str, Any]:
+        try:
+            token_i = int(token)
+        except Exception:
+            token_i = token if isinstance(token, int) else 0
+        q = self._quotes.get(token_i)
+        if not q:
+            return {
+                "stale": True,
+                "age": None,
+                "age_sec": None,
+                "has_depth": False,
+                "depth_ok": False,
+                "spread_pct": None,
+                "spread_ok": False,
+                "bid": None,
+                "ask": None,
+                "bid_qty": None,
+                "ask_qty": None,
+                "last_tick_ts": None,
+                "reason": "no_quote",
+            }
+        now = time.time()
+        age = max(now - q.ts, 0.0)
+        tick_stale = float(getattr(self.settings, "TICK_STALE_SECONDS", 5.0))
+        stale = age > tick_stale
+        depth_min_qty = int(getattr(self.settings, "DEPTH_MIN_QTY", 0))
+        depth_ok = bool(
+            q.has_depth
+            and q.bid_qty is not None
+            and q.ask_qty is not None
+            and q.bid_qty >= depth_min_qty
+            and q.ask_qty >= depth_min_qty
+        )
+        spread_cap = float(getattr(self.settings, "SPREAD_MAX_PCT", 1.0))
+        spread_ok = bool(q.spread_pct is not None and q.spread_pct <= spread_cap)
+        if stale:
+            if token_i not in self._stale_tokens:
+                self._stale_tokens.add(token_i)
+                self.log.info(
+                    "data.tick_stale",
+                    extra={"token": token_i, "age": round(age, 3), "threshold": tick_stale},
+                )
+        else:
+            self._stale_tokens.discard(token_i)
+        return {
+            "stale": stale,
+            "age": round(age, 3),
+            "age_sec": round(age, 3),
+            "has_depth": q.has_depth,
+            "depth_ok": depth_ok,
+            "spread_pct": q.spread_pct,
+            "spread_ok": spread_ok,
+            "bid": q.bid,
+            "ask": q.ask,
+            "bid_qty": q.bid_qty,
+            "ask_qty": q.ask_qty,
+            "last_tick_ts": q.ts,
+        }
 
     def prime_option_quote(
         self, token: int | str
@@ -2178,12 +2437,30 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
         ce_token,
         pe_token,
     )
-    _subscribe_tokens(self, tokens)
+    subscribe_full = getattr(self, "_subscribe_tokens_full", None)
+    logger = getattr(self, "log", log)
+    if callable(subscribe_full):
+        subscribe_full(tokens)
+    else:
+        _subscribe_tokens(self, tokens)
+    if hasattr(logger, "info"):
+        try:
+            logger.info(
+                "data.tokens_resolved",
+                extra={"ce": ce_token, "pe": pe_token, "mode": "FULL"},
+            )
+        except Exception:
+            logger.info(
+                "data.tokens_resolved ce=%s pe=%s mode=FULL", ce_token, pe_token
+            )
     for _ in range(2):
         missing = [t for t in tokens if not _have_quote(self, t)]
         if not missing:
             break
-        _subscribe_tokens(self, missing)
+        if callable(subscribe_full):
+            subscribe_full(missing)
+        else:
+            _subscribe_tokens(self, missing)
         time.sleep(0.1)
 
 
@@ -2210,7 +2487,17 @@ def auto_resubscribe_atm(self: Any) -> None:
     missing = [t for t in tokens if not _have_quote(self, t)]
     if not missing:
         return
-    if _subscribe_tokens(self, missing):
+    subscribed = False
+    subscribe_full = getattr(self, "_subscribe_tokens_full", None)
+    if callable(subscribe_full):
+        try:
+            subscribe_full(missing)
+            subscribed = True
+        except Exception:
+            subscribed = False
+    if not subscribed:
+        subscribed = _subscribe_tokens(self, missing)
+    if subscribed:
         log.info("auto_resubscribe_atm: resubscribed tokens=%s", missing)
     else:
         log.warning("auto_resubscribe_atm: could not resubscribe tokens=%s", missing)
