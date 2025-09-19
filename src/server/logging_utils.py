@@ -2,13 +2,52 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import time
 from collections import deque
+from typing import Callable
 
 from src.boot.validate_env import _log_cred_presence
-from src.config import settings
+from src.config import LOG_LEVEL, settings
 from src.utils.log_filters import install_warmup_filters
 from src.utils.logger_setup import setup_logging
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
+
+
+class LogGate:
+    """Simple time/sample gate for noisy log statements."""
+
+    def __init__(
+        self,
+        min_interval_seconds: float,
+        sample_rate: float,
+        *,
+        clock: Callable[[], float] | None = None,
+        rng: random.Random | None = None,
+    ) -> None:
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must be non-negative")
+        if not 0.0 <= sample_rate <= 1.0:
+            raise ValueError("sample_rate must be between 0 and 1")
+        self._min_interval = float(min_interval_seconds)
+        self._sample_rate = float(sample_rate)
+        self._clock = clock or time.monotonic
+        self._rng = rng or random.Random()
+        self._last_emitted: float | None = None
+
+    def allow(self) -> bool:
+        """Return ``True`` when the caller should emit a log."""
+
+        now = self._clock()
+        if self._last_emitted is None or now - self._last_emitted >= self._min_interval:
+            self._last_emitted = now
+            return True
+        return self._rng.random() < self._sample_rate
+
+    def reset(self) -> None:
+        """Reset the gate, forcing the next ``allow`` to pass."""
+
+        self._last_emitted = None
 
 
 def _setup_logging() -> None:  # pragma: no cover
@@ -18,7 +57,7 @@ def _setup_logging() -> None:  # pragma: no cover
         if log_path is None and env_log_path:
             log_path = env_log_path
         setup_logging(
-            level=settings.log_level,
+            level=LOG_LEVEL,
             log_file=str(log_path) if log_path else None,
             json=settings.log_json,
         )
