@@ -28,6 +28,7 @@ from src.strategies.warmup import check as warmup_check
 from src.utils import strike_selector
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 from src.utils.freshness import compute as compute_freshness
+from src.utils import ringlog
 from src.diagnostics.metrics import daily_summary
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
     "/summary": "One-line performance summary",
     "/tick": "Latest L1 quote for ATM option",
     "/tpmult": "Get/Set take-profit ATR multiple",
+    "/diagstatus": "Compact diagnostic status summary",
+    "/diagtrace": "Structured diagnostic trace events",
     "/trace": "Enable verbose trace logging",
     "/traceoff": "Disable trace logging",
     "/trend": "Adjust trend-mode TP/SL boosts",
@@ -110,6 +113,33 @@ def _fmt_micro(
         f"depth={depth_ok if depth_ok is not None else 'N/A'} "
         f"last_bar_ts={last_bar_ts} lag_s={lag_s}"
     )
+
+
+def _diag_trace_limit() -> int:
+    """Return the maximum number of diagnostic trace events to display."""
+
+    raw = getattr(settings, "DIAG_TRACE_EVENTS", None)
+    if raw is None:
+        raw = getattr(settings, "diag_trace_events", None)
+    if isinstance(raw, bool):
+        return 20 if raw else 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def _sanitize_json(value: Any) -> Any:
+    """Return a JSON-serializable representation of ``value``."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_json(v) for v in value]
+    return str(value)
 
 
 class TelegramController:
@@ -1007,6 +1037,62 @@ class TelegramController:
                 return self._send("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Diag error: {e}")
+
+        if cmd == "/diagstatus":
+            if not self._compact_diag_provider:
+                return self._send("Diag status provider not wired.")
+            try:
+                summary = self._compact_diag_provider() or {}
+            except Exception as exc:
+                return self._send(f"Diag status error: {exc}")
+            if not summary:
+                return self._send("No diagnostic summary available.")
+            status_messages = summary.get("status_messages") or {}
+            overall = "ok" if summary.get("ok") else "issues"
+            lines = [f"overall: {overall}"]
+            for key in sorted(status_messages):
+                lines.append(f"{key}: {status_messages[key]}")
+            text = "\n".join(lines)
+            return self._send(f"```text\n{text}\n```", parse_mode="Markdown")
+
+        if cmd == "/diagtrace":
+            limit = _diag_trace_limit()
+            if limit <= 0 or not ringlog.enabled():
+                return self._send("Diagnostic trace capture disabled.")
+            try:
+                records = ringlog.tail(None)
+            except Exception as exc:
+                return self._send(f"Diag trace error: {exc}")
+            if not records:
+                return self._send("No diagnostic events captured.")
+            target_trace = args[0].strip() if args else ""
+            filtered = (
+                [r for r in records if str(r.get("trace_id")) == target_trace]
+                if target_trace
+                else records
+            )
+            if not filtered:
+                return self._send(f"No events found for trace {target_trace}.")
+            payload: List[Dict[str, Any]] = []
+            for rec in filtered[-limit:]:
+                item: Dict[str, Any] = {}
+                for key in ("ts", "level", "comp", "event", "trace_id", "symbol", "side"):
+                    val = rec.get(key)
+                    if val not in (None, ""):
+                        item[key] = _sanitize_json(val)
+                msg = rec.get("msg") or rec.get("message")
+                if msg:
+                    item["msg"] = _sanitize_json(msg)
+                extras = {
+                    k: _sanitize_json(v)
+                    for k, v in rec.items()
+                    if k not in item and k not in {"msg"} and v not in (None, "")
+                }
+                if extras:
+                    item["data"] = extras
+                payload.append(item)
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            return self._send(f"```json\n{text}\n```", parse_mode="Markdown")
 
         if cmd == "/greeks":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)

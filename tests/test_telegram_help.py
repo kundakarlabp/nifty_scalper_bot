@@ -35,6 +35,8 @@ EXPECTED_COMMANDS = {
     "/config",
     "/depthmin",
     "/diag",
+    "/diagstatus",
+    "/diagtrace",
     "/emergency_stop",
     "/eventguard",
     "/events",
