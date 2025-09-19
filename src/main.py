@@ -28,6 +28,7 @@ import src.boot.synthetic_warmup  # noqa: E402,F401  # apply synthetic warmup pa
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
 from src.config import settings  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
+from src.diagnostics import healthkit  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
 from src.server import health  # noqa: E402
@@ -369,14 +370,18 @@ def main() -> int:
             if isinstance(flow, dict):
                 plan_payload = flow.get("plan") or flow.get("signal")
                 reason = flow.get("reason_block")
+                log_level = logging.INFO if healthkit.trace_active() else logging.DEBUG
                 if flow.get("signal_ok") and plan_payload and not reason:
-                    log.info("Signal generated: %s", plan_payload)
+                    log.log(log_level, "Signal generated: %s", plan_payload)
                 elif flow.get("signal_ok"):
-                    log.debug(
-                        "Signal candidate blocked: %s plan=%s", reason, plan_payload
+                    log.log(
+                        log_level,
+                        "Signal candidate blocked: %s plan=%s",
+                        reason,
+                        plan_payload,
                     )
                 else:
-                    log.debug("No signal generated: %s", reason)
+                    log.log(log_level, "No signal generated: %s", reason)
             runner.health_check()
             now = time.time()
             if (now - last_hb) >= 15 * 60:
