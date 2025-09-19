@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
 from pprint import pformat
 from typing import Any, Callable, Optional
 
@@ -50,6 +51,8 @@ class TelegramCommands:
         *,
         settings: Any | None = None,
         source: Any | None = None,
+        strategy: Any | None = None,
+        risk: Any | None = None,
     ) -> None:
         self.token = bot_token or ""
         self.chat = str(chat_id or "")
@@ -68,6 +71,8 @@ class TelegramCommands:
         self.paused_until = 0.0
         self.settings = settings or global_settings
         self.source = source
+        self.strategy = strategy
+        self.risk = risk
         self._diag_until_ts = 0.0
         self._trace_until_ts = 0.0
 
@@ -208,6 +213,180 @@ class TelegramCommands:
         except Exception:
             return None
 
+    def _diag_snapshot(self) -> dict[str, Any]:
+        """Build a compact diagnostic snapshot for the trading pipeline."""
+
+        settings_obj = self.settings
+        try:
+            cap_pct = float(getattr(settings_obj, "EXPOSURE_CAP_PCT", 0.0))
+        except Exception:
+            cap_pct = 0.0
+
+        snapshot: dict[str, Any] = {
+            "market_open": False,
+            "equity": None,
+            "risk": {"daily_dd": None, "cap_pct": cap_pct},
+            "signals": {"regime": None, "atr_pct": None, "score": None},
+            "micro": {"ce": None, "pe": None},
+            "open_orders": 0,
+            "positions": 0,
+            "latency": {"tick_age": None, "bar_lag": None},
+        }
+
+        source = self.source
+        tokens = self._current_tokens()
+        if tokens[0]:
+            snapshot["micro"]["ce"] = self._get_micro_state(int(tokens[0]))
+        if len(tokens) > 1 and tokens[1]:
+            snapshot["micro"]["pe"] = self._get_micro_state(int(tokens[1]))
+
+        if source is not None:
+            tick_ts = getattr(source, "last_tick_ts", None)
+            if tick_ts:
+                try:
+                    snapshot["latency"]["tick_age"] = max(
+                        time.time() - float(tick_ts),
+                        0.0,
+                    )
+                except Exception:
+                    snapshot["latency"]["tick_age"] = None
+
+        strategy = self.strategy
+        risk_obj = self.risk or getattr(strategy, "risk", None)
+
+        if risk_obj is not None:
+            daily_dd = getattr(risk_obj, "day_realized_loss", None)
+            if daily_dd is None:
+                engine_state = getattr(getattr(risk_obj, "state", None), "cum_loss_rupees", None)
+                daily_dd = engine_state
+            if daily_dd is not None:
+                try:
+                    snapshot["risk"]["daily_dd"] = round(float(daily_dd), 2)
+                except Exception:
+                    snapshot["risk"]["daily_dd"] = daily_dd
+        elif strategy is not None:
+            engine = getattr(strategy, "risk_engine", None)
+            state = getattr(engine, "state", None)
+            daily_dd = getattr(state, "cum_loss_rupees", None)
+            if daily_dd is not None:
+                try:
+                    snapshot["risk"]["daily_dd"] = round(float(daily_dd), 2)
+                except Exception:
+                    snapshot["risk"]["daily_dd"] = daily_dd
+
+        if strategy is None:
+            return snapshot
+
+        window_fn = getattr(strategy, "_within_trading_window", None)
+        if callable(window_fn):
+            try:
+                snapshot["market_open"] = bool(window_fn(None))
+            except TypeError:
+                try:
+                    snapshot["market_open"] = bool(window_fn())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        else:
+            market_flag = getattr(strategy, "market_open", None)
+            if market_flag is not None:
+                snapshot["market_open"] = bool(market_flag)
+
+        equity_cached = getattr(strategy, "_equity_cached_value", None)
+        if equity_cached is None:
+            equity_cached = getattr(strategy, "equity", None)
+        if equity_cached is not None:
+            try:
+                snapshot["equity"] = round(float(equity_cached), 2)
+            except Exception:
+                snapshot["equity"] = equity_cached
+
+        plan = getattr(strategy, "last_plan", None)
+        if not isinstance(plan, dict):
+            plan = getattr(strategy, "_last_signal_debug", None)
+        if isinstance(plan, dict):
+            for key in ("regime", "atr_pct", "score"):
+                if key in plan:
+                    snapshot["signals"][key] = plan.get(key)
+
+        executor = getattr(strategy, "executor", None) or getattr(
+            strategy, "order_executor", None
+        )
+        if executor is not None:
+            orders_fn = getattr(executor, "get_active_orders", None)
+            try:
+                open_orders = orders_fn() if callable(orders_fn) else None
+            except Exception:
+                open_orders = None
+            if isinstance(open_orders, (list, tuple, set)):
+                snapshot["open_orders"] = len(open_orders)
+            elif isinstance(open_orders, dict):
+                snapshot["open_orders"] = len(open_orders)
+            elif open_orders is not None:
+                try:
+                    snapshot["open_orders"] = int(open_orders)
+                except Exception:
+                    pass
+
+            pos_fn = getattr(executor, "get_positions_kite", None)
+            try:
+                positions = pos_fn() if callable(pos_fn) else None
+            except Exception:
+                positions = None
+            if isinstance(positions, dict):
+                snapshot["positions"] = len(positions)
+            elif isinstance(positions, (list, tuple, set)):
+                snapshot["positions"] = len(positions)
+            elif positions:
+                snapshot["positions"] = 1
+
+        window = getattr(strategy, "_ohlc_cache", None)
+        if window is not None:
+            try:
+                is_empty = bool(getattr(window, "empty", False))
+            except Exception:
+                is_empty = False
+            if not is_empty:
+                try:
+                    last_ts = window.index[-1]
+                except Exception:
+                    last_ts = None
+                if last_ts is not None:
+                    last_dt = None
+                    if hasattr(last_ts, "to_pydatetime"):
+                        try:
+                            last_dt = last_ts.to_pydatetime()
+                        except Exception:
+                            last_dt = None
+                    elif isinstance(last_ts, datetime):
+                        last_dt = last_ts
+                    else:
+                        try:
+                            last_dt = datetime.fromisoformat(str(last_ts))
+                        except Exception:
+                            last_dt = None
+                    if last_dt is not None:
+                        now_fn = getattr(strategy, "_now_ist", None)
+                        if callable(now_fn):
+                            try:
+                                now_dt = now_fn()
+                            except Exception:
+                                now_dt = datetime.utcnow()
+                        else:
+                            now_dt = datetime.utcnow()
+                        if last_dt.tzinfo is None and getattr(now_dt, "tzinfo", None) is not None:
+                            last_dt = last_dt.replace(tzinfo=now_dt.tzinfo)
+                        try:
+                            snapshot["latency"]["bar_lag"] = max(
+                                (now_dt - last_dt).total_seconds(),
+                                0.0,
+                            )
+                        except Exception:
+                            snapshot["latency"]["bar_lag"] = None
+
+        return snapshot
+
     def _handle_cmd(self, cmd: str, arg: str) -> bool:
         """Handle built-in commands when no external handler is wired."""
 
@@ -253,14 +432,12 @@ class TelegramCommands:
             return True
         if cmd == "/diag":
             try:
-                from src.diagnostics.healthkit import snapshot_pipeline
-
-                snap = snapshot_pipeline()
+                snapshot = self._diag_snapshot()
             except Exception as exc:
                 reply(f"Diag snapshot failed: {exc}")
                 return True
             text = format_block(
-                snap,
+                snapshot,
                 max_lines=int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 30)),
             )
             reply(text)

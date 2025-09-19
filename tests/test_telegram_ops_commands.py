@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 
-import sys
 from types import SimpleNamespace
 
 import src.notifications.telegram_commands as tg_mod
@@ -42,6 +41,7 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
         LOG_DIAG_DEFAULT_SEC=5,
         LOG_TRACE_DEFAULT_SEC=7,
         LOG_MAX_LINES_REPLY=10,
+        EXPOSURE_CAP_PCT=5.0,
     )
 
     class DummySource:
@@ -73,14 +73,39 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     assert tc._diag_until_ts == 0.0
     assert tc._trace_until_ts == 0.0
 
-    dummy_diag = SimpleNamespace(snapshot_pipeline=lambda: {"status": "ok"})
-    monkeypatch.setitem(sys.modules, "src.diagnostics.healthkit", dummy_diag)
     assert tc._handle_cmd("/diag", "") is True
     assert sent[-1].startswith("```")
-    assert "status" in sent[-1]
+    snapshot = tc._diag_snapshot()
+    assert snapshot["risk"]["cap_pct"] == 5.0
 
     assert tc._handle_cmd("/micro", "") is True
     assert "\"CE\"" in sent[-1]
 
     assert tc._handle_cmd("/quotes", "") is True
     assert "bid" in sent[-1]
+
+
+def test_diag_with_source_only() -> None:
+    dummy_settings = SimpleNamespace(
+        LOG_MAX_LINES_REPLY=10,
+        EXPOSURE_CAP_PCT=2.5,
+    )
+
+    class DummySource:
+        def current_tokens(self) -> tuple[int, int]:
+            return (111, 0)
+
+        def get_micro_state(self, token: int) -> dict[str, int]:
+            return {"token": token, "depth_ok": 1}
+
+    tc = TelegramCommands("t", "1", settings=dummy_settings, source=DummySource())
+    sent: list[str] = []
+    tc._send = lambda msg: sent.append(msg)
+
+    assert tc._handle_cmd("/diag", "") is True
+    assert sent, "Expected /diag to produce output"
+    text = sent[-1]
+    assert text.startswith("```")
+    snapshot = tc._diag_snapshot()
+    assert snapshot["risk"]["cap_pct"] == 2.5
+    assert snapshot["micro"]["ce"]["token"] == 111
