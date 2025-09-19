@@ -45,14 +45,25 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     )
 
     class DummySource:
-        def current_tokens(self) -> tuple[int, int]:
-            return (111, 222)
+        def __init__(self) -> None:
+            self.atm_tokens = (111, 222)
+            self._current_tokens: tuple[int, int] | None = None
 
-        def get_micro_state(self, token: int) -> dict[str, int]:
-            return {"token": token, "depth_ok": 1}
+        def current_tokens(self) -> tuple[int, int] | None:
+            return self._current_tokens
 
-        def quote_snapshot(self, token: int) -> dict[str, int]:
-            return {"token": token, "bid": token + 1, "ask": token + 2}
+        def get_micro_state(self, token: int) -> dict[str, object]:
+            phase = "after" if self._current_tokens else "before"
+            return {"token": token, "depth_ok": 1, "phase": phase}
+
+        def quote_snapshot(self, token: int) -> dict[str, object]:
+            phase = "after" if self._current_tokens else "before"
+            return {
+                "token": token,
+                "bid": token + 1,
+                "ask": token + 2,
+                "phase": phase,
+            }
 
     source = DummySource()
     tc = TelegramCommands("t", "1", settings=dummy_settings, source=source)
@@ -79,10 +90,26 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     assert snapshot["risk"]["cap_pct"] == 5.0
 
     assert tc._handle_cmd("/micro", "") is True
-    assert "\"CE\"" in sent[-1]
+    micro_before = sent[-1]
+    assert "\"CE\"" in micro_before
+    assert "\"phase\": \"before\"" in micro_before
 
     assert tc._handle_cmd("/quotes", "") is True
-    assert "bid" in sent[-1]
+    quotes_before = sent[-1]
+    assert "bid" in quotes_before
+    assert "\"phase\": \"before\"" in quotes_before
+
+    source._current_tokens = (333, 444)
+
+    assert tc._handle_cmd("/micro", "") is True
+    micro_after = sent[-1]
+    assert "\"CE\"" in micro_after
+    assert "\"phase\": \"after\"" in micro_after
+
+    assert tc._handle_cmd("/quotes", "") is True
+    quotes_after = sent[-1]
+    assert "bid" in quotes_after
+    assert "\"phase\": \"after\"" in quotes_after
 
 
 def test_diag_with_source_only() -> None:
