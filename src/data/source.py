@@ -28,8 +28,11 @@ from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
 from src.utils.time_windows import TZ
 from src.utils.strike_selector import _nearest_strike
+from src.utils.structured_logger import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
+log.propagate = True
+structured_log = cast(Any, log).bind(comp="data.source")
 
 # Warn only once when historical data access is denied
 _warn_perm_once = False
@@ -1234,8 +1237,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 log.debug("bar_builder.on_tick failed", exc_info=True)
 
     def prime_option_quote(
-        self, token: int | str
+        self, token: int | str, trace_id: Optional[str] = None
     ) -> tuple[float | None, str | None, int | None]:
+        log_ctx = structured_log if trace_id is None else structured_log.bind(
+            trace_id=trace_id
+        )
         try:
             token_i = int(token)
         except Exception:
@@ -1250,7 +1256,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 if isinstance(val, (int, float)) and val > 0:
                     if ts_ms is None:
                         ts_ms = int(time.time() * 1000)
-                    return float(val), f"ws_{label}", ts_ms
+                    mode_label = f"ws_{label}"
+                    log_ctx(
+                        logging.DEBUG,
+                        "option_quote_cache_hit",
+                        token=token_i,
+                        mode=mode_label,
+                        ts_ms=ts_ms,
+                        price=float(val),
+                    )
+                    return float(val), mode_label, ts_ms
 
         quote_payload: dict[str, Any] | None = None
         if self.kite:
@@ -1279,6 +1294,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     "source": "rest",
                     "mode": "rest_ltp",
                 }
+                log_ctx(
+                    logging.INFO,
+                    "option_quote_rest_cache",
+                    token=token_i,
+                    price=float(ltp_price),
+                    ts_ms=ts_ms,
+                )
                 return float(ltp_price), "rest_ltp", ts_ms
             return None, None, None
 
@@ -1290,6 +1312,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
             fetch_ltp=fetch_ltp,
         )
         if not quote_dict:
+            log_ctx(
+                logging.DEBUG,
+                "option_quote_no_quote",
+                token=token_i,
+            )
             return None, None, None
 
         ts_ms = _to_epoch_ms(quote_dict.get("timestamp")) or int(time.time() * 1000)
@@ -1305,7 +1332,17 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     source_label = "rest_ltp"
                 else:
                     source_label = label
-                return float(val), source_label, ts_ms
+                price_val = float(val)
+                log_ctx(
+                    logging.DEBUG,
+                    "option_quote_resolved",
+                    token=token_i,
+                    price=price_val,
+                    mode=source_label,
+                    ts_ms=ts_ms,
+                    source=quote_dict.get("source"),
+                )
+                return price_val, source_label, ts_ms
 
         rest_ltp: float | None = None
         if mode != "rest_ltp":
@@ -1325,11 +1362,35 @@ class LiveKiteSource(DataSource, BaseDataSource):
             merged["ts_ms"] = ts_ms
             merged.setdefault("source", "rest")
             self._option_quote_cache[token_i] = merged
+            log_ctx(
+                logging.INFO,
+                "option_quote_rest_fallback",
+                token=token_i,
+                price=rest_ltp,
+                ts_ms=ts_ms,
+            )
             return rest_ltp, "rest_ltp", ts_ms
 
         ltp_val = quote_dict.get("ltp")
         if isinstance(ltp_val, (int, float)) and ltp_val > 0:
-            return float(ltp_val), mode or "ltp", ts_ms
+            price_val = float(ltp_val)
+            log_ctx(
+                logging.DEBUG,
+                "option_quote_resolved",
+                token=token_i,
+                price=price_val,
+                mode=mode or "ltp",
+                ts_ms=ts_ms,
+                source=quote_dict.get("source"),
+            )
+            return price_val, mode or "ltp", ts_ms
+        log_ctx(
+            logging.WARNING,
+            "option_quote_unavailable",
+            token=token_i,
+            mode=mode,
+            ts_ms=ts_ms,
+        )
         return None, mode, ts_ms
 
     def ensure_backfill(

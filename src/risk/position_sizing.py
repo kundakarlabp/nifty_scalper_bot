@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple, Literal, cast
+from typing import Any, Dict, Tuple, Literal, Optional, cast
 import logging
 import math
 from types import SimpleNamespace
 
 from src.config import settings
+from src.utils.structured_logger import get_logger
 
-logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
+_logger.propagate = True
+structured_log = cast(Any, _logger).bind(comp="risk.position_sizing")
 
 
 def _mid_from_quote(q: dict) -> float:
@@ -28,8 +31,13 @@ def lots_from_premium_cap(
     quote: dict,
     lot_size: int,
     max_lots: int,
+    trace_id: Optional[str] = None,
 ) -> Tuple[int, float, float, str]:
     from src.config import settings as _settings
+
+    log_ctx = (
+        structured_log if trace_id is None else structured_log.bind(trace_id=trace_id)
+    )
 
     def _coerce_float(value: Any) -> float | None:
         try:
@@ -102,7 +110,11 @@ def lots_from_premium_cap(
                 elif hasattr(runner, "equity_amount"):
                     eq_candidate = _coerce_float(getattr(runner, "equity_amount"))
             except Exception as exc:  # pragma: no cover - defensive logging
-                logger.debug("lots_from_premium_cap: live equity fetch failed: %s", exc)
+                log_ctx(
+                    logging.DEBUG,
+                    "premium_cap_live_equity_failed",
+                    error=str(exc),
+                )
         if eq_candidate is not None:
             eq_value = max(eq_candidate, 0.0)
             eq_source = "live"
@@ -140,13 +152,14 @@ def lots_from_premium_cap(
             )
         ).lower()
         if exposure_basis == "premium":
-            logger.info(
-                "lots_from_premium_cap: basis=premium source=%s eq=%.2f cap_pct=%.2f cap=%.2f cap_abs=%.2f",
-                eq_source,
-                eq_value,
-                cap_pct,
-                cap,
-                cap_abs_setting,
+            log_ctx(
+                logging.INFO,
+                "premium_cap_equity",
+                source=eq_source,
+                equity=round(eq_value, 2),
+                cap_pct=round(cap_pct, 4),
+                cap=round(cap, 2),
+                cap_abs=round(cap_abs_setting, 2),
             )
     else:
         cap = float(
@@ -166,11 +179,25 @@ def lots_from_premium_cap(
 
     price = float(_mid_from_quote(quote or {}))
     if price <= 0:
+        log_ctx(
+            logging.DEBUG,
+            "premium_cap_zero_price",
+            cap=float(cap),
+            lot_size=lot_size,
+        )
         return 0, 0.0, float(cap), eq_source
 
     unit_notional = price * float(lot_size)
     lots = 0 if unit_notional <= 0 else int(float(cap) // unit_notional)
     lots = min(int(max_lots), max(0, lots))
+    log_ctx(
+        logging.DEBUG,
+        "premium_cap_result",
+        lots=lots,
+        unit_notional=round(unit_notional, 2),
+        cap=round(float(cap), 2),
+        eq_source=eq_source,
+    )
     return lots, unit_notional, float(cap), eq_source
 
 
@@ -323,6 +350,7 @@ class PositionSizer:
         spot_sl_points: float | None = None,
         delta: float | None = None,
         quote: Dict | None = None,
+        trace_id: Optional[str] = None,
     ) -> Tuple[int, int, Dict]:
         mid = _mid_from_quote(quote) if quote else float(entry_price)
         sl_points_spot = (
@@ -339,12 +367,17 @@ class PositionSizer:
             spot_sl_points=sl_points_spot,
             delta=delta,
         )
-        qty, lots, diag = self._compute_quantity(si, self.params)
+        qty, lots, diag = self._compute_quantity(si, self.params, trace_id=trace_id)
         return qty, lots, diag
 
 
     @staticmethod
-    def _compute_quantity(si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
+    def _compute_quantity(
+        si: SizingInputs, sp: SizingParams, *, trace_id: Optional[str] = None
+    ) -> Tuple[int, int, Dict]:
+        log_ctx = (
+            structured_log if trace_id is None else structured_log.bind(trace_id=trace_id)
+        )
         if si.entry_price <= 0 or si.lot_size <= 0 or si.equity <= 0:
             return 0, 0, PositionSizer._diag(
                 si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "invalid"
@@ -382,6 +415,7 @@ class PositionSizer:
                 {"mid": si.entry_price},
                 si.lot_size,
                 sp.max_lots,
+                trace_id=trace_id,
             )
             cap_pct = float(settings.EXPOSURE_CAP_PCT_OF_EQUITY)
             min_eq_needed = (
@@ -408,34 +442,37 @@ class PositionSizer:
 
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
-        logger.info(
-            "sizer calc: exposure=%d risk=%d limit=%d -> calc=%d",
-            max_lots_exposure,
-            max_lots_risk,
-            max_lots_limit,
-            calc_lots,
+        log_ctx(
+            logging.INFO,
+            "sizer_calc",
+            max_lots_exposure=max_lots_exposure,
+            max_lots_risk=max_lots_risk,
+            max_lots_limit=max_lots_limit,
+            calc_lots=calc_lots,
         )
         lots = calc_lots
         if sp.exposure_basis == "premium" and max_lots_exposure < 1:
             if sp.allow_min_one_lot and si.equity >= unit_notional:
                 lots = sp.min_lots
                 block_reason = ""
-                logger.info(
-                    "sizer allow_min_one_lot: basis=%s unit=%.2f cap=%.2f -> lots=%d",
-                    sp.exposure_basis,
-                    unit_notional,
-                    exposure_cap,
-                    lots,
+                log_ctx(
+                    logging.INFO,
+                    "sizer_allow_min_one_lot",
+                    basis=sp.exposure_basis,
+                    unit=round(unit_notional, 2),
+                    cap=round(exposure_cap, 2),
+                    lots=lots,
                 )
             else:
                 lots = 0
                 block_reason = "cap_lt_one_lot"
-                logger.info(
-                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                    sp.exposure_basis,
-                    unit_notional,
-                    max_lots_exposure,
-                    exposure_cap,
+                log_ctx(
+                    logging.INFO,
+                    "sizer_block",
+                    basis=sp.exposure_basis,
+                    unit=round(unit_notional, 2),
+                    lots=max_lots_exposure,
+                    cap=round(exposure_cap, 2),
                 )
         else:
             if (
@@ -444,7 +481,7 @@ class PositionSizer:
                 and sp.min_lots <= max_lots_limit
             ):
                 lots = sp.min_lots
-                logger.info("sizer clamp to min lots=%d", lots)
+                log_ctx(logging.INFO, "sizer_clamp_min_lots", lots=lots)
             block_reason = ""
             if lots == 0:
                 if max_lots_limit < sp.min_lots:
@@ -453,12 +490,13 @@ class PositionSizer:
                     block_reason = "exposure_cap"
                 else:
                     block_reason = "risk_cap"
-                logger.info(
-                    "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
-                    sp.exposure_basis,
-                    unit_notional,
-                    calc_lots,
-                    exposure_cap,
+                log_ctx(
+                    logging.INFO,
+                    "sizer_block",
+                    basis=sp.exposure_basis,
+                    unit=round(unit_notional, 2),
+                    lots=calc_lots,
+                    cap=round(exposure_cap, 2),
                 )
 
         quantity = lots * si.lot_size

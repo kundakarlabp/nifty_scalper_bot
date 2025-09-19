@@ -39,8 +39,11 @@ from src.utils.strike_selector import (
     resolve_weekly_atm,
     select_strike,
 )
+from src.utils.structured_logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+logger.propagate = True
+structured_log = cast(Any, logger).bind(comp="strategy.scalping")
 
 # --- 60s log throttle (avoid spam in deploy logs) ---
 _LOG_EVERY = 60.0
@@ -672,6 +675,7 @@ class EnhancedScalpingStrategy:
         current_tick: Optional[Dict[str, Any]] = None,
         current_price: Optional[float] = None,
         spot_df: Optional[pd.DataFrame] = None,
+        trace_id: Optional[str] = None,
     ) -> SignalOutput:
         cfg: StrategyConfig | None = getattr(
             getattr(self, "runner", None), "strategy_cfg", None
@@ -727,6 +731,7 @@ class EnhancedScalpingStrategy:
             "opt_tp2": None,
             "opt_atr": None,
             "opt_atr_pct": None,
+            "trace_id": trace_id,
         }
 
         plan["score_dbg"] = {
@@ -743,6 +748,9 @@ class EnhancedScalpingStrategy:
         plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
 
         dbg: Dict[str, Any] = {"reason_block": None}
+        log_ctx = (
+            structured_log if trace_id is None else structured_log.bind(trace_id=trace_id)
+        )
 
         def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
             sd = plan.setdefault(
@@ -940,6 +948,7 @@ class EnhancedScalpingStrategy:
                 di_plus=di_plus,
                 di_minus=di_minus,
                 bb_width=bb_width,
+                trace_id=trace_id,
             )
             if reg.regime == "RANGE" and adx_series is None:
                 reg.regime = "TREND"  # fallback when ADX not available
@@ -1201,6 +1210,7 @@ class EnhancedScalpingStrategy:
                 atr_pct=atr_pct_val,
                 cfg=cfg,
                 side=side,
+                trace_id=trace_id,
             )
             if not isinstance(micro, dict):
                 micro = {}
@@ -1396,6 +1406,17 @@ class EnhancedScalpingStrategy:
             runtime_metrics.set_elasticity(float(plan.get("elasticity") or 0.0))
             plan["tp1_qty_ratio"] = cfg.tp1_partial
 
+            log_ctx(
+                logging.INFO,
+                "strategy_signal",
+                action=plan.get("action"),
+                option_type=plan.get("option_type"),
+                strike=plan.get("strike"),
+                regime=reg.regime,
+                score=round(float(score), 3),
+                rr=round(float(rr), 2),
+                reasons=list(reasons),
+            )
             self._last_debug = {
                 "score": score,
                 "regime": reg.regime,

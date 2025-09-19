@@ -12,8 +12,11 @@ from zoneinfo import ZoneInfo
 
 from src.config import settings
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
+from src.utils.structured_logger import get_logger
 
-logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
+_logger.propagate = True
+structured_log = cast(Any, _logger).bind(comp="risk.limits")
 
 
 @dataclass
@@ -291,6 +294,7 @@ class RiskEngine:
         planned_delta_units: Optional[float] = None,
         portfolio_delta_units: Optional[float] = None,
         gamma_mode: Optional[bool] = None,
+        trace_id: Optional[str] = None,
     ) -> Block | Tuple[bool, str, Dict[str, Any]]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
@@ -304,6 +308,11 @@ class RiskEngine:
         now = when
         self.state.new_session_if_needed(now)
 
+        trace = trace_id or plan.get("trace_id") if isinstance(plan, dict) else trace_id
+        if isinstance(plan, dict) and trace:
+            plan.setdefault("trace_id", trace)
+        log_ctx = structured_log if trace is None else structured_log.bind(trace_id=trace)
+
         details: Dict[str, Any] = {}
         regime = self._regime_key(plan)
         if regime:
@@ -311,6 +320,16 @@ class RiskEngine:
         dynamic_loss_cap = self._dynamic_loss_cap(plan)
         if dynamic_loss_cap is not None:
             details["dynamic_loss_cap"] = round(dynamic_loss_cap, 2)
+
+        log_ctx(
+            logging.DEBUG,
+            "risk_pre_trade_start",
+            symbol=intended_symbol,
+            intended_lots=intended_lots,
+            lot_size=lot_size,
+            regime=regime,
+            equity=round(float(equity_rupees), 2),
+        )
 
         if self.state.cooloff_until and now < self.state.cooloff_until:
             return (
@@ -451,6 +470,7 @@ class RiskEngine:
                 quote_payload,
                 lot_size,
                 available_lots,
+                trace_id=trace,
             )
             plan["eq_source"] = eq_source
             cap_from_equity = float(cap)
@@ -479,10 +499,11 @@ class RiskEngine:
                 allow_min_override = True
                 exposure_cap = max(exposure_cap or 0.0, unit_notional)
                 cap = exposure_cap
-                logger.info(
-                    "allow_min_one_lot override: unit_notional=%.2f cap=%.2f",
-                    unit_notional,
-                    cap,
+                log_ctx(
+                    logging.INFO,
+                    "risk_allow_min_one_lot_override",
+                    unit_notional=round(unit_notional, 2),
+                    cap=round(cap, 2),
                 )
             if lots <= 0:
                 cap_abs_value = (
@@ -511,7 +532,7 @@ class RiskEngine:
                     meta["cap_abs"] = None
             if settings_basis.lower() == "premium" and lots <= 0:
                 if meta and meta.get("reason") == "cap_lt_one_lot":
-                    logger.info("block_cap_lt_one_lot %s", meta)
+                    log_ctx(logging.INFO, "risk_block_cap_lt_one_lot", **meta)
                     plan["qty_lots"] = 0
                     plan["reason_block"] = "cap_lt_one_lot"
                     cap_msg = (
@@ -548,12 +569,13 @@ class RiskEngine:
             exposure_cap is not None
             and exposure.notional_rupees + intended_notional > exposure_cap
         ):
-            logger.info(
-                "max_notional block: basis=%s unit_notional=%.2f calc_lots=%d cap=%.2f",
-                basis,
-                unit_notional,
-                intended_lots,
-                exposure_cap,
+            log_ctx(
+                logging.INFO,
+                "risk_max_notional_block",
+                basis=basis,
+                unit_notional=round(unit_notional, 2),
+                intended_lots=intended_lots,
+                cap=round(float(exposure_cap or 0.0), 2),
             )
             return (
                 False,
@@ -640,6 +662,15 @@ class RiskEngine:
             details["R_rupees_est"] = round(r_rupees, 2)
         if allow_min_override:
             details["allow_min_one_lot"] = True
+
+        log_ctx(
+            logging.INFO,
+            "risk_pre_trade_pass",
+            intended_lots=intended_lots,
+            unit_notional=round(unit_notional, 2) if unit_notional else None,
+            delta_cap=details.get("delta_cap"),
+            allow_min_one_lot=details.get("allow_min_one_lot", False),
+        )
 
         return True, "", details
 

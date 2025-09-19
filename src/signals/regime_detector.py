@@ -14,12 +14,18 @@ and logging purposes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 import pandas as pd
 
 from src.config import RegimeSettings, settings
+from src.utils.structured_logger import get_logger
+
+logger = get_logger(__name__)
+logger.propagate = True
+structured_log = cast(Any, logger).bind(comp="signals.regime")
 
 
 @dataclass
@@ -74,6 +80,7 @@ def detect_market_regime(
     adx_range_threshold: float | None = None,
     di_delta_range_threshold: float | None = None,
     bb_width_range_threshold: float | None = None,
+    trace_id: Optional[str] = None,
 ) -> RegimeResult:
     """Classify the market regime using ADX/DI and Bollinger width.
 
@@ -86,8 +93,25 @@ def detect_market_regime(
         Dataclass containing the detected regime and diagnostic values.
     """
 
+    log_ctx = (
+        structured_log if trace_id is None else structured_log.bind(trace_id=trace_id)
+    )
+
+    def _emit(result: RegimeResult) -> RegimeResult:
+        log_ctx(
+            logging.DEBUG,
+            "regime_detected",
+            regime=result.regime,
+            adx=result.adx,
+            di_plus=result.di_plus,
+            di_minus=result.di_minus,
+            bb_width_pct=result.bb_width_pct,
+            reason=result.reason,
+        )
+        return result
+
     if df is None or df.empty:
-        return RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "empty_df")
+        return _emit(RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "empty_df"))
 
     # Pull series from df if not explicitly provided
     adx = adx if adx is not None else _pick_col(df, "adx")
@@ -121,7 +145,7 @@ def detect_market_regime(
             or 0.0
         )
     except Exception:
-        return RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "bad_inputs")
+        return _emit(RegimeResult("NO_TRADE", 0.0, 0.0, 0.0, 0.0, "bad_inputs"))
 
     di_delta = abs(dip - dim)
 
@@ -166,8 +190,8 @@ def detect_market_regime(
         and di_delta >= di_delta_trend_threshold
         and bb_width_val >= bb_width_trend_threshold
     ):
-        return RegimeResult(
-            "TREND", adx_val, dip, dim, bb_width_val, "trend_conditions"
+        return _emit(
+            RegimeResult("TREND", adx_val, dip, dim, bb_width_val, "trend_conditions")
         )
 
     if (
@@ -175,11 +199,13 @@ def detect_market_regime(
         or bb_width_val < bb_width_range_threshold
         or di_delta < di_delta_range_threshold
     ):
-        return RegimeResult(
-            "RANGE", adx_val, dip, dim, bb_width_val, "range_conditions"
+        return _emit(
+            RegimeResult("RANGE", adx_val, dip, dim, bb_width_val, "range_conditions")
         )
 
-    return RegimeResult("NO_TRADE", adx_val, dip, dim, bb_width_val, "indecisive")
+    return _emit(
+        RegimeResult("NO_TRADE", adx_val, dip, dim, bb_width_val, "indecisive")
+    )
 
 
 __all__ = ["RegimeResult", "detect_market_regime"]

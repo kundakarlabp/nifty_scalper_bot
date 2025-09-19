@@ -180,11 +180,12 @@ def _configure_handlers(logger: logging.Logger, state: _LoggerState) -> None:
     if getattr(logger, "_structured_configured", False):
         return
 
-    logger.setLevel(state.level)
+    logger.setLevel(logging.NOTSET)
     logger.propagate = False
     logger.handlers.clear()
 
     stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(state.level)
     stream_handler.setFormatter(state.formatter())
     logger.addHandler(stream_handler)
 
@@ -192,6 +193,7 @@ def _configure_handlers(logger: logging.Logger, state: _LoggerState) -> None:
         directory = os.path.dirname(state.log_path) or "."
         os.makedirs(directory, exist_ok=True)
         file_handler = logging.FileHandler(state.log_path)
+        file_handler.setLevel(state.level)
         file_handler.setFormatter(state.formatter())
         logger.addHandler(file_handler)
 
