@@ -76,6 +76,7 @@ from src.utils.market_time import (
     prev_session_last_20m,
 )
 from src.utils.time_windows import TZ, floor_to_minute
+from src.utils.logging_tools import structured_debug_handler
 
 from .warmup import check as warmup_check, required_bars
 
@@ -96,6 +97,9 @@ except Exception:  # pragma: no cover - defensive import guard
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+if structured_debug_handler not in logger.handlers:
+    logger.addHandler(structured_debug_handler)
 
 # =========================== Cadence controller ============================
 
@@ -1061,10 +1065,10 @@ class StrategyRunner:
 
         needed_tokens: list[int] = [int(t) for t in (ce_token, pe_token) if t]
         if not needed_tokens:
-            logger.info("quote_prime_fail", {"err": "tokens_missing"})
+            logger.debug("quote_prime_fail", {"err": "tokens_missing"})
             return False, "tokens_missing", []
         if broker is None:
-            logger.info("quote_prime_fail", {"err": "broker_missing"})
+            logger.debug("quote_prime_fail", {"err": "broker_missing"})
             return False, "broker_missing", needed_tokens
 
         quotes: Any | None = None
@@ -1094,13 +1098,13 @@ class StrategyRunner:
 
         if not quotes:
             err_msg = ";".join(err for err in errors if err) or "quote_unavailable"
-            logger.info("quote_prime_fail", {"err": err_msg})
+            logger.debug("quote_prime_fail", {"err": err_msg})
             return False, err_msg, needed_tokens
 
         missing_tokens = self._detect_missing_tokens(needed_tokens, quotes)
         if missing_tokens:
             err_msg = f"missing:{','.join(str(tok) for tok in missing_tokens)}"
-            logger.info("quote_prime_fail", {"err": err_msg})
+            logger.debug("quote_prime_fail", {"err": err_msg})
             return False, err_msg, needed_tokens
 
         logger.debug("quote_prime_ok", {"n": len(needed_tokens)})
@@ -1843,7 +1847,7 @@ class StrategyRunner:
                     expiry=plan.get("atm_expiry"),
                 )
 
-            logger.info(
+            logger.debug(
                 "picked option: type=%s ce=%s pe=%s chosen=%s",
                 option_type,
                 ce_token,

@@ -71,6 +71,43 @@ class InMemoryLogHandler(logging.Handler):
 log_buffer_handler = InMemoryLogHandler()
 
 
+class StructuredDebugHandler(logging.Handler):
+    """Capture strategy debug logs in a compact ring buffer."""
+
+    def __init__(self, capacity: int = 200) -> None:
+        super().__init__(level=logging.DEBUG)
+        self._buf: Deque[str] = deque(maxlen=max(50, capacity))
+        self._lock = threading.Lock()
+        self.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - trivial
+        if record.levelno > logging.DEBUG:
+            return
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = getattr(record, "message", str(record))
+        with self._lock:
+            self._buf.append(msg)
+
+    def tail(self, n: int = 20) -> List[str]:
+        n = max(1, int(n))
+        with self._lock:
+            items = list(self._buf)
+        return items[-n:]
+
+
+structured_debug_handler = StructuredDebugHandler(capacity=settings.diag_ring_size)
+
+
 def get_recent_logs(n: int = 60, min_level: Optional[int] = None) -> List[str]:
     """Return the last ``n`` log lines as a list of strings."""
     return log_buffer_handler.tail(n=n, min_level=min_level)
+
+
+def get_structured_debug_logs(n: int = 20) -> List[str]:
+    """Return the latest structured debug log lines for Telegram delivery."""
+
+    return structured_debug_handler.tail(n=n)

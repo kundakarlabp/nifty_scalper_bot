@@ -1,6 +1,7 @@
 # Path: src/main.py
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import signal
@@ -32,7 +33,7 @@ from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
 from src.server import health  # noqa: E402
 from src.server.logging_utils import _setup_logging  # noqa: E402
 from src.strategies.runner import StrategyRunner  # noqa: E402
-from src.utils.logging_tools import get_recent_logs  # noqa: E402
+from src.utils.logging_tools import get_structured_debug_logs  # noqa: E402
 
 # Optional broker SDK
 try:
@@ -151,7 +152,7 @@ def _wire_real_telegram(runner: StrategyRunner) -> None:
         risk_provider=getattr(runner, "risk_snapshot", None),
         limits_provider=_safe_limits_snapshot,
         risk_reset_today=getattr(runner, "risk_reset_today", None),
-        logs_provider=get_recent_logs,
+        logs_provider=get_structured_debug_logs,
         last_signal_provider=getattr(runner, "get_last_signal_debug", None),
         bars_provider=getattr(runner, "get_recent_bars", None),
         quotes_provider=getattr(runner.executor, "quote_diagnostics", None),
@@ -339,6 +340,12 @@ def main() -> int:
         return 1
 
     last_hb = time.time()
+    periodic_logs_enabled = bool(
+        getattr(settings, "TELEGRAM__PERIODIC_LOGS", False)
+        or getattr(settings, "telegram_periodic_logs", False)
+    )
+    last_log_push = time.time()
+    last_log_digest: str | None = None
     try:
         while not _stop_flag:
             start_ts = time.perf_counter()
@@ -387,6 +394,29 @@ def main() -> int:
                 except Exception as e:
                     log.debug("Heartbeat telegram failed: %s", e, exc_info=True)
                 last_hb = now
+            if periodic_logs_enabled and (now - last_log_push) >= 300:
+                try:
+                    lines = get_structured_debug_logs(20)
+                except Exception as exc:
+                    log.debug("Periodic log fetch failed: %s", exc, exc_info=True)
+                else:
+                    if lines:
+                        payload = "\n".join(lines[-20:])
+                        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+                        if digest != last_log_digest:
+                            block = payload[-3500:]
+                            try:
+                                runner.telegram_controller.send_message(
+                                    "```text\n" + block + "\n```",
+                                    parse_mode="Markdown",
+                                )
+                            except Exception as exc:
+                                log.debug(
+                                    "Periodic log telegram failed: %s", exc, exc_info=True
+                                )
+                            else:
+                                last_log_digest = digest
+                last_log_push = now
             time.sleep(5)
     finally:
         try:

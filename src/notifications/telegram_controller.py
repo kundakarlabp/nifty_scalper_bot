@@ -55,6 +55,7 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
     "/warmup": "Warm-up status (historical bootstrap)",
     "/watch": "Toggle pre-trade watch alerts",
     "/why": "Explain last decision and gates",
+    "/logs": "Latest structured debug log snapshot (default 20 lines)",
 }
 
 
@@ -1740,11 +1741,12 @@ class TelegramController:
             if not self._logs_provider:
                 return self._send("Logs provider not wired.")
             try:
-                n = int(args[0]) if args else 30
-                lines = self._logs_provider(max(5, min(200, n))) or []
+                n = int(args[0]) if args else 20
+                span = max(5, min(200, n))
+                lines = self._logs_provider(span) or []
                 if not lines:
                     return self._send("No logs available.")
-                block = "\n".join(lines[-n:])
+                block = "\n".join(lines[-min(len(lines), n):])
                 if len(block) > 3500:
                     block = block[-3500:]
                 return self._send("```text\n" + block + "\n```", parse_mode="Markdown")

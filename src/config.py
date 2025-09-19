@@ -1205,6 +1205,11 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("LOG_RING_ENABLED"),
         description="Toggle the in-memory log ring buffer used for /logs.",
     )
+    telegram_periodic_logs: bool = Field(
+        False,
+        validation_alias=AliasChoices("TELEGRAM__PERIODIC_LOGS"),
+        description="Enable periodic Telegram debug log snapshots (every 5 minutes).",
+    )
     diag_ring_size: int = Field(
         4000,
         validation_alias=AliasChoices("DIAG_RING_SIZE"),
@@ -1891,6 +1896,12 @@ def _apply_env_overrides(cfg: AppSettings) -> None:
             bool(getattr(cfg, "TELEGRAM__PRETRADE_ALERTS", False)),
         ),
     )
+    periodic_logs = _bool_env(
+        "TELEGRAM__PERIODIC_LOGS",
+        bool(getattr(cfg, "TELEGRAM__PERIODIC_LOGS", cfg.telegram_periodic_logs)),
+    )
+    object.__setattr__(cfg, "TELEGRAM__PERIODIC_LOGS", periodic_logs)
+    object.__setattr__(cfg, "telegram_periodic_logs", periodic_logs)
     object.__setattr__(
         cfg,
         "DIAG_INTERVAL_SECONDS",
