@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
-from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
+from typing import Any, Deque, Dict, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -763,13 +763,45 @@ class EnhancedScalpingStrategy:
                 },
             )
             sd.setdefault("components", {})
-            sd.setdefault("weights", {})
+            if not sd["components"]:
+                sd["components"] = {
+                    "trend": 0.0,
+                    "momentum": 0.0,
+                    "pullback": 0.0,
+                    "breakout": 0.0,
+                }
+            default_weights: Dict[str, float] = {
+                "trend": 0.4,
+                "momentum": 0.3,
+                "pullback": 0.2,
+                "breakout": 0.1,
+            }
+            if isinstance(cfg, StrategyConfig):
+                try:
+                    strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+                    weight_cfg = strat_cfg.get("weights", {})
+                    if isinstance(weight_cfg, Mapping):
+                        merged = {
+                            key: float(weight_cfg.get(key, default_weights[key]))
+                            for key in default_weights
+                        }
+                        default_weights = merged
+                except Exception:
+                    pass
+            sd.setdefault("weights", dict(default_weights))
+            if not sd["weights"]:
+                sd["weights"] = dict(default_weights)
             sd.setdefault("penalties", {})
             sd.setdefault("raw", 0.0)
             sd.setdefault("final", 0.0)
             sd.setdefault("threshold", 0.0)
             sd.setdefault("bb_percent", plan.get("bb_percent"))
             sd.setdefault("adx_slope", plan.get("adx_slope"))
+            if plan.get("score") is None:
+                try:
+                    plan["score"] = float(sd.get("final") or 0.0)
+                except Exception:
+                    plan["score"] = 0.0
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
@@ -1257,7 +1289,8 @@ class EnhancedScalpingStrategy:
             plan["lot_size"] = lot_sz
             sp = micro.get("spread_pct") if isinstance(micro, dict) else None
             cap = micro.get("cap_pct") if isinstance(micro, dict) else None
-            depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
+            depth_raw = micro.get("depth_ok") if isinstance(micro, dict) else None
+            depth_ok = True if depth_raw is None else bool(depth_raw)
             over_spread = bool(sp is not None and cap is not None and sp > cap)
             ok_micro = not (over_spread or not depth_ok)
             gate_checks["microstructure"] = {
@@ -1265,7 +1298,7 @@ class EnhancedScalpingStrategy:
                 "mode": micro.get("mode"),
                 "spread_pct": sp,
                 "cap_pct": cap,
-                "depth_ok": depth_ok,
+                "depth_ok": depth_raw,
             }
             if not ok_micro and (
                 micro.get("mode") == "HARD" or micro.get("would_block")

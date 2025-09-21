@@ -338,7 +338,23 @@ def test_plan_displays_option_numbers(monkeypatch) -> None:
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/plan"}})
     msg = sent[0]
-    assert "Option → entry" in msg and "lot" in msg
+    assert msg.startswith("🧭 *Signal plan*")
+    assert "option:" in msg and "lot" in msg
+
+
+def test_plan_fallback_when_missing(monkeypatch) -> None:
+    _prep_settings(monkeypatch)
+    runner = SimpleNamespace(last_plan=None)
+    monkeypatch.setattr(
+        StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    tc._handle_update({"message": {"chat": {"id": 1}, "text": "/plan"}})
+    assert sent[0] == "No active signal."
 
 
 def test_config_outputs_strategy_config(monkeypatch) -> None:
