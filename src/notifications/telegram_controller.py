@@ -10,9 +10,10 @@ import statistics as stats
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import requests
@@ -945,7 +946,7 @@ class TelegramController:
                     age = age or micro.get("age")
             age_str = _format_float(age, 1) if isinstance(age, (int, float)) else "-"
             spread_pct = (
-                _format_float(float(spread) * 100.0, 2)
+                _format_float((float(spread) * 100.0), 2)
                 if isinstance(spread, (int, float))
                 else "-"
             )
@@ -1041,7 +1042,7 @@ class TelegramController:
                         else "—"
                     ),
                     spr=esc(
-                        _format_float(float(spread) * 100.0, 2)
+                        _format_float((float(spread) * 100.0), 2)
                         if isinstance(spread, (int, float))
                         else "—"
                     ),
@@ -1138,7 +1139,7 @@ class TelegramController:
                 micro_ok = not reason or str(reason).lower() in {"ok", "pass"}
                 spread_val = micro_detail.get("spread_pct")
                 spread_txt = (
-                    _format_float(float(spread_val) * 100.0, 2)
+                    _format_float((float(spread_val) * 100.0), 2)
                     if isinstance(spread_val, (int, float))
                     else "-"
                 )
@@ -1212,7 +1213,7 @@ class TelegramController:
             if spread is None and isinstance(snap.get("micro"), Mapping):
                 spread = snap.get("micro", {}).get("spread_pct")
             spread_txt = (
-                _format_float(float(spread) * 100.0, 2)
+                _format_float((float(spread) * 100.0), 2)
                 if isinstance(spread, (int, float))
                 else "—"
             )
@@ -1247,7 +1248,7 @@ class TelegramController:
                 depth_ok = depth_val if depth_val not in (None, "") else "—"
                 spread_val = micro_detail.get("spread_pct")
                 if isinstance(spread_val, (int, float)):
-                    micro_spread = _format_float(float(spread_val) * 100.0, 2)
+                    micro_spread = _format_float((float(spread_val) * 100.0), 2)
             last_label = getattr(runner, "_last_decision_label", None) if runner else None
             last_reason = getattr(runner, "_last_decision_reason", None) if runner else None
             lines = [
@@ -1437,7 +1438,7 @@ class TelegramController:
             if age is None and isinstance(micro, Mapping):
                 age = micro.get("age")
             spread_txt = (
-                _format_float(float(spread) * 100.0, 2)
+                _format_float((float(spread) * 100.0), 2)
                 if isinstance(spread, (int, float))
                 else "—"
             )
@@ -2090,7 +2091,7 @@ class TelegramController:
                 if age_val is None and isinstance(micro, Mapping):
                     age_val = micro.get("age")
                 spread_txt = (
-                    _format_float(float(spread_val) * 100.0, 2)
+                    _format_float((float(spread_val) * 100.0), 2)
                     if isinstance(spread_val, (int, float))
                     else "—"
                 )
