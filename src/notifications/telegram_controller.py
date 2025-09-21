@@ -103,6 +103,10 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
     "/warmup": "Warm-up status (historical bootstrap)",
     "/watch": "Toggle pre-trade watch alerts",
     "/why": "Explain last decision and gates",
+    "/deep": "Detailed status snapshot (debug)",
+    "/whydetail": "Gate chain with reasons (debug)",
+    "/errors": "Recent error ring entries",
+    "/statusjson": "Raw status snapshot JSON",
     "/logs": "Latest structured debug log snapshot (default 20 lines)",
 }
 
@@ -897,27 +901,22 @@ class TelegramController:
             self._send("⏳ Please wait before repeating this command.")
             return True
 
-        if cmd == "/statusjson":
-            if not self._status_provider:
-                self._send("Status provider unavailable.")
-                return True
-            try:
-                status_payload = self._status_provider()
-            except Exception as exc:
-                log.debug("statusjson fetch failed", exc_info=True)
-                self._send(f"Status fetch failed: {exc}")
-                return True
-            pretty = json.dumps(status_payload, indent=2, default=str)
-            self._send(pretty[:3500])
-            return True
-
         snap = self._quick_snapshot()
+
+        if cmd == "/statusjson":
+            try:
+                payload = json.dumps(snap, default=str, ensure_ascii=False)
+            except TypeError:
+                payload = json.dumps(_sanitize_json(snap), ensure_ascii=False)
+            self._send(payload[:3500])
+            return True
         if not snap.get("runner_ready"):
             self._send("Runner not ready.")
             return True
 
         status = snap.get("status", {})
         plan = snap.get("plan", {})
+        runner = self._resolve_runner()
 
         if cmd == "/hb":
             ts = status.get("time_ist")
@@ -1117,51 +1116,192 @@ class TelegramController:
             return True
 
         if cmd == "/whydetail":
-            detail_lines = [self._render_reason_details(plan)]
-            reasons = plan.get("reasons")
-            if isinstance(reasons, Mapping):
-                for key, value in reasons.items():
-                    if isinstance(value, Mapping):
-                        inner = ", ".join(f"{k}={v}" for k, v in value.items())
-                        detail_lines.append(f"{key}: {inner}")
-                    else:
-                        detail_lines.append(f"{key}: {value}")
-            elif isinstance(reasons, (list, tuple)):
-                detail_lines.extend(str(item) for item in reasons)
-            banners = status.get("banners")
-            if isinstance(banners, (list, tuple)) and banners:
-                detail_lines.append("Banners: " + ", ".join(str(b) for b in banners))
-            text = "\n".join(line for line in detail_lines if line)
-            self._send(text or "No gate details available.")
+            chain: list[str] = []
+            warm = getattr(runner, "_warm", None) if runner else None
+            if warm is not None:
+                warm_ok = getattr(warm, "ok", False)
+                have = getattr(warm, "have_bars", None)
+                need = getattr(warm, "required_bars", None)
+                chain.append(f"warmup:{'ok' if warm_ok else 'fail'}({have}/{need})")
+            plan_snapshot = getattr(runner, "_last_plan", None) if runner else None
+            if not isinstance(plan_snapshot, Mapping):
+                plan_snapshot = plan
+            micro_detail: Mapping[str, Any] = {}
+            if isinstance(plan_snapshot, Mapping):
+                micro_raw = plan_snapshot.get("micro")
+                if isinstance(micro_raw, Mapping):
+                    micro_detail = micro_raw
+            if not micro_detail and isinstance(snap.get("micro"), Mapping):
+                micro_detail = snap["micro"]  # type: ignore[assignment]
+            if micro_detail:
+                reason = micro_detail.get("reason") or micro_detail.get("block_reason")
+                micro_ok = not reason or str(reason).lower() in {"ok", "pass"}
+                spread_val = micro_detail.get("spread_pct")
+                spread_txt = (
+                    _format_float(float(spread_val) * 100.0, 2)
+                    if isinstance(spread_val, (int, float))
+                    else "-"
+                )
+                chain.append(
+                    "micro:{status}(spr={spr} depth={depth})".format(
+                        status="ok" if micro_ok else "fail",
+                        spr=spread_txt,
+                        depth=micro_detail.get("depth_ok"),
+                    )
+                )
+            rr_val = plan_snapshot.get("rr") if isinstance(plan_snapshot, Mapping) else None
+            if isinstance(rr_val, (int, float)):
+                chain.append(f"score:ok(rr={_format_float(rr_val)})")
+            lots = getattr(runner, "_last_computed_lots", None) if runner else None
+            if lots is not None:
+                chain.append(f"sizing:{'ok' if lots > 0 else 'fail'}(lots={lots})")
+            last_label = getattr(runner, "_last_decision_label", None) if runner else None
+            last_reason = getattr(runner, "_last_decision_reason", None) if runner else None
+            label_txt = last_label or "idle"
+            if last_reason:
+                chain.append(f"decision:{label_txt}(reason={last_reason})")
+            else:
+                chain.append(f"decision:{label_txt}")
+            text = " → ".join(chain) if chain else "No gate details available."
+            self._send(text)
             return True
 
         if cmd == "/deep":
-            components = status.get("components", {})
-            comp_line = ""
-            if isinstance(components, Mapping) and components:
-                comp_line = ", ".join(
-                    f"{k}={v}" for k, v in components.items() if v not in (None, "")
-                )
-            eq = _format_number(snap.get("equity"), 0)
-            losses = status.get("consecutive_losses", "?")
-            trades = status.get("trades_today", "?")
-            market = "open" if snap.get("market_open") else "closed"
-            mode = "LIVE" if status.get("live_trading") else "DRY"
+            plan_snapshot = getattr(runner, "_last_plan", None) if runner else None
+            if not isinstance(plan_snapshot, Mapping):
+                plan_snapshot = plan
+            plan_data = plan_snapshot if isinstance(plan_snapshot, Mapping) else {}
+            side = plan_data.get("action") or plan_data.get("side") or "—"
+            option_type = plan_data.get("option_type") or plan_data.get("ot") or "—"
+            strike = (
+                plan_data.get("strike")
+                or plan_data.get("symbol")
+                or plan_data.get("option_symbol")
+                or "—"
+            )
+            entry = (
+                _format_number(plan_data.get("entry"))
+                if plan_data.get("entry") not in (None, "")
+                else "—"
+            )
+            sl = (
+                _format_number(plan_data.get("sl"))
+                if plan_data.get("sl") not in (None, "")
+                else "—"
+            )
+            tp1 = (
+                _format_number(plan_data.get("tp1"))
+                if plan_data.get("tp1") not in (None, "")
+                else "—"
+            )
+            tp2 = (
+                _format_number(plan_data.get("tp2"))
+                if plan_data.get("tp2") not in (None, "")
+                else "—"
+            )
+            rr = (
+                _format_float(plan_data.get("rr"))
+                if plan_data.get("rr") not in (None, "")
+                else "—"
+            )
+            qty = plan_data.get("qty_lots") or plan_data.get("qty") or "—"
+            lot = plan_data.get("lot") or plan_data.get("lot_size") or "—"
+            spread = plan_data.get("spr") or plan_data.get("spread_pct")
+            if spread is None and isinstance(plan_data.get("micro"), Mapping):
+                spread = plan_data.get("micro", {}).get("spread_pct")
+            if spread is None and isinstance(snap.get("micro"), Mapping):
+                spread = snap.get("micro", {}).get("spread_pct")
+            spread_txt = (
+                _format_float(float(spread) * 100.0, 2)
+                if isinstance(spread, (int, float))
+                else "—"
+            )
+            age = (
+                plan_data.get("age")
+                or plan_data.get("quote_age_s")
+                or plan_data.get("bar_age_s")
+                or plan_data.get("last_bar_lag_s")
+            )
+            micro_detail = plan_data.get("micro") if isinstance(plan_data.get("micro"), Mapping) else {}
+            if not micro_detail and isinstance(snap.get("micro"), Mapping):
+                micro_detail = snap["micro"]  # type: ignore[assignment]
+            if age is None and isinstance(micro_detail, Mapping):
+                age = micro_detail.get("age")
+            age_txt = (
+                _format_float(age, 1) if isinstance(age, (int, float)) else "—"
+            )
+            equity = _format_number(snap.get("equity"), 0)
+            position = status.get("pos")
+            if position in (None, ""):
+                position = status.get("open_positions")
+            if position in (None, ""):
+                position = "—"
+            micro_reason = "—"
+            micro_mode = "—"
+            depth_ok = "—"
+            micro_spread = "—"
+            if isinstance(micro_detail, Mapping) and micro_detail:
+                micro_reason = micro_detail.get("reason") or micro_detail.get("block_reason") or "OK"
+                micro_mode = micro_detail.get("mode") or "—"
+                depth_val = micro_detail.get("depth_ok")
+                depth_ok = depth_val if depth_val not in (None, "") else "—"
+                spread_val = micro_detail.get("spread_pct")
+                if isinstance(spread_val, (int, float)):
+                    micro_spread = _format_float(float(spread_val) * 100.0, 2)
+            last_label = getattr(runner, "_last_decision_label", None) if runner else None
+            last_reason = getattr(runner, "_last_decision_reason", None) if runner else None
             lines = [
-                f"Deep status {status.get('time_ist', '-')}",
-                f"Mode: {mode} | Market: {market}",
-                f"Equity: {eq} | Open positions: {status.get('open_positions', '?')}",
-                f"Trades today: {trades} | Loss streak: {losses}",
+                f"• MARKET  {'open' if snap.get('market_open') else 'closed'}  tick_age={age_txt}s",
+                f"• EQUITY  {equity}  POS={position}",
+                (
+                    "• PLAN    {side} {ot} {strike}  e={entry} sl={sl} tp1={tp1} tp2={tp2} rr={rr} "
+                    "lots={qty}×{lot}".format(
+                        side=side,
+                        ot=option_type,
+                        strike=strike,
+                        entry=entry,
+                        sl=sl,
+                        tp1=tp1,
+                        tp2=tp2,
+                        rr=rr,
+                        qty=qty,
+                        lot=lot,
+                    )
+                ),
+                f"• QUOTE   age={age_txt}s spr={spread_txt}%",
             ]
-            if comp_line:
-                lines.append(f"Components: {comp_line}")
+            if isinstance(micro_detail, Mapping) and micro_detail:
+                lines.append(
+                    "• MICRO   mode={mode} gate={gate} (depth_ok={depth} spr%={spr})".format(
+                        mode=micro_mode,
+                        gate="OK" if str(micro_reason).lower() in {"ok", "none", ""} else micro_reason,
+                        depth=depth_ok,
+                        spr=micro_spread,
+                    )
+                )
+            decision_line = "• DECISION last={label} reason={reason}".format(
+                label=last_label or "—",
+                reason=last_reason or "—",
+            )
+            lines.append(decision_line)
             self._send("\n".join(lines))
             return True
+
+
 
         if cmd == "/errors":
             limit = 20
             if args and args[0].isdigit():
                 limit = max(1, min(int(args[0]), 100))
+            ring = getattr(self, "error_ring", None)
+            if isinstance(ring, list) and ring:
+                subset = ring[-limit:]
+                lines = [
+                    f"- {item.get('type', 'Error')}: {item.get('msg')} @ {item.get('where')}"
+                    for item in subset
+                ]
+                self._send("\n".join(lines))
+                return True
             lines = self._recent_errors(limit)
             if not lines:
                 self._send("No recent errors found.")
