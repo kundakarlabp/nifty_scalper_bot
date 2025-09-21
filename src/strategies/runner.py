@@ -2025,11 +2025,27 @@ class StrategyRunner:
                     except Exception:
                         self.log.debug("token resync failed", exc_info=True)
                 # Informative log; DO NOT set reason_block or return.
-                self.log.info(
-                    "token_mismatch: resynced datasource to token=%s (type=%s)",
-                    plan.get("token"),
-                    option_type,
-                )
+                # Avoid spamming the same mismatch repeatedly within a short window.
+                try:
+                    now = time.time()
+                    last = getattr(self, "_ts_last_token_resync", 0.0)
+                    if now - last > 1.0:
+                        logger.info(  # use the same module logger for consistency
+                            "token_mismatch: resynced datasource to token=%s (type=%s)",
+                            plan.get("token"),
+                            option_type,
+                        )
+                        self._ts_last_token_resync = now
+                except Exception:
+                    logger.debug("token_mismatch.log_error", exc_info=True)
+
+                # Ensure live streaming is aligned to the chosen token after resync.
+                try:
+                    ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
+                    if callable(ensure_subscribe) and plan.get("token"):
+                        ensure_subscribe(plan.get("token"), mode="FULL")
+                except Exception:
+                    logger.debug("token_mismatch.ensure_subscribe_error", exc_info=True)
             self._last_option = opt
             if not token:
                 plan["reason_block"] = "no_option_token"
