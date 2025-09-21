@@ -60,6 +60,7 @@ from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
+from src.server.logging_setup import log_event
 from src.server.logging_utils import SimpleLogGate
 from src.strategies.strategy_config import (
     StrategyConfig,
@@ -369,6 +370,22 @@ class StrategyRunner:
         self._last_decision_label: str | None = None
         self._last_decision_reason: str | None = None
         self._last_computed_lots: int | None = None
+
+        self._lg = SimpleLogGate(default_interval_seconds=5.0)
+
+        def _interval(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            try:
+                return float(raw) if raw is not None else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        self._lg.set_interval("hb", _interval("HEARTBEAT_INTERVAL_SEC", 30.0))
+        self._lg.set_interval("plan", _interval("PLAN_LOG_INTERVAL_SEC", 60.0))
+        self._lg.set_interval(
+            "block.summary", _interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
+        )
+        self._block_counts: dict[str, int] = {}
 
         self.settings = settings
 
@@ -947,6 +964,12 @@ class StrategyRunner:
             if reason_value is None and isinstance(plan_snapshot, Mapping):
                 reason_value = plan_snapshot.get("reason_block")
 
+            plan_source: Mapping[str, Any] | None = None
+            if isinstance(plan, Mapping):
+                plan_source = plan
+            elif isinstance(plan_snapshot, Mapping):
+                plan_source = plan_snapshot
+
             payload = {
                 "label": label_value,
                 "reason_block": reason_value,
@@ -954,6 +977,25 @@ class StrategyRunner:
             }
             self._last_decision_label = label_value
             self._last_decision_reason = reason_value
+            fields: dict[str, Any] = {
+                "label": label_value,
+                "reason": (reason_value or ""),
+            }
+            if plan_source is not None:
+                mapping = {
+                    "side": "side",
+                    "option_type": "ot",
+                    "atm_strike": "strike",
+                    "rr": "rr",
+                }
+                for src_key, dest_key in mapping.items():
+                    value = plan_source.get(src_key)
+                    if value is not None:
+                        fields[dest_key] = value
+            log_event("decision", "info", **fields)
+            if reason_value:
+                reason_key = str(reason_value)
+                self._block_counts[reason_key] = self._block_counts.get(reason_key, 0) + 1
             now = time.time()
             last = getattr(self, "_ts_last_decision_emit", 0.0)
             if now - last < 0.05:
@@ -1386,6 +1428,54 @@ class StrategyRunner:
         if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
             self._last_hb_ts = now
+        if self._lg.ok("hb"):
+            telemetry: dict[str, Any]
+            try:
+                telemetry = self.telemetry_snapshot()
+                equity_val = telemetry.get("equity")
+                try:
+                    rounded_equity = round(float(equity_val), 2) if equity_val is not None else 0.0
+                except (TypeError, ValueError):
+                    rounded_equity = 0.0
+                tel_fields = {
+                    "equity": rounded_equity,
+                    "pos": telemetry.get("open_positions_count"),
+                }
+            except Exception:
+                tel_fields = {"equity": 0.0, "pos": -1}
+            log_event(
+                "hb",
+                "info",
+                broker="ok",
+                market="open" if self._within_trading_window() else "closed",
+                strategy="ready" if getattr(self, "ready", True) else "warming",
+                **tel_fields,
+            )
+        if self._last_plan and self._lg.ok("plan"):
+            plan_fields = dict(self._last_plan)
+            micro = plan_fields.get("micro") or {}
+            if not isinstance(micro, Mapping):
+                micro = {}
+            if not micro.get("stale"):
+                log_event(
+                    "plan",
+                    "info",
+                    side=plan_fields.get("side"),
+                    option_type=plan_fields.get("option_type"),
+                    atm_strike=plan_fields.get("atm_strike"),
+                    entry=plan_fields.get("entry"),
+                    sl=plan_fields.get("sl"),
+                    tp1=plan_fields.get("tp1"),
+                    tp2=plan_fields.get("tp2"),
+                    rr=plan_fields.get("rr"),
+                    qty=plan_fields.get("qty_lots"),
+                    lot=plan_fields.get("lot_size"),
+                    age_s=plan_fields.get("quote_age_s"),
+                    spr_pct=plan_fields.get("spread_pct"),
+                )
+        if self._block_counts and self._lg.ok("block.summary"):
+            log_event("block.summary", "info", **dict(self._block_counts))
+            self._block_counts = {}
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
