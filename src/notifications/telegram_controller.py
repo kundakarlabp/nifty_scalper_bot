@@ -28,6 +28,7 @@ from src.risk.position_sizing import PositionSizer
 from src.strategies.runner import StrategyRunner
 from src.strategies.warmup import check as warmup_check
 from src.utils import strike_selector
+from src.utils.emit import emit_debug_full
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 from src.utils.freshness import compute as compute_freshness
 from src.diagnostics.metrics import daily_summary
@@ -2396,6 +2397,17 @@ class TelegramController:
                             lines.append(f"• fix: {r.fix}")
                 except Exception:
                     pass
+                emit_debug_full(
+                    "why",
+                    {
+                        "status": status,
+                        "plan": plan,
+                        "gates": [
+                            {"name": name, "ok": ok, "value": value} for name, ok, value in gates
+                        ],
+                        "summary": summary,
+                    },
+                )
                 return self._send("\n".join(lines)[:3500], parse_mode="Markdown")
             except Exception as e:
                 return self._send(f"Why error: {e}")
