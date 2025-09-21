@@ -15,6 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from src.data.source import get_option_quote_safe
 from src.logs.journal import Journal
+from src.server.logging_setup import log_event
 from src.state import StateStore
 from src.utils.broker_errors import (
     AUTH,
@@ -1465,6 +1466,27 @@ class OrderExecutor:
                 time.sleep(2)
 
         mode = "live" if self.kite else "paper"
+        raw_strategy = getattr(self, "strategy_name", None)
+        if not raw_strategy:
+            strategy_obj = getattr(self, "strategy", None)
+            if isinstance(strategy_obj, str):
+                raw_strategy = strategy_obj
+            elif strategy_obj is not None:
+                raw_strategy = (
+                    getattr(strategy_obj, "name", "")
+                    or strategy_obj.__class__.__name__
+                )
+        strategy_name = str(raw_strategy or "")
+        log_event(
+            "order.new",
+            "info",
+            side=action,
+            token=token or "",
+            qty=qty,
+            price=float(price),
+            mode=mode,
+            strategy=strategy_name,
+        )
         if self.kite:
             parts = _chunks(
                 qty,
@@ -1736,7 +1758,9 @@ class OrderExecutor:
         # cancel old TPs if any
         for old in (rec.tp1_order_id, rec.tp2_order_id):
             if old:
-                res_cancel = self._cancel_with_cb(old, variety=rec.variety)
+                res_cancel = self._cancel_with_cb(
+                    old, variety=rec.variety, reason="refresh_tp"
+                )
                 if not res_cancel.get("ok"):
                     log.debug(
                         "Failed to cancel TP order %s: %s",
@@ -2453,7 +2477,9 @@ class OrderExecutor:
                         continue
                     order_id = str(qi.placed_order_id) if qi.placed_order_id else ""
                     if order_id and order_id not in cancelled_ids:
-                        res = self._cancel_with_cb(order_id)
+                        res = self._cancel_with_cb(
+                            order_id, reason="cancel_trade_queue"
+                        )
                         if not res.get("ok"):
                             log.debug(
                                 "Cancel failed for queued leg %s: %s",
@@ -2474,7 +2500,9 @@ class OrderExecutor:
 
             broker_id = str(leg.broker_order_id) if leg.broker_order_id else ""
             if broker_id and broker_id not in cancelled_ids:
-                res = self._cancel_with_cb(broker_id)
+                res = self._cancel_with_cb(
+                    broker_id, reason="cancel_trade_leg"
+                )
                 if not res.get("ok"):
                     log.debug(
                         "Cancel failed for leg %s: %s",
@@ -2512,7 +2540,9 @@ class OrderExecutor:
             if not oid:
                 continue
             order_id = str(oid)
-            res = self._cancel_with_cb(order_id, variety=rec.variety)
+            res = self._cancel_with_cb(
+                order_id, variety=rec.variety, reason="cancel_record_orders"
+            )
             if not res.get("ok"):
                 log.debug(
                     "Cancel failed for record order %s: %s",
@@ -2679,7 +2709,9 @@ class OrderExecutor:
                     qi.step_idx = 1
                     qi.placed_at_ms = self._now_ms()
                 else:
-                    self._cancel_with_cb(qi.placed_order_id)
+                    self._cancel_with_cb(
+                        qi.placed_order_id, reason="ack_timeout"
+                    )
                     self.logger.info(
                         f"ROUTER cancel {sym} leg={qi.leg_id} reason=ack_timeout"
                     )
@@ -2693,7 +2725,9 @@ class OrderExecutor:
                 qi.acked_at_ms
                 and (now_ms - qi.acked_at_ms) > self.router_fill_timeout_ms
             ):
-                self._cancel_with_cb(qi.placed_order_id)
+                self._cancel_with_cb(
+                    qi.placed_order_id, reason="fill_timeout"
+                )
                 self.logger.info(
                     f"ROUTER cancel {sym} leg={qi.leg_id} reason=fill_timeout"
                 )
@@ -2863,8 +2897,14 @@ class OrderExecutor:
             res = single()
         return res
 
-    def _cancel_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
+    def _cancel_with_cb(
+        self, order_id: str, *, reason: str | None = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Cancel order via broker with breaker and retries."""
+
+        order_ref = str(order_id)
+        if order_ref:
+            log_event("order.cancel", "info", id=order_ref, reason=reason or "")
 
         def single() -> Dict[str, Any]:
             if not self.cb_modify.allow():
@@ -2997,6 +3037,15 @@ class OrderReconciler:
             payload: Dict[str, Any] = {}
             if status in {"COMPLETE", "FILLED"} or filled_qty >= leg.qty:
                 leg.on_fill(avg_price)
+                order_ref = str(oid or leg.broker_order_id or leg.idempotency_key or "")
+                if order_ref:
+                    log_event(
+                        "order.fill",
+                        "info",
+                        id=order_ref,
+                        qty=int(leg.filled_qty),
+                        avg=float(leg.avg_price or avg_price),
+                    )
                 event_type = "FILLED"
                 payload = {"filled_qty": leg.filled_qty, "avg_price": leg.avg_price}
             elif status in {"PARTIALLY_FILLED"} or 0 < filled_qty < leg.qty:
