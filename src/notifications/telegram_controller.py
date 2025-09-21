@@ -200,6 +200,18 @@ def _format_trace_summary_line(record: dict[str, Any]) -> str:
     return " ".join(str(p) for p in parts if str(p))
 
 
+_MD_ESCAPE_RE = re.compile(r"([_*`])")
+
+
+def _escape_markdown(value: Any, fallback: str = "-") -> str:
+    """Return ``value`` as text with Telegram Markdown escapes applied."""
+
+    if value in (None, ""):
+        return fallback
+    text = str(value)
+    return _MD_ESCAPE_RE.sub(r"\\\1", text)
+
+
 class TelegramController:
     """
     Production-safe Telegram controller:
@@ -1075,27 +1087,160 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner:
                 return self._send("runner not ready")
-            plan = runner.last_plan if runner else {}
+
+            def _fmt_float(value: Any, digits: int = 2) -> str:
+                try:
+                    return f"{float(value):.{digits}f}"
+                except (TypeError, ValueError):
+                    return "-"
+
+            def _fmt_int(value: Any) -> str:
+                try:
+                    return str(int(value))
+                except (TypeError, ValueError):
+                    return "-"
+
+            plan: dict[str, Any] = {}
+            for attr in ("_last_plan", "last_plan"):
+                payload = getattr(runner, attr, None)
+                if isinstance(payload, dict) and payload:
+                    plan = dict(payload)
+                    break
+            if not plan:
+                return self._send("No active signal.")
+
+            reason = _escape_markdown(plan.get("reason_block"))
+            regime = _escape_markdown(plan.get("regime"))
+            action = _escape_markdown(plan.get("action") or plan.get("side"))
+            opt_kind = _escape_markdown(plan.get("option_type") or plan.get("kind"))
+            strike = _escape_markdown(plan.get("strike") or plan.get("symbol"))
+            expiry = _escape_markdown(plan.get("expiry") or plan.get("option_expiry"))
+            lots = plan.get("qty_lots") or plan.get("qty") or plan.get("planned_lots")
+            rr = _fmt_float(plan.get("rr"))
+            score = _fmt_float(plan.get("score"))
+            atr = _fmt_float(plan.get("atr_pct"), 4)
+            has_signal = bool(plan.get("has_signal"))
+            status_icon = "✅" if has_signal else "⏸"
+            state_label = "active" if has_signal else "blocked"
+            threshold = _fmt_float(plan.get("score_threshold"))
+            bar_count = _fmt_int(plan.get("bar_count") or plan.get("bars"))
+            last_bar_ts = plan.get("last_bar_ts") or "-"
+            lag = plan.get("lag_s") or plan.get("last_bar_lag_s")
+            lag_fmt = _fmt_int(lag) if lag is not None else "-"
+            data_src = _escape_markdown(plan.get("data_source") or plan.get("quote_src"))
+            planned_delta = plan.get("planned_delta_units")
+            planned_notional = plan.get("planned_notional")
+
             lines = [
-                "spot: entry={e} sl={sl} tp1={tp1} tp2={tp2}".format(
-                    e=plan.get("entry"),
-                    sl=plan.get("sl"),
-                    tp1=plan.get("tp1"),
-                    tp2=plan.get("tp2"),
-                )
+                "🧭 *Signal plan*",
+                f"{status_icon} {state_label} | reason={reason}",
+                (
+                    "action={a} {kind} strike={strike} expiry={expiry} "
+                    "lots={lots} rr={rr}"
+                ).format(
+                    a=action,
+                    kind=opt_kind,
+                    strike=strike,
+                    expiry=expiry,
+                    lots=_fmt_int(lots) if lots is not None else "-",
+                    rr=rr,
+                ),
+                f"regime={regime} score={score} thr={threshold} atr%={atr}",
+                (
+                    "bars={bars} last_bar={last_bar} lag_s={lag} data={data}"
+                ).format(
+                    bars=bar_count,
+                    last_bar=_escape_markdown(last_bar_ts),
+                    lag=lag_fmt,
+                    data=data_src,
+                ),
             ]
+
+            entry = _fmt_float(plan.get("entry"))
+            sl = _fmt_float(plan.get("sl"))
+            tp1 = _fmt_float(plan.get("tp1"))
+            tp2 = _fmt_float(plan.get("tp2"))
+            lines.append(
+                f"spot: entry={entry} sl={sl} tp1={tp1} tp2={tp2}"
+            )
+
             basis = str(settings.EXPOSURE_BASIS).lower()
             if basis == "premium":
+                opt_entry = _fmt_float(plan.get("opt_entry"))
+                opt_sl = _fmt_float(plan.get("opt_sl"))
+                opt_tp1 = _fmt_float(plan.get("opt_tp1"))
+                opt_tp2 = _fmt_float(plan.get("opt_tp2"))
+                lot_cost = _fmt_float(plan.get("opt_lot_cost"))
+                opt_atr = _fmt_float(plan.get("opt_atr"))
+                opt_atr_pct = _fmt_float(plan.get("opt_atr_pct"), 4)
                 lines.append(
-                    "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
-                        e=plan.get("opt_entry"),
-                        sl=plan.get("opt_sl"),
-                        tp1=plan.get("opt_tp1"),
-                        tp2=plan.get("opt_tp2"),
-                        lc=plan.get("opt_lot_cost"),
+                    "option: entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc} "
+                    "ATR {atr} ATR% {atrp}".format(
+                        e=opt_entry,
+                        sl=opt_sl,
+                        tp1=opt_tp1,
+                        tp2=opt_tp2,
+                        lc=lot_cost,
+                        atr=opt_atr,
+                        atrp=opt_atr_pct,
                     )
                 )
-            return self._send("\n".join(lines))
+
+            micro = plan.get("micro") or {}
+            spread = micro.get("spread_pct", plan.get("spread_pct"))
+            depth = micro.get("depth_ok", plan.get("depth_ok"))
+            depth_fmt = "✅" if depth is True else ("❌" if depth is False else "-")
+            lines.append(
+                "micro: spread%={sp} depth={depth} src={src}".format(
+                    sp=_fmt_float(spread, 4),
+                    depth=depth_fmt,
+                    src=_escape_markdown(plan.get("quote_src")),
+                )
+            )
+
+            if planned_delta is not None or planned_notional is not None:
+                delta_fmt = _fmt_float(planned_delta, 2)
+                try:
+                    notional_fmt = f"₹{float(planned_notional):,.0f}"
+                except (TypeError, ValueError):
+                    notional_fmt = "-"
+                lines.append(
+                    f"portfolio: Δ(units)={delta_fmt} notional={notional_fmt}"
+                )
+
+            features_ok = plan.get("feature_ok")
+            reasons = plan.get("reasons") or []
+            reason_text = ",".join(_escape_markdown(r) for r in reasons) or "-"
+            lines.append(
+                "features: {status} reasons={reasons}".format(
+                    status="PASS" if features_ok else "FAIL",
+                    reasons=reason_text,
+                )
+            )
+
+            probe_from = plan.get("probe_window_from")
+            probe_to = plan.get("probe_window_to")
+            if probe_from and probe_to:
+                lines.append(
+                    "probe_window: {start} → {end} (IST)".format(
+                        start=_escape_markdown(probe_from),
+                        end=_escape_markdown(probe_to),
+                    )
+                )
+
+            option = plan.get("option") or {}
+            token = option.get("token") or plan.get("token") or plan.get("option_token")
+            if option or token:
+                lines.append(
+                    "option_meta: kind={kind} strike={strike} expiry={expiry} token={token}".format(
+                        kind=_escape_markdown(option.get("kind") or opt_kind),
+                        strike=_escape_markdown(option.get("strike") or strike),
+                        expiry=_escape_markdown(option.get("expiry") or expiry),
+                        token=_escape_markdown(token),
+                    )
+                )
+
+            return self._send("\n".join(lines), parse_mode="Markdown")
 
         if cmd == "/events":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)

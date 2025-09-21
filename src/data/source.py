@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Deque,
@@ -43,9 +42,7 @@ from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
 from src.utils.strike_selector import _nearest_strike
 from src.utils.time_windows import TZ
-
-if TYPE_CHECKING:
-    from src.utils.log_gate import LogGate
+from src.utils.log_gate import LogGate
 
 log = logging.getLogger(__name__)
 
@@ -959,7 +956,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self.kite = kite
         self.log = logging.getLogger(self.__class__.__name__)
         self.telegram = getattr(self, "telegram", None)
-        self._gate = cast("LogGate", settings.build_log_gate())
+        gate_factory = getattr(settings, "build_log_gate", None)
+        if callable(gate_factory):
+            try:
+                self._gate = cast("LogGate", gate_factory())
+            except Exception:
+                self._gate = LogGate()
+        else:
+            self._gate = LogGate()
         self.kite_ticker = getattr(kite, "ticker", None)
         self._quotes: dict[int, QuoteState] = {}
         self._full_depth_tokens: set[int] = set()
