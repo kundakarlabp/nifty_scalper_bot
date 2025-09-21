@@ -371,6 +371,15 @@ class StrategyRunner:
         self._last_computed_lots: int | None = None
 
         self.settings = settings
+        self._heartbeat_interval = float(
+            getattr(self.settings, "heartbeat_interval_sec", 30.0)
+        )
+        self._plan_log_interval = float(
+            getattr(self.settings, "plan_log_interval_sec", 60.0)
+        )
+        self._block_summary_interval = float(
+            getattr(self.settings, "block_summary_interval_sec", 30.0)
+        )
 
         # Event guard configuration
         self.events_path = resolve_config_path(
@@ -979,7 +988,9 @@ class StrategyRunner:
         """Emit a compact heartbeat log with current signal context."""
         if not self.hb_enabled:
             return
-        if not self._gate.should_emit("runner:heartbeat", interval=30.0):
+        if not self._gate.should_emit(
+            "runner:heartbeat", interval=self._heartbeat_interval
+        ):
             return
         snap = self.telemetry_snapshot()
         sig = snap.get("signal", {})
@@ -1336,7 +1347,9 @@ class StrategyRunner:
             or plan.get("reason_block") != self._last_reason_block
         )
         if (not self._log_signal_changes_only) or changed:
-            if changed or self._gate.should_emit("runner:plan_debug", interval=5.0):
+            if changed or self._gate.should_emit(
+                "runner:plan_debug", interval=self._plan_log_interval
+            ):
                 strike = self._format_two_decimals(plan.get("strike"))
                 atm_strike = self._format_two_decimals(plan.get("atm_strike"))
                 score = self._format_two_decimals(plan.get("score"))
@@ -2411,7 +2424,9 @@ class StrategyRunner:
                 extras = dict(micro_guard)
                 extras["token"] = plan_token
                 gate_key = f"runner:block_micro:{reason_micro or 'unknown'}"
-                if self._gate.should_emit(gate_key, interval=15.0):
+                if self._gate.should_emit(
+                    gate_key, interval=self._block_summary_interval
+                ):
                     self.log.info("signal.block_micro", extra=extras)
                 reasons = plan.setdefault("reasons", [])
                 if reason_micro and reason_micro not in reasons:
@@ -2461,7 +2476,9 @@ class StrategyRunner:
             diagnostics.log_trade_context(self.log, size_ctx)
             if qty <= 0:
                 gate_key = f"runner:block_size:{size_ctx.get('reason')}"
-                if self._gate.should_emit(gate_key, interval=15.0):
+                if self._gate.should_emit(
+                    gate_key, interval=self._block_summary_interval
+                ):
                     self.log.info("signal.block_size", extra=size_ctx)
                 existing_reason = plan.get("reason_block")
                 reason = (
