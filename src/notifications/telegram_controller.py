@@ -9,9 +9,10 @@ import re
 import statistics as stats
 import threading
 import time
+from collections import deque
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 import requests
@@ -31,6 +32,34 @@ from src.utils.freshness import compute as compute_freshness
 from src.diagnostics.metrics import daily_summary
 
 log = logging.getLogger(__name__)
+
+
+def _format_number(value: Any, digits: int = 2) -> str:
+    """Return ``value`` formatted as a decimal string."""
+
+    try:
+        return f"{float(value):,.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+class _CmdGate:
+    """Simple per-chat command rate limiter."""
+
+    def __init__(self) -> None:
+        self._last: Dict[tuple[int, str], float] = {}
+
+    def allow(self, chat_id: int, key: str, interval: float) -> bool:
+        now = time.time()
+        marker = (chat_id, key)
+        last = self._last.get(marker, 0.0)
+        if now - last < interval:
+            return False
+        self._last[marker] = now
+        return True
+
+
+_COMMAND_GATE = _CmdGate()
 
 
 COMMAND_HELP_OVERRIDES: dict[str, str] = {
@@ -645,6 +674,329 @@ class TelegramController:
         )
         return "\n".join(lines)
 
+    def _resolve_runner(self) -> Optional[StrategyRunner]:
+        """Return the wired runner instance if available."""
+
+        candidate = getattr(getattr(self, "_runner_tick", None), "__self__", None)
+        if isinstance(candidate, StrategyRunner):
+            return candidate
+        try:
+            return StrategyRunner.get_singleton()
+        except Exception:
+            return None
+
+    def _quick_snapshot(self) -> Dict[str, Any]:
+        """Collect a lightweight snapshot for quick-look commands."""
+
+        try:
+            tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
+        except Exception:
+            tz = timezone.utc
+
+        snap: Dict[str, Any] = {
+            "timestamp": datetime.now(tz),
+            "runner_ready": False,
+            "plan": {},
+            "status": {},
+        }
+
+        runner = self._resolve_runner()
+        if not runner:
+            return snap
+
+        snap["runner_ready"] = True
+
+        try:
+            telemetry = runner.telemetry_snapshot()
+        except Exception:
+            telemetry = {}
+        if isinstance(telemetry, dict):
+            snap["telemetry"] = telemetry
+        else:
+            snap["telemetry"] = {}
+
+        signal = snap["telemetry"].get("signal", {})
+        plan: Dict[str, Any] = {}
+        if isinstance(signal, Mapping):
+            plan.update(signal)
+
+        raw_plan = getattr(runner, "last_plan", None)
+        if isinstance(raw_plan, Mapping):
+            for key in (
+                "action",
+                "option_type",
+                "qty_lots",
+                "strike",
+                "entry",
+                "sl",
+                "tp1",
+                "tp2",
+                "rr",
+                "score",
+                "regime",
+                "reason_block",
+                "reasons",
+            ):
+                plan.setdefault(key, raw_plan.get(key))
+        snap["plan"] = plan
+
+        micro = plan.get("micro") if isinstance(plan, Mapping) else None
+        snap["micro"] = micro if isinstance(micro, Mapping) else {}
+
+        try:
+            status = runner.get_status_snapshot()
+        except Exception:
+            status = {}
+        if isinstance(status, dict):
+            snap["status"] = status
+
+        try:
+            equity_snapshot = runner.get_equity_snapshot()
+        except Exception:
+            equity_snapshot = {}
+        equity_value: Optional[float] = None
+        if isinstance(equity_snapshot, dict):
+            candidate = equity_snapshot.get("equity_cached")
+            if isinstance(candidate, (int, float)):
+                equity_value = float(candidate)
+        if equity_value is None:
+            cached = getattr(runner, "_equity_cached_value", None)
+            if isinstance(cached, (int, float)):
+                equity_value = float(cached)
+        snap["equity"] = equity_value
+
+        status_dict = snap["status"]
+        snap["market_open"] = bool(status_dict.get("market_open"))
+        snap["open_positions"] = status_dict.get("open_positions")
+
+        return snap
+
+    def _render_plan_summary(self, plan: Mapping[str, Any]) -> str:
+        """Render a compact multi-line summary of the current plan."""
+
+        if not plan:
+            return "No active plan."
+
+        action = plan.get("action") or plan.get("side") or "idle"
+        option_type = plan.get("option_type") or ""
+        qty = plan.get("qty_lots")
+        header = f"Action: {action} {option_type}".strip()
+        if qty not in (None, ""):
+            header += f" | lots={qty}"
+
+        entry_line = []
+        for label in ("entry", "sl", "tp1", "tp2"):
+            value = plan.get(label)
+            if value not in (None, ""):
+                entry_line.append(f"{label.upper()}={_format_number(value)}")
+
+        meta_line = []
+        for label, digits in (("rr", 2), ("score", 2), ("atr_pct", 2), ("regime", None)):
+            value = plan.get(label)
+            if value in (None, ""):
+                continue
+            if label == "regime":
+                meta_line.append(f"regime={value}")
+            else:
+                meta_line.append(f"{label}={_format_number(value, digits)}")
+
+        lines = [header]
+        if entry_line:
+            lines.append(" | ".join(entry_line))
+        if meta_line:
+            lines.append(" | ".join(meta_line))
+        return "\n".join(lines)
+
+    def _render_reason_details(self, plan: Mapping[str, Any]) -> str:
+        """Describe the current gating outcome from the plan snapshot."""
+
+        reason = plan.get("reason_block")
+        reasons = plan.get("reasons")
+        if not reason and not reasons:
+            return "All gates passed."
+
+        lines: List[str] = []
+        if reason:
+            lines.append(f"Blocked by: {reason}")
+
+        if isinstance(reasons, Mapping):
+            for key, value in reasons.items():
+                if isinstance(value, Mapping):
+                    detail = ", ".join(f"{k}={v}" for k, v in value.items())
+                    lines.append(f"- {key}: {detail}")
+                else:
+                    lines.append(f"- {key}: {value}")
+        elif isinstance(reasons, (list, tuple)):
+            for item in reasons:
+                lines.append(f"- {item}")
+
+        return "\n".join(lines) if lines else "Blocked without detail."
+
+    def _recent_errors(self, limit: int = 20) -> List[str]:
+        """Return the most recent error log lines."""
+
+        paths = [
+            Path("logs/error.log"),
+            Path("logs/errors.log"),
+            Path("logs/bot-error.log"),
+        ]
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    lines = list(deque(handle, maxlen=limit))
+            except Exception:
+                log.debug("Failed to read error log %s", path, exc_info=True)
+                continue
+            return [line.rstrip("\n") for line in lines]
+        return []
+
+    def _handle_quick_commands(
+        self, cmd: str, args: List[str], chat_id: int
+    ) -> bool:
+        """Handle compact snapshot commands added for mobile quick-checks."""
+
+        quick_commands = {
+            "/hb": 3.0,
+            "/plan": 3.0,
+            "/why": 3.0,
+            "/whydetail": 5.0,
+            "/deep": 5.0,
+            "/errors": 10.0,
+            "/statusjson": 5.0,
+        }
+        if cmd not in quick_commands:
+            return False
+
+        interval = quick_commands[cmd]
+        if not _COMMAND_GATE.allow(chat_id, cmd, interval):
+            self._send("⏳ Please wait before repeating this command.")
+            return True
+
+        if cmd == "/statusjson":
+            if not self._status_provider:
+                self._send("Status provider unavailable.")
+                return True
+            try:
+                status_payload = self._status_provider()
+            except Exception as exc:
+                log.debug("statusjson fetch failed", exc_info=True)
+                self._send(f"Status fetch failed: {exc}")
+                return True
+            pretty = json.dumps(status_payload, indent=2, default=str)
+            self._send(pretty[:3500])
+            return True
+
+        snap = self._quick_snapshot()
+        if not snap.get("runner_ready"):
+            self._send("Runner not ready.")
+            return True
+
+        status = snap.get("status", {})
+        plan = snap.get("plan", {})
+
+        if cmd == "/hb":
+            ts = status.get("time_ist")
+            if not ts and isinstance(snap.get("timestamp"), datetime):
+                ts = snap["timestamp"].strftime("%H:%M:%S")
+            mode = "LIVE" if status.get("live_trading") else "DRY"
+            market = "open" if snap.get("market_open") else "closed"
+            eq = _format_number(snap.get("equity"), 0)
+            open_pos = status.get("open_positions", "?")
+            trades = status.get("trades_today", "?")
+            cooldown = status.get("cooloff_until", "-")
+            msg = (
+                f"HB {ts}\n"
+                f"Mode: {mode} | Market: {market}\n"
+                f"Equity: {eq} | Open positions: {open_pos}\n"
+                f"Trades today: {trades} | Cooldown: {cooldown}"
+            )
+            self._send(msg)
+            return True
+
+        if cmd == "/plan":
+            text = self._render_plan_summary(plan)
+            micro = snap.get("micro")
+            if isinstance(micro, Mapping) and micro:
+                micro_bits = []
+                for key in ("spread_pct", "depth_ok", "source"):
+                    value = micro.get(key)
+                    if value in (None, ""):
+                        continue
+                    micro_bits.append(f"{key}={value}")
+                if micro_bits:
+                    text += "\nMicro: " + ", ".join(micro_bits)
+            self._send(text)
+            return True
+
+        if cmd == "/why":
+            lines = [self._render_reason_details(plan)]
+            banners = status.get("banners")
+            if isinstance(banners, (list, tuple)) and banners:
+                lines.append("Banners: " + ", ".join(str(b) for b in banners))
+            text = "\n".join(line for line in lines if line)
+            self._send(text)
+            return True
+
+        if cmd == "/whydetail":
+            detail_lines = [self._render_reason_details(plan)]
+            reasons = plan.get("reasons")
+            if isinstance(reasons, Mapping):
+                for key, value in reasons.items():
+                    if isinstance(value, Mapping):
+                        inner = ", ".join(f"{k}={v}" for k, v in value.items())
+                        detail_lines.append(f"{key}: {inner}")
+                    else:
+                        detail_lines.append(f"{key}: {value}")
+            elif isinstance(reasons, (list, tuple)):
+                detail_lines.extend(str(item) for item in reasons)
+            banners = status.get("banners")
+            if isinstance(banners, (list, tuple)) and banners:
+                detail_lines.append("Banners: " + ", ".join(str(b) for b in banners))
+            text = "\n".join(line for line in detail_lines if line)
+            self._send(text or "No gate details available.")
+            return True
+
+        if cmd == "/deep":
+            components = status.get("components", {})
+            comp_line = ""
+            if isinstance(components, Mapping) and components:
+                comp_line = ", ".join(
+                    f"{k}={v}" for k, v in components.items() if v not in (None, "")
+                )
+            eq = _format_number(snap.get("equity"), 0)
+            losses = status.get("consecutive_losses", "?")
+            trades = status.get("trades_today", "?")
+            market = "open" if snap.get("market_open") else "closed"
+            mode = "LIVE" if status.get("live_trading") else "DRY"
+            lines = [
+                f"Deep status {status.get('time_ist', '-')}",
+                f"Mode: {mode} | Market: {market}",
+                f"Equity: {eq} | Open positions: {status.get('open_positions', '?')}",
+                f"Trades today: {trades} | Loss streak: {losses}",
+            ]
+            if comp_line:
+                lines.append(f"Components: {comp_line}")
+            self._send("\n".join(lines))
+            return True
+
+        if cmd == "/errors":
+            limit = 20
+            if args and args[0].isdigit():
+                limit = max(1, min(int(args[0]), 100))
+            lines = self._recent_errors(limit)
+            if not lines:
+                self._send("No recent errors found.")
+                return True
+            text = "Recent errors:\n" + "\n".join(lines)
+            if len(text) > 3500:
+                text = text[-3500:]
+            self._send(text)
+            return True
+
+        return False
+
     # --------------- commands ---------------
     def _handle_update(self, upd: Dict[str, Any]) -> None:
         # Inline callbacks
@@ -682,6 +1034,9 @@ class TelegramController:
         parts = text.split()
         cmd = parts[0].lower()
         args = parts[1:]
+
+        if self._handle_quick_commands(cmd, args, int(chat_id)):
+            return
 
         # START / HELP
         if cmd == "/start":
