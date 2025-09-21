@@ -959,7 +959,26 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self.kite = kite
         self.log = logging.getLogger(self.__class__.__name__)
         self.telegram = getattr(self, "telegram", None)
-        self._gate = cast("LogGate", settings.build_log_gate())
+        gate_factory = getattr(settings, "build_log_gate", None)
+        gate_obj: Any | None = None
+        if callable(gate_factory):
+            try:
+                gate_obj = gate_factory()
+            except Exception:
+                gate_obj = None
+                self.log.debug("log_gate.build_error", exc_info=True)
+        if gate_obj is None:
+            try:
+                from src.utils.log_gate import LogGate as _RuntimeLogGate
+
+                gate_obj = _RuntimeLogGate()
+            except Exception:
+                class _NoopGate:
+                    def should_emit(self, *args: Any, **kwargs: Any) -> bool:
+                        return True
+
+                gate_obj = _NoopGate()
+        self._gate = cast("LogGate", gate_obj)
         self.kite_ticker = getattr(kite, "ticker", None)
         self._quotes: dict[int, QuoteState] = {}
         self._full_depth_tokens: set[int] = set()
