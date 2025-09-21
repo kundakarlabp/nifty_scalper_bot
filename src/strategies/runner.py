@@ -966,21 +966,39 @@ class StrategyRunner:
         """Emit a compact heartbeat log with current signal context."""
         if not self.hb_enabled:
             return
+
         snap = self.telemetry_snapshot()
         status = self.get_status_snapshot()
-        signal = snap.get("signal", {})
-        micro = signal.get("micro") or {}
+        plan_snapshot = dict(self.last_plan or {})
+        micro = dict(plan_snapshot.get("micro") or {})
+        plan_snapshot["micro"] = micro
+
         try:
-            within_window = self._within_trading_window(signal.get("adx"))
+            within_window = self._within_trading_window(plan_snapshot.get("adx"))
         except TypeError:
             within_window = self._within_trading_window()
+
         live_requested = bool(getattr(settings, "enable_live_trading", False))
         broker_connected = getattr(self, "kite", None) is not None
-        equity_snapshot = self.get_equity_snapshot()
+
+        try:
+            equity_snapshot = self.get_equity_snapshot()
+        except Exception:
+            equity_snapshot = {}
+
         cached_equity = getattr(self, "_equity_cached_value", None)
-        if cached_equity is not None:
+        if cached_equity is not None and isinstance(equity_snapshot, dict):
             equity_snapshot = dict(equity_snapshot)
             equity_snapshot.setdefault("equity_cached", round(float(cached_equity), 2))
+
+        open_positions = status.get("open_positions")
+        if open_positions is None:
+            try:
+                open_positions = getattr(
+                    self.order_executor, "open_legs_snapshot", lambda: []
+                )()
+            except Exception:
+                open_positions = []
 
         heartbeat_payload = {
             "ts": snap.get("ts"),
@@ -988,14 +1006,14 @@ class StrategyRunner:
             "last_eval_ts": snap.get("last_eval_ts"),
             "ready": bool(self.ready),
             "signal": {
-                "regime": signal.get("regime"),
-                "score": signal.get("score"),
-                "atr_pct": signal.get("atr_pct"),
-                "reason_block": signal.get("reason_block"),
-                "micro": {
-                    "spread_pct": micro.get("spread_pct"),
-                    "depth_ok": micro.get("depth_ok"),
-                },
+                "regime": plan_snapshot.get("regime"),
+                "score": plan_snapshot.get("score"),
+                "atr_pct": plan_snapshot.get("atr_pct"),
+            },
+            "reason_block": plan_snapshot.get("reason_block"),
+            "micro": {
+                "spread_pct": micro.get("spread_pct"),
+                "depth_ok": micro.get("depth_ok"),
             },
             "broker": {
                 "live_requested": live_requested,
@@ -1008,12 +1026,14 @@ class StrategyRunner:
                 "within_window": bool(within_window),
             },
             "equity": equity_snapshot,
-            "open_positions": status.get("open_positions"),
+            "open_positions": open_positions,
             "plan": {
-                "action": signal.get("action"),
-                "reason": signal.get("reason_block"),
+                "action": plan_snapshot.get("action"),
+                "option_type": plan_snapshot.get("option_type"),
+                "qty_lots": plan_snapshot.get("qty_lots"),
             },
         }
+
         self.log.info(
             "runner.heartbeat %s",
             json.dumps(heartbeat_payload, default=str, sort_keys=True),
@@ -1403,11 +1423,19 @@ class StrategyRunner:
         plan["probe_window_from"] = pw[0] if pw else None
         plan["probe_window_to"] = pw[1] if pw else None
         plan["shadow_blockers"] = self._shadow_blockers(plan)
-        self.last_plan = dict(plan)
+        self.last_plan = self._build_plan_snapshot(plan)
         now = time.time()
         if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
             self._last_hb_ts = now
+
+    def _build_plan_snapshot(self, plan: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return a defensive copy of the latest plan for diagnostics."""
+
+        snapshot = dict(plan)
+        micro = snapshot.get("micro") or {}
+        snapshot["micro"] = dict(micro)
+        return snapshot
 
     def _log_decisive_event(
         self,
