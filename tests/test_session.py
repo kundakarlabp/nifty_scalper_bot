@@ -137,7 +137,7 @@ def test_risk_limit_max_drawdown(risk_config: RiskSettings):
 
 
 def test_allow_min_one_lot(session: TradingSession, caplog):
-    premium_per_lot = 60_000.0  # exceeds 55% cap of 100k equity
+    premium_per_lot = 60_000.0  # exceeds 40% cap of 100k equity
     original_flag = session.risk_config.allow_min_one_lot
     try:
         session.risk_config.allow_min_one_lot = False
