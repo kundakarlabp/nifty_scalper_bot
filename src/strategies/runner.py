@@ -60,6 +60,7 @@ from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
+from src.server.logging_utils import SimpleLogGate
 from src.strategies.strategy_config import (
     StrategyConfig,
     resolve_config_path,
@@ -327,27 +328,6 @@ class _RiskCheckState:
 
 # Sentinel used when risk gates are intentionally skipped
 RISK_GATES_SKIPPED = object()
-
-
-class _LogGate:
-    """Simple per-key emission gate for throttling log noise."""
-
-    def __init__(self, default_interval: float = 0.0) -> None:
-        self.default_interval = float(default_interval)
-        self._last_emit: dict[str, float] = {}
-        self._lock = threading.Lock()
-
-    def should_emit(self, key: str, *, interval: float | None = None) -> bool:
-        """Return ``True`` when ``key`` may be emitted again."""
-
-        window = float(self.default_interval if interval is None else interval)
-        now = time.time()
-        with self._lock:
-            last = self._last_emit.get(key)
-            if window <= 0.0 or last is None or (now - last) >= window:
-                self._last_emit[key] = now
-                return True
-            return False
 
 
 # ============================== Runner =================================
@@ -670,7 +650,7 @@ class StrategyRunner:
         self.last_eval_ts: Optional[str] = None
         self.trace_ticks_remaining: int = 0
         self.hb_enabled: bool = True
-        self._gate = _LogGate()
+        self._gate = SimpleLogGate()
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
         self._last_atr_state: Optional[str] = None
@@ -1005,6 +985,18 @@ class StrategyRunner:
 
                 payload["signal"] = dict(plan_mapping)
 
+            if "blocked" in {label_value, decision_value}:
+                block_key_parts: list[str] = []
+                if reason_block:
+                    block_key_parts.append(str(reason_block))
+                elif payload.get("reason_block"):
+                    block_key_parts.append(str(payload["reason_block"]))
+                if reason_list:
+                    block_key_parts.append("|".join(reason_list))
+                gate_key = "runner:decision_block:" + ":".join(block_key_parts or ["unknown"])
+                if not self._gate.should_emit(gate_key, interval=10.0):
+                    return
+
             try:
                 payload["plan_snapshot"] = self._build_plan_snapshot()
             except Exception:
@@ -1030,6 +1022,8 @@ class StrategyRunner:
     def emit_heartbeat(self) -> None:
         """Emit a compact heartbeat log with current signal context."""
         if not self.hb_enabled:
+            return
+        if not self._gate.should_emit("runner:heartbeat", interval=30.0):
             return
         snap = self.telemetry_snapshot()
         sig = snap.get("signal", {})
@@ -2393,7 +2387,9 @@ class StrategyRunner:
                 )
                 extras = dict(micro_guard)
                 extras["token"] = plan_token
-                self.log.info("signal.block_micro", extra=extras)
+                gate_key = f"runner:block_micro:{reason_micro or 'unknown'}"
+                if self._gate.should_emit(gate_key, interval=15.0):
+                    self.log.info("signal.block_micro", extra=extras)
                 reasons = plan.setdefault("reasons", [])
                 if reason_micro and reason_micro not in reasons:
                     reasons.append(reason_micro)
@@ -2440,7 +2436,9 @@ class StrategyRunner:
             }
             diagnostics.log_trade_context(self.log, size_ctx)
             if qty <= 0:
-                self.log.info("signal.block_size", extra=size_ctx)
+                gate_key = f"runner:block_size:{size_ctx.get('reason')}"
+                if self._gate.should_emit(gate_key, interval=15.0):
+                    self.log.info("signal.block_size", extra=size_ctx)
                 existing_reason = plan.get("reason_block")
                 reason = (
                     existing_reason
