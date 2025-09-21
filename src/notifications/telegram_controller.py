@@ -388,6 +388,12 @@ class TelegramController:
         self._backoff = 1.0
         self._backoff_max = 20.0
 
+        # heartbeat (auto-edit) state
+        self._hb_lock = threading.Lock()
+        self._hb_by_chat: Dict[int, Dict[str, Any]] = {}
+        self._hb_thread: Optional[threading.Thread] = None
+        self._hb_run = False
+
     # --------------- outbound helpers ---------------
     def _rate_ok(self, text: str) -> bool:
         now = time.time()
@@ -897,6 +903,9 @@ class TelegramController:
         if cmd not in quick_commands:
             return False
 
+        if cmd == "/hb" and args and args[0].lower() in {"on", "off"}:
+            return self._handle_hb_toggle(chat_id, args)
+
         interval = quick_commands[cmd]
         if not _COMMAND_GATE.allow(chat_id, cmd, interval):
             self._send("⏳ Please wait before repeating this command.")
@@ -920,45 +929,7 @@ class TelegramController:
         runner = self._resolve_runner()
 
         if cmd == "/hb":
-            ts = status.get("time_ist")
-            if not ts and isinstance(snap.get("timestamp"), datetime):
-                ts = snap["timestamp"].strftime("%H:%M:%S")
-            broker = status.get("broker") or "ok"
-            market = "open" if snap.get("market_open") else "closed"
-            runner_state = "ready" if snap.get("runner_ready") else "down"
-            position = status.get("pos")
-            if position in (None, ""):
-                position = status.get("open_positions")
-            if position in (None, ""):
-                position = "—"
-            equity = _format_number(snap.get("equity"), 0)
-            side = plan.get("action") or plan.get("side") or "—"
-            option_type = plan.get("option_type") or plan.get("ot") or "—"
-            strike = plan.get("strike") or "—"
-            age = plan.get("age") or plan.get("quote_age_s") or plan.get("bar_age_s")
-            if age is None:
-                age = plan.get("last_bar_lag_s")
-            spread = plan.get("spr") or plan.get("spread_pct")
-            if spread is None:
-                micro = snap.get("micro") or {}
-                if isinstance(micro, Mapping):
-                    spread = micro.get("spread_pct")
-                    age = age or micro.get("age")
-            age_str = _format_float(age, 1) if isinstance(age, (int, float)) else "-"
-            spread_pct = (
-                _format_float((float(spread) * 100.0), 2)
-                if isinstance(spread, (int, float))
-                else "-"
-            )
-            plan_line = (
-                f"{side} {option_type} {strike} age={age_str}s spr={spread_pct}%"
-            )
-            msg = (
-                f"hb {ts or '-'} broker={broker} market={market} "
-                f"strategy={runner_state} pos={position} equity={equity}"
-            )
-            msg += f" plan={plan_line}"
-            self._send(msg)
+            self._send(self._build_heartbeat_text(snap))
             return True
 
         if cmd == "/plan":
@@ -1314,6 +1285,203 @@ class TelegramController:
             return True
 
         return False
+
+    def _build_heartbeat_text(self, snap: Mapping[str, Any]) -> str:
+        """Render the compact heartbeat line from a quick snapshot."""
+
+        status = snap.get("status") if isinstance(snap.get("status"), Mapping) else {}
+        plan = snap.get("plan") if isinstance(snap.get("plan"), Mapping) else {}
+        micro = snap.get("micro") if isinstance(snap.get("micro"), Mapping) else {}
+
+        ts = status.get("time_ist")
+        timestamp = snap.get("timestamp")
+        if not ts and isinstance(timestamp, datetime):
+            ts = timestamp.strftime("%H:%M:%S")
+        broker = status.get("broker") or "ok"
+        market = "open" if snap.get("market_open") else "closed"
+        runner_state = "ready" if snap.get("runner_ready") else "down"
+
+        position = status.get("pos")
+        if position in (None, ""):
+            position = status.get("open_positions")
+        if position in (None, ""):
+            position = "—"
+
+        equity = _format_number(snap.get("equity"), 0)
+
+        side = plan.get("action") or plan.get("side") or "—"
+        option_type = plan.get("option_type") or plan.get("ot") or "—"
+        strike = plan.get("strike") or plan.get("symbol") or "—"
+
+        age = (
+            plan.get("age")
+            or plan.get("quote_age_s")
+            or plan.get("bar_age_s")
+            or plan.get("last_bar_lag_s")
+        )
+        spread = plan.get("spr") or plan.get("spread_pct")
+        if spread is None and isinstance(micro, Mapping):
+            spread = micro.get("spread_pct")
+        if age is None and isinstance(micro, Mapping):
+            age = micro.get("age")
+
+        age_str = _format_float(age, 1) if isinstance(age, (int, float)) else "-"
+        spread_pct = (
+            _format_float((float(spread) * 100.0), 2)
+            if isinstance(spread, (int, float))
+            else "-"
+        )
+
+        plan_line = f"{side} {option_type} {strike} age={age_str}s spr={spread_pct}%"
+        header = (
+            f"hb {ts or '-'} broker={broker} market={market} "
+            f"strategy={runner_state} pos={position} equity={equity}"
+        )
+        return f"{header} plan={plan_line}"
+
+    def _handle_hb_toggle(self, chat_id: int, args: List[str]) -> bool:
+        """Handle `/hb on|off [interval]` commands for auto-heartbeat."""
+
+        if not _COMMAND_GATE.allow(chat_id, "/hb_cfg", 1.5):
+            self._send("⏳ Please wait before repeating this command.")
+            return True
+
+        action = args[0].lower()
+
+        if action == "off":
+            with self._hb_lock:
+                state = self._hb_by_chat.setdefault(
+                    chat_id,
+                    {"enabled": False, "interval": 30.0, "message_id": None, "last": 0.0},
+                )
+                state["enabled"] = False
+            self._hb_maybe_stop()
+            self._send("hb auto-update disabled.")
+            return True
+
+        interval = _env_float("HB_DEFAULT_SEC", 30.0)
+        if len(args) > 1:
+            try:
+                interval = float(args[1])
+            except (TypeError, ValueError):
+                interval = _env_float("HB_DEFAULT_SEC", 30.0)
+        interval = max(interval, 5.0)
+
+        with self._hb_lock:
+            state = self._hb_by_chat.setdefault(
+                chat_id,
+                {"enabled": False, "interval": interval, "message_id": None, "last": 0.0},
+            )
+            state["enabled"] = True
+            state["interval"] = interval
+            state["last"] = 0.0
+            state["message_id"] = None
+        self._hb_ensure_thread()
+        self._send(f"hb auto-update enabled every {int(interval)}s.")
+        return True
+
+    def _hb_ensure_thread(self) -> None:
+        with self._hb_lock:
+            if self._hb_run and self._hb_thread and self._hb_thread.is_alive():
+                return
+            self._hb_run = True
+            thread = threading.Thread(target=self._hb_loop, name="tg-hb", daemon=True)
+            self._hb_thread = thread
+        thread.start()
+
+    def _hb_maybe_stop(self) -> None:
+        with self._hb_lock:
+            if any(state.get("enabled") for state in self._hb_by_chat.values()):
+                return
+            self._hb_run = False
+
+    def _hb_loop(self) -> None:
+        while True:
+            with self._hb_lock:
+                run = self._hb_run
+                chat_ids = list(self._hb_by_chat.keys())
+            if not run:
+                break
+            now = time.time()
+            for cid in chat_ids:
+                self._hb_process_chat(cid, now)
+            time.sleep(1.0)
+        with self._hb_lock:
+            self._hb_thread = None
+
+    def _hb_process_chat(self, chat_id: int, now: float) -> None:
+        with self._hb_lock:
+            state = self._hb_by_chat.get(chat_id)
+            if not state or not state.get("enabled"):
+                return
+            try:
+                interval = float(state.get("interval", 30.0))
+            except (TypeError, ValueError):
+                interval = 30.0
+            interval = max(interval, 5.0)
+            last = float(state.get("last", 0.0) or 0.0)
+            message_id = state.get("message_id")
+        if now - last < interval:
+            return
+
+        try:
+            snap = self._quick_snapshot()
+        except Exception:
+            log.debug("heartbeat snapshot failed", exc_info=True)
+            snap = {}
+
+        text = self._build_heartbeat_text(snap)
+        ok, new_id = self._hb_send_or_edit(chat_id, message_id, text)
+
+        with self._hb_lock:
+            state = self._hb_by_chat.setdefault(chat_id, {})
+            state["last"] = now
+            state["message_id"] = new_id if ok else None
+
+    def _hb_send_or_edit(
+        self, chat_id: int, message_id: Optional[int], text: str
+    ) -> tuple[bool, Optional[int]]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        endpoint = "editMessageText" if message_id else "sendMessage"
+        if message_id:
+            payload["message_id"] = message_id
+        ok, result = self._hb_api_call(endpoint, payload)
+        if not ok:
+            return False, None
+        new_id: Optional[int] = None
+        if isinstance(result, Mapping):
+            msg_id = result.get("message_id")
+            if isinstance(msg_id, int):
+                new_id = msg_id
+        if message_id and new_id is None:
+            new_id = message_id
+        return True, new_id
+
+    def _hb_api_call(
+        self, endpoint: str, payload: Dict[str, Any]
+    ) -> tuple[bool, Optional[Mapping[str, Any]]]:
+        try:
+            response = self._session.post(
+                f"{self._base}/{endpoint}", json=payload, timeout=self._timeout
+            )
+            data = response.json()
+        except Exception:
+            log.debug("heartbeat %s request failed", endpoint, exc_info=True)
+            return False, None
+        if not response.ok or not data.get("ok"):
+            log.debug(
+                "heartbeat %s failed: status=%s data=%s",
+                endpoint,
+                response.status_code,
+                data,
+            )
+            return False, None
+        result = data.get("result")
+        return True, result if isinstance(result, Mapping) else None
 
     # --------------- commands ---------------
     def _handle_update(self, upd: Dict[str, Any]) -> None:
