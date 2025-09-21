@@ -159,10 +159,14 @@ def _fmt_micro(
     m = micro or {}
     spread = m.get("spread_pct")
     depth_ok = m.get("depth_ok")
+    try:
+        spread_pct = _format_float(float(spread) * 100.0, 2)
+    except (TypeError, ValueError):
+        spread_pct = "N/A"
     return (
         f"quote: {sym} src={m.get('source', '-')} "
         f"ltp={m.get('ltp')} bid={m.get('bid')} ask={m.get('ask')} "
-        f"spread%={spread if spread is not None else 'N/A'} "
+        f"spread%={spread_pct} "
         f"bid5={m.get('bid5')} ask5={m.get('ask5')} "
         f"depth={depth_ok if depth_ok is not None else 'N/A'} "
         f"last_bar_ts={last_bar_ts} lag_s={lag_s}"
@@ -3055,8 +3059,12 @@ class TelegramController:
                 if spread_pct is None or depth_ok is None:
                     return self._send("📉 Micro: N/A (no_quote)")
                 src = q.get("source", "-")
+                try:
+                    spread_pct_fmt = _format_float(float(spread_pct) * 100.0, 2)
+                except (TypeError, ValueError):
+                    spread_pct_fmt = "N/A"
                 return self._send(
-                    f"📉 Micro\n• spread%={round(spread_pct,2)}\n• depth_ok={depth_ok}\n• src={src}"
+                    f"📉 Micro\n• spread%={spread_pct_fmt}\n• depth_ok={depth_ok}\n• src={src}"
                 )
             except Exception:
                 log.exception("/micro failed")

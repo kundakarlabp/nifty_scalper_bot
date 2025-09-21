@@ -17,7 +17,7 @@ def test_quotes_why_show_micro_fields():
     from src.notifications.telegram_controller import _fmt_micro
 
     s = _fmt_micro(plan["tsym"], plan["micro"], plan["last_bar_ts"], plan["last_bar_lag_s"])
-    assert "src=ltp_fallback" in s and "spread%=0.25" in s and "lag_s=42" in s
+    assert "src=ltp_fallback" in s and "spread%=25.00" in s and "lag_s=42" in s
 
 
 def test_why_handles_missing_atr_and_score(monkeypatch):

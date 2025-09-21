@@ -556,7 +556,7 @@ def test_micro_command(monkeypatch) -> None:
     tc._send = lambda text, parse_mode=None: sent.append(text)
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/micro"}})
     msg = sent[0]
-    assert "spread%=0.5" in msg and "depth_ok=True" in msg
+    assert "spread%=50.00" in msg and "depth_ok=True" in msg
 
 
 def test_logtail_returns_tail(monkeypatch, tmp_path) -> None:
