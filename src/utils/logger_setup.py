@@ -1,5 +1,3 @@
-"""Unified logging setup for the whole app."""
-
 from __future__ import annotations
 
 import json
@@ -7,90 +5,67 @@ import logging
 import os
 import sys
 import time
-from logging.handlers import RotatingFileHandler
-from typing import Optional
 
+from .log_filters_compact import DedupFilter, RateLimitFilter
 
-# --- JSON & logfmt formatters -------------------------------------------------
 
 class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
+    def format(self, record):
         base = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
             "lvl": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
         }
-        # Allow structured payloads via extra={"extra": {...}}
         extra = getattr(record, "extra", None)
         if isinstance(extra, dict):
             base.update(extra)
         return json.dumps(base, ensure_ascii=False)
 
 
-class _LogfmtFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        # minimal logfmt: key=value space-separated
-        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
-        msg_value = json.dumps(record.getMessage(), ensure_ascii=False)
-        kv = [
-            f"ts={ts}",
-            f"lvl={record.levelname}",
-            f"logger={record.name}",
-            f"msg={msg_value}",
-        ]
+class _LineFormatter(logging.Formatter):
+    def format(self, record):
         extra = getattr(record, "extra", None)
-        if isinstance(extra, dict):
-            for k, v in extra.items():
-                kv.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-        return " ".join(kv)
+        if isinstance(extra, dict) and extra:
+            return f"{record.levelname} {record.name} {extra}"
+        return super().format(record)
 
 
-# --- Core setup ----------------------------------------------------------------
-
-def setup_logging(
-    level: str = "INFO",
-    log_file: Optional[str] = None,
-    json: bool = False,
-) -> None:
-    """
-    Configure the ROOT logger with a single StreamHandler and optional rotating file.
-    Removes any pre-existing handlers to prevent mixed formats and duplicates.
-    """
-    # Normalize level
-    lvl = getattr(logging, str(level).upper(), logging.INFO)
-
-    # Remove any existing handlers
+def setup_logging():
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    json_mode = os.getenv("LOG_JSON", "true").lower() == "true"
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
-
-    # Choose formatter
-    formatter = _JsonFormatter() if json else _LogfmtFormatter()
-
-    # Stream handler to stdout
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(lvl)
-    sh.setFormatter(formatter)
-    root.addHandler(sh)
-    root.setLevel(lvl)
-
-    # Optional rotating file
+    formatter: logging.Formatter
+    if json_mode:
+        formatter = _JsonFormatter()
+    else:
+        formatter = _LineFormatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(formatter)
+    # Global dedup + rate-limit (tunable via env)
+    dedup_ttl = float(os.getenv("LOG_DEDUP_TTL_S", "5"))
+    rate_n = int(os.getenv("LOG_RATE_N", "8"))
+    rate_win = float(os.getenv("LOG_RATE_WIN_S", "60"))
+    h.addFilter(DedupFilter(ttl_s=dedup_ttl))
+    h.addFilter(RateLimitFilter(per_key=rate_n, window_s=rate_win))
+    root.addHandler(h)
+    log_file = os.getenv("LOG_FILE") or os.getenv("LOG_PATH")
     if log_file:
         try:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
-            fh = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3)
-            fh.setLevel(lvl)
+            fh = logging.FileHandler(log_file)
             fh.setFormatter(formatter)
+            fh.addFilter(DedupFilter(ttl_s=dedup_ttl))
+            fh.addFilter(RateLimitFilter(per_key=rate_n, window_s=rate_win))
             root.addHandler(fh)
         except Exception:
-            # Do not crash on file IO issues; stdout is enough
-            pass
-
-    # Force third-party loggers to propagate to root and not install their own handlers
+            logging.getLogger(__name__).warning("log_file_setup_failed", exc_info=True)
+    root.setLevel(getattr(logging, level, logging.INFO))
     for noisy in ("uvicorn", "gunicorn", "werkzeug", "waitress", "urllib3", "kiteconnect", "flask"):
         lg = logging.getLogger(noisy)
         lg.handlers.clear()
         lg.propagate = True
-        # keep them at WARNING except kiteconnect which is informative
         lg.setLevel(logging.WARNING if noisy != "kiteconnect" else logging.INFO)
+    logging.getLogger("structured").setLevel(getattr(logging, level, logging.INFO))

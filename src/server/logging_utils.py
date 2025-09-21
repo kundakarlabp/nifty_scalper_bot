@@ -11,7 +11,7 @@ from typing import Callable
 from src.boot.validate_env import _log_cred_presence
 from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
 from src.utils.log_filters import install_warmup_filters
-from src.utils.logger_setup import setup_logging
+from src.utils.logger_setup import setup_logging as _unified_setup
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
 
 
@@ -172,27 +172,21 @@ def should_emit_log(
 
 def _setup_logging() -> None:  # pragma: no cover
     try:
-        from src.utils.logger_setup import setup_logging as _unified_setup
-        env_log_path = os.environ.get("LOG_PATH") or os.environ.get("LOG_FILE")
-        log_path = settings.log_path or env_log_path
-        fmt = (getattr(settings, "log_format", None) or
-               ("json" if getattr(settings, "log_json", False) else "logfmt")).lower()
-        _unified_setup(
-            level=getattr(settings, "LOG_LEVEL", None) or settings.log_level,
-            log_file=str(log_path) if log_path else None,
-            json=(fmt == "json"),
-        )
-
-        # Reconfirm root level
-        try:
-            level_value = getattr(logging, str(settings.log_level).upper(), logging.INFO)
-        except Exception:
-            level_value = logging.INFO
-        logging.getLogger().setLevel(level_value)
-
-        # Rate-limit filter & ring buffer stay as-is
-        from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
-        from src.utils.log_filters import install_warmup_filters
+        if getattr(settings, "log_level", None):
+            os.environ.setdefault("LOG_LEVEL", str(settings.log_level))
+        if getattr(settings, "log_json", None) is not None:
+            os.environ.setdefault(
+                "LOG_JSON",
+                "true" if bool(getattr(settings, "log_json", False)) else "false",
+            )
+        _unified_setup()
+        if getattr(settings, "log_level", None):
+            try:
+                logging.getLogger().setLevel(
+                    getattr(logging, str(settings.log_level).upper(), logging.INFO)
+                )
+            except Exception:
+                logging.getLogger().setLevel(logging.INFO)
 
         install_warmup_filters()
         root = logging.getLogger()
@@ -204,20 +198,19 @@ def _setup_logging() -> None:  # pragma: no cover
             if log_buffer_handler in root.handlers:
                 root.removeHandler(log_buffer_handler)
 
-        # Final touch: ensure common libraries don't carry their own handlers
-        for noisy in ("uvicorn", "gunicorn", "werkzeug", "waitress", "urllib3", "kiteconnect", "flask"):
-            lg = logging.getLogger(noisy)
-            lg.handlers.clear()
-            lg.propagate = True
-            lg.setLevel(logging.WARNING if noisy != "kiteconnect" else logging.INFO)
-
         # Optional: note presence of credentials without leaking them
-        from src.boot.validate_env import _log_cred_presence
         _log_cred_presence()
 
-        logging.getLogger("main").info("logging.init", extra={"extra": {
-            "level": settings.log_level, "format": fmt, "ring": settings.log_ring_enabled
-        }})
+        logging.getLogger("main").info(
+            "logging.init",
+            extra={
+                "extra": {
+                    "level": settings.log_level,
+                    "ring": settings.log_ring_enabled,
+                    "json": os.environ.get("LOG_JSON"),
+                }
+            },
+        )
     except Exception as exc:
         logging.getLogger("main").warning("Failed to initialize logging: %s", exc, exc_info=True)
         raise
