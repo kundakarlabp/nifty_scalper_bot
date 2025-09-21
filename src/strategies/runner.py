@@ -350,6 +350,25 @@ class _LogGate:
             return False
 
 
+class _DecisiveExit(Exception):
+    """Internal control-flow exception used to stop ``process_tick`` early."""
+
+    def __init__(
+        self,
+        stage: str,
+        decision: str,
+        reason_codes: Iterable[str],
+        plan: Mapping[str, Any],
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(stage, decision)
+        self.stage = stage
+        self.decision = decision
+        self.reason_codes = list(reason_codes)
+        self.plan = dict(plan)
+        self.metrics = dict(metrics or {})
+
+
 # ============================== Runner =================================
 
 
@@ -948,17 +967,56 @@ class StrategyRunner:
         if not self.hb_enabled:
             return
         snap = self.telemetry_snapshot()
-        sig = snap.get("signal", {})
-        micro = sig.get("micro") or {}
+        status = self.get_status_snapshot()
+        signal = snap.get("signal", {})
+        micro = signal.get("micro") or {}
+        try:
+            within_window = self._within_trading_window(signal.get("adx"))
+        except TypeError:
+            within_window = self._within_trading_window()
+        live_requested = bool(getattr(settings, "enable_live_trading", False))
+        broker_connected = getattr(self, "kite", None) is not None
+        equity_snapshot = self.get_equity_snapshot()
+        cached_equity = getattr(self, "_equity_cached_value", None)
+        if cached_equity is not None:
+            equity_snapshot = dict(equity_snapshot)
+            equity_snapshot.setdefault("equity_cached", round(float(cached_equity), 2))
+
+        heartbeat_payload = {
+            "ts": snap.get("ts"),
+            "eval": snap.get("eval_count"),
+            "last_eval_ts": snap.get("last_eval_ts"),
+            "ready": bool(self.ready),
+            "signal": {
+                "regime": signal.get("regime"),
+                "score": signal.get("score"),
+                "atr_pct": signal.get("atr_pct"),
+                "reason_block": signal.get("reason_block"),
+                "micro": {
+                    "spread_pct": micro.get("spread_pct"),
+                    "depth_ok": micro.get("depth_ok"),
+                },
+            },
+            "broker": {
+                "live_requested": live_requested,
+                "connected": broker_connected,
+                "mode": status.get("broker"),
+                "live_trading": bool(live_requested and broker_connected),
+            },
+            "market": {
+                "open": bool(status.get("market_open")),
+                "within_window": bool(within_window),
+            },
+            "equity": equity_snapshot,
+            "open_positions": status.get("open_positions"),
+            "plan": {
+                "action": signal.get("action"),
+                "reason": signal.get("reason_block"),
+            },
+        }
         self.log.info(
-            "HB eval=%s regime=%s atr%%=%s score=%s spread%%=%s depth=%s block=%s",
-            snap.get("eval_count"),
-            sig.get("regime"),
-            sig.get("atr_pct"),
-            sig.get("score"),
-            micro.get("spread_pct"),
-            micro.get("depth_ok"),
-            sig.get("reason_block"),
+            "runner.heartbeat %s",
+            json.dumps(heartbeat_payload, default=str, sort_keys=True),
         )
 
     def _maybe_hot_reload_cfg(self) -> None:
@@ -1351,6 +1409,54 @@ class StrategyRunner:
             self.emit_heartbeat()
             self._last_hb_ts = now
 
+    def _log_decisive_event(
+        self,
+        *,
+        stage: str,
+        decision: str,
+        reason_codes: Iterable[str],
+        plan: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a structured log capturing the runner's decision state."""
+
+        plan_payload = dict(plan or self.last_plan or {})
+        micro = plan_payload.get("micro") or {}
+        spread_pct = plan_payload.get("spread_pct")
+        if spread_pct is None:
+            spread_pct = micro.get("spread_pct")
+        depth_ok = plan_payload.get("depth_ok")
+        if depth_ok is None:
+            depth_ok = micro.get("depth_ok")
+
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stage": stage,
+            "decision": decision,
+            "reason_codes": list(reason_codes),
+            "reason_block": plan_payload.get("reason_block"),
+            "action": plan_payload.get("action"),
+            "option_type": plan_payload.get("option_type"),
+            "symbol": plan_payload.get("symbol") or plan_payload.get("strike"),
+            "qty_lots": plan_payload.get("qty_lots"),
+            "score": plan_payload.get("score"),
+            "atr_pct": plan_payload.get("atr_pct"),
+            "atr_pct_raw": plan_payload.get("atr_pct_raw"),
+            "spread_pct": spread_pct,
+            "depth_ok": depth_ok,
+            "eval_count": self.eval_count,
+            "last_eval_ts": self.last_eval_ts,
+            "ready": bool(self.ready),
+            "within_window": bool(self.within_window),
+            "reasons": list(plan_payload.get("reasons", [])),
+            "stage_metrics": dict(metrics or {}),
+        }
+
+        self.log.info(
+            "DECISION %s",
+            json.dumps(payload, default=str, sort_keys=True),
+        )
+
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
@@ -1388,6 +1494,59 @@ class StrategyRunner:
         warm_min = int(
             getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
         )
+
+        def _exit(
+            stage: str,
+            decision: str,
+            *,
+            reason_codes: Iterable[str] | None = None,
+            plan: Mapping[str, Any] | None = None,
+            metrics: Mapping[str, Any] | None = None,
+        ) -> None:
+            resolved_plan: Mapping[str, Any] = plan if plan is not None else self.last_plan or {}
+            raise _DecisiveExit(
+                stage,
+                decision,
+                list(reason_codes or []),
+                resolved_plan,
+                metrics,
+            )
+
+        def _stop(
+            *,
+            stage: str | None = None,
+            decision: str = "blocked",
+            reason_codes: Iterable[str] | None = None,
+            plan: Mapping[str, Any] | None = None,
+            flow_snapshot: Mapping[str, Any] | None = None,
+            metrics: Mapping[str, Any] | None = None,
+        ) -> None:
+            plan_payload = plan or {}
+            flow_payload = flow_snapshot or {}
+            inferred_stage = stage or str(
+                plan_payload.get("reason_block")
+                or flow_payload.get("reason_block")
+                or "process"
+            )
+            if reason_codes is None:
+                inferred_reasons = [
+                    str(code)
+                    for code in (
+                        plan_payload.get("reason_block"),
+                        flow_payload.get("reason_block"),
+                    )
+                    if code
+                ]
+            else:
+                inferred_reasons = list(reason_codes)
+            _exit(
+                inferred_stage,
+                decision,
+                reason_codes=inferred_reasons,
+                plan=plan,
+                metrics=metrics,
+            )
+
         if (
             self.data_source
             and warm_min > 0
@@ -1408,7 +1567,17 @@ class StrategyRunner:
                         "Waiting for warmup: %s bars required", warm_min
                     )
                     self._warmup_log_ts = now_t
-                return
+                try:
+                    _stop(stage="warmup", flow_snapshot=flow)
+                except _DecisiveExit as outcome:
+                    self._log_decisive_event(
+                        stage=outcome.stage,
+                        decision=outcome.decision,
+                        reason_codes=outcome.reason_codes,
+                        plan=outcome.plan,
+                        metrics=outcome.metrics,
+                    )
+                    return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
         for cb in [
@@ -1505,7 +1674,7 @@ class StrategyRunner:
                 flow["reason_block"] = "paused"
                 self._last_flow_debug = flow
                 self.log.debug("Skipping tick: runner paused")
-                return
+                _stop(stage="paused", flow_snapshot=flow)
 
             # new day / equity
             self._ensure_day_state()
@@ -1521,7 +1690,7 @@ class StrategyRunner:
                     flow["bars"],
                     int(settings.strategy.min_bars_for_signal),
                 )
-                return
+                _stop(stage="data", flow_snapshot=flow)
             flow["data_ok"] = True
             # Event guard pre-check to hint strategy
             active_events: List[EventWindow] = []
@@ -1561,7 +1730,7 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
-                return
+                _stop(plan=plan, flow_snapshot=flow)
             now = self._now_ist()
             self._fresh = compute_freshness(
                 now=now,
@@ -1585,7 +1754,7 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
-                return
+                _stop(plan=plan, flow_snapshot=flow)
             atr_val = atr_pct(df, period=atr_period)
             plan["atr_pct_raw"] = float(atr_val) if atr_val is not None else None
             plan["atr_pct"] = (
@@ -1597,7 +1766,7 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
-                return
+                _stop(stage="features", plan=plan, flow_snapshot=flow)
             band = resolve_atr_band(self.strategy_cfg, self.under_symbol)
             ok, reason, atr_min, atr_max = check_atr(
                 plan["atr_pct_raw"], self.strategy_cfg, self.under_symbol, band=band
@@ -1621,7 +1790,7 @@ class StrategyRunner:
                     "band": (atr_min, atr_max),
                 }
                 self._last_flow_debug = flow
-                return
+                _stop(stage="atr", plan=plan, flow_snapshot=flow)
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
             if not prime_ok:
                 reasons = plan.setdefault("reasons", [])
@@ -1651,7 +1820,7 @@ class StrategyRunner:
                     prime_tokens,
                     prime_err,
                 )
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             score_val, details = compute_score(
                 df, plan.get("regime"), self.strategy_cfg
             )
@@ -1693,7 +1862,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 self.log.debug("No tradable plan: %s", flow["reason_block"])
-                return
+                _stop(plan=plan, flow_snapshot=flow)
             flow["signal_ok"] = True
             metrics.inc_signal()
             flow["plan"] = dict(plan)
@@ -1713,10 +1882,9 @@ class StrategyRunner:
                 if block:
                     plan["has_signal"] = False
                     plan["reason_block"] = "event_guard"
-                    self.last_plan = plan
                     self._last_flow_debug = flow
                     self._record_plan(plan)
-                    return
+                    _stop(stage="event_guard", plan=plan, flow_snapshot=flow)
                 else:
                     plan["_event_post_widen"] = float(widen)
 
@@ -1733,7 +1901,7 @@ class StrategyRunner:
                 self.log.info(
                     "Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min
                 )
-                return
+                _stop(stage="rr", plan=plan, flow_snapshot=flow)
 
             cfg = self.strategy_cfg
             score = plan.get("score") or 0
@@ -1796,7 +1964,7 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._last_option = None
                 self.log.exception("Failed to resolve ATM option")
-                return
+                _stop(stage="option", plan=plan, flow_snapshot=flow)
             token = opt.get("token")
             plan["option"] = opt
             plan["expiry"] = opt.get("expiry")
@@ -1868,7 +2036,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                return
+                _stop(stage="option", plan=plan, flow_snapshot=flow)
             self._last_option = opt
             if not token:
                 plan["reason_block"] = "no_option_token"
@@ -1886,7 +2054,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                return
+                _stop(stage="option", plan=plan, flow_snapshot=flow)
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
                 try:
@@ -1917,7 +2085,7 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.log.info("no_quote token=%s", token_for_quote)
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
                 try:
@@ -1948,7 +2116,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             def _positive_number(value: Any) -> bool:
                 return isinstance(value, (int, float)) and value > 0
 
@@ -1988,7 +2156,7 @@ class StrategyRunner:
                     not have_price,
                     not have_levels,
                 )
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -2021,16 +2189,14 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                self.last_plan = plan
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             if micro.get("would_block"):
                 plan.setdefault("reasons", []).append("micro")
                 plan["reason_block"] = "micro"
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                self.last_plan = plan
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
             if micro.get("mode") == "SOFT":
                 penalty = (
                     0.5
@@ -2059,7 +2225,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                return
+                _stop(stage="risk", plan=plan, flow_snapshot=flow)
 
             # ---- risk gates
             gates = self._risk_gates_for(plan)
@@ -2078,7 +2244,7 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 self.log.info("Signal blocked by risk gates: %s", blocked)
-                return
+                _stop(stage="risk", plan=plan, flow_snapshot=flow)
 
             # ---- limits engine
             exposure = Exposure(
@@ -2169,10 +2335,9 @@ class StrategyRunner:
                 plan.setdefault("risk_details", det)
                 self._record_plan(plan)
                 self._last_flow_debug = flow
-                self.last_plan = plan
-                return
+                _stop(stage="risk", plan=plan, flow_snapshot=flow)
 
-            plan_token = plan_token or plan.get("token") or plan.get("option_token")
+            plan_token = plan.get("token") or plan.get("option_token")
             micro_guard: Dict[str, Any] = {}
             micro_ok = True
             if plan_token is not None:
@@ -2205,7 +2370,7 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 self._record_plan(plan)
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
@@ -2286,7 +2451,7 @@ class StrategyRunner:
                 self.log.debug(
                     "Signal skipped: quantity %s <= 0 reason=%s", qty, reason
                 )
-                return
+                _stop(stage="sizing", plan=plan, flow_snapshot=flow, metrics=diag)
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
             plan["qty_lots"] = planned_lots
@@ -2330,7 +2495,7 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.log.info("micro precheck: no_quote token=%s", plan_token)
-                return
+                _stop(stage="micro", plan=plan, flow_snapshot=flow)
 
             quote_snapshot = dict(quote_snapshot)
             plan["quote"] = quote_snapshot
@@ -2389,7 +2554,7 @@ class StrategyRunner:
                 )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
-                return
+                _stop(stage="scoring", plan=plan, flow_snapshot=flow)
             if (
                 ok_micro
                 and score_val >= int(settings.strategy.min_signal_score)
@@ -2415,7 +2580,7 @@ class StrategyRunner:
                 )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
-                return
+                _stop(plan=plan, flow_snapshot=flow)
 
             self._record_plan(plan)
 
@@ -2525,6 +2690,29 @@ class StrategyRunner:
                 )
 
             self._last_flow_debug = flow
+
+            decision = "executed" if placed_ok else "rejected"
+            reason_codes: list[str] = []
+            block_reason = flow.get("reason_block")
+            if not placed_ok and block_reason:
+                reason_codes.append(str(block_reason))
+            self._log_decisive_event(
+                stage="execution",
+                decision=decision,
+                reason_codes=reason_codes,
+                plan=plan,
+                metrics={"executed": placed_ok},
+            )
+
+        except _DecisiveExit as outcome:
+            self._log_decisive_event(
+                stage=outcome.stage,
+                decision=outcome.decision,
+                reason_codes=outcome.reason_codes,
+                plan=outcome.plan,
+                metrics=outcome.metrics,
+            )
+            return
 
         except Exception as e:
             flow["reason_block"] = f"exception:{e.__class__.__name__}"
@@ -3599,7 +3787,20 @@ class StrategyRunner:
         if mr:
             diag["margins"] = mr
 
-        mins_since = (self.now_ist - self._last_trade_time).total_seconds() / 60.0
+        now_val = self.now_ist
+        last_trade = getattr(self, "_last_trade_time", None)
+        mins_since = 0.0
+        if isinstance(last_trade, datetime):
+            now_cmp = now_val
+            last_cmp = last_trade
+            if last_cmp.tzinfo is None and now_cmp.tzinfo is not None:
+                last_cmp = last_cmp.replace(tzinfo=now_cmp.tzinfo)
+            elif last_cmp.tzinfo is not None and now_cmp.tzinfo is None:
+                now_cmp = now_cmp.replace(tzinfo=last_cmp.tzinfo)
+            try:
+                mins_since = (now_cmp - last_cmp).total_seconds() / 60.0
+            except Exception:
+                mins_since = 0.0
         diag["minutes_since_last_trade"] = round(mins_since, 1)
         if self._auto_relax_active:
             diag.setdefault("banners", []).append("auto_relax")

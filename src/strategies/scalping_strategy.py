@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
-from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
+from typing import Any, Deque, Dict, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -770,11 +770,29 @@ class EnhancedScalpingStrategy:
             sd.setdefault("threshold", 0.0)
             sd.setdefault("bb_percent", plan.get("bb_percent"))
             sd.setdefault("adx_slope", plan.get("adx_slope"))
+            if not sd.get("components"):
+                strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+                default_weights: Mapping[str, float] = strat_cfg.get(
+                    "weights",
+                    {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1},
+                )
+                comps = sd.setdefault("components", {})
+                for key in default_weights:
+                    comps.setdefault(key, 0.0)
+                weight_map = sd.setdefault("weights", {})
+                for key, val in default_weights.items():
+                    weight_map.setdefault(key, float(val))
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
-            if reason == "score_low" and plan.get("score") is None:
-                plan["score"] = float(extra.get("score", 0.0))
+            if plan.get("score") is None:
+                score_override = extra.get("score") if isinstance(extra, dict) else None
+                if score_override is not None:
+                    plan["score"] = float(score_override)
+                else:
+                    final_dbg = plan.get("score_dbg", {}).get("final")
+                    if isinstance(final_dbg, (int, float)):
+                        plan["score"] = float(final_dbg)
             if "score_dbg" not in plan:
                 min_score_cfg = 0.0
                 if isinstance(cfg, StrategyConfig):
@@ -1252,25 +1270,40 @@ class EnhancedScalpingStrategy:
             )
             if not isinstance(micro, dict):
                 micro = {}
+            micro = dict(micro)
             micro["cap_pct"] = cap_pct
             plan["micro"] = micro
             plan["lot_size"] = lot_sz
-            sp = micro.get("spread_pct") if isinstance(micro, dict) else None
-            cap = micro.get("cap_pct") if isinstance(micro, dict) else None
-            depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
-            over_spread = bool(sp is not None and cap is not None and sp > cap)
-            ok_micro = not (over_spread or not depth_ok)
+            sp = micro.get("spread_pct")
+            cap = micro.get("cap_pct")
+            depth_raw = micro.get("depth_ok")
+            depth_ok = bool(depth_raw) if depth_raw is not None else None
+            missing_micro = sp is None and depth_raw is None
             gate_checks["microstructure"] = {
-                "ok": bool(ok_micro),
                 "mode": micro.get("mode"),
                 "spread_pct": sp,
                 "cap_pct": cap,
-                "depth_ok": depth_ok,
+                "depth_ok": depth_raw,
             }
-            if not ok_micro and (
-                micro.get("mode") == "HARD" or micro.get("would_block")
-            ):
-                return plan_block("microstructure", micro=micro)
+            if missing_micro:
+                micro["would_block"] = False
+                gate_checks["microstructure"].update(
+                    {
+                        "ok": True,
+                        "reason": micro.get("reason", "no_quote"),
+                    }
+                )
+            else:
+                over_spread = bool(
+                    sp is not None and cap is not None and float(sp) > float(cap)
+                )
+                ok_micro = not (over_spread or depth_ok is False)
+                gate_checks["microstructure"]["ok"] = bool(ok_micro)
+                if not ok_micro and (
+                    str(micro.get("mode", "")).upper() == "HARD"
+                    or micro.get("would_block")
+                ):
+                    return plan_block("microstructure", micro=micro)
 
             comps = {
                 "trend": float(regime_score),
