@@ -914,98 +914,49 @@ class StrategyRunner:
     def _log_decisive_event(
         self,
         *,
-        stage: str | None = None,
-        decision: str | None = None,
-        reason_codes: Iterable[str] | None = None,
-        plan: Mapping[str, Any] | None = None,
-        metrics: Mapping[str, Any] | None = None,
         label: str | None = None,
         signal: Mapping[str, Any] | None = None,
         reason_block: str | None = None,
+        stage: str | None = None,  # legacy parameter (ignored)
+        decision: str | None = None,  # legacy parameter (fallback for label)
+        reason_codes: Iterable[str] | None = None,  # legacy parameter (ignored)
+        plan: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,  # legacy parameter (ignored)
     ) -> None:
-        """Emit a structured log entry describing a decisive plan outcome."""
+        """Emit a concise decision log with best-effort plan context."""
+
+        del stage, reason_codes, metrics  # unused legacy args
 
         try:
-            reason_list: list[str] = []
-            if reason_codes:
-                reason_list = [str(code) for code in reason_codes]
+            candidate: Mapping[str, Any] | None = plan or signal
+            if hasattr(self, "_record_plan") and candidate is not None:
+                try:
+                    self._record_plan(dict(candidate))
+                except Exception:
+                    pass
 
-            plan_mapping: Mapping[str, Any] | None = plan or signal
+            plan_snapshot = getattr(self, "_last_plan", None)
+            label_value = label or decision
+            if label_value is None:
+                label_value = "blocked" if reason_block else "idle"
 
-            stage_value = stage or "process_tick"
-            decision_value = decision or label or (
-                "blocked" if (reason_block or reason_list) else "idle"
-            )
-            label_value = label or decision_value
+            reason_value = reason_block
+            if reason_value is None and isinstance(plan_snapshot, Mapping):
+                reason_value = plan_snapshot.get("reason_block")
 
-            payload: Dict[str, Any] = {
-                "stage": stage_value,
-                "decision": decision_value,
+            payload = {
                 "label": label_value,
-                "reason_codes": reason_list,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "eval_count": getattr(self, "eval_count", None),
-                "last_eval_ts": getattr(self, "last_eval_ts", None),
-                "stage_metrics": dict(metrics or {}),
-                "strategy_ready": getattr(self, "ready", None),
-                "reason_block": reason_block,
+                "reason_block": reason_value,
+                "plan": plan_snapshot,
             }
-
-            if isinstance(plan_mapping, Mapping):
-                payload.update(
-                    {
-                        "reason_block": reason_block
-                        if reason_block is not None
-                        else plan_mapping.get("reason_block"),
-                        "action": plan_mapping.get("action"),
-                        "option_type": plan_mapping.get("option_type"),
-                        "qty_lots": plan_mapping.get("qty_lots"),
-                        "symbol": plan_mapping.get("symbol"),
-                        "score": plan_mapping.get("score"),
-                        "atr_pct": plan_mapping.get("atr_pct"),
-                        "atr_pct_raw": plan_mapping.get("atr_pct_raw"),
-                        "rr": plan_mapping.get("rr"),
-                        "sl": plan_mapping.get("sl"),
-                        "tp1": plan_mapping.get("tp1"),
-                        "tp2": plan_mapping.get("tp2"),
-                    }
-                )
-
-                reasons_val = plan_mapping.get("reasons")
-                if isinstance(reasons_val, Iterable) and not isinstance(
-                    reasons_val, (str, bytes)
-                ):
-                    payload["reasons"] = [str(item) for item in reasons_val]
-
-                micro = plan_mapping.get("micro")
-                if isinstance(micro, Mapping):
-                    for key in ("spread_pct", "depth_ok", "block_reason", "cap_pct"):
-                        if key in micro:
-                            payload[key] = micro.get(key)
-
-                payload["signal"] = dict(plan_mapping)
-
-            if "blocked" in {label_value, decision_value}:
-                block_key_parts: list[str] = []
-                if reason_block:
-                    block_key_parts.append(str(reason_block))
-                elif payload.get("reason_block"):
-                    block_key_parts.append(str(payload["reason_block"]))
-                if reason_list:
-                    block_key_parts.append("|".join(reason_list))
-                gate_key = "runner:decision_block:" + ":".join(block_key_parts or ["unknown"])
-                if not self._gate.should_emit(gate_key, interval=10.0):
-                    return
-
-            try:
-                payload["plan_snapshot"] = self._build_plan_snapshot()
-            except Exception:
-                payload["plan_snapshot"] = {"plan": {}, "micro": {"reason": "error"}}
-
-            message = json.dumps(payload, default=str, sort_keys=True)
-            self.log.info("DECISION %s", message)
+            now = time.time()
+            last = getattr(self, "_ts_last_decision_emit", 0.0)
+            if now - last < 0.05:
+                return
+            self._ts_last_decision_emit = now
+            logging.getLogger(__name__).info("decision", extra=payload)
         except Exception:
-            self.log.debug("decision.emit_error", exc_info=True)
+            logging.getLogger(__name__).debug("decision.emit_error", exc_info=True)
 
     @staticmethod
     def _score_bucket_label(score: float) -> str:
@@ -1423,7 +1374,9 @@ class StrategyRunner:
         plan["probe_window_from"] = pw[0] if pw else None
         plan["probe_window_to"] = pw[1] if pw else None
         plan["shadow_blockers"] = self._shadow_blockers(plan)
-        self.last_plan = dict(plan)
+        snapshot = dict(plan)
+        self.last_plan = snapshot
+        self._last_plan = snapshot
         now = time.time()
         if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
@@ -1994,6 +1947,12 @@ class StrategyRunner:
                 pe_token,
                 plan["token"],
             )
+            try:
+                debounce_sec = float(os.getenv("TOKEN_SWITCH_DEBOUNCE_SEC", "15"))
+            except Exception:
+                debounce_sec = 15.0
+            last_switch_ts = getattr(self, "_ts_last_token_switch", 0.0)
+            now_ts = time.time()
             if (
                 option_type == "PE"
                 and pe_token is not None
@@ -2003,6 +1962,26 @@ class StrategyRunner:
                 and ce_token is not None
                 and plan.get("token") != ce_token
             ):
+                if now_ts - last_switch_ts < debounce_sec:
+                    self.log.debug(
+                        "token resync suppressed by debounce",
+                        extra={
+                            "option_type": option_type,
+                            "selected_token": plan.get("token"),
+                            "debounce_sec": debounce_sec,
+                        },
+                    )
+                    plan["token"] = pe_token if option_type == "PE" else ce_token
+                    plan.setdefault("reasons", []).append("token_debounce")
+                    flow["reason_block"] = "token_debounce"
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
                 # Resync datasource's "current" token to the resolver's chosen token instead of blocking.
                 ds = getattr(self, "data_source", None)
                 if ds is not None:
@@ -2021,21 +2000,23 @@ class StrategyRunner:
                                     toks.append(int(value))
                                 except Exception:
                                     pass
-                            setattr(ds, "atm_tokens", toks)
+                            try:
+                                setattr(ds, "atm_tokens", tuple(toks))
+                            except Exception:
+                                setattr(ds, "atm_tokens", toks)
                     except Exception:
                         self.log.debug("token resync failed", exc_info=True)
                 # Informative log; DO NOT set reason_block or return.
                 # Avoid spamming the same mismatch repeatedly within a short window.
                 try:
-                    now = time.time()
                     last = getattr(self, "_ts_last_token_resync", 0.0)
-                    if now - last > 1.0:
+                    if now_ts - last > 1.0:
                         logger.info(  # use the same module logger for consistency
                             "token_mismatch: resynced datasource to token=%s (type=%s)",
                             plan.get("token"),
                             option_type,
                         )
-                        self._ts_last_token_resync = now
+                        self._ts_last_token_resync = now_ts
                 except Exception:
                     logger.debug("token_mismatch.log_error", exc_info=True)
 
@@ -2046,6 +2027,10 @@ class StrategyRunner:
                         ensure_subscribe(plan.get("token"), mode="FULL")
                 except Exception:
                     logger.debug("token_mismatch.ensure_subscribe_error", exc_info=True)
+                try:
+                    self._ts_last_token_switch = now_ts
+                except Exception:
+                    pass
             self._last_option = opt
             if not token:
                 plan["reason_block"] = "no_option_token"
