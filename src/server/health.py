@@ -314,6 +314,10 @@ def run(
         serve = None
 
     if serve is not None:
+        # Route waitress logs through our unified root logger
+        wl = logging.getLogger("waitress")
+        wl.handlers.clear()
+        wl.propagate = True
         serve(app, host=bind_host, port=bind_port)
     else:
         # No reloader, multi-threaded to avoid blocking the trading loop
