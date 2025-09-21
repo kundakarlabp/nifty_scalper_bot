@@ -87,7 +87,24 @@ class SimpleLogGate:
         self._default_interval = float(default_interval_seconds)
         self._clock = clock or time.monotonic
         self._last_emitted: dict[str, float] = {}
+        self._key_intervals: dict[str, float] = {}
         self._lock = threading.Lock()
+
+    def set_interval(self, key: str, seconds: float) -> None:
+        """Configure a persistent interval for ``key``."""
+
+        window = max(0.0, float(seconds))
+        with self._lock:
+            if window == 0.0:
+                self._key_intervals.pop(key, None)
+            else:
+                self._key_intervals[key] = window
+
+    def _interval_for(self, key: str, override: float | None) -> float:
+        if override is not None:
+            return float(override)
+        with self._lock:
+            return self._key_intervals.get(key, self._default_interval)
 
     def should_emit(
         self,
@@ -103,7 +120,7 @@ class SimpleLogGate:
                 self._last_emitted[key] = self._clock()
             return True
 
-        window = self._default_interval if interval is None else float(interval)
+        window = self._interval_for(key, interval)
         if window <= 0.0:
             with self._lock:
                 self._last_emitted[key] = self._clock()
@@ -116,6 +133,17 @@ class SimpleLogGate:
                 self._last_emitted[key] = now
                 return True
             return False
+
+    def ok(
+        self,
+        key: str,
+        *,
+        interval: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Alias for :meth:`should_emit` for ergonomic call sites."""
+
+        return self.should_emit(key, interval=interval, force=force)
 
     def reset(self, key: str | None = None) -> None:
         """Reset stored timestamps for ``key`` or all keys."""
