@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, time as dt_time
 from random import uniform as rand_uniform
-from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
+from typing import Any, Deque, Dict, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -770,6 +770,18 @@ class EnhancedScalpingStrategy:
             sd.setdefault("threshold", 0.0)
             sd.setdefault("bb_percent", plan.get("bb_percent"))
             sd.setdefault("adx_slope", plan.get("adx_slope"))
+            if not sd["components"]:
+                if isinstance(cfg, StrategyConfig):
+                    strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+                    weights_default = strat_cfg.get(
+                        "weights",
+                        {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1},
+                    )
+                else:
+                    weights_default = {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1}
+                sd["components"] = {key: 0.0 for key in weights_default}
+                for key, value in weights_default.items():
+                    sd["weights"].setdefault(key, value)
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
@@ -791,6 +803,10 @@ class EnhancedScalpingStrategy:
                     "final": round(final, 4),
                     "threshold": min_score_cfg,
                 }
+            elif plan.get("score") is None:
+                dbg_payload = plan.get("score_dbg")
+                if isinstance(dbg_payload, Mapping):
+                    plan["score"] = float(dbg_payload.get("final", 0.0))
             dbg["score"] = plan.get("score")
             dbg["score_dbg"] = plan.get("score_dbg")
             self._last_debug = dbg
@@ -1257,7 +1273,8 @@ class EnhancedScalpingStrategy:
             plan["lot_size"] = lot_sz
             sp = micro.get("spread_pct") if isinstance(micro, dict) else None
             cap = micro.get("cap_pct") if isinstance(micro, dict) else None
-            depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
+            depth_state = micro.get("depth_ok") if isinstance(micro, dict) else None
+            depth_ok = True if depth_state is None else bool(depth_state)
             over_spread = bool(sp is not None and cap is not None and sp > cap)
             ok_micro = not (over_spread or not depth_ok)
             gate_checks["microstructure"] = {
@@ -1265,10 +1282,12 @@ class EnhancedScalpingStrategy:
                 "mode": micro.get("mode"),
                 "spread_pct": sp,
                 "cap_pct": cap,
-                "depth_ok": depth_ok,
+                "depth_ok": depth_state,
             }
-            if not ok_micro and (
-                micro.get("mode") == "HARD" or micro.get("would_block")
+            if (
+                not ok_micro
+                and (micro.get("mode") == "HARD" or micro.get("would_block"))
+                and micro.get("reason") != "no_quote"
             ):
                 return plan_block("microstructure", micro=micro)
 
