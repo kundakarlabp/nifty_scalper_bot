@@ -172,24 +172,28 @@ def should_emit_log(
 
 def _setup_logging() -> None:  # pragma: no cover
     try:
+        from src.utils.logger_setup import setup_logging as _unified_setup
         env_log_path = os.environ.get("LOG_PATH") or os.environ.get("LOG_FILE")
-        log_path = settings.log_path
-        if log_path is None and env_log_path:
-            log_path = env_log_path
-        log_format = getattr(settings, "log_format", None)
-        if not isinstance(log_format, str) or log_format.lower() not in {"json", "logfmt"}:
-            log_format = "json" if getattr(settings, "log_json", False) else "logfmt"
-        setup_logging(
-            level=LOG_LEVEL,
+        log_path = settings.log_path or env_log_path
+        fmt = (getattr(settings, "log_format", None) or
+               ("json" if getattr(settings, "log_json", False) else "logfmt")).lower()
+        _unified_setup(
+            level=getattr(settings, "LOG_LEVEL", None) or settings.log_level,
             log_file=str(log_path) if log_path else None,
-            json=str(log_format).lower() == "json",
+            json=(fmt == "json"),
         )
-        level_name = getattr(settings, "LOG_LEVEL", None) or settings.log_level
+
+        # Reconfirm root level
         try:
-            level_value = getattr(logging, str(level_name).upper(), logging.INFO)
+            level_value = getattr(logging, str(settings.log_level).upper(), logging.INFO)
         except Exception:
             level_value = logging.INFO
         logging.getLogger().setLevel(level_value)
+
+        # Rate-limit filter & ring buffer stay as-is
+        from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
+        from src.utils.log_filters import install_warmup_filters
+
         install_warmup_filters()
         root = logging.getLogger()
         root.addFilter(RateLimitFilter(interval=120.0))
@@ -199,12 +203,23 @@ def _setup_logging() -> None:  # pragma: no cover
         else:
             if log_buffer_handler in root.handlers:
                 root.removeHandler(log_buffer_handler)
+
+        # Final touch: ensure common libraries don't carry their own handlers
+        for noisy in ("uvicorn", "gunicorn", "werkzeug", "waitress", "urllib3", "kiteconnect", "flask"):
+            lg = logging.getLogger(noisy)
+            lg.handlers.clear()
+            lg.propagate = True
+            lg.setLevel(logging.WARNING if noisy != "kiteconnect" else logging.INFO)
+
+        # Optional: note presence of credentials without leaking them
+        from src.boot.validate_env import _log_cred_presence
         _log_cred_presence()
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+        logging.getLogger("main").info("logging.init", extra={"extra": {
+            "level": settings.log_level, "format": fmt, "ring": settings.log_ring_enabled
+        }})
     except Exception as exc:
-        logging.getLogger("main").warning(
-            "Failed to initialize logging: %s", exc, exc_info=True
-        )
+        logging.getLogger("main").warning("Failed to initialize logging: %s", exc, exc_info=True)
         raise
 
 
