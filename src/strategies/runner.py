@@ -2003,17 +2003,33 @@ class StrategyRunner:
                 and ce_token is not None
                 and plan.get("token") != ce_token
             ):
-                plan["reason_block"] = "token_mismatch"
-                plan.setdefault("reasons", []).append("token_mismatch")
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
+                # Resync datasource's "current" token to the resolver's chosen token instead of blocking.
+                ds = getattr(self, "data_source", None)
+                if ds is not None:
+                    try:
+                        if option_type == "PE":
+                            setattr(ds, "_current_pe_token", plan.get("token"))
+                        elif option_type == "CE":
+                            setattr(ds, "_current_ce_token", plan.get("token"))
+                        # Keep atm_tokens coherent for subscriptions/streaming
+                        if hasattr(ds, "atm_tokens"):
+                            ce_cur = getattr(ds, "_current_ce_token", None)
+                            pe_cur = getattr(ds, "_current_pe_token", None)
+                            toks = []
+                            for value in (ce_cur, pe_cur):
+                                try:
+                                    toks.append(int(value))
+                                except Exception:
+                                    pass
+                            setattr(ds, "atm_tokens", toks)
+                    except Exception:
+                        self.log.debug("token resync failed", exc_info=True)
+                # Informative log; DO NOT set reason_block or return.
+                self.log.info(
+                    "token_mismatch: resynced datasource to token=%s (type=%s)",
+                    plan.get("token"),
+                    option_type,
                 )
-                return
             self._last_option = opt
             if not token:
                 plan["reason_block"] = "no_option_token"
