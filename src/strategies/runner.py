@@ -366,6 +366,9 @@ class StrategyRunner:
         self._score_total: float | None = None
         self._last_bar_count: int = 0
         self._warmup_log_ts: float = 0.0
+        self._last_decision_label: str | None = None
+        self._last_decision_reason: str | None = None
+        self._last_computed_lots: int | None = None
 
         self.settings = settings
 
@@ -949,6 +952,8 @@ class StrategyRunner:
                 "reason_block": reason_value,
                 "plan": plan_snapshot,
             }
+            self._last_decision_label = label_value
+            self._last_decision_reason = reason_value
             now = time.time()
             last = getattr(self, "_ts_last_decision_emit", 0.0)
             if now - last < 0.05:
@@ -1586,6 +1591,7 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
+            self._last_computed_lots = None
             signal_for_log = plan
             atr_period = int(getattr(settings.strategy, "atr_period", 14))
             last_bar_ts_obj = (
@@ -2431,6 +2437,7 @@ class StrategyRunner:
                 delta=plan.get("delta"),
                 quote=plan.get("quote"),
             )
+            self._last_computed_lots = int(diag.get("lots_final", diag.get("lots", 0)))
             flow["sizing"] = diag
             block_reason = diag.get("block_reason")
             flow["qty"] = int(qty)
