@@ -6,7 +6,11 @@ import random
 import threading
 import time
 from collections import defaultdict, deque
-from typing import Callable
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Callable
+
+_EVENT_LOGGER = logging.getLogger("event")
 
 from src.boot.validate_env import _log_cred_presence
 from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
@@ -88,6 +92,22 @@ class SimpleLogGate:
         self._clock = clock or time.monotonic
         self._last_emitted: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._intervals: dict[str, float] = {}
+
+    def set_interval(self, key: str, interval_seconds: float | None) -> None:
+        """Configure a custom interval for ``key`` (<=0 removes override)."""
+
+        with self._lock:
+            if interval_seconds is None or float(interval_seconds) <= 0.0:
+                self._intervals.pop(key, None)
+            else:
+                self._intervals[key] = float(interval_seconds)
+
+    def _interval_for(self, key: str, override: float | None) -> float:
+        if override is not None:
+            return float(override)
+        with self._lock:
+            return self._intervals.get(key, self._default_interval)
 
     def should_emit(
         self,
@@ -103,7 +123,7 @@ class SimpleLogGate:
                 self._last_emitted[key] = self._clock()
             return True
 
-        window = self._default_interval if interval is None else float(interval)
+        window = self._interval_for(key, interval)
         if window <= 0.0:
             with self._lock:
                 self._last_emitted[key] = self._clock()
@@ -117,14 +137,55 @@ class SimpleLogGate:
                 return True
             return False
 
+    def ok(
+        self,
+        key: str,
+        *,
+        interval: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Convenience wrapper returning :meth:`should_emit`."""
+
+        return self.should_emit(key, interval=interval, force=force)
+
     def reset(self, key: str | None = None) -> None:
         """Reset stored timestamps for ``key`` or all keys."""
 
         with self._lock:
             if key is None:
                 self._last_emitted.clear()
+                self._intervals.clear()
             else:
                 self._last_emitted.pop(key, None)
+                self._intervals.pop(key, None)
+
+
+def _coerce_log_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _coerce_log_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_coerce_log_value(v) for v in value]
+    return value
+
+
+def log_event(name: str, level: str = "info", **fields: Any) -> None:
+    """Emit a structured log entry tagged by ``name``."""
+
+    payload = {"event": str(name)}
+    for key, value in fields.items():
+        payload[str(key)] = _coerce_log_value(value)
+
+    level_name = str(level).lower()
+    log_method = getattr(_EVENT_LOGGER, level_name, None)
+    if callable(log_method):
+        log_method(str(name), extra=payload)
+        return
+    level_no = getattr(logging, level_name.upper(), logging.INFO)
+    _EVENT_LOGGER.log(level_no, str(name), extra=payload)
 
 
 _GLOBAL_LOG_GATE = LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)

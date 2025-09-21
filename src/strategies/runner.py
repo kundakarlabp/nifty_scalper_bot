@@ -60,7 +60,7 @@ from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
-from src.server.logging_utils import SimpleLogGate
+from src.server.logging_utils import SimpleLogGate, log_event
 from src.strategies.strategy_config import (
     StrategyConfig,
     resolve_config_path,
@@ -369,6 +369,23 @@ class StrategyRunner:
         self._last_decision_label: str | None = None
         self._last_decision_reason: str | None = None
         self._last_computed_lots: int | None = None
+        self._block_counts: dict[str, int] = {}
+
+        def _safe_interval(env_name: str, default: float) -> float:
+            raw = os.getenv(env_name)
+            if raw is None or raw.strip() == "":
+                return float(default)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return float(default)
+
+        self._lg = SimpleLogGate(default_interval_seconds=5.0)
+        self._lg.set_interval("hb", _safe_interval("HEARTBEAT_INTERVAL_SEC", 30.0))
+        self._lg.set_interval("plan", _safe_interval("PLAN_LOG_INTERVAL_SEC", 60.0))
+        self._lg.set_interval(
+            "block.summary", _safe_interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
+        )
 
         self.settings = settings
 
@@ -954,12 +971,36 @@ class StrategyRunner:
             }
             self._last_decision_label = label_value
             self._last_decision_reason = reason_value
+            context: Mapping[str, Any] = {}
+            for source in (plan_snapshot, candidate):
+                if isinstance(source, Mapping):
+                    context = source
+                    break
+            if reason_value:
+                self._block_counts[reason_value] = (
+                    self._block_counts.get(reason_value, 0) + 1
+                )
             now = time.time()
             last = getattr(self, "_ts_last_decision_emit", 0.0)
             if now - last < 0.05:
                 return
             self._ts_last_decision_emit = now
             logging.getLogger(__name__).info("decision", extra=payload)
+            try:
+                log_event(
+                    "decision",
+                    "info",
+                    side=context.get("side"),
+                    ot=context.get("option_type"),
+                    strike=context.get("atm_strike"),
+                    rr=context.get("rr"),
+                    reason=reason_value or "",
+                    label=label_value,
+                )
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "decision.event_emit_error", exc_info=True
+                )
         except Exception:
             logging.getLogger(__name__).debug("decision.emit_error", exc_info=True)
 
@@ -1386,10 +1427,76 @@ class StrategyRunner:
         if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
             self._last_hb_ts = now
+        if hasattr(self, "_lg") and self._lg.ok("plan"):
+            micro_snapshot = snapshot.get("micro") or {}
+            if not micro_snapshot.get("stale"):
+                try:
+                    log_event(
+                        "plan",
+                        "info",
+                        side=snapshot.get("side"),
+                        option_type=snapshot.get("option_type"),
+                        atm_strike=snapshot.get("atm_strike"),
+                        entry=snapshot.get("entry"),
+                        sl=snapshot.get("sl"),
+                        tp1=snapshot.get("tp1"),
+                        tp2=snapshot.get("tp2"),
+                        rr=snapshot.get("rr"),
+                        qty=snapshot.get("qty_lots"),
+                        lot=snapshot.get("lot_size") or getattr(self, "lot_size", None),
+                        age_s=snapshot.get("quote_age_s"),
+                        spr_pct=micro_snapshot.get("spread_pct"),
+                    )
+                except Exception:
+                    self.log.debug("plan.event_emit_error", exc_info=True)
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
+        if hasattr(self, "_lg") and self._lg.ok("hb"):
+            try:
+                equity_value = round(float(self._active_equity()), 2)
+            except Exception:
+                equity_value = 0.0
+            try:
+                open_positions = len(self.open_trades_provider())
+            except Exception:
+                open_positions = -1
+            kite = getattr(self, "kite", None)
+            broker_state = "none"
+            if kite is not None:
+                broker_state = "ok"
+                is_conn = getattr(kite, "is_connected", None)
+                try:
+                    broker_state = (
+                        "ok" if not callable(is_conn) or bool(is_conn()) else "down"
+                    )
+                except Exception:
+                    broker_state = "unknown"
+            market_state = "open" if self._within_trading_window() else "closed"
+            strategy_state = "ready" if getattr(self, "ready", False) else "warming"
+            try:
+                log_event(
+                    "hb",
+                    "info",
+                    broker=broker_state,
+                    market=market_state,
+                    strategy=strategy_state,
+                    equity=equity_value,
+                    pos=open_positions,
+                )
+            except Exception:
+                self.log.debug("hb.event_emit_error", exc_info=True)
+        if (
+            self._block_counts
+            and hasattr(self, "_lg")
+            and self._lg.ok("block.summary")
+        ):
+            try:
+                log_event("block.summary", "info", **self._block_counts)
+            except Exception:
+                self.log.debug("block.summary.event_emit_error", exc_info=True)
+            self._block_counts.clear()
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
             self._maybe_reload_events()
