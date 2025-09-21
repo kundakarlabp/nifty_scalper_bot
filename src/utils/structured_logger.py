@@ -201,7 +201,15 @@ def _configure_handlers(logger: logging.Logger, state: _LoggerState) -> None:
 def _logger_state() -> _LoggerState:
     level = _resolve_level(_get_setting("LOG_LEVEL", "INFO"))
     tz = _resolve_tz()
-    json_enabled = _as_bool(_get_setting("LOG_JSON", False))
+    fmt_raw = _get_setting("LOG_FORMAT", None)
+    if isinstance(fmt_raw, str):
+        fmt = fmt_raw.strip().lower()
+    else:
+        fmt = ""
+    if fmt in {"json", "logfmt"}:
+        json_enabled = fmt == "json"
+    else:
+        json_enabled = _as_bool(_get_setting("LOG_JSON", False))
     log_path = _get_setting("LOG_PATH", None)
     return _LoggerState(level=level, tz=tz, json_enabled=json_enabled, log_path=log_path)
 

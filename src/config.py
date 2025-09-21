@@ -12,7 +12,18 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    SupportsFloat,
+    Tuple,
+    cast,
+)
 
 from dotenv import load_dotenv
 from pydantic import (
@@ -38,6 +49,7 @@ DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
 SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT: str = os.getenv("LOG_FORMAT", "logfmt").lower()
 STRUCTURED_LOGS: bool = os.getenv("STRUCTURED_LOGS", "true").lower() == "true"
 LOG_SAMPLE_RATE: float = float(os.getenv("LOG_SAMPLE_RATE", 0.05))
 LOG_MIN_INTERVAL_SEC: float = float(os.getenv("LOG_MIN_INTERVAL_SEC", 3.0))
@@ -1202,6 +1214,11 @@ class AppSettings(BaseSettings):
         "Asia/Kolkata", validation_alias=AliasChoices("LOG_TZ", "TZ")
     )
     log_level: str = Field("INFO", validation_alias=AliasChoices("LOG_LEVEL"))
+    log_format: Literal["logfmt", "json"] = Field(
+        "logfmt",
+        validation_alias=AliasChoices("LOG_FORMAT"),
+        description="Output format for structured logs.",
+    )
     log_json: bool = Field(False, validation_alias=AliasChoices("LOG_JSON"))
     log_path: Path | None = Field(
         None,
@@ -1227,6 +1244,21 @@ class AppSettings(BaseSettings):
         False,
         validation_alias=AliasChoices("DIAG_TRACE_EVENTS"),
         description="Enable verbose diagnostic event tracing.",
+    )
+    heartbeat_interval_sec: float = Field(
+        30.0,
+        validation_alias=AliasChoices("HEARTBEAT_INTERVAL_SEC"),
+        description="Seconds between heartbeat log lines when unchanged.",
+    )
+    plan_log_interval_sec: float = Field(
+        60.0,
+        validation_alias=AliasChoices("PLAN_LOG_INTERVAL_SEC"),
+        description="Seconds between plan debug log lines when unchanged.",
+    )
+    block_summary_interval_sec: float = Field(
+        30.0,
+        validation_alias=AliasChoices("BLOCK_SUMMARY_INTERVAL_SEC"),
+        description="Seconds between repeated block reason summaries.",
     )
     # Fallback notional equity (₹) when live equity fetch fails or is disabled.
     RISK_DEFAULT_EQUITY: int = Field(
@@ -1338,6 +1370,17 @@ class AppSettings(BaseSettings):
             return v
         return str(v).lower() in {"1", "true", "yes", "on"}
 
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _v_log_format(cls, v: object) -> str:
+        if isinstance(v, str):
+            val = v.strip().lower()
+            if val in {"logfmt", "json"}:
+                return val
+        if isinstance(v, bool):
+            return "json" if v else "logfmt"
+        raise ValueError("LOG_FORMAT must be 'logfmt' or 'json'")
+
     @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod
     def _v_app_exposure_basis(cls, v: object) -> str:
@@ -1400,12 +1443,48 @@ class AppSettings(BaseSettings):
             raise ValueError("cadence intervals must be > 0")
         return val
 
+    @field_validator(
+        "heartbeat_interval_sec",
+        "plan_log_interval_sec",
+        "block_summary_interval_sec",
+        mode="before",
+    )
+    @classmethod
+    def _v_positive_interval(cls, v: object) -> float:
+        try:
+            if isinstance(v, (int, float, str)):
+                val = float(v)
+            elif hasattr(v, "__float__"):
+                val = float(cast(SupportsFloat, v))
+            else:
+                raise TypeError("unsupported interval type")
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("interval values must be numeric seconds") from exc
+        if val <= 0:
+            raise ValueError("interval values must be > 0 seconds")
+        return val
+
     @model_validator(mode="after")
     def _v_cadence_bounds(self) -> "AppSettings":
         if self.cadence_min_interval_s > self.cadence_max_interval_s:
             raise ValueError(
                 "cadence_min_interval_s must be less than or equal to cadence_max_interval_s"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _sync_log_format(self) -> "AppSettings":
+        fields_set: set[str] = getattr(self, "model_fields_set", set())
+        fmt = str(getattr(self, "log_format", "logfmt"))
+        fmt = fmt.strip().lower() if fmt else "logfmt"
+        if fmt not in {"logfmt", "json"}:
+            fmt = "logfmt"
+        if "log_json" in fields_set and "log_format" not in fields_set:
+            self.log_format = "json" if self.log_json else "logfmt"
+        else:
+            fmt_literal = cast(Literal["logfmt", "json"], fmt)
+            self.log_format = fmt_literal
+            self.log_json = fmt == "json"
         return self
 
     @property

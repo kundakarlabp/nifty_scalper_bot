@@ -148,10 +148,13 @@ def _setup_logging() -> None:  # pragma: no cover
         log_path = settings.log_path
         if log_path is None and env_log_path:
             log_path = env_log_path
+        log_format = getattr(settings, "log_format", None)
+        if not isinstance(log_format, str) or log_format.lower() not in {"json", "logfmt"}:
+            log_format = "json" if getattr(settings, "log_json", False) else "logfmt"
         setup_logging(
             level=LOG_LEVEL,
             log_file=str(log_path) if log_path else None,
-            json=settings.log_json,
+            json=str(log_format).lower() == "json",
         )
         level_name = getattr(settings, "LOG_LEVEL", None) or settings.log_level
         try:
