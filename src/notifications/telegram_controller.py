@@ -43,6 +43,25 @@ def _format_number(value: Any, digits: int = 2) -> str:
         return "-"
 
 
+def _format_float(value: Any, digits: int = 2) -> str:
+    """Return ``value`` formatted with ``digits`` decimal places without grouping."""
+
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Return ``float`` from environment variable ``name`` with ``default`` fallback."""
+
+    raw = os.getenv(name)
+    try:
+        return float(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 class _CmdGate:
     """Simple per-chat command rate limiter."""
 
@@ -736,6 +755,11 @@ class TelegramController:
                 "regime",
                 "reason_block",
                 "reasons",
+                "opt_entry",
+                "opt_tp1",
+                "opt_tp2",
+                "opt_sl",
+                "opt_lot_cost",
             ):
                 plan.setdefault(key, raw_plan.get(key))
         snap["plan"] = plan
@@ -858,13 +882,12 @@ class TelegramController:
         """Handle compact snapshot commands added for mobile quick-checks."""
 
         quick_commands = {
-            "/hb": 3.0,
-            "/plan": 3.0,
-            "/why": 3.0,
-            "/whydetail": 5.0,
-            "/deep": 5.0,
-            "/errors": 10.0,
-            "/statusjson": 5.0,
+            "/hb": _env_float("TG_RATE_HB_SEC", 3.0),
+            "/plan": _env_float("TG_RATE_PLAN_SEC", 3.0),
+            "/whydetail": _env_float("TG_RATE_WHYDETAIL_SEC", 5.0),
+            "/deep": _env_float("TG_RATE_DEEP_SEC", 5.0),
+            "/errors": _env_float("TG_RATE_ERRORS_SEC", 10.0),
+            "/statusjson": _env_float("TG_RATE_STATUSJSON_SEC", 5.0),
         }
         if cmd not in quick_commands:
             return False
@@ -900,43 +923,197 @@ class TelegramController:
             ts = status.get("time_ist")
             if not ts and isinstance(snap.get("timestamp"), datetime):
                 ts = snap["timestamp"].strftime("%H:%M:%S")
-            mode = "LIVE" if status.get("live_trading") else "DRY"
+            broker = status.get("broker") or "ok"
             market = "open" if snap.get("market_open") else "closed"
-            eq = _format_number(snap.get("equity"), 0)
-            open_pos = status.get("open_positions", "?")
-            trades = status.get("trades_today", "?")
-            cooldown = status.get("cooloff_until", "-")
-            msg = (
-                f"HB {ts}\n"
-                f"Mode: {mode} | Market: {market}\n"
-                f"Equity: {eq} | Open positions: {open_pos}\n"
-                f"Trades today: {trades} | Cooldown: {cooldown}"
+            runner_state = "ready" if snap.get("runner_ready") else "down"
+            position = status.get("pos")
+            if position in (None, ""):
+                position = status.get("open_positions")
+            if position in (None, ""):
+                position = "—"
+            equity = _format_number(snap.get("equity"), 0)
+            side = plan.get("action") or plan.get("side") or "—"
+            option_type = plan.get("option_type") or plan.get("ot") or "—"
+            strike = plan.get("strike") or "—"
+            age = plan.get("age") or plan.get("quote_age_s") or plan.get("bar_age_s")
+            if age is None:
+                age = plan.get("last_bar_lag_s")
+            spread = plan.get("spr") or plan.get("spread_pct")
+            if spread is None:
+                micro = snap.get("micro") or {}
+                if isinstance(micro, Mapping):
+                    spread = micro.get("spread_pct")
+                    age = age or micro.get("age")
+            age_str = _format_float(age, 1) if isinstance(age, (int, float)) else "-"
+            spread_pct = (
+                _format_float(float(spread) * 100.0, 2)
+                if isinstance(spread, (int, float))
+                else "-"
             )
+            plan_line = (
+                f"{side} {option_type} {strike} age={age_str}s spr={spread_pct}%"
+            )
+            msg = (
+                f"hb {ts or '-'} broker={broker} market={market} "
+                f"strategy={runner_state} pos={position} equity={equity}"
+            )
+            msg += f" plan={plan_line}"
             self._send(msg)
             return True
 
         if cmd == "/plan":
-            text = self._render_plan_summary(plan)
-            micro = snap.get("micro")
-            if isinstance(micro, Mapping) and micro:
-                micro_bits = []
-                for key in ("spread_pct", "depth_ok", "source"):
-                    value = micro.get(key)
-                    if value in (None, ""):
-                        continue
-                    micro_bits.append(f"{key}={value}")
-                if micro_bits:
-                    text += "\nMicro: " + ", ".join(micro_bits)
-            self._send(text)
-            return True
+            side = plan.get("action") or plan.get("side")
+            status_flag = str(plan.get("status") or "").lower()
+            has_signal = bool(side) and str(side).lower() not in {"idle", "none", "hold"}
+            has_details = any(
+                plan.get(field) not in (None, "")
+                for field in (
+                    "entry",
+                    "tp1",
+                    "tp2",
+                    "sl",
+                    "opt_entry",
+                    "opt_tp1",
+                    "opt_tp2",
+                    "opt_sl",
+                    "opt_lot_cost",
+                    "strike",
+                )
+            )
+            if not plan or (status_flag == "no_signal" and not has_signal and not has_details):
+                self._send("📉 No active signal right now.")
+                return True
 
-        if cmd == "/why":
-            lines = [self._render_reason_details(plan)]
-            banners = status.get("banners")
-            if isinstance(banners, (list, tuple)) and banners:
-                lines.append("Banners: " + ", ".join(str(b) for b in banners))
-            text = "\n".join(line for line in lines if line)
-            self._send(text)
+            esc = self._escape_markdown
+            option_type = plan.get("option_type") or plan.get("ot") or "—"
+            strike = plan.get("strike") or plan.get("symbol") or "—"
+            entry = plan.get("entry")
+            sl = plan.get("sl")
+            tp1 = plan.get("tp1")
+            tp2 = plan.get("tp2")
+            rr = plan.get("rr")
+            qty = plan.get("qty_lots") or plan.get("qty")
+            lot = plan.get("lot") or plan.get("lot_size")
+            quote_age = (
+                plan.get("age")
+                or plan.get("quote_age_s")
+                or plan.get("bar_age_s")
+                or plan.get("last_bar_lag_s")
+            )
+            spread = plan.get("spr") or plan.get("spread_pct")
+            micro = snap.get("micro")
+            if spread is None and isinstance(micro, Mapping):
+                spread = micro.get("spread_pct")
+            if quote_age is None and isinstance(micro, Mapping):
+                quote_age = micro.get("age")
+            micro_detail = plan.get("micro") if isinstance(plan.get("micro"), Mapping) else {}
+            if not micro_detail and isinstance(micro, Mapping):
+                micro_detail = micro
+
+            side_display = str(side).upper() if has_signal else "—"
+
+            lines = ["*📋 Trading Plan*"]
+            lines.append(
+                f"• {esc(side_display)} {esc(str(option_type))} {esc(str(strike))}"
+            )
+            lines.append(
+                "• Entry: {entry} | SL: {sl}\n"
+                "• TP1: {tp1} | TP2: {tp2} | RR: {rr}"
+                .format(
+                    entry=esc(_format_number(entry) if entry not in (None, "") else "—"),
+                    sl=esc(_format_number(sl) if sl not in (None, "") else "—"),
+                    tp1=esc(_format_number(tp1) if tp1 not in (None, "") else "—"),
+                    tp2=esc(_format_number(tp2) if tp2 not in (None, "") else "—"),
+                    rr=esc(_format_float(rr) if rr not in (None, "") else "—"),
+                )
+            )
+            lines.append(
+                "• Size: {qty} lots × {lot}"
+                .format(
+                    qty=esc(str(qty) if qty not in (None, "") else "—"),
+                    lot=esc(str(lot) if lot not in (None, "") else "—"),
+                )
+            )
+            lines.append(
+                "• Quote: age={age}s spread%={spr}%".format(
+                    age=esc(
+                        _format_float(quote_age, 1)
+                        if isinstance(quote_age, (int, float))
+                        else "—"
+                    ),
+                    spr=esc(
+                        _format_float(float(spread) * 100.0, 2)
+                        if isinstance(spread, (int, float))
+                        else "—"
+                    ),
+                )
+            )
+
+            option_fields_present = any(
+                plan.get(field) not in (None, "")
+                for field in ("opt_entry", "opt_tp1", "opt_tp2", "opt_sl", "opt_lot_cost")
+            )
+            if option_fields_present:
+                lines.append(
+                    "Option → entry ₹{e} SL ₹{sl} TP1 ₹{tp1} TP2 ₹{tp2} lot ₹{lc}".format(
+                        e=esc(
+                            _format_number(plan.get("opt_entry"))
+                            if plan.get("opt_entry") not in (None, "")
+                            else "—"
+                        ),
+                        sl=esc(
+                            _format_number(plan.get("opt_sl"))
+                            if plan.get("opt_sl") not in (None, "")
+                            else "—"
+                        ),
+                        tp1=esc(
+                            _format_number(plan.get("opt_tp1"))
+                            if plan.get("opt_tp1") not in (None, "")
+                            else "—"
+                        ),
+                        tp2=esc(
+                            _format_number(plan.get("opt_tp2"))
+                            if plan.get("opt_tp2") not in (None, "")
+                            else "—"
+                        ),
+                        lc=esc(
+                            _format_number(plan.get("opt_lot_cost"), 2)
+                            if plan.get("opt_lot_cost") not in (None, "")
+                            else "—"
+                        ),
+                    )
+                )
+
+            if micro_detail:
+                reason = micro_detail.get("reason")
+                status = (
+                    "OK"
+                    if not reason or reason in {"ok", None}
+                    else f"BLOCK → {reason}"
+                )
+                lines.append(
+                    "• Micro: {status} (depth_ok={depth} spr%={spr})".format(
+                        status=esc(str(status)),
+                        depth=esc(
+                            str(micro_detail.get("depth_ok"))
+                            if micro_detail.get("depth_ok") not in (None, "")
+                            else "—"
+                        ),
+                        spr=esc(
+                            _format_float(
+                                float(micro_detail.get("spread_pct", 0.0)) * 100.0,
+                                2,
+                            )
+                            if isinstance(
+                                micro_detail.get("spread_pct"),
+                                (int, float),
+                            )
+                            else "—",
+                        ),
+                    )
+                )
+
+            self._send("\n".join(lines), parse_mode="Markdown")
             return True
 
         if cmd == "/whydetail":
@@ -1052,21 +1229,102 @@ class TelegramController:
 
         # STATUS
         if cmd == "/status":
-            try:
-                s = self._status_provider() if self._status_provider else {}
-            except Exception:
-                s = {}
             verbose = args and args[0].lower().startswith("v")
             if verbose:
+                try:
+                    s = self._status_provider() if self._status_provider else {}
+                except Exception:
+                    s = {}
                 return self._send(
                     "```json\n" + json.dumps(s, indent=2) + "\n```",
                     parse_mode="Markdown",
                 )
-            return self._send(
-                f"📊 {s.get('time_ist')}\n"
-                f"🔁 {'🟢 LIVE' if s.get('live_trading') else '🟡 DRY'} | {s.get('broker')}\n"
-                f"📦 Active: {s.get('active_orders', 0)}"
+            if not _COMMAND_GATE.allow(int(chat_id), cmd, _env_float("TG_RATE_STATUS_SEC", 3.0)):
+                self._send("⏳ Please wait before repeating this command.")
+                return
+
+            snap = self._quick_snapshot()
+            if not snap.get("runner_ready"):
+                return self._send("Runner not ready.")
+
+            status = snap.get("status", {})
+            plan = snap.get("plan", {})
+            esc = self._escape_markdown
+
+            runner_state = "ready" if snap.get("runner_ready") else "down"
+            market_state = "open" if snap.get("market_open") else "closed"
+            broker = status.get("broker") or "ok"
+            equity = _format_number(snap.get("equity"), 0)
+            position = status.get("pos")
+            if position in (None, ""):
+                position = status.get("open_positions")
+            if position in (None, ""):
+                position = "—"
+            plan_side = plan.get("action") or plan.get("side") or "—"
+            plan_ot = plan.get("option_type") or plan.get("ot") or "—"
+            plan_strike = plan.get("strike") or plan.get("symbol") or "—"
+            entry = (
+                _format_number(plan.get("entry"))
+                if plan.get("entry") not in (None, "")
+                else "—"
             )
+            sl = (
+                _format_number(plan.get("sl"))
+                if plan.get("sl") not in (None, "")
+                else "—"
+            )
+            tp1 = (
+                _format_number(plan.get("tp1"))
+                if plan.get("tp1") not in (None, "")
+                else "—"
+            )
+            rr = (
+                _format_float(plan.get("rr"))
+                if plan.get("rr") not in (None, "")
+                else "—"
+            )
+
+            spread = plan.get("spr") or plan.get("spread_pct")
+            micro = snap.get("micro") if isinstance(snap.get("micro"), Mapping) else {}
+            if spread is None and isinstance(micro, Mapping):
+                spread = micro.get("spread_pct")
+            age = (
+                plan.get("age")
+                or plan.get("quote_age_s")
+                or plan.get("bar_age_s")
+                or plan.get("last_bar_lag_s")
+            )
+            if age is None and isinstance(micro, Mapping):
+                age = micro.get("age")
+            spread_txt = (
+                _format_float(float(spread) * 100.0, 2)
+                if isinstance(spread, (int, float))
+                else "—"
+            )
+            age_txt = (
+                _format_float(age, 1) if isinstance(age, (int, float)) else "—"
+            )
+
+            lines = [
+                f"*RUNNER*  {esc(runner_state)}",
+                f"*MARKET*  {esc(market_state)}",
+                f"*BROKER*  {esc(str(broker))}",
+                f"*EQUITY*  {esc(equity)}  *POS* {esc(str(position))}",
+                (
+                    "*PLAN*    {side} {ot} {strike}  e={entry} sl={sl} tp1={tp1} rr={rr}".format(
+                        side=esc(str(plan_side)),
+                        ot=esc(str(plan_ot)),
+                        strike=esc(str(plan_strike)),
+                        entry=esc(entry),
+                        sl=esc(sl),
+                        tp1=esc(tp1),
+                        rr=esc(rr),
+                    )
+                ),
+                f"*QUOTE*   age={esc(age_txt)}s spr={esc(spread_txt)}%",
+            ]
+
+            return self._send("\n".join(lines), parse_mode="Markdown")
 
         # HEALTH (cards)
         if cmd == "/health":
@@ -1583,6 +1841,11 @@ class TelegramController:
                 return self._send(f"Audit error: {e}")
 
         if cmd == "/why":
+            if not _COMMAND_GATE.allow(
+                int(chat_id), cmd, _env_float("TG_RATE_WHY_SEC", 3.0)
+            ):
+                self._send("⏳ Please wait before repeating this command.")
+                return
             try:
                 status = self._status_provider() if self._status_provider else {}
                 plan = (
@@ -1671,9 +1934,70 @@ class TelegramController:
                     else ""
                 )
                 reasons = plan.get("reasons") or []
-                lines = ["/why gates"]
-                if "auto_relax" in status.get("banners", []):
-                    lines.append("auto_relax: active")
+                micro = plan.get("micro") if isinstance(plan.get("micro"), Mapping) else {}
+                spread_val = plan.get("spr") or plan.get("spread_pct")
+                if spread_val is None and isinstance(micro, Mapping):
+                    spread_val = micro.get("spread_pct")
+                depth_val = plan.get("depth_ok")
+                if depth_val is None and isinstance(micro, Mapping):
+                    depth_val = micro.get("depth_ok")
+                age_val = (
+                    plan.get("age")
+                    or plan.get("quote_age_s")
+                    or plan.get("bar_age_s")
+                    or plan.get("last_bar_lag_s")
+                )
+                if age_val is None and isinstance(micro, Mapping):
+                    age_val = micro.get("age")
+                spread_txt = (
+                    _format_float(float(spread_val) * 100.0, 2)
+                    if isinstance(spread_val, (int, float))
+                    else "—"
+                )
+                age_txt = (
+                    _format_float(age_val, 1)
+                    if isinstance(age_val, (int, float))
+                    else "—"
+                )
+                depth_txt = str(depth_val) if depth_val is not None else "—"
+                micro_reason = ""
+                if isinstance(micro, Mapping):
+                    micro_reason = micro.get("reason") or ""
+
+                summary_reasons = plan.get("reasons")
+                summary_extra = ""
+                if isinstance(summary_reasons, (list, tuple)) and summary_reasons:
+                    summary_extra = str(summary_reasons[0])
+                elif isinstance(summary_reasons, Mapping) and summary_reasons:
+                    first_key = next(iter(summary_reasons))
+                    summary_extra = f"{first_key}:{summary_reasons[first_key]}"
+
+                if reason_block and reason_block != "-":
+                    summary = f"why: BLOCK {reason_block}"
+                    if summary_extra and summary_extra != reason_block:
+                        summary += f" ({summary_extra})"
+                else:
+                    runner_label = status.get("state") or status.get("runner_state")
+                    if not runner_label:
+                        runner_label = "ready" if within else "down"
+                    summary = f"why: {runner_label}"
+
+                summary += f" spr={spread_txt}% age={age_txt}s depth_ok={depth_txt}"
+                if micro_reason and micro_reason not in {"ok", reason_block}:
+                    summary += f" reason={micro_reason}"
+
+                lines = ["/why gates", summary]
+                banners_raw = status.get("banners")
+                if isinstance(banners_raw, str):
+                    banners_seq = [banners_raw]
+                elif isinstance(banners_raw, (list, tuple, set)):
+                    banners_seq = [str(item) for item in banners_raw]
+                else:
+                    banners_seq = []
+                if banners_seq:
+                    if any("auto_relax" in item for item in banners_seq):
+                        lines.append("auto_relax: active")
+                    lines.append("Banners: " + ", ".join(banners_seq))
                 for name, ok, value in gates:
                     lines.append(f"{name}: {mark(ok)} {value}")
                 if reason_block in {"no_option_quote", "no_option_token"}:
