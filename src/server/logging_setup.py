@@ -132,9 +132,10 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     """Emit a structured log line with ``tag`` and arbitrary ``fields``."""
 
     logger = logging.getLogger(tag)
+    msg = " ".join(f"{key}={_q(value)}" for key, value in fields.items()) if fields else ""
     record_extra = {"extra": fields, "ts": _iso_now(), "tag": tag}
     log_fn = getattr(logger, level.lower(), None)
     if not callable(log_fn):
         log_fn = logger.info
-    log_fn("", extra=record_extra)
+    log_fn(msg, extra=record_extra)
 
