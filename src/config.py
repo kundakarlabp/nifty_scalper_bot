@@ -33,7 +33,7 @@ DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
 
 # --- Environment toggles (flat reads for legacy modules) ---
 ALLOW_NO_DEPTH: bool = os.getenv("ALLOW_NO_DEPTH", "false").lower() == "true"
-TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 2.5))
+TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 5.0))
 DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
 SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
 
@@ -914,7 +914,7 @@ class ExecutorSettings(BaseModel):
         validation_alias=AliasChoices("EXECUTOR_DEPTH_MULTIPLIER"),
     )
     depth_min_lots: float = Field(
-        5.0,
+        3.0,
         description="Minimum number of lots that must be available in depth when depth checks are enabled.",
         validation_alias=AliasChoices(
             "EXECUTOR__DEPTH_MIN_LOTS", "EXECUTOR_DEPTH_MIN_LOTS"
