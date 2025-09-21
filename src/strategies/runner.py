@@ -931,6 +931,90 @@ class StrategyRunner:
         self.log.info("state.confidence_zone", extra=extras)
         self._last_confidence_zone = zone
 
+    def _log_decisive_event(
+        self,
+        *,
+        stage: str | None = None,
+        decision: str | None = None,
+        reason_codes: Iterable[str] | None = None,
+        plan: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        label: str | None = None,
+        signal: Mapping[str, Any] | None = None,
+        reason_block: str | None = None,
+    ) -> None:
+        """Emit a structured log entry describing a decisive plan outcome."""
+
+        try:
+            reason_list: list[str] = []
+            if reason_codes:
+                reason_list = [str(code) for code in reason_codes]
+
+            plan_mapping: Mapping[str, Any] | None = plan or signal
+
+            stage_value = stage or "process_tick"
+            decision_value = decision or label or (
+                "blocked" if (reason_block or reason_list) else "idle"
+            )
+            label_value = label or decision_value
+
+            payload: Dict[str, Any] = {
+                "stage": stage_value,
+                "decision": decision_value,
+                "label": label_value,
+                "reason_codes": reason_list,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "eval_count": getattr(self, "eval_count", None),
+                "last_eval_ts": getattr(self, "last_eval_ts", None),
+                "stage_metrics": dict(metrics or {}),
+                "strategy_ready": getattr(self, "ready", None),
+                "reason_block": reason_block,
+            }
+
+            if isinstance(plan_mapping, Mapping):
+                payload.update(
+                    {
+                        "reason_block": reason_block
+                        if reason_block is not None
+                        else plan_mapping.get("reason_block"),
+                        "action": plan_mapping.get("action"),
+                        "option_type": plan_mapping.get("option_type"),
+                        "qty_lots": plan_mapping.get("qty_lots"),
+                        "symbol": plan_mapping.get("symbol"),
+                        "score": plan_mapping.get("score"),
+                        "atr_pct": plan_mapping.get("atr_pct"),
+                        "atr_pct_raw": plan_mapping.get("atr_pct_raw"),
+                        "rr": plan_mapping.get("rr"),
+                        "sl": plan_mapping.get("sl"),
+                        "tp1": plan_mapping.get("tp1"),
+                        "tp2": plan_mapping.get("tp2"),
+                    }
+                )
+
+                reasons_val = plan_mapping.get("reasons")
+                if isinstance(reasons_val, Iterable) and not isinstance(
+                    reasons_val, (str, bytes)
+                ):
+                    payload["reasons"] = [str(item) for item in reasons_val]
+
+                micro = plan_mapping.get("micro")
+                if isinstance(micro, Mapping):
+                    for key in ("spread_pct", "depth_ok", "block_reason", "cap_pct"):
+                        if key in micro:
+                            payload[key] = micro.get(key)
+
+                payload["signal"] = dict(plan_mapping)
+
+            try:
+                payload["plan_snapshot"] = self._build_plan_snapshot()
+            except Exception:
+                payload["plan_snapshot"] = {"plan": {}, "micro": {"reason": "error"}}
+
+            message = json.dumps(payload, default=str, sort_keys=True)
+            self.log.info("DECISION %s", message)
+        except Exception:
+            self.log.debug("decision.emit_error", exc_info=True)
+
     @staticmethod
     def _score_bucket_label(score: float) -> str:
         if not math.isfinite(score):
@@ -1384,6 +1468,7 @@ class StrategyRunner:
             "executed": False,
             "reason_block": None,
         }
+        signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
         warm_min = int(
             getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
@@ -1408,6 +1493,11 @@ class StrategyRunner:
                         "Waiting for warmup: %s bars required", warm_min
                     )
                     self._warmup_log_ts = now_t
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
@@ -1505,6 +1595,11 @@ class StrategyRunner:
                 flow["reason_block"] = "paused"
                 self._last_flow_debug = flow
                 self.log.debug("Skipping tick: runner paused")
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             # new day / equity
@@ -1520,6 +1615,11 @@ class StrategyRunner:
                     "Signal evaluation skipped: insufficient data (bars=%s, need=%s)",
                     flow["bars"],
                     int(settings.strategy.min_bars_for_signal),
+                )
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
                 )
                 return
             flow["data_ok"] = True
@@ -1539,6 +1639,7 @@ class StrategyRunner:
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
+            signal_for_log = plan
             atr_period = int(getattr(settings.strategy, "atr_period", 14))
             last_bar_ts_obj = (
                 df.index[-1].to_pydatetime()
@@ -1561,6 +1662,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             now = self._now_ist()
             self._fresh = compute_freshness(
@@ -1585,6 +1691,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             atr_val = atr_pct(df, period=atr_period)
             plan["atr_pct_raw"] = float(atr_val) if atr_val is not None else None
@@ -1597,6 +1708,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             band = resolve_atr_band(self.strategy_cfg, self.under_symbol)
             ok, reason, atr_min, atr_max = check_atr(
@@ -1621,6 +1737,11 @@ class StrategyRunner:
                     "band": (atr_min, atr_max),
                 }
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
             if not prime_ok:
@@ -1650,6 +1771,11 @@ class StrategyRunner:
                     "Signal blocked: no_quote tokens=%s err=%s",
                     prime_tokens,
                     prime_err,
+                )
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
                 )
                 return
             score_val, details = compute_score(
@@ -1693,6 +1819,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 self.log.debug("No tradable plan: %s", flow["reason_block"])
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             flow["signal_ok"] = True
             metrics.inc_signal()
@@ -1716,6 +1847,11 @@ class StrategyRunner:
                     self.last_plan = plan
                     self._last_flow_debug = flow
                     self._record_plan(plan)
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block="event_guard",
+                    )
                     return
                 else:
                     plan["_event_post_widen"] = float(widen)
@@ -1732,6 +1868,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self.log.info(
                     "Signal skipped: rr %.2f below minimum %.2f", rr_val, rr_min
+                )
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
                 )
                 return
 
@@ -1796,6 +1937,11 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._last_option = None
                 self.log.exception("Failed to resolve ATM option")
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             token = opt.get("token")
             plan["option"] = opt
@@ -1868,6 +2014,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             self._last_option = opt
             if not token:
@@ -1886,6 +2037,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
@@ -1917,6 +2073,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.log.info("no_quote token=%s", token_for_quote)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
@@ -1948,6 +2109,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             def _positive_number(value: Any) -> bool:
                 return isinstance(value, (int, float)) and value > 0
@@ -1988,6 +2154,11 @@ class StrategyRunner:
                     not have_price,
                     not have_levels,
                 )
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             micro = evaluate_micro(
                 q=quote_dict,
@@ -2022,6 +2193,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.last_plan = plan
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             if micro.get("would_block"):
                 plan.setdefault("reasons", []).append("micro")
@@ -2030,6 +2206,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.last_plan = plan
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             if micro.get("mode") == "SOFT":
                 penalty = (
@@ -2059,6 +2240,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             # ---- risk gates
@@ -2078,6 +2264,11 @@ class StrategyRunner:
                 self._last_flow_debug = flow
                 self._record_plan(plan)
                 self.log.info("Signal blocked by risk gates: %s", blocked)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             # ---- limits engine
@@ -2170,9 +2361,14 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.last_plan = plan
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
-            plan_token = plan_token or plan.get("token") or plan.get("option_token")
+            plan_token = plan.get("token") or plan.get("option_token")
             micro_guard: Dict[str, Any] = {}
             micro_ok = True
             if plan_token is not None:
@@ -2205,6 +2401,11 @@ class StrategyRunner:
                 flow["reason_block"] = plan["reason_block"]
                 self._last_flow_debug = flow
                 self._record_plan(plan)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             # ---- sizing
@@ -2286,6 +2487,11 @@ class StrategyRunner:
                 self.log.debug(
                     "Signal skipped: quantity %s <= 0 reason=%s", qty, reason
                 )
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
@@ -2330,6 +2536,11 @@ class StrategyRunner:
                 self._record_plan(plan)
                 self._last_flow_debug = flow
                 self.log.info("micro precheck: no_quote token=%s", plan_token)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             quote_snapshot = dict(quote_snapshot)
@@ -2389,6 +2600,11 @@ class StrategyRunner:
                 )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
             if (
                 ok_micro
@@ -2415,6 +2631,11 @@ class StrategyRunner:
                 )
                 self._last_flow_debug = flow
                 self._record_plan(plan)
+                self._log_decisive_event(
+                    label="blocked" if plan.get("reason_block") else "idle",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
                 return
 
             self._record_plan(plan)
@@ -2531,6 +2752,26 @@ class StrategyRunner:
             self._last_error = str(e)
             self._last_flow_debug = flow
             self.log.exception("process_tick error: %s", e)
+            self._log_decisive_event(
+                label="blocked",
+                signal=signal_for_log,
+                reason_block=flow.get("reason_block"),
+            )
+        else:
+            reason_block = flow.get("reason_block")
+            if flow.get("executed"):
+                label = "action"
+            elif reason_block:
+                label = "blocked"
+            elif isinstance(signal_for_log, Mapping) and signal_for_log.get("has_signal"):
+                label = "action"
+            else:
+                label = "idle"
+            self._log_decisive_event(
+                label=label,
+                signal=signal_for_log,
+                reason_block=reason_block,
+            )
         finally:
             if getattr(self, "trace_ticks_remaining", 0) > 0:
                 p = self.last_plan or {}
@@ -3219,6 +3460,63 @@ class StrategyRunner:
             "risk": risk.snapshot() if risk else {},
             "portfolio": getattr(self, "portfolio_greeks", None),
         }
+
+    def _build_plan_snapshot(self) -> Dict[str, Any]:
+        """Return the latest plan augmented with optional market data diagnostics."""
+
+        plan = dict(self.last_plan or {})
+        snapshot: Dict[str, Any] = {"plan": plan}
+
+        def _coerce_token(value: Any) -> Any:
+            if value in (None, ""):
+                return None
+            try:
+                return int(value)
+            except Exception:
+                return value
+
+        token = _coerce_token(
+            plan.get("option_token")
+            or plan.get("token")
+            or plan.get("hedge_token")
+        )
+        source = getattr(self, "source", None)
+
+        micro_state: Dict[str, Any]
+        get_micro = getattr(source, "get_micro_state", None) if source is not None else None
+        if token is None:
+            micro_state = {"reason": "no_token"}
+        elif callable(get_micro):
+            try:
+                result = get_micro(token)
+            except Exception:
+                self.log.debug("plan_snapshot.get_micro_state_failed", exc_info=True)
+                micro_state = {"reason": "error"}
+            else:
+                if isinstance(result, Mapping):
+                    micro_state = dict(result)
+                elif result is None:
+                    micro_state = {}
+                else:
+                    micro_state = {"value": result}
+        else:
+            micro_state = {"reason": "unavailable"}
+
+        snapshot["micro"] = micro_state
+
+        quote_getter = (
+            getattr(source, "quote_snapshot", None) if source is not None else None
+        )
+        if token is not None and callable(quote_getter):
+            try:
+                quote = quote_getter(token)
+            except Exception:
+                self.log.debug("plan_snapshot.quote_snapshot_failed", exc_info=True)
+            else:
+                if isinstance(quote, Mapping):
+                    snapshot["quote"] = dict(quote)
+
+        return snapshot
 
     def get_last_signal_debug(self) -> Dict[str, Any]:
         return dict(self.last_plan or {})

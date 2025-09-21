@@ -731,8 +731,18 @@ class EnhancedScalpingStrategy:
         }
 
         plan["score_dbg"] = {
-            "components": {},
-            "weights": {},
+            "components": {
+                "trend": 0.0,
+                "momentum": 0.0,
+                "pullback": 0.0,
+                "breakout": 0.0,
+            },
+            "weights": {
+                "trend": 0.4,
+                "momentum": 0.3,
+                "pullback": 0.2,
+                "breakout": 0.1,
+            },
             "penalties": {},
             "raw": 0.0,
             "final": 0.0,
@@ -752,8 +762,18 @@ class EnhancedScalpingStrategy:
             sd = plan.setdefault(
                 "score_dbg",
                 {
-                    "components": {},
-                    "weights": {},
+                    "components": {
+                        "trend": 0.0,
+                        "momentum": 0.0,
+                        "pullback": 0.0,
+                        "breakout": 0.0,
+                    },
+                    "weights": {
+                        "trend": 0.4,
+                        "momentum": 0.3,
+                        "pullback": 0.2,
+                        "breakout": 0.1,
+                    },
                     "penalties": {},
                     "raw": 0.0,
                     "final": 0.0,
@@ -763,13 +783,27 @@ class EnhancedScalpingStrategy:
                 },
             )
             sd.setdefault("components", {})
-            sd.setdefault("weights", {})
+            sd.setdefault(
+                "weights",
+                {
+                    "trend": 0.4,
+                    "momentum": 0.3,
+                    "pullback": 0.2,
+                    "breakout": 0.1,
+                },
+            )
             sd.setdefault("penalties", {})
             sd.setdefault("raw", 0.0)
             sd.setdefault("final", 0.0)
             sd.setdefault("threshold", 0.0)
             sd.setdefault("bb_percent", plan.get("bb_percent"))
             sd.setdefault("adx_slope", plan.get("adx_slope"))
+            if plan.get("score") is None:
+                final_val = sd.get("final")
+                try:
+                    plan["score"] = float(final_val) if final_val is not None else 0.0
+                except (TypeError, ValueError):
+                    plan["score"] = 0.0
             plan.update(extra)
             plan["reason_block"] = reason
             dbg["reason_block"] = reason
@@ -1252,12 +1286,16 @@ class EnhancedScalpingStrategy:
             )
             if not isinstance(micro, dict):
                 micro = {}
+            micro_reason = micro.get("reason") if isinstance(micro, dict) else None
+            if micro_reason == "no_quote":
+                micro["would_block"] = False
             micro["cap_pct"] = cap_pct
             plan["micro"] = micro
             plan["lot_size"] = lot_sz
             sp = micro.get("spread_pct") if isinstance(micro, dict) else None
             cap = micro.get("cap_pct") if isinstance(micro, dict) else None
-            depth_ok = bool(micro.get("depth_ok")) if isinstance(micro, dict) else False
+            depth_flag = micro.get("depth_ok") if isinstance(micro, dict) else None
+            depth_ok = bool(depth_flag) if depth_flag is not None else True
             over_spread = bool(sp is not None and cap is not None and sp > cap)
             ok_micro = not (over_spread or not depth_ok)
             gate_checks["microstructure"] = {
