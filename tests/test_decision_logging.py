@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import json
 import logging
 from pathlib import Path
 
@@ -38,35 +37,31 @@ def test_decisive_event_logging_includes_shared_fields(
         "reasons": ["micro:depth"],
     }
 
-    with caplog.at_level(logging.INFO, logger="StrategyRunner"):
+    with caplog.at_level(logging.INFO, logger="src.strategies.runner"):
         runner._log_decisive_event(
-            stage="micro",
-            decision="blocked",
-            reason_codes=["micro"],
-            plan=plan,
-            metrics={"spread_pct": 0.12},
+            label="blocked",
+            signal=dict(plan),
+            reason_block="micro",
         )
 
-    record = next((rec for rec in caplog.records if "DECISION" in rec.message), None)
-    assert record is not None, "Expected DECISION log entry"
+    record = next((rec for rec in caplog.records if rec.message == "decision"), None)
+    assert record is not None, "Expected decision log entry"
 
-    payload = json.loads(record.message.split("DECISION ", 1)[1])
-    assert payload["stage"] == "micro"
-    assert payload["decision"] == "blocked"
-    assert payload["reason_codes"] == ["micro"]
-    assert payload["reason_block"] == "micro"
-    assert payload["action"] == "BUY"
-    assert payload["option_type"] == "CE"
-    assert payload["qty_lots"] == 2
-    assert payload["symbol"] == "NIFTY24APR18000CE"
-    assert payload["atr_pct_raw"] == pytest.approx(0.451)
-    assert payload["eval_count"] == 42
-    assert payload["last_eval_ts"] == "2024-01-01T00:00:00+00:00"
-    assert "timestamp" in payload
-    assert pytest.approx(payload["spread_pct"], rel=1e-3) == 0.12
-    assert payload["depth_ok"] is True
-    assert payload["stage_metrics"]["spread_pct"] == pytest.approx(0.12)
-    assert payload["reasons"] == ["micro:depth"]
+    assert getattr(record, "label", None) == "blocked"
+    assert getattr(record, "reason_block", None) == "micro"
+
+    plan_payload = getattr(record, "plan", None)
+    assert isinstance(plan_payload, dict)
+    assert plan_payload["action"] == "BUY"
+    assert plan_payload["option_type"] == "CE"
+    assert plan_payload["qty_lots"] == 2
+    assert plan_payload["symbol"] == "NIFTY24APR18000CE"
+    assert plan_payload["atr_pct_raw"] == pytest.approx(0.451)
+    assert plan_payload["eval_count"] == 42
+    assert plan_payload["last_eval_ts"] == "2024-01-01T00:00:00+00:00"
+    assert plan_payload["micro"]["spread_pct"] == pytest.approx(0.12)
+    assert plan_payload["micro"]["depth_ok"] is True
+    assert plan_payload["reasons"] == ["micro:depth"]
 
 
 def test_process_tick_returns_emit_decisive_logs() -> None:
