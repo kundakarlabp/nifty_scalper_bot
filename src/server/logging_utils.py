@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 import time
 from collections import defaultdict, deque
 from typing import Callable
@@ -72,6 +73,58 @@ class LogGate:
             self._last_emitted.clear()
         else:
             self._last_emitted.pop(key, None)
+
+
+class SimpleLogGate:
+    """Thread-safe keyed rate limiter without sampling."""
+
+    def __init__(
+        self,
+        default_interval_seconds: float = 0.0,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._default_interval = float(default_interval_seconds)
+        self._clock = clock or time.monotonic
+        self._last_emitted: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def should_emit(
+        self,
+        key: str,
+        *,
+        interval: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Return ``True`` when ``key`` may be emitted again."""
+
+        if force:
+            with self._lock:
+                self._last_emitted[key] = self._clock()
+            return True
+
+        window = self._default_interval if interval is None else float(interval)
+        if window <= 0.0:
+            with self._lock:
+                self._last_emitted[key] = self._clock()
+            return True
+
+        now = self._clock()
+        with self._lock:
+            last = self._last_emitted.get(key)
+            if last is None or (now - last) >= window:
+                self._last_emitted[key] = now
+                return True
+            return False
+
+    def reset(self, key: str | None = None) -> None:
+        """Reset stored timestamps for ``key`` or all keys."""
+
+        with self._lock:
+            if key is None:
+                self._last_emitted.clear()
+            else:
+                self._last_emitted.pop(key, None)
 
 
 _GLOBAL_LOG_GATE = LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)
