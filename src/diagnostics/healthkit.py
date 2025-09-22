@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.config import settings
+from src.diagnostics import trace_ctl
 
 if TYPE_CHECKING:
     from src.strategies.runner import StrategyRunner
@@ -200,6 +201,9 @@ def snapshot_pipeline() -> Dict[str, Any]:
 
 def trace_active() -> bool:
     """Return ``True`` when trace logging should emit at INFO level."""
+
+    if trace_ctl.active():
+        return True
 
     runner_cls: type["StrategyRunner"] | None
     try:

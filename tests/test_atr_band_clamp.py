@@ -84,7 +84,7 @@ def test_check_atr_within_band_logs_debug(caplog):
     info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
     debug_logs = [record for record in caplog.records if record.levelno == logging.DEBUG]
     assert info_logs == []
-    assert len(debug_logs) == 2
+    assert len(debug_logs) == 1
 
 
 def test_check_atr_logs_debug_when_value_changes(caplog):

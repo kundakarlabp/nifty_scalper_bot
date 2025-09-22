@@ -200,23 +200,35 @@ def check_atr(
     else:
         max_repr = "inf"
 
-    _should_log_info(
-        symbol,
-        atr_value=atr_value,
-        min_val=min_val,
-        max_bound=effective_max,
-        ok=ok,
-    )
-
     trace_enabled = healthkit.trace_active()
-    log_fn = logger.info if trace_enabled or not ok else logger.debug
-    log_fn(
-        "ATR gate: atr_pct=%.4f min=%.4f max=%s result=%s",
-        atr_value,
-        min_val,
-        max_repr,
-        "ok" if ok else "out_of_band",
-    )
+    should_emit = trace_enabled or not ok
+    if not should_emit:
+        should_emit = _should_log_info(
+            symbol,
+            atr_value=atr_value,
+            min_val=min_val,
+            max_bound=effective_max,
+            ok=ok,
+        )
+
+    if should_emit:
+        message = "ATR gate: atr_pct=%.4f min=%.4f max=%s result=%s"
+        if trace_enabled or not ok:
+            logger.info(
+                message,
+                atr_value,
+                min_val,
+                max_repr,
+                "ok" if ok else "out_of_band",
+            )
+        else:
+            logger.debug(
+                message,
+                atr_value,
+                min_val,
+                max_repr,
+                "ok" if ok else "out_of_band",
+            )
 
     return ok, reason, min_val, max_val
 
