@@ -190,6 +190,30 @@ def test_runner_blocks_when_levels_missing(monkeypatch):
     assert runner.last_plan["reason_block"] == "no_quote"
 
 
+def test_transient_no_quote_respects_hysteresis(monkeypatch):
+    runner = _setup_runner(
+        monkeypatch,
+        (0, {"rupee_risk_per_lot": 1, "lots_final": 0, "block_reason": "equity_low"}),
+    )
+
+    runner.process_tick({})
+
+    assert runner.get_last_flow_debug()["reason_block"] == "equity_low"
+    assert runner.last_plan["reason_block"] == "equity_low"
+
+    runner.kite.quote = lambda symbols: {symbols[0]: {"last_price": 101.0}}
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+    plan = runner.last_plan
+
+    assert flow["reason_block"] == "equity_low"
+    assert plan["reason_block"] == "equity_low"
+    assert "no_quote_transient" in plan.get("reasons", [])
+    assert plan.get("reason_block") != "no_quote"
+
+
 def test_qty_zero_keeps_plan_reason_when_sizer_blocks(monkeypatch):
     runner = _setup_runner(
         monkeypatch,
