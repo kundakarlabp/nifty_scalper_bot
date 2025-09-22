@@ -3809,6 +3809,19 @@ class StrategyRunner:
             except Exception:
                 return value
 
+        def _as_percent(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                pct = float(value)
+            except (TypeError, ValueError):
+                return None
+            if pct <= 1.0:
+                return pct * 100.0
+            if pct > 50.0:
+                return pct / 100.0
+            return pct
+
         source = getattr(self, "source", None)
 
         signal_debug = getattr(self, "_last_signal_debug", None)
@@ -3830,6 +3843,14 @@ class StrategyRunner:
                 or plan.get("token")
                 or plan.get("hedge_token")
             )
+        if explicit_token is None:
+            last_plan = getattr(self, "_last_plan", None)
+            if isinstance(last_plan, Mapping):
+                explicit_token = _coerce_token(
+                    last_plan.get("token")
+                    or last_plan.get("option_token")
+                    or last_plan.get("hedge_token")
+                )
 
         if explicit_token is None and option_type in {"CE", "PE"}:
             ds = getattr(self, "data_source", None)
@@ -3904,6 +3925,7 @@ class StrategyRunner:
 
         plan["quote_age_s"] = age_s
         plan["spread_pct"] = spread_pct
+        plan["spr"] = _as_percent(spread_pct)
 
         if explicit_token is not None:
             if isinstance(spread_pct, (int, float)):
