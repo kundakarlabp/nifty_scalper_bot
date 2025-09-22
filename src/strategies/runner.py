@@ -1300,6 +1300,20 @@ class StrategyRunner:
                 return dict(raw)
         return None
 
+    @staticmethod
+    def _normalize_quote_age(data: Mapping[str, Any] | None) -> float | None:
+        """Normalize quote age fields to a non-negative float."""
+
+        if not isinstance(data, Mapping):
+            return None
+        age_value = data.get("age_sec")
+        if age_value in (None, ""):
+            age_value = data.get("age_s")
+        try:
+            return max(0.0, float(age_value or 0.0))
+        except (TypeError, ValueError):
+            return None
+
     def _detect_missing_tokens(self, tokens: list[int], quote_payload: Any) -> list[int]:
         """Identify which instrument tokens are absent from a quote payload."""
 
@@ -2368,6 +2382,7 @@ class StrategyRunner:
             plan["quote_src"] = quote_dict.get("source", "kite")
             plan["quote_mode"] = quote_mode
             plan["quote"] = quote_dict
+            plan["quote_age_s"] = self._normalize_quote_age(quote_dict)
             self.log.debug(
                 "quote=ok mid=%.2f bid=%.2f ask=%.2f mode=%s src=%s",
                 float(quote_dict.get("mid", 0.0)),
@@ -2746,6 +2761,7 @@ class StrategyRunner:
             quote_snapshot = dict(quote_snapshot)
             plan["quote"] = quote_snapshot
             plan["quote_src"] = quote_snapshot.get("source")
+            plan["quote_age_s"] = self._normalize_quote_age(quote_snapshot)
 
             ok_micro, micro = self.executor.micro_decision(
                 quote=quote_snapshot,

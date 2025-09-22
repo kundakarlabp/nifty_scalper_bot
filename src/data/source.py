@@ -1449,10 +1449,20 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     )
                 except Exception:
                     has_depth = False
+        ltp_tick = _as_float(
+            tick.get("last_price")
+            or tick.get("ltp")
+            or tick.get("close")
+            or tick.get("close_price")
+        )
         spread_pct = None
-        if bid is not None and ask is not None and ask > 0 and bid > 0:
+        if bid is not None and ask is not None:
             try:
-                spread_pct = abs(ask - bid) / ((ask + bid) / 2.0) * 100.0
+                if bid <= 0.0 or ask <= 0.0:
+                    spread_pct = 999.0
+                else:
+                    ref_price = ltp_tick if ltp_tick > 0 else (bid + ask) / 2.0
+                    spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
             except Exception:
                 spread_pct = None
         state = QuoteState(
