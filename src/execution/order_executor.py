@@ -923,6 +923,7 @@ class OrderExecutor:
         self.depth_multiplier = float(getattr(ex, "depth_multiplier", 5.0))
         self.depth_min_lots = float(getattr(ex, "depth_min_lots", 5.0))
         self.micro_retry_limit = int(getattr(ex, "micro_retry_limit", 3))
+        self._micro_ok_ts_by_token: dict[int, int] = {}  # token -> last OK ms
 
         # track last notification to throttle duplicates
         self._last_notification: Tuple[str, float] = ("", 0.0)
