@@ -15,7 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from src.data.source import get_option_quote_safe
 from src.logs.journal import Journal
-from src.server.logging_setup import log_event
+from src.server.logging_setup import LogSuppressor, log_event
 from src.state import StateStore
 from src.utils.broker_errors import (
     AUTH,
@@ -68,6 +68,7 @@ except Exception:  # pragma: no cover - module may be missing
     yf = None  # type: ignore
 
 log = logging.getLogger(__name__)
+_SUPPRESS_EXEC = LogSuppressor()
 
 __all__ = [
     "OrderExecutor",
@@ -154,7 +155,10 @@ def _safe_kite_call(
     except PermissionException as e:  # pragma: no cover - broker perms
         _warn_perm_once(log, f"{label}: {e}")
     except Exception as e:  # pragma: no cover - best effort
-        log.error("%s() failed: %s", label, e)
+        msg = str(e)
+        key = "auth" if "api_key" in msg or "access_token" in msg else label
+        if _SUPPRESS_EXEC.should_log("err", key, label):
+            log.error("%s() failed: %s", label, msg)
     return default
 
 

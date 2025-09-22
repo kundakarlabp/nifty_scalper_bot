@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable, Tuple
 
 _LOG = logging.getLogger(__name__)
 
@@ -138,4 +140,45 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     if not callable(log_fn):
         log_fn = logger.info
     log_fn(msg, extra=record_extra)
+
+
+class LogSuppressor:
+    """Rate-limit repeated log lines based on arbitrary keys."""
+
+    def __init__(self, default_interval_s: float = 60.0) -> None:
+        self._default_interval_s = max(default_interval_s, 0.0)
+        self._lock = threading.Lock()
+        self._last_logged: dict[Tuple[str, ...], float] = {}
+
+    def _now(self) -> float:
+        return time.monotonic()
+
+    def _normalize(self, keys: Iterable[str]) -> Tuple[str, ...]:
+        normalized = tuple(str(k) for k in keys if k is not None)
+        return normalized or ("log",)
+
+    def should_log(
+        self, *keys: str, interval_s: float | None = None
+    ) -> bool:
+        """Return ``True`` if a log should be emitted for ``keys``."""
+
+        window = self._default_interval_s if interval_s is None else max(interval_s, 0.0)
+        key = self._normalize(keys)
+        now = self._now()
+        with self._lock:
+            last = self._last_logged.get(key)
+            if last is None or now - last >= window:
+                self._last_logged[key] = now
+                return True
+        return False
+
+    def reset(self, *keys: str) -> None:
+        """Forget the suppression window for ``keys`` (or all keys)."""
+
+        with self._lock:
+            if keys:
+                key = self._normalize(keys)
+                self._last_logged.pop(key, None)
+            else:
+                self._last_logged.clear()
 
