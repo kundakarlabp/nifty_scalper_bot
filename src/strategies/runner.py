@@ -951,21 +951,103 @@ class StrategyRunner:
             return
         self._micro_ok_ts_by_token[token_int] = self._now_ms()
 
-    def _should_block_no_quote(self, plan: Mapping[str, Any]) -> bool:
+    def _update_plan_micro_from_snapshot(
+        self,
+        plan: Mapping[str, Any],
+        snapshot: Mapping[str, Any] | None,
+    ) -> bool:
+        """Merge ``snapshot`` fields into ``plan['micro']`` and return depth health."""
+
+        if not isinstance(plan, dict) or not isinstance(snapshot, Mapping):
+            return False
+
+        micro = plan.setdefault("micro", {})
+        if not isinstance(micro, dict):
+            micro = {}
+            plan["micro"] = micro
+
+        spread_val: float | None
+        raw_spread = snapshot.get("spread_pct")
+        try:
+            spread_val = float(raw_spread) if raw_spread is not None else None
+        except (TypeError, ValueError):
+            spread_val = None
+        if spread_val is None:
+            try:
+                bid = float(snapshot.get("bid") or 0.0)
+                ask = float(snapshot.get("ask") or 0.0)
+            except (TypeError, ValueError):
+                bid = ask = 0.0
+            if bid > 0.0 and ask > 0.0:
+                mid = (bid + ask) / 2.0
+                if mid > 0.0:
+                    spread_val = abs(ask - bid) / mid * 100.0
+        if spread_val is not None:
+            micro["spread_pct"] = float(spread_val)
+
+        depth_raw = snapshot.get("has_depth")
+        depth_ok: bool | None
+        if isinstance(depth_raw, bool):
+            depth_ok = depth_raw
+        else:
+            try:
+                bid_qty = float(snapshot.get("bid_qty") or 0.0)
+            except (TypeError, ValueError):
+                bid_qty = 0.0
+            try:
+                ask_qty = float(snapshot.get("ask_qty") or 0.0)
+            except (TypeError, ValueError):
+                ask_qty = 0.0
+            depth_ok = bool(bid_qty > 0.0 and ask_qty > 0.0)
+
+        if depth_ok is not None:
+            micro["depth_ok"] = bool(depth_ok)
+            if depth_ok:
+                self._mark_micro_ok(plan.get("token") or plan.get("option_token"))
+                return True
+        return False
+
+    def _should_block_no_quote(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        warmed_snapshot: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Return ``True`` when a ``no_quote`` condition should block the signal."""
 
-        should_block = True
+        try:
+            depth_healthy = self._update_plan_micro_from_snapshot(plan, warmed_snapshot)
+        except Exception:
+            depth_healthy = False
+        if depth_healthy:
+            return False
+
+        try:
+            hysteresis_ms = int(os.getenv("MICRO_OK_HYSTERESIS_MS", "2000"))
+        except Exception:
+            hysteresis_ms = 2000
+        hysteresis_ms = max(0, hysteresis_ms)
+
+        if hysteresis_ms == 0:
+            return True
+
         try:
             token = plan.get("token") or plan.get("option_token")
-            if token:
-                token_int = int(token)
-                last_ok = self._micro_ok_ts_by_token.get(token_int, 0)
-                hysteresis_ms = int(os.getenv("MICRO_OK_HYSTERESIS_MS", "2000"))
-                if last_ok and (self._now_ms() - last_ok) <= max(0, hysteresis_ms):
-                    should_block = False
         except Exception:
-            pass
-        return should_block
+            token = None
+        if not token:
+            return True
+
+        try:
+            token_int = int(token)
+        except (TypeError, ValueError):
+            return True
+
+        last_ok = self._micro_ok_ts_by_token.get(token_int, 0)
+        if not last_ok:
+            return True
+
+        return (self._now_ms() - last_ok) > hysteresis_ms
 
     @staticmethod
     def _flag_transient_no_quote(plan: Dict[str, Any]) -> None:
@@ -2097,9 +2179,17 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+            plan_token_for_warm = plan.get("token")
+            warmed_plan_snapshot: Mapping[str, Any] | None = None
+            if plan_token_for_warm:
+                warmed_plan_snapshot = self._ensure_token_subscribed_and_quote(
+                    plan_token_for_warm
+                )
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
             if not prime_ok:
-                should_block = self._should_block_no_quote(plan)
+                should_block = self._should_block_no_quote(
+                    plan, warmed_snapshot=warmed_plan_snapshot
+                )
                 if should_block:
                     reasons = plan.setdefault("reasons", [])
                     if "no_quote" not in reasons:
@@ -2508,8 +2598,15 @@ class StrategyRunner:
             plan["prime_quote_price"] = prime_price
             plan["prime_quote_src"] = prime_src
             plan["prime_quote_ts"] = prime_ts
+            warmed_quote_snapshot: Mapping[str, Any] | None = warmed_plan_snapshot
+            if warmed_quote_snapshot is None and token_for_quote:
+                warmed_quote_snapshot = self._ensure_token_subscribed_and_quote(
+                    token_for_quote
+                )
             if require_prime and token_for_quote and not prime_price:
-                if self._should_block_no_quote(plan):
+                if self._should_block_no_quote(
+                    plan, warmed_snapshot=warmed_quote_snapshot
+                ):
                     plan["reason_block"] = "no_quote"
                     plan.setdefault("reasons", []).append("no_quote")
                     flow["reason_block"] = plan["reason_block"]
@@ -2545,20 +2642,27 @@ class StrategyRunner:
                 fetch_ltp=fetch_ltp,
             )
             if not quote_dict:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
+                should_block = self._should_block_no_quote(
+                    plan, warmed_snapshot=warmed_quote_snapshot
                 )
-                return
+                if should_block:
+                    plan["reason_block"] = "no_option_quote"
+                    plan.setdefault("reasons", []).append("no_option_quote")
+                    plan["spread_pct"] = None
+                    plan["depth_ok"] = None
+                    plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
+                self._flag_transient_no_quote(plan)
+                plan.setdefault("micro", {}).setdefault("spread_pct", None)
+                plan["micro"].setdefault("depth_ok", None)
             def _positive_number(value: Any) -> bool:
                 return isinstance(value, (int, float)) and value > 0
 
@@ -2586,7 +2690,13 @@ class StrategyRunner:
             if have_price or have_levels:
                 self._mark_tick_activity()
             if not have_price or not have_levels:
-                if self._should_block_no_quote(plan):
+                if warmed_quote_snapshot is None and token_for_quote:
+                    warmed_quote_snapshot = self._ensure_token_subscribed_and_quote(
+                        token_for_quote
+                    )
+                if self._should_block_no_quote(
+                    plan, warmed_snapshot=warmed_quote_snapshot
+                ):
                     plan["reason_block"] = "no_quote"
                     plan.setdefault("reasons", []).append("no_quote")
                     plan["spread_pct"] = None
@@ -3124,11 +3234,18 @@ class StrategyRunner:
                 except (TypeError, ValueError):
                     return 0.0
 
+            warmed_cached_snapshot: Mapping[str, Any] | None = None
+            if plan_token:
+                warmed_cached_snapshot = self._ensure_token_subscribed_and_quote(
+                    plan_token
+                )
             if not quote_snapshot or (
                 _as_float(quote_snapshot.get("bid")) <= 0.0
                 and _as_float(quote_snapshot.get("ask")) <= 0.0
             ):
-                if self._should_block_no_quote(plan):
+                if self._should_block_no_quote(
+                    plan, warmed_snapshot=warmed_cached_snapshot
+                ):
                     plan.setdefault("reasons", [])
                     if "no_quote" not in plan["reasons"]:
                         plan["reasons"].append("no_quote")
