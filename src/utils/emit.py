@@ -1,43 +1,44 @@
 from __future__ import annotations
 
 import logging
-import os
-
-from .log_filters_compact import (
-    compact_extra,
-    summarize_decision,
-    summarize_micro,
-)
-
-LOG = logging.getLogger("structured")
 
 
-def emit(event: str, **fields) -> None:
-    LOG.info(event, extra={"extra": {"event": event, **fields}})
+def emit_decision(payload: dict) -> None:
+    summary = {
+        "event": "decision",
+        "action": payload.get("action"),
+        "side": payload.get("side"),
+        "strike": payload.get("strike"),
+        "lots": payload.get("lots"),
+        "rr": round(payload.get("rr", 0), 2) if payload.get("rr") else None,
+        "score": round(payload.get("score", 0), 2) if payload.get("score") else None,
+        "atr_pct": round(payload.get("atr_pct", 0), 3)
+        if payload.get("atr_pct")
+        else None,
+        "reason": payload.get("reason_block") or payload.get("reason"),
+    }
+    extras: dict[str, object] = {"summary": summary}
+    label = payload.get("label")
+    if label is not None:
+        extras["label"] = label
+    reason_block = payload.get("reason_block") or payload.get("reason")
+    if reason_block is not None:
+        extras["reason_block"] = reason_block
+    plan_summary = payload.get("plan_summary")
+    if isinstance(plan_summary, dict):
+        extras["plan"] = plan_summary
+    logging.getLogger("decision").info("decision", extra=extras)
 
 
-def emit_decision(payload: dict, level: str | None = None) -> None:
-    summary = summarize_decision(payload)
-    lvl_raw = level if level is not None else os.getenv("DECISION_LOG_LEVEL", "INFO")
-    lvl = str(lvl_raw).upper()
-    fn = getattr(LOG, lvl.lower(), LOG.info)
-    record_extra: dict[str, object] = {"extra": summary}
-    if summary.get("label") is not None:
-        record_extra["label"] = summary["label"]
-    reason_value = summary.get("reason_block")
-    if reason_value is not None:
-        record_extra["reason_block"] = reason_value
-        record_extra.setdefault("reason", reason_value)
-    plan_snapshot = payload.get("plan")
-    if plan_snapshot is not None:
-        record_extra["plan"] = plan_snapshot
-    fn("decision", extra=record_extra)
+def emit_micro(depth_ok: bool | None, spread_pct: float | None) -> None:
+    logging.getLogger("micro").info(
+        {
+            "event": "micro",
+            "depth_ok": depth_ok,
+            "spread_pct": round(spread_pct, 3) if spread_pct else None,
+        }
+    )
 
 
-def emit_micro(payload: dict) -> None:
-    LOG.info("micro", extra={"extra": summarize_micro(payload)})
-
-
-def emit_debug_full(event: str, payload: dict) -> None:
-    # Full JSON dump for /why or DEBUG runs
-    LOG.debug(event, extra={"extra": {"event": event, **compact_extra(payload)}})
+def emit_debug(event: str, payload: dict) -> None:
+    logging.getLogger("debug").debug({"event": event, **payload})
