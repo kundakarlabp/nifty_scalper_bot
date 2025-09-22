@@ -684,6 +684,7 @@ class StrategyRunner:
         self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
+        self._micro_ok_ts_by_token: Dict[int, int] = {}
         self.last_spot: Optional[float] = None
         self._log_signal_changes_only = (
             os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
@@ -849,6 +850,46 @@ class StrategyRunner:
         """Return current monotonic time in milliseconds."""
 
         return int(time.monotonic() * 1000)
+
+    def _mark_micro_ok(self, token: Any) -> None:
+        """Record the timestamp for the most recent successful micro check."""
+
+        try:
+            if token is None:
+                return
+            token_int = int(token)
+        except (TypeError, ValueError):
+            return
+        self._micro_ok_ts_by_token[token_int] = self._now_ms()
+
+    def _should_block_no_quote(self, plan: Mapping[str, Any]) -> bool:
+        """Return ``True`` when a ``no_quote`` condition should block the signal."""
+
+        should_block = True
+        try:
+            token = plan.get("token") or plan.get("option_token")
+            if token:
+                token_int = int(token)
+                last_ok = self._micro_ok_ts_by_token.get(token_int, 0)
+                hysteresis_ms = int(os.getenv("MICRO_OK_HYSTERESIS_MS", "2000"))
+                if last_ok and (self._now_ms() - last_ok) <= max(0, hysteresis_ms):
+                    should_block = False
+        except Exception:
+            pass
+        return should_block
+
+    @staticmethod
+    def _flag_transient_no_quote(plan: Dict[str, Any]) -> None:
+        """Annotate ``plan`` to indicate a transient ``no_quote`` condition."""
+
+        reasons = plan.setdefault("reasons", [])
+        if "no_quote_transient" not in reasons:
+            reasons.append("no_quote_transient")
+        micro = plan.get("micro")
+        if not isinstance(micro, dict):
+            micro = {}
+            plan["micro"] = micro
+        micro["reason"] = "transient_no_quote"
 
     def _ensure_token_subscribed_and_quote(self, token: int | None) -> dict | None:
         """Ensure ``token`` is subscribed and return a fresh quote snapshot if available."""
@@ -1963,39 +2004,44 @@ class StrategyRunner:
                 return
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
             if not prime_ok:
-                reasons = plan.setdefault("reasons", [])
-                if "no_quote" not in reasons:
-                    reasons.append("no_quote")
-                if prime_err:
-                    detail = f"quote_prime:{prime_err}"
-                    if detail not in reasons:
-                        reasons.append(detail)
-                plan["reason_block"] = "no_quote"
-                plan["has_signal"] = False
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                should_block = self._should_block_no_quote(plan)
+                if should_block:
+                    reasons = plan.setdefault("reasons", [])
+                    if "no_quote" not in reasons:
+                        reasons.append("no_quote")
+                    if prime_err:
+                        detail = f"quote_prime:{prime_err}"
+                        if detail not in reasons:
+                            reasons.append(detail)
+                    plan["reason_block"] = "no_quote"
+                    plan["has_signal"] = False
+                    plan["spread_pct"] = None
+                    plan["depth_ok"] = None
+                    plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                else:
+                    self._flag_transient_no_quote(plan)
                 plan["quote_prime_tokens"] = prime_tokens
                 if prime_err:
                     plan["quote_prime_error"] = prime_err
-                self._record_plan(plan)
-                flow["reason_block"] = plan["reason_block"]
-                flow.setdefault("reason_details", {})["no_quote"] = {
-                    "tokens": prime_tokens,
-                    "error": prime_err,
-                }
-                self._last_flow_debug = flow
-                self.log.info(
-                    "Signal blocked: no_quote tokens=%s err=%s",
-                    prime_tokens,
-                    prime_err,
-                )
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                if should_block:
+                    self._record_plan(plan)
+                    flow["reason_block"] = plan["reason_block"]
+                    flow.setdefault("reason_details", {})["no_quote"] = {
+                        "tokens": prime_tokens,
+                        "error": prime_err,
+                    }
+                    self._last_flow_debug = flow
+                    self.log.info(
+                        "Signal blocked: no_quote tokens=%s err=%s",
+                        prime_tokens,
+                        prime_err,
+                    )
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
             score_val, details = compute_score(
                 df, plan.get("regime"), self.strategy_cfg
             )
@@ -2368,18 +2414,20 @@ class StrategyRunner:
             plan["prime_quote_src"] = prime_src
             plan["prime_quote_ts"] = prime_ts
             if require_prime and token_for_quote and not prime_price:
-                plan["reason_block"] = "no_quote"
-                plan.setdefault("reasons", []).append("no_quote")
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.log.info("no_quote token=%s", token_for_quote)
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                if self._should_block_no_quote(plan):
+                    plan["reason_block"] = "no_quote"
+                    plan.setdefault("reasons", []).append("no_quote")
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.log.info("no_quote token=%s", token_for_quote)
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
+                self._flag_transient_no_quote(plan)
             raw_quote: dict[str, Any] | None = None
             if self.kite is not None and opt.get("tradingsymbol"):
                 try:
@@ -2441,26 +2489,30 @@ class StrategyRunner:
                                 have_levels = True
                                 break
             if not have_price or not have_levels:
-                plan["reason_block"] = "no_quote"
-                plan.setdefault("reasons", []).append("no_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.log.info(
-                    "no_quote token=%s missing_price=%s missing_levels=%s",
-                    token,
-                    not have_price,
-                    not have_levels,
-                )
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                if self._should_block_no_quote(plan):
+                    plan["reason_block"] = "no_quote"
+                    plan.setdefault("reasons", []).append("no_quote")
+                    plan["spread_pct"] = None
+                    plan["depth_ok"] = None
+                    plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.log.info(
+                        "no_quote token=%s missing_price=%s missing_levels=%s",
+                        token,
+                        not have_price,
+                        not have_levels,
+                    )
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
+                self._flag_transient_no_quote(plan)
+                plan.setdefault("micro", {}).setdefault("spread_pct", None)
+                plan["micro"].setdefault("depth_ok", None)
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -2793,6 +2845,8 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+            else:
+                self._mark_micro_ok(plan_token)
 
             # ---- sizing
             qty, diag = self._calculate_quantity_diag(
@@ -2965,26 +3019,32 @@ class StrategyRunner:
                 _as_float(quote_snapshot.get("bid")) <= 0.0
                 and _as_float(quote_snapshot.get("ask")) <= 0.0
             ):
-                plan.setdefault("reasons", [])
-                if "no_quote" not in plan["reasons"]:
-                    plan["reasons"].append("no_quote")
-                plan["reason_block"] = "no_quote"
-                plan["micro"] = {
-                    "block_reason": "no_quote",
-                    "spread_pct": None,
-                    "depth_ok": None,
-                }
+                if self._should_block_no_quote(plan):
+                    plan.setdefault("reasons", [])
+                    if "no_quote" not in plan["reasons"]:
+                        plan["reasons"].append("no_quote")
+                    plan["reason_block"] = "no_quote"
+                    plan["micro"] = {
+                        "block_reason": "no_quote",
+                        "spread_pct": None,
+                        "depth_ok": None,
+                    }
+                    emit_micro(depth_ok=None, spread_pct=None)
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.log.debug("micro precheck: no_quote token=%s", plan_token)
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
+                self._flag_transient_no_quote(plan)
+                plan.setdefault("micro", {}).setdefault("spread_pct", None)
+                plan["micro"].setdefault("depth_ok", None)
                 emit_micro(depth_ok=None, spread_pct=None)
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.log.debug("micro precheck: no_quote token=%s", plan_token)
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                quote_snapshot = {}
 
             quote_snapshot = dict(quote_snapshot)
             plan["quote"] = quote_snapshot
@@ -3058,6 +3118,7 @@ class StrategyRunner:
                 and score_val >= int(settings.strategy.min_signal_score)
                 and not plan.get("reason_block")
             ):
+                self._mark_micro_ok(plan_token)
                 plan["has_signal"] = True
                 self._emit_diag(plan, micro)
             else:
