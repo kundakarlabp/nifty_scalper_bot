@@ -386,6 +386,7 @@ class StrategyRunner:
         self._lg.set_interval(
             "block.summary", _interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
         )
+        self._lg.set_interval("decision", _interval("DECISION_INTERVAL_SEC", 10.0))
         self._block_counts: dict[str, int] = {}
 
         self.settings = settings
@@ -1006,26 +1007,27 @@ class StrategyRunner:
                 "last_eval_ts": getattr(self, "last_eval_ts", None),
             }
 
-            self._last_decision_label = label_value
-            self._last_decision_reason = reason_value
-
-            fields: dict[str, Any] = {
-                "label": label_value,
-                "reason": (reason_value or ""),
-                "plan": plan_log,
-            }
-            if isinstance(plan_source, Mapping):
-                mapping = {
-                    "side": "side",
-                    "option_type": "ot",
-                    "atm_strike": "strike",
-                    "rr": "rr",
+            reason_text = reason_value or ""
+            if self._lg.ok_changed("decision", (label_value, reason_text)):
+                fields: dict[str, Any] = {
+                    "label": label_value,
+                    "reason": reason_text,
+                    "plan": plan_log,
                 }
-                for src_key, dest_key in mapping.items():
-                    value = plan_source.get(src_key)
-                    if value is not None:
-                        fields[dest_key] = value
-            log_event("decision", "info", **fields)
+                if isinstance(plan_source, Mapping):
+                    mapping = {
+                        "side": "side",
+                        "option_type": "ot",
+                        "atm_strike": "strike",
+                        "rr": "rr",
+                    }
+                    for src_key, dest_key in mapping.items():
+                        value = plan_source.get(src_key)
+                        if value is not None:
+                            fields[dest_key] = value
+                log_event("decision", "info", **fields)
+                self._last_decision_label = label_value
+                self._last_decision_reason = reason_value
 
             decision_payload = {
                 "event": "decision",
