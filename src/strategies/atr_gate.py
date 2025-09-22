@@ -8,6 +8,7 @@ import time
 from math import isfinite
 from threading import Lock
 
+from src.diagnostics import healthkit
 from src.signals.patches import resolve_atr_band
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,7 @@ def check_atr(
     else:
         max_repr = "inf"
 
-    info_log = _should_log_info(
+    _should_log_info(
         symbol,
         atr_value=atr_value,
         min_val=min_val,
@@ -207,7 +208,8 @@ def check_atr(
         ok=ok,
     )
 
-    log_fn = logger.info if info_log or not ok else logger.debug
+    trace_enabled = healthkit.trace_active()
+    log_fn = logger.info if trace_enabled or not ok else logger.debug
     log_fn(
         "ATR gate: atr_pct=%.4f min=%.4f max=%s result=%s",
         atr_value,
