@@ -6,6 +6,25 @@ import os
 import sys
 import time
 
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
+
+def _is_truthy(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUTHY_VALUES
+
+
+def _should_use_json_logs() -> bool:
+    fmt_raw = os.getenv("LOG_FORMAT")
+    if fmt_raw:
+        fmt = fmt_raw.strip().lower()
+        if fmt == "json":
+            return True
+        if fmt == "logfmt":
+            return False
+    return _is_truthy(os.getenv("LOG_JSON"), default=True)
+
 from .log_filters_compact import DedupFilter, RateLimitFilter
 
 
@@ -33,7 +52,7 @@ class _LineFormatter(logging.Formatter):
 
 def setup_logging():
     level = os.getenv("LOG_LEVEL", "INFO").upper()
-    json_mode = os.getenv("LOG_JSON", "true").lower() == "true"
+    json_mode = _should_use_json_logs()
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
