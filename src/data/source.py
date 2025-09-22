@@ -2351,7 +2351,9 @@ def _to_date(val: Any) -> dt.date:
     return dt.datetime.strptime(str(val), "%Y-%m-%d").date()
 
 
-def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
+def _subscribe_tokens(
+    obj: Any, tokens: list[int], *, mode: str | None = None
+) -> bool:
     if not tokens:
         return False
     seen: set[int] = {int(t) for t in tokens if t is not None}
@@ -2394,10 +2396,16 @@ def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
         for attr in ("set_mode", "set_mode_full"):
             mode_fn = getattr(target, attr, None)
             if callable(mode_fn):
-                mode = getattr(target, "MODE_FULL", getattr(obj, "MODE_FULL", "full"))
+                mode_value_raw = mode or getattr(
+                    target, "MODE_FULL", getattr(obj, "MODE_FULL", "full")
+                )
+                if attr == "set_mode" and isinstance(mode_value_raw, str):
+                    mode_value = mode_value_raw.lower()
+                else:
+                    mode_value = mode_value_raw
                 try:
                     if attr == "set_mode":
-                        mode_fn(mode, payload)
+                        mode_fn(mode_value, payload)
                     else:
                         mode_fn(payload)
                     mode_applied = True
@@ -2408,7 +2416,7 @@ def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
         hook = getattr(target, "on_reconnect", None)
         if callable(hook):
             try:
-                hook(lambda t=target, p=payload: _subscribe_tokens(t, p))
+                hook(lambda t=target, p=payload: _subscribe_tokens(t, p, mode=mode))
             except Exception:
                 log.debug("subscribe_tokens: reconnect hook failed", exc_info=True)
 
@@ -2416,18 +2424,20 @@ def _subscribe_tokens(obj: Any, tokens: list[int]) -> bool:
         return True
 
     broker = getattr(obj, "broker", None)
-    if broker and _subscribe_tokens(broker, tokens):
+    if broker and _subscribe_tokens(broker, tokens, mode=mode):
         return True
 
     kite = getattr(obj, "kite", None)
-    if kite and _subscribe_tokens(kite, tokens):
+    if kite and _subscribe_tokens(kite, tokens, mode=mode):
         return True
 
     return False
 
 
-def ensure_token_subscribed(self: Any, token: int | str) -> bool:
-    """Ensure ``token`` is subscribed in FULL mode via the underlying broker."""
+def ensure_token_subscribed(
+    self: Any, token: int | str, *, mode: str | None = None
+) -> bool:
+    """Ensure ``token`` is subscribed via the underlying broker."""
 
     try:
         token_i = int(token)
@@ -2437,11 +2447,11 @@ def ensure_token_subscribed(self: Any, token: int | str) -> bool:
     if token_i <= 0:
         return False
 
-    if _subscribe_tokens(self, [token_i]):
+    if _subscribe_tokens(self, [token_i], mode=mode):
         return True
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
-    if broker and _subscribe_tokens(broker, [token_i]):
+    if broker and _subscribe_tokens(broker, [token_i], mode=mode):
         return True
     return False
 

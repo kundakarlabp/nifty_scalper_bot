@@ -917,7 +917,10 @@ def pretrade_micro_checks(  # type: ignore[no-redef]
     ensure_subscribe = getattr(source, "ensure_token_subscribed", None)
     if callable(ensure_subscribe):
         try:
-            ensure_subscribe(token)
+            try:
+                ensure_subscribe(token, mode="FULL")
+            except TypeError:
+                ensure_subscribe(token)
         except Exception:  # pragma: no cover - defensive logging guard
             logger.debug(
                 "pretrade_micro_checks ensure_token_subscribed failed",

@@ -2101,6 +2101,19 @@ class StrategyRunner:
                     if len(tokens_raw) > 1:
                         pe_token = _coerce_token(tokens_raw[1])
 
+                ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
+                if callable(ensure_subscribe):
+                    for tok in (ce_token, pe_token):
+                        if tok:
+                            try:
+                                ensure_subscribe(tok, mode="FULL")
+                            except TypeError:
+                                ensure_subscribe(tok)
+                            except Exception:
+                                self.log.debug(
+                                    "ensure_token_subscribed failed", exc_info=True
+                                )
+
             option_type = str(plan.get("option_type") or plan.get("side_hint") or "").upper()
             token_map: dict[str, int | None] = {"CE": ce_token, "PE": pe_token}
             plan["token"] = token_map.get(option_type)
@@ -2203,7 +2216,10 @@ class StrategyRunner:
                 try:
                     ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
                     if callable(ensure_subscribe) and plan.get("token"):
-                        ensure_subscribe(plan.get("token"), mode="FULL")
+                        try:
+                            ensure_subscribe(plan.get("token"), mode="FULL")
+                        except TypeError:
+                            ensure_subscribe(plan.get("token"))
                 except Exception:
                     logger.debug("token_mismatch.ensure_subscribe_error", exc_info=True)
                 try:
@@ -2236,7 +2252,10 @@ class StrategyRunner:
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
                 try:
-                    ensure_subscribe(token)
+                    try:
+                        ensure_subscribe(token, mode="FULL")
+                    except TypeError:
+                        ensure_subscribe(token)
                 except Exception:
                     self.log.debug("ensure_token_subscribed failed", exc_info=True)
             prime_price: float | None = None

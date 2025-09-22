@@ -26,7 +26,9 @@ def test_ensure_atm_tokens_widens_strike(monkeypatch) -> None:
     ]
     monkeypatch.setattr(src, "_refresh_instruments_nfo", lambda _b: items)
     monkeypatch.setattr(src, "_pick_expiry", lambda _i, _u, _t: expiry)
-    monkeypatch.setattr(src, "_subscribe_tokens", lambda _o, _t: True)
+    monkeypatch.setattr(
+        src, "_subscribe_tokens", lambda _o, _t, *, mode=None: True
+    )
     monkeypatch.setattr(src, "_have_quote", lambda _o, _t: True)
 
     class _Settings:
@@ -59,7 +61,7 @@ def test_drift_triggers_once(monkeypatch) -> None:
     monkeypatch.setattr(src, "_pick_expiry", lambda _i, _u, _t: expiry)
     monkeypatch.setattr(src, "_have_quote", lambda _o, _t: True)
 
-    def _sub(_o, t):
+    def _sub(_o, t, *, mode=None):
         calls.append(t)
         return True
 
