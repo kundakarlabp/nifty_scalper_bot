@@ -1422,7 +1422,8 @@ class StrategyRunner:
         del stage, reason_codes, metrics  # unused legacy args
 
         try:
-            candidate: Mapping[str, Any] | None = plan or signal
+            sig: dict[str, Any] = dict(signal) if isinstance(signal, Mapping) else {}
+            candidate: Mapping[str, Any] | None = plan or (sig if sig else None)
             if hasattr(self, "_record_plan") and candidate is not None:
                 try:
                     self._record_plan(dict(candidate))
@@ -1476,10 +1477,27 @@ class StrategyRunner:
                 "last_eval_ts": getattr(self, "last_eval_ts", None),
             }
 
+            summary = {
+                "label": label_value,
+                "reason": reason_value,
+                "reason_block": reason_value,
+                "action": plan_data.get("action") or sig.get("action"),
+                "option_type": plan_data.get("option_type")
+                or plan_data.get("ot")
+                or sig.get("option_type"),
+                "strike": plan_data.get("atm_strike")
+                or plan_data.get("strike")
+                or sig.get("strike"),
+                "rr": plan_data.get("rr") or sig.get("rr"),
+                "score": plan_data.get("score") or sig.get("score"),
+                "plan": plan_log,
+            }
+
             reason_text = reason_value or ""
             if self._lg.ok_changed(
                 "decision", (label_value, reason_text), force=trace_on
             ):
+                self.log.info("decision", extra=summary)
                 fields: dict[str, Any] = {
                     "label": label_value,
                     "reason": reason_text,
@@ -1534,7 +1552,12 @@ class StrategyRunner:
 
             self._log_structured_once(payload, event="structured.decision")
 
-            if trace_on or self._gate.ok("decision"):
+            if trace_on:
+                detail = sig or (
+                    dict(plan_data) if isinstance(plan_data, Mapping) else {}
+                )
+                self.log.debug("decision.detail", extra={"plan": detail})
+            elif self._gate.ok("decision"):
                 self.log.debug("decision")
 
             emit_decision(decision_payload)
@@ -1939,6 +1962,17 @@ class StrategyRunner:
                 pass
 
     def _record_plan(self, plan: Dict[str, Any]) -> None:
+        """Record the latest plan snapshot and emit gated logs."""
+
+        # Structured plan blobs are large; keep them DEBUG by default, surface at
+        # INFO only during explicit /trace windows to avoid log spam in steady
+        # state Railway deployments.
+        payload = plan or {}
+        if healthkit.trace_active():
+            self.log.info("structured.plan", extra=payload)
+        else:
+            self.log.debug("structured.plan", extra=payload)
+
         micro = plan.get("micro") or {"spread_pct": 0.0, "depth_ok": False}
         changed = (
             plan.get("has_signal") != self._last_has_signal
@@ -2722,12 +2756,13 @@ class StrategyRunner:
                     expiry=plan.get("atm_expiry"),
                 )
 
+            # keep this lightweight; DEBUG only
             logger.debug(
                 "picked option: type=%s ce=%s pe=%s chosen=%s",
                 option_type,
                 ce_token,
                 pe_token,
-                plan["token"],
+                plan.get("token"),
             )
             try:
                 debounce_sec = float(os.getenv("TOKEN_SWITCH_DEBOUNCE_SEC", "15"))

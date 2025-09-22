@@ -1148,7 +1148,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if healthkit.trace_active():
             self.log.info(event, extra=payload)
         else:
-            self.log.debug(event, extra=payload)
+            self.log.debug(event)
 
     def _subscribe_tokens_full(self, tokens: list[int]) -> None:
         if not tokens:

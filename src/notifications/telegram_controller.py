@@ -2545,12 +2545,16 @@ class TelegramController:
                     self._trace_provider(0)
                 except Exception as exc:
                     return self._send(f"Trace off error: {exc}")
-                return self._send("⚪️ Trace disabled")
+                return self._send(
+                    "🔕 Trace disabled — detailed structured logs now hidden (DEBUG only)."
+                )
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
                 return self._send("Runner unavailable.")
             runner.trace_ticks_remaining = 0
-            return self._send("⚪️ Trace disabled")
+            return self._send(
+                "🔕 Trace disabled — detailed structured logs now hidden (DEBUG only)."
+            )
 
         if cmd == "/summary":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
