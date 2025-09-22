@@ -60,7 +60,7 @@ from src.signals.patches import resolve_atr_band
 from src.strategies.atr_gate import check_atr
 from src.strategies.registry import init_default_registries
 from src.strategies.scalping_strategy import compute_score, _log_throttled
-from src.server.logging_setup import log_event
+from src.server.logging_setup import LogSuppressor, log_event
 from src.server.logging_utils import SimpleLogGate
 from src.strategies.strategy_config import (
     StrategyConfig,
@@ -386,6 +386,8 @@ class StrategyRunner:
         self._lg.set_interval(
             "block.summary", _interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
         )
+        self._lg.set_interval("decision", _interval("DECISION_INTERVAL_SEC", 10.0))
+        self._suppress = LogSuppressor()
         self._block_counts: dict[str, int] = {}
 
         self.settings = settings
@@ -1009,23 +1011,25 @@ class StrategyRunner:
             self._last_decision_label = label_value
             self._last_decision_reason = reason_value
 
-            fields: dict[str, Any] = {
-                "label": label_value,
-                "reason": (reason_value or ""),
-                "plan": plan_log,
-            }
-            if isinstance(plan_source, Mapping):
-                mapping = {
-                    "side": "side",
-                    "option_type": "ot",
-                    "atm_strike": "strike",
-                    "rr": "rr",
+            reason_text = reason_value or ""
+            if self._lg.ok_changed("decision", (label_value, reason_text)):
+                fields: dict[str, Any] = {
+                    "label": label_value,
+                    "reason": reason_text,
+                    "plan": plan_log,
                 }
-                for src_key, dest_key in mapping.items():
-                    value = plan_source.get(src_key)
-                    if value is not None:
-                        fields[dest_key] = value
-            log_event("decision", "info", **fields)
+                if isinstance(plan_source, Mapping):
+                    mapping = {
+                        "side": "side",
+                        "option_type": "ot",
+                        "atm_strike": "strike",
+                        "rr": "rr",
+                    }
+                    for src_key, dest_key in mapping.items():
+                        value = plan_source.get(src_key)
+                        if value is not None:
+                            fields[dest_key] = value
+                log_event("decision", "info", **fields)
 
             decision_payload = {
                 "event": "decision",

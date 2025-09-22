@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 _LOG = logging.getLogger(__name__)
 
@@ -138,4 +139,36 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     if not callable(log_fn):
         log_fn = logger.info
     log_fn(msg, extra=record_extra)
+
+
+class LogSuppressor:
+    """Best-effort suppression for noisy log statements.
+
+    The suppressor stores the timestamp of the last allowed emission per key and only
+    permits another log once ``interval`` seconds have elapsed. Use this to wrap
+    warnings or errors from chatty dependencies.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock or time.monotonic
+        self._last_emitted: dict[str, float] = {}
+
+    def allow(self, key: str, *, interval: float) -> bool:
+        """Return ``True`` if ``key`` may log again after ``interval`` seconds."""
+
+        window = max(0.0, float(interval))
+        now = self._clock()
+        last = self._last_emitted.get(key)
+        if last is None or (now - last) >= window:
+            self._last_emitted[key] = now
+            return True
+        return False
+
+    def reset(self, key: str | None = None) -> None:
+        """Clear stored timestamps for ``key`` or for all keys."""
+
+        if key is None:
+            self._last_emitted.clear()
+        else:
+            self._last_emitted.pop(key, None)
 

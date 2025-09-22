@@ -6,7 +6,7 @@ import random
 import threading
 import time
 from collections import defaultdict, deque
-from typing import Callable
+from typing import Any, Callable
 
 from src.boot.validate_env import _log_cred_presence
 from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
@@ -88,6 +88,7 @@ class SimpleLogGate:
         self._clock = clock or time.monotonic
         self._last_emitted: dict[str, float] = {}
         self._key_intervals: dict[str, float] = {}
+        self._last_values: dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def set_interval(self, key: str, seconds: float) -> None:
@@ -151,8 +152,28 @@ class SimpleLogGate:
         with self._lock:
             if key is None:
                 self._last_emitted.clear()
+                self._last_values.clear()
             else:
                 self._last_emitted.pop(key, None)
+                self._last_values.pop(key, None)
+
+    def ok_changed(
+        self,
+        key: str,
+        value: Any,
+        *,
+        interval: float | None = None,
+    ) -> bool:
+        """Emit when ``value`` changes or ``interval`` seconds pass."""
+
+        with self._lock:
+            last_value = self._last_values.get(key, object())
+            changed = last_value != value
+            if changed:
+                self._last_values[key] = value
+        if changed:
+            return self.should_emit(key, interval=interval, force=True)
+        return self.should_emit(key, interval=interval)
 
 
 _GLOBAL_LOG_GATE = LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)
