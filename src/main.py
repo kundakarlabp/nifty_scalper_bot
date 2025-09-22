@@ -381,20 +381,8 @@ def main() -> int:
             metrics.set_queue_depth(qd)
             flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
             if isinstance(flow, dict):
-                plan_payload = flow.get("plan") or flow.get("signal")
-                reason = flow.get("reason_block")
-                log_level = logging.INFO if healthkit.trace_active() else logging.DEBUG
-                if flow.get("signal_ok") and plan_payload and not reason:
-                    log.log(log_level, "Signal generated: %s", plan_payload)
-                elif flow.get("signal_ok"):
-                    log.log(
-                        log_level,
-                        "Signal candidate blocked: %s plan=%s",
-                        reason,
-                        plan_payload,
-                    )
-                else:
-                    log.log(log_level, "No signal generated: %s", reason)
+                # Keep loop quiet; Runner already emits hb/plan/decision in a controlled cadence.
+                log.debug("loop.eval")
             runner.health_check()
             now = time.time()
             if (now - last_hb) >= 15 * 60:
@@ -405,7 +393,6 @@ def main() -> int:
                     f"HB last_tick_age={snap['last_tick_age']:.1f}s "
                     f"queue={snap['queue_depth']} cb={cb_state}"
                 )
-                log.info(hb)
                 try:
                     if settings.telegram.enabled:
                         runner.telegram_controller.send_message(hb)
