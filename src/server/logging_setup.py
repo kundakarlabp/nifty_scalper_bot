@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -126,6 +127,30 @@ def setup_root_logger() -> None:
 
     root.addHandler(handler)
     _LOG.info("logging.init", extra={"extra": {"level": level_name, "format": fmt}})
+
+
+class LogSuppressor:
+    """Remember once-only log combinations to avoid repeated noise."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+
+    def should_log(self, *parts: object) -> bool:
+        """Return ``True`` if the given ``parts`` combination hasn't been seen."""
+
+        key = "|".join(str(part) for part in parts)
+        with self._lock:
+            if key in self._seen:
+                return False
+            self._seen.add(key)
+            return True
+
+    def reset(self) -> None:
+        """Clear the tracked combinations."""
+
+        with self._lock:
+            self._seen.clear()
 
 
 def log_event(tag: str, level: str = "info", **fields: Any) -> None:
