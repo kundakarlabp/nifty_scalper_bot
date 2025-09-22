@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from flask import Flask, Response, request
 
@@ -176,6 +176,49 @@ def _prometheus_metrics() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _plan_summary(plan: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a compact plan summary guarding against missing keys."""
+
+    opt_type = plan.get("option_type") or plan.get("ot") or "-"
+    side = plan.get("side") or plan.get("action") or "-"
+    strike = plan.get("strike") or plan.get("atm_strike") or plan.get("symbol") or "-"
+    qty = plan.get("qty_lots") or plan.get("lots") or plan.get("qty") or None
+    score = plan.get("score")
+    rr = plan.get("rr")
+
+    reason = plan.get("reason_block") or plan.get("reason") or "none"
+    micro_raw = plan.get("micro")
+    micro = micro_raw if isinstance(micro_raw, Mapping) else {}
+
+    spread = plan.get("spread_pct")
+    if spread is None:
+        spread = micro.get("spread_pct")
+
+    age = (
+        plan.get("quote_age_s")
+        or plan.get("age")
+        or plan.get("bar_age_s")
+        or plan.get("last_bar_lag_s")
+    )
+    if age is None:
+        age = micro.get("age")
+
+    depth = micro.get("depth_ok") if micro else None
+
+    return {
+        "side": side,
+        "option_type": opt_type,
+        "strike": strike,
+        "qty_lots": qty,
+        "score": score,
+        "rr": rr,
+        "reason": reason,
+        "quote_age_s": age,
+        "spread_pct": spread,
+        "depth_ok": depth,
+    }
+
+
 def _parse_tail_limit(raw: Optional[str]) -> Optional[int]:
     """Return sanitized tail limit from query params."""
 
@@ -267,6 +310,21 @@ def metrics_get() -> Tuple[Response, int]:
     except Exception as e:
         log.exception("Metrics GET error: %s", e)
         return Response(f"# error {e}\n", mimetype="text/plain"), 500
+
+
+@app.route("/plan", methods=["GET"])
+def plan_get() -> Tuple[Dict[str, Any], int]:
+    """Expose the latest plan summary for quick diagnostics."""
+
+    runner = StrategyRunner.get_singleton()
+    if runner is None:
+        return {"ok": False, "error": "runner_unavailable"}, 503
+
+    raw_plan = getattr(runner, "last_plan", {}) or {}
+    plan = raw_plan if isinstance(raw_plan, Mapping) else {}
+    summary = _plan_summary(plan)
+
+    return {"ok": True, "plan": summary}, 200
 
 
 def run(
