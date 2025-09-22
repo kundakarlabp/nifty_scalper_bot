@@ -705,7 +705,8 @@ class StrategyRunner:
         self._gate.set("structured", 10.0)
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
-        self._last_tick_ms: int = self._now_ms()
+        # monotonic ms clock of last live tick (or bridged quote)
+        self._last_tick_ms: int = int(time.monotonic() * 1000)
         self._micro_ok_last_ms: int = 0
         self._micro_ok_streak: int = 0
         try:
@@ -881,10 +882,10 @@ class StrategyRunner:
         self._last_tick_ms = self._now_ms()
 
     def on_market_tick(self) -> None:
-        """Hook for data sources to record live tick activity."""
+        """Called by data_source on every L1 tick to keep freshness clock hot."""
 
         try:
-            self._mark_tick_activity()
+            self._last_tick_ms = int(time.monotonic() * 1000)
         except Exception:
             self.log.debug("tick_hook_error", exc_info=True)
 
@@ -902,7 +903,7 @@ class StrategyRunner:
 
     def _quote_fresh(self, q: Mapping[str, Any] | dict | None) -> bool:
         age = self._quote_age_seconds(q)
-        if age is None:
+        if age is None or age < 0:
             return False
         try:
             max_age = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
@@ -910,23 +911,29 @@ class StrategyRunner:
             max_age = 3000.0
         return (age * 1000.0) <= max_age
 
-    def _bridge_quote_to_tick(self, token: Any) -> None:
+    def _bridge_quote_to_tick(self, token: int | None) -> None:
+        """If quotes are fresh for the chosen token, advance tick clock."""
+
         if not token:
             return
         ds = getattr(self, "data_source", None)
-        snapshot = getattr(ds, "quote_snapshot", None)
-        if ds is None or not callable(snapshot):
+        if not ds:
+            return
+        qsnap = getattr(ds, "quote_snapshot", None)
+        if not callable(qsnap):
             return
         try:
-            quote = snapshot(int(token)) or {}
+            quote = qsnap(int(token)) or {}
+            age_s = quote.get("age_sec", quote.get("age_s"))
+            if isinstance(age_s, (int, float)) and age_s >= 0:
+                try:
+                    max_age_ms = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
+                except (TypeError, ValueError):
+                    max_age_ms = 3000.0
+                if age_s * 1000 <= max_age_ms:
+                    self._last_tick_ms = int(time.monotonic() * 1000)
         except Exception:
             self.log.debug("quote_bridge_error", exc_info=True)
-            return
-        if self._quote_fresh(quote):
-            try:
-                self._last_tick_ms = int(time.monotonic() * 1000)
-            except Exception:
-                self._mark_tick_activity()
 
     def _micro_warmup_update(self, micro_ok: bool) -> None:
         now = int(time.monotonic() * 1000)
@@ -2071,25 +2078,35 @@ class StrategyRunner:
         if isinstance(tick, Mapping) and tick:
             self._mark_tick_activity()
 
+        # If socket idled, try to nudge subscription and bridge a fresh quote into the tick clock.
         try:
             now_ms = int(time.monotonic() * 1000)
             idle_ms = now_ms - getattr(self, "_last_tick_ms", now_ms)
             if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "2000")):
-                tok: Any | None = None
+                tok: int | None = None
                 last_plan = getattr(self, "_last_plan", None)
                 if isinstance(last_plan, dict):
-                    tok = last_plan.get("token")
+                    tok_val = last_plan.get("token")
+                    try:
+                        tok = int(tok_val) if tok_val is not None else None
+                    except (TypeError, ValueError):
+                        tok = None
                 ds = getattr(self, "data_source", None)
-                if (not tok) and ds is not None:
-                    tok = getattr(ds, "_current_ce_token", None) or getattr(
+                if not tok and ds is not None:
+                    candidate = getattr(ds, "_current_ce_token", None) or getattr(
                         ds, "_current_pe_token", None
                     )
-                ensure = getattr(getattr(self, "data_source", None), "ensure_token_subscribed", None)
-                if tok and callable(ensure):
                     try:
-                        ensure(int(tok), mode="FULL")
-                    except Exception:
-                        self.log.debug("watchdog.ensure_error", exc_info=True)
+                        tok = int(candidate) if candidate is not None else None
+                    except (TypeError, ValueError):
+                        tok = None
+                if ds is not None and tok:
+                    ensure = getattr(ds, "ensure_token_subscribed", None)
+                    if callable(ensure):
+                        try:
+                            ensure(int(tok), mode="FULL")
+                        except Exception:
+                            self.log.debug("watchdog.ensure_error", exc_info=True)
                 self._bridge_quote_to_tick(tok)
         except Exception:
             self.log.debug("watchdog_error", exc_info=True)
