@@ -1,6 +1,6 @@
 import pandas as pd
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from src.config import settings
 from src.strategies.runner import StrategyRunner
@@ -18,6 +18,8 @@ def _setup_runner(
     risk_result: Optional[Tuple[bool, str, Dict[str, Any]]] = None,
     *,
     allow_min: bool = False,
+    micro_eval: Optional[Callable[..., Dict[str, Any]]] = None,
+    score_override: Optional[float] = None,
 ) -> StrategyRunner:
     """Return a runner patched to reach sizing stage."""
 
@@ -81,17 +83,22 @@ def _setup_runner(
 
     import src.strategies.runner as runner_mod
 
+    if micro_eval is None:
+        def _default_micro_eval(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+            return {
+                "spread_pct": 0.1,
+                "depth_ok": True,
+                "mode": "HARD",
+                "would_block": False,
+            }
+
+        micro_eval = _default_micro_eval
+    monkeypatch.setattr(runner_mod, "evaluate_micro", micro_eval)
+    score_val = 1.0 if score_override is None else float(score_override)
+
     monkeypatch.setattr(
-        runner_mod,
-        "evaluate_micro",
-        lambda *a, **k: {
-            "spread_pct": 0.1,
-            "depth_ok": True,
-            "mode": "HARD",
-            "would_block": False,
-        },
+        runner_mod, "compute_score", lambda df, regime, cfg: (score_val, None)
     )
-    monkeypatch.setattr(runner_mod, "compute_score", lambda df, regime, cfg: (1.0, None))
     monkeypatch.setattr(runner_mod, "atr_pct", lambda df, period=14: 0.03)
     monkeypatch.setattr(runner, "_record_plan", lambda plan: setattr(runner, "last_plan", plan))
     monkeypatch.setattr(runner, "_emit_diag", lambda plan, micro: None)
@@ -131,7 +138,7 @@ def _setup_runner(
             "sl": 99.0,
             "tp1": 101.0,
             "tp2": 102.0,
-            "score": 1.0,
+            "score": score_val,
             "option_type": "CE",
             "strike": "OPT",
             "qty_lots": 1,
@@ -310,4 +317,31 @@ def test_risk_block_preserves_existing_reason(monkeypatch):
     assert "risk:cap_lt_one_lot" in plan["reasons"]
     assert flow.get("reason_details", {}).get("cap_lt_one_lot") == detail
     assert plan.get("risk_details") == detail
+
+
+def test_micro_mode_soft_when_score_below_env(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    def _micro_eval(*_args: Any, **kwargs: Any) -> Dict[str, Any]:
+        mode = kwargs.get("mode_override")
+        captured["mode"] = mode
+        return {
+            "spread_pct": 0.1,
+            "depth_ok": True,
+            "mode": mode or "HARD",
+            "would_block": False,
+        }
+
+    runner = _setup_runner(
+        monkeypatch,
+        (1, {"rupee_risk_per_lot": 1, "lots_final": 1, "block_reason": None}),
+        micro_eval=_micro_eval,
+        score_override=0.4,
+    )
+    monkeypatch.setenv("MIN_SCORE", "0.5")
+
+    runner.process_tick({})
+
+    assert captured.get("mode") == "SOFT"
+    assert runner.last_plan["micro"]["mode"] == "SOFT"
 

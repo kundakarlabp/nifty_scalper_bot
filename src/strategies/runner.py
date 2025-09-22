@@ -2513,6 +2513,17 @@ class StrategyRunner:
                 self._flag_transient_no_quote(plan)
                 plan.setdefault("micro", {}).setdefault("spread_pct", None)
                 plan["micro"].setdefault("depth_ok", None)
+            try:
+                min_score_env = float(os.getenv("MIN_SCORE", "0.35"))
+            except Exception:
+                min_score_env = 0.35
+            try:
+                score_for_micro = float(plan.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score_for_micro = 0.0
+            micro_mode = "HARD" if score_for_micro >= min_score_env else "SOFT"
+            plan["micro_mode"] = micro_mode
+
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -2524,6 +2535,7 @@ class StrategyRunner:
                     getattr(settings.executor, "depth_multiplier", 1.0)
                 ),
                 require_depth=bool(getattr(settings.executor, "require_depth", False)),
+                mode_override=micro_mode,
             )
             plan["spread_pct"] = micro.get("spread_pct")
             plan["depth_ok"] = micro.get("depth_ok")
