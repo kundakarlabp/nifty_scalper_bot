@@ -884,8 +884,8 @@ class StrategyRunner:
         except Exception:
             self.log.debug("tick_hook_error", exc_info=True)
 
-    def _refresh_from_quote(self, token: int | None) -> dict | None:
-        """Treat a fresh quote snapshot as a tick and update recency state."""
+    def _bridge_quote_to_tick(self, token: int | None) -> dict | None:
+        """If quotes are fresh for ``token``, advance the tick freshness clock."""
 
         if not token:
             return None
@@ -897,20 +897,23 @@ class StrategyRunner:
             return None
         try:
             quote = snapshot(int(token)) or {}
-            age_s = quote.get("age_sec")
-            if age_s is None:
-                age_s = quote.get("age_s")
+            age_s = quote.get("age_sec", quote.get("age_s"))
             if isinstance(age_s, (int, float)) and age_s >= 0:
                 try:
                     max_age_ms = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
                 except (TypeError, ValueError):
                     max_age_ms = 3000.0
-                if (age_s * 1000.0) <= max_age_ms:
+                if age_s * 1000.0 <= max_age_ms:
                     self._mark_tick_activity()
             return quote
         except Exception:
-            self.log.debug("quote_to_tick_error", exc_info=True)
+            self.log.debug("quote_bridge_error", exc_info=True)
             return None
+
+    def _refresh_from_quote(self, token: int | None) -> dict | None:
+        """Backward-compatible wrapper that bridges quotes into the tick clock."""
+
+        return self._bridge_quote_to_tick(token)
 
     def _last_tick_timestamp(self, now: datetime) -> datetime | None:
         """Reconstruct wall-clock timestamp for the most recent tick."""
@@ -2215,6 +2218,36 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+            try:
+                now_ms = self._now_ms()
+                idle_ms = now_ms - getattr(self, "_last_tick_ms", now_ms)
+                try:
+                    watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+                except (TypeError, ValueError):
+                    watchdog_ms = 2000
+                if self.market_open and idle_ms > watchdog_ms:
+                    token_hint: Any = None
+                    last_plan = getattr(self, "_last_plan", None)
+                    if isinstance(last_plan, Mapping):
+                        token_hint = last_plan.get("token") or last_plan.get("option_token")
+                    if not token_hint:
+                        token_hint = plan.get("token") or plan.get("option_token")
+                    if not token_hint:
+                        ds = getattr(self, "data_source", None)
+                        if ds is not None:
+                            token_hint = getattr(ds, "_current_ce_token", None) or getattr(
+                                ds, "_current_pe_token", None
+                            )
+                    ds = getattr(self, "data_source", None)
+                    ensure = getattr(ds, "ensure_token_subscribed", None)
+                    if ds and token_hint and callable(ensure):
+                        try:
+                            ensure(int(token_hint), mode="FULL")
+                        except Exception:
+                            self.log.debug("watchdog.ensure_error", exc_info=True)
+                    self._bridge_quote_to_tick(token_hint)
+            except Exception:
+                self.log.debug("watchdog_error", exc_info=True)
             now = self._now_ist()
             last_tick_ts = self._last_tick_timestamp(now)
             max_tick_lag = int(getattr(self.strategy_cfg, "max_tick_lag_s", 8))
@@ -2259,6 +2292,13 @@ class StrategyRunner:
                 )
                 _update_fresh(plan)
             if not self._fresh.ok:
+                try:
+                    tok_hint: Any = ((getattr(self, "_last_plan", {}) or {})).get("token")
+                    if not tok_hint:
+                        tok_hint = plan.get("token") or plan.get("option_token")
+                    self._bridge_quote_to_tick(tok_hint)
+                except Exception:
+                    pass
                 plan["reason_block"] = "data_stale"
                 plan.setdefault("reasons", []).append(
                     f"tick_lag={self._fresh.tick_lag_s}"
