@@ -522,6 +522,10 @@ class StrategyRunner:
             pass
         self.data_source = self.components.data_provider
         self.source = self.components.data_provider
+        try:
+            setattr(self.data_source, "_runner", self)
+        except Exception:
+            pass
         if hasattr(self.data_source, "connect"):
             try:
                 self.data_source.connect()
@@ -706,6 +710,13 @@ class StrategyRunner:
             self._tick_watchdog_ms = 2000
         if self._tick_watchdog_ms < 0:
             self._tick_watchdog_ms = 0
+        try:
+            self._watchdog_poll_ms = int(os.getenv("WATCHDOG_POLL_MS", "0"))
+        except (TypeError, ValueError):
+            self._watchdog_poll_ms = 0
+        if self._watchdog_poll_ms < 0:
+            self._watchdog_poll_ms = 0
+        self._last_watchdog_run_ms: int = 0
         self._last_atr_state: Optional[str] = None
         self._last_confidence_zone: Optional[str] = None
         self.market_open: bool = is_market_open(self._now_ist())
@@ -865,6 +876,42 @@ class StrategyRunner:
 
         self._last_tick_ms = self._now_ms()
 
+    def on_market_tick(self) -> None:
+        """Hook for data sources to record live tick activity."""
+
+        try:
+            self._mark_tick_activity()
+        except Exception:
+            self.log.debug("tick_hook_error", exc_info=True)
+
+    def _refresh_from_quote(self, token: int | None) -> dict | None:
+        """Treat a fresh quote snapshot as a tick and update recency state."""
+
+        if not token:
+            return None
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return None
+        snapshot = getattr(ds, "quote_snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            quote = snapshot(int(token)) or {}
+            age_s = quote.get("age_sec")
+            if age_s is None:
+                age_s = quote.get("age_s")
+            if isinstance(age_s, (int, float)) and age_s >= 0:
+                try:
+                    max_age_ms = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
+                except (TypeError, ValueError):
+                    max_age_ms = 3000.0
+                if (age_s * 1000.0) <= max_age_ms:
+                    self._mark_tick_activity()
+            return quote
+        except Exception:
+            self.log.debug("quote_to_tick_error", exc_info=True)
+            return None
+
     def _last_tick_timestamp(self, now: datetime) -> datetime | None:
         """Reconstruct wall-clock timestamp for the most recent tick."""
 
@@ -924,21 +971,84 @@ class StrategyRunner:
     def _run_tick_watchdog(self) -> None:
         """Nudge live quotes when ticks have stalled during market hours."""
 
-        if getattr(self, "_tick_watchdog_ms", 0) <= 0:
+        try:
+            watchdog_ms = int(
+                os.getenv("TICK_WATCHDOG_MS", str(getattr(self, "_tick_watchdog_ms", 2000)))
+            )
+        except (TypeError, ValueError):
+            watchdog_ms = getattr(self, "_tick_watchdog_ms", 2000)
+        if watchdog_ms <= 0:
             return
         if not getattr(self, "market_open", False):
             return
-        if (self._now_ms() - getattr(self, "_last_tick_ms", self._now_ms())) < self._tick_watchdog_ms:
+
+        now_ms = self._now_ms()
+        last_tick_ms = getattr(self, "_last_tick_ms", now_ms)
+        if (now_ms - last_tick_ms) <= watchdog_ms:
             return
 
-        for token in self._watchdog_candidate_tokens():
-            try:
-                quote = self._ensure_token_subscribed_and_quote(token)
-            except Exception:
-                self.log.debug("tick_watchdog.ensure_quote_failed", exc_info=True)
-                continue
-            if quote:
-                self._mark_tick_activity()
+        poll_ms = getattr(self, "_watchdog_poll_ms", 0)
+        last_run_ms = getattr(self, "_last_watchdog_run_ms", 0)
+        if poll_ms > 0 and (now_ms - last_run_ms) < poll_ms:
+            return
+
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return
+
+        tokens: list[int] = []
+        plan = getattr(self, "_last_plan", None)
+        if isinstance(plan, Mapping):
+            for key in ("token", "option_token"):
+                try:
+                    candidate = plan.get(key)
+                except Exception:
+                    candidate = None
+                try:
+                    if candidate is None:
+                        continue
+                    token_val = int(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if token_val > 0 and token_val not in tokens:
+                    tokens.append(token_val)
+
+        if not tokens:
+            for attr in (
+                "_current_ce_token",
+                "_current_pe_token",
+                "current_token",
+                "current_option_token",
+            ):
+                candidate = getattr(ds, attr, None)
+                try:
+                    if candidate is None:
+                        continue
+                    token_val = int(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if token_val > 0 and token_val not in tokens:
+                    tokens.append(token_val)
+
+        for extra in self._watchdog_candidate_tokens():
+            if extra > 0 and extra not in tokens:
+                tokens.append(extra)
+
+        if not tokens:
+            return
+
+        self._last_watchdog_run_ms = now_ms
+        ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
+
+        for token in tokens:
+            if callable(ensure_subscribe):
+                try:
+                    ensure_subscribe(int(token), mode="FULL")
+                except Exception:
+                    self.log.debug("watchdog.ensure_error", exc_info=True)
+            before_ms = getattr(self, "_last_tick_ms", 0)
+            self._refresh_from_quote(token)
+            if getattr(self, "_last_tick_ms", 0) != before_ms:
                 break
 
     def _mark_micro_ok(self, token: Any) -> None:
@@ -2107,17 +2217,47 @@ class StrategyRunner:
                 return
             now = self._now_ist()
             last_tick_ts = self._last_tick_timestamp(now)
+            max_tick_lag = int(getattr(self.strategy_cfg, "max_tick_lag_s", 8))
+            max_bar_lag = int(getattr(self.strategy_cfg, "max_bar_lag_s", 75))
+
+            def _update_fresh(plan_map: Dict[str, Any]) -> None:
+                plan_map["tick_lag_s"] = self._fresh.tick_lag_s
+                plan_map["bar_lag_s"] = self._fresh.bar_lag_s
+                plan_map["lag_s"] = self._fresh.bar_lag_s
+
             self._fresh = compute_freshness(
                 now=now,
                 last_tick_ts=last_tick_ts,
                 last_bar_open_ts=last_bar_ts_obj,
                 tf_seconds=60,
-                max_tick_lag_s=int(getattr(self.strategy_cfg, "max_tick_lag_s", 8)),
-                max_bar_lag_s=int(getattr(self.strategy_cfg, "max_bar_lag_s", 75)),
+                max_tick_lag_s=max_tick_lag,
+                max_bar_lag_s=max_bar_lag,
             )
-            plan["tick_lag_s"] = self._fresh.tick_lag_s
-            plan["bar_lag_s"] = self._fresh.bar_lag_s
-            plan["lag_s"] = self._fresh.bar_lag_s
+            _update_fresh(plan)
+            if not self._fresh.ok:
+                try:
+                    token_candidate: Any = None
+                    last_plan = getattr(self, "_last_plan", None)
+                    if isinstance(last_plan, Mapping):
+                        token_candidate = (
+                            last_plan.get("token")
+                            or last_plan.get("option_token")
+                        )
+                    if not token_candidate:
+                        token_candidate = plan.get("token") or plan.get("option_token")
+                    self._refresh_from_quote(token_candidate)
+                except Exception:
+                    pass
+                last_tick_ts = self._last_tick_timestamp(now)
+                self._fresh = compute_freshness(
+                    now=now,
+                    last_tick_ts=last_tick_ts,
+                    last_bar_open_ts=last_bar_ts_obj,
+                    tf_seconds=60,
+                    max_tick_lag_s=max_tick_lag,
+                    max_bar_lag_s=max_bar_lag,
+                )
+                _update_fresh(plan)
             if not self._fresh.ok:
                 plan["reason_block"] = "data_stale"
                 plan.setdefault("reasons", []).append(
