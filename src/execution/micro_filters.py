@@ -191,6 +191,7 @@ def evaluate_micro(
     depth_multiplier: Optional[float] = None,
     require_depth: Optional[bool] = None,
     trace_id: Optional[str] = None,
+    mode_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate microstructure metrics and gating conditions.
 
@@ -198,7 +199,12 @@ def evaluate_micro(
     """
 
     micro_cfg = _micro_cfg(cfg)
-    mode = str(micro_cfg.get("mode", "HARD")).upper()
+    if mode_override is not None:
+        mode = str(mode_override).upper() or "HARD"
+    else:
+        mode = str(micro_cfg.get("mode", "HARD")).upper()
+    if mode not in {"HARD", "SOFT"}:
+        mode = "HARD"
     hard = mode == "HARD"
     side_norm = str(side).upper() if side else None
 
