@@ -839,6 +839,53 @@ class StrategyRunner:
         self.log.info("state.regime_change", extra=extras)
         self._last_regime = regime_str
 
+    def _now_ms(self) -> int:
+        """Return current monotonic time in milliseconds."""
+
+        return int(time.monotonic() * 1000)
+
+    def _ensure_token_subscribed_and_quote(self, token: int | None) -> dict | None:
+        """Ensure ``token`` is subscribed and return a fresh quote snapshot if available."""
+
+        if not token:
+            return None
+
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return None
+
+        ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
+        if callable(ensure_subscribe):
+            try:
+                ensure_subscribe(int(token), mode="FULL")
+            except Exception:
+                self.log.debug("ensure_token_subscribed failed", exc_info=True)
+
+        qshot_fn = getattr(ds, "quote_snapshot", None)
+        if not callable(qshot_fn):
+            return None
+
+        warmup_ms = int(os.getenv("MICRO_QUOTE_WARMUP_MS", "1200"))
+        poll_ms = int(os.getenv("MICRO_QUOTE_POLL_MS", "120"))
+        deadline = self._now_ms() + max(100, warmup_ms)
+
+        last_q: dict | None = None
+        while self._now_ms() < deadline:
+            try:
+                q = qshot_fn(int(token)) or {}
+                last_q = q
+                bid = float(q.get("bid") or 0.0)
+                ask = float(q.get("ask") or 0.0)
+                bq = int(q.get("bid_qty") or 0)
+                aq = int(q.get("ask_qty") or 0)
+                if (bid > 0 and bq > 0) or (ask > 0 and aq > 0):
+                    return q
+            except Exception:
+                self.log.debug("quote_snapshot poll error", exc_info=True)
+            time.sleep(max(0.05, poll_ms / 1000.0))
+
+        return last_q
+
     def _log_atr_band_state(self, plan: Mapping[str, Any]) -> None:
         def _coerce(value: Any) -> float | None:
             try:
