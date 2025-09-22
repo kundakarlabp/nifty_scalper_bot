@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+from importlib import import_module
 from typing import Any, Mapping, MutableMapping, Sequence
-
-from src.diagnostics import healthkit
 
 __all__ = ["StructuredLogger", "structured_log"]
 
@@ -66,7 +65,19 @@ class StructuredLogger:
             safe_payload = {k: _normalize(v) for k, v in payload.items()}
             message = json.dumps(safe_payload, sort_keys=True)
 
-        if event in _TRACE_GATED_EVENTS and not healthkit.trace_active():
+        trace_active = True
+        if event in _TRACE_GATED_EVENTS:
+            try:
+                hk = import_module("src.diagnostics.healthkit")
+            except Exception:  # pragma: no cover - optional dependency
+                hk = None
+            if hk is not None:
+                trace_fn = getattr(hk, "trace_active", None)
+                try:
+                    trace_active = bool(trace_fn()) if callable(trace_fn) else True
+                except Exception:  # pragma: no cover - defensive
+                    trace_active = True
+        if event in _TRACE_GATED_EVENTS and not trace_active:
             self._logger.debug(message)
         else:
             self._logger.info(message)

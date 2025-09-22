@@ -3678,20 +3678,52 @@ class StrategyRunner:
             except Exception:
                 return value
 
-        token = _coerce_token(
-            plan.get("option_token")
-            or plan.get("token")
-            or plan.get("hedge_token")
-        )
         source = getattr(self, "source", None)
+
+        signal_debug = getattr(self, "_last_signal_debug", None)
+        if not isinstance(signal_debug, Mapping):
+            signal_debug = {}
+
+        option_type = str(
+            signal_debug.get("option_type")
+            or plan.get("option_type")
+            or plan.get("side_hint")
+            or plan.get("side")
+            or ""
+        ).upper()
+
+        explicit_token = _coerce_token(signal_debug.get("option_token"))
+        if explicit_token is None:
+            explicit_token = _coerce_token(
+                plan.get("option_token")
+                or plan.get("token")
+                or plan.get("hedge_token")
+            )
+
+        if explicit_token is None and option_type in {"CE", "PE"}:
+            ds = getattr(self, "data_source", None)
+            ce_token: int | None = None
+            pe_token: int | None = None
+            if ds is not None:
+                tokens_raw = getattr(ds, "atm_tokens", None)
+                if isinstance(tokens_raw, (list, tuple)):
+                    if len(tokens_raw) > 0:
+                        ce_token = _coerce_token(tokens_raw[0])
+                    if len(tokens_raw) > 1:
+                        pe_token = _coerce_token(tokens_raw[1])
+                if ce_token is None:
+                    ce_token = _coerce_token(getattr(ds, "_current_ce_token", None))
+                if pe_token is None:
+                    pe_token = _coerce_token(getattr(ds, "_current_pe_token", None))
+            explicit_token = ce_token if option_type == "CE" else pe_token
 
         micro_state: Dict[str, Any]
         get_micro = getattr(source, "get_micro_state", None) if source is not None else None
-        if token is None:
+        if explicit_token is None:
             micro_state = {"reason": "no_token"}
         elif callable(get_micro):
             try:
-                result = get_micro(token)
+                result = get_micro(explicit_token)
             except Exception:
                 self.log.debug("plan_snapshot.get_micro_state_failed", exc_info=True)
                 micro_state = {"reason": "error"}
@@ -3705,19 +3737,64 @@ class StrategyRunner:
         else:
             micro_state = {"reason": "unavailable"}
 
-        snapshot["micro"] = micro_state
-
+        quote_payload: Mapping[str, Any] | None = None
         quote_getter = (
             getattr(source, "quote_snapshot", None) if source is not None else None
         )
-        if token is not None and callable(quote_getter):
+        if explicit_token is not None and callable(quote_getter):
             try:
-                quote = quote_getter(token)
+                quote = quote_getter(explicit_token)
             except Exception:
                 self.log.debug("plan_snapshot.quote_snapshot_failed", exc_info=True)
             else:
                 if isinstance(quote, Mapping):
-                    snapshot["quote"] = dict(quote)
+                    quote_payload = dict(quote)
+                    snapshot["quote"] = quote_payload
+
+        depth_ok = None
+        if isinstance(micro_state, Mapping):
+            depth_ok = micro_state.get("depth_ok")
+
+        micro_for_plan: Dict[str, Any]
+        if isinstance(micro_state, Mapping):
+            micro_for_plan = dict(micro_state)
+        else:
+            micro_for_plan = {"value": micro_state}
+
+        age_s: Any = None
+        spread_pct: Any = None
+        if isinstance(quote_payload, Mapping):
+            age_s = quote_payload.get("age_sec") or quote_payload.get("age_s")
+            spread_pct = quote_payload.get("spread_pct")
+            if quote_payload.get("spread_pct") is None and isinstance(micro_state, Mapping):
+                spread_pct = micro_state.get("spread_pct")
+        elif isinstance(micro_state, Mapping):
+            spread_pct = micro_state.get("spread_pct")
+
+        plan["quote_age_s"] = age_s
+        plan["spread_pct"] = spread_pct
+
+        if explicit_token is not None:
+            if isinstance(spread_pct, (int, float)):
+                try:
+                    max_spread = float(os.getenv("MAX_SPREAD_PCT", "0.8"))
+                except (TypeError, ValueError):
+                    max_spread = 0.8
+                if spread_pct > max_spread:
+                    micro_for_plan.setdefault("depth_ok", depth_ok)
+                    micro_for_plan["reason"] = "spread_wide"
+                    micro_for_plan["spread_pct"] = spread_pct
+            else:
+                micro_for_plan.setdefault("depth_ok", depth_ok)
+                micro_for_plan["spread_pct"] = None
+                if not micro_for_plan.get("reason") or micro_for_plan.get("reason") in {
+                    "ok",
+                    "no_quote",
+                }:
+                    micro_for_plan["reason"] = "no_quote"
+
+        plan["micro"] = micro_for_plan
+        snapshot["micro"] = micro_for_plan
 
         return snapshot
 
