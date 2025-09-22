@@ -1,6 +1,7 @@
 import smoke  # noqa: F401
 import logging
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -70,8 +71,8 @@ def test_resolve_atr_band_uses_gate_when_threshold_missing():
     assert band[1] == pytest.approx(0.8)
 
 
-def test_check_atr_throttles_repeated_info_logs(caplog):
-    """Repeated ATR values should emit info logs only once."""
+def test_check_atr_within_band_logs_debug(caplog):
+    """ATR values inside the band should emit debug logs by default."""
 
     atr_gate._reset_log_throttle_state()
     cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
@@ -82,22 +83,24 @@ def test_check_atr_throttles_repeated_info_logs(caplog):
 
     info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
     debug_logs = [record for record in caplog.records if record.levelno == logging.DEBUG]
-    assert len(info_logs) == 1
-    assert len(debug_logs) == 1
+    assert info_logs == []
+    assert len(debug_logs) == 2
 
 
-def test_check_atr_logs_when_value_changes(caplog):
-    """Changing ATR values should produce a fresh info log."""
+def test_check_atr_logs_debug_when_value_changes(caplog):
+    """Changing ATR readings should continue to emit debug logs."""
 
     atr_gate._reset_log_throttle_state()
     cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
 
-    with caplog.at_level(logging.INFO, logger="src.strategies.atr_gate"):
+    with caplog.at_level(logging.DEBUG, logger="src.strategies.atr_gate"):
         check_atr(0.05, cfg, "NIFTY")
         check_atr(0.051, cfg, "NIFTY")
 
     info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
-    assert len(info_logs) == 2
+    debug_logs = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert info_logs == []
+    assert len(debug_logs) == 2
 
 
 def test_check_atr_out_of_band_always_logs(caplog):
@@ -112,3 +115,20 @@ def test_check_atr_out_of_band_always_logs(caplog):
 
     info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
     assert len(info_logs) == 2
+
+
+def test_check_atr_uses_info_logging_when_trace_active(caplog):
+    """Trace activation should force ATR logs to INFO level."""
+
+    atr_gate._reset_log_throttle_state()
+    cfg = _make_cfg(gate_min=0.02, gate_max=0.9)
+
+    with mock.patch("src.strategies.atr_gate.healthkit.trace_active", return_value=True):
+        with caplog.at_level(logging.INFO, logger="src.strategies.atr_gate"):
+            check_atr(0.05, cfg, "NIFTY")
+            check_atr(0.051, cfg, "NIFTY")
+
+    info_logs = [record for record in caplog.records if record.levelno == logging.INFO]
+    debug_logs = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert len(info_logs) == 2
+    assert debug_logs == []
