@@ -1230,6 +1230,13 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("LOG_RING_ENABLED"),
         description="Toggle the in-memory log ring buffer used for /logs.",
     )
+    log_suppress_window_sec: float = Field(
+        300.0,
+        validation_alias=AliasChoices("LOG_SUPPRESS_WINDOW_SEC"),
+        description=(
+            "Seconds to suppress repeated warning/error logs per (kind, group, ident)."
+        ),
+    )
     telegram_periodic_logs: bool = Field(
         False,
         validation_alias=AliasChoices("TELEGRAM__PERIODIC_LOGS"),
@@ -1259,6 +1266,11 @@ class AppSettings(BaseSettings):
         30.0,
         validation_alias=AliasChoices("BLOCK_SUMMARY_INTERVAL_SEC"),
         description="Seconds between repeated block reason summaries.",
+    )
+    decision_interval_sec: float = Field(
+        10.0,
+        validation_alias=AliasChoices("DECISION_INTERVAL_SEC"),
+        description="Seconds between repeated decision logs when unchanged.",
     )
     # Fallback notional equity (₹) when live equity fetch fails or is disabled.
     RISK_DEFAULT_EQUITY: int = Field(
@@ -1447,6 +1459,8 @@ class AppSettings(BaseSettings):
         "heartbeat_interval_sec",
         "plan_log_interval_sec",
         "block_summary_interval_sec",
+        "decision_interval_sec",
+        "log_suppress_window_sec",
         mode="before",
     )
     @classmethod

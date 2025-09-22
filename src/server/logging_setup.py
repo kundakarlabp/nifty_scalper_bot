@@ -10,6 +10,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from src.config import settings
+
 _LOG = logging.getLogger(__name__)
 
 _RESERVED_ATTRS = {
@@ -169,7 +171,14 @@ class LogSuppressor:  # type: ignore[no-redef]
     """Suppress bursts of repeated warnings/errors for a fixed window."""
 
     def __init__(self, window_sec: float | None = None) -> None:
-        self._window = float(os.getenv("LOG_SUPPRESS_WINDOW_SEC", window_sec or 300))
+        default_window = (
+            window_sec
+            if window_sec is not None
+            else getattr(settings, "log_suppress_window_sec", 300.0)
+        )
+        self._window = float(
+            os.getenv("LOG_SUPPRESS_WINDOW_SEC", default_window)
+        )
         self._last: dict[tuple[str, str, str], float] = {}
         self._count: dict[tuple[str, str, str], int] = {}
 
