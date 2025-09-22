@@ -394,6 +394,12 @@ class StrategyRunner:
         self._lg.set_interval("decision", _interval("decision_interval_sec", 10.0))
         self._block_counts: dict[str, int] = {}
 
+        self._micro_ok_ts_by_token: dict[int, int] = {}
+        try:
+            self._micro_hysteresis_ms = int(os.getenv("MICRO_HYSTERESIS_MS", "2000"))
+        except (TypeError, ValueError):
+            self._micro_hysteresis_ms = 2000
+
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
         )
@@ -2474,6 +2480,13 @@ class StrategyRunner:
             plan["quote_mode"] = quote_mode
             plan["quote"] = quote_dict
             plan["quote_age_s"] = self._normalize_quote_age(quote_dict)
+            try:
+                token_for_micro = plan.get("token") or plan.get("option_token")
+                token_int = int(token_for_micro) if token_for_micro is not None else None
+            except (TypeError, ValueError):
+                token_int = None
+            if token_int is not None and micro.get("depth_ok"):
+                self._micro_ok_ts_by_token[token_int] = self._now_ms()
             self.log.debug(
                 "quote=ok mid=%.2f bid=%.2f ask=%.2f mode=%s src=%s",
                 float(quote_dict.get("mid", 0.0)),
@@ -2696,6 +2709,64 @@ class StrategyRunner:
             else:
                 micro_guard = {"reason": "no_token"}
             flow["pretrade_micro"] = micro_guard
+            if not micro_ok:
+                try:
+                    warm_token = plan.get("token") or plan_token
+                    q = self._ensure_token_subscribed_and_quote(warm_token)
+                    if q:
+                        micro_state = plan.get("micro")
+                        if not isinstance(micro_state, dict):
+                            micro_state = {}
+                            plan["micro"] = micro_state
+                        def _num(value: Any) -> float:
+                            try:
+                                if value is None:
+                                    return 0.0
+                                return float(value)
+                            except (TypeError, ValueError):
+                                return 0.0
+                        micro_state["spread_pct"] = q.get("spread_pct")
+                        bid = _num(q.get("bid"))
+                        ask = _num(q.get("ask"))
+                        bid_qty = _num(q.get("bid_qty"))
+                        ask_qty = _num(q.get("ask_qty"))
+                        depth_ok = (q.get("depth_ok") is True) or (
+                            bid_qty > 0 and ask_qty > 0
+                        )
+                        micro_state["depth_ok"] = depth_ok
+                        micro_guard["hydrated"] = True
+                        try:
+                            token_int = int(warm_token) if warm_token is not None else None
+                        except (TypeError, ValueError):
+                            token_int = None
+                        if token_int is not None and depth_ok and (bid > 0 or ask > 0):
+                            self._micro_ok_ts_by_token[token_int] = self._now_ms()
+                    try:
+                        token_int = None
+                        if plan_token is not None:
+                            token_int = int(plan_token)
+                        elif plan.get("token") is not None:
+                            token_int = int(plan.get("token"))
+                    except (TypeError, ValueError):
+                        token_int = None
+                    hysteresis_ms = max(0, int(getattr(self, "_micro_hysteresis_ms", 0)))
+                    if token_int is not None and hysteresis_ms > 0:
+                        last_ok = self._micro_ok_ts_by_token.get(token_int)
+                        if last_ok is not None and self._now_ms() - last_ok <= hysteresis_ms:
+                            prev_reason = micro_guard.get("reason")
+                            if prev_reason and prev_reason != "ok":
+                                micro_guard["reason_prev"] = prev_reason
+                            micro_guard["reason"] = "ok"
+                            if "block_reason" in micro_guard:
+                                micro_guard["block_reason_prev"] = micro_guard.pop(
+                                    "block_reason"
+                                )
+                            micro_guard["recent_ok"] = True
+                            micro_guard["recent_ok_ts"] = last_ok
+                            micro_ok = True
+                except Exception:
+                    self.log.debug("micro warmup/hydrate failed", exc_info=True)
+                flow["pretrade_micro"] = micro_guard
             if not micro_ok:
                 reason_micro = (
                     micro_guard.get("reason")
