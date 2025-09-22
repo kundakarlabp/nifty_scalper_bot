@@ -38,6 +38,7 @@ from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
 from src import diagnostics
+from src.diagnostics import healthkit
 from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -1056,6 +1057,21 @@ class StrategyRunner:
             if isinstance(plan_snapshot, Mapping):
                 decision_payload["plan"] = plan_snapshot
             decision_payload["plan_summary"] = plan_log
+
+            payload = {
+                "event": "decision",
+                "label": label_value,
+                "reason": reason_value,
+                "decision": decision_payload,
+            }
+            if isinstance(plan_snapshot, Mapping):
+                payload["plan"] = dict(plan_snapshot)
+
+            if healthkit.trace_active():
+                self.log.info("structured.decision", extra=payload)
+            else:
+                self.log.debug("structured.decision", extra=payload)
+
             emit_decision(decision_payload)
             if reason_value:
                 reason_key = str(reason_value)
