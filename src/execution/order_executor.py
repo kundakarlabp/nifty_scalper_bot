@@ -15,7 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 from src.data.source import get_option_quote_safe
 from src.logs.journal import Journal
-from src.server.logging_setup import log_event
+from src.server.logging_setup import LogSuppressor, log_event
 from src.state import StateStore
 from src.utils.broker_errors import (
     AUTH,
@@ -134,6 +134,7 @@ _CACHE_LOCK = threading.Lock()
 _QUOTE_ERR_RL = RateLimiter(5)
 _AUTH_WARNED = False
 _PERM_WARN_TS = 0.0
+_EXEC_LOG_SUPPRESSOR = LogSuppressor()
 
 
 def _warn_perm_once(log: logging.Logger, msg: str) -> None:
@@ -154,7 +155,12 @@ def _safe_kite_call(
     except PermissionException as e:  # pragma: no cover - broker perms
         _warn_perm_once(log, f"{label}: {e}")
     except Exception as e:  # pragma: no cover - best effort
-        log.error("%s() failed: %s", label, e)
+        msg = str(e)
+        if label == "positions":
+            key = "auth" if "api_key" in msg or "access_token" in msg else label
+            if not _EXEC_LOG_SUPPRESSOR.should_log("err", key, label):
+                return default
+        log.error("%s() failed: %s", label, msg)
     return default
 
 
