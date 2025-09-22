@@ -201,6 +201,14 @@ def snapshot_pipeline() -> Dict[str, Any]:
 def trace_active() -> bool:
     """Return ``True`` when trace logging should emit at INFO level."""
 
+    try:
+        from src.diagnostics import trace_ctl as _trace_ctl
+    except Exception:  # pragma: no cover - defensive import guard
+        pass
+    else:
+        if _trace_ctl.active():
+            return True
+
     runner_cls: type["StrategyRunner"] | None
     try:
         from src.strategies.runner import StrategyRunner as _StrategyRunner

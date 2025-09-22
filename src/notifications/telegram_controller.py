@@ -2453,6 +2453,11 @@ class TelegramController:
                 return self._send(f"Quotes error: {e}")
 
         if cmd == "/trace":
+            if not args:
+                from src.diagnostics import trace_ctl
+
+                trace_ctl.enable()  # auto-expires (TRACE_TTL_SEC)
+                return self._send("🟢 Trace enabled (auto-off by TTL)")
             trace_setter: Optional[Callable[[int], None]] = None
             if self._trace_provider:
                 trace_setter = self._trace_provider
@@ -2494,17 +2499,19 @@ class TelegramController:
             return self._send(f"```json\n{text}\n```", parse_mode="Markdown")
 
         if cmd == "/traceoff":
+            from src.diagnostics import trace_ctl
+
+            trace_ctl.disable()
             if self._trace_provider:
                 try:
                     self._trace_provider(0)
                 except Exception as exc:
                     return self._send(f"Trace off error: {exc}")
-                return self._send("Trace off.")
+                return self._send("⚪️ Trace disabled")
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
-            if not runner:
-                return self._send("Runner unavailable.")
-            runner.trace_ticks_remaining = 0
-            return self._send("Trace off.")
+            if runner:
+                runner.trace_ticks_remaining = 0
+            return self._send("⚪️ Trace disabled")
 
         if cmd == "/summary":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)

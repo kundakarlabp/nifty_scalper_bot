@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from src.notifications.telegram_controller import TelegramController
 from src.config import settings
+from src.diagnostics import trace_ctl
 
 
 class FakeRunner:
@@ -76,3 +77,24 @@ def test_trace_toggle(monkeypatch) -> None:
     assert sum(1 for line in logs if line.startswith("TRACE")) == 3
     tc._handle_update({"message": {"chat": {"id": 1}, "text": "/traceoff"}})
     assert runner.trace_ticks_remaining == 0
+
+
+def test_trace_ttl_window(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings,
+        "telegram",
+        SimpleNamespace(bot_token="t", chat_id=1, enabled=True, extra_admin_ids=[]),
+    )
+    trace_ctl.disable()
+    tc = TelegramController(status_provider=lambda: {})
+    sent: list[str] = []
+    tc._send = lambda text, parse_mode=None: sent.append(text)
+    try:
+        tc._handle_update({"message": {"chat": {"id": 1}, "text": "/trace"}})
+        assert trace_ctl.active()
+        assert sent[-1].startswith("🟢 Trace enabled")
+        tc._handle_update({"message": {"chat": {"id": 1}, "text": "/traceoff"}})
+        assert not trace_ctl.active()
+        assert sent[-1] == "⚪️ Trace disabled"
+    finally:
+        trace_ctl.disable()
