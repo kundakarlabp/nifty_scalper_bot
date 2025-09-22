@@ -1544,6 +1544,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._ingest_option_tick(tick)
         except Exception:  # pragma: no cover - defensive
             log.debug("option_tick_ingest_failed", exc_info=True)
+        runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
+        if runner and hasattr(runner, "on_market_tick"):
+            try:
+                runner.on_market_tick()
+            except Exception:
+                pass
         self._last_tick_ts = datetime.utcnow()
         self.last_tick_ts = time.time()
         if self.hist_mode == "live_warmup" and self.bar_builder:
