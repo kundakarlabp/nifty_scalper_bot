@@ -698,6 +698,13 @@ class StrategyRunner:
         self._gate = SimpleLogGate()
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
+        self._last_tick_ms: int = self._now_ms()
+        try:
+            self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+        except (TypeError, ValueError):
+            self._tick_watchdog_ms = 2000
+        if self._tick_watchdog_ms < 0:
+            self._tick_watchdog_ms = 0
         self._last_atr_state: Optional[str] = None
         self._last_confidence_zone: Optional[str] = None
 
@@ -851,6 +858,88 @@ class StrategyRunner:
 
         return int(time.monotonic() * 1000)
 
+    def _mark_tick_activity(self) -> None:
+        """Record the monotonic timestamp for the most recent tick or quote."""
+
+        self._last_tick_ms = self._now_ms()
+
+    def _last_tick_timestamp(self, now: datetime) -> datetime | None:
+        """Reconstruct wall-clock timestamp for the most recent tick."""
+
+        last_ms = getattr(self, "_last_tick_ms", None)
+        if last_ms is None:
+            return None
+        try:
+            delta_ms = self._now_ms() - int(last_ms)
+        except (TypeError, ValueError):
+            return None
+        if delta_ms < 0:
+            delta_ms = 0
+        return now - timedelta(milliseconds=delta_ms)
+
+    def _watchdog_candidate_tokens(self) -> list[int]:
+        """Return tokens worth nudging when the tick watchdog fires."""
+
+        candidates: list[int] = []
+        seen: set[int] = set()
+
+        def _add(candidate: Any) -> None:
+            try:
+                token_int = int(candidate)
+            except (TypeError, ValueError):
+                return
+            if token_int <= 0 or token_int in seen:
+                return
+            seen.add(token_int)
+            candidates.append(token_int)
+
+        plan = self.last_plan
+        if isinstance(plan, Mapping):
+            _add(plan.get("token"))
+            _add(plan.get("option_token"))
+
+        last_opt = getattr(self, "_last_option", None)
+        if isinstance(last_opt, Mapping):
+            _add(last_opt.get("token"))
+            _add(last_opt.get("instrument_token"))
+
+        ds = getattr(self, "data_source", None)
+        if ds is not None:
+            atm_tokens = getattr(ds, "atm_tokens", None)
+            if isinstance(atm_tokens, (list, tuple, set)):
+                for tok in atm_tokens:
+                    _add(tok)
+            for attr in (
+                "_current_ce_token",
+                "_current_pe_token",
+                "current_token",
+                "current_option_token",
+            ):
+                _add(getattr(ds, attr, None))
+
+        return candidates
+
+    def _run_tick_watchdog(self) -> None:
+        """Nudge live quotes when ticks have stalled during market hours."""
+
+        if getattr(self, "_tick_watchdog_ms", 0) <= 0:
+            return
+        now_ist = self._now_ist()
+        if not is_market_open(now_ist):
+            return
+        if (self._now_ms() - getattr(self, "_last_tick_ms", self._now_ms())) < self._tick_watchdog_ms:
+            return
+
+        for token in self._watchdog_candidate_tokens():
+            try:
+                quote = self._ensure_token_subscribed_and_quote(token)
+            except Exception:
+                self.log.debug("tick_watchdog.ensure_quote_failed", exc_info=True)
+                continue
+            if quote:
+                self._mark_tick_activity()
+                break
+
     def _mark_micro_ok(self, token: Any) -> None:
         """Record the timestamp for the most recent successful micro check."""
 
@@ -926,6 +1015,7 @@ class StrategyRunner:
                 bq = int(q.get("bid_qty") or 0)
                 aq = int(q.get("ask_qty") or 0)
                 if (bid > 0 and bq > 0) or (ask > 0 and aq > 0):
+                    self._mark_tick_activity()
                     return q
             except Exception:
                 self.log.debug("quote_snapshot poll error", exc_info=True)
@@ -1713,6 +1803,9 @@ class StrategyRunner:
             }
             self.journal.save_checkpoint(snap)
         self.last_eval_ts = datetime.now(timezone.utc).isoformat()
+        if isinstance(tick, Mapping) and tick:
+            self._mark_tick_activity()
+
         flow: Dict[str, Any] = {
             "within_window": False,
             "paused": self._paused,
@@ -1759,6 +1852,7 @@ class StrategyRunner:
                 return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
+        self._run_tick_watchdog()
         for cb in [
             getattr(self.order_executor, "cb_orders", None),
             getattr(self.order_executor, "cb_modify", None),
@@ -1928,9 +2022,10 @@ class StrategyRunner:
                 )
                 return
             now = self._now_ist()
+            last_tick_ts = self._last_tick_timestamp(now)
             self._fresh = compute_freshness(
                 now=now,
-                last_tick_ts=None,
+                last_tick_ts=last_tick_ts,
                 last_bar_open_ts=last_bar_ts_obj,
                 tf_seconds=60,
                 max_tick_lag_s=int(getattr(self.strategy_cfg, "max_tick_lag_s", 8)),
@@ -2488,6 +2583,8 @@ class StrategyRunner:
                             ):
                                 have_levels = True
                                 break
+            if have_price or have_levels:
+                self._mark_tick_activity()
             if not have_price or not have_levels:
                 if self._should_block_no_quote(plan):
                     plan["reason_block"] = "no_quote"
