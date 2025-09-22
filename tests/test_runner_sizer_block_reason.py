@@ -2,6 +2,7 @@ import pandas as pd
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
+from src.config import settings
 from src.strategies.runner import StrategyRunner
 
 
@@ -15,6 +16,8 @@ def _setup_runner(
     qty_diag: Tuple[int, Dict[str, Any]],
     plan_extra: Optional[Dict[str, Any]] = None,
     risk_result: Optional[Tuple[bool, str, Dict[str, Any]]] = None,
+    *,
+    allow_min: bool = False,
 ) -> StrategyRunner:
     """Return a runner patched to reach sizing stage."""
 
@@ -111,6 +114,8 @@ def _setup_runner(
     monkeypatch.setattr(runner, "_notional_rupees", lambda: 0)
     monkeypatch.setattr(runner, "_portfolio_delta_units", lambda: 0)
     monkeypatch.setattr(runner, "_calculate_quantity_diag", lambda **k: qty_diag)
+    monkeypatch.setattr(settings.risk, "allow_min_one_lot", allow_min, raising=False)
+    monkeypatch.setattr(settings, "risk_allow_min_one_lot", allow_min, raising=False)
     monkeypatch.setattr(runner.risk, "day_realized_loss", 0, raising=False)
     monkeypatch.setattr(runner.risk, "consecutive_losses", 0, raising=False)
     monkeypatch.setattr(runner.risk, "trades_today", 0, raising=False)
@@ -204,6 +209,58 @@ def test_qty_zero_adds_cap_reason_to_plan_reasons(monkeypatch):
     )
     assert runner.last_plan["reason_block"] == "cap_lt_one_lot"
     assert "cap_lt_one_lot" in flow.get("reason_details", {})
+
+
+def test_allow_min_one_lot_override_when_gates_pass(monkeypatch):
+    diag = {
+        "rupee_risk_per_lot": 1,
+        "lots_final": 0,
+        "lots": 0,
+        "block_reason": "cap_lt_one_lot",
+        "lot_size": 75,
+        "unit_notional": 60000.0,
+        "equity": 120000.0,
+        "cap_abs": None,
+    }
+    runner = _setup_runner(monkeypatch, (0, diag), allow_min=True)
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+    plan = runner.last_plan
+
+    assert flow["qty"] == 75
+    assert flow["sizing"]["override"] == "allow_min_one_lot"
+    assert plan.get("qty_lots") == 1
+    assert plan.get("reason_block") != "cap_lt_one_lot"
+    assert "allow_min_one_lot" in plan.get("reasons", [])
+
+
+def test_allow_min_one_lot_not_applied_when_gates_fail(monkeypatch):
+    diag = {
+        "rupee_risk_per_lot": 1,
+        "lots_final": 0,
+        "lots": 0,
+        "block_reason": "cap_lt_one_lot",
+        "lot_size": 75,
+        "unit_notional": 60000.0,
+        "equity": 120000.0,
+        "cap_abs": None,
+    }
+    runner = _setup_runner(
+        monkeypatch,
+        (0, diag),
+        plan_extra={"gates": {"warmup": {"ok": False}}},
+        allow_min=True,
+    )
+
+    runner.process_tick({})
+
+    flow = runner.get_last_flow_debug()
+
+    assert flow["qty"] == 0
+    assert flow["reason_block"] == "cap_lt_one_lot"
+    assert "override" not in flow["sizing"]
 
 
 def test_risk_block_records_reason_details(monkeypatch):
