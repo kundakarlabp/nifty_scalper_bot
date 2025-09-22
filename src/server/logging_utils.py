@@ -75,6 +75,9 @@ class LogGate:
             self._last_emitted.pop(key, None)
 
 
+_MISSING = object()
+
+
 class SimpleLogGate:
     """Thread-safe keyed rate limiter without sampling."""
 
@@ -89,6 +92,7 @@ class SimpleLogGate:
         self._last_emitted: dict[str, float] = {}
         self._key_intervals: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._last_values: dict[str, object] = {}
 
     def set_interval(self, key: str, seconds: float) -> None:
         """Configure a persistent interval for ``key``."""
@@ -151,8 +155,43 @@ class SimpleLogGate:
         with self._lock:
             if key is None:
                 self._last_emitted.clear()
+                self._last_values.clear()
             else:
                 self._last_emitted.pop(key, None)
+                self._last_values.pop(key, None)
+
+    def ok_changed(
+        self,
+        key: str,
+        current_value: object,
+        *,
+        interval: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        """Return ``True`` when ``current_value`` differs or the interval elapsed."""
+
+        if force:
+            with self._lock:
+                self._last_values[key] = current_value
+                self._last_emitted[key] = self._clock()
+            return True
+
+        window = self._interval_for(key, interval)
+        now = self._clock()
+        with self._lock:
+            last_value = self._last_values.get(key, _MISSING)
+            last_timestamp = self._last_emitted.get(key)
+            value_changed = last_value is _MISSING or current_value != last_value
+            interval_elapsed = (
+                window <= 0.0
+                or last_timestamp is None
+                or (now - last_timestamp) >= window
+            )
+            if value_changed or interval_elapsed:
+                self._last_values[key] = current_value
+                self._last_emitted[key] = now
+                return True
+            return False
 
 
 _GLOBAL_LOG_GATE = LogGate(LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE)
