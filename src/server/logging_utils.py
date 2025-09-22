@@ -104,6 +104,11 @@ class SimpleLogGate:
             else:
                 self._key_intervals[key] = window
 
+    def set(self, key: str, seconds: float) -> None:
+        """Compatibility alias for ``set_interval`` used by runtime patches."""
+
+        self.set_interval(key, seconds)
+
     def _interval_for(self, key: str, override: float | None) -> float:
         if override is not None:
             return float(override)

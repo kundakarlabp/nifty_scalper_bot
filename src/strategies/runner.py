@@ -700,7 +700,9 @@ class StrategyRunner:
         self.last_eval_ts: Optional[str] = None
         self.trace_ticks_remaining: int = 0
         self.hb_enabled: bool = True
-        self._gate = SimpleLogGate()
+        self._gate = getattr(self, "_gate", SimpleLogGate())
+        self._gate.set("decision", 5.0)
+        self._gate.set("structured", 10.0)
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
         self._last_tick_ms: int = self._now_ms()
@@ -911,6 +913,16 @@ class StrategyRunner:
         except Exception:
             self.log.debug("quote_to_tick_error", exc_info=True)
             return None
+
+    def _log_structured_once(
+        self, payload: dict[str, Any], *, event: str = "structured"
+    ) -> None:
+        """Emit large structured payloads at INFO only during trace windows."""
+
+        if healthkit.trace_active():
+            self.log.info(event, extra=payload)
+        elif self._gate.ok("structured"):
+            self.log.debug(event, extra=payload)
 
     def _last_tick_timestamp(self, now: datetime) -> datetime | None:
         """Reconstruct wall-clock timestamp for the most recent tick."""
@@ -1453,10 +1465,10 @@ class StrategyRunner:
             if isinstance(plan_snapshot, Mapping):
                 payload["plan"] = dict(plan_snapshot)
 
-            if trace_on:
-                self.log.info("structured.decision", extra=payload)
-            else:
-                self.log.debug("structured.decision", extra=payload)
+            self._log_structured_once(payload, event="structured.decision")
+
+            if trace_on or self._gate.ok("decision"):
+                self.log.debug("decision")
 
             emit_decision(decision_payload)
             if reason_value:
@@ -1999,6 +2011,55 @@ class StrategyRunner:
         if isinstance(tick, Mapping) and tick:
             self._mark_tick_activity()
 
+        try:
+            now_ms = int(time.monotonic() * 1000)
+            last_ms_raw = getattr(self, "_last_tick_ms", 0)
+            try:
+                last_ms = int(last_ms_raw)
+            except (TypeError, ValueError):
+                last_ms = 0
+            try:
+                max_idle = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+            except (TypeError, ValueError):
+                max_idle = 2000
+            if (
+                getattr(self, "market_open", False)
+                and now_ms - last_ms > max_idle
+            ):
+                tok: int | None = None
+                last_plan = getattr(self, "_last_plan", None)
+                if isinstance(last_plan, dict):
+                    token_val = last_plan.get("token")
+                    try:
+                        tok = int(token_val) if token_val is not None else None
+                    except (TypeError, ValueError):
+                        tok = None
+                ds = getattr(self, "data_source", None)
+                if tok is None and ds is not None:
+                    candidates = (
+                        getattr(ds, "_current_ce_token", None),
+                        getattr(ds, "_current_pe_token", None),
+                    )
+                    for candidate in candidates:
+                        try:
+                            if candidate is None:
+                                continue
+                            tok = int(candidate)
+                        except (TypeError, ValueError):
+                            continue
+                        else:
+                            break
+                if ds and tok:
+                    ensure = getattr(ds, "ensure_token_subscribed", None)
+                    if callable(ensure):
+                        try:
+                            ensure(int(tok), mode="FULL")
+                        except Exception:
+                            self.log.debug("watchdog.ensure_error", exc_info=True)
+                self._refresh_from_quote(tok)
+        except Exception:
+            self.log.debug("watchdog_error", exc_info=True)
+
         flow: Dict[str, Any] = {
             "within_window": False,
             "paused": self._paused,
@@ -2259,6 +2320,14 @@ class StrategyRunner:
                 )
                 _update_fresh(plan)
             if not self._fresh.ok:
+                try:
+                    last_plan = getattr(self, "_last_plan", {}) or {}
+                    token_hint = None
+                    if isinstance(last_plan, Mapping):
+                        token_hint = last_plan.get("token")
+                    self._refresh_from_quote(token_hint)
+                except Exception:
+                    pass
                 plan["reason_block"] = "data_stale"
                 plan.setdefault("reasons", []).append(
                     f"tick_lag={self._fresh.tick_lag_s}"
