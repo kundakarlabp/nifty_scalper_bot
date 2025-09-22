@@ -11,6 +11,7 @@ from pprint import pformat
 from typing import Any, Callable, Optional
 
 from src.config import settings as global_settings
+from src.diagnostics import trace_ctl
 
 
 def prettify(value: Any) -> str:
@@ -399,6 +400,7 @@ class TelegramCommands:
             if not parts or parts[0].lower() == "off":
                 self._diag_until_ts = 0.0
                 self._trace_until_ts = 0.0
+                trace_ctl.disable()
                 reply("✅ Logging windows disabled (back to baseline).")
                 return True
             default = int(getattr(self.settings, "LOG_DIAG_DEFAULT_SEC", 60))
@@ -426,8 +428,9 @@ class TelegramCommands:
             except Exception:
                 seconds = default
             self._enable_window("trace", seconds)
+            trace_ctl.enable(seconds)
             reply(
-                f"🟠 TRACE window enabled for {seconds}s. Expect more DEBUG logs."
+                f"🟢 Trace enabled (auto-off by TTL) for {seconds}s."
             )
             return True
         if cmd == "/diag":

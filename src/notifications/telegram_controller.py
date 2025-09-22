@@ -2453,6 +2453,8 @@ class TelegramController:
                 return self._send(f"Quotes error: {e}")
 
         if cmd == "/trace":
+            from src.diagnostics import trace_ctl
+
             trace_setter: Optional[Callable[[int], None]] = None
             if self._trace_provider:
                 trace_setter = self._trace_provider
@@ -2469,13 +2471,18 @@ class TelegramController:
                     requested = None
                 if trace_setter and requested is not None:
                     count = max(1, min(50, requested))
+                    trace_ctl.enable()
                     trace_setter(count)
-                    return self._send(f"Tracing next {count} evals.")
+                    return self._send(
+                        f"🟢 Trace enabled (auto-off by TTL); capturing next {count} evals."
+                    )
             if not args:
-                return self._send("Usage: /trace <trace_id>")
+                trace_ctl.enable()
+                return self._send("🟢 Trace enabled (auto-off by TTL)")
             trace_id = args[0].strip()
             if not trace_id:
-                return self._send("Usage: /trace <trace_id>")
+                trace_ctl.enable()
+                return self._send("🟢 Trace enabled (auto-off by TTL)")
             ring = getattr(checks, "TRACE_RING", None)
             if ring is None:
                 return self._send("Diagnostic trace capture disabled.")
@@ -2494,17 +2501,20 @@ class TelegramController:
             return self._send(f"```json\n{text}\n```", parse_mode="Markdown")
 
         if cmd == "/traceoff":
+            from src.diagnostics import trace_ctl
+
+            trace_ctl.disable()
             if self._trace_provider:
                 try:
                     self._trace_provider(0)
                 except Exception as exc:
                     return self._send(f"Trace off error: {exc}")
-                return self._send("Trace off.")
+                return self._send("⚪️ Trace disabled")
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
             if not runner:
                 return self._send("Runner unavailable.")
             runner.trace_ticks_remaining = 0
-            return self._send("Trace off.")
+            return self._send("⚪️ Trace disabled")
 
         if cmd == "/summary":
             runner = getattr(getattr(self, "_runner_tick", None), "__self__", None)
