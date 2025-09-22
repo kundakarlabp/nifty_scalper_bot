@@ -161,7 +161,7 @@ def _fmt_micro(
     spread = m.get("spread_pct")
     depth_ok = m.get("depth_ok")
     try:
-        spread_pct = _format_float(float(spread) * 100.0, 2)
+        spread_pct = f"{float(spread) * 100.0:.2f}"
     except (TypeError, ValueError):
         spread_pct = "N/A"
     return (
@@ -3072,7 +3072,7 @@ class TelegramController:
                     return self._send("📉 Micro: N/A (no_quote)")
                 src = q.get("source", "-")
                 try:
-                    spread_pct_fmt = _format_float(float(spread_pct) * 100.0, 2)
+                    spread_pct_fmt = f"{float(spread_pct) * 100.0:.2f}"
                 except (TypeError, ValueError):
                     spread_pct_fmt = "N/A"
                 return self._send(
