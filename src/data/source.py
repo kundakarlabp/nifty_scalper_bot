@@ -1411,6 +1411,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             token = int(token_raw)
         except Exception:
             return
+        runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
+        if runner and hasattr(runner, "on_market_tick"):
+            try:
+                runner.on_market_tick()
+            except Exception:
+                pass
         now = time.time()
         depth = tick.get("depth") if isinstance(tick, Mapping) else None
         bid = ask = None
@@ -2414,6 +2420,7 @@ def _subscribe_tokens(
                 mode_value_raw = mode or getattr(
                     target, "MODE_FULL", getattr(obj, "MODE_FULL", "full")
                 )
+                mode_value: Any
                 if attr == "set_mode" and isinstance(mode_value_raw, str):
                     mode_value = mode_value_raw.lower()
                 else:
