@@ -185,6 +185,46 @@ def test_metrics_endpoint(monkeypatch) -> None:
     assert "slippage_bps" in body and "micro_wait_ratio" in body
 
 
+def test_plan_endpoint_missing_runner(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner_module.StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: None),
+    )
+    client = health_module.app.test_client()
+    resp = client.get("/plan")
+    assert resp.status_code == 503
+    payload = resp.get_json()
+    assert payload == {"ok": False, "error": "runner_unavailable"}
+
+
+def test_plan_endpoint_sanitizes_plan(monkeypatch) -> None:
+    plan = {
+        "action": "buy",
+        "ot": "CE",
+        "qty_lots": 2,
+        "micro": {"spread_pct": 0.0125, "depth_ok": True, "age": 4.5},
+    }
+    runner = SimpleNamespace(last_plan=plan)
+    monkeypatch.setattr(
+        runner_module.StrategyRunner,
+        "get_singleton",
+        classmethod(lambda cls: runner),
+    )
+    client = health_module.app.test_client()
+    resp = client.get("/plan")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    summary = payload["plan"]
+    assert summary["side"] == "buy"
+    assert summary["option_type"] == "CE"
+    assert summary["reason"] == "none"
+    assert summary["spread_pct"] == 0.0125
+    assert summary["depth_ok"] is True
+    assert summary["quote_age_s"] == 4.5
+
+
 def test_diag_last_endpoint(monkeypatch) -> None:
     monkeypatch.setattr(settings, "LOG_RING_ENABLED", True, raising=False)
     ringlog.clear()
