@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from typing import Any
 
-from src.execution.micro_filters import cap_for_mid, evaluate_micro
+from src.execution.micro_filters import cap_for_mid, evaluate_micro, micro_from_quote
 
 
 def _cfg() -> SimpleNamespace:
@@ -102,10 +102,22 @@ def test_evaluate_micro_requires_top_of_book():
         "ask5_qty": [120, 100, 80, 60, 40],
     }
     result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
-    assert result["reason"] == "no_quote"
-    assert result["spread_pct"] is None
-    assert result["depth_ok"] is None
+    assert result["reason"] == "spread"
+    assert result["spread_pct"] >= 999.0
+    assert result["depth_ok"] is True
     assert result["would_block"] is True
+
+
+def test_micro_from_quote_marks_zero_prices_wide() -> None:
+    quote = {
+        "depth": {
+            "buy": [{"price": 0.0, "quantity": 100}],
+            "sell": [{"price": 101.0, "quantity": 100}],
+        }
+    }
+    spread, depth_ok = micro_from_quote(quote, lot_size=50, depth_min_lots=1)
+    assert spread == 999.0
+    assert depth_ok is True
 
 
 def _capture_events(monkeypatch: Any) -> list[tuple[str, dict[str, Any]]]:

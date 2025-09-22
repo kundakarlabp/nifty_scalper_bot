@@ -54,6 +54,28 @@ def micro_from_l1(
     return spread_pct, depth_ok, {"bid": bid, "ask": ask, "bid5": bq, "ask5": sq}
 
 
+def _quote_reference_price(data: Mapping[str, Any] | None) -> float:
+    """Return a positive reference price from ``data`` if available."""
+
+    if not isinstance(data, Mapping):
+        return 0.0
+
+    fallback: float = 0.0
+    for key in ("ltp", "mid", "last_price", "close", "close_price"):
+        value = data.get(key)
+        if value is None:
+            continue
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if price > 0.0:
+            return price
+        if fallback == 0.0 and price != 0.0:
+            fallback = price
+    return fallback
+
+
 def micro_from_quote(
     q: Optional[Dict[str, Any]], *, lot_size: int, depth_min_lots: int
 ) -> Tuple[Optional[float], Optional[bool]]:
@@ -87,10 +109,12 @@ def micro_from_quote(
         ask = float(sell_levels[0].get("price", 0.0)) if sell_levels else 0.0
     except Exception:
         bid = ask = 0.0
+    ltp = _quote_reference_price(q)
     if bid <= 0 or ask <= 0:
-        return None, None
-    mid = (bid + ask) / 2.0
-    spread = (ask - bid) / ((bid + ask) / 2.0) * 100.0
+        spread = 999.0
+    else:
+        ref_price = ltp if ltp > 0 else (bid + ask) / 2.0
+        spread = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     need_units = max(int(depth_min_lots), 0) * max(int(lot_size), 0)
     depth_ok = True
     if need_units > 0:
@@ -265,6 +289,7 @@ def evaluate_micro(
 
     bid = _as_float(q.get("bid"))
     ask = _as_float(q.get("ask"))
+    ltp = _quote_reference_price(q)
 
     if not bid5 or not ask5:
         log_outcome(
@@ -291,35 +316,14 @@ def evaluate_micro(
             "would_block": True,
         }
 
-    if bid <= 0.0 or ask <= 0.0:
-        log_outcome(
-            "micro_wait",
-            reason="no_quote",
-            spread_pct=None,
-            cap_pct=cap_default,
-            depth_ok=None,
-            depth_available=None,
-            available_bid_qty=sum(bid5),
-            available_ask_qty=sum(ask5),
-            spread_block=None,
-            depth_block=None,
-            raw_block=True,
-            would_block=True,
-            bid=bid,
-            ask=ask,
-        )
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": True,
-        }
-
     mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
-    spread_pct = (
-        (ask - bid) / ((bid + ask) / 2.0) * 100.0 if bid > 0 and ask > 0 else None
-    )
+    if mid is None and ltp > 0:
+        mid = ltp
+    if bid <= 0.0 or ask <= 0.0:
+        spread_pct = 999.0
+    else:
+        ref_price = ltp if ltp > 0 else (mid or 0.0)
+        spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     cap = cap_for_mid(mid or 0.0, cfg)
 
     available_bid = sum(bid5)
@@ -377,6 +381,7 @@ def evaluate_micro(
         "depth_multiplier": depth_mult,
         "require_depth": require_depth_flag,
         "mode": mode,
+        "reason": reason,
         "would_block": final_block,
     }
 
