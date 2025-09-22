@@ -156,11 +156,14 @@ def _safe_kite_call(
         _warn_perm_once(log, f"{label}: {e}")
     except Exception as e:  # pragma: no cover - best effort
         msg = str(e)
-        if label == "positions":
-            key = "auth" if "api_key" in msg or "access_token" in msg else label
-            if not _EXEC_LOG_SUPPRESSOR.should_log("err", key, label):
-                return default
-        log.error("%s() failed: %s", label, msg)
+        group = label
+        ident = msg
+        if label == "positions" and (
+            "api_key" in msg or "access_token" in msg
+        ):
+            ident = "auth"
+        if _EXEC_LOG_SUPPRESSOR.should_log("err", group, ident):
+            log.error("%s() failed: %s", label, msg)
     return default
 
 

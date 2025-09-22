@@ -19,17 +19,19 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.server.logging_utils import _setup_logging as _setup_logging_boot  # noqa: E402
+from src.server.logging_setup import log_event  # noqa: E402
 
 _setup_logging = _setup_logging_boot
 _setup_logging_boot()
 log_format_env = os.getenv("LOG_FORMAT")
 log_json_env = os.getenv("LOG_JSON", "true").lower() == "true"
-print(
-    "APP_BOOT",
-    f"git_sha={os.getenv('GIT_SHA', 'unknown')}",
-    f"build_id={os.getenv('RAILWAY_BUILD_ID', 'unknown')}",
-    f"log_format={log_format_env or ('json' if log_json_env else 'logfmt')}",
-    f"started_at={datetime.now(timezone.utc).isoformat()}",
+log_event(
+    "app.boot",
+    "info",
+    git_sha=os.getenv("GIT_SHA", "unknown"),
+    build_id=os.getenv("RAILWAY_BUILD_ID", "unknown"),
+    log_format=log_format_env or ("json" if log_json_env else "logfmt"),
+    started_at=datetime.now(timezone.utc).isoformat(),
 )
 
 from src.boot.validate_env import (  # noqa: E402

@@ -54,6 +54,15 @@ def _format_float(value: Any, digits: int = 2) -> str:
         return "-"
 
 
+def _format_percent(value: Any, digits: int = 2) -> str:
+    """Return ``value`` converted to percentage points (×100)."""
+
+    try:
+        return f"{float(value) * 100.0:.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
 def _env_float(name: str, default: float) -> float:
     """Return ``float`` from environment variable ``name`` with ``default`` fallback."""
 
@@ -160,10 +169,7 @@ def _fmt_micro(
     m = micro or {}
     spread = m.get("spread_pct")
     depth_ok = m.get("depth_ok")
-    try:
-        spread_pct = f"{float(spread) * 100.0:.2f}"
-    except (TypeError, ValueError):
-        spread_pct = "N/A"
+    spread_pct = _format_percent(spread, 2)
     return (
         f"quote: {sym} src={m.get('source', '-')} "
         f"ltp={m.get('ltp')} bid={m.get('bid')} ask={m.get('ask')} "
@@ -1018,7 +1024,7 @@ class TelegramController:
                         else "—"
                     ),
                     spr=esc(
-                        _format_float((float(spread) * 100.0), 2)
+                        _format_percent(spread, 2)
                         if isinstance(spread, (int, float))
                         else "—"
                     ),
@@ -1076,10 +1082,7 @@ class TelegramController:
                             else "—"
                         ),
                         spr=esc(
-                            _format_float(
-                                float(micro_detail.get("spread_pct", 0.0)) * 100.0,
-                                2,
-                            )
+                            _format_percent(micro_detail.get("spread_pct"), 2)
                             if isinstance(
                                 micro_detail.get("spread_pct"),
                                 (int, float),
@@ -1115,7 +1118,7 @@ class TelegramController:
                 micro_ok = not reason or str(reason).lower() in {"ok", "pass"}
                 spread_val = micro_detail.get("spread_pct")
                 spread_txt = (
-                    _format_float((float(spread_val) * 100.0), 2)
+                    _format_percent(spread_val, 2)
                     if isinstance(spread_val, (int, float))
                     else "-"
                 )
@@ -1189,7 +1192,7 @@ class TelegramController:
             if spread is None and isinstance(snap.get("micro"), Mapping):
                 spread = snap.get("micro", {}).get("spread_pct")
             spread_txt = (
-                _format_float((float(spread) * 100.0), 2)
+                _format_percent(spread, 2)
                 if isinstance(spread, (int, float))
                 else "—"
             )
@@ -1224,7 +1227,7 @@ class TelegramController:
                 depth_ok = depth_val if depth_val not in (None, "") else "—"
                 spread_val = micro_detail.get("spread_pct")
                 if isinstance(spread_val, (int, float)):
-                    micro_spread = _format_float((float(spread_val) * 100.0), 2)
+                    micro_spread = _format_percent(spread_val, 2)
             last_label = getattr(runner, "_last_decision_label", None) if runner else None
             last_reason = getattr(runner, "_last_decision_reason", None) if runner else None
             lines = [
@@ -1332,7 +1335,7 @@ class TelegramController:
 
         age_str = _format_float(age, 1) if isinstance(age, (int, float)) else "-"
         spread_pct = (
-            _format_float((float(spread) * 100.0), 2)
+            _format_percent(spread, 2)
             if isinstance(spread, (int, float))
             else "-"
         )
@@ -1611,7 +1614,7 @@ class TelegramController:
             if age is None and isinstance(micro, Mapping):
                 age = micro.get("age")
             spread_txt = (
-                _format_float((float(spread) * 100.0), 2)
+                _format_percent(spread, 2)
                 if isinstance(spread, (int, float))
                 else "—"
             )
@@ -2131,7 +2134,7 @@ class TelegramController:
                     sp_line = "N/A (no_quote)"
                     dp_line = "N/A (no_quote)"
                 else:
-                    sp_line = msp
+                    sp_line = _format_percent(msp, 2)
                     dp_line = "✅" if mdp else "❌"
                 lines.append(
                     f"micro: spread%={sp_line} depth={dp_line} src={sig.get('quote_src','-')}"
@@ -2264,7 +2267,7 @@ class TelegramController:
                 if age_val is None and isinstance(micro, Mapping):
                     age_val = micro.get("age")
                 spread_txt = (
-                    _format_float((float(spread_val) * 100.0), 2)
+                    _format_percent(spread_val, 2)
                     if isinstance(spread_val, (int, float))
                     else "—"
                 )
@@ -2317,7 +2320,9 @@ class TelegramController:
                 if reason_block in {"no_option_quote", "no_option_token"}:
                     lines.append("micro: N/A (no_quote)")
                 else:
-                    sp_line = "N/A (no_quote)" if sp is None else round(sp, 3)
+                    sp_line = (
+                        "N/A (no_quote)" if sp is None else _format_percent(sp, 3)
+                    )
                     dp_line = "N/A (no_quote)" if dp is None else ("✅" if dp else "❌")
                     lines.append(
                         f"micro: spread%={sp_line} depth={dp_line} src={plan.get('quote_src','-')}"
@@ -2464,24 +2469,40 @@ class TelegramController:
                     trace_setter = lambda n: setattr(
                         runner, "trace_ticks_remaining", max(1, min(50, n))
                     )
-            if args:
+            ttl_override: Optional[int] = None
+            parsed_args: list[str] = []
+            for token in args:
+                stripped = str(token).strip()
+                if not stripped:
+                    continue
+                if stripped.lower().startswith("ttl="):
+                    try:
+                        ttl_override = max(1, int(stripped.split("=", 1)[1]))
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    parsed_args.append(stripped)
+
+            ttl_value = ttl_override
+
+            if parsed_args:
                 try:
-                    requested = int(args[0])
+                    requested = int(parsed_args[0])
                 except (TypeError, ValueError):
                     requested = None
                 if trace_setter and requested is not None:
                     count = max(1, min(50, requested))
-                    trace_ctl.enable()
+                    trace_ctl.enable(ttl_value)
                     trace_setter(count)
                     return self._send(
                         f"🟢 Trace enabled (auto-off by TTL); capturing next {count} evals."
                     )
-            if not args:
-                trace_ctl.enable()
+            if not parsed_args:
+                trace_ctl.enable(ttl_value)
                 return self._send("🟢 Trace enabled (auto-off by TTL)")
-            trace_id = args[0].strip()
+            trace_id = parsed_args[0]
             if not trace_id:
-                trace_ctl.enable()
+                trace_ctl.enable(ttl_value)
                 return self._send("🟢 Trace enabled (auto-off by TTL)")
             ring = getattr(checks, "TRACE_RING", None)
             if ring is None:
@@ -3082,8 +3103,8 @@ class TelegramController:
                     return self._send("📉 Micro: N/A (no_quote)")
                 src = q.get("source", "-")
                 try:
-                    spread_pct_fmt = f"{float(spread_pct) * 100.0:.2f}"
-                except (TypeError, ValueError):
+                    spread_pct_fmt = _format_percent(spread_pct, 2)
+                except Exception:
                     spread_pct_fmt = "N/A"
                 return self._send(
                     f"📉 Micro\n• spread%={spread_pct_fmt}\n• depth_ok={depth_ok}\n• src={src}"

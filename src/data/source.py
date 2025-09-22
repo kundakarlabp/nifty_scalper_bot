@@ -55,6 +55,7 @@ log = logging.getLogger(__name__)
 _warn_perm_once = False
 
 _hist_log_suppressor = LogSuppressor()
+_tick_log_suppressor = LogSuppressor(window_sec=180.0)
 
 
 def _as_float(val: Any) -> float:
@@ -1254,7 +1255,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if heartbeat_ts:
             lag = now - heartbeat_ts
             if lag > tick_max_lag_s:
-                log.warning("tick_stale", {"tick_lag": lag})
+                bucket = round(lag)
+                if _tick_log_suppressor.should_log("warn", "tick_stale", bucket):
+                    log.warning("tick_stale", {"tick_lag": lag})
                 try:
                     self.reconnect_ws()
                     log.info("tick_reconnect_attempt", {"tick_lag": lag})
@@ -2130,7 +2133,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
             if df.empty:
                 if _hist_log_suppressor.should_log(
-                    "hist.empty", token, interval, start, end
+                    "hist.empty",
+                    f"{token}:{interval}",
+                    f"{start}->{end}",
                 ):
                     log.error(
                         "historical_data empty for token=%s interval=%s window=%s→%s",

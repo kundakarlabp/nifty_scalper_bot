@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import sys
-import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -131,40 +130,35 @@ def setup_root_logger() -> None:
     _LOG.info("logging.init", extra={"extra": {"level": level_name, "format": fmt}})
 
 
-class LogSuppressor:
-    """Remember once-only log combinations to avoid repeated noise."""
-
-    def __init__(self) -> None:
-        self._seen: set[str] = set()
-        self._lock = threading.Lock()
-
-    def should_log(self, *parts: object) -> bool:
-        """Return ``True`` if the given ``parts`` combination hasn't been seen."""
-
-        key = "|".join(str(part) for part in parts)
-        with self._lock:
-            if key in self._seen:
-                return False
-            self._seen.add(key)
-            return True
-
-    def reset(self) -> None:
-        """Clear the tracked combinations."""
-
-        with self._lock:
-            self._seen.clear()
-
-
 def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     """Emit a structured log line compatible with JSON and logfmt handlers."""
 
     logger = logging.getLogger(tag)
-    msg = " ".join(f"{key}={_q(value)}" for key, value in fields.items()) if fields else ""
-    record_extra = {"extra": fields, "ts": _iso_now(), "tag": tag}
+    ts = _iso_now()
+    safe_fields = dict(fields)
+    if safe_fields:
+        fallback_fields = " ".join(
+            f"{key}={_q(value)}" for key, value in safe_fields.items()
+        )
+        message = f"{tag} {fallback_fields}"
+    else:
+        message = tag
+
+    record_extra: dict[str, Any] = {"ts": ts, "tag": tag}
+    if safe_fields:
+        record_extra.update(safe_fields)
+        record_extra.setdefault("fields", safe_fields)
+
+    level_value = getattr(logging, level.upper(), None)
+    if isinstance(level_value, int):
+        logger.log(level_value, message, extra=record_extra)
+        return
+
     log_fn = getattr(logger, level.lower(), None)
-    if not callable(log_fn):
-        log_fn = logger.info
-    log_fn(msg, extra=record_extra)
+    if callable(log_fn):
+        log_fn(message, extra=record_extra)
+    else:
+        logger.info(message, extra=record_extra)
 
 
 class LogSuppressor:  # type: ignore[no-redef]

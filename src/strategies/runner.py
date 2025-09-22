@@ -38,7 +38,7 @@ from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
 from src import diagnostics
-from src.diagnostics import healthkit
+from src.diagnostics import healthkit, trace_ctl
 from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
@@ -998,6 +998,8 @@ class StrategyRunner:
 
             plan_data: Mapping[str, Any] = plan_for_payload or {}
             micro_info = plan_data.get("micro") if isinstance(plan_data, Mapping) else None
+            trace_on = healthkit.trace_active()
+
             plan_log: dict[str, Any] = {
                 "action": plan_data.get("action"),
                 "option_type": plan_data.get("option_type"),
@@ -1007,7 +1009,11 @@ class StrategyRunner:
                 "atr_pct_raw": plan_data.get("atr_pct_raw"),
                 "reasons": plan_data.get("reasons"),
                 "micro": {
-                    "spread_pct": micro_info.get("spread_pct") if isinstance(micro_info, Mapping) else None,
+                    "spread_pct": (
+                        micro_info.get("spread_pct")
+                        if isinstance(micro_info, Mapping)
+                        else None
+                    ),
                     "depth_ok": micro_info.get("depth_ok") if isinstance(micro_info, Mapping) else None,
                 },
                 "eval_count": getattr(self, "eval_count", None),
@@ -1015,7 +1021,9 @@ class StrategyRunner:
             }
 
             reason_text = reason_value or ""
-            if self._lg.ok_changed("decision", (label_value, reason_text)):
+            if self._lg.ok_changed(
+                "decision", (label_value, reason_text), force=trace_on
+            ):
                 fields: dict[str, Any] = {
                     "label": label_value,
                     "reason": reason_text,
@@ -1032,7 +1040,8 @@ class StrategyRunner:
                         value = plan_source.get(src_key)
                         if value is not None:
                             fields[dest_key] = value
-                log_event("decision", "info", **fields)
+                level = "info" if trace_on else "debug"
+                log_event("decision", level, **fields)
                 self._last_decision_label = label_value
                 self._last_decision_reason = reason_value
 
@@ -1067,7 +1076,7 @@ class StrategyRunner:
             if isinstance(plan_snapshot, Mapping):
                 payload["plan"] = dict(plan_snapshot)
 
-            if healthkit.trace_active():
+            if trace_on:
                 self.log.info("structured.decision", extra=payload)
             else:
                 self.log.debug("structured.decision", extra=payload)
@@ -1098,22 +1107,29 @@ class StrategyRunner:
 
     def emit_heartbeat(self) -> None:
         """Emit a compact heartbeat log with current signal context."""
+        trace_on = healthkit.trace_active()
         if not self.hb_enabled:
             return
         if not self._gate.should_emit(
-            "runner:heartbeat", interval=self._heartbeat_interval
+            "runner:heartbeat", interval=self._heartbeat_interval, force=trace_on
         ):
             return
         snap = self.telemetry_snapshot()
         sig = snap.get("signal", {})
         micro = sig.get("micro") or {}
-        self.log.info(
+        spread_val = micro.get("spread_pct")
+        try:
+            spread_fmt = f"{float(spread_val) * 100.0:.2f}"
+        except (TypeError, ValueError):
+            spread_fmt = spread_val
+        log_fn = self.log.info if trace_on else self.log.debug
+        log_fn(
             "HB eval=%s regime=%s atr%%=%s score=%s spread%%=%s depth=%s block=%s",
             snap.get("eval_count"),
             sig.get("regime"),
             sig.get("atr_pct"),
             sig.get("score"),
-            micro.get("spread_pct"),
+            spread_fmt,
             micro.get("depth_ok"),
             sig.get("reason_block"),
         )
@@ -1511,7 +1527,8 @@ class StrategyRunner:
         if self.hb_enabled and (now - self._last_hb_ts) >= 15 * 60:
             self.emit_heartbeat()
             self._last_hb_ts = now
-        if self._lg.ok("hb"):
+        trace_on = healthkit.trace_active()
+        if self._lg.ok("hb", force=trace_on):
             telemetry: dict[str, Any]
             try:
                 telemetry = self.telemetry_snapshot()
@@ -1526,23 +1543,30 @@ class StrategyRunner:
                 }
             except Exception:
                 tel_fields = {"equity": 0.0, "pos": -1}
+            level = "info" if trace_on else "debug"
             log_event(
                 "hb",
-                "info",
+                level,
                 broker="ok",
                 market="open" if self._within_trading_window() else "closed",
                 strategy="ready" if getattr(self, "ready", True) else "warming",
                 **tel_fields,
             )
-        if self._last_plan and self._lg.ok("plan"):
+        if self._last_plan and self._lg.ok("plan", force=trace_on):
             plan_fields = dict(self._last_plan)
             micro = plan_fields.get("micro") or {}
             if not isinstance(micro, Mapping):
                 micro = {}
             if not micro.get("stale"):
+                spread_val = plan_fields.get("spread_pct")
+                try:
+                    spr_pct = round(float(spread_val) * 100.0, 3)
+                except (TypeError, ValueError):
+                    spr_pct = spread_val
+                level = "info" if trace_on else "debug"
                 log_event(
                     "plan",
-                    "info",
+                    level,
                     side=plan_fields.get("side"),
                     option_type=plan_fields.get("option_type"),
                     atm_strike=plan_fields.get("atm_strike"),
@@ -1554,10 +1578,11 @@ class StrategyRunner:
                     qty=plan_fields.get("qty_lots"),
                     lot=plan_fields.get("lot_size"),
                     age_s=plan_fields.get("quote_age_s"),
-                    spr_pct=plan_fields.get("spread_pct"),
+                    spr_pct=spr_pct,
                 )
-        if self._block_counts and self._lg.ok("block.summary"):
-            log_event("block.summary", "info", **dict(self._block_counts))
+        if self._block_counts and self._lg.ok("block.summary", force=trace_on):
+            level = "info" if trace_on else "debug"
+            log_event("block.summary", level, **dict(self._block_counts))
             self._block_counts = {}
 
     # ---------------- main loop entry ----------------
@@ -2979,12 +3004,17 @@ class StrategyRunner:
             if getattr(self, "trace_ticks_remaining", 0) > 0:
                 p = self.last_plan or {}
                 m = p.get("micro") or {}
+                spread_val = m.get("spread_pct")
+                try:
+                    spread_fmt = f"{float(spread_val) * 100.0:.3f}"
+                except (TypeError, ValueError):
+                    spread_fmt = spread_val
                 self.log.info(
                     "TRACE regime=%s score=%s atr%%=%.2f spread%%=%s depth=%s rr=%s entry=%s sl=%s tp1=%s tp2=%s opt_sl=%s opt_tp1=%s opt_tp2=%s block=%s reasons=%s",
                     p.get("regime"),
                     p.get("score"),
                     float(p.get("atr_pct") or 0.0),
-                    m.get("spread_pct"),
+                    spread_fmt,
                     m.get("depth_ok"),
                     p.get("rr"),
                     p.get("entry"),
@@ -3744,10 +3774,12 @@ class StrategyRunner:
 
         return render_last_bars(self.data_source, n)
 
-    def enable_trace(self, n: int) -> None:
+    def enable_trace(self, n: int, ttl_sec: int | None = None) -> None:
+        trace_ctl.enable(ttl_sec)
         self.trace_ticks_remaining = int(max(0, n))
 
     def disable_trace(self) -> None:
+        trace_ctl.disable()
         self.trace_ticks_remaining = 0
 
     # detailed bundle used by /check

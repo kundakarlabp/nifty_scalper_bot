@@ -68,6 +68,7 @@ class CircuitBreaker:
 
         self.state: str = self.CLOSED
         self._last_state: str = self.state
+        self._last_logged_state: str = self.state
         self._latencies: Deque[int] = deque(maxlen=self.window_size)
         self._errors = 0
         self._total = 0
@@ -136,7 +137,10 @@ class CircuitBreaker:
             self.open_until = _utcnow() + timedelta(seconds=self.open_cooldown_sec)
 
     def _transition(self, src: str, dst: str, **extra: Any) -> None:
-        if dst != getattr(self, "_last_state", None):
+        if dst == self.state:
+            return
+
+        if dst != getattr(self, "_last_logged_state", None):
             log.info(
                 "CB[%s] %s→%s err=%.1f%% p95=%sms n=%s reason=%s",
                 self.name,
@@ -147,6 +151,8 @@ class CircuitBreaker:
                 self._total,
                 extra.get("reason", ""),
             )
+            self._last_logged_state = dst
+
         self._last_state = dst
         self.state = dst
 
@@ -179,6 +185,7 @@ class CircuitBreaker:
         """Force breaker to OPEN for ``seconds`` seconds."""
         self.state = self.OPEN
         self._last_state = self.state
+        self._last_logged_state = self.state
         self.open_until = _utcnow() + timedelta(seconds=max(0, int(seconds)))
         self.last_reason = "forced_open"
 
@@ -186,6 +193,7 @@ class CircuitBreaker:
         """Reset breaker to CLOSED and clear metrics."""
         self.state = self.CLOSED
         self._last_state = self.state
+        self._last_logged_state = self.state
         self.open_until = None
         self._half_open_successes = 0
         self._reset_metrics()

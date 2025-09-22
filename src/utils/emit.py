@@ -35,7 +35,9 @@ def emit_micro(depth_ok: bool | None, spread_pct: float | None) -> None:
         {
             "event": "micro",
             "depth_ok": depth_ok,
-            "spread_pct": round(spread_pct, 3) if spread_pct else None,
+            "spread_pct": (
+                round(spread_pct * 100.0, 3) if isinstance(spread_pct, (int, float)) else None
+            ),
         }
     )
 
