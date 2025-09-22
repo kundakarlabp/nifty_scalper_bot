@@ -886,6 +886,41 @@ class StrategyRunner:
         except Exception:
             self.log.debug("tick_hook_error", exc_info=True)
 
+    def _bridge_quote_to_tick(self, token: int | None) -> None:
+        """If quotes are fresh, advance the tick clock without mutating plan state."""
+
+        if token is None:
+            return
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return
+        snapshot = getattr(ds, "quote_snapshot", None)
+        if not callable(snapshot):
+            return
+        try:
+            token_int = int(token)
+        except (TypeError, ValueError):
+            return
+        try:
+            quote = snapshot(token_int) or {}
+        except Exception:
+            self.log.debug("quote_bridge_error", exc_info=True)
+            return
+        age_s = quote.get("age_sec")
+        if age_s is None:
+            age_s = quote.get("age_s")
+        if not isinstance(age_s, (int, float)) or age_s < 0:
+            return
+        try:
+            max_age_ms = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
+        except (TypeError, ValueError):
+            max_age_ms = 3000.0
+        if age_s * 1000.0 <= max_age_ms:
+            try:
+                self._last_tick_ms = int(time.monotonic() * 1000)
+            except Exception:
+                self._mark_tick_activity()
+
     def _refresh_from_quote(self, token: int | None) -> dict | None:
         """Treat a fresh quote snapshot as a tick and update recency state."""
 
@@ -2013,50 +2048,35 @@ class StrategyRunner:
 
         try:
             now_ms = int(time.monotonic() * 1000)
-            last_ms_raw = getattr(self, "_last_tick_ms", 0)
+            last_ms_raw = getattr(self, "_last_tick_ms", now_ms)
             try:
-                last_ms = int(last_ms_raw)
+                idle_ms = now_ms - int(last_ms_raw)
             except (TypeError, ValueError):
-                last_ms = 0
+                idle_ms = 0
             try:
-                max_idle = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+                watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
             except (TypeError, ValueError):
-                max_idle = 2000
-            if (
-                getattr(self, "market_open", False)
-                and now_ms - last_ms > max_idle
-            ):
-                tok: int | None = None
+                watchdog_ms = 2000
+            if getattr(self, "market_open", False) and idle_ms > watchdog_ms:
+                tok: Any = None
                 last_plan = getattr(self, "_last_plan", None)
                 if isinstance(last_plan, dict):
-                    token_val = last_plan.get("token")
-                    try:
-                        tok = int(token_val) if token_val is not None else None
-                    except (TypeError, ValueError):
-                        tok = None
+                    tok = last_plan.get("token")
+                if not tok:
+                    ds = getattr(self, "data_source", None)
+                    if ds is not None:
+                        tok = (
+                            getattr(ds, "_current_ce_token", None)
+                            or getattr(ds, "_current_pe_token", None)
+                        )
                 ds = getattr(self, "data_source", None)
-                if tok is None and ds is not None:
-                    candidates = (
-                        getattr(ds, "_current_ce_token", None),
-                        getattr(ds, "_current_pe_token", None),
-                    )
-                    for candidate in candidates:
-                        try:
-                            if candidate is None:
-                                continue
-                            tok = int(candidate)
-                        except (TypeError, ValueError):
-                            continue
-                        else:
-                            break
-                if ds and tok:
-                    ensure = getattr(ds, "ensure_token_subscribed", None)
-                    if callable(ensure):
-                        try:
-                            ensure(int(tok), mode="FULL")
-                        except Exception:
-                            self.log.debug("watchdog.ensure_error", exc_info=True)
-                self._refresh_from_quote(tok)
+                ensure = getattr(ds, "ensure_token_subscribed", None)
+                if ds is not None and tok is not None and callable(ensure):
+                    try:
+                        ensure(int(tok), mode="FULL")
+                    except Exception:
+                        self.log.debug("watchdog.ensure_error", exc_info=True)
+                self._bridge_quote_to_tick(tok)
         except Exception:
             self.log.debug("watchdog_error", exc_info=True)
 
@@ -2326,6 +2346,11 @@ class StrategyRunner:
                     if isinstance(last_plan, Mapping):
                         token_hint = last_plan.get("token")
                     self._refresh_from_quote(token_hint)
+                except Exception:
+                    pass
+                try:
+                    token_bridge = (getattr(self, "_last_plan", {}) or {}).get("token")
+                    self._bridge_quote_to_tick(token_bridge)
                 except Exception:
                     pass
                 plan["reason_block"] = "data_stale"
