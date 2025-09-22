@@ -680,13 +680,13 @@ class RiskSettings(BaseModel):
                 "RISK__ALLOW_MIN_ONE_LOT",
                 "RISK_ALLOW_MIN_ONE_LOT",
                 "ALLOW_MIN_ONE_LOT",
-                default="false",
+                default="true",
             )
         ).lower()
         == "true",
         description=(
             "Permit one-lot trades when the equity-funded premium exceeds the "
-            "exposure cap by itself. Disabled by default."
+            "exposure cap by itself. Enabled by default."
         ),
         validation_alias=AliasChoices(
             "RISK__ALLOW_MIN_ONE_LOT",

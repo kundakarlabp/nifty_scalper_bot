@@ -151,7 +151,7 @@ EXPOSURE_CAP_SOURCE=equity
 EXPOSURE_CAP_PCT=40              # ₹100k equity ⇒ ₹40k cap
 EXPOSURE_CAP_ABS=0               # disable absolute fallback cap
 RISK__MAX_POSITION_SIZE_PCT=0.40  # per-trade cap tied to equity
-# Defaults to false; set to true to permit a single lot when cash covers the premium override
+# Enabled by default; set to false to disable the single-lot premium override
 RISK__ALLOW_MIN_ONE_LOT=true
 
 # static environment cap

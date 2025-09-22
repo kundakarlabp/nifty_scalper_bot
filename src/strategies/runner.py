@@ -2484,7 +2484,8 @@ class StrategyRunner:
             # ---- risk gates
             gates = self._risk_gates_for(plan)
             flow["risk_gates"] = gates
-            if not all(gates.values()):
+            risk_gate_ok = all(bool(v) for v in gates.values())
+            if not risk_gate_ok:
                 blocked = [k for k, v in gates.items() if not v]
                 if "daily_drawdown" in blocked:
                     plan["reason_block"] = "daily_dd_hit"
@@ -2504,6 +2505,20 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+
+            gates_pass = bool(plan.get("risk_ok", True)) and risk_gate_ok
+            plan_gates = plan.get("gates")
+            if isinstance(plan_gates, Mapping) and plan_gates:
+                gate_flags: list[bool] = []
+                for value in plan_gates.values():
+                    if isinstance(value, Mapping) and "ok" in value:
+                        gate_flags.append(bool(value.get("ok")))
+                    else:
+                        gate_flags.append(bool(value))
+                if gate_flags:
+                    gates_pass = gates_pass and all(gate_flags)
+            flow["gates_pass"] = gates_pass
+            plan["gates_pass"] = gates_pass
 
             # ---- limits engine
             exposure = Exposure(
@@ -2656,6 +2671,57 @@ class StrategyRunner:
                 delta=plan.get("delta"),
                 quote=plan.get("quote"),
             )
+            allow_min_cfg = bool(getattr(self.settings.risk, "allow_min_one_lot", False))
+            if (
+                qty <= 0
+                and allow_min_cfg
+                and gates_pass
+                and diag.get("block_reason") == "cap_lt_one_lot"
+            ):
+                lot_size_diag = diag.get("lot_size")
+                try:
+                    lot_size_units = int(lot_size_diag) if lot_size_diag else int(
+                        settings.instruments.nifty_lot_size
+                    )
+                except (TypeError, ValueError):
+                    lot_size_units = int(settings.instruments.nifty_lot_size)
+                unit_cost_val = diag.get("unit_notional")
+                equity_val = diag.get("equity")
+                cap_abs_val = diag.get("cap_abs")
+                try:
+                    unit_cost = float(unit_cost_val)
+                except (TypeError, ValueError):
+                    unit_cost = 0.0
+                try:
+                    equity_amt = float(equity_val)
+                except (TypeError, ValueError):
+                    equity_amt = 0.0
+                cap_abs_ok = True
+                if cap_abs_val not in (None, 0):
+                    try:
+                        cap_abs_float = float(cap_abs_val)
+                    except (TypeError, ValueError):
+                        cap_abs_float = 0.0
+                    if unit_cost > 0:
+                        cap_abs_ok = cap_abs_float >= unit_cost
+                equity_ok = unit_cost <= 0 or equity_amt >= unit_cost
+                if unit_cost > 0 and equity_ok and cap_abs_ok:
+                    qty = lot_size_units
+                    diag = dict(diag)
+                    diag["lots"] = diag["lots_final"] = 1
+                    diag["block_reason"] = ""
+                    diag["override"] = "allow_min_one_lot"
+                    diag["reason"] = "allow_min_one_lot"
+                    diag["equity"] = round(equity_amt, 2)
+                    plan_reasons = plan.setdefault("reasons", [])
+                    if "allow_min_one_lot" not in plan_reasons:
+                        plan_reasons.append("allow_min_one_lot")
+                    self.log.info(
+                        "allow_min_one_lot override applied: unit=%.2f equity=%.2f",
+                        unit_cost,
+                        equity_amt,
+                    )
+
             self._last_computed_lots = int(diag.get("lots_final", diag.get("lots", 0)))
             flow["sizing"] = diag
             block_reason = diag.get("block_reason")
