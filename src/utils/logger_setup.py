@@ -68,4 +68,6 @@ def setup_logging():
         lg.handlers.clear()
         lg.propagate = True
         lg.setLevel(logging.WARNING if noisy != "kiteconnect" else logging.INFO)
-    logging.getLogger("structured").setLevel(getattr(logging, level, logging.INFO))
+    logging.getLogger("decision").setLevel(logging.INFO)
+    logging.getLogger("micro").setLevel(logging.INFO)
+    logging.getLogger("debug").setLevel(logging.DEBUG)

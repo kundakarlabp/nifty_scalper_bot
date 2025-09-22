@@ -79,7 +79,7 @@ from src.utils.market_time import (
 )
 from src.utils.time_windows import TZ, floor_to_minute
 from src.utils.logging_tools import structured_debug_handler
-from src.utils.emit import emit_decision, emit_debug_full, emit_micro
+from src.utils.emit import emit_decision, emit_micro
 
 from .warmup import check as warmup_check, required_bars
 
@@ -980,13 +980,41 @@ class StrategyRunner:
             elif isinstance(plan_snapshot, Mapping):
                 plan_source = plan_snapshot
 
+            plan_for_payload: Mapping[str, Any] | None = None
+            if isinstance(plan_source, Mapping):
+                plan_for_payload = plan_source
+            elif isinstance(plan_snapshot, Mapping):
+                plan_for_payload = plan_snapshot
+            elif isinstance(signal, Mapping):
+                plan_for_payload = signal
+
+            plan_data: Mapping[str, Any] = plan_for_payload or {}
+            micro_info = plan_data.get("micro") if isinstance(plan_data, Mapping) else None
+            plan_log: dict[str, Any] = {
+                "action": plan_data.get("action"),
+                "option_type": plan_data.get("option_type"),
+                "symbol": plan_data.get("symbol"),
+                "qty_lots": plan_data.get("qty_lots") or plan_data.get("lots"),
+                "score": plan_data.get("score"),
+                "atr_pct_raw": plan_data.get("atr_pct_raw"),
+                "reasons": plan_data.get("reasons"),
+                "micro": {
+                    "spread_pct": micro_info.get("spread_pct") if isinstance(micro_info, Mapping) else None,
+                    "depth_ok": micro_info.get("depth_ok") if isinstance(micro_info, Mapping) else None,
+                },
+                "eval_count": getattr(self, "eval_count", None),
+                "last_eval_ts": getattr(self, "last_eval_ts", None),
+            }
+
             self._last_decision_label = label_value
             self._last_decision_reason = reason_value
+
             fields: dict[str, Any] = {
                 "label": label_value,
                 "reason": (reason_value or ""),
+                "plan": plan_log,
             }
-            if plan_source is not None:
+            if isinstance(plan_source, Mapping):
                 mapping = {
                     "side": "side",
                     "option_type": "ot",
@@ -999,15 +1027,6 @@ class StrategyRunner:
                         fields[dest_key] = value
             log_event("decision", "info", **fields)
 
-            plan_for_payload: Mapping[str, Any] | None = None
-            if isinstance(plan_source, Mapping):
-                plan_for_payload = plan_source
-            elif isinstance(plan_snapshot, Mapping):
-                plan_for_payload = plan_snapshot
-            elif isinstance(signal, Mapping):
-                plan_for_payload = signal
-
-            plan_data: Mapping[str, Any] = plan_for_payload or {}
             decision_payload = {
                 "event": "decision",
                 "label": label_value,
@@ -1028,16 +1047,8 @@ class StrategyRunner:
             }
             if isinstance(plan_snapshot, Mapping):
                 decision_payload["plan"] = plan_snapshot
+            decision_payload["plan_summary"] = plan_log
             emit_decision(decision_payload)
-            debug_payload: dict[str, Any] = {
-                "label": label_value,
-                "reason_block": reason_value,
-            }
-            if isinstance(plan_snapshot, Mapping):
-                debug_payload["plan"] = plan_snapshot
-            if isinstance(signal, Mapping):
-                debug_payload["signal"] = dict(signal)
-            emit_debug_full("decision_full", debug_payload)
             if reason_value:
                 reason_key = str(reason_value)
                 self._block_counts[reason_key] = self._block_counts.get(reason_key, 0) + 1
@@ -2696,14 +2707,7 @@ class StrategyRunner:
                     "spread_pct": None,
                     "depth_ok": None,
                 }
-                emit_micro(
-                    {
-                        "depth_ok": None,
-                        "spread_pct": None,
-                        "tick_full": False,
-                        "tick_ltp_only": False,
-                    }
-                )
+                emit_micro(depth_ok=None, spread_pct=None)
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
                 self._last_flow_debug = flow
@@ -2730,13 +2734,9 @@ class StrategyRunner:
                 side=str(plan.get("action") or ""),
             )
             plan["micro"] = micro
-            micro_payload = {
-                "depth_ok": micro.get("depth_ok") if isinstance(micro, Mapping) else None,
-                "spread_pct": micro.get("spread_pct") if isinstance(micro, Mapping) else None,
-                "tick_full": bool(quote_snapshot),
-                "tick_ltp_only": False,
-            }
-            emit_micro(micro_payload)
+            depth_ok = micro.get("depth_ok") if isinstance(micro, Mapping) else None
+            spread_pct = micro.get("spread_pct") if isinstance(micro, Mapping) else None
+            emit_micro(depth_ok=depth_ok, spread_pct=spread_pct)
             if micro:
                 spread_val = micro.get("spread_pct")
                 try:
