@@ -165,7 +165,7 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     log_fn(msg, extra=record_extra)
 
 
-class LogSuppressor:
+class LogSuppressor:  # type: ignore[no-redef]
     """Suppress bursts of repeated warnings/errors for a fixed window."""
 
     def __init__(self, window_sec: float | None = None) -> None:
