@@ -63,6 +63,22 @@ def _format_percent(value: Any, digits: int = 2) -> str:
         return "-"
 
 
+def _as_percent(value: Any) -> float | None:
+    """Normalize numeric inputs that may represent percentages in different scales."""
+
+    if value is None:
+        return None
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pct <= 1.0:
+        return pct * 100.0
+    if pct > 50.0:
+        return pct / 100.0
+    return pct
+
+
 def _env_float(name: str, default: float) -> float:
     """Return ``float`` from environment variable ``name`` with ``default`` fallback."""
 
@@ -167,9 +183,9 @@ def _fmt_micro(
     """Format microstructure diagnostics for Telegram output."""
 
     m = micro or {}
-    spread = m.get("spread_pct")
+    spread = _as_percent(m.get("spread_pct"))
     depth_ok = m.get("depth_ok")
-    spread_pct = _format_percent(spread, 2)
+    spread_pct = _format_float(spread, 2) if spread is not None else "-"
     return (
         f"quote: {sym} src={m.get('source', '-')} "
         f"ltp={m.get('ltp')} bid={m.get('bid')} ask={m.get('ask')} "
@@ -988,6 +1004,7 @@ class TelegramController:
                 spread = micro.get("spread_pct")
             if quote_age is None and isinstance(micro, Mapping):
                 quote_age = micro.get("age")
+            spread = _as_percent(spread)
             micro_detail = plan.get("micro") if isinstance(plan.get("micro"), Mapping) else {}
             if not micro_detail and isinstance(micro, Mapping):
                 micro_detail = micro
@@ -1024,7 +1041,7 @@ class TelegramController:
                         else "—"
                     ),
                     spr=esc(
-                        _format_percent(spread, 2)
+                        _format_float(spread, 2)
                         if isinstance(spread, (int, float))
                         else "—"
                     ),
@@ -1073,6 +1090,7 @@ class TelegramController:
                     if not reason or reason in {"ok", None}
                     else f"BLOCK → {reason}"
                 )
+                micro_spread = _as_percent(micro_detail.get("spread_pct"))
                 lines.append(
                     "• Micro: {status} (depth_ok={depth} spr%={spr})".format(
                         status=esc(str(status)),
@@ -1082,11 +1100,8 @@ class TelegramController:
                             else "—"
                         ),
                         spr=esc(
-                            _format_percent(micro_detail.get("spread_pct"), 2)
-                            if isinstance(
-                                micro_detail.get("spread_pct"),
-                                (int, float),
-                            )
+                            _format_float(micro_spread, 2)
+                            if isinstance(micro_spread, (int, float))
                             else "—",
                         ),
                     )
@@ -3102,10 +3117,12 @@ class TelegramController:
                 if spread_pct is None or depth_ok is None:
                     return self._send("📉 Micro: N/A (no_quote)")
                 src = q.get("source", "-")
-                try:
-                    spread_pct_fmt = _format_percent(spread_pct, 2)
-                except Exception:
-                    spread_pct_fmt = "N/A"
+                spread_pct_norm = _as_percent(spread_pct)
+                spread_pct_fmt = (
+                    _format_float(spread_pct_norm, 2)
+                    if isinstance(spread_pct_norm, (int, float))
+                    else "N/A"
+                )
                 return self._send(
                     f"📉 Micro\n• spread%={spread_pct_fmt}\n• depth_ok={depth_ok}\n• src={src}"
                 )
