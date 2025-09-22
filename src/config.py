@@ -1260,6 +1260,16 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("BLOCK_SUMMARY_INTERVAL_SEC"),
         description="Seconds between repeated block reason summaries.",
     )
+    decision_interval_sec: float = Field(
+        10.0,
+        validation_alias=AliasChoices("DECISION_INTERVAL_SEC"),
+        description="Minimum seconds between repeated decision logs when unchanged.",
+    )
+    log_suppress_window_sec: float = Field(
+        300.0,
+        validation_alias=AliasChoices("LOG_SUPPRESS_WINDOW_SEC"),
+        description="Window for grouping repeated warning/error suppressions.",
+    )
     # Fallback notional equity (₹) when live equity fetch fails or is disabled.
     RISK_DEFAULT_EQUITY: int = Field(
         default_factory=lambda: int(os.getenv("RISK_DEFAULT_EQUITY", "40000")),
@@ -1447,6 +1457,8 @@ class AppSettings(BaseSettings):
         "heartbeat_interval_sec",
         "plan_log_interval_sec",
         "block_summary_interval_sec",
+        "decision_interval_sec",
+        "log_suppress_window_sec",
         mode="before",
     )
     @classmethod

@@ -386,6 +386,7 @@ class StrategyRunner:
         self._lg.set_interval(
             "block.summary", _interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
         )
+        self._lg.set_interval("decision", _interval("DECISION_INTERVAL_SEC", 10.0))
         self._block_counts: dict[str, int] = {}
 
         self.settings = settings
@@ -397,6 +398,9 @@ class StrategyRunner:
         )
         self._block_summary_interval = float(
             getattr(self.settings, "block_summary_interval_sec", 30.0)
+        )
+        self._decision_interval = float(
+            getattr(self.settings, "decision_interval_sec", 10.0)
         )
 
         # Event guard configuration
@@ -1025,8 +1029,6 @@ class StrategyRunner:
                     value = plan_source.get(src_key)
                     if value is not None:
                         fields[dest_key] = value
-            log_event("decision", "info", **fields)
-
             decision_payload = {
                 "event": "decision",
                 "label": label_value,
@@ -1048,15 +1050,27 @@ class StrategyRunner:
             if isinstance(plan_snapshot, Mapping):
                 decision_payload["plan"] = plan_snapshot
             decision_payload["plan_summary"] = plan_log
-            emit_decision(decision_payload)
             if reason_value:
                 reason_key = str(reason_value)
                 self._block_counts[reason_key] = self._block_counts.get(reason_key, 0) + 1
             now = time.time()
-            last = getattr(self, "_ts_last_decision_emit", 0.0)
-            if now - last < 0.05:
+            last_emit = getattr(self, "_ts_last_decision_emit", 0.0)
+            if now - last_emit < 0.05:
                 return
+
+            decision_key = (label_value, reason_value)
+            if not self._lg.ok_changed(
+                "decision",
+                decision_key,
+                interval=self._decision_interval,
+            ):
+                return
+
             self._ts_last_decision_emit = now
+
+            log_event("decision", "info", **fields)
+
+            emit_decision(decision_payload)
         except Exception:
             logging.getLogger(__name__).debug("decision.emit_error", exc_info=True)
 

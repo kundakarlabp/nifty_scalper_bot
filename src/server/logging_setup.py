@@ -129,7 +129,7 @@ def setup_root_logger() -> None:
     _LOG.info("logging.init", extra={"extra": {"level": level_name, "format": fmt}})
 
 
-class LogSuppressor:
+class LogMemoSuppressor:
     """Remember once-only log combinations to avoid repeated noise."""
 
     def __init__(self) -> None:
@@ -173,12 +173,17 @@ class LogSuppressor:
         self._last: dict[tuple[str, str, str], float] = {}
         self._count: dict[tuple[str, str, str], int] = {}
 
-    def should_log(self, kind: str, group: str, ident: Any) -> bool:
-        """Return ``True`` if the call should emit a log for ``ident``."""
+    def should_log(self, kind: str, group: Any, *identity: Any) -> bool:
+        """Return ``True`` if the call should emit a log for ``identity``."""
 
         import time
 
-        key = (kind, group, str(ident))
+        group_text = str(group)
+        if identity:
+            ident_text = "|".join(str(part) for part in identity)
+        else:
+            ident_text = group_text
+        key = (kind, group_text, ident_text)
         now = time.time()
         last = self._last.get(key, 0.0)
         if now - last >= self._window:
@@ -187,8 +192,8 @@ class LogSuppressor:
                 log_event(
                     "warn.suppressed",
                     "warning",
-                    group=group,
-                    ident=str(ident),
+                    group=group_text,
+                    ident=ident_text,
                     repeats=repeats,
                     window_s=self._window,
                 )
