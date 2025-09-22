@@ -396,9 +396,11 @@ class StrategyRunner:
 
         self._micro_ok_ts_by_token: dict[int, int] = {}
         try:
-            self._micro_hysteresis_ms = int(os.getenv("MICRO_HYSTERESIS_MS", "2000"))
+            self._micro_ok_hysteresis_ms = int(
+                os.getenv("MICRO_OK_HYSTERESIS_MS", "2000")
+            )
         except (TypeError, ValueError):
-            self._micro_hysteresis_ms = 2000
+            self._micro_ok_hysteresis_ms = 2000
 
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
@@ -684,7 +686,6 @@ class StrategyRunner:
         self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
-        self._micro_ok_ts_by_token: Dict[int, int] = {}
         self.last_spot: Optional[float] = None
         self._log_signal_changes_only = (
             os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
@@ -707,6 +708,7 @@ class StrategyRunner:
             self._tick_watchdog_ms = 0
         self._last_atr_state: Optional[str] = None
         self._last_confidence_zone: Optional[str] = None
+        self.market_open: bool = is_market_open(self._now_ist())
 
         # Runtime flags
         self._last_error: Optional[str] = None
@@ -924,8 +926,7 @@ class StrategyRunner:
 
         if getattr(self, "_tick_watchdog_ms", 0) <= 0:
             return
-        now_ist = self._now_ist()
-        if not is_market_open(now_ist):
+        if not getattr(self, "market_open", False):
             return
         if (self._now_ms() - getattr(self, "_last_tick_ms", self._now_ms())) < self._tick_watchdog_ms:
             return
@@ -2006,6 +2007,7 @@ class StrategyRunner:
             except TypeError:
                 window_ok = self._within_trading_window()
             enable_windows = getattr(settings, "enable_time_windows", True)
+            self.market_open = bool(window_ok)
             within = (
                 (not enable_windows)
                 or window_ok
@@ -3020,7 +3022,9 @@ class StrategyRunner:
                             token_int = int(plan.get("token"))
                     except (TypeError, ValueError):
                         token_int = None
-                    hysteresis_ms = max(0, int(getattr(self, "_micro_hysteresis_ms", 0)))
+                    hysteresis_ms = max(
+                        0, int(getattr(self, "_micro_ok_hysteresis_ms", 0))
+                    )
                     if token_int is not None and hysteresis_ms > 0:
                         last_ok = self._micro_ok_ts_by_token.get(token_int)
                         if last_ok is not None and self._now_ms() - last_ok <= hysteresis_ms:
