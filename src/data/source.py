@@ -27,6 +27,8 @@ from typing import (
 import numpy as np
 import pandas as pd
 
+from src.server.logging_setup import LogSuppressor
+
 from src.boot.validate_env import (
     data_clamp_to_market_open,
     data_warmup_backfill_min,
@@ -51,6 +53,8 @@ log = logging.getLogger(__name__)
 
 # Warn only once when historical data access is denied
 _warn_perm_once = False
+
+_hist_log_suppressor = LogSuppressor()
 
 
 def _as_float(val: Any) -> float:
@@ -2125,13 +2129,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
             df = df[~df.index.duplicated(keep="last")]
 
             if df.empty:
-                log.error(
-                    "historical_data empty for token=%s interval=%s window=%s→%s",
-                    token,
-                    interval,
-                    start,
-                    end,
-                )
+                if _hist_log_suppressor.should_log(
+                    "hist.empty", token, interval, start, end
+                ):
+                    log.error(
+                        "historical_data empty for token=%s interval=%s window=%s→%s",
+                        token,
+                        interval,
+                        start,
+                        end,
+                    )
                 ltp = self.get_last_price(token)
                 if isinstance(ltp, (int, float)):
                     syn = _synthetic_ohlc(float(ltp), end, interval, WARMUP_BARS)
