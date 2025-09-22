@@ -129,7 +129,7 @@ def setup_root_logger() -> None:
 
 
 def log_event(tag: str, level: str = "info", **fields: Any) -> None:
-    """Emit a structured log line with ``tag`` and arbitrary ``fields``."""
+    """Emit a structured log line compatible with JSON and logfmt handlers."""
 
     logger = logging.getLogger(tag)
     msg = " ".join(f"{key}={_q(value)}" for key, value in fields.items()) if fields else ""
@@ -138,4 +138,38 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
     if not callable(log_fn):
         log_fn = logger.info
     log_fn(msg, extra=record_extra)
+
+
+class LogSuppressor:
+    """Suppress bursts of repeated warnings/errors for a fixed window."""
+
+    def __init__(self, window_sec: float | None = None) -> None:
+        self._window = float(os.getenv("LOG_SUPPRESS_WINDOW_SEC", window_sec or 300))
+        self._last: dict[tuple[str, str, str], float] = {}
+        self._count: dict[tuple[str, str, str], int] = {}
+
+    def should_log(self, kind: str, group: str, ident: Any) -> bool:
+        """Return ``True`` if the call should emit a log for ``ident``."""
+
+        import time
+
+        key = (kind, group, str(ident))
+        now = time.time()
+        last = self._last.get(key, 0.0)
+        if now - last >= self._window:
+            repeats = self._count.pop(key, 0)
+            if repeats:
+                log_event(
+                    "warn.suppressed",
+                    "warning",
+                    group=group,
+                    ident=str(ident),
+                    repeats=repeats,
+                    window_s=self._window,
+                )
+            self._last[key] = now
+            return True
+
+        self._count[key] = self._count.get(key, 0) + 1
+        return False
 
