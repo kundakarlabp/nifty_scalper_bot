@@ -706,6 +706,8 @@ class StrategyRunner:
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
         self._last_tick_ms: int = self._now_ms()
+        self._micro_ok_last_ms: int = 0
+        self._micro_ok_streak: int = 0
         try:
             self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
         except (TypeError, ValueError):
@@ -886,6 +888,72 @@ class StrategyRunner:
         except Exception:
             self.log.debug("tick_hook_error", exc_info=True)
 
+    def _quote_age_seconds(self, q: Mapping[str, Any] | dict | None) -> float | None:
+        if not q:
+            return None
+        try:
+            raw = q.get("age_sec", q.get("age_s"))
+        except AttributeError:
+            return None
+        try:
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _quote_fresh(self, q: Mapping[str, Any] | dict | None) -> bool:
+        age = self._quote_age_seconds(q)
+        if age is None:
+            return False
+        try:
+            max_age = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
+        except (TypeError, ValueError):
+            max_age = 3000.0
+        return (age * 1000.0) <= max_age
+
+    def _bridge_quote_to_tick(self, token: Any) -> None:
+        if not token:
+            return
+        ds = getattr(self, "data_source", None)
+        snapshot = getattr(ds, "quote_snapshot", None)
+        if ds is None or not callable(snapshot):
+            return
+        try:
+            quote = snapshot(int(token)) or {}
+        except Exception:
+            self.log.debug("quote_bridge_error", exc_info=True)
+            return
+        if self._quote_fresh(quote):
+            try:
+                self._last_tick_ms = int(time.monotonic() * 1000)
+            except Exception:
+                self._mark_tick_activity()
+
+    def _micro_warmup_update(self, micro_ok: bool) -> None:
+        now = int(time.monotonic() * 1000)
+        if micro_ok:
+            self._micro_ok_streak += 1
+            self._micro_ok_last_ms = now
+        else:
+            self._micro_ok_streak = 0
+
+    def _micro_in_grace(self) -> bool:
+        now = int(time.monotonic() * 1000)
+        try:
+            grace = int(os.getenv("MICRO_GRACE_MS", "2500"))
+        except (TypeError, ValueError):
+            grace = 2500
+        try:
+            min_streak = int(os.getenv("MICRO_MIN_OK_STREAK", "2"))
+        except (TypeError, ValueError):
+            min_streak = 2
+        if grace < 0:
+            grace = 0
+        if min_streak < 0:
+            min_streak = 0
+        return (now - self._micro_ok_last_ms) <= grace or (
+            self._micro_ok_streak >= min_streak and min_streak > 0
+        )
+
     def _refresh_from_quote(self, token: int | None) -> dict | None:
         """Treat a fresh quote snapshot as a tick and update recency state."""
 
@@ -899,16 +967,8 @@ class StrategyRunner:
             return None
         try:
             quote = snapshot(int(token)) or {}
-            age_s = quote.get("age_sec")
-            if age_s is None:
-                age_s = quote.get("age_s")
-            if isinstance(age_s, (int, float)) and age_s >= 0:
-                try:
-                    max_age_ms = float(os.getenv("FRESH_TICK_MAX_AGE_MS", "3000"))
-                except (TypeError, ValueError):
-                    max_age_ms = 3000.0
-                if (age_s * 1000.0) <= max_age_ms:
-                    self._mark_tick_activity()
+            if self._quote_fresh(quote):
+                self._mark_tick_activity()
             return quote
         except Exception:
             self.log.debug("quote_to_tick_error", exc_info=True)
@@ -2013,50 +2073,24 @@ class StrategyRunner:
 
         try:
             now_ms = int(time.monotonic() * 1000)
-            last_ms_raw = getattr(self, "_last_tick_ms", 0)
-            try:
-                last_ms = int(last_ms_raw)
-            except (TypeError, ValueError):
-                last_ms = 0
-            try:
-                max_idle = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
-            except (TypeError, ValueError):
-                max_idle = 2000
-            if (
-                getattr(self, "market_open", False)
-                and now_ms - last_ms > max_idle
-            ):
-                tok: int | None = None
+            idle_ms = now_ms - getattr(self, "_last_tick_ms", now_ms)
+            if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "2000")):
+                tok: Any | None = None
                 last_plan = getattr(self, "_last_plan", None)
                 if isinstance(last_plan, dict):
-                    token_val = last_plan.get("token")
-                    try:
-                        tok = int(token_val) if token_val is not None else None
-                    except (TypeError, ValueError):
-                        tok = None
+                    tok = last_plan.get("token")
                 ds = getattr(self, "data_source", None)
-                if tok is None and ds is not None:
-                    candidates = (
-                        getattr(ds, "_current_ce_token", None),
-                        getattr(ds, "_current_pe_token", None),
+                if (not tok) and ds is not None:
+                    tok = getattr(ds, "_current_ce_token", None) or getattr(
+                        ds, "_current_pe_token", None
                     )
-                    for candidate in candidates:
-                        try:
-                            if candidate is None:
-                                continue
-                            tok = int(candidate)
-                        except (TypeError, ValueError):
-                            continue
-                        else:
-                            break
-                if ds and tok:
-                    ensure = getattr(ds, "ensure_token_subscribed", None)
-                    if callable(ensure):
-                        try:
-                            ensure(int(tok), mode="FULL")
-                        except Exception:
-                            self.log.debug("watchdog.ensure_error", exc_info=True)
-                self._refresh_from_quote(tok)
+                ensure = getattr(getattr(self, "data_source", None), "ensure_token_subscribed", None)
+                if tok and callable(ensure):
+                    try:
+                        ensure(int(tok), mode="FULL")
+                    except Exception:
+                        self.log.debug("watchdog.ensure_error", exc_info=True)
+                self._bridge_quote_to_tick(tok)
         except Exception:
             self.log.debug("watchdog_error", exc_info=True)
 
@@ -2326,6 +2360,11 @@ class StrategyRunner:
                     if isinstance(last_plan, Mapping):
                         token_hint = last_plan.get("token")
                     self._refresh_from_quote(token_hint)
+                except Exception:
+                    pass
+                try:
+                    tok = (getattr(self, "_last_plan", {}) or {}).get("token")
+                    self._bridge_quote_to_tick(tok)
                 except Exception:
                     pass
                 plan["reason_block"] = "data_stale"
@@ -2962,6 +3001,10 @@ class StrategyRunner:
             plan["quote_mode"] = quote_mode
             plan["quote"] = quote_dict
             plan["quote_age_s"] = self._normalize_quote_age(quote_dict)
+            micro_ok_flag = bool(micro and micro.get("depth_ok")) and (
+                micro.get("spread_pct") is not None
+            )
+            self._micro_warmup_update(micro_ok_flag)
             try:
                 token_for_micro = plan.get("token") or plan.get("option_token")
                 token_int = int(token_for_micro) if token_for_micro is not None else None
@@ -2977,32 +3020,71 @@ class StrategyRunner:
                 quote_mode,
                 plan["quote_src"],
             )
-            if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.last_plan = plan
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
-            if micro.get("would_block"):
-                plan.setdefault("reasons", []).append("micro")
-                plan["reason_block"] = "micro"
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.last_plan = plan
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+            def _micro_subscription_nudge(allow_grace: bool) -> bool:
+                ds_local = getattr(self, "data_source", None)
+                ensure_local = getattr(ds_local, "ensure_token_subscribed", None)
+                tok_local: Any | None = None
+                try:
+                    tok_local = (self._last_plan or {}).get("token")
+                except Exception:
+                    tok_local = None
+                if not tok_local:
+                    tok_local = plan.get("token") or plan.get("option_token")
+                if ds_local and tok_local and callable(ensure_local):
+                    try:
+                        ensure_local(int(tok_local), mode="FULL")
+                    except Exception:
+                        self.log.debug("micro.ensure_error", exc_info=True)
+                if allow_grace and self._micro_in_grace():
+                    flow["reason_block"] = None
+                    plan["reason_block"] = None
+                    reasons_local = plan.setdefault("reasons", [])
+                    if "micro_grace" not in reasons_local:
+                        reasons_local.append("micro_grace")
+                    return True
+                return False
+
+            skip_micro_block = False
+            missing_micro = micro.get("spread_pct") is None or micro.get("depth_ok") is None
+            if missing_micro:
+                plan.setdefault("micro", {}).setdefault("spread_pct", None)
+                plan["micro"].setdefault("depth_ok", None)
+                if _micro_subscription_nudge(True):
+                    skip_micro_block = True
+                else:
+                    plan["reason_block"] = "no_option_quote"
+                    reasons = plan.setdefault("reasons", [])
+                    if "no_option_quote" not in reasons:
+                        reasons.append("no_option_quote")
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.last_plan = plan
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
+            if (not skip_micro_block) and micro.get("would_block"):
+                allow_grace = micro.get("reason") == "no_quote"
+                if _micro_subscription_nudge(allow_grace):
+                    skip_micro_block = True
+                else:
+                    reasons = plan.setdefault("reasons", [])
+                    if "micro" not in reasons:
+                        reasons.append("micro")
+                    plan["reason_block"] = "micro"
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.last_plan = plan
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
             if micro.get("mode") == "SOFT":
                 penalty = (
                     0.5
@@ -3599,6 +3681,65 @@ class StrategyRunner:
             tp2_px = float(
                 plan.get("opt_tp2") if tp_basis == "premium" else plan.get("tp2")
             )
+
+            try:
+                ds = getattr(self, "data_source", None)
+                qsnap = getattr(ds, "quote_snapshot", None)
+                tok: Any | None = None
+                try:
+                    tok = (self._last_plan or {}).get("token")
+                except Exception:
+                    tok = None
+                if not tok:
+                    tok = plan.get("token") or plan.get("option_token")
+                max_age = float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "1500"))
+                max_spread = float(os.getenv("ORDER_MAX_SPREAD_PCT", "0.35"))
+                retries = int(os.getenv("ORDER_MICRO_RETRIES", "3"))
+                pause = float(os.getenv("ORDER_MICRO_RETRY_MS", "120")) / 1000.0
+
+                def _ok(q: Mapping[str, Any] | None) -> bool:
+                    if not q:
+                        return False
+                    age = self._quote_age_seconds(q)
+                    spread_raw = q.get("spread_pct") if isinstance(q, Mapping) else None
+                    try:
+                        spread_val = float(spread_raw) if spread_raw is not None else None
+                    except (TypeError, ValueError):
+                        spread_val = None
+                    return (
+                        age is not None and age * 1000.0 <= max_age
+                    ) and (spread_val is not None and spread_val <= max_spread)
+
+                if ds and callable(qsnap) and tok:
+                    ensure = getattr(ds, "ensure_token_subscribed", None)
+                    if callable(ensure):
+                        try:
+                            ensure(int(tok), mode="FULL")
+                        except Exception:
+                            self.log.debug("order.ensure_error", exc_info=True)
+                    q_state: Mapping[str, Any] | None = qsnap(int(tok)) or {}
+                    attempts = 0
+                    while attempts < retries and not _ok(q_state):
+                        time.sleep(max(pause, 0.0))
+                        q_state = qsnap(int(tok)) or {}
+                        attempts += 1
+                    if not _ok(q_state):
+                        raise RuntimeError("micro_retry_fail")
+            except RuntimeError:
+                self.log.info("order.block", extra={"reason": "micro_retry_fail"})
+                plan.setdefault("reasons", []).append("micro_retry_fail")
+                plan["reason_block"] = "micro_retry_fail"
+                flow["reason_block"] = "micro_retry_fail"
+                self._last_flow_debug = flow
+                self._record_plan(plan)
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
+                return
+            except Exception:
+                self.log.debug("order.guard_error", exc_info=True)
             if hasattr(self.executor, "place_order"):
                 hash_input = {
                     "action": plan["action"],
