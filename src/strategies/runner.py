@@ -373,23 +373,26 @@ class StrategyRunner:
         self._last_computed_lots: int | None = None
 
         self._lg = SimpleLogGate(default_interval_seconds=5.0)
+        self.settings = settings
 
-        def _interval(name: str, default: float) -> float:
-            raw = os.getenv(name)
+        def _interval(attr: str, default: float) -> float:
             try:
-                return float(raw) if raw is not None else float(default)
+                value = getattr(self.settings, attr)
+            except AttributeError:
+                return float(default)
+            try:
+                return float(value)
             except (TypeError, ValueError):
                 return float(default)
 
-        self._lg.set_interval("hb", _interval("HEARTBEAT_INTERVAL_SEC", 30.0))
-        self._lg.set_interval("plan", _interval("PLAN_LOG_INTERVAL_SEC", 60.0))
+        self._lg.set_interval("hb", _interval("heartbeat_interval_sec", 30.0))
+        self._lg.set_interval("plan", _interval("plan_log_interval_sec", 60.0))
         self._lg.set_interval(
-            "block.summary", _interval("BLOCK_SUMMARY_INTERVAL_SEC", 30.0)
+            "block.summary", _interval("block_summary_interval_sec", 30.0)
         )
-        self._lg.set_interval("decision", _interval("DECISION_INTERVAL_SEC", 10.0))
+        self._lg.set_interval("decision", _interval("decision_interval_sec", 10.0))
         self._block_counts: dict[str, int] = {}
 
-        self.settings = settings
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
         )
@@ -398,6 +401,9 @@ class StrategyRunner:
         )
         self._block_summary_interval = float(
             getattr(self.settings, "block_summary_interval_sec", 30.0)
+        )
+        self._decision_interval = float(
+            getattr(self.settings, "decision_interval_sec", 10.0)
         )
 
         # Event guard configuration
