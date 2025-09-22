@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config import settings
+from src.utils.jsonsafe import json_safe
 
 _LOG = logging.getLogger(__name__)
 
@@ -135,7 +136,14 @@ def log_event(tag: str, level: str = "info", **fields: Any) -> None:
 
     logger = logging.getLogger(tag)
     ts = _iso_now()
-    safe_fields = dict(fields)
+    safe_fields = {
+        key: (
+            json_safe(value)
+            if not isinstance(value, (int, float, str, bool, type(None)))
+            else value
+        )
+        for key, value in fields.items()
+    }
     if safe_fields:
         fallback_fields = " ".join(
             f"{key}={_q(value)}" for key, value in safe_fields.items()

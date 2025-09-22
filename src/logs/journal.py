@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.utils.jsonsafe import json_safe
+
 DDL = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -163,9 +165,17 @@ class Journal:
     # ---------------- checkpoints ----------------
     def save_checkpoint(self, payload: Dict[str, Any]) -> None:
         """Persist a lightweight checkpoint snapshot."""
-        ts = datetime.utcnow().isoformat()
+        snap = dict(payload)
+        ts = snap.get("ts") or datetime.utcnow().isoformat()
+        if not isinstance(ts, str):
+            try:
+                ts = ts.isoformat()
+            except Exception:  # pragma: no cover - fallback path
+                ts = str(ts)
+        snap["ts"] = ts
+        payload_json = json.dumps(snap, default=json_safe, ensure_ascii=False)
         self._exec(
-            "INSERT INTO checkpoints(ts,payload) VALUES(?,?)", (ts, json.dumps(payload))
+            "INSERT INTO checkpoints(ts,payload) VALUES(?,?)", (ts, payload_json)
         )
 
     def load_latest_checkpoint(self) -> Optional[Dict[str, Any]]:
