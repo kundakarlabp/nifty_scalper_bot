@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 import weakref
 from collections import deque
@@ -1277,12 +1278,37 @@ class EnhancedScalpingStrategy:
                 plan["opt_atr"] = None
                 plan["opt_atr_pct"] = None
             cap_pct = cap_for_mid(mid, cfg)
+            comps = {
+                "trend": float(regime_score),
+                "momentum": float(momentum_score),
+                "pullback": float(structure_score),
+                "breakout": float(vol_score),
+            }
+            strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
+            weights = strat_cfg.get(
+                "weights",
+                {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1},
+            )
+            raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
+            max_score = sum(float(weights.get(k, 0.0)) for k in comps)
+            base_score = 0.0
+            if max_score > 0:
+                base_score = max(0.0, raw_score) / max_score
+            try:
+                min_score_env = float(os.getenv("MIN_SCORE", "0.35"))
+            except Exception:
+                min_score_env = 0.35
+            signal_score = plan.get("score")
+            if signal_score is None:
+                signal_score = base_score
+            micro_mode = "HARD" if float(signal_score or 0.0) >= min_score_env else "SOFT"
             micro = evaluate_micro(
                 q,
                 lot_size=lot_sz,
                 atr_pct=atr_pct_val,
                 cfg=cfg,
                 side=side,
+                mode=micro_mode,
             )
             if not isinstance(micro, dict):
                 micro = {}
@@ -1310,19 +1336,6 @@ class EnhancedScalpingStrategy:
             ):
                 return plan_block("microstructure", micro=micro)
 
-            comps = {
-                "trend": float(regime_score),
-                "momentum": float(momentum_score),
-                "pullback": float(structure_score),
-                "breakout": float(vol_score),
-            }
-            strat_cfg = getattr(cfg, "raw", {}).get("strategy", {})  # type: ignore[arg-type]
-            weights = strat_cfg.get(
-                "weights",
-                {"trend": 0.4, "momentum": 0.3, "pullback": 0.2, "breakout": 0.1},
-            )
-            raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
-            max_score = sum(float(weights.get(k, 0.0)) for k in comps)
             penalties: Dict[str, float] = {}
             m_val = plan.get("micro")
             m = m_val if isinstance(m_val, dict) else {}

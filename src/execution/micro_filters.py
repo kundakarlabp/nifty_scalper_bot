@@ -188,6 +188,7 @@ def evaluate_micro(
     cfg: Any,
     side: Optional[str] = None,
     lots: Optional[int] = None,
+    mode: Optional[str] = None,
     depth_multiplier: Optional[float] = None,
     require_depth: Optional[bool] = None,
     trace_id: Optional[str] = None,
@@ -198,8 +199,7 @@ def evaluate_micro(
     """
 
     micro_cfg = _micro_cfg(cfg)
-    mode = str(micro_cfg.get("mode", "HARD")).upper()
-    hard = mode == "HARD"
+    mode = str(mode or micro_cfg.get("mode", "HARD")).upper()
     side_norm = str(side).upper() if side else None
 
     lots_val: int

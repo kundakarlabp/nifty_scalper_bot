@@ -2455,6 +2455,15 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+            try:
+                min_score_env = float(os.getenv("MIN_SCORE", "0.35"))
+            except Exception:
+                min_score_env = 0.35
+            micro_mode = (
+                "HARD"
+                if float(plan.get("score") or 0.0) >= min_score_env
+                else "SOFT"
+            )
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=opt.get("lot_size", self.lot_size),
@@ -2462,6 +2471,7 @@ class StrategyRunner:
                 cfg=self.strategy_cfg.raw,
                 side=plan.get("action"),
                 lots=plan.get("qty_lots"),
+                mode=micro_mode,
                 depth_multiplier=float(
                     getattr(settings.executor, "depth_multiplier", 1.0)
                 ),
