@@ -395,10 +395,8 @@ class StrategyRunner:
         self._block_counts: dict[str, int] = {}
 
         self._micro_ok_ts_by_token: dict[int, int] = {}
-        try:
-            self._micro_hysteresis_ms = int(os.getenv("MICRO_HYSTERESIS_MS", "2000"))
-        except (TypeError, ValueError):
-            self._micro_hysteresis_ms = 2000
+        self._last_tick_ms: int = self._now_ms()
+        self.market_open: bool = False
 
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
@@ -684,7 +682,6 @@ class StrategyRunner:
         self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
         self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
         self.last_plan: Optional[Dict[str, Any]] = None
-        self._micro_ok_ts_by_token: Dict[int, int] = {}
         self.last_spot: Optional[float] = None
         self._log_signal_changes_only = (
             os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
@@ -890,6 +887,66 @@ class StrategyRunner:
             micro = {}
             plan["micro"] = micro
         micro["reason"] = "transient_no_quote"
+
+    def _warmup_micro_before_block(
+        self, plan: Dict[str, Any]
+    ) -> tuple[dict | None, bool]:
+        """Attempt to hydrate micro data before blocking on missing quotes."""
+
+        warm_quote: dict | None = None
+        token = plan.get("token")
+
+        try:
+            warm_quote = self._ensure_token_subscribed_and_quote(
+                int(token) if token is not None else None
+            )
+            if warm_quote:
+                micro_state = plan.setdefault("micro", {})
+
+                def _as_float(value: Any) -> float:
+                    try:
+                        return float(value or 0.0)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                def _as_int(value: Any) -> int:
+                    try:
+                        return int(value or 0)
+                    except (TypeError, ValueError):
+                        return 0
+
+                bid = _as_float(warm_quote.get("bid"))
+                ask = _as_float(warm_quote.get("ask"))
+                bid_qty = _as_int(warm_quote.get("bid_qty"))
+                ask_qty = _as_int(warm_quote.get("ask_qty"))
+                depth_ok = (warm_quote.get("depth_ok") is True) or (
+                    bid_qty > 0 and ask_qty > 0
+                )
+                micro_state.setdefault("spread_pct", warm_quote.get("spread_pct"))
+                micro_state.setdefault("depth_ok", depth_ok)
+                if (bid > 0.0 or ask > 0.0) and depth_ok and token is not None:
+                    try:
+                        self._micro_ok_ts_by_token[int(token)] = self._now_ms()
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            self.log.debug("micro.warmup_error", exc_info=True)
+
+        should_block = True
+        try:
+            if token is not None:
+                token_int = int(token)
+                last_ok = self._micro_ok_ts_by_token.get(token_int, 0)
+                hysteresis_ms = int(os.getenv("MICRO_OK_HYSTERESIS_MS", "2000"))
+                if last_ok and (self._now_ms() - last_ok) <= max(0, hysteresis_ms):
+                    should_block = False
+        except Exception:
+            pass
+
+        if not should_block:
+            self._flag_transient_no_quote(plan)
+
+        return warm_quote, should_block
 
     def _ensure_token_subscribed_and_quote(self, token: int | None) -> dict | None:
         """Ensure ``token`` is subscribed and return a fresh quote snapshot if available."""
@@ -1695,6 +1752,42 @@ class StrategyRunner:
 
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
+        if tick:
+            self._last_tick_ms = self._now_ms()
+
+        try:
+            watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+        except Exception:
+            watchdog_ms = 2000
+
+        try:
+            if self.market_open and (self._now_ms() - self._last_tick_ms) > max(0, watchdog_ms):
+                tok: Any = None
+                last_plan = getattr(self, "_last_plan", {}) or {}
+                if isinstance(last_plan, Mapping):
+                    tok = last_plan.get("token")
+                if not tok:
+                    ds = getattr(self, "data_source", None)
+                    if ds is not None:
+                        tok = getattr(ds, "_current_ce_token", None) or getattr(
+                            ds, "_current_pe_token", None
+                        )
+                warm_quote = None
+                if tok is not None:
+                    try:
+                        warm_quote = self._ensure_token_subscribed_and_quote(int(tok))
+                    except (TypeError, ValueError):
+                        warm_quote = self._ensure_token_subscribed_and_quote(None)
+                if warm_quote:
+                    if tok is not None:
+                        try:
+                            self._micro_ok_ts_by_token[int(tok)] = self._now_ms()
+                        except (TypeError, ValueError):
+                            pass
+                    self._last_tick_ms = self._now_ms()
+        except Exception:
+            self.log.debug("watchdog.nudge_error", exc_info=True)
+
         self.eval_count += 1
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
@@ -1835,6 +1928,7 @@ class StrategyRunner:
                 or window_ok
                 or bool(settings.allow_offhours_testing)
             )
+            self.market_open = bool(window_ok)
             # Always process ticks regardless of trading window
             self.within_window = True
             flow["within_window"] = True
@@ -2450,20 +2544,34 @@ class StrategyRunner:
                 fetch_ltp=fetch_ltp,
             )
             if not quote_dict:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                plan["spread_pct"] = None
-                plan["depth_ok"] = None
-                plan["micro"] = {"spread_pct": None, "depth_ok": None}
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                warm_quote, should_block_quote = self._warmup_micro_before_block(plan)
+                if warm_quote:
+                    quote_dict = warm_quote
+                    if not quote_mode:
+                        quote_mode = "snapshot"
+                if not quote_dict:
+                    last_plan = getattr(self, "_last_plan", None)
+                    if isinstance(last_plan, Mapping):
+                        prev_quote = last_plan.get("quote")
+                        if isinstance(prev_quote, Mapping):
+                            quote_dict = dict(prev_quote)
+                if not quote_dict:
+                    quote_dict = {}
+                if should_block_quote:
+                    plan["reason_block"] = "no_option_quote"
+                    plan.setdefault("reasons", []).append("no_option_quote")
+                    plan["spread_pct"] = None
+                    plan["depth_ok"] = None
+                    plan["micro"] = {"spread_pct": None, "depth_ok": None}
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
             def _positive_number(value: Any) -> bool:
                 return isinstance(value, (int, float)) and value > 0
 
@@ -2489,7 +2597,39 @@ class StrategyRunner:
                                 have_levels = True
                                 break
             if not have_price or not have_levels:
-                if self._should_block_no_quote(plan):
+                warm_quote, should_block_quote = self._warmup_micro_before_block(plan)
+                if warm_quote:
+                    quote_dict = warm_quote
+
+                    have_price = any(
+                        _positive_number(quote_dict.get(key))
+                        for key in ("mid", "ltp", "bid", "ask")
+                    )
+                    have_levels = any(
+                        _positive_number(quote_dict.get(key))
+                        for key in (
+                            "bid",
+                            "ask",
+                            "bid_qty",
+                            "ask_qty",
+                            "bid5_qty",
+                            "ask5_qty",
+                        )
+                    )
+                    if not have_levels:
+                        depth_payload = quote_dict.get("depth")
+                        if isinstance(depth_payload, Mapping):
+                            for side in ("buy", "sell"):
+                                levels = depth_payload.get(side)
+                                if isinstance(levels, list) and levels:
+                                    first = levels[0]
+                                    if isinstance(first, Mapping) and (
+                                        _positive_number(first.get("price"))
+                                        or _positive_number(first.get("quantity"))
+                                    ):
+                                        have_levels = True
+                                        break
+                if (not have_price or not have_levels) and should_block_quote:
                     plan["reason_block"] = "no_quote"
                     plan.setdefault("reasons", []).append("no_quote")
                     plan["spread_pct"] = None
@@ -2510,9 +2650,10 @@ class StrategyRunner:
                         reason_block=flow.get("reason_block"),
                     )
                     return
-                self._flag_transient_no_quote(plan)
-                plan.setdefault("micro", {}).setdefault("spread_pct", None)
-                plan["micro"].setdefault("depth_ok", None)
+                if not have_price or not have_levels:
+                    self._flag_transient_no_quote(plan)
+                    plan.setdefault("micro", {}).setdefault("spread_pct", None)
+                    plan["micro"].setdefault("depth_ok", None)
             try:
                 min_score_env = float(os.getenv("MIN_SCORE", "0.35"))
             except Exception:
@@ -2560,18 +2701,45 @@ class StrategyRunner:
                 plan["quote_src"],
             )
             if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
-                plan["reason_block"] = "no_option_quote"
-                plan.setdefault("reasons", []).append("no_option_quote")
-                flow["reason_block"] = plan["reason_block"]
-                self._record_plan(plan)
-                self._last_flow_debug = flow
-                self.last_plan = plan
-                self._log_decisive_event(
-                    label="blocked",
-                    signal=signal_for_log,
-                    reason_block=flow.get("reason_block"),
-                )
-                return
+                warm_quote, should_block_quote = self._warmup_micro_before_block(plan)
+                if warm_quote:
+                    quote_dict = warm_quote
+                    micro = evaluate_micro(
+                        q=quote_dict,
+                        lot_size=opt.get("lot_size", self.lot_size),
+                        atr_pct=plan.get("atr_pct"),
+                        cfg=self.strategy_cfg.raw,
+                        side=plan.get("action"),
+                        lots=plan.get("qty_lots"),
+                        depth_multiplier=float(
+                            getattr(settings.executor, "depth_multiplier", 1.0)
+                        ),
+                        require_depth=bool(
+                            getattr(settings.executor, "require_depth", False)
+                        ),
+                        mode_override=micro_mode,
+                    )
+                    plan["spread_pct"] = micro.get("spread_pct")
+                    plan["depth_ok"] = micro.get("depth_ok")
+                    plan["micro"] = micro
+                    plan["quote_src"] = quote_dict.get("source", "kite")
+                    plan["quote_mode"] = quote_mode or "snapshot"
+                    plan["quote"] = quote_dict
+                    plan["quote_age_s"] = self._normalize_quote_age(quote_dict)
+                if micro.get("spread_pct") is None or micro.get("depth_ok") is None:
+                    if should_block_quote:
+                        plan["reason_block"] = "no_option_quote"
+                        plan.setdefault("reasons", []).append("no_option_quote")
+                        flow["reason_block"] = plan["reason_block"]
+                        self._record_plan(plan)
+                        self._last_flow_debug = flow
+                        self.last_plan = plan
+                        self._log_decisive_event(
+                            label="blocked",
+                            signal=signal_for_log,
+                            reason_block=flow.get("reason_block"),
+                        )
+                        return
             if micro.get("would_block"):
                 plan.setdefault("reasons", []).append("micro")
                 plan["reason_block"] = "micro"
@@ -2813,7 +2981,11 @@ class StrategyRunner:
                             token_int = int(plan.get("token"))
                     except (TypeError, ValueError):
                         token_int = None
-                    hysteresis_ms = max(0, int(getattr(self, "_micro_hysteresis_ms", 0)))
+                    try:
+                        hysteresis_ms = int(os.getenv("MICRO_OK_HYSTERESIS_MS", "2000"))
+                    except Exception:
+                        hysteresis_ms = 2000
+                    hysteresis_ms = max(0, hysteresis_ms)
                     if token_int is not None and hysteresis_ms > 0:
                         last_ok = self._micro_ok_ts_by_token.get(token_int)
                         if last_ok is not None and self._now_ms() - last_ok <= hysteresis_ms:
