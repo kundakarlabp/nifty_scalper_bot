@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from src import config
 from src.strategies.runner import StrategyRunner
+from src.server import logging_setup
 
 
 class DummyTelegram:
@@ -138,3 +140,27 @@ def test_process_tick_returns_emit_decisive_logs() -> None:
             missing_logs.append(node.lineno)
 
     assert not missing_logs, f"Returns without decisive event logging: {missing_logs}"
+
+
+def test_decision_logging_respects_interval(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DECISION_INTERVAL_SEC", "60")
+    monkeypatch.setenv("LOG_SUPPRESS_WINDOW_SEC", "0")
+    monkeypatch.setattr(config.settings, "_settings", None, raising=False)
+    logging_setup._reset_log_event_suppressor()
+
+    runner = StrategyRunner(telegram_controller=DummyTelegram())
+    runner.last_eval_ts = "2024-01-01T00:00:00+00:00"
+    runner.eval_count = 1
+
+    with caplog.at_level(logging.INFO):
+        runner._log_decisive_event(label="blocked", signal={}, reason_block="micro")
+        runner._log_decisive_event(label="blocked", signal={}, reason_block="micro")
+
+    decision_records = [
+        rec
+        for rec in caplog.records
+        if rec.name == "decision" and rec.pathname.endswith("logging_setup.py")
+    ]
+    assert len(decision_records) == 1

@@ -370,6 +370,8 @@ class StrategyRunner:
         self._warmup_log_ts: float = 0.0
         self._last_decision_label: str | None = None
         self._last_decision_reason: str | None = None
+        self._last_logged_decision_label: str | None = None
+        self._last_logged_decision_reason: str | None = None
         self._last_computed_lots: int | None = None
 
         self._lg = SimpleLogGate(default_interval_seconds=5.0)
@@ -398,6 +400,10 @@ class StrategyRunner:
         self._block_summary_interval = float(
             getattr(self.settings, "block_summary_interval_sec", 30.0)
         )
+        self._decision_interval = float(
+            getattr(self.settings, "decision_interval_sec", 10.0)
+        )
+        self._lg.set_interval("decision", self._decision_interval)
 
         # Event guard configuration
         self.events_path = resolve_config_path(
@@ -1025,7 +1031,18 @@ class StrategyRunner:
                     value = plan_source.get(src_key)
                     if value is not None:
                         fields[dest_key] = value
-            log_event("decision", "info", **fields)
+            reason_text = reason_value or ""
+            prev_label = self._last_logged_decision_label
+            prev_reason = self._last_logged_decision_reason or ""
+            force_emit = label_value != prev_label or reason_text != prev_reason
+            if force_emit:
+                should_log_decision = self._lg.should_emit("decision", force=True)
+            else:
+                should_log_decision = self._lg.should_emit("decision")
+            if should_log_decision:
+                log_event("decision", "info", **fields)
+                self._last_logged_decision_label = label_value
+                self._last_logged_decision_reason = reason_text
 
             decision_payload = {
                 "event": "decision",
