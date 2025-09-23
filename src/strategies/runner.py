@@ -11,7 +11,7 @@ import threading
 import time
 from decimal import Decimal
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import (
@@ -2727,6 +2727,14 @@ class StrategyRunner:
             plan["expiry"] = opt.get("expiry")
             plan["option_token"] = token
             plan["token"] = token
+            lot_size_resolved = opt.get("lot_size")
+            if lot_size_resolved:
+                try:
+                    plan["lot_size"] = int(lot_size_resolved)
+                except Exception:
+                    plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
+            else:
+                plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
             ds = getattr(self, "data_source", None)
             atm_strike = getattr(ds, "current_atm_strike", None)
             if atm_strike is None:
@@ -2918,6 +2926,60 @@ class StrategyRunner:
             prime_fn = getattr(ds, "prime_option_quote", None)
             require_prime = bool(getattr(self.settings, "enable_live_trading", False))
             token_for_quote = plan.get("token")
+            quote_ready_status = None
+            ensure_ready_fn = getattr(ds, "ensure_quote_ready", None)
+            if callable(ensure_ready_fn) and token_for_quote:
+                try:
+                    quote_ready_status = ensure_ready_fn(
+                        token_for_quote,
+                        getattr(self.settings, "QUOTES__MODE", "FULL"),
+                        symbol=str(
+                            opt.get("symbol")
+                            or getattr(self.settings.instruments, "trade_symbol", None)
+                        ),
+                    )
+                except Exception:
+                    self.log.debug("ensure_quote_ready failed", exc_info=True)
+                    quote_ready_status = None
+            if quote_ready_status is not None:
+                try:
+                    plan["quote_ready"] = asdict(quote_ready_status)
+                except Exception:
+                    plan["quote_ready"] = {
+                        "ok": quote_ready_status.ok,
+                        "reason": quote_ready_status.reason,
+                        "last_tick_age_ms": quote_ready_status.last_tick_age_ms,
+                        "retries": quote_ready_status.retries,
+                    }
+                if not quote_ready_status.ok:
+                    plan.setdefault("micro", {}).update(
+                        {
+                            "spread_pct": None,
+                            "depth_ok": None,
+                            "reason": quote_ready_status.reason,
+                            "would_block": True,
+                            "last_tick_age_ms": quote_ready_status.last_tick_age_ms,
+                        }
+                    )
+                    resubscribe_fn = getattr(ds, "resubscribe_if_stale", None)
+                    if callable(resubscribe_fn):
+                        try:
+                            resubscribe_fn(token_for_quote)
+                        except Exception:
+                            self.log.debug("resubscribe_if_stale failed", exc_info=True)
+                    plan["reason_block"] = "micro_wait"
+                    flow["reason_block"] = plan["reason_block"]
+                    self._record_plan(plan)
+                    self._last_flow_debug = flow
+                    self.log.debug(
+                        "quote_wait", extra={"token": token_for_quote, "reason": quote_ready_status.reason}
+                    )
+                    self._log_decisive_event(
+                        label="blocked",
+                        signal=signal_for_log,
+                        reason_block=flow.get("reason_block"),
+                    )
+                    return
             if callable(prime_fn) and token_for_quote:
                 try:
                     prime_price, prime_src, prime_ts = prime_fn(token_for_quote)
@@ -3064,15 +3126,13 @@ class StrategyRunner:
 
             micro = evaluate_micro(
                 q=quote_dict,
-                lot_size=opt.get("lot_size", self.lot_size),
+                lot_size=int(plan.get("lot_size", self.lot_size)),
                 atr_pct=plan.get("atr_pct"),
                 cfg=self.strategy_cfg.raw,
                 side=plan.get("action"),
                 lots=plan.get("qty_lots"),
-                depth_multiplier=float(
-                    getattr(settings.executor, "depth_multiplier", 1.0)
-                ),
-                require_depth=bool(getattr(settings.executor, "require_depth", False)),
+                depth_multiplier=None,
+                require_depth=None,
                 mode_override=micro_mode,
             )
             now_ts = time.time()

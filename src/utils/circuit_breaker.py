@@ -21,7 +21,13 @@ def _utcnow() -> datetime:
 def _as_aware_utc(dt: datetime) -> datetime:
     """Convert ``dt`` to an aware UTC ``datetime``."""
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        as_local = dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
+        as_utc = dt.replace(tzinfo=timezone.utc)
+        now_utc = _utcnow()
+        if abs((as_local - now_utc).total_seconds()) <= abs((as_utc - now_utc).total_seconds()):
+            return as_local
+        return as_utc
     return dt.astimezone(timezone.utc)
 
 

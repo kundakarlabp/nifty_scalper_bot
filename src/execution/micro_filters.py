@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict, Optional, Tuple
 
-from src.config import settings
+from src.config import (
+    MICRO__DEPTH_MULTIPLIER,
+    MICRO__REQUIRE_DEPTH,
+    MICRO__STALE_MS,
+    RISK__EXPOSURE_CAP_PCT,
+    settings,
+)
 from src.logs import structured_log
 
 
@@ -222,25 +229,22 @@ def evaluate_micro(
     lot_units = max(int(lot_size), 0)
     need_units = lots_val * lot_units
 
-    depth_mult = (
-        float(depth_multiplier)
-        if depth_multiplier is not None
-        else float(
-            micro_cfg.get(
-                "depth_multiplier",
-                getattr(settings.executor, "depth_multiplier", 1.0),
-            )
-        )
-    )
-    require_depth_flag = (
-        bool(require_depth)
-        if require_depth is not None
-        else bool(
-            micro_cfg.get(
-                "require_depth", getattr(settings.executor, "require_depth", False)
-            )
-        )
-    )
+    if depth_multiplier is not None:
+        depth_mult = float(depth_multiplier)
+    elif micro_cfg.get("depth_multiplier") is not None:
+        try:
+            depth_mult = float(micro_cfg.get("depth_multiplier", MICRO__DEPTH_MULTIPLIER))
+        except Exception:
+            depth_mult = float(getattr(settings, "MICRO__DEPTH_MULTIPLIER", MICRO__DEPTH_MULTIPLIER))
+    else:
+        depth_mult = float(getattr(settings, "MICRO__DEPTH_MULTIPLIER", MICRO__DEPTH_MULTIPLIER))
+
+    if require_depth is not None:
+        require_depth_flag = bool(require_depth)
+    elif micro_cfg.get("require_depth") is not None:
+        require_depth_flag = bool(micro_cfg.get("require_depth"))
+    else:
+        require_depth_flag = bool(getattr(settings, "MICRO__REQUIRE_DEPTH", MICRO__REQUIRE_DEPTH))
     required_units = int(math.ceil(need_units * depth_mult)) if need_units else 0
 
     base_context: Dict[str, Any] = {
@@ -255,6 +259,9 @@ def evaluate_micro(
         "atr_pct": float(atr_pct) if atr_pct is not None else None,
     }
     cap_default = float(micro_cfg.get("max_spread_pct", 1.0))
+    exposure_cap_pct = float(
+        getattr(settings, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)
+    )
 
     def emit(event: str, **fields: Any) -> None:
         payload = dict(base_context)
@@ -272,7 +279,7 @@ def evaluate_micro(
             "micro_wait",
             reason="no_quote",
             spread_pct=None,
-            cap_pct=cap_default,
+            cap_pct=exposure_cap_pct,
             depth_ok=None,
             depth_available=None,
             available_bid_qty=None,
@@ -290,29 +297,73 @@ def evaluate_micro(
             "would_block": True,
         }
 
-    bid5 = _top5_quantities(q.get("bid5_qty"), [])
-    ask5 = _top5_quantities(q.get("ask5_qty"), [])
-
     bid = _as_float(q.get("bid"))
     ask = _as_float(q.get("ask"))
+    bid5 = _top5_quantities(q.get("bid5_qty"), [])
+    ask5 = _top5_quantities(q.get("ask5_qty"), [])
+    available_bid = sum(bid5)
+    available_ask = sum(ask5)
     ltp = _quote_reference_price(q)
 
-    if not bid5 or not ask5:
+    age_ms: float | None = None
+    ts_raw = q.get("age_ms")
+    if ts_raw is not None:
+        try:
+            age_ms = float(ts_raw)
+        except (TypeError, ValueError):
+            age_ms = None
+    if age_ms is None:
+        ts_val = q.get("ts_ms") or q.get("timestamp")
+        if isinstance(ts_val, (int, float)):
+            ts_ms_val = float(ts_val)
+            if ts_ms_val < 1e12:
+                ts_ms_val *= 1000.0
+            age_ms = max(0.0, time.time() * 1000.0 - ts_ms_val)
+
+    if age_ms is not None and age_ms > float(getattr(settings, "MICRO__STALE_MS", MICRO__STALE_MS)):
         log_outcome(
             "micro_wait",
-            reason="no_quote",
+            reason="stale_quote",
             spread_pct=None,
-            cap_pct=cap_default,
+            cap_pct=exposure_cap_pct,
             depth_ok=None,
             depth_available=None,
-            available_bid_qty=sum(bid5),
-            available_ask_qty=sum(ask5),
+            available_bid_qty=available_bid,
+            available_ask_qty=available_ask,
             spread_block=None,
             depth_block=None,
             raw_block=True,
             would_block=True,
             bid=bid,
             ask=ask,
+            last_tick_age_ms=age_ms,
+        )
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "stale_quote",
+            "would_block": True,
+            "last_tick_age_ms": age_ms,
+        }
+
+    if not bid5 or not ask5:
+        log_outcome(
+            "micro_wait",
+            reason="no_depth",
+            spread_pct=None,
+            cap_pct=exposure_cap_pct,
+            depth_ok=None,
+            depth_available=None,
+            available_bid_qty=available_bid,
+            available_ask_qty=available_ask,
+            spread_block=None,
+            depth_block=None,
+            raw_block=True,
+            would_block=True,
+            bid=bid,
+            ask=ask,
+            last_tick_age_ms=age_ms,
         )
         return {
             "spread_pct": None,
@@ -320,6 +371,7 @@ def evaluate_micro(
             "mode": mode,
             "reason": "no_quote",
             "would_block": True,
+            "last_tick_age_ms": age_ms,
         }
 
     mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
@@ -332,8 +384,6 @@ def evaluate_micro(
         spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     cap = cap_for_mid(mid or 0.0, cfg)
 
-    available_bid = sum(bid5)
-    available_ask = sum(ask5)
     if side_norm == "SELL":
         depth_available = available_bid
     elif side_norm == "BUY":
@@ -341,8 +391,9 @@ def evaluate_micro(
     else:
         depth_available = min(available_bid, available_ask)
 
+    depth_requirement = required_units
     if require_depth_flag:
-        depth_ok = depth_available >= required_units
+        depth_ok = depth_available >= depth_requirement
     else:
         depth_ok = True
 
@@ -356,7 +407,7 @@ def evaluate_micro(
         "micro_block" if final_block else "micro_pass",
         reason=reason,
         spread_pct=spread_pct,
-        cap_pct=cap,
+            cap_pct=exposure_cap_pct,
         depth_ok=depth_ok,
         depth_available=depth_available,
         available_bid_qty=available_bid,
@@ -368,12 +419,13 @@ def evaluate_micro(
         bid=bid,
         ask=ask,
         mid=mid,
+        last_tick_age_ms=age_ms,
     )
 
     return {
         "mid": mid,
         "spread_pct": spread_pct,
-        "cap_pct": cap,
+        "cap_pct": float(getattr(settings, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)),
         "depth_ok": depth_ok,
         "need_lots": lots_val,
         "lot_size": lot_units,
@@ -389,6 +441,7 @@ def evaluate_micro(
         "mode": mode,
         "reason": reason,
         "would_block": final_block,
+        "last_tick_age_ms": age_ms,
     }
 
 

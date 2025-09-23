@@ -48,6 +48,24 @@ TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 5.0))
 DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
 SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
 
+# Quote priming controls
+QUOTES__PRIME_TIMEOUT_MS: int = int(os.getenv("QUOTES__PRIME_TIMEOUT_MS", "1500"))
+QUOTES__RETRY_ATTEMPTS: int = int(os.getenv("QUOTES__RETRY_ATTEMPTS", "3"))
+QUOTES__RETRY_JITTER_MS: int = int(os.getenv("QUOTES__RETRY_JITTER_MS", "150"))
+QUOTES__MODE: str = os.getenv("QUOTES__MODE", "FULL").upper()
+
+# Microstructure requirements
+MICRO__REQUIRE_DEPTH: bool = (
+    os.getenv("MICRO__REQUIRE_DEPTH", "false").lower() == "true"
+)
+MICRO__DEPTH_MULTIPLIER: float = float(os.getenv("MICRO__DEPTH_MULTIPLIER", "5.0"))
+MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "1500"))
+
+# Single source for risk exposure cap (decimal fraction)
+RISK__EXPOSURE_CAP_PCT: float = float(
+    os.getenv("RISK__EXPOSURE_CAP_PCT", os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.02"))
+)
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT: str = os.getenv("LOG_FORMAT", "logfmt").lower()
 STRUCTURED_LOGS: bool = os.getenv("STRUCTURED_LOGS", "true").lower() == "true"
@@ -249,7 +267,7 @@ class InstrumentConfig(BaseModel):
     trade_exchange: str = "NFO"
     instrument_token: int = 256265
     spot_token: int = 256265
-    nifty_lot_size: int = 75
+    nifty_lot_size: int = 50
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10
@@ -301,7 +319,7 @@ class InstrumentsSettings(BaseModel):
     spot_token: int = (
         256265  # optional explicit spot token (helps with logs/diagnostics)
     )
-    nifty_lot_size: int = 75
+    nifty_lot_size: int = 50
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10
@@ -1539,6 +1557,12 @@ class AppSettings(BaseSettings):
 
         pct = float(self.EXPOSURE_CAP_PCT)
         return pct / 100.0
+
+    @property
+    def RISK__EXPOSURE_CAP_PCT(self) -> float:
+        """Unified exposure cap ratio consumed by micro + risk gates."""
+
+        return float(self.EXPOSURE_CAP_PCT_OF_EQUITY)
 
     instruments_csv: str = Field(
         default_factory=lambda: str(

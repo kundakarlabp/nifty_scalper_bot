@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from statistics import median
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, TypeVar, cast
 
 from src.config import OptionSelectorSettings, settings
 from src.risk.greeks import OptionType, bs_price_delta_gamma, implied_vol_newton
@@ -499,6 +499,19 @@ def get_instrument_tokens(
             trade_symbol,
         )
 
+        instrument_rows: Dict[int, Dict[str, Any]] = {}
+        lot_candidates: list[int] = []
+
+        def _register_row(row: Mapping[str, Any]) -> None:
+            token_int = _coerce_int(row.get("instrument_token"))
+            if token_int is None:
+                return
+            if token_int not in instrument_rows:
+                instrument_rows[token_int] = dict(row)
+            lot_int = _coerce_int(row.get("lot_size")) or 0
+            if lot_int > 0:
+                lot_candidates.append(lot_int)
+
         def _scan(
             dump: List[Dict[str, Any]],
         ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
@@ -516,6 +529,7 @@ def get_instrument_tokens(
                         continue
                     strike = int(strike_val)
                     itype = row.get("instrument_type")
+                    _register_row(row)
                     if strike == target:
                         if itype == "CE":
                             ce_tok = row.get("instrument_token")
@@ -543,20 +557,72 @@ def get_instrument_tokens(
             )
             ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
 
+        using_atm = False
+        if not ce_token and atm_ce:
+            ce_token = atm_ce
+            using_atm = True
+        if not pe_token and atm_pe:
+            pe_token = atm_pe
+            using_atm = True
+        strike_selected = atm if using_atm else target
+
+        lot_size = 0
+        if lot_candidates:
+            lot_size = max(lot_candidates, key=lot_candidates.count)
+        symbol_upper = trade_symbol.upper()
+        if lot_size <= 0 and symbol_upper == "NIFTY":
+            lot_size = 50
+        elif lot_size <= 0:
+            try:
+                lot_size = int(getattr(settings.instruments, "nifty_lot_size", 50))
+            except Exception:
+                lot_size = 50
+        allowed_lot_sizes = {10, 15, 25, 40, 50, 100}
+        if lot_size not in allowed_lot_sizes:
+            logger.warning(
+                "strike_selector: unusual lot size resolved",
+                extra={"symbol": trade_symbol, "lot_size": lot_size},
+            )
+
+        def _build_contract(token_val: Optional[int]) -> Dict[str, Any] | None:
+            token_int = _coerce_int(token_val)
+            if token_int is None:
+                return None
+            row = instrument_rows.get(token_int, {})
+            strike_val = _coerce_int(row.get("strike"))
+            return {
+                "symbol": trade_symbol,
+                "token": token_int,
+                "tradingsymbol": row.get("tradingsymbol"),
+                "expiry": expiry,
+                "strike": strike_val if strike_val is not None else strike_selected,
+                "lot_size": lot_size,
+            }
+
+        contracts: Dict[str, Dict[str, Any]] = {}
+        ce_contract = _build_contract(ce_token)
+        pe_contract = _build_contract(pe_token)
+        if ce_contract:
+            contracts["ce"] = ce_contract
+        if pe_contract:
+            contracts["pe"] = pe_contract
+
         result = {
             "spot_token": int(spot_token),
             "spot_price": float(px),
             "atm_strike": int(atm),
-            "target_strike": int(target),
+            "target_strike": int(strike_selected),
             "expiry": expiry,
             "tokens": {"ce": ce_token, "pe": pe_token},
             "atm_tokens": {"ce": atm_ce, "pe": atm_pe},
+            "lot_size": lot_size,
+            "contracts": contracts,
         }
 
         if not ce_token or not pe_token:
             logger.warning(
                 "Missing option token for strike %s, expiry %s, trade symbol %s",
-                target,
+                strike_selected,
                 expiry,
                 trade_symbol,
             )
@@ -726,3 +792,17 @@ def needs_reatm(
         return abs(curr - entry) / entry * 100.0 >= threshold
     except Exception:
         return False
+def _coerce_int(value: Any) -> Optional[int]:
+    """Return ``value`` coerced to ``int`` when possible."""
+
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value)))
+        except (TypeError, ValueError):
+            return None
+
+
