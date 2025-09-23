@@ -35,6 +35,9 @@ def test_load_from_env():
         "RISK__MAX_DAILY_DRAWDOWN_PCT": "0.1",
         "RISK__RISK_PER_TRADE": "0.02",
         "ENABLE_LIVE_TRADING": "true",
+        "LOG_DECISION_THROTTLE_S": "5",
+        "QUOTE_WARMUP_TRIES": "3",
+        "QUOTE_WARMUP_SLEEP_MS": "250",
     }
     with mock.patch.dict(os.environ, test_env):
         settings = AppSettings()
@@ -43,6 +46,9 @@ def test_load_from_env():
         assert settings.risk.max_daily_drawdown_pct == 0.1
         assert settings.risk.risk_per_trade == 0.02
         assert settings.enable_live_trading is True
+        assert settings.decision_interval_sec == 5
+        assert settings.quote_warmup_tries == 3
+        assert settings.quote_warmup_sleep_ms == 250
 
 def test_validation_error_on_invalid_data():
     """Tests that Pydantic raises a ValidationError for out-of-bounds data."""
@@ -90,6 +96,8 @@ def test_default_values():
         assert settings.cadence_min_interval_s == pytest.approx(0.3)
         assert settings.cadence_max_interval_s == pytest.approx(1.5)
         assert settings.cadence_interval_step_s == pytest.approx(0.3)
+        assert settings.quote_warmup_tries == 1
+        assert settings.quote_warmup_sleep_ms == 0
 
 
 def test_exposure_env_overrides():

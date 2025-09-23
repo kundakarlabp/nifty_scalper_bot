@@ -414,6 +414,18 @@ class StrategyRunner:
         self._decision_interval = float(
             getattr(self.settings, "decision_interval_sec", 10.0)
         )
+        try:
+            self._quote_warmup_tries = max(
+                1, int(getattr(self.settings, "quote_warmup_tries", 1))
+            )
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            self._quote_warmup_tries = 1
+        try:
+            self._quote_warmup_sleep_ms = max(
+                0, int(getattr(self.settings, "quote_warmup_sleep_ms", 0))
+            )
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            self._quote_warmup_sleep_ms = 0
 
         # Event guard configuration
         self.events_path = resolve_config_path(
@@ -1723,44 +1735,55 @@ class StrategyRunner:
             logger.debug("quote_prime_fail", {"err": "broker_missing"})
             return False, "broker_missing", needed_tokens
 
-        quotes: Any | None = None
-        errors: list[str] = []
         payloads = (needed_tokens, [str(t) for t in needed_tokens])
-        for payload in payloads:
-            if not payload:
-                continue
-            if hasattr(broker, "quote"):
-                try:
-                    quotes = broker.quote(payload)
-                except Exception as exc:  # pragma: no cover - network failures
-                    errors.append(str(exc))
-                    quotes = None
-                else:
-                    if quotes:
-                        break
-            if hasattr(broker, "ltp"):
-                try:
-                    quotes = broker.ltp(payload)
-                except Exception as exc:  # pragma: no cover - network failures
-                    errors.append(str(exc))
-                    quotes = None
-                else:
-                    if quotes:
-                        break
+        tries = max(1, getattr(self, "_quote_warmup_tries", 1))
+        sleep_s = max(0.0, getattr(self, "_quote_warmup_sleep_ms", 0) / 1000.0)
+        last_err: str | None = None
 
-        if not quotes:
-            err_msg = ";".join(err for err in errors if err) or "quote_unavailable"
-            logger.debug("quote_prime_fail", {"err": err_msg})
-            return False, err_msg, needed_tokens
+        for attempt in range(tries):
+            quotes: Any | None = None
+            errors: list[str] = []
+            for payload in payloads:
+                if not payload:
+                    continue
+                if hasattr(broker, "quote"):
+                    try:
+                        quotes = broker.quote(payload)
+                    except Exception as exc:  # pragma: no cover - network failures
+                        errors.append(str(exc))
+                        quotes = None
+                    else:
+                        if quotes:
+                            break
+                if hasattr(broker, "ltp"):
+                    try:
+                        quotes = broker.ltp(payload)
+                    except Exception as exc:  # pragma: no cover - network failures
+                        errors.append(str(exc))
+                        quotes = None
+                    else:
+                        if quotes:
+                            break
 
-        missing_tokens = self._detect_missing_tokens(needed_tokens, quotes)
-        if missing_tokens:
-            err_msg = f"missing:{','.join(str(tok) for tok in missing_tokens)}"
-            logger.debug("quote_prime_fail", {"err": err_msg})
-            return False, err_msg, needed_tokens
+            if quotes:
+                missing_tokens = self._detect_missing_tokens(needed_tokens, quotes)
+                if not missing_tokens:
+                    logger.debug("quote_prime_ok", {"n": len(needed_tokens), "attempt": attempt + 1})
+                    return True, None, needed_tokens
+                err_msg = f"missing:{','.join(str(tok) for tok in missing_tokens)}"
+            else:
+                err_msg = ";".join(err for err in errors if err) or "quote_unavailable"
 
-        logger.debug("quote_prime_ok", {"n": len(needed_tokens)})
-        return True, None, needed_tokens
+            last_err = err_msg
+            if attempt == tries - 1:
+                logger.debug(
+                    "quote_prime_fail",
+                    {"err": err_msg, "attempt": attempt + 1, "tries": tries},
+                )
+            elif sleep_s > 0:
+                time.sleep(sleep_s)
+
+        return False, last_err or "quote_unavailable", needed_tokens
 
     def _get_cached_full_quote(
         self, token: int | str | None
