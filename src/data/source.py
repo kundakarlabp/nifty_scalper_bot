@@ -38,6 +38,7 @@ from src.config import settings
 from src.data.base_source import BaseDataSource
 from src.data.types import HistResult, HistStatus
 from src.diagnostics import healthkit
+from src.diagnostics.checks import emit_quote_diag
 from src.logs import structured_log
 from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
@@ -584,6 +585,19 @@ class QuoteState:
     has_depth: bool
 
 
+@dataclass(slots=True)
+class QuoteReadyStatus:
+    ok: bool
+    reason: str
+    retries: int = 0
+    bid: float | None = None
+    ask: float | None = None
+    bid_qty: int | None = None
+    ask_qty: int | None = None
+    last_tick_age_ms: int | None = None
+    source: str | None = None
+
+
 class _TTLCache:
     """
     Extremely simple per‑(token,interval) cache to soften historical_data pressure
@@ -1020,6 +1034,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_auth_warn = 0.0
         self._option_quote_cache: dict[int, dict[str, Any]] = {}
         self._atm_reconnect_hook_set = False
+        self._last_quote_ready_attempt: dict[int, float] = {}
 
     def _build_micro_settings(self) -> SimpleNamespace:
         try:
@@ -1646,6 +1661,271 @@ class LiveKiteSource(DataSource, BaseDataSource):
             "age_sec": round(age, 3),
         }
 
+    def get_last_bbo(
+        self, token: int | str
+    ) -> tuple[float | None, float | None, int | None, int | None, int | None]:
+        """Return the last seen best-bid/ask tuple for ``token``."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return None, None, None, None, None
+        state = self._quotes.get(int(token_i))
+        if not state:
+            return None, None, None, None, None
+        ts_ms = int(max(state.ts, 0.0) * 1000.0)
+        return state.bid, state.ask, state.bid_qty, state.ask_qty, ts_ms
+
+    def _update_quote_state_from_payload(
+        self,
+        token: int | str,
+        payload: Mapping[str, Any] | None,
+        *,
+        ts_ms: int | None = None,
+    ) -> None:
+        if payload is None:
+            return
+        try:
+            token_i = int(token)
+        except Exception:
+            return
+        if token_i <= 0:
+            return
+        bid = _as_float(payload.get("bid"))
+        ask = _as_float(payload.get("ask"))
+        bid_qty = _as_int(payload.get("bid_qty"))
+        ask_qty = _as_int(payload.get("ask_qty"))
+        if bid_qty <= 0:
+            depth = payload.get("depth") if isinstance(payload, Mapping) else None
+            if isinstance(depth, Mapping):
+                try:
+                    bid_lvl = depth.get("buy", [])[0]
+                except Exception:
+                    bid_lvl = None
+                if isinstance(bid_lvl, Mapping):
+                    bid_qty = _as_int(bid_lvl.get("quantity"))
+                    if bid <= 0:
+                        bid = _as_float(bid_lvl.get("price"))
+        if ask_qty <= 0:
+            depth = payload.get("depth") if isinstance(payload, Mapping) else None
+            if isinstance(depth, Mapping):
+                try:
+                    ask_lvl = depth.get("sell", [])[0]
+                except Exception:
+                    ask_lvl = None
+                if isinstance(ask_lvl, Mapping):
+                    ask_qty = _as_int(ask_lvl.get("quantity"))
+                    if ask <= 0:
+                        ask = _as_float(ask_lvl.get("price"))
+        ts_val = ts_ms if isinstance(ts_ms, int) else _to_epoch_ms(payload.get("ts"))
+        if ts_val is None:
+            ts_val = _to_epoch_ms(payload.get("timestamp"))
+        if ts_val is None:
+            ts_val = int(time.time() * 1000)
+        spread_pct = None
+        if bid > 0 and ask > 0:
+            ref = (bid + ask) / 2.0
+            spread_pct = abs(ask - bid) / max(ref, 1e-6) * 100.0
+        has_depth = bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0
+        self._quotes[token_i] = QuoteState(
+            token=token_i,
+            ts=float(ts_val) / 1000.0,
+            bid=bid if bid > 0 else None,
+            ask=ask if ask > 0 else None,
+            bid_qty=bid_qty if bid_qty > 0 else None,
+            ask_qty=ask_qty if ask_qty > 0 else None,
+            spread_pct=spread_pct,
+            has_depth=has_depth,
+        )
+
+    def ensure_quote_ready(
+        self,
+        token: int | str,
+        mode: str | None = None,
+        *,
+        symbol: str | None = None,
+    ) -> QuoteReadyStatus:
+        """Ensure ``token`` has a live best-bid/offer before strategy evaluation."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return QuoteReadyStatus(ok=False, reason="invalid_token")
+        if token_i <= 0:
+            return QuoteReadyStatus(ok=False, reason="invalid_token")
+
+        mode_pref = mode or getattr(settings, "QUOTES__MODE", getattr(_cfg, "QUOTES__MODE", "FULL"))
+        mode_norm = str(mode_pref).upper() or "FULL"
+        attempts = max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "QUOTES__RETRY_ATTEMPTS",
+                    getattr(_cfg, "QUOTES__RETRY_ATTEMPTS", 3),
+                )
+            ),
+        )
+        timeout_ms = max(
+            0,
+            int(
+                getattr(
+                    settings,
+                    "QUOTES__PRIME_TIMEOUT_MS",
+                    getattr(_cfg, "QUOTES__PRIME_TIMEOUT_MS", 1500),
+                )
+            ),
+        )
+        jitter_ms = max(
+            0,
+            int(
+                getattr(
+                    settings,
+                    "QUOTES__RETRY_JITTER_MS",
+                    getattr(_cfg, "QUOTES__RETRY_JITTER_MS", 150),
+                )
+            ),
+        )
+        stale_ms = max(
+            0,
+            int(
+                getattr(
+                    settings,
+                    "MICRO__STALE_MS",
+                    getattr(_cfg, "MICRO__STALE_MS", 1500),
+                )
+            ),
+        )
+
+        def _state_status(state: QuoteState | None) -> QuoteReadyStatus | None:
+            if not state or state.bid is None or state.ask is None:
+                return None
+            age_ms = int(max(0.0, (time.time() - float(state.ts)) * 1000.0))
+            ok = age_ms <= stale_ms and state.bid > 0 and state.ask > 0
+            reason = "ready" if ok else "stale_quote"
+            return QuoteReadyStatus(
+                ok=ok,
+                reason=reason,
+                bid=state.bid,
+                ask=state.ask,
+                bid_qty=state.bid_qty,
+                ask_qty=state.ask_qty,
+                last_tick_age_ms=age_ms,
+                source=mode_norm,
+            )
+
+        ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
+        status = QuoteReadyStatus(ok=False, reason="no_quote")
+
+        for attempt in range(attempts):
+            status.retries = attempt
+            try:
+                if callable(ensure_subscribe):
+                    ensure_subscribe(token_i, mode=mode_norm)
+                else:
+                    _subscribe_tokens(self, [token_i], mode=mode_norm)
+            except Exception:
+                self.log.debug("ensure_quote_ready.subscribe_failed", exc_info=True)
+
+            state = self._quotes.get(token_i)
+            state_status = _state_status(state)
+            if state_status and state_status.ok:
+                state_status.retries = attempt
+                self._last_quote_ready_attempt[token_i] = time.time()
+                emit_quote_diag(
+                    token=token_i,
+                    symbol=symbol,
+                    sub_mode=mode_norm,
+                    bid=state_status.bid,
+                    ask=state_status.ask,
+                    bid_qty=state_status.bid_qty,
+                    ask_qty=state_status.ask_qty,
+                    last_tick_age_ms=state_status.last_tick_age_ms,
+                    retries=attempt,
+                    reason="ready",
+                    source=state_status.source,
+                )
+                return state_status
+            if state_status is not None:
+                status = state_status
+
+            try:
+                self.prime_option_quote(token_i)
+            except Exception:
+                self.log.debug("ensure_quote_ready.prime_failed", exc_info=True)
+
+            deadline = time.time() + (timeout_ms / 1000.0 if timeout_ms else 0.0)
+            while timeout_ms == 0 or time.time() < deadline:
+                state = self._quotes.get(token_i)
+                state_status = _state_status(state)
+                if state_status and state_status.ok:
+                    state_status.retries = attempt
+                    self._last_quote_ready_attempt[token_i] = time.time()
+                    emit_quote_diag(
+                        token=token_i,
+                        symbol=symbol,
+                        sub_mode=mode_norm,
+                        bid=state_status.bid,
+                        ask=state_status.ask,
+                        bid_qty=state_status.bid_qty,
+                        ask_qty=state_status.ask_qty,
+                        last_tick_age_ms=state_status.last_tick_age_ms,
+                        retries=attempt,
+                        reason="ready",
+                        source=state_status.source,
+                    )
+                    return state_status
+                if timeout_ms == 0:
+                    break
+                time.sleep(0.05)
+
+            if attempt < attempts - 1 and jitter_ms:
+                time.sleep((jitter_ms + random.uniform(0, jitter_ms)) / 1000.0)
+
+        status.source = mode_norm
+        status.reason = status.reason or "no_quote"
+        self._last_quote_ready_attempt[token_i] = time.time()
+        emit_quote_diag(
+            token=token_i,
+            symbol=symbol,
+            sub_mode=mode_norm,
+            bid=status.bid,
+            ask=status.ask,
+            bid_qty=status.bid_qty,
+            ask_qty=status.ask_qty,
+            last_tick_age_ms=status.last_tick_age_ms,
+            retries=status.retries,
+            reason=status.reason,
+            source=status.source,
+        )
+        return status
+
+    def resubscribe_if_stale(self, token: int | str) -> None:
+        """Resubscribe to ``token`` if the cached quote appears stale."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return
+        if token_i <= 0:
+            return
+        state = self._quotes.get(token_i)
+        stale_ms = int(
+            getattr(settings, "MICRO__STALE_MS", getattr(_cfg, "MICRO__STALE_MS", 1500))
+        )
+        now = time.time()
+        if state is not None:
+            age_ms = (now - float(state.ts)) * 1000.0
+            if age_ms <= stale_ms:
+                return
+        last = self._last_quote_ready_attempt.get(token_i, 0.0)
+        if now - last < 0.5:
+            return
+        self.ensure_quote_ready(
+            token_i,
+            getattr(settings, "QUOTES__MODE", getattr(_cfg, "QUOTES__MODE", "FULL")),
+        )
+
     def prime_option_quote(
         self, token: int | str
     ) -> tuple[float | None, str | None, int | None]:
@@ -1753,6 +2033,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         quote_dict["ts_ms"] = ts_ms
         quote_dict.setdefault("source", quote_payload.get("source", "kite"))
         self._option_quote_cache[token_i] = quote_dict
+        self._update_quote_state_from_payload(token_i, quote_dict, ts_ms=ts_ms)
 
         for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
             val = quote_dict.get(key)
@@ -1788,6 +2069,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             merged["ts_ms"] = ts_ms
             merged.setdefault("source", "rest")
             self._option_quote_cache[token_i] = merged
+            self._update_quote_state_from_payload(token_i, merged, ts_ms=ts_ms)
             _emit_snapshot(
                 price=float(rest_ltp),
                 source="rest_ltp",
