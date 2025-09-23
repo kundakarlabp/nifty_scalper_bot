@@ -374,6 +374,7 @@ class StrategyRunner:
         self._last_computed_lots: int | None = None
 
         self._lg = SimpleLogGate(default_interval_seconds=5.0)
+        self._decision_log_gate = SimpleLogGate(default_interval_seconds=5.0)
         self.settings = settings
 
         def _interval(attr: str, default: float) -> float:
@@ -1497,7 +1498,13 @@ class StrategyRunner:
             if self._lg.ok_changed(
                 "decision", (label_value, reason_text), force=trace_on
             ):
-                self.log.info("decision", extra=summary)
+                try:
+                    if self._decision_log_gate.ok(
+                        "summary", force=trace_on
+                    ):
+                        self.log.info("decision", extra=summary)
+                except Exception:
+                    self.log.info("decision", extra=summary)
                 fields: dict[str, Any] = {
                     "label": label_value,
                     "reason": reason_text,
