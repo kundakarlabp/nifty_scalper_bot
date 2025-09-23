@@ -81,6 +81,8 @@ def test_score_none_blocks_and_reports(monkeypatch):
             "score": None,
             "option_type": "CE",
             "strike": "OPT",
+            "token": 1,
+            "option_token": 1,
             "qty_lots": 1,
             "reasons": [],
         }

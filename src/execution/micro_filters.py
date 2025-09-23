@@ -320,6 +320,33 @@ def evaluate_micro(
                 ts_ms_val *= 1000.0
             age_ms = max(0.0, time.time() * 1000.0 - ts_ms_val)
 
+    if bid <= 0.0 or ask <= 0.0:
+        log_outcome(
+            "micro_wait",
+            reason="no_quote",
+            spread_pct=None,
+            cap_pct=exposure_cap_pct,
+            depth_ok=None,
+            depth_available=None,
+            available_bid_qty=available_bid,
+            available_ask_qty=available_ask,
+            spread_block=None,
+            depth_block=None,
+            raw_block=True,
+            would_block=True,
+            bid=bid,
+            ask=ask,
+            last_tick_age_ms=age_ms,
+        )
+        return {
+            "spread_pct": None,
+            "depth_ok": None,
+            "mode": mode,
+            "reason": "no_quote",
+            "would_block": True,
+            "last_tick_age_ms": age_ms,
+        }
+
     if age_ms is not None and age_ms > float(getattr(settings, "MICRO__STALE_MS", MICRO__STALE_MS)):
         log_outcome(
             "micro_wait",

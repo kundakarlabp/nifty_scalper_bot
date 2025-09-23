@@ -42,6 +42,7 @@ from src.diagnostics import healthkit, trace_ctl
 from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
+from src.logs import structured_log
 from src.execution.order_executor import OrderManager, OrderReconciler
 from src.state import StateStore
 from src.features.indicators import atr_pct
@@ -2779,6 +2780,95 @@ class StrategyRunner:
                         reason_block=flow.get("reason_block"),
                     )
                     return
+            ds_pre_score = getattr(self, "data_source", None)
+            ensure_ready_pre = getattr(ds_pre_score, "ensure_quote_ready", None)
+            token_pre = plan.get("token") or plan.get("option_token")
+            ensure_ready_available = callable(ensure_ready_pre)
+            quote_ready_status = None
+            if ensure_ready_available and token_pre:
+                try:
+                    quote_ready_status = ensure_ready_pre(
+                        token_pre,
+                        getattr(self.settings, "QUOTES__MODE", "FULL"),
+                        symbol=str(
+                            plan.get("tradingsymbol")
+                            or plan.get("option_symbol")
+                            or (plan.get("option") or {}).get("tradingsymbol")
+                            or getattr(self.settings.instruments, "trade_symbol", None)
+                            or ""
+                        )
+                        or None,
+                    )
+                except TypeError:
+                    quote_ready_status = ensure_ready_pre(token_pre)
+                except Exception:
+                    self.log.debug("ensure_quote_ready pre-score failed", exc_info=True)
+                    quote_ready_status = None
+            need_micro_wait = token_pre is None
+            if quote_ready_status is None:
+                if ensure_ready_available and token_pre:
+                    need_micro_wait = True
+            else:
+                try:
+                    plan["quote_ready"] = asdict(quote_ready_status)
+                except Exception:
+                    plan["quote_ready"] = {
+                        "ok": quote_ready_status.ok,
+                        "reason": quote_ready_status.reason,
+                        "last_tick_age_ms": quote_ready_status.last_tick_age_ms,
+                        "retries": quote_ready_status.retries,
+                    }
+                bid_ok = (
+                    quote_ready_status.bid is not None and float(quote_ready_status.bid) > 0.0
+                )
+                ask_ok = (
+                    quote_ready_status.ask is not None and float(quote_ready_status.ask) > 0.0
+                )
+                if not (bid_ok and ask_ok):
+                    need_micro_wait = True
+                elif not quote_ready_status.ok and quote_ready_status.reason in {
+                    "invalid_token",
+                    "no_quote",
+                }:
+                    need_micro_wait = True
+            if need_micro_wait:
+                try:
+                    tok_val = int(token_pre) if token_pre is not None else None
+                except Exception:
+                    tok_val = None
+                structured_log.event(
+                    "micro_wait",
+                    reason="no_quote",
+                    token=tok_val,
+                    bid=getattr(quote_ready_status, "bid", None),
+                    ask=getattr(quote_ready_status, "ask", None),
+                    last_tick_age_ms=getattr(quote_ready_status, "last_tick_age_ms", None),
+                    retries=getattr(quote_ready_status, "retries", 0),
+                )
+                plan.setdefault("reasons", [])
+                if "no_quote" not in plan["reasons"]:
+                    plan["reasons"].append("no_quote")
+                plan["reason_block"] = "no_quote"
+                plan.setdefault("micro", {}).update(
+                    {
+                        "spread_pct": None,
+                        "depth_ok": None,
+                        "reason": "no_quote",
+                        "would_block": True,
+                        "last_tick_age_ms": getattr(
+                            quote_ready_status, "last_tick_age_ms", None
+                        ),
+                    }
+                )
+                flow["reason_block"] = plan["reason_block"]
+                self._record_plan(plan)
+                self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
+                return
             score_val, details = compute_score(
                 df, plan.get("regime"), self.strategy_cfg
             )

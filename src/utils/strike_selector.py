@@ -570,14 +570,15 @@ def get_instrument_tokens(
         if lot_candidates:
             lot_size = max(lot_candidates, key=lot_candidates.count)
         symbol_upper = trade_symbol.upper()
-        if lot_size <= 0 and symbol_upper == "NIFTY":
-            lot_size = 50
+        try:
+            configured_nifty_lot = int(getattr(settings.instruments, "nifty_lot_size", 50))
+        except Exception:
+            configured_nifty_lot = 50
+        if symbol_upper == "NIFTY":
+            lot_size = configured_nifty_lot if configured_nifty_lot > 0 else 50
         elif lot_size <= 0:
-            try:
-                lot_size = int(getattr(settings.instruments, "nifty_lot_size", 50))
-            except Exception:
-                lot_size = 50
-        allowed_lot_sizes = {10, 15, 25, 40, 50, 100}
+            lot_size = configured_nifty_lot if configured_nifty_lot > 0 else 50
+        allowed_lot_sizes = {10, 15, 25, 40, 50, 100, configured_nifty_lot}
         if lot_size not in allowed_lot_sizes:
             logger.warning(
                 "strike_selector: unusual lot size resolved",

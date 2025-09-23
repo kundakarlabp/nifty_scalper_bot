@@ -141,6 +141,8 @@ def _setup_runner(
             "score": score_val,
             "option_type": "CE",
             "strike": "OPT",
+            "token": 1,
+            "option_token": 1,
             "qty_lots": 1,
             "reasons": [],
         }

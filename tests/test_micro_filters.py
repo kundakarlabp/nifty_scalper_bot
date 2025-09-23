@@ -102,9 +102,9 @@ def test_evaluate_micro_requires_top_of_book():
         "ask5_qty": [120, 100, 80, 60, 40],
     }
     result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
-    assert result["reason"] == "spread"
-    assert result["spread_pct"] >= 999.0
-    assert result["depth_ok"] is True
+    assert result["reason"] == "no_quote"
+    assert result["spread_pct"] is None
+    assert result["depth_ok"] is None
     assert result["would_block"] is True
 
 
