@@ -12,6 +12,7 @@ import time
 from decimal import Decimal
 from collections import deque
 from dataclasses import dataclass, asdict
+from enum import Enum
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import (
@@ -47,6 +48,7 @@ from src.execution.order_executor import OrderManager, OrderReconciler
 from src.state import StateStore
 from src.features.indicators import atr_pct
 from src.logs.journal import Journal
+from src.options.contract_registry import InstrumentRegistry
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
 from src.risk import guards, risk_gates
@@ -145,6 +147,19 @@ class CadenceController:
             self.interval = min(self.max_interval, self.interval + self.step)
         self.interval = max(self.min_interval, min(self.max_interval, self.interval))
         return self.interval
+
+
+# ============================ Runner phase FSM ==============================
+
+
+class RunnerPhase(Enum):
+    """Discrete phases for the strategy execution loop."""
+
+    IDLE = "IDLE"
+    PRIME_QUOTES = "PRIME_QUOTES"
+    EVALUATE = "EVALUATE"
+    PLACE = "PLACE"
+    MONITOR = "MONITOR"
 
 
 # ============================== Orchestrator ==============================
@@ -394,6 +409,7 @@ class StrategyRunner:
         )
         self._lg.set_interval("decision", _interval("decision_interval_sec", 10.0))
         self._lg.set_interval("quotes.precondition", 5.0)
+        self._lg.set_interval("phase", 2.0)
         self._lg.set_interval("watchdog.stale_tick", 5.0)
         self._block_counts: dict[str, int] = {}
 
@@ -453,8 +469,15 @@ class StrategyRunner:
 
         self.under_symbol = str(getattr(settings.instruments, "trade_symbol", "NIFTY"))
         self.lot_size = int(getattr(settings.instruments, "nifty_lot_size", 50))
+        registry_source = getattr(settings, "instruments_csv", None) or getattr(
+            settings, "INSTRUMENTS_CSV", None
+        )
+        self.instrument_registry = InstrumentRegistry(source=registry_source)
+        self._refresh_instrument_registry(force=True)
         self.instruments = InstrumentsCache(self.kite)
-        self.option_resolver = OptionResolver(self.instruments, self.kite)
+        self.option_resolver = OptionResolver(
+            self.instruments, self.kite, registry=self.instrument_registry
+        )
         self._last_option: Optional[dict] = None
 
         self._position_sizer = PositionSizer()
@@ -760,6 +783,8 @@ class StrategyRunner:
         self._last_signal_hash: tuple | None = None
 
         self.within_window: bool = False
+        self._phase: RunnerPhase = RunnerPhase.IDLE
+        self._quote_ready_cache: dict[int, Any] = {}
 
         self.log.info(
             "StrategyRunner ready (live_trading=%s, use_live_equity=%s)",
@@ -1103,6 +1128,111 @@ class StrategyRunner:
                     _push(getattr(ds, attr, None))
 
         return tokens
+
+    def _quote_ready_barrier(self, flow: Dict[str, Any]) -> bool:
+        """Ensure latest quotes are available before strategy evaluation."""
+
+        ds = getattr(self, "data_source", None)
+        tokens = self._candidate_quote_tokens()
+        detail_tokens: dict[int, dict[str, Any]] = {}
+        summary = {"checked": len(tokens), "ready_count": 0}
+        if not tokens or ds is None:
+            flow["quotes_ready"] = True
+            flow["quotes_ready_detail"] = {"tokens": detail_tokens, "summary": summary}
+            self._last_quote_ready_ok = True
+            self._last_quote_ready_detail = flow["quotes_ready_detail"]
+            self._quote_ready_cache = {}
+            return True
+
+        ensure_ready = getattr(ds, "ensure_quote_ready", None)
+        mode = getattr(self.settings, "QUOTES__MODE", "FULL")
+        cache: dict[int, Any] = {}
+        all_ok = True
+        fail_info: dict[str, Any] | None = None
+        for token in tokens:
+            try:
+                status = None
+                if callable(ensure_ready):
+                    try:
+                        status = ensure_ready(
+                            token,
+                            mode,
+                            symbol=self.under_symbol,
+                        )
+                    except TypeError:
+                        status = ensure_ready(token)
+                else:
+                    status = None
+            except Exception:
+                self.log.debug("quote_barrier.ensure_failed", exc_info=True)
+                status = None
+
+            info = {
+                "token": token,
+                "ok": False,
+                "reason": "no_quote",
+                "last_tick_age_ms": None,
+                "retries": None,
+                "bid": None,
+                "ask": None,
+            }
+            if status is not None:
+                info.update(
+                    {
+                        "ok": bool(getattr(status, "ok", False)),
+                        "reason": getattr(status, "reason", "no_quote"),
+                        "last_tick_age_ms": getattr(status, "last_tick_age_ms", None),
+                        "retries": getattr(status, "retries", None),
+                        "bid": getattr(status, "bid", None),
+                        "ask": getattr(status, "ask", None),
+                    }
+                )
+                cache[int(token)] = status
+            detail_tokens[int(token)] = info
+            if not info["ok"]:
+                all_ok = False
+                if fail_info is None:
+                    fail_info = dict(info)
+                break
+            summary["ready_count"] += 1
+
+        flow["quotes_ready"] = all_ok
+        flow["quotes_ready_detail"] = {"tokens": detail_tokens, "summary": summary}
+        self._last_quote_ready_detail = flow["quotes_ready_detail"]
+        self._quote_ready_cache = cache
+        if all_ok:
+            self._last_quote_ready_ok = True
+            return True
+
+        self._last_quote_ready_ok = False
+
+        allow_transient = False
+        last_plan = getattr(self, "last_plan", None)
+        if isinstance(last_plan, Mapping):
+            last_reason = last_plan.get("reason_block")
+            last_micro_reason: Any = None
+            micro_section = last_plan.get("micro")
+            if isinstance(micro_section, Mapping):
+                last_micro_reason = micro_section.get("reason")
+            disqualify = {"no_quote", "no_option_quote", "micro_wait", "stale_quote"}
+            if isinstance(last_reason, str) and last_reason not in disqualify:
+                if last_micro_reason not in {"no_quote", "stale_quote", "micro_wait"}:
+                    allow_transient = True
+
+        if allow_transient:
+            flow["quotes_ready_transient"] = True
+            return True
+
+        if fail_info is not None:
+            structured_log.event(
+                "micro_wait",
+                reason=fail_info.get("reason", "no_quote"),
+                token=fail_info.get("token"),
+                last_tick_age_ms=fail_info.get("last_tick_age_ms"),
+                retries=fail_info.get("retries"),
+            )
+
+        return False
 
     def _quotes_ready(
         self,
@@ -2300,6 +2430,13 @@ class StrategyRunner:
             log_event("block.summary", level, **dict(self._block_counts))
             self._block_counts = {}
 
+    def _set_phase(self, phase: RunnerPhase) -> None:
+        if self._phase is phase:
+            return
+        self._phase = phase
+        if self._lg.ok("phase"):
+            structured_log.event("runner_phase", phase=phase.value)
+
     # ---------------- main loop entry ----------------
     def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
         self.eval_count += 1
@@ -2371,6 +2508,7 @@ class StrategyRunner:
         }
         signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
+        self._set_phase(RunnerPhase.PRIME_QUOTES)
 
         healthy, watchdog_detail = self._health_and_watchdogs()
         self._last_watchdog_detail = watchdog_detail
@@ -2383,34 +2521,20 @@ class StrategyRunner:
                 signal=signal_for_log,
                 reason_block=flow.get("reason_block"),
             )
+            self._set_phase(RunnerPhase.IDLE)
             return
 
-        tokens_for_quotes = self._candidate_quote_tokens()
-        quotes_ready, readiness_detail = self._quotes_ready(tokens_for_quotes)
-        self._last_quote_ready_ok = quotes_ready
-        self._last_quote_ready_detail = readiness_detail
-        flow["quotes_ready"] = quotes_ready
-        flow["quotes_ready_detail"] = readiness_detail
-        if not quotes_ready:
-            if self._lg.ok("quotes.precondition"):
-                summary = readiness_detail.get("summary", {})
-                self.log.debug(
-                    "precond.quotes_not_ready",
-                    extra={
-                        "tokens": tokens_for_quotes,
-                        "needed": summary.get("needed"),
-                        "ready_count": summary.get("ready_count"),
-                        "ttl_s": summary.get("ttl_s"),
-                    },
-                )
-            flow["reason_block"] = "quotes_not_ready"
+        if not self._quote_ready_barrier(flow):
+            flow["reason_block"] = flow.get("reason_block") or "no_quote"
             self._last_flow_debug = flow
             self._log_decisive_event(
                 label="blocked",
                 signal=signal_for_log,
                 reason_block=flow.get("reason_block"),
             )
+            self._set_phase(RunnerPhase.IDLE)
             return
+        self._set_phase(RunnerPhase.EVALUATE)
 
         warm_min = int(
             getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
@@ -2440,6 +2564,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
@@ -2544,6 +2669,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             # new day / equity
@@ -2565,6 +2691,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             flow["data_ok"] = True
             # Event guard pre-check to hint strategy
@@ -2612,6 +2739,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             now = self._now_ist()
             last_tick_ts = self._last_tick_timestamp(now)
@@ -2685,6 +2813,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             atr_val = atr_pct(df, period=atr_period)
             plan["atr_pct_raw"] = float(atr_val) if atr_val is not None else None
@@ -2702,6 +2831,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             band = resolve_atr_band(self.strategy_cfg, self.under_symbol)
             ok, reason, atr_min, atr_max = check_atr(
@@ -2731,6 +2861,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             plan_token_for_warm = plan.get("token")
             warmed_plan_snapshot: Mapping[str, Any] | None = None
@@ -2779,6 +2910,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
             ds_pre_score = getattr(self, "data_source", None)
             ensure_ready_pre = getattr(ds_pre_score, "ensure_quote_ready", None)
@@ -2868,6 +3000,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             score_val, details = compute_score(
                 df, plan.get("regime"), self.strategy_cfg
@@ -2915,6 +3048,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             flow["signal_ok"] = True
             metrics.inc_signal()
@@ -2943,6 +3077,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block="event_guard",
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 else:
                     plan["_event_post_widen"] = float(widen)
@@ -2965,6 +3100,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             cfg = self.strategy_cfg
@@ -3033,6 +3169,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             token = opt.get("token")
             plan["option"] = opt
@@ -3061,7 +3198,9 @@ class StrategyRunner:
                 try:
                     coerced = int(value)
                 except (TypeError, ValueError):
+                    self._set_phase(RunnerPhase.IDLE)
                     return None
+                self._set_phase(RunnerPhase.IDLE)
                 return coerced or None
 
             ce_token: int | None = None
@@ -3147,6 +3286,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 # Resync datasource's "current" token to the resolver's chosen token instead of blocking.
                 ds = getattr(self, "data_source", None)
@@ -3222,6 +3362,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
@@ -3307,6 +3448,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
             if callable(prime_fn) and token_for_quote:
                 try:
@@ -3339,6 +3481,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 self._flag_transient_no_quote(plan)
             raw_quote: dict[str, Any] | None = None
@@ -3380,11 +3523,13 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 self._flag_transient_no_quote(plan)
                 plan.setdefault("micro", {}).setdefault("spread_pct", None)
                 plan["micro"].setdefault("depth_ok", None)
             def _positive_number(value: Any) -> bool:
+                self._set_phase(RunnerPhase.IDLE)
                 return isinstance(value, (int, float)) and value > 0
 
             have_price = any(
@@ -3437,6 +3582,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 self._flag_transient_no_quote(plan)
                 plan.setdefault("micro", {}).setdefault("spread_pct", None)
@@ -3570,7 +3716,9 @@ class StrategyRunner:
                     reasons_local = plan.setdefault("reasons", [])
                     if "micro_grace" not in reasons_local:
                         reasons_local.append("micro_grace")
+                    self._set_phase(RunnerPhase.IDLE)
                     return True
+                self._set_phase(RunnerPhase.IDLE)
                 return False
 
             skip_micro_block = False
@@ -3594,6 +3742,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
             if (not skip_micro_block) and micro.get("would_block"):
                 allow_grace = micro.get("reason") == "no_quote"
@@ -3613,6 +3762,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
             if micro.get("mode") == "SOFT":
                 penalty = (
@@ -3647,6 +3797,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             # ---- risk gates
@@ -3672,6 +3823,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             gates_pass = bool(plan.get("risk_ok", True)) and risk_gate_ok
@@ -3783,6 +3935,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             plan_token = plan.get("token") or plan.get("option_token")
@@ -3814,9 +3967,12 @@ class StrategyRunner:
                         def _num(value: Any) -> float:
                             try:
                                 if value is None:
+                                    self._set_phase(RunnerPhase.IDLE)
                                     return 0.0
+                                self._set_phase(RunnerPhase.IDLE)
                                 return float(value)
                             except (TypeError, ValueError):
+                                self._set_phase(RunnerPhase.IDLE)
                                 return 0.0
                         micro_state["spread_pct"] = q.get("spread_pct")
                         bid = _num(q.get("bid"))
@@ -3887,6 +4043,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             else:
                 self._mark_micro_ok(plan_token)
@@ -4031,6 +4188,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             planned_lots = int(qty / int(settings.instruments.nifty_lot_size))
@@ -4054,8 +4212,10 @@ class StrategyRunner:
 
             def _as_float(val: Any) -> float:
                 try:
+                    self._set_phase(RunnerPhase.IDLE)
                     return float(val)
                 except (TypeError, ValueError):
+                    self._set_phase(RunnerPhase.IDLE)
                     return 0.0
 
             warmed_cached_snapshot: Mapping[str, Any] | None = None
@@ -4089,6 +4249,7 @@ class StrategyRunner:
                         signal=signal_for_log,
                         reason_block=flow.get("reason_block"),
                     )
+                    self._set_phase(RunnerPhase.IDLE)
                     return
                 self._flag_transient_no_quote(plan)
                 plan.setdefault("micro", {}).setdefault("spread_pct", None)
@@ -4162,6 +4323,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             if (
                 ok_micro
@@ -4194,6 +4356,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
 
             self._record_plan(plan)
@@ -4228,6 +4391,7 @@ class StrategyRunner:
 
                 def _ok(q: Mapping[str, Any] | None) -> bool:
                     if not q:
+                        self._set_phase(RunnerPhase.IDLE)
                         return False
                     age = self._quote_age_seconds(q)
                     spread_raw = q.get("spread_pct") if isinstance(q, Mapping) else None
@@ -4235,6 +4399,7 @@ class StrategyRunner:
                         spread_val = float(spread_raw) if spread_raw is not None else None
                     except (TypeError, ValueError):
                         spread_val = None
+                    self._set_phase(RunnerPhase.IDLE)
                     return (
                         age is not None and age * 1000.0 <= max_age
                     ) and (spread_val is not None and spread_val <= max_spread)
@@ -4266,6 +4431,7 @@ class StrategyRunner:
                     signal=signal_for_log,
                     reason_block=flow.get("reason_block"),
                 )
+                self._set_phase(RunnerPhase.IDLE)
                 return
             except Exception:
                 self.log.debug("order.guard_error", exc_info=True)
@@ -4294,6 +4460,7 @@ class StrategyRunner:
                 }
                 if plan.get("quote"):
                     exec_payload["quote"] = dict(plan["quote"])
+                self._set_phase(RunnerPhase.PLACE)
                 placed_ok = bool(self.order_manager.submit(exec_payload))
                 if placed_ok and hasattr(self.executor, "create_trade_fsm"):
                     try:
@@ -4310,6 +4477,7 @@ class StrategyRunner:
                 side = "BUY" if str(plan["action"]).upper() == "BUY" else "SELL"
                 symbol = getattr(settings.instruments, "trade_symbol", "NIFTY")
                 token = int(getattr(settings.instruments, "instrument_token", 0))
+                self._set_phase(RunnerPhase.PLACE)
                 oid = self.executor.place_entry_order(
                     token=token,
                     symbol=symbol,
@@ -4318,26 +4486,27 @@ class StrategyRunner:
                     price=entry_px,
                 )
                 placed_ok = bool(oid)
-                if placed_ok and hasattr(self.executor, "create_trade_fsm"):
-                    try:
-                        plan_exec = dict(plan)
-                        plan_exec["trade_id"] = oid
-                        plan_exec["entry"] = entry_px
-                        plan_exec["sl"] = sl_px
-                        plan_exec["tp2"] = tp2_px
-                        fsm = self.executor.create_trade_fsm(plan_exec)
-                        self.executor.place_trade(fsm)
-                    except Exception:
-                        self.log.debug("FSM enqueue failed", exc_info=True)
-                if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
-                    try:
-                        self.executor.setup_gtt_orders(
-                            record_id=oid,
-                            sl_price=sl_px,
-                            tp_price=tp2_px,
-                        )
-                    except Exception as e:
-                        self.log.warning("setup_gtt_orders failed: %s", e)
+            self._set_phase(RunnerPhase.MONITOR)
+            if placed_ok and hasattr(self.executor, "create_trade_fsm"):
+                try:
+                    plan_exec = dict(plan)
+                    plan_exec["trade_id"] = oid
+                    plan_exec["entry"] = entry_px
+                    plan_exec["sl"] = sl_px
+                    plan_exec["tp2"] = tp2_px
+                    fsm = self.executor.create_trade_fsm(plan_exec)
+                    self.executor.place_trade(fsm)
+                except Exception:
+                    self.log.debug("FSM enqueue failed", exc_info=True)
+            if placed_ok and hasattr(self.executor, "setup_gtt_orders"):
+                try:
+                    self.executor.setup_gtt_orders(
+                        record_id=oid,
+                        sl_price=sl_px,
+                        tp_price=tp2_px,
+                    )
+                except Exception as e:
+                    self.log.warning("setup_gtt_orders failed: %s", e)
             else:
                 self.log.error("No known execution method found on OrderExecutor")
 
@@ -4417,6 +4586,7 @@ class StrategyRunner:
                     p.get("reasons"),
                 )
                 self.trace_ticks_remaining -= 1
+        self._set_phase(RunnerPhase.IDLE)
 
     # one-shot tick used by Telegram
     def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
@@ -4999,6 +5169,37 @@ class StrategyRunner:
             self.risk = RiskState(trading_day=today)
             self._loss_cooldown.reset_for_new_day()
             self._notify("🔁 New trading day — risk counters reset")
+            self._refresh_instrument_registry(force=True)
+
+    def _refresh_instrument_registry(self, *, force: bool = False) -> None:
+        registry = getattr(self, "instrument_registry", None)
+        if registry is None:
+            return
+        try:
+            registry.refresh(force=force)
+        except Exception:
+            self.log.warning("instrument_registry_refresh_failed", exc_info=True)
+            return
+        lot = registry.lot_size(self.under_symbol)
+        if lot and isinstance(lot, (int, float)):
+            try:
+                lot_int = int(lot)
+                if lot_int <= 0 and self.under_symbol.upper() == "NIFTY":
+                    lot_int = 75
+                    self.log.warning("instrument_registry returned non-positive lot size; defaulting to 75")
+                self.lot_size = lot_int
+            except (TypeError, ValueError):
+                pass
+            else:
+                try:
+                    setattr(self.settings.instruments, "nifty_lot_size", int(self.lot_size))
+                except Exception:
+                    pass
+        else:
+            try:
+                setattr(self.settings.instruments, "nifty_lot_size", int(self.lot_size))
+            except Exception:
+                pass
 
     def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
         """Return ``True`` if current IST time falls within the configured window.

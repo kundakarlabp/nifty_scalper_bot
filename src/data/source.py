@@ -577,6 +577,7 @@ class _CacheEntry:
 class QuoteState:
     token: int
     ts: float
+    monotonic_ts: float
     bid: float | None
     ask: float | None
     bid_qty: int | None
@@ -1504,6 +1505,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         state = QuoteState(
             token=token,
             ts=now,
+            monotonic_ts=time.monotonic(),
             bid=bid,
             ask=ask,
             bid_qty=bid_qty,
@@ -1856,6 +1858,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._quotes[token_i] = QuoteState(
             token=token_i,
             ts=float(ts_val) / 1000.0,
+            monotonic_ts=time.monotonic(),
             bid=bid if bid > 0 else None,
             ask=ask if ask > 0 else None,
             bid_qty=bid_qty if bid_qty > 0 else None,
@@ -1936,7 +1939,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         def _state_status(state: QuoteState | None) -> QuoteReadyStatus | None:
             if not state or state.bid is None or state.ask is None:
                 return None
-            age_ms = int(max(0.0, (time.time() - float(state.ts)) * 1000.0))
+            mono = getattr(state, "monotonic_ts", None)
+            if mono is not None:
+                age_ms = int(max(0.0, (time.monotonic() - float(mono)) * 1000.0))
+            else:
+                age_ms = int(max(0.0, (time.time() - float(state.ts)) * 1000.0))
             ok = age_ms <= stale_ms and state.bid > 0 and state.ask > 0
             reason = "ready" if ok else "stale_quote"
             return QuoteReadyStatus(
@@ -1952,10 +1959,17 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
         status = QuoteReadyStatus(ok=False, reason="no_quote")
+        start_monotonic = time.monotonic()
+        deadline = (
+            start_monotonic + (timeout_ms / 1000.0)
+            if timeout_ms > 0
+            else None
+        )
 
-        for attempt in range(attempts):
+        for attempt in range(max(1, attempts)):
             status.retries = attempt
-            resub_logged = False
+            snapshot_taken = False
+            snapshot_deadline = start_monotonic + (snapshot_delay_ms / 1000.0)
             try:
                 if callable(ensure_subscribe):
                     ensure_subscribe(token_i, mode="FULL")
@@ -1964,86 +1978,80 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:
                 self.log.debug("ensure_quote_ready.subscribe_failed", exc_info=True)
 
-            state = self._quotes.get(token_i)
-            state_status = _state_status(state)
+            state_status = _state_status(self._quotes.get(token_i))
             if state_status is not None:
                 status = state_status
-                if (
-                    state_status.last_tick_age_ms is not None
-                    and state_status.last_tick_age_ms > stale_ms
-                    and not resub_logged
-                ):
+                if status.last_tick_age_ms is not None and status.last_tick_age_ms > stale_ms:
                     try:
                         self.resubscribe_if_stale(token_i)
                     except Exception:
-                        self.log.debug(
-                            "ensure_quote_ready.resubscribe_failed", exc_info=True
-                        )
-                    resub_logged = True
-            if state_status and state_status.ok:
-                state_status.retries = attempt
+                        self.log.debug("ensure_quote_ready.resubscribe_failed", exc_info=True)
+            if status.ok:
+                status.retries = attempt
                 self._last_quote_ready_attempt[token_i] = time.time()
                 emit_quote_diag(
                     token=token_i,
                     symbol=symbol,
                     sub_mode=mode_norm,
-                    bid=state_status.bid,
-                    ask=state_status.ask,
-                    bid_qty=state_status.bid_qty,
-                    ask_qty=state_status.ask_qty,
-                    last_tick_age_ms=state_status.last_tick_age_ms,
+                    bid=status.bid,
+                    ask=status.ask,
+                    bid_qty=status.bid_qty,
+                    ask_qty=status.ask_qty,
+                    last_tick_age_ms=status.last_tick_age_ms,
                     retries=attempt,
                     reason="ready",
-                    source=state_status.source,
+                    source=status.source,
                 )
-                return state_status
+                return status
 
-            deadline = time.time() + (timeout_ms / 1000.0 if timeout_ms else 0.0)
-            snapshot_deadline = time.time() + (snapshot_delay_ms / 1000.0)
-            snapshot_taken = False
-            while timeout_ms == 0 or time.time() < deadline:
-                state = self._quotes.get(token_i)
-                state_status = _state_status(state)
-                if state_status and state_status.ok:
-                    state_status.retries = attempt
-                    self._last_quote_ready_attempt[token_i] = time.time()
-                    emit_quote_diag(
-                        token=token_i,
-                        symbol=symbol,
-                        sub_mode=mode_norm,
-                        bid=state_status.bid,
-                        ask=state_status.ask,
-                        bid_qty=state_status.bid_qty,
-                        ask_qty=state_status.ask_qty,
-                        last_tick_age_ms=state_status.last_tick_age_ms,
-                        retries=attempt,
-                        reason="ready",
-                        source=state_status.source,
-                    )
-                    return state_status
-                if state_status is not None:
-                    status = state_status
-                now_ts = time.time()
+            while True:
+                now_mono = time.monotonic()
                 if (
                     not snapshot_taken
-                    and now_ts >= snapshot_deadline
+                    and now_mono >= snapshot_deadline
                     and (status.bid in {None, 0.0} or status.ask in {None, 0.0})
                 ):
                     try:
                         self.prime_option_quote(token_i)
                     except Exception:
-                        self.log.debug(
-                            "ensure_quote_ready.snapshot_failed", exc_info=True
-                        )
+                        self.log.debug("ensure_quote_ready.snapshot_failed", exc_info=True)
                     snapshot_taken = True
-                    continue
-                if timeout_ms == 0:
+                    time.sleep(0.1)
+                state_status = _state_status(self._quotes.get(token_i))
+                if state_status is not None:
+                    status = state_status
+                if status.ok:
+                    status.retries = attempt
+                    self._last_quote_ready_attempt[token_i] = time.time()
+                    emit_quote_diag(
+                        token=token_i,
+                        symbol=symbol,
+                        sub_mode=mode_norm,
+                        bid=status.bid,
+                        ask=status.ask,
+                        bid_qty=status.bid_qty,
+                        ask_qty=status.ask_qty,
+                        last_tick_age_ms=status.last_tick_age_ms,
+                        retries=attempt,
+                        reason="ready",
+                        source=status.source,
+                    )
+                    return status
+                if deadline is not None and now_mono >= deadline:
                     break
-                time.sleep(0.05)
+                if deadline is None:
+                    break
+                time.sleep(0.1)
 
             if attempt < attempts - 1 and jitter_ms:
-                time.sleep((jitter_ms + random.uniform(0, jitter_ms)) / 1000.0)
+                sleep_ms = jitter_ms + random.uniform(0, jitter_ms)
+                time.sleep(max(sleep_ms, 0.0) / 1000.0)
 
+        if not status.ok:
+            try:
+                self.resubscribe_if_stale(token_i)
+            except Exception:
+                self.log.debug("ensure_quote_ready.resubscribe_failed", exc_info=True)
         status.source = mode_norm
         status.reason = status.reason or "no_quote"
         self._last_quote_ready_attempt[token_i] = time.time()
@@ -2078,7 +2086,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         now = time.time()
         age_ms: float | None = None
         if state is not None:
-            age_ms = (now - float(state.ts)) * 1000.0
+            mono = getattr(state, "monotonic_ts", None)
+            if mono is not None:
+                age_ms = (time.monotonic() - float(mono)) * 1000.0
+            else:
+                age_ms = (now - float(state.ts)) * 1000.0
             if age_ms <= stale_ms:
                 return
         last = self._last_quote_ready_attempt.get(token_i, 0.0)
