@@ -109,6 +109,8 @@ def test_atr_pct_rounding_allows_min_threshold(monkeypatch):
             "score": 1.0,
             "option_type": "CE",
             "strike": "OPT",
+            "token": 1,
+            "option_token": 1,
             "qty_lots": 1,
             "reasons": [],
         }

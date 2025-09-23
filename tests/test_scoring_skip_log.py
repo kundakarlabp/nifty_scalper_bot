@@ -48,6 +48,8 @@ def test_logs_when_scoring_skipped(monkeypatch, caplog):
             "rr": 0.0,
             "option_type": None,
             "strike": None,
+            "token": 1,
+            "option_token": 1,
             "reasons": [],
         }
 

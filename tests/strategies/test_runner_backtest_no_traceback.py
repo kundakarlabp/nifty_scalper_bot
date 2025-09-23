@@ -96,6 +96,8 @@ def test_process_tick_blocks_when_option_resolution_fails(monkeypatch):
                 "action": "BUY",
                 "qty_lots": 1,
                 "rr": 2.0,
+                "token": 12345,
+                "option_token": 12345,
             }
 
     fake_components = SimpleNamespace(

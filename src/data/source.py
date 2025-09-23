@@ -1796,6 +1796,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
             ),
         )
+        snapshot_delay_ms = max(
+            100,
+            int(
+                getattr(
+                    settings,
+                    "QUOTES__SNAPSHOT_DELAY_MS",
+                    getattr(_cfg, "QUOTES__SNAPSHOT_DELAY_MS", 1000),
+                )
+            ),
+        )
 
         def _state_status(state: QuoteState | None) -> QuoteReadyStatus | None:
             if not state or state.bid is None or state.ask is None:
@@ -1819,16 +1829,31 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         for attempt in range(attempts):
             status.retries = attempt
+            resub_logged = False
             try:
                 if callable(ensure_subscribe):
-                    ensure_subscribe(token_i, mode=mode_norm)
+                    ensure_subscribe(token_i, mode="FULL")
                 else:
-                    _subscribe_tokens(self, [token_i], mode=mode_norm)
+                    _subscribe_tokens(self, [token_i], mode="FULL")
             except Exception:
                 self.log.debug("ensure_quote_ready.subscribe_failed", exc_info=True)
 
             state = self._quotes.get(token_i)
             state_status = _state_status(state)
+            if state_status is not None:
+                status = state_status
+                if (
+                    state_status.last_tick_age_ms is not None
+                    and state_status.last_tick_age_ms > stale_ms
+                    and not resub_logged
+                ):
+                    try:
+                        self.resubscribe_if_stale(token_i)
+                    except Exception:
+                        self.log.debug(
+                            "ensure_quote_ready.resubscribe_failed", exc_info=True
+                        )
+                    resub_logged = True
             if state_status and state_status.ok:
                 state_status.retries = attempt
                 self._last_quote_ready_attempt[token_i] = time.time()
@@ -1846,15 +1871,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     source=state_status.source,
                 )
                 return state_status
-            if state_status is not None:
-                status = state_status
-
-            try:
-                self.prime_option_quote(token_i)
-            except Exception:
-                self.log.debug("ensure_quote_ready.prime_failed", exc_info=True)
 
             deadline = time.time() + (timeout_ms / 1000.0 if timeout_ms else 0.0)
+            snapshot_deadline = time.time() + (snapshot_delay_ms / 1000.0)
+            snapshot_taken = False
             while timeout_ms == 0 or time.time() < deadline:
                 state = self._quotes.get(token_i)
                 state_status = _state_status(state)
@@ -1875,6 +1895,22 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         source=state_status.source,
                     )
                     return state_status
+                if state_status is not None:
+                    status = state_status
+                now_ts = time.time()
+                if (
+                    not snapshot_taken
+                    and now_ts >= snapshot_deadline
+                    and (status.bid in {None, 0.0} or status.ask in {None, 0.0})
+                ):
+                    try:
+                        self.prime_option_quote(token_i)
+                    except Exception:
+                        self.log.debug(
+                            "ensure_quote_ready.snapshot_failed", exc_info=True
+                        )
+                    snapshot_taken = True
+                    continue
                 if timeout_ms == 0:
                     break
                 time.sleep(0.05)
@@ -1914,6 +1950,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             getattr(settings, "MICRO__STALE_MS", getattr(_cfg, "MICRO__STALE_MS", 1500))
         )
         now = time.time()
+        age_ms: float | None = None
         if state is not None:
             age_ms = (now - float(state.ts)) * 1000.0
             if age_ms <= stale_ms:
@@ -1921,10 +1958,24 @@ class LiveKiteSource(DataSource, BaseDataSource):
         last = self._last_quote_ready_attempt.get(token_i, 0.0)
         if now - last < 0.5:
             return
-        self.ensure_quote_ready(
-            token_i,
-            getattr(settings, "QUOTES__MODE", getattr(_cfg, "QUOTES__MODE", "FULL")),
-        )
+        ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
+        try:
+            if callable(ensure_subscribe):
+                ensure_subscribe(token_i, mode="FULL")
+            else:
+                _subscribe_tokens(self, [token_i], mode="FULL")
+            try:
+                structured_log.event(
+                    "ws_resubscribe",
+                    token=int(token_i),
+                    last_tick_age_ms=int(age_ms) if age_ms is not None else None,
+                    reason="stale_quote",
+                )
+            except Exception:
+                self.log.debug("resubscribe_if_stale.log_failed", exc_info=True)
+            self._last_quote_ready_attempt[token_i] = now
+        except Exception:
+            self.log.debug("resubscribe_if_stale.ensure_failed", exc_info=True)
 
     def prime_option_quote(
         self, token: int | str
