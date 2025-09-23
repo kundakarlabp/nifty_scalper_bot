@@ -293,9 +293,52 @@ def evaluate_micro(
     bid5 = _top5_quantities(q.get("bid5_qty"), [])
     ask5 = _top5_quantities(q.get("ask5_qty"), [])
 
+    available_bid = sum(bid5)
+    available_ask = sum(ask5)
+    if side_norm == "SELL":
+        depth_available = available_bid
+    elif side_norm == "BUY":
+        depth_available = available_ask
+    else:
+        depth_available = min(available_bid, available_ask)
+
+    if require_depth_flag:
+        depth_ok_default = depth_available >= required_units
+    else:
+        depth_ok_default = True
+
     bid = _as_float(q.get("bid"))
     ask = _as_float(q.get("ask"))
     ltp = _quote_reference_price(q)
+
+    if bid <= 0.0 or ask <= 0.0:
+        log_outcome(
+            "micro_wait",
+            reason="spread",
+            spread_pct=999.0,
+            cap_pct=cap_default,
+            depth_ok=depth_ok_default,
+            depth_available=depth_available,
+            available_bid_qty=available_bid,
+            available_ask_qty=available_ask,
+            spread_block=True,
+            depth_block=None,
+            raw_block=True,
+            would_block=True,
+            bid=bid,
+            ask=ask,
+        )
+        return {
+            "spread_pct": 999.0,
+            "depth_ok": depth_ok_default,
+            "mode": mode,
+            "reason": "spread",
+            "would_block": True,
+            "empty_top": True,
+            "depth_available": depth_available,
+            "available_bid_qty": available_bid,
+            "available_ask_qty": available_ask,
+        }
 
     if not bid5 or not ask5:
         log_outcome(
@@ -332,19 +375,9 @@ def evaluate_micro(
         spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     cap = cap_for_mid(mid or 0.0, cfg)
 
-    available_bid = sum(bid5)
-    available_ask = sum(ask5)
-    if side_norm == "SELL":
-        depth_available = available_bid
-    elif side_norm == "BUY":
-        depth_available = available_ask
-    else:
-        depth_available = min(available_bid, available_ask)
-
+    depth_ok = depth_ok_default
     if require_depth_flag:
         depth_ok = depth_available >= required_units
-    else:
-        depth_ok = True
 
     spread_block = spread_pct is None or (spread_pct > cap)
     depth_block = depth_ok is False

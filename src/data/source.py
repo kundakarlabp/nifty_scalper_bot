@@ -995,6 +995,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
+        self._ok_snap: dict[int, deque[float]] = {}
+        self._subscribed: set[int] = set()
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
@@ -1059,6 +1061,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
     @last_tick_ts.setter
     def last_tick_ts(self, value: float | None) -> None:
         self._last_tick_epoch = value
+
+    def get_last_tick_ts(self) -> float | None:
+        return self._last_tick_epoch
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1170,6 +1175,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 continue
             seen.add(token)
             ordered_payload.append(token)
+        if ordered_payload:
+            try:
+                self._subscribed.update(int(t) for t in ordered_payload)
+            except Exception:
+                pass
         subscribed = False
         mode_applied = False
         candidates = [
@@ -1214,6 +1224,29 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:
                 log.debug("LiveKiteSource: kite close failed", exc_info=True)
         log.info("LiveKiteSource: disconnected from Kite.")
+
+    def subscribe(self, tokens: list[int], mode: str = "FULL") -> None:
+        if not tokens:
+            return
+        payload: list[int] = []
+        for token in tokens:
+            try:
+                token_i = int(token)
+            except (TypeError, ValueError):
+                continue
+            if token_i == 0:
+                continue
+            payload.append(token_i)
+        if not payload:
+            return
+        if mode.upper() == "FULL":
+            self._subscribe_tokens_full(payload)
+        else:
+            _subscribe_tokens(self, payload, mode=mode)
+        try:
+            self._subscribed.update(payload)
+        except Exception:
+            pass
 
     def reconnect_with_backoff(self) -> None:
         delay = self._reconnect_backoff
@@ -1486,6 +1519,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
         )
         self._quotes[token] = state
         self._stale_tokens.discard(token)
+        if bid is not None and ask is not None and bid > 0.0 and ask > 0.0:
+            dq = self._ok_snap.setdefault(token, deque(maxlen=8))
+            dq.append(now)
         if has_depth:
             force_trace = self._trace_force()
             if token not in self._full_depth_tokens:
@@ -1557,6 +1593,73 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.bar_builder.on_tick(tick)
             except Exception:  # pragma: no cover - defensive
                 log.debug("bar_builder.on_tick failed", exc_info=True)
+
+    # ---------- Readiness helpers ----------
+    def quote_ready(
+        self,
+        token: int,
+        *,
+        min_snapshots: int = 2,
+        within_s: float = 2.5,
+    ) -> bool:
+        try:
+            token_i = int(token)
+        except (TypeError, ValueError):
+            return False
+        if token_i not in self._subscribed:
+            return False
+        if min_snapshots <= 0:
+            return True
+        if within_s < 0:
+            within_s = 0.0
+        dq = self._ok_snap.get(token_i)
+        if not dq or len(dq) < min_snapshots:
+            return False
+        now = time.time()
+        recent = [ts for ts in dq if (now - ts) <= within_s]
+        return len(recent) >= min_snapshots
+
+    def ensure_ready(
+        self,
+        token: int,
+        *,
+        min_snapshots: int = 2,
+        timeout_ms: int = 800,
+    ) -> None:
+        try:
+            token_i = int(token)
+        except (TypeError, ValueError):
+            return
+        if token_i <= 0:
+            return
+        if token_i not in self._subscribed:
+            try:
+                self.subscribe([token_i], mode="FULL")
+            except Exception:
+                pass
+        if self.quote_ready(token_i, min_snapshots=min_snapshots):
+            return
+        start = time.time()
+        step = 0.04
+        while (time.time() - start) * 1000.0 < max(timeout_ms, 0):
+            if self.quote_ready(token_i, min_snapshots=min_snapshots):
+                return
+            time.sleep(step)
+
+    def resubscribe_current(self) -> None:
+        tokens = list(self._subscribed)
+        if not tokens:
+            tokens = [
+                int(t)
+                for t in getattr(self, "atm_tokens", ())
+                if t not in (None, "", 0)
+            ]
+        if not tokens:
+            return
+        try:
+            self.subscribe(tokens, mode="FULL")
+        except Exception:
+            self.log.debug("resubscribe_current_failed", exc_info=True)
 
     def get_micro_state(self, token: int) -> dict[str, Any]:
         try:
@@ -2388,6 +2491,18 @@ def _subscribe_tokens(
         return False
     payload = list(seen)
 
+    def _record_subscription(target: Any, values: Sequence[int]) -> None:
+        try:
+            store = getattr(target, "_subscribed", None)
+        except Exception:
+            return
+        if not isinstance(store, set):
+            return
+        try:
+            store.update(int(v) for v in values if v is not None)
+        except Exception:
+            pass
+
     def _iter_targets(source: Any) -> list[Any]:
         targets: list[Any] = []
         seen_ids: set[int] = set()
@@ -2447,14 +2562,17 @@ def _subscribe_tokens(
                 log.debug("subscribe_tokens: reconnect hook failed", exc_info=True)
 
     if subscribed or mode_applied:
+        _record_subscription(obj, payload)
         return True
 
     broker = getattr(obj, "broker", None)
     if broker and _subscribe_tokens(broker, tokens, mode=mode):
+        _record_subscription(obj, payload)
         return True
 
     kite = getattr(obj, "kite", None)
     if kite and _subscribe_tokens(kite, tokens, mode=mode):
+        _record_subscription(obj, payload)
         return True
 
     return False

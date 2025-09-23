@@ -392,6 +392,8 @@ class StrategyRunner:
             "block.summary", _interval("block_summary_interval_sec", 30.0)
         )
         self._lg.set_interval("decision", _interval("decision_interval_sec", 10.0))
+        self._lg.set_interval("precond.quotes_not_ready", 5.0)
+        self._lg.set_interval("watchdog.stale_tick", 5.0)
         self._block_counts: dict[str, int] = {}
 
         self._micro_ok_ts_by_token: dict[int, int] = {}
@@ -401,6 +403,7 @@ class StrategyRunner:
             )
         except (TypeError, ValueError):
             self._micro_ok_hysteresis_ms = 2000
+        self._quotes_ready_detail: dict[int, dict[str, Any]] = {}
 
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
@@ -725,9 +728,9 @@ class StrategyRunner:
         self._last_micro_ok_ts: float | None = None
         self._last_micro_ok: dict[str, Any] | None = None
         try:
-            self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+            self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "45000"))
         except (TypeError, ValueError):
-            self._tick_watchdog_ms = 2000
+            self._tick_watchdog_ms = 45000
         if self._tick_watchdog_ms < 0:
             self._tick_watchdog_ms = 0
         try:
@@ -976,6 +979,41 @@ class StrategyRunner:
             self._micro_ok_streak >= min_streak and min_streak > 0
         )
 
+    def _recent_quote_ok(self, token: Any) -> bool:
+        try:
+            token_int = int(token)
+        except (TypeError, ValueError):
+            return False
+        if token_int <= 0:
+            return False
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return False
+        try:
+            grace = float(os.getenv("QUOTE_OK_GRACE_S", "2"))
+        except (TypeError, ValueError):
+            grace = 2.0
+        if grace < 0:
+            grace = 0.0
+        ready_fn = getattr(ds, "quote_ready", None)
+        if callable(ready_fn):
+            try:
+                if ready_fn(token_int, min_snapshots=1, within_s=grace):
+                    return True
+            except Exception:
+                pass
+        ok_snap = getattr(ds, "_ok_snap", None)
+        if isinstance(ok_snap, dict):
+            dq = ok_snap.get(token_int)
+            if dq:
+                now = time.time()
+                for ts in reversed(dq):
+                    if (now - ts) <= grace:
+                        return True
+                    if (now - ts) > grace:
+                        break
+        return False
+
     def _refresh_from_quote(self, token: int | None) -> dict | None:
         """Treat a fresh quote snapshot as a tick and update recency state."""
 
@@ -1019,6 +1057,46 @@ class StrategyRunner:
         if delta_ms < 0:
             delta_ms = 0
         return now - timedelta(milliseconds=delta_ms)
+
+    def _candidate_tokens(self) -> list[int]:
+        tokens: list[int] = []
+        seen: set[int] = set()
+
+        def _add(candidate: Any) -> None:
+            try:
+                token_int = int(candidate)
+            except (TypeError, ValueError):
+                return
+            if token_int <= 0 or token_int in seen:
+                return
+            seen.add(token_int)
+            tokens.append(token_int)
+
+        plan_sources: tuple[Any, ...] = (
+            getattr(self, "_last_plan", None),
+            getattr(self, "last_plan", None),
+            getattr(self, "_last_option", None),
+        )
+        for source in plan_sources:
+            if isinstance(source, Mapping):
+                _add(source.get("token"))
+                _add(source.get("option_token"))
+
+        ds = getattr(self, "data_source", None)
+        if ds is not None:
+            atm_tokens = getattr(ds, "atm_tokens", None)
+            if isinstance(atm_tokens, (list, tuple, set)):
+                for tok in atm_tokens:
+                    _add(tok)
+            for attr in (
+                "_current_ce_token",
+                "_current_pe_token",
+                "current_token",
+                "current_option_token",
+            ):
+                _add(getattr(ds, attr, None))
+
+        return tokens
 
     def _watchdog_candidate_tokens(self) -> list[int]:
         """Return tokens worth nudging when the tick watchdog fires."""
@@ -1067,10 +1145,10 @@ class StrategyRunner:
 
         try:
             watchdog_ms = int(
-                os.getenv("TICK_WATCHDOG_MS", str(getattr(self, "_tick_watchdog_ms", 2000)))
+                os.getenv("TICK_WATCHDOG_MS", str(getattr(self, "_tick_watchdog_ms", 45000)))
             )
         except (TypeError, ValueError):
-            watchdog_ms = getattr(self, "_tick_watchdog_ms", 2000)
+            watchdog_ms = getattr(self, "_tick_watchdog_ms", 45000)
         if watchdog_ms <= 0:
             return
         if not getattr(self, "market_open", False):
@@ -1145,6 +1223,48 @@ class StrategyRunner:
             if getattr(self, "_last_tick_ms", 0) != before_ms:
                 break
 
+    def _quotes_ready(
+        self, tokens: list[int], *, min_snapshots: int = 2
+    ) -> tuple[bool, dict[int, dict[str, Any]]]:
+        detail: dict[int, dict[str, Any]] = {}
+        try:
+            ttl = float(os.getenv("QUOTE_TTL_S", "2.5"))
+        except (TypeError, ValueError):
+            ttl = 2.5
+        ds = getattr(self, "data_source", None)
+        if ds is None or not tokens:
+            self._quotes_ready_detail = detail
+            return True, detail
+        ready_fn = getattr(ds, "quote_ready", None)
+        ok_snap = getattr(ds, "_ok_snap", None)
+        now = time.time()
+        overall_ok = True
+        for raw in tokens:
+            try:
+                token_int = int(raw)
+            except (TypeError, ValueError):
+                overall_ok = False
+                continue
+            entry = {"min": min_snapshots, "ttl": ttl, "seen": 0, "ready": False}
+            if isinstance(ok_snap, dict):
+                dq = ok_snap.get(token_int)
+                if dq:
+                    entry["seen"] = sum(1 for ts in dq if (now - ts) <= ttl)
+            ready_flag = True
+            if callable(ready_fn):
+                try:
+                    ready_flag = bool(
+                        ready_fn(token_int, min_snapshots=min_snapshots, within_s=ttl)
+                    )
+                except Exception:
+                    ready_flag = False
+            entry["ready"] = ready_flag
+            detail[token_int] = entry
+            if not ready_flag:
+                overall_ok = False
+        self._quotes_ready_detail = detail
+        return overall_ok, detail
+
     def _mark_micro_ok(self, token: Any) -> None:
         """Record the timestamp for the most recent successful micro check."""
 
@@ -1155,6 +1275,50 @@ class StrategyRunner:
         except (TypeError, ValueError):
             return
         self._micro_ok_ts_by_token[token_int] = self._now_ms()
+
+    def _health_and_watchdogs(self) -> bool:
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return True
+        if not getattr(self, "market_open", False):
+            return True
+        try:
+            watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "45000"))
+        except (TypeError, ValueError):
+            watchdog_ms = 45000
+        if watchdog_ms <= 0:
+            return True
+        getter = getattr(ds, "get_last_tick_ts", None)
+        last_ts: float | None = None
+        if callable(getter):
+            try:
+                last_ts = getter()
+            except Exception:
+                last_ts = None
+        if last_ts is None:
+            resub = getattr(ds, "resubscribe_current", None)
+            if callable(resub):
+                try:
+                    resub()
+                except Exception:
+                    self.log.debug("watchdog.resubscribe_error", exc_info=True)
+            return True
+
+        age_ms = int(max((time.time() - float(last_ts)) * 1000.0, 0.0))
+        if age_ms > watchdog_ms:
+            if self._lg.ok("watchdog.stale_tick"):
+                self.log.warning(
+                    "watchdog.stale_tick",
+                    extra={"tick_age_ms": age_ms},
+                )
+            resub = getattr(ds, "resubscribe_current", None)
+            if callable(resub):
+                try:
+                    resub()
+                except Exception:
+                    self.log.debug("watchdog.resubscribe_error", exc_info=True)
+            return False
+        return True
 
     def _update_plan_micro_from_snapshot(
         self,
@@ -2145,7 +2309,7 @@ class StrategyRunner:
         try:
             now_ms = int(time.monotonic() * 1000)
             idle_ms = now_ms - getattr(self, "_last_tick_ms", now_ms)
-            if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "2000")):
+            if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "45000")):
                 tok: int | None = None
                 last_plan = getattr(self, "_last_plan", None)
                 if isinstance(last_plan, dict):
@@ -2218,6 +2382,16 @@ class StrategyRunner:
                     reason_block=flow.get("reason_block"),
                 )
                 return
+        if not self._health_and_watchdogs():
+            flow["reason_block"] = flow.get("reason_block") or "tick_feed_stale"
+            flow["watchdog_stale"] = True
+            self._last_flow_debug = flow
+            self._log_decisive_event(
+                label="blocked",
+                signal=signal_for_log,
+                reason_block=flow.get("reason_block"),
+            )
+            return
         now = datetime.now(timezone.utc)
         tick_now = datetime.now(TZ)
         self._run_tick_watchdog()
@@ -2344,6 +2518,25 @@ class StrategyRunner:
                 )
                 return
             flow["data_ok"] = True
+            candidate_tokens = self._candidate_tokens()
+            ready, ready_detail = self._quotes_ready(candidate_tokens)
+            flow["quotes_ready"] = ready
+            if ready_detail:
+                flow["quotes_ready_detail"] = ready_detail
+            if not ready:
+                flow["reason_block"] = "quotes_not_ready"
+                if self._lg.ok("precond.quotes_not_ready"):
+                    self.log.debug(
+                        "precond.quotes_not_ready",
+                        extra={"tokens": candidate_tokens, "detail": ready_detail},
+                    )
+                self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
+                return
             # Event guard pre-check to hint strategy
             active_events: List[EventWindow] = []
             event_block = False
@@ -2912,6 +3105,14 @@ class StrategyRunner:
                         ensure_subscribe(token)
                 except Exception:
                     self.log.debug("ensure_token_subscribed failed", exc_info=True)
+            ensure_ready = getattr(ds, "ensure_ready", None)
+            if callable(ensure_ready) and plan.get("token"):
+                try:
+                    ensure_ready(int(plan["token"]), min_snapshots=3, timeout_ms=1200)
+                except TypeError:
+                    ensure_ready(int(plan["token"]))
+                except Exception:
+                    self.log.debug("ensure_ready_failed", exc_info=True)
             prime_price: float | None = None
             prime_src: str | None = None
             prime_ts: int | None = None
@@ -3133,13 +3334,30 @@ class StrategyRunner:
                         ensure_local(int(tok_local), mode="FULL")
                     except Exception:
                         self.log.debug("micro.ensure_error", exc_info=True)
-                if allow_grace and self._micro_in_grace():
-                    flow["reason_block"] = None
-                    plan["reason_block"] = None
+                token_int: int | None = None
+                try:
+                    if tok_local is not None:
+                        token_int = int(tok_local)
+                except (TypeError, ValueError):
+                    token_int = None
+                if allow_grace:
                     reasons_local = plan.setdefault("reasons", [])
-                    if "micro_grace" not in reasons_local:
-                        reasons_local.append("micro_grace")
-                    return True
+                    if self._micro_in_grace():
+                        flow["reason_block"] = None
+                        plan["reason_block"] = None
+                        if "micro_grace" not in reasons_local:
+                            reasons_local.append("micro_grace")
+                        return True
+                    if token_int is not None and self._recent_quote_ok(token_int):
+                        flow["reason_block"] = None
+                        plan["reason_block"] = None
+                        micro_local = plan.setdefault("micro", {})
+                        micro_local["reason"] = "grace_recent_ok"
+                        micro_local["would_block"] = False
+                        micro_local.setdefault("grace", "recent_ok")
+                        if "micro_grace_recent_ok" not in reasons_local:
+                            reasons_local.append("micro_grace_recent_ok")
+                        return True
                 return False
 
             skip_micro_block = False
@@ -3165,7 +3383,14 @@ class StrategyRunner:
                     )
                     return
             if (not skip_micro_block) and micro.get("would_block"):
-                allow_grace = micro.get("reason") == "no_quote"
+                allow_grace = bool(
+                    micro.get("reason") == "no_quote"
+                    or (
+                        micro.get("reason") == "spread"
+                        and micro.get("spread_pct") is None
+                    )
+                    or micro.get("empty_top")
+                )
                 if _micro_subscription_nudge(allow_grace):
                     skip_micro_block = True
                 else:
@@ -5263,6 +5488,13 @@ class StrategyRunner:
                 "guard_start": next_ev.guard_start().isoformat(),
                 "guard_end": next_ev.guard_end().isoformat(),
             }
+        flow_snapshot = getattr(self, "_last_flow_debug", {}) or {}
+        if isinstance(flow_snapshot, Mapping):
+            if flow_snapshot.get("quotes_ready") is not None:
+                diag["quotes_ready"] = bool(flow_snapshot.get("quotes_ready"))
+            detail = flow_snapshot.get("quotes_ready_detail")
+            if detail:
+                diag["quotes_ready_detail"] = detail
         return diag
 
     def risk_snapshot(self) -> Dict[str, Any]:
