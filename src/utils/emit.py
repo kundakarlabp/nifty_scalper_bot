@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import logging
 
+from src.server.logging_utils import SimpleLogGate
+
+
+_DECISION_GATE: SimpleLogGate = SimpleLogGate(default_interval_seconds=5.0)
+
 
 def emit_decision(payload: dict) -> None:
     summary = {
@@ -27,7 +32,14 @@ def emit_decision(payload: dict) -> None:
     plan_summary = payload.get("plan_summary")
     if isinstance(plan_summary, dict):
         extras["plan"] = plan_summary
-    logging.getLogger("decision").info("decision", extra=extras)
+    logger = logging.getLogger("decision")
+    try:
+        # Throttle noisy 'decision' logs; keep one every ~5s
+        if _DECISION_GATE.ok("decision"):
+            logger.info("decision", extra=extras)
+    except Exception:
+        # Fallback: still log if gating fails
+        logger.info("decision", extra=extras)
 
 
 def emit_micro(depth_ok: bool | None, spread_pct: float | None) -> None:
