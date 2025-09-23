@@ -1009,6 +1009,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
+        # Rolling ok snapshots for tokens with valid bid+ask quotes.
+        self._ok_snap: dict[int, deque[float]] = {}
+        # Tokens we have attempted to subscribe to via FULL depth.
+        self._subscribed: set[int] = set()
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
@@ -1185,6 +1189,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 continue
             seen.add(token)
             ordered_payload.append(token)
+        if hasattr(self, "_subscribed"):
+            try:
+                self._subscribed.update(ordered_payload)
+            except Exception:
+                pass
         subscribed = False
         mode_applied = False
         candidates = [
@@ -1417,6 +1426,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
             payload["depth"] = depth_raw
 
         self._option_quote_cache[token] = payload
+        if bid > 0.0 and ask > 0.0:
+            dq = self._ok_snap.setdefault(token, deque(maxlen=8))
+            dq.append(time.time())
 
     def _on_tick(self, tick: Mapping[str, Any]) -> None:
         token_raw = tick.get("instrument_token") or tick.get("token")
@@ -1638,6 +1650,120 @@ class LiveKiteSource(DataSource, BaseDataSource):
             "ask_qty": q.ask_qty,
             "last_tick_ts": q.ts,
         }
+
+    # ---------- Quote readiness helpers ----------
+    def quote_ready_state(
+        self,
+        token: int,
+        *,
+        min_snapshots: int = 2,
+        within_s: float = 2.5,
+    ) -> dict[str, Any]:
+        """Return readiness metadata for ``token`` based on cached snapshots."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            token_i = 0
+        within = max(float(within_s), 0.0)
+        needed = max(int(min_snapshots), 0)
+        dq = self._ok_snap.get(token_i) if token_i else None
+        now = time.time()
+        recent = 0
+        last_ok_ts = None
+        if dq:
+            last_ok_ts = dq[-1] if dq else None
+            recent = sum(1 for ts in dq if (now - float(ts)) <= within)
+        subscribed = token_i in self._subscribed if token_i else False
+        ready = subscribed and recent >= needed and needed > 0
+        return {
+            "token": token_i,
+            "ready": bool(ready or (needed == 0 and subscribed)),
+            "recent": int(recent),
+            "total": int(len(dq) if dq else 0),
+            "needed": needed,
+            "ttl_s": within,
+            "subscribed": subscribed,
+            "last_ok_ts": last_ok_ts,
+        }
+
+    def quote_ready(
+        self,
+        token: int,
+        *,
+        min_snapshots: int = 2,
+        within_s: float = 2.5,
+    ) -> bool:
+        """Return ``True`` when we have enough recent bid+ask snapshots."""
+
+        state = self.quote_ready_state(
+            token, min_snapshots=min_snapshots, within_s=within_s
+        )
+        return bool(state.get("ready"))
+
+    def ensure_ready(
+        self,
+        token: int,
+        *,
+        min_snapshots: int = 2,
+        timeout_ms: int = 800,
+        within_s: float | None = None,
+    ) -> None:
+        """Ensure ``token`` is subscribed and wait briefly for fresh quotes."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return
+        if token_i <= 0:
+            return
+        ensure_fn = getattr(self, "ensure_token_subscribed", None)
+        if callable(ensure_fn):
+            try:
+                ensure_fn(token_i, mode="FULL")
+            except Exception:
+                pass
+        ttl_raw: float | str | None
+        if within_s is not None:
+            ttl_raw = within_s
+        else:
+            ttl_raw = os.getenv("QUOTE_TTL_S", "2.5")
+        try:
+            ttl_val = max(float(ttl_raw), 0.0)
+        except (TypeError, ValueError):
+            ttl_val = 2.5
+        if self.quote_ready(token_i, min_snapshots=min_snapshots, within_s=ttl_val):
+            return
+        max_wait = max(int(timeout_ms), 0)
+        if max_wait == 0:
+            return
+        start = time.time()
+        step = 0.04
+        while (time.time() - start) * 1000.0 < max_wait:
+            if self.quote_ready(
+                token_i, min_snapshots=min_snapshots, within_s=ttl_val
+            ):
+                return
+            time.sleep(step)
+
+    def resubscribe_current(self) -> None:
+        """Resubscribe all known tokens using FULL mode (idempotent)."""
+
+        tokens = list(getattr(self, "_subscribed", set()) or [])
+        if not tokens:
+            return
+        try:
+            self._subscribe_tokens_full(tokens)
+        except Exception:
+            try:
+                _subscribe_tokens(self, tokens, mode="FULL")
+            except Exception:
+                self.log.debug("resubscribe_current.failed", exc_info=True)
+
+    def get_last_tick_ts(self) -> float | None:
+        """Return epoch seconds for the last processed tick."""
+
+        return self.last_tick_ts
 
     def quote_snapshot(self, token: int | str) -> dict[str, Any] | None:
         """Return a lightweight quote summary for Telegram diagnostics."""
@@ -2669,6 +2795,11 @@ def _subscribe_tokens(
     if not seen:
         return False
     payload = list(seen)
+    if hasattr(obj, "_subscribed"):
+        try:
+            obj._subscribed.update(payload)
+        except Exception:
+            pass
 
     def _iter_targets(source: Any) -> list[Any]:
         targets: list[Any] = []
@@ -2756,10 +2887,20 @@ def ensure_token_subscribed(
         return False
 
     if _subscribe_tokens(self, [token_i], mode=mode):
+        if hasattr(self, "_subscribed"):
+            try:
+                self._subscribed.add(token_i)
+            except Exception:
+                pass
         return True
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     if broker and _subscribe_tokens(broker, [token_i], mode=mode):
+        if hasattr(self, "_subscribed"):
+            try:
+                self._subscribed.add(token_i)
+            except Exception:
+                pass
         return True
     return False
 

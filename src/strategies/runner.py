@@ -392,6 +392,8 @@ class StrategyRunner:
             "block.summary", _interval("block_summary_interval_sec", 30.0)
         )
         self._lg.set_interval("decision", _interval("decision_interval_sec", 10.0))
+        self._lg.set_interval("quotes.precondition", 5.0)
+        self._lg.set_interval("watchdog.stale_tick", 5.0)
         self._block_counts: dict[str, int] = {}
 
         self._micro_ok_ts_by_token: dict[int, int] = {}
@@ -426,6 +428,9 @@ class StrategyRunner:
             )
         except (TypeError, ValueError):  # pragma: no cover - defensive
             self._quote_warmup_sleep_ms = 0
+        self._last_quote_ready_ok: bool = True
+        self._last_quote_ready_detail: dict[int, dict[str, Any]] = {}
+        self._last_watchdog_detail: dict[str, Any] = {}
 
         # Event guard configuration
         self.events_path = resolve_config_path(
@@ -1061,6 +1066,182 @@ class StrategyRunner:
                 _add(getattr(ds, attr, None))
 
         return candidates
+
+    def _candidate_quote_tokens(self) -> list[int]:
+        """Return unique tokens to check for quote readiness."""
+
+        tokens: list[int] = []
+        seen: set[int] = set()
+
+        def _push(value: Any) -> None:
+            try:
+                token_int = int(value)
+            except (TypeError, ValueError):
+                return
+            if token_int <= 0 or token_int in seen:
+                return
+            seen.add(token_int)
+            tokens.append(token_int)
+
+        for candidate in self._watchdog_candidate_tokens():
+            _push(candidate)
+
+        if not tokens:
+            ds = getattr(self, "data_source", None)
+            if ds is not None:
+                atm_tokens = getattr(ds, "atm_tokens", None)
+                if isinstance(atm_tokens, (list, tuple, set)):
+                    for tok in atm_tokens:
+                        _push(tok)
+                for attr in (
+                    "_current_ce_token",
+                    "_current_pe_token",
+                    "current_token",
+                    "current_option_token",
+                ):
+                    _push(getattr(ds, attr, None))
+
+        return tokens
+
+    def _quotes_ready(
+        self,
+        tokens: Iterable[int],
+        *,
+        min_snapshots: int = 2,
+        ttl_s: float | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Return readiness flag and detail for ``tokens``."""
+
+        detail: dict[str, Any] = {"tokens": {}, "summary": {}}
+        ds = getattr(self, "data_source", None)
+        if ds is None:
+            return True, detail
+
+        try:
+            ttl = float(ttl_s if ttl_s is not None else os.getenv("QUOTE_TTL_S", "2.5"))
+        except (TypeError, ValueError):
+            ttl = 2.5
+        ttl = max(ttl, 0.0)
+        try:
+            min_snaps = max(int(min_snapshots), 0)
+        except (TypeError, ValueError):
+            min_snaps = 2
+        try:
+            env_min = int(os.getenv("QUOTE_READY_MIN_SNAPSHOTS", str(min_snaps)))
+            min_snaps = max(env_min, 0)
+        except (TypeError, ValueError):
+            pass
+
+        filtered: list[int] = []
+        seen: set[int] = set()
+        for tok in tokens:
+            try:
+                tok_int = int(tok)
+            except (TypeError, ValueError):
+                continue
+            if tok_int <= 0 or tok_int in seen:
+                continue
+            seen.add(tok_int)
+            filtered.append(tok_int)
+
+        if not filtered:
+            detail["summary"] = {
+                "needed": min_snaps,
+                "ttl_s": ttl,
+                "checked": 0,
+                "ready_count": 0,
+            }
+            return True, detail
+
+        check_state = getattr(ds, "quote_ready_state", None)
+        check_simple = getattr(ds, "quote_ready", None)
+
+        tokens_detail: dict[int, dict[str, Any]] = {}
+        ready_all = True
+        ready_count = 0
+        for tok in filtered:
+            state_map: dict[str, Any]
+            ready_flag: bool
+            if callable(check_state):
+                raw_state = check_state(tok, min_snapshots=min_snaps, within_s=ttl)
+                state_map = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+                ready_flag = bool(state_map.get("ready"))
+                if "token" not in state_map:
+                    state_map["token"] = tok
+            elif callable(check_simple):
+                ready_flag = bool(
+                    check_simple(tok, min_snapshots=min_snaps, within_s=ttl)
+                )
+                state_map = {
+                    "token": tok,
+                    "ready": ready_flag,
+                    "needed": min_snaps,
+                    "ttl_s": ttl,
+                }
+            else:
+                return True, detail
+            tokens_detail[tok] = state_map
+            if ready_flag:
+                ready_count += 1
+            else:
+                ready_all = False
+
+        detail["tokens"] = tokens_detail
+        detail["summary"] = {
+            "needed": min_snaps,
+            "ttl_s": ttl,
+            "checked": len(filtered),
+            "ready_count": ready_count,
+        }
+        return ready_all, detail
+
+    def _health_and_watchdogs(self) -> tuple[bool, dict[str, Any]]:
+        """Return watchdog health state and refresh subscriptions if stale."""
+
+        ds = getattr(self, "data_source", None)
+        detail: dict[str, Any] = {"ok": True}
+        if ds is None:
+            return True, detail
+        try:
+            watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "45000"))
+        except (TypeError, ValueError):
+            watchdog_ms = 45000
+        watchdog_ms = max(watchdog_ms, 0)
+        detail.update({"threshold_ms": watchdog_ms})
+        if watchdog_ms == 0:
+            return True, detail
+        getter = getattr(ds, "get_last_tick_ts", None)
+        try:
+            last_ts = getter() if callable(getter) else getattr(ds, "last_tick_ts", None)
+        except Exception:
+            last_ts = getattr(ds, "last_tick_ts", None)
+        age_ms: int | None = None
+        if last_ts is not None:
+            try:
+                age_ms = int((time.time() - float(last_ts)) * 1000.0)
+                if age_ms < 0:
+                    age_ms = 0
+            except (TypeError, ValueError):
+                age_ms = None
+        detail.update({"last_tick_ts": last_ts, "tick_age_ms": age_ms})
+        if age_ms is None:
+            detail.update({"ok": True, "reason": "no_tick"})
+            return True, detail
+        if age_ms > watchdog_ms:
+            detail.update({"ok": False, "reason": "stale_tick"})
+            if self._lg.ok("watchdog.stale_tick"):
+                self.log.warning(
+                    "watchdog.stale_tick",
+                    extra={"tick_age_ms": age_ms, "threshold_ms": watchdog_ms},
+                )
+            resubscribe = getattr(ds, "resubscribe_current", None)
+            if callable(resubscribe):
+                try:
+                    resubscribe()
+                except Exception:
+                    self.log.debug("watchdog.resubscribe_error", exc_info=True)
+            return False, detail
+        return True, detail
 
     def _run_tick_watchdog(self) -> None:
         """Nudge live quotes when ticks have stalled during market hours."""
@@ -2189,6 +2370,47 @@ class StrategyRunner:
         }
         signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
+
+        healthy, watchdog_detail = self._health_and_watchdogs()
+        self._last_watchdog_detail = watchdog_detail
+        flow["tick_watchdog"] = watchdog_detail
+        if not healthy:
+            flow["reason_block"] = watchdog_detail.get("reason", "stale_tick")
+            self._last_flow_debug = flow
+            self._log_decisive_event(
+                label="blocked",
+                signal=signal_for_log,
+                reason_block=flow.get("reason_block"),
+            )
+            return
+
+        tokens_for_quotes = self._candidate_quote_tokens()
+        quotes_ready, readiness_detail = self._quotes_ready(tokens_for_quotes)
+        self._last_quote_ready_ok = quotes_ready
+        self._last_quote_ready_detail = readiness_detail
+        flow["quotes_ready"] = quotes_ready
+        flow["quotes_ready_detail"] = readiness_detail
+        if not quotes_ready:
+            if self._lg.ok("quotes.precondition"):
+                summary = readiness_detail.get("summary", {})
+                self.log.debug(
+                    "precond.quotes_not_ready",
+                    extra={
+                        "tokens": tokens_for_quotes,
+                        "needed": summary.get("needed"),
+                        "ready_count": summary.get("ready_count"),
+                        "ttl_s": summary.get("ttl_s"),
+                    },
+                )
+            flow["reason_block"] = "quotes_not_ready"
+            self._last_flow_debug = flow
+            self._log_decisive_event(
+                label="blocked",
+                signal=signal_for_log,
+                reason_block=flow.get("reason_block"),
+            )
+            return
+
         warm_min = int(
             getattr(settings, "WARMUP_MIN_BARS", getattr(settings, "warmup_min_bars", 0))
         )
@@ -2920,6 +3142,22 @@ class StrategyRunner:
                         ensure_subscribe(token)
                 except Exception:
                     self.log.debug("ensure_token_subscribed failed", exc_info=True)
+            ensure_ready_fn = getattr(ds, "ensure_ready", None)
+            if callable(ensure_ready_fn) and token_for_quote:
+                try:
+                    try:
+                        ttl_env = os.getenv("QUOTE_TTL_S", "2.5")
+                        ttl_val = float(ttl_env)
+                    except (TypeError, ValueError):
+                        ttl_val = 2.5
+                    ensure_ready_fn(
+                        int(token_for_quote),
+                        min_snapshots=3,
+                        timeout_ms=1200,
+                        within_s=ttl_val,
+                    )
+                except Exception:
+                    self.log.debug("ensure_ready_failed", exc_info=True)
             prime_price: float | None = None
             prime_src: str | None = None
             prime_ts: int | None = None
@@ -3168,6 +3406,49 @@ class StrategyRunner:
                 token_int = int(token_for_micro) if token_for_micro is not None else None
             except (TypeError, ValueError):
                 token_int = None
+            if (
+                token_int is not None
+                and isinstance(micro, Mapping)
+                and micro.get("would_block")
+                and micro.get("reason") in {"no_quote", "no_depth"}
+            ):
+                ds_local = getattr(self, "data_source", None)
+                try:
+                    grace = max(float(os.getenv("QUOTE_OK_GRACE_S", "2")), 0.0)
+                except (TypeError, ValueError):
+                    grace = 2.0
+                last_ok = None
+                if ds_local is not None:
+                    state_fn = getattr(ds_local, "quote_ready_state", None)
+                    if callable(state_fn):
+                        try:
+                            state = state_fn(token_int, min_snapshots=1, within_s=grace)
+                        except Exception:
+                            state = {}
+                        if isinstance(state, Mapping):
+                            last_ok = state.get("last_ok_ts")
+                    if last_ok is None:
+                        ok_snap = getattr(ds_local, "_ok_snap", None)
+                        if isinstance(ok_snap, Mapping):
+                            try:
+                                dq = ok_snap.get(int(token_int))
+                                if dq:
+                                    last_ok = dq[-1]
+                            except Exception:
+                                last_ok = None
+                try:
+                    recent_age = None if last_ok is None else max(time.time() - float(last_ok), 0.0)
+                except (TypeError, ValueError):
+                    recent_age = None
+                if recent_age is not None and recent_age <= grace:
+                    micro = dict(micro)
+                    micro["would_block"] = False
+                    micro["reason"] = "grace_recent_ok"
+                    micro.setdefault("grace", {})["age_s"] = round(recent_age, 3)
+                    plan_reasons = plan.setdefault("reasons", [])
+                    if "micro_grace_recent_ok" not in plan_reasons:
+                        plan_reasons.append("micro_grace_recent_ok")
+                    plan["micro"] = micro
             if token_int is not None and micro.get("depth_ok"):
                 self._micro_ok_ts_by_token[token_int] = self._now_ms()
             self.log.debug(
@@ -5246,6 +5527,11 @@ class StrategyRunner:
             "strategy": getattr(self, "strategy_name", "unknown"),
             "data_provider": getattr(self, "data_provider_name", "none"),
         }
+        diag["quotes_ready"] = bool(self._last_quote_ready_ok)
+        if self._last_quote_ready_detail:
+            diag["quotes_ready_detail"] = self._last_quote_ready_detail
+        if self._last_watchdog_detail:
+            diag["tick_watchdog"] = self._last_watchdog_detail
         if mr:
             diag["margins"] = mr
 
