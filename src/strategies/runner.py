@@ -703,12 +703,15 @@ class StrategyRunner:
         self._gate = getattr(self, "_gate", SimpleLogGate())
         self._gate.set("decision", 5.0)
         self._gate.set("structured", 10.0)
+        self._gate.set("loop.info", 1.0)
         self._prev_score_bucket: str | None = None
         self._last_regime: Optional[str] = None
         # monotonic ms clock of last live tick (or bridged quote)
         self._last_tick_ms: int = int(time.monotonic() * 1000)
         self._micro_ok_last_ms: int = 0
         self._micro_ok_streak: int = 0
+        self._last_micro_ok_ts: float | None = None
+        self._last_micro_ok: dict[str, Any] | None = None
         try:
             self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
         except (TypeError, ValueError):
@@ -1497,7 +1500,10 @@ class StrategyRunner:
             if self._lg.ok_changed(
                 "decision", (label_value, reason_text), force=trace_on
             ):
-                self.log.info("decision", extra=summary)
+                if trace_on or self._gate.gated("loop.info", 1.0):
+                    self.log.info("decision", extra=summary)
+                else:
+                    self.log.debug("decision", extra=summary)
                 fields: dict[str, Any] = {
                     "label": label_value,
                     "reason": reason_text,
@@ -3046,6 +3052,17 @@ class StrategyRunner:
                 require_depth=bool(getattr(settings.executor, "require_depth", False)),
                 mode_override=micro_mode,
             )
+            now_ts = time.time()
+            if (
+                micro
+                and micro.get("would_block")
+                and (micro.get("reason") == "no_quote" or micro.get("spread_pct") is None)
+                and self._last_micro_ok_ts is not None
+                and self._last_micro_ok
+                and (now_ts - self._last_micro_ok_ts) <= 2.0
+            ):
+                micro = dict(self._last_micro_ok)
+                self._last_micro_ok_ts = now_ts
             plan["spread_pct"] = micro.get("spread_pct")
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
@@ -3057,6 +3074,12 @@ class StrategyRunner:
                 micro.get("spread_pct") is not None
             )
             self._micro_warmup_update(micro_ok_flag)
+            if micro and micro.get("mode") in {"HARD", "SOFT"}:
+                reason = micro.get("reason")
+                would_block = bool(micro.get("would_block"))
+                if not would_block and reason in (None, "", "ok", "OK"):
+                    self._last_micro_ok_ts = now_ts
+                    self._last_micro_ok = dict(micro)
             try:
                 token_for_micro = plan.get("token") or plan.get("option_token")
                 token_int = int(token_for_micro) if token_for_micro is not None else None

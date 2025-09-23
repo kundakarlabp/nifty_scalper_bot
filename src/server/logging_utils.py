@@ -154,6 +154,12 @@ class SimpleLogGate:
 
         return self.should_emit(key, interval=interval, force=force)
 
+    def gated(self, key: str, seconds: float) -> bool:
+        """Convenience helper for callers needing ad-hoc intervals."""
+
+        self.set_interval(key, seconds)
+        return self.ok(key)
+
     def reset(self, key: str | None = None) -> None:
         """Reset stored timestamps for ``key`` or all keys."""
 

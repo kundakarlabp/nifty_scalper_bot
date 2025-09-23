@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta, timezone
 
 from src.utils.freshness import compute
@@ -51,3 +52,17 @@ def test_freshness_accepts_iso_strings() -> None:
         max_bar_lag_s=75,
     )
     assert f.tick_lag_s is not None and f.bar_lag_s is not None
+
+
+def test_freshness_without_tick_is_stale() -> None:
+    now = datetime.utcnow()
+    fresh = compute(
+        now=now,
+        last_tick_ts=None,
+        last_bar_open_ts=now - timedelta(minutes=1),
+        tf_seconds=60,
+        max_tick_lag_s=8,
+        max_bar_lag_s=75,
+    )
+    assert not fresh.ok
+    assert fresh.tick_lag_s is not None and math.isinf(fresh.tick_lag_s)
