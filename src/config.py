@@ -1269,8 +1269,18 @@ class AppSettings(BaseSettings):
     )
     decision_interval_sec: float = Field(
         10.0,
-        validation_alias=AliasChoices("DECISION_INTERVAL_SEC"),
+        validation_alias=AliasChoices("DECISION_INTERVAL_SEC", "LOG_DECISION_THROTTLE_S"),
         description="Seconds between repeated decision logs when unchanged.",
+    )
+    quote_warmup_tries: int = Field(
+        1,
+        validation_alias=AliasChoices("QUOTE_WARMUP_TRIES"),
+        description="Number of attempts to warm broker quotes before blocking.",
+    )
+    quote_warmup_sleep_ms: int = Field(
+        0,
+        validation_alias=AliasChoices("QUOTE_WARMUP_SLEEP_MS"),
+        description="Delay between quote warmup attempts in milliseconds.",
     )
     # Fallback notional equity (₹) when live equity fetch fails or is disabled.
     RISK_DEFAULT_EQUITY: int = Field(
@@ -1392,6 +1402,28 @@ class AppSettings(BaseSettings):
         if isinstance(v, bool):
             return "json" if v else "logfmt"
         raise ValueError("LOG_FORMAT must be 'logfmt' or 'json'")
+
+    @field_validator("quote_warmup_tries", mode="before")
+    @classmethod
+    def _v_quote_warmup_tries(cls, v: object) -> int:
+        try:
+            val = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("QUOTE_WARMUP_TRIES must be >= 1") from exc
+        if val < 1:
+            raise ValueError("QUOTE_WARMUP_TRIES must be >= 1")
+        return val
+
+    @field_validator("quote_warmup_sleep_ms", mode="before")
+    @classmethod
+    def _v_quote_warmup_sleep_ms(cls, v: object) -> int:
+        try:
+            val = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("QUOTE_WARMUP_SLEEP_MS must be >= 0") from exc
+        if val < 0:
+            raise ValueError("QUOTE_WARMUP_SLEEP_MS must be >= 0")
+        return val
 
     @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod
