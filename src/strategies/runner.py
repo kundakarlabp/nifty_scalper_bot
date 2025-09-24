@@ -2033,7 +2033,7 @@ class StrategyRunner:
                 )
                 self.log.debug("decision.detail", extra={"plan": detail})
             elif self._gate.ok("decision"):
-                self.log.debug("decision")
+                self.log.debug("decision", extra=summary)
 
             emit_decision(decision_payload)
             if reason_value:
