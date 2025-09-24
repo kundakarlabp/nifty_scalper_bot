@@ -58,7 +58,7 @@ def mock_kite():
             "strike": 19500,
             "tradingsymbol": "NIFTY2480819500CE",
             "instrument_token": 1,
-            "lot_size": 50,
+            "lot_size": 75,
         },
         {
             "name": "NIFTY",
@@ -68,7 +68,7 @@ def mock_kite():
             "strike": 19500,
             "tradingsymbol": "NIFTY2480819500PE",
             "instrument_token": 2,
-            "lot_size": 50,
+            "lot_size": 75,
         },
         {
             "name": "NIFTY",
@@ -78,7 +78,7 @@ def mock_kite():
             "strike": 19550,
             "tradingsymbol": "NIFTY2480819550CE",
             "instrument_token": 3,
-            "lot_size": 50,
+            "lot_size": 75,
         },
         {
             "name": "NIFTY",
@@ -88,7 +88,7 @@ def mock_kite():
             "strike": 19550,
             "tradingsymbol": "NIFTY2480819550PE",
             "instrument_token": 4,
-            "lot_size": 50,
+            "lot_size": 75,
         },
     ]
     return kite
@@ -102,12 +102,12 @@ def test_get_instrument_tokens_weekly_expiry(mock_kite):
     )
     assert tokens is not None
     assert tokens["expiry"] == "2024-08-06"
-    assert tokens["lot_size"] == 50
+    assert tokens["lot_size"] == 75
     assert "contracts" in tokens
     ce_contract = tokens["contracts"].get("ce")
     pe_contract = tokens["contracts"].get("pe")
     assert ce_contract is not None and pe_contract is not None
-    assert ce_contract["lot_size"] == 50
+    assert ce_contract["lot_size"] == 75
     assert ce_contract["token"] == tokens["tokens"]["ce"]
     assert ce_contract["segment"] == "NFO-OPT"
     assert ce_contract["expiry"] == "2024-08-06"
@@ -130,7 +130,7 @@ def test_get_instrument_tokens_monthly_expiry(mock_kite):
             "strike": 19500,
             "tradingsymbol": "NIFTY24AUG19500CE",
             "instrument_token": 5,
-            "lot_size": 50,
+            "lot_size": 75,
         },
         {
             "name": "NIFTY",
@@ -140,7 +140,7 @@ def test_get_instrument_tokens_monthly_expiry(mock_kite):
             "strike": 19500,
             "tradingsymbol": "NIFTY24AUG19500PE",
             "instrument_token": 6,
-            "lot_size": 50,
+            "lot_size": 75,
         },
     ]
     tokens = get_instrument_tokens(
@@ -148,7 +148,7 @@ def test_get_instrument_tokens_monthly_expiry(mock_kite):
     )
     assert tokens is not None
     assert tokens["expiry"] == "2024-08-27"
-    assert tokens["lot_size"] == 50
+    assert tokens["lot_size"] == 75
     assert tokens.get("prewarm_tokens", {}).get("ce")
 
 

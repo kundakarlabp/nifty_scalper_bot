@@ -2050,6 +2050,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         mode: str | None = None,
         *,
         symbol: str | None = None,
+        retries: int | None = None,
     ) -> QuoteReadyStatus:
         """Ensure ``token`` has a live best-bid/offer before strategy evaluation."""
 
@@ -2072,6 +2073,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
             ),
         )
+        if retries is not None:
+            try:
+                attempts = max(1, int(retries))
+            except (TypeError, ValueError):
+                attempts = max(1, attempts)
         timeout_ms = max(
             0,
             int(
@@ -2098,7 +2104,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 getattr(
                     settings,
                     "MICRO__STALE_MS",
-                    getattr(_cfg, "MICRO__STALE_MS", 1500),
+                    getattr(_cfg, "MICRO__STALE_MS", 3500),
                 )
             ),
         )

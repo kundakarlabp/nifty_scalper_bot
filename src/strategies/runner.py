@@ -2651,6 +2651,8 @@ class StrategyRunner:
             "executed": False,
             "reason_block": None,
         }
+        token_for_quote: int | None = None
+        lot_size_for_plan: int | None = None
         signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
         self._cycle_guard_token += 1
@@ -3367,6 +3369,10 @@ class StrategyRunner:
                     plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
             else:
                 plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
+            try:
+                lot_size_for_plan = int(plan.get("lot_size", 0) or 0)
+            except Exception:
+                lot_size_for_plan = None
             ds = getattr(self, "data_source", None)
             atm_strike = getattr(ds, "current_atm_strike", None)
             if atm_strike is None:
@@ -3417,6 +3423,13 @@ class StrategyRunner:
                     plan["token"] = int(token)
                 except (TypeError, ValueError):
                     plan["token"] = None
+            token_for_quote = _coerce_token(plan.get("token") or plan.get("option_token"))
+            if token_for_quote is None:
+                token_for_quote = _coerce_token(token)
+            if token_for_quote is not None:
+                plan["token"] = token_for_quote
+            else:
+                plan["token"] = None
 
             if ds is not None:
                 self._sync_atm_state(
@@ -3524,16 +3537,13 @@ class StrategyRunner:
                 except Exception:
                     pass
             self._last_option = opt
-            if not token:
-                plan["reason_block"] = "no_option_token"
-                plan.setdefault("reasons", []).append("no_option_token")
+            if token_for_quote is None:
                 plan["token"] = None
-                self.log.warning(
-                    "No option token: expiry=%s strike=%s kind=%s",
-                    opt.get("expiry"),
-                    opt.get("strike"),
-                    plan.get("side_hint"),
-                )
+                if self._last_micro_wait_cycle != self._cycle_guard_token:
+                    structured_log.event("micro_wait", reason="no_token_selected")
+                    self._last_micro_wait_cycle = self._cycle_guard_token
+                plan["reason_block"] = "micro_wait"
+                plan.setdefault("reasons", []).append("no_token_selected")
                 plan["spread_pct"] = None
                 plan["depth_ok"] = None
                 plan["micro"] = {"spread_pct": None, "depth_ok": None}
@@ -3547,18 +3557,12 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
-            token_for_quote: int | None = None
-            for candidate in (plan.get("token"), plan.get("option_token"), token):
-                if candidate in (None, "", 0):
-                    continue
+            if lot_size_for_plan is None:
                 try:
-                    token_for_quote = int(candidate)
-                except (TypeError, ValueError):
-                    continue
-                else:
-                    break
-            if token_for_quote is not None:
-                plan["token"] = token_for_quote
+                    lot_size_for_plan = int(plan.get("lot_size", self.lot_size))
+                except Exception:
+                    lot_size_for_plan = None
+            ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
                 subscribe_token: Any | None = (
@@ -3869,9 +3873,17 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
+            lot_size_for_micro = lot_size_for_plan
+            if not isinstance(lot_size_for_micro, int) or lot_size_for_micro <= 0:
+                try:
+                    lot_size_for_micro = int(plan.get("lot_size", self.lot_size))
+                except Exception:
+                    lot_size_for_micro = self.lot_size
+            plan["lot_size"] = lot_size_for_micro
+            lot_size_for_plan = lot_size_for_micro
             micro = evaluate_micro(
                 q=quote_dict,
-                lot_size=int(plan.get("lot_size", self.lot_size)),
+                lot_size=int(lot_size_for_micro or self.lot_size),
                 atr_pct=plan.get("atr_pct"),
                 cfg=self.strategy_cfg.raw,
                 side=plan.get("action"),

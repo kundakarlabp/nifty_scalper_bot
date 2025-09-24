@@ -1626,6 +1626,93 @@ class OrderExecutor:
                     bid, ask, depth = refresh_cb()
                 time.sleep(2)
 
+        final_quote_payload: Dict[str, Any] | None = None
+        if callable(ensure_ready) and token > 0:
+            final_status: Any = None
+            try:
+                final_status = ensure_ready(
+                    token,
+                    mode="FULL",
+                    symbol=symbol,
+                    retries=1,
+                )
+            except Exception:
+                final_status = None
+                log.debug("ensure_quote_ready final check failed", exc_info=True)
+            final_ok_raw = _status_value(final_status, "ok")
+            final_ok = bool(final_ok_raw) if final_ok_raw is not None else None
+            final_payload = {
+                "ok": final_ok_raw,
+                "reason": _status_value(final_status, "reason"),
+                "age_ms": _status_value(final_status, "last_tick_age_ms"),
+                "retries": _status_value(final_status, "retries"),
+                "source": _status_value(final_status, "source"),
+                "bid": _status_value(final_status, "bid"),
+                "ask": _status_value(final_status, "ask"),
+                "bid_qty": _status_value(final_status, "bid_qty"),
+                "ask_qty": _status_value(final_status, "ask_qty"),
+            }
+            stale_limit_exec = int(
+                getattr(settings, "MICRO__STALE_MS", CONFIG_MICRO_STALE_MS)
+            ) if settings else int(CONFIG_MICRO_STALE_MS)
+            age_val_final = final_payload.get("age_ms")
+            if (
+                final_ok
+                and isinstance(age_val_final, (int, float))
+                and age_val_final > stale_limit_exec
+            ):
+                final_ok = False
+                final_payload["ok"] = False
+                final_payload["reason"] = "stale_quote"
+            if final_ok is False or final_status is None:
+                final_quote_payload = final_payload
+
+        if final_quote_payload is not None:
+            structured_log.event(
+                "execution_block",
+                reason="no_quote_at_execution",
+                symbol=symbol,
+                token=int(token) if token else None,
+                side=action,
+                qty=int(qty),
+                mode=mode,
+                strategy=strategy_name or None,
+                trace_id=trace_id,
+                client_oid=client_oid or None,
+                quote_ready=final_quote_payload,
+            )
+            log_event(
+                "order.block",
+                "warning",
+                side=action,
+                token=token or "",
+                qty=qty,
+                price=float(price),
+                mode=mode,
+                strategy=strategy_name,
+                reason="no_quote_at_execution",
+                quote_ready_ok=final_quote_payload.get("ok"),
+                quote_ready_reason=final_quote_payload.get("reason"),
+                quote_ready_age_ms=final_quote_payload.get("age_ms"),
+                quote_ready_retries=final_quote_payload.get("retries"),
+                quote_ready_source=final_quote_payload.get("source"),
+            )
+            self._emit_order_event(
+                "no_quote_at_execution",
+                trace_id=trace_id,
+                client_oid=client_oid or None,
+                symbol=symbol,
+                action=action,
+                qty=qty,
+                mode=mode,
+                reason="no_quote_at_execution",
+                quote_ready=final_quote_payload,
+                sizing=sizing_raw,
+                instrument_token=token,
+            )
+            self.last_error = "no_quote_at_execution"
+            return None
+
         log_event(
             "order.new",
             "info",

@@ -220,16 +220,23 @@ def micro_check(
 
     bid = _as_float(q.get("bid"))
     ask = _as_float(q.get("ask"))
+    bid_qty_raw = _as_int(q.get("bid_qty"))
+    ask_qty_raw = _as_int(q.get("ask_qty"))
+    bid_qty = bid_qty_raw if bid_qty_raw > 0 else None
+    ask_qty = ask_qty_raw if ask_qty_raw > 0 else None
     bid5 = _top5_quantities(q.get("bid5_qty"), q.get("depth", {}).get("buy", []))
     ask5 = _top5_quantities(q.get("ask5_qty"), q.get("depth", {}).get("sell", []))
-    available_bid = sum(bid5)
-    available_ask = sum(ask5)
+    fallback_bid_qty = sum(bid5) if bid5 else None
+    fallback_ask_qty = sum(ask5) if ask5 else None
+    if bid_qty is None and ask_qty is None and not bid5 and not ask5:
+        result["reason"] = "no_quote"
+        return result
     result.update(
         {
             "bid_top5": bid5,
             "ask_top5": ask5,
-            "available_bid_qty": available_bid,
-            "available_ask_qty": available_ask,
+            "available_bid_qty": bid_qty if bid_qty is not None else fallback_bid_qty,
+            "available_ask_qty": ask_qty if ask_qty is not None else fallback_ask_qty,
             "bid": bid if bid > 0 else None,
             "ask": ask if ask > 0 else None,
         }
@@ -253,13 +260,11 @@ def micro_check(
     result["last_tick_age_ms"] = age_ms
 
     if bid <= 0.0 or ask <= 0.0:
+        result["reason"] = "no_quote"
         return result
 
     if age_ms is not None and age_ms > stale_ms_limit:
         result["reason"] = "stale_quote"
-        return result
-
-    if not bid5 or not ask5:
         return result
 
     ltp = _quote_reference_price(q)
@@ -268,24 +273,36 @@ def micro_check(
         mid = ltp
     result["mid"] = mid
 
-    if bid <= 0.0 or ask <= 0.0:
-        return result
-
     ref_price = ltp if ltp > 0.0 else (mid or 0.0)
     spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     spread_cap = cap_for_mid(mid or 0.0, cfg)
     result.update({"spread_pct": spread_pct, "cap_pct": spread_cap, "spread_cap_pct": spread_cap})
 
     if side_norm == "SELL":
-        depth_available = available_bid
+        depth_available = bid_qty
     elif side_norm == "BUY":
-        depth_available = available_ask
+        depth_available = ask_qty
     else:
-        depth_available = min(available_bid, available_ask)
-    result["depth_available"] = depth_available
+        candidates = [qty for qty in (bid_qty, ask_qty) if qty is not None]
+        depth_available = min(candidates) if candidates else None
+    depth_metric = depth_available
+    if depth_metric is None:
+        if side_norm == "SELL":
+            depth_metric = fallback_bid_qty
+        elif side_norm == "BUY":
+            depth_metric = fallback_ask_qty
+        else:
+            candidates_display = [
+                val for val in (fallback_bid_qty, fallback_ask_qty) if val is not None
+            ]
+            depth_metric = min(candidates_display) if candidates_display else None
+    result["depth_available"] = depth_metric
 
     if require_depth_flag:
-        depth_ok = depth_available >= required_units
+        if depth_metric is None:
+            depth_ok = True
+        else:
+            depth_ok = depth_metric >= required_units
     else:
         depth_ok = True
     result["depth_ok"] = depth_ok
