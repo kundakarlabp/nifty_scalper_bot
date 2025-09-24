@@ -1026,6 +1026,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts_ms: int | None = None
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
+        self._ws_resub_window_ms: dict[int, int] = {}
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
         self._ok_snap: dict[int, deque[float]] = {}
         # Tokens we have attempted to subscribe to via FULL depth.
@@ -2341,17 +2342,35 @@ class LiveKiteSource(DataSource, BaseDataSource):
         last = self._last_quote_ready_attempt.get(token_i, 0.0)
         if now_mono - float(last) < 0.5:
             return
-        min_interval_ms = int(
+        min_interval_raw = int(
             getattr(
                 settings,
                 "WS_RESUBSCRIBE_MIN_INTERVAL_MS",
-                getattr(_cfg, "WS_RESUBSCRIBE_MIN_INTERVAL_MS", 15000),
+                getattr(_cfg, "WS_RESUBSCRIBE_MIN_INTERVAL_MS", 10000),
             )
         )
-        last_resub = self._last_ws_resub_ms.get(token_i, 0)
-        if now_ms - int(last_resub) < max(min_interval_ms, 0):
+        max_interval_raw = int(
+            getattr(
+                settings,
+                "WS_RESUBSCRIBE_MAX_INTERVAL_MS",
+                getattr(_cfg, "WS_RESUBSCRIBE_MAX_INTERVAL_MS", 15000),
+            )
+        )
+        min_interval_ms = max(min_interval_raw, 10000)
+        max_interval_ms = max(max_interval_raw, min_interval_ms + 5000)
+
+        debounce_window = int(self._ws_resub_window_ms.get(token_i, min_interval_ms))
+        debounce_window = max(debounce_window, min_interval_ms)
+        last_resub = int(self._last_ws_resub_ms.get(token_i, 0))
+        if now_ms - last_resub < debounce_window:
             return
+
+        def _next_window() -> int:
+            if max_interval_ms <= min_interval_ms:
+                return max(min_interval_ms, 0)
+            return int(random.uniform(min_interval_ms, max_interval_ms))
         ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
+        next_window_ms = _next_window()
         try:
             if callable(ensure_subscribe):
                 ensure_subscribe(token_i, mode="FULL", force=True)
@@ -2363,13 +2382,17 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     token=int(token_i),
                     last_tick_age_ms=int(age_ms) if age_ms is not None else None,
                     reason="stale_quote",
+                    debounce_ms=next_window_ms,
                 )
             except Exception:
                 self.log.debug("resubscribe_if_stale.log_failed", exc_info=True)
             self._last_quote_ready_attempt[token_i] = now_mono
             self._last_ws_resub_ms[token_i] = now_ms
+            self._ws_resub_window_ms[token_i] = next_window_ms
         except Exception:
             self.log.debug("resubscribe_if_stale.ensure_failed", exc_info=True)
+            self._last_ws_resub_ms[token_i] = now_ms
+            self._ws_resub_window_ms[token_i] = _next_window()
 
     def prime_option_quote(
         self, token: int | str
