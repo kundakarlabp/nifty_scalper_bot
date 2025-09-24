@@ -194,7 +194,6 @@ def micro_check(
         "required_qty": required_units,
         "depth_multiplier": depth_mult,
         "require_depth": require_depth_flag,
-        "cap_pct": cap_for_mid(0.0, cfg),
         "risk_cap_pct": risk_cap_pct,
         "spread_cap_pct": None,
         "spread_pct": None,
@@ -243,7 +242,13 @@ def micro_check(
     )
 
     age_ms: float | None = None
-    ts_raw = q.get("age_ms")
+    age_raw = q.get("last_tick_age_ms")
+    if age_raw is not None:
+        try:
+            age_ms = float(age_raw)
+        except (TypeError, ValueError):
+            age_ms = None
+    ts_raw = q.get("age_ms") if age_ms is None else None
     if ts_raw is not None:
         try:
             age_ms = float(ts_raw)
@@ -276,7 +281,7 @@ def micro_check(
     ref_price = ltp if ltp > 0.0 else (mid or 0.0)
     spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
     spread_cap = cap_for_mid(mid or 0.0, cfg)
-    result.update({"spread_pct": spread_pct, "cap_pct": spread_cap, "spread_cap_pct": spread_cap})
+    result.update({"spread_pct": spread_pct, "spread_cap_pct": spread_cap})
 
     if side_norm == "SELL":
         depth_available = bid_qty

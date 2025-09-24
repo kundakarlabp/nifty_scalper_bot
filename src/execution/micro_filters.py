@@ -172,7 +172,7 @@ def evaluate_micro(
         "require_depth": micro.get("require_depth"),
         "atr_pct": float(atr_pct) if atr_pct is not None else None,
         "spread_pct": micro.get("spread_pct"),
-        "cap_pct": micro.get("cap_pct"),
+        "spread_cap_pct": micro.get("spread_cap_pct"),
         "risk_cap_pct": micro.get("risk_cap_pct"),
         "depth_ok": micro.get("depth_ok"),
         "depth_available": micro.get("depth_available"),

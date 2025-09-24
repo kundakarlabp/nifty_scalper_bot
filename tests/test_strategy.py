@@ -226,7 +226,7 @@ def test_micro_failures_block_trade_even_in_soft_mode(
     )
     def _micro(*args: object, **kwargs: object) -> dict:
         payload = dict(micro_payload)
-        payload.setdefault("cap_pct", 1.0)
+        payload.setdefault("spread_cap_pct", 1.0)
         return payload
 
     monkeypatch.setattr("src.strategies.scalping_strategy.micro_check", _micro)
@@ -263,7 +263,12 @@ def test_uses_data_source_atm_tokens(
     )
     monkeypatch.setattr(
         "src.strategies.scalping_strategy.micro_check",
-        lambda *args, **kwargs: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD", "cap_pct": 1.0},
+        lambda *args, **kwargs: {
+            "spread_pct": 0.1,
+            "depth_ok": True,
+            "mode": "HARD",
+            "spread_cap_pct": 1.0,
+        },
     )
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
