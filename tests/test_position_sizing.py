@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from src.risk.position_sizing import (
     PositionSizer,
+    SizingBlock,
     _mid_from_quote,
     lots_from_premium_cap,
 )
@@ -52,19 +53,16 @@ def test_mid_from_quote_variants():
 def test_lots_from_premium_cap(monkeypatch):
     """lots_from_premium_cap respects equity-based caps."""
     monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.10, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.10, raising=False)
-    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.10, raising=False)
-    monkeypatch.setattr(
-        cfg.risk, "exposure_cap_pct_of_equity", 0.10, raising=False
-    )
     runner = SimpleNamespace(equity_amount=10_000)
-    lots, unit_notional, cap, eq_source = lots_from_premium_cap(
+    lots, unit_notional, cap, eq_source, block = lots_from_premium_cap(
         runner, {"mid": 100}, 25, 10
     )
     assert unit_notional == 2_500
     assert cap == 1_000
     assert lots == 0
     assert eq_source == "live"
+    assert isinstance(block, SizingBlock)
+    assert block.reason == "cap_lt_one_lot"
 
 
 def test_basic_sizing():
@@ -147,12 +145,7 @@ def test_min_lots_rescue_when_affordable():
 
 def test_cap_abs_in_diag(monkeypatch):
     monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.40, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
-    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 5_000.0, raising=False)
-    monkeypatch.setattr(
-        cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False
-    )
     monkeypatch.setattr(cfg.risk, "exposure_cap_abs", 5_000.0, raising=False)
     monkeypatch.setattr(cfg.risk, "allow_min_one_lot", False, raising=False)
     sizer = _sizer()
@@ -195,9 +188,6 @@ def test_underlying_basis_caps_by_spot():
 
 def test_allow_min_one_lot_when_cap_small(monkeypatch):
     monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.01, raising=False)
-    monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.01, raising=False)
-    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.01, raising=False)
-    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.01, raising=False)
     monkeypatch.setattr(cfg.risk, "allow_min_one_lot", True, raising=False)
     sizer = _sizer()
     qty, lots, diag = sizer.size_from_signal(
