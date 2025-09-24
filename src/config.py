@@ -76,7 +76,10 @@ MICRO__REQUIRE_DEPTH: bool = (
 MICRO__DEPTH_MULTIPLIER: float = float(os.getenv("MICRO__DEPTH_MULTIPLIER", "5.0"))
 MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "3500"))
 WS_RESUBSCRIBE_MIN_INTERVAL_MS: int = int(
-    os.getenv("WS_RESUBSCRIBE_MIN_INTERVAL_MS", "15000")
+    os.getenv("WS_RESUBSCRIBE_MIN_INTERVAL_MS", "10000")
+)
+WS_RESUBSCRIBE_MAX_INTERVAL_MS: int = int(
+    os.getenv("WS_RESUBSCRIBE_MAX_INTERVAL_MS", "15000")
 )
 
 # Single source for risk exposure cap (decimal fraction)
@@ -1343,9 +1346,9 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("RISK__EXPOSURE_CAP_SOURCE"),
     )
     # Percent of equity allowed per trade (converted to ratio for risk model).
-    EXPOSURE_CAP_PCT: float = Field(
-        default_factory=lambda: float(
-            os.getenv("RISK__EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))
+    RISK__EXPOSURE_CAP_PCT: float = Field(
+        default_factory=lambda: _coerce_pct_env(
+            "RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT
         ),
         validation_alias=AliasChoices("RISK__EXPOSURE_CAP_PCT"),
     )
@@ -1461,16 +1464,16 @@ class AppSettings(BaseSettings):
             )
         return val
 
-    @field_validator("EXPOSURE_CAP_PCT")
+    @field_validator("RISK__EXPOSURE_CAP_PCT")
     @classmethod
     def _v_app_exposure_cap_pct(cls, v: float) -> float:
         pct = float(v)
         if pct <= 0:
-            raise ValueError("EXPOSURE_CAP_PCT must be > 0")
-        if pct <= 1.0:
-            pct *= 100.0
-        if pct > 100.0:
-            raise ValueError("EXPOSURE_CAP_PCT must be <= 100")
+            raise ValueError("RISK__EXPOSURE_CAP_PCT must be > 0")
+        if pct > 1.0:
+            pct = pct / 100.0
+        if pct <= 0 or pct > 1.0:
+            raise ValueError("RISK__EXPOSURE_CAP_PCT must be within (0, 1]")
         return pct
 
     @field_validator("EXPOSURE_CAP_ABS")
@@ -1553,16 +1556,15 @@ class AppSettings(BaseSettings):
 
     @property
     def EXPOSURE_CAP_PCT_OF_EQUITY(self) -> float:
-        """Return the exposure cap as a ratio for legacy callers."""
+        """Return the exposure cap ratio for legacy callers."""
 
-        pct = float(self.EXPOSURE_CAP_PCT)
-        return pct / 100.0
+        return float(getattr(self, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT))
 
     @property
-    def RISK__EXPOSURE_CAP_PCT(self) -> float:
-        """Unified exposure cap ratio consumed by micro + risk gates."""
+    def EXPOSURE_CAP_PCT(self) -> float:
+        """Return the exposure cap percentage (0-100) for legacy callers."""
 
-        return float(self.EXPOSURE_CAP_PCT_OF_EQUITY)
+        return self.EXPOSURE_CAP_PCT_OF_EQUITY * 100.0
 
     instruments_csv: str = Field(
         default_factory=lambda: str(
@@ -1615,7 +1617,12 @@ class AppSettings(BaseSettings):
         if cap_source == "env":
             cap_source = "absolute"
         self.risk.exposure_cap_source = cap_source
-        self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
+        cap_pct_ratio = float(
+            getattr(self, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)
+        )
+        if cap_pct_ratio > 1.0:
+            cap_pct_ratio = cap_pct_ratio / 100.0
+        self.risk.exposure_cap_pct_of_equity = cap_pct_ratio
         self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
         self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
         min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")

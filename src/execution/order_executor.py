@@ -1373,6 +1373,20 @@ class OrderExecutor:
         refresh_cb = payload.get("refresh_market")
         symbol = payload.get("symbol") or self._infer_symbol(payload)
         token = int(payload.get("instrument_token") or 0)
+        token_for_quote: int | None = None
+        for key in ("token_for_quote", "quote_token", "token", "instrument_token"):
+            raw_token_val = payload.get(key)
+            if raw_token_val is None:
+                continue
+            try:
+                coerced = int(raw_token_val)
+            except Exception:
+                continue
+            if coerced > 0:
+                token_for_quote = coerced
+                break
+        if token_for_quote is None and token > 0:
+            token_for_quote = token
         client_oid = str(payload.get("client_oid") or "")
         if not client_oid:
             ts_val = payload.get("ts") or payload.get("timestamp") or ""
@@ -1666,6 +1680,68 @@ class OrderExecutor:
                 final_payload["reason"] = "stale_quote"
             if final_ok is False or final_status is None:
                 final_quote_payload = final_payload
+
+        prime_fn = getattr(data_source, "prime_option_quote", None)
+        if callable(prime_fn) and token_for_quote:
+            prime_attempt: Dict[str, Any] | None = None
+            prime_ok = False
+            stale_limit_exec = int(
+                getattr(settings, "MICRO__STALE_MS", CONFIG_MICRO_STALE_MS)
+            ) if settings else int(CONFIG_MICRO_STALE_MS)
+            for attempt in range(2):
+                try:
+                    prime_price, prime_source, prime_ts = prime_fn(token_for_quote)
+                except Exception:
+                    prime_price = prime_source = prime_ts = None
+                now_ms_exec = int(time.time() * 1000)
+                age_ms_prime: int | None = None
+                if isinstance(prime_ts, (int, float)):
+                    age_ms_prime = max(int(now_ms_exec - float(prime_ts)), 0)
+                prime_attempt = {
+                    "token": int(token_for_quote),
+                    "attempt": attempt + 1,
+                    "price": (
+                        float(prime_price)
+                        if isinstance(prime_price, (int, float))
+                        else None
+                    ),
+                    "source": prime_source,
+                }
+                if isinstance(prime_ts, (int, float)):
+                    prime_attempt["ts_ms"] = int(prime_ts)
+                if age_ms_prime is not None:
+                    prime_attempt["age_ms"] = age_ms_prime
+                price_ok = prime_attempt.get("price") is not None
+                fresh = (
+                    price_ok
+                    and age_ms_prime is not None
+                    and age_ms_prime <= stale_limit_exec
+                )
+                if fresh:
+                    prime_attempt["fresh"] = True
+                    prime_ok = True
+                    break
+                prime_attempt["fresh"] = False
+                if attempt == 0:
+                    time.sleep(0.05)
+            if not prime_ok:
+                prime_payload = prime_attempt or {"token": int(token_for_quote)}
+                price_val = prime_payload.get("price")
+                reason_prime = "stale_quote" if price_val is not None else "no_quote"
+                prime_payload.setdefault("reason", reason_prime)
+                if final_quote_payload is None:
+                    final_quote_payload = {
+                        "ok": False,
+                        "reason": reason_prime,
+                        "age_ms": prime_payload.get("age_ms"),
+                        "source": prime_payload.get("source"),
+                        "price": price_val,
+                        "prime": prime_payload,
+                    }
+                else:
+                    final_quote_payload.setdefault("prime", prime_payload)
+                    final_quote_payload.setdefault("reason", reason_prime)
+                    final_quote_payload.setdefault("ok", False)
 
         if final_quote_payload is not None:
             structured_log.event(

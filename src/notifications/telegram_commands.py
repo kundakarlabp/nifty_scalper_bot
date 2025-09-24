@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime
 from pprint import pformat
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, SupportsFloat, cast
 
 from src.config import settings as global_settings
 from src.diagnostics import trace_ctl
@@ -218,18 +218,19 @@ class TelegramCommands:
         """Build a compact diagnostic snapshot for the trading pipeline."""
 
         settings_obj = self.settings
+        cap_val = getattr(settings_obj, "RISK__EXPOSURE_CAP_PCT", None)
+        if cap_val is None:
+            cap_val = getattr(settings_obj, "EXPOSURE_CAP_PCT", 0.0)
+        cap_pct = 0.0
         try:
-            cap_pct = float(
-                getattr(
-                    settings_obj,
-                    "RISK__EXPOSURE_CAP_PCT",
-                    getattr(settings_obj, "EXPOSURE_CAP_PCT", 0.0),
-                )
-            )
-            if cap_pct <= 1.0:
-                cap_pct *= 100.0
-        except Exception:
+            if isinstance(cap_val, (int, float, str)):
+                cap_pct = float(cap_val)
+            elif hasattr(cap_val, "__float__"):
+                cap_pct = float(cast(SupportsFloat, cap_val))
+        except (TypeError, ValueError):
             cap_pct = 0.0
+        if cap_pct <= 1.0:
+            cap_pct *= 100.0
 
         snapshot: dict[str, Any] = {
             "market_open": False,
