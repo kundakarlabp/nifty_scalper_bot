@@ -6,7 +6,7 @@ from typing import Any, Dict, Tuple, Literal, cast
 import logging
 import math
 
-from src.config import settings
+from src.config import RISK__EXPOSURE_CAP_PCT, settings
 from src.logs import structured_log
 
 logger = logging.getLogger(__name__)
@@ -259,17 +259,17 @@ class PositionSizer:
             _coerce_float(getattr(s, "EXPOSURE_CAP_ABS", 0.0)) or 0.0
         )
         cap_pct_setting = _coerce_float(
-            getattr(s, "EXPOSURE_CAP_PCT_OF_EQUITY", None)
+            getattr(s, "RISK__EXPOSURE_CAP_PCT", None)
         )
         if cap_pct_setting is None:
             cap_pct_setting = _coerce_float(
                 getattr(getattr(s, "risk", None), "exposure_cap_pct_of_equity", None)
             )
-        cap_pct_setting = float(cap_pct_setting or 0.0)
-        if cap_pct_setting > 1.0:
-            cap_pct_fraction = cap_pct_setting / 100.0
-        else:
-            cap_pct_fraction = cap_pct_setting
+        if cap_pct_setting is None:
+            cap_pct_setting = RISK__EXPOSURE_CAP_PCT
+        cap_pct_fraction = float(cap_pct_setting)
+        if cap_pct_fraction > 1.0:
+            cap_pct_fraction = cap_pct_fraction / 100.0
 
         lot_size_int = int(lot_size)
         unit_price = float(_coerce_float(unit_premium) or 0.0)

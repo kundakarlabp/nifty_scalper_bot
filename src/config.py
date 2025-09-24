@@ -42,6 +42,25 @@ DEFAULT_EXPOSURE_CAP_PCT = 40.0
 DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
 
 
+def _coerce_pct_env(name: str, default_pct: float) -> float:
+    """Return an environment percentage converted to a fraction."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        value = float(default_pct)
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logging.getLogger(__name__).warning(
+                "Invalid percentage for %s: %s", name, raw
+            )
+            value = float(default_pct)
+    if value > 1.0:
+        value = value / 100.0
+    return float(value)
+
+
 # --- Environment toggles (flat reads for legacy modules) ---
 ALLOW_NO_DEPTH: bool = os.getenv("ALLOW_NO_DEPTH", "false").lower() == "true"
 TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 5.0))
@@ -49,10 +68,10 @@ DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
 SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
 
 # Quote priming controls
-QUOTES__PRIME_TIMEOUT_MS: int = int(os.getenv("QUOTES__PRIME_TIMEOUT_MS", "1500"))
+QUOTES__MODE: str = os.getenv("QUOTES__MODE", "FULL").upper()
+QUOTES__PRIME_TIMEOUT_MS: int = int(os.getenv("QUOTES__PRIME_TIMEOUT_MS", "2000"))
 QUOTES__RETRY_ATTEMPTS: int = int(os.getenv("QUOTES__RETRY_ATTEMPTS", "3"))
 QUOTES__RETRY_JITTER_MS: int = int(os.getenv("QUOTES__RETRY_JITTER_MS", "150"))
-QUOTES__MODE: str = os.getenv("QUOTES__MODE", "FULL").upper()
 
 # Microstructure requirements
 MICRO__REQUIRE_DEPTH: bool = (
@@ -62,8 +81,8 @@ MICRO__DEPTH_MULTIPLIER: float = float(os.getenv("MICRO__DEPTH_MULTIPLIER", "5.0
 MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "1500"))
 
 # Single source for risk exposure cap (decimal fraction)
-RISK__EXPOSURE_CAP_PCT: float = float(
-    os.getenv("RISK__EXPOSURE_CAP_PCT", os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.02"))
+RISK__EXPOSURE_CAP_PCT: float = _coerce_pct_env(
+    "RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT
 )
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -76,9 +95,6 @@ LOG_TRACE_DEFAULT_SEC: int = int(os.getenv("LOG_TRACE_DEFAULT_SEC", 30))
 LOG_MAX_LINES_REPLY: int = int(os.getenv("LOG_MAX_LINES_REPLY", 30))
 
 EXPOSURE_BASIS: str = os.getenv("EXPOSURE_BASIS", "premium")
-EXPOSURE_CAP_SOURCE: str = os.getenv("EXPOSURE_CAP_SOURCE", "equity")
-EXPOSURE_CAP_PCT: float = float(os.getenv("EXPOSURE_CAP_PCT", 4.0))
-EXPOSURE_CAP_STATIC: float = float(os.getenv("EXPOSURE_CAP_STATIC", 0.0))
 RISK_USE_LIVE_EQUITY: bool = os.getenv("RISK_USE_LIVE_EQUITY", "true").lower() == "true"
 RISK_DEFAULT_EQUITY: int = int(os.getenv("RISK_DEFAULT_EQUITY", 40000))
 
@@ -670,26 +686,20 @@ class RiskSettings(BaseModel):
     )
     exposure_basis: Literal["underlying", "premium"] = "premium"
     exposure_cap_source: Literal["equity", "absolute"] = Field(
-        "equity",
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_SOURCE",
-            "RISK__EXPOSURE_CAP_SOURCE",
-        ),
+        default_factory=lambda: str(
+            os.getenv("RISK__EXPOSURE_CAP_SOURCE", "equity")
+        ).lower(),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_SOURCE"),
     )
     exposure_cap_pct_of_equity: float = Field(
-        DEFAULT_EXPOSURE_CAP_RATIO,
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_PCT_OF_EQUITY",
-            "EXPOSURE_CAP_PCT",
-            "RISK__EXPOSURE_CAP_PCT",
+        default_factory=lambda: _coerce_pct_env(
+            "RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT
         ),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_PCT"),
     )
     exposure_cap_abs: float = Field(
-        0.0,
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_ABS",
-            "RISK__EXPOSURE_CAP_ABS",
-        ),
+        default_factory=lambda: float(os.getenv("RISK__EXPOSURE_CAP_ABS", "0")),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_ABS"),
     )
     premium_cap_per_trade: float = 10000.0
     allow_min_one_lot: bool = Field(
@@ -1321,38 +1331,29 @@ class AppSettings(BaseSettings):
     )
     # Exposure calculations based on option premium or underlying notional.
     EXPOSURE_BASIS: Literal["premium", "underlying"] = Field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium")).lower(),
-        validation_alias=AliasChoices(
-            "EXPOSURE_BASIS",
-            "RISK__EXPOSURE_BASIS",
-        ),
+        default_factory=lambda: str(
+            os.getenv("RISK__EXPOSURE_BASIS", os.getenv("EXPOSURE_BASIS", "premium"))
+        ).lower(),
+        validation_alias=AliasChoices("RISK__EXPOSURE_BASIS", "EXPOSURE_BASIS"),
     )
     tp_basis: Literal["premium", "spot"] = "premium"
     # Source used to cap exposure (percentage of equity or absolute rupees).
     # Legacy value 'env' is treated as 'absolute' downstream for compatibility.
     EXPOSURE_CAP_SOURCE: Literal["equity", "absolute", "env"] = Field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_CAP_SOURCE", "equity")).lower(),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_SOURCE",
-            "RISK__EXPOSURE_CAP_SOURCE",
-        ),
+        default_factory=lambda: str(os.getenv("RISK__EXPOSURE_CAP_SOURCE", "equity")).lower(),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_SOURCE"),
     )
     # Percent of equity allowed per trade (converted to ratio for risk model).
     EXPOSURE_CAP_PCT: float = Field(
-        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_PCT",
-            "EXPOSURE_CAP_PCT_OF_EQUITY",
-            "RISK__EXPOSURE_CAP_PCT",
+        default_factory=lambda: float(
+            os.getenv("RISK__EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))
         ),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_PCT"),
     )
     # Absolute rupee cap fallback when percentage-based cap is insufficient.
     EXPOSURE_CAP_ABS: float = Field(
-        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_ABS", "0")),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_ABS",
-            "RISK__EXPOSURE_CAP_ABS",
-        ),
+        default_factory=lambda: float(os.getenv("RISK__EXPOSURE_CAP_ABS", "0")),
+        validation_alias=AliasChoices("RISK__EXPOSURE_CAP_ABS"),
     )
     # Hard cap on collected premium per trade (₹).
     PREMIUM_CAP_PER_TRADE: float = 10000.0

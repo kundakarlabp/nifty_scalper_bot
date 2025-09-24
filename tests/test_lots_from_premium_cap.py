@@ -5,7 +5,9 @@ from src.config import settings as cfg
 
 def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
     """Returns at least one lot when equity-based cap allows it."""
+    monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     runner = SimpleNamespace(equity_amount=40_000.0)
     price = 112.8
@@ -21,7 +23,9 @@ def test_lots_from_premium_cap_equity_sufficient(monkeypatch):
 
 def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
     """Blocks when cap derived from equity is below one lot."""
+    monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.40, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.40, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     monkeypatch.setattr(cfg.risk, "allow_min_one_lot", False, raising=False)
     runner = SimpleNamespace(equity_amount=20_000.0)
@@ -51,7 +55,9 @@ def test_lots_from_premium_cap_equity_insufficient(monkeypatch):
 
 def test_lots_from_premium_cap_fallbacks_to_default_equity(monkeypatch):
     """When live equity is unavailable, the default equity should be used."""
+    monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.50, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.50, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.50, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     monkeypatch.setattr(cfg.risk, "default_equity", 40_000.0, raising=False)
     monkeypatch.setattr(cfg.risk, "use_live_equity", False, raising=False)
@@ -66,7 +72,9 @@ def test_lots_from_premium_cap_fallbacks_to_default_equity(monkeypatch):
 
 def test_lots_from_premium_cap_respects_absolute_cap(monkeypatch):
     """Absolute premium caps should clamp exposure even if equity allows more."""
+    monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.80, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.80, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.80, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 5_000.0, raising=False)
     runner = SimpleNamespace(equity_amount=100_000.0)
     lots, unit, cap, eq_source = lots_from_premium_cap(
@@ -84,7 +92,9 @@ def test_lots_from_premium_cap_respects_absolute_cap(monkeypatch):
 def test_lots_from_premium_cap_uses_floor_equity(monkeypatch):
     """When fallback equity is below the floor, the floor should drive sizing."""
 
+    monkeypatch.setattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.50, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.50, raising=False)
+    monkeypatch.setattr(cfg.risk, "exposure_cap_pct_of_equity", 0.50, raising=False)
     monkeypatch.setattr(cfg, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     monkeypatch.setattr(cfg.risk, "default_equity", 0.0, raising=False)
     monkeypatch.setattr(cfg.risk, "min_equity_floor", 25_000.0, raising=False)
