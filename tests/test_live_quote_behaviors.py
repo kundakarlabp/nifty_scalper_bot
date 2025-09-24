@@ -172,6 +172,70 @@ def test_resubscribe_if_stale_triggers_force(monkeypatch: pytest.MonkeyPatch) ->
     assert events and events[-1]["reason"] == "stale_quote"
 
 
+def test_resubscribe_current_reconnects_after_repeated_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = LiveKiteSource(kite=None)
+    token = 4321
+    src._subscribed = {token}  # noqa: SLF001 - test setup
+
+    def _fail_full(_tokens: list[int]) -> None:
+        raise RuntimeError("subscribe failed")
+
+    def _fail_force(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("force subscribe failed")
+
+    monkeypatch.setattr(src, "_subscribe_tokens_full", _fail_full)
+    monkeypatch.setattr(source, "_force_subscribe_tokens", _fail_force)
+
+    reconnect_calls: list[dict[str, Any] | None] = []
+
+    def _reconnect(*, reason: str | None = None, context: dict[str, Any] | None = None) -> None:
+        reconnect_calls.append({"reason": reason, "context": context})
+
+    monkeypatch.setattr(src, "reconnect_with_backoff", _reconnect)
+
+    for _ in range(3):
+        src.resubscribe_current()
+
+    assert reconnect_calls == [
+        {"reason": "resubscribe_failed", "context": {"failures": 3, "tokens": [token]}}
+    ]
+    assert src._resubscribe_failures == 0  # noqa: SLF001 - ensure reset after reconnect
+
+
+def test_resubscribe_current_resets_failure_count_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = LiveKiteSource(kite=None)
+    token = 8765
+    src._subscribed = {token}  # noqa: SLF001 - test setup
+
+    attempts = {"count": 0}
+
+    def _maybe_fail(tokens: list[int]) -> None:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("transient failure")
+
+    def _force_fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("force failure")
+
+    reconnect_calls: list[Any] = []
+
+    monkeypatch.setattr(src, "_subscribe_tokens_full", _maybe_fail)
+    monkeypatch.setattr(source, "_force_subscribe_tokens", _force_fail)
+    monkeypatch.setattr(src, "reconnect_with_backoff", lambda *a, **k: reconnect_calls.append((a, k)))
+
+    for attempt in range(3):
+        src.resubscribe_current()
+        if attempt < 2:
+            assert src._resubscribe_failures == attempt + 1  # noqa: SLF001 - inspect counter
+
+    assert reconnect_calls == []
+    assert src._resubscribe_failures == 0  # noqa: SLF001 - counter reset after success
+
+
 def test_ensure_quote_ready_returns_live_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(source.settings, "QUOTES__RETRY_ATTEMPTS", 1, raising=False)
     monkeypatch.setattr(source.settings, "MICRO__STALE_MS", 2_000, raising=False)
