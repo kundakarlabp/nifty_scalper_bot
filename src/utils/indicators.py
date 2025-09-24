@@ -30,11 +30,11 @@ from src.utils.atr_helper import (
 try:
     from ta.momentum import RSIIndicator  # type: ignore
     from ta.trend import MACD, ADXIndicator, EMAIndicator  # type: ignore
-    from ta.volatility import AverageTrueRange, BollingerBands  # type: ignore
+    from ta.volatility import BollingerBands  # type: ignore
 
     TA_AVAILABLE = True
 except Exception:
-    RSIIndicator = EMAIndicator = MACD = ADXIndicator = AverageTrueRange = BollingerBands = None  # type: ignore
+    RSIIndicator = EMAIndicator = MACD = ADXIndicator = BollingerBands = None  # type: ignore
     TA_AVAILABLE = False
 
 
