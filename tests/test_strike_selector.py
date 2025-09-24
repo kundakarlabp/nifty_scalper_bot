@@ -109,6 +109,13 @@ def test_get_instrument_tokens_weekly_expiry(mock_kite):
     assert ce_contract is not None and pe_contract is not None
     assert ce_contract["lot_size"] == 50
     assert ce_contract["token"] == tokens["tokens"]["ce"]
+    assert ce_contract["segment"] == "NFO-OPT"
+    assert ce_contract["expiry"] == "2024-08-06"
+    prewarm = tokens.get("prewarm_contracts", {})
+    assert {19500, 19550}.issubset(prewarm.get("ce", {}).keys())
+    assert {19500, 19550}.issubset(prewarm.get("pe", {}).keys())
+    assert tokens.get("prewarm_tokens", {}).get("ce")
+    assert tokens.get("prewarm_tokens", {}).get("pe")
 
 
 @freeze_time("2024-08-26 10:00:00+05:30")  # A Monday before monthly expiry
@@ -142,6 +149,7 @@ def test_get_instrument_tokens_monthly_expiry(mock_kite):
     assert tokens is not None
     assert tokens["expiry"] == "2024-08-27"
     assert tokens["lot_size"] == 50
+    assert tokens.get("prewarm_tokens", {}).get("ce")
 
 
 @freeze_time("2024-08-05 10:00:00+05:30")
