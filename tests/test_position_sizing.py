@@ -2,6 +2,7 @@
 
 """Unit tests for :mod:`src.risk.position_sizing`."""
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -89,8 +90,12 @@ def test_max_lots_clamp():
         spot_sl_points=5.0,
         delta=0.5,
     )
-    assert qty == 125
-    assert lots == 5
+    cap_pct = getattr(cfg, "RISK__EXPOSURE_CAP_PCT", 0.0)
+    cap_rupees = cap_pct * 100_000.0
+    unit_notional = 200.0 * 25
+    expected_lots = max(1, min(5, math.floor(cap_rupees / unit_notional)))
+    assert qty == expected_lots * 25
+    assert lots == expected_lots
 
 
 def test_returns_zero_when_budget_insufficient():

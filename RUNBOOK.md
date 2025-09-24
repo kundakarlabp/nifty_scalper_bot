@@ -15,6 +15,16 @@
 2. `./manage_bot.sh run`
 3. Verify `curl localhost:8000/health` returns JSON.
 
+## Post-deploy log verification
+After each deployment, review recent logs and confirm:
+
+1. `quote_diag` emits bid/ask details for a token, the subsequent `micro` line references the same token, and it does **not** report `reason=no_quote`.
+2. `micro` log entries display a lot size of `75` for NIFTY.
+3. The exposure `cap_pct` printed by both `gates` and `micro` logs matches exactly.
+4. `resubscribe` messages for any token appear no more than once every 10–15 seconds.
+5. There are no `UnboundLocalError` messages or crashes.
+6. When trades are skipped, the log notes a confidence score below the configured threshold rather than `no_quote`.
+
 ## Common failure modes
 - **Network down**: health check fails or no ticks. Verify connectivity and restart.
 - **Broker reject**: order API returns an error. Review logs and `/apihealth` for circuit breaker status.
