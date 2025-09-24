@@ -8,9 +8,10 @@ ATM upkeep helpers on data sources run during strategy evaluation.
 """
 
 import logging
-from math import isfinite
+from collections.abc import Callable
 from importlib import import_module
-from typing import Any, Callable
+from math import isfinite
+from typing import Any
 
 from src.signals.patches import resolve_atr_band
 

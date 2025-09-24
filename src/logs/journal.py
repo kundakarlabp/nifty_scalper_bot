@@ -6,9 +6,10 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from src.utils.jsonsafe import json_safe
 
@@ -60,7 +61,7 @@ class Journal:
     _lock: threading.Lock
 
     @classmethod
-    def open(cls, path: str) -> "Journal":
+    def open(cls, path: str) -> Journal:
         """Open a journal at ``path``, creating tables if needed."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -84,9 +85,9 @@ class Journal:
         trade_id: str,
         leg_id: str,
         etype: str,
-        broker_order_id: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
-        payload: Optional[Dict[str, Any]] = None,
+        broker_order_id: str | None = None,
+        idempotency_key: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Append an event row and record idempotency mapping if provided."""
         self._exec(
@@ -108,7 +109,7 @@ class Journal:
             )
 
     # ---------------- trades ----------------
-    def append_trade(self, trade: Dict[str, Any]) -> None:
+    def append_trade(self, trade: dict[str, Any]) -> None:
         """Append a closed trade record."""
         self._exec(
             "INSERT INTO trades(ts_entry,ts_exit,trade_id,side,symbol,qty,entry,exit,exit_reason,R,pnl_R,pnl_rupees) "
@@ -129,7 +130,7 @@ class Journal:
             ),
         )
 
-    def last_trades(self, n: int = 10) -> List[Dict[str, Any]]:
+    def last_trades(self, n: int = 10) -> list[dict[str, Any]]:
         """Return the latest ``n`` closed trades."""
         cur = self._exec(
             "SELECT ts_entry,ts_exit,trade_id,side,symbol,qty,entry,exit,exit_reason,R,pnl_R,pnl_rupees "
@@ -151,10 +152,10 @@ class Journal:
             "pnl_R",
             "pnl_rupees",
         ]
-        return [dict(zip(keys, r)) for r in rows]
+        return [dict(zip(keys, r, strict=False)) for r in rows]
 
     # ---------------- idempotency ----------------
-    def get_idemp_leg(self, key: str) -> Optional[str]:
+    def get_idemp_leg(self, key: str) -> str | None:
         """Return leg_id associated with ``key`` if known."""
         cur = self._exec(
             "SELECT leg_id FROM idempotency WHERE idempotency_key=?", (key,)
@@ -163,7 +164,7 @@ class Journal:
         return r[0] if r else None
 
     # ---------------- checkpoints ----------------
-    def save_checkpoint(self, payload: Dict[str, Any]) -> None:
+    def save_checkpoint(self, payload: dict[str, Any]) -> None:
         """Persist a lightweight checkpoint snapshot."""
         snap = dict(payload)
         ts = snap.get("ts") or datetime.utcnow().isoformat()
@@ -178,14 +179,14 @@ class Journal:
             "INSERT INTO checkpoints(ts,payload) VALUES(?,?)", (ts, payload_json)
         )
 
-    def load_latest_checkpoint(self) -> Optional[Dict[str, Any]]:
+    def load_latest_checkpoint(self) -> dict[str, Any] | None:
         """Return latest checkpoint payload if present."""
         cur = self._exec("SELECT payload FROM checkpoints ORDER BY ts DESC LIMIT 1")
         r = cur.fetchone()
         return json.loads(r[0]) if r else None
 
     # ---------------- rehydrate ----------------
-    def rehydrate_open_legs(self) -> List[Dict[str, Any]]:
+    def rehydrate_open_legs(self) -> list[dict[str, Any]]:
         """Return non-terminal legs with their latest known state."""
         cur = self._exec(
             """
@@ -195,7 +196,7 @@ class Journal:
              ON e1.leg_id=t.leg_id AND e1.id=t.max_id
         """
         )
-        open_legs: List[Dict[str, Any]] = []
+        open_legs: list[dict[str, Any]] = []
         for trade_id, leg_id, etype, boid, ikey, payload_json in cur.fetchall():
             if etype in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED"}:
                 continue
@@ -244,14 +245,14 @@ class Journal:
 # ---------------- compatibility helpers ----------------
 def read_trades_between(
     start_dt: datetime, end_dt: datetime, path: str = "data/journal.sqlite"
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return trades closed between ``start_dt`` and ``end_dt`` from the journal."""
     j = Journal.open(path)
     cur = j._exec(
         "SELECT ts_exit,pnl_R FROM trades WHERE ts_exit>=? AND ts_exit<=?",
         (start_dt.isoformat(), end_dt.isoformat()),
     )
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for ts_exit, pnl_R in cur.fetchall():
         rows.append(
             {

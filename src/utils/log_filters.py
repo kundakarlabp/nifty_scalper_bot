@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from typing import Iterable
+from collections.abc import Iterable
 
 
 class DedupFilter(logging.Filter):

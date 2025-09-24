@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque
+from typing import Any
 
 from src.config import settings
 
@@ -24,7 +24,7 @@ def _capacity() -> int:
         return 512
 
 
-_BUFFER: Deque[dict[str, Any]] = deque(maxlen=_capacity())
+_BUFFER: deque[dict[str, Any]] = deque(maxlen=_capacity())
 
 
 def enabled() -> bool:

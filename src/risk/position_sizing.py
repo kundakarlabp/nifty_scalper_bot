@@ -1,10 +1,9 @@
-# Path: src/risk/position_sizing.py
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple, Literal, cast
 import logging
 import math
+from dataclasses import dataclass, field
+from typing import Any, Literal, cast
 
 from src.config import settings
 from src.logs import structured_log
@@ -36,7 +35,7 @@ def _coerce_float(value: Any) -> float | None:
 
 def _resolve_equity_for_cap(
     *, settings_obj: Any, equity_live: float | None
-) -> Tuple[float, str]:
+) -> tuple[float, str]:
     """Return the equity amount and source used for premium caps."""
 
     risk_cfg = getattr(settings_obj, "risk", None)
@@ -75,7 +74,7 @@ def lots_from_premium_cap(
     quote: dict,
     lot_size: int,
     max_lots: int,
-) -> Tuple[int, float, float, str]:
+) -> tuple[int, float, float, str]:
     from src.config import settings as _settings
 
     price = float(_mid_from_quote(quote or {}))
@@ -88,7 +87,7 @@ def lots_from_premium_cap(
             if hasattr(runner, "get_equity_amount"):
                 equity_live = _coerce_float(runner.get_equity_amount())
             elif hasattr(runner, "equity_amount"):
-                equity_live = _coerce_float(getattr(runner, "equity_amount"))
+                equity_live = _coerce_float(runner.equity_amount)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.debug("lots_from_premium_cap: live equity fetch failed: %s", exc)
 
@@ -200,7 +199,7 @@ class PositionSizer:
         ):
             rs = risk_per_trade
             allow_min_one_lot = bool(getattr(rs, "allow_min_one_lot", allow_min_one_lot))
-            risk_per_trade = getattr(rs, "risk_per_trade")
+            risk_per_trade = rs.risk_per_trade
             min_lots = getattr(rs, "min_lots", None)
             max_lots = getattr(rs, "max_lots", None)
             max_position_size_pct = getattr(rs, "max_position_size_pct", None)
@@ -248,7 +247,7 @@ class PositionSizer:
         equity_live: float | None,
         unit_premium: float,
         lot_size: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Compute the exposure cap, cost of one lot, and affordable lots."""
 
         s = self.settings
@@ -343,7 +342,7 @@ class PositionSizer:
         max_lots: int,
         max_position_size_pct: float,
         exposure_basis: str = "premium",
-    ) -> "PositionSizer":
+    ) -> PositionSizer:
         """Convenience creator to mirror env/config fields; keeps imports clean here."""
         return cls(
             risk_per_trade=float(risk_per_trade),
@@ -363,8 +362,8 @@ class PositionSizer:
         spot_price: float | None = None,
         spot_sl_points: float | None = None,
         delta: float | None = None,
-        quote: Dict | None = None,
-    ) -> Tuple[int, int, Dict]:
+        quote: dict | None = None,
+    ) -> tuple[int, int, dict]:
         mid = _mid_from_quote(quote) if quote else float(entry_price)
         sl_points_spot = (
             float(spot_sl_points)
@@ -384,7 +383,7 @@ class PositionSizer:
         return qty, lots, diag
 
 
-    def _compute_quantity(self, si: SizingInputs, sp: SizingParams) -> Tuple[int, int, Dict]:
+    def _compute_quantity(self, si: SizingInputs, sp: SizingParams) -> tuple[int, int, dict]:
         if si.entry_price <= 0 or si.lot_size <= 0 or si.equity <= 0:
             diag = PositionSizer._diag(
                 si, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "invalid"
@@ -561,7 +560,7 @@ class PositionSizer:
         *,
         eq_source: str | None = None,
         cap_abs: float = 0.0,
-    ) -> Dict:
+    ) -> dict:
         unit_val = (
             round(unit_notional, 2)
             if math.isfinite(unit_notional)

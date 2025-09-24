@@ -15,13 +15,8 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    List,
     Literal,
-    Optional,
     SupportsFloat,
-    Tuple,
     cast,
 )
 
@@ -30,41 +25,11 @@ from pydantic import (
     AliasChoices,
     BaseModel,
     Field,
-    FieldValidationInfo,
     ValidationInfo,
     field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-DEFAULT_EXPOSURE_CAP_PCT = 40.0
-DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
-
-
-# --- Environment toggles (flat reads for legacy modules) ---
-ALLOW_NO_DEPTH: bool = os.getenv("ALLOW_NO_DEPTH", "false").lower() == "true"
-TICK_STALE_SECONDS: float = float(os.getenv("TICK_STALE_SECONDS", 5.0))
-DEPTH_MIN_QTY: int = int(os.getenv("DEPTH_MIN_QTY", 200))
-SPREAD_MAX_PCT: float = float(os.getenv("SPREAD_MAX_PCT", 0.35))
-
-# Quote priming controls
-QUOTES__PRIME_TIMEOUT_MS: int = int(os.getenv("QUOTES__PRIME_TIMEOUT_MS", "1500"))
-QUOTES__RETRY_ATTEMPTS: int = int(os.getenv("QUOTES__RETRY_ATTEMPTS", "3"))
-QUOTES__RETRY_JITTER_MS: int = int(os.getenv("QUOTES__RETRY_JITTER_MS", "150"))
-QUOTES__MODE: str = os.getenv("QUOTES__MODE", "FULL").upper()
-
-# Microstructure requirements
-MICRO__REQUIRE_DEPTH: bool = (
-    os.getenv("MICRO__REQUIRE_DEPTH", "false").lower() == "true"
-)
-MICRO__DEPTH_MULTIPLIER: float = float(os.getenv("MICRO__DEPTH_MULTIPLIER", "5.0"))
-MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "1500"))
-
-# Single source for risk exposure cap (decimal fraction)
-RISK__EXPOSURE_CAP_PCT: float = float(
-    os.getenv("RISK__EXPOSURE_CAP_PCT", os.getenv("EXPOSURE_CAP_PCT_OF_EQUITY", "0.02"))
-)
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT: str = os.getenv("LOG_FORMAT", "logfmt").lower()
@@ -74,21 +39,6 @@ LOG_MIN_INTERVAL_SEC: float = float(os.getenv("LOG_MIN_INTERVAL_SEC", 3.0))
 LOG_DIAG_DEFAULT_SEC: int = int(os.getenv("LOG_DIAG_DEFAULT_SEC", 60))
 LOG_TRACE_DEFAULT_SEC: int = int(os.getenv("LOG_TRACE_DEFAULT_SEC", 30))
 LOG_MAX_LINES_REPLY: int = int(os.getenv("LOG_MAX_LINES_REPLY", 30))
-
-EXPOSURE_BASIS: str = os.getenv("EXPOSURE_BASIS", "premium")
-EXPOSURE_CAP_SOURCE: str = os.getenv("EXPOSURE_CAP_SOURCE", "equity")
-EXPOSURE_CAP_PCT: float = float(os.getenv("EXPOSURE_CAP_PCT", 4.0))
-EXPOSURE_CAP_STATIC: float = float(os.getenv("EXPOSURE_CAP_STATIC", 0.0))
-RISK_USE_LIVE_EQUITY: bool = os.getenv("RISK_USE_LIVE_EQUITY", "true").lower() == "true"
-RISK_DEFAULT_EQUITY: int = int(os.getenv("RISK_DEFAULT_EQUITY", 40000))
-
-
-def get_equity_for_cap(equity_live: float | None) -> float:
-    """Return the equity reference used when applying exposure caps."""
-
-    if RISK_USE_LIVE_EQUITY and equity_live and equity_live > 0:
-        return equity_live
-    return float(RISK_DEFAULT_EQUITY)
 
 
 def env_any(*names: str, default: str | None = None) -> str | None:
@@ -104,7 +54,7 @@ if TYPE_CHECKING:
     from src.server.logging_utils import LogGate
 
 
-def build_log_gate() -> "LogGate":
+def build_log_gate() -> LogGate:
     """Return a ``LogGate`` configured with the global sampling knobs."""
 
     from src.server.logging_utils import LogGate
@@ -119,7 +69,7 @@ class ZerodhaSettings(BaseModel):
     access_token: str = ""
 
     @classmethod
-    def from_env(cls) -> "ZerodhaSettings":
+    def from_env(cls) -> ZerodhaSettings:
         """Load legacy flat env vars if present."""
         return cls(
             api_key=(
@@ -156,7 +106,7 @@ class TelegramSettings(BaseModel):
     chat_id: int = 0  # store as int to match controller usage
 
     @classmethod
-    def from_env(cls) -> "TelegramSettings":
+    def from_env(cls) -> TelegramSettings:
         """Support legacy flat env vars such as ``TELEGRAM_CHAT_ID``.
 
         If no bot token or chat ID is provided, Telegram alerts are disabled
@@ -323,7 +273,7 @@ class InstrumentsSettings(BaseModel):
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10
-    additional: Dict[str, InstrumentConfig] = Field(
+    additional: dict[str, InstrumentConfig] = Field(
         default_factory=dict,
         description="Optional portfolio of additional tradable instruments keyed by alias.",
     )
@@ -369,10 +319,10 @@ class InstrumentsSettings(BaseModel):
             max_lots=self.max_lots,
         )
 
-    def portfolio(self) -> Dict[str, InstrumentConfig]:
+    def portfolio(self) -> dict[str, InstrumentConfig]:
         """Return a dictionary of all configured instruments keyed by normalized symbol."""
 
-        items: Dict[str, InstrumentConfig] = {}
+        items: dict[str, InstrumentConfig] = {}
         primary = self._primary()
         items[primary.key()] = primary
         for alias, inst in self.additional.items():
@@ -668,7 +618,7 @@ class RiskSettings(BaseModel):
             env_any("EXPOSURE_CAP", "RISK__MAX_NOTIONAL_RUPEES") or 1_500_000.0
         )
     )
-    exposure_basis: Literal["underlying", "premium"] = "premium"
+    exposure_basis: str = "premium"
     exposure_cap_source: Literal["equity", "absolute"] = Field(
         "equity",
         validation_alias=AliasChoices(
@@ -677,7 +627,7 @@ class RiskSettings(BaseModel):
         ),
     )
     exposure_cap_pct_of_equity: float = Field(
-        DEFAULT_EXPOSURE_CAP_RATIO,
+        0.40,
         validation_alias=AliasChoices(
             "EXPOSURE_CAP_PCT_OF_EQUITY",
             "EXPOSURE_CAP_PCT",
@@ -720,6 +670,14 @@ class RiskSettings(BaseModel):
         if val not in {"premium", "underlying"}:
             raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
         return val
+
+    @model_validator(mode="after")
+    def _normalize_exposure_basis(self) -> RiskSettings:
+        basis = str(self.exposure_basis).lower()
+        if basis not in {"premium", "underlying"}:
+            basis = "premium"
+        self.exposure_basis = basis
+        return self
 
     @field_validator("exposure_cap_source", mode="before")
     @classmethod
@@ -901,6 +859,48 @@ class MicroSettings(BaseModel):
         if v < 0:
             raise ValueError("entry wait seconds must be >= 0")
         return v
+
+    stale_ms: int = Field(
+        1500,
+        description="Maximum tolerated quote age before a refresh is required.",
+        validation_alias=AliasChoices("MICRO__STALE_MS"),
+    )
+    require_depth: bool = Field(
+        False,
+        description="Whether depth checks are mandatory for entries.",
+        validation_alias=AliasChoices("MICRO__REQUIRE_DEPTH"),
+    )
+    depth_multiplier: float = Field(
+        5.0,
+        description="Multiplier applied to depth_min_lots for liquidity checks.",
+        validation_alias=AliasChoices("MICRO__DEPTH_MULTIPLIER"),
+    )
+
+    @field_validator("stale_ms", "depth_multiplier", mode="before")
+    @classmethod
+    def _v_micro_numeric(cls, value: Any) -> float:
+        return float(value)
+
+    @field_validator("stale_ms")
+    @classmethod
+    def _v_stale_positive(cls, value: float) -> int:
+        if value < 0:
+            raise ValueError("MICRO__STALE_MS must be >= 0")
+        return int(value)
+
+    @field_validator("depth_multiplier")
+    @classmethod
+    def _v_depth_multiplier(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("MICRO__DEPTH_MULTIPLIER must be > 0")
+        return float(value)
+
+    @field_validator("require_depth", mode="before")
+    @classmethod
+    def _v_require_depth(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() in {"1", "true", "yes", "on"}
 
     @property
     def spread_cap_ratio(self) -> float:
@@ -1320,42 +1320,23 @@ class AppSettings(BaseSettings):
         ),
     )
     # Exposure calculations based on option premium or underlying notional.
-    EXPOSURE_BASIS: Literal["premium", "underlying"] = Field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_BASIS", "premium")).lower(),
-        validation_alias=AliasChoices(
-            "EXPOSURE_BASIS",
-            "RISK__EXPOSURE_BASIS",
-        ),
-    )
     tp_basis: Literal["premium", "spot"] = "premium"
-    # Source used to cap exposure (percentage of equity or absolute rupees).
-    # Legacy value 'env' is treated as 'absolute' downstream for compatibility.
-    EXPOSURE_CAP_SOURCE: Literal["equity", "absolute", "env"] = Field(
-        default_factory=lambda: str(os.getenv("EXPOSURE_CAP_SOURCE", "equity")).lower(),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_SOURCE",
-            "RISK__EXPOSURE_CAP_SOURCE",
-        ),
+    QUOTES__MODE: str = Field(
+        default_factory=lambda: str(os.getenv("QUOTES__MODE", "FULL")).upper(),
+        validation_alias=AliasChoices("QUOTES__MODE"),
     )
-    # Percent of equity allowed per trade (converted to ratio for risk model).
-    EXPOSURE_CAP_PCT: float = Field(
-        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_PCT",
-            "EXPOSURE_CAP_PCT_OF_EQUITY",
-            "RISK__EXPOSURE_CAP_PCT",
-        ),
+    QUOTES__PRIME_TIMEOUT_MS: int = Field(
+        default_factory=lambda: int(os.getenv("QUOTES__PRIME_TIMEOUT_MS", "1500")),
+        validation_alias=AliasChoices("QUOTES__PRIME_TIMEOUT_MS"),
     )
-    # Absolute rupee cap fallback when percentage-based cap is insufficient.
-    EXPOSURE_CAP_ABS: float = Field(
-        default_factory=lambda: float(os.getenv("EXPOSURE_CAP_ABS", "0")),
-        validation_alias=AliasChoices(
-            "EXPOSURE_CAP_ABS",
-            "RISK__EXPOSURE_CAP_ABS",
-        ),
+    QUOTES__RETRY_ATTEMPTS: int = Field(
+        default_factory=lambda: int(os.getenv("QUOTES__RETRY_ATTEMPTS", "3")),
+        validation_alias=AliasChoices("QUOTES__RETRY_ATTEMPTS"),
     )
-    # Hard cap on collected premium per trade (₹).
-    PREMIUM_CAP_PER_TRADE: float = 10000.0
+    QUOTES__RETRY_JITTER_MS: int = Field(
+        default_factory=lambda: int(os.getenv("QUOTES__RETRY_JITTER_MS", "150")),
+        validation_alias=AliasChoices("QUOTES__RETRY_JITTER_MS"),
+    )
     # Maximum tolerated lag for inbound ticks in seconds.
     TICK_MAX_LAG_S: float = Field(
         default_factory=lambda: float(os.getenv("TICK_MAX_LAG_S", "5")),
@@ -1443,43 +1424,38 @@ class AppSettings(BaseSettings):
             raise ValueError("QUOTE_WARMUP_SLEEP_MS must be >= 0")
         return val
 
-    @field_validator("EXPOSURE_BASIS", mode="before")
+    @field_validator(
+        "QUOTES__PRIME_TIMEOUT_MS",
+        "QUOTES__RETRY_JITTER_MS",
+        mode="before",
+    )
     @classmethod
-    def _v_app_exposure_basis(cls, v: object) -> str:
-        val = str(v).lower()
-        if val not in {"premium", "underlying"}:
-            raise ValueError("EXPOSURE_BASIS must be 'premium' or 'underlying'")
-        return val
+    def _v_quotes_timeout(cls, v: object) -> int:
+        try:
+            value = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("quote timing knobs must be numeric") from exc
+        if value < 0:
+            raise ValueError("quote timing knobs must be >= 0")
+        return value
 
-    @field_validator("EXPOSURE_CAP_SOURCE", mode="before")
+    @field_validator("QUOTES__RETRY_ATTEMPTS", mode="before")
     @classmethod
-    def _v_app_exposure_cap_source(cls, v: object) -> str:
-        val = str(v).lower()
-        if val not in {"equity", "absolute", "env"}:
-            raise ValueError(
-                "EXPOSURE_CAP_SOURCE must be 'equity', 'absolute', or legacy 'env'"
-            )
-        return val
+    def _v_quotes_retries(cls, v: object) -> int:
+        try:
+            value = int(float(str(v)))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("QUOTES__RETRY_ATTEMPTS must be numeric") from exc
+        if value < 0:
+            raise ValueError("QUOTES__RETRY_ATTEMPTS must be >= 0")
+        return value
 
-    @field_validator("EXPOSURE_CAP_PCT")
+    @field_validator("QUOTES__MODE", mode="before")
     @classmethod
-    def _v_app_exposure_cap_pct(cls, v: float) -> float:
-        pct = float(v)
-        if pct <= 0:
-            raise ValueError("EXPOSURE_CAP_PCT must be > 0")
-        if pct <= 1.0:
-            pct *= 100.0
-        if pct > 100.0:
-            raise ValueError("EXPOSURE_CAP_PCT must be <= 100")
-        return pct
-
-    @field_validator("EXPOSURE_CAP_ABS")
-    @classmethod
-    def _v_app_cap_abs(cls, v: float) -> float:
-        val = float(v)
-        if val < 0:
-            raise ValueError("EXPOSURE_CAP_ABS must be >= 0")
-        return val
+    def _v_quotes_mode(cls, v: object) -> str:
+        if isinstance(v, str):
+            return v.upper()
+        return str(v).upper()
 
     @field_validator("TICK_MAX_LAG_S", "BAR_MAX_LAG_S")
     @classmethod
@@ -1529,7 +1505,7 @@ class AppSettings(BaseSettings):
         return val
 
     @model_validator(mode="after")
-    def _v_cadence_bounds(self) -> "AppSettings":
+    def _v_cadence_bounds(self) -> AppSettings:
         if self.cadence_min_interval_s > self.cadence_max_interval_s:
             raise ValueError(
                 "cadence_min_interval_s must be less than or equal to cadence_max_interval_s"
@@ -1537,7 +1513,7 @@ class AppSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _sync_log_format(self) -> "AppSettings":
+    def _sync_log_format(self) -> AppSettings:
         fields_set: set[str] = getattr(self, "model_fields_set", set())
         fmt = str(getattr(self, "log_format", "logfmt"))
         fmt = fmt.strip().lower() if fmt else "logfmt"
@@ -1555,14 +1531,80 @@ class AppSettings(BaseSettings):
     def EXPOSURE_CAP_PCT_OF_EQUITY(self) -> float:
         """Return the exposure cap as a ratio for legacy callers."""
 
-        pct = float(self.EXPOSURE_CAP_PCT)
-        return pct / 100.0
+        alias_pct = getattr(self, "_exposure_cap_pct_alias", None)
+        if isinstance(alias_pct, (int, float)):
+            return float(alias_pct)
+        return float(self.risk.exposure_cap_pct_of_equity)
 
     @property
     def RISK__EXPOSURE_CAP_PCT(self) -> float:
         """Unified exposure cap ratio consumed by micro + risk gates."""
 
         return float(self.EXPOSURE_CAP_PCT_OF_EQUITY)
+
+    @property
+    def EXPOSURE_CAP_PCT(self) -> float:
+        """Return the exposure cap as percentage for backwards compatibility."""
+
+        return self.EXPOSURE_CAP_PCT_OF_EQUITY * 100.0
+
+    @property
+    def EXPOSURE_BASIS(self) -> Literal["premium", "underlying"]:
+        """Expose the risk exposure basis for legacy flat reads."""
+
+        alias = getattr(self, "_exposure_basis_alias", None)
+        if isinstance(alias, str) and alias.lower() in {"premium", "underlying"}:
+            return cast(Literal["premium", "underlying"], alias.lower())
+        basis = str(self.risk.exposure_basis).lower()
+        return cast(Literal["premium", "underlying"], basis)
+
+    @property
+    def EXPOSURE_CAP_SOURCE(self) -> Literal["equity", "absolute", "env"]:
+        """Expose the risk exposure cap source for legacy callers."""
+
+        alias = getattr(self, "_exposure_cap_source_alias", None)
+        if isinstance(alias, str) and alias.lower() == "env":
+            return cast(Literal["equity", "absolute", "env"], "env")
+        resolved = str(self.risk.exposure_cap_source).lower()
+        if resolved not in {"equity", "absolute"}:
+            resolved = "equity"
+        return cast(Literal["equity", "absolute", "env"], resolved)
+
+    @property
+    def EXPOSURE_CAP_ABS(self) -> float:
+        """Return the absolute exposure cap in rupees."""
+
+        alias = getattr(self, "_exposure_cap_abs_alias", None)
+        if isinstance(alias, (int, float)):
+            return float(alias)
+        return float(self.risk.exposure_cap_abs)
+
+    @property
+    def PREMIUM_CAP_PER_TRADE(self) -> float:
+        """Return the configured premium cap per trade."""
+
+        alias = getattr(self, "_premium_cap_alias", None)
+        if isinstance(alias, (int, float)):
+            return float(alias)
+        return float(self.risk.premium_cap_per_trade)
+
+    @property
+    def MICRO__STALE_MS(self) -> int:
+        """Expose micro stale threshold for legacy callers."""
+
+        return int(self.micro.stale_ms)
+
+    @property
+    def MICRO__REQUIRE_DEPTH(self) -> bool:
+        """Expose micro depth requirement toggle for legacy callers."""
+
+        return bool(self.micro.require_depth)
+
+    @property
+    def MICRO__DEPTH_MULTIPLIER(self) -> float:
+        """Expose micro depth multiplier for legacy callers."""
+
+        return float(self.micro.depth_multiplier)
 
     instruments_csv: str = Field(
         default_factory=lambda: str(
@@ -1609,14 +1651,79 @@ class AppSettings(BaseSettings):
             pass
         self.risk.use_live_equity = bool(self.RISK_USE_LIVE_EQUITY)
         self.risk.default_equity = float(self.RISK_DEFAULT_EQUITY)
-        self.risk.exposure_basis = self.EXPOSURE_BASIS
-        cap_source = self.EXPOSURE_CAP_SOURCE
-        if cap_source == "env":
-            cap_source = "absolute"
-        self.risk.exposure_cap_source = cap_source
-        self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
-        self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
-        self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
+        basis_alias = env_any("EXPOSURE_BASIS", "RISK__EXPOSURE_BASIS")
+        basis_norm = str(basis_alias).lower() if basis_alias is not None else None
+        if basis_norm in {"premium", "underlying"}:
+            self.risk.exposure_basis = basis_norm  # type: ignore[assignment]
+            object.__setattr__(self, "_exposure_basis_alias", basis_norm)
+        else:
+            object.__setattr__(
+                self, "_exposure_basis_alias", str(self.risk.exposure_basis).lower()
+            )
+        cap_source_alias = env_any("EXPOSURE_CAP_SOURCE", "RISK__EXPOSURE_CAP_SOURCE")
+        cap_source_norm = (
+            str(cap_source_alias).lower()
+            if cap_source_alias is not None
+            else str(self.risk.exposure_cap_source).lower()
+        )
+        if cap_source_norm == "env":
+            cap_source_norm = "absolute"
+        if cap_source_norm not in {"equity", "absolute"}:
+            cap_source_norm = "equity"
+        self.risk.exposure_cap_source = cap_source_norm
+        object.__setattr__(
+            self,
+            "_exposure_cap_source_alias",
+            str(cap_source_alias).lower() if cap_source_alias is not None else cap_source_norm,
+        )
+        cap_pct_alias = env_any(
+            "EXPOSURE_CAP_PCT_OF_EQUITY",
+            "EXPOSURE_CAP_PCT",
+            "RISK__EXPOSURE_CAP_PCT",
+        )
+        cap_pct_norm: float | None = None
+        if cap_pct_alias is not None:
+            try:
+                cap_pct_norm = float(cap_pct_alias)
+                if cap_pct_norm > 1.0:
+                    cap_pct_norm /= 100.0
+                if not 0.0 < cap_pct_norm <= 1.0:
+                    cap_pct_norm = None
+            except (TypeError, ValueError):
+                cap_pct_norm = None
+        if cap_pct_norm is not None:
+            self.risk.exposure_cap_pct_of_equity = cap_pct_norm
+        else:
+            cap_pct_norm = float(self.risk.exposure_cap_pct_of_equity)
+        object.__setattr__(self, "_exposure_cap_pct_alias", cap_pct_norm)
+        cap_abs_alias = env_any("EXPOSURE_CAP_ABS", "RISK__EXPOSURE_CAP_ABS")
+        if cap_abs_alias is not None:
+            try:
+                cap_abs_val = float(cap_abs_alias)
+                self.risk.exposure_cap_abs = cap_abs_val
+                object.__setattr__(self, "_exposure_cap_abs_alias", cap_abs_val)
+            except (TypeError, ValueError):
+                object.__setattr__(
+                    self, "_exposure_cap_abs_alias", float(self.risk.exposure_cap_abs)
+                )
+        else:
+            object.__setattr__(
+                self, "_exposure_cap_abs_alias", float(self.risk.exposure_cap_abs)
+            )
+        premium_alias = env_any("PREMIUM_CAP_PER_TRADE", "RISK__PREMIUM_CAP_PER_TRADE")
+        if premium_alias is not None:
+            try:
+                premium_val = float(premium_alias)
+                self.risk.premium_cap_per_trade = premium_val
+                object.__setattr__(self, "_premium_cap_alias", premium_val)
+            except (TypeError, ValueError):
+                object.__setattr__(
+                    self, "_premium_cap_alias", float(self.risk.premium_cap_per_trade)
+                )
+        else:
+            object.__setattr__(
+                self, "_premium_cap_alias", float(self.risk.premium_cap_per_trade)
+            )
         min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")
         if min_floor_env is not None:
             try:
@@ -1713,7 +1820,7 @@ class AppSettings(BaseSettings):
     def LOG_PATH(self) -> Path | None:  # pragma: no cover - simple alias
         return self.log_path
 
-    # Strategy (flat)
+    # ---- Strategy (flat) ----
     @property
     def strategy_min_signal_score(self) -> int:
         return self.strategy.min_signal_score
@@ -1766,7 +1873,7 @@ class AppSettings(BaseSettings):
     def strategy_rr_threshold(self) -> float | None:
         return self.strategy.rr_threshold
 
-    # Risk (flat)
+    # ---- Risk (flat) ----
     @property
     def risk_use_live_equity(self) -> bool:
         return self.risk.use_live_equity
@@ -1851,7 +1958,7 @@ class AppSettings(BaseSettings):
     def risk_allow_min_one_lot(self) -> bool:
         return self.risk.allow_min_one_lot
 
-    # Instruments (flat)
+    # ---- Instruments (flat) ----
     @property
     def instruments_spot_symbol(self) -> str:
         return self.instruments.spot_symbol
@@ -1884,7 +1991,7 @@ class AppSettings(BaseSettings):
     def instruments_max_lots(self) -> int:
         return self.instruments.max_lots
 
-    # Data (flat)
+    # ---- Data (flat) ----
     @property
     def data_lookback_minutes(self) -> int:
         return self.data.lookback_minutes
@@ -1909,7 +2016,7 @@ class AppSettings(BaseSettings):
     def data_cache_ttl_seconds(self) -> int:
         return self.data.cache_ttl_seconds
 
-    # Executor (flat)
+    # ---- Executor (flat) ----
     @property
     def executor_exchange(self) -> str:
         return self.executor.exchange
@@ -1990,7 +2097,7 @@ class AppSettings(BaseSettings):
     def executor_max_place_retries(self) -> int:
         return self.executor.max_place_retries
 
-    # Health/System (flat)
+    # ---- Health/System (flat) ----
     @property
     def health_enable_server(self) -> bool:
         return self.health.enable_server

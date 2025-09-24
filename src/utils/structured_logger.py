@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Mapping, MutableMapping
+from typing import Any
 
 try:  # Python 3.11+ includes zoneinfo in the stdlib
     from zoneinfo import ZoneInfo
@@ -64,7 +65,7 @@ class _LoggerState:
     json_enabled: bool
     log_path: str | None
 
-    def formatter(self) -> "_StructuredFormatter":
+    def formatter(self) -> _StructuredFormatter:
         return _StructuredFormatter(self)
 
 
@@ -103,27 +104,27 @@ class _BoundLogger:
     ) -> None:
         self._logger = logger
         self._state = state
-        self._context: Dict[str, Any] = dict(context or {})
+        self._context: dict[str, Any] = dict(context or {})
 
-    def __call__(self, level: int, event: str, **fields: Any) -> Dict[str, Any]:
+    def __call__(self, level: int, event: str, **fields: Any) -> dict[str, Any]:
         payload = self._payload(level, event, fields)
         self._emit(level, payload)
         return payload
 
-    def log(self, level: int, event: str, **fields: Any) -> Dict[str, Any]:
+    def log(self, level: int, event: str, **fields: Any) -> dict[str, Any]:
         return self(level, event, **fields)
 
-    def bind(self, **ctx: Any) -> "_BoundLogger":
+    def bind(self, **ctx: Any) -> _BoundLogger:
         merged = dict(self._context)
         merged.update(_normalize_context(ctx, self._state))
         return _BoundLogger(self._logger, self._state, merged)
 
-    def with_trace(self, trace: Trace) -> "_BoundLogger":
+    def with_trace(self, trace: Trace) -> _BoundLogger:
         return self.bind(trace=trace)
 
     def _payload(
         self, level: int, event: str, fields: Mapping[str, Any]
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         now = datetime.now(self._state.tz).isoformat()
         level_name = logging.getLevelName(level)
         context = dict(self._context)
@@ -137,7 +138,7 @@ class _BoundLogger:
                 context.setdefault("order_client_id", trace.order_client_id)
 
         trace_id = context.pop("trace_id", None)
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "ts": now,
             "level": str(level_name).lower(),
             "comp": context.pop("comp", self._logger.name),
@@ -161,7 +162,7 @@ class _BoundLogger:
 def _normalize_context(
     ctx: Mapping[str, Any] | MutableMapping[str, Any] | None,
     state: _LoggerState,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if ctx is None:
         return {}
     data = dict(ctx)
@@ -226,7 +227,7 @@ def get_logger(name: str) -> logging.Logger:
         base = _normalize_context(ctx, state)
         return _BoundLogger(logger, state, base)
 
-    setattr(logger, "bind", bind)
+    logger.bind = bind
     return logger
 
 

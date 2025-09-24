@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -170,7 +170,7 @@ class BacktestCsvSource(DataSource):
         """Returns the datetime of the current bar."""
         return self._df.index[self._current_index].to_pydatetime()
 
-    def get_spot_price(self, symbol: str) -> Optional[float]:
+    def get_spot_price(self, symbol: str) -> float | None:
         """
         Returns the closing price of the current bar as the spot price.
         If the requested symbol differs from this source's symbol, returns None.

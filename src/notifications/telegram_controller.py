@@ -10,16 +10,18 @@ import statistics as stats
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from collections.abc import Callable, Mapping
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 
 from src.config import settings
 from src.diagnostics import checks
+from src.diagnostics.metrics import daily_summary
 from src.diagnostics.registry import run, run_all
 from src.execution.micro_filters import micro_from_quote
 from src.execution.order_executor import fetch_quote_with_depth
@@ -31,7 +33,6 @@ from src.utils import strike_selector
 from src.utils.emit import emit_debug
 from src.utils.expiry import last_tuesday_of_month, next_tuesday_expiry
 from src.utils.freshness import compute as compute_freshness
-from src.diagnostics.metrics import daily_summary
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class _CmdGate:
     """Simple per-chat command rate limiter."""
 
     def __init__(self) -> None:
-        self._last: Dict[tuple[int, str], float] = {}
+        self._last: dict[tuple[int, str], float] = {}
 
     def allow(self, chat_id: int, key: str, interval: float) -> bool:
         now = time.time()
@@ -138,7 +139,7 @@ COMMAND_HELP_OVERRIDES: dict[str, str] = {
 }
 
 
-def _kpis(trades: List[Dict[str, float]]) -> Dict[str, float]:
+def _kpis(trades: list[dict[str, float]]) -> dict[str, float]:
     """Compute basic KPIs from a list of trade dicts."""
     if not trades:
         return {}
@@ -292,7 +293,7 @@ class TelegramController:
     """
 
     @classmethod
-    def create(cls, *args: Any, **kwargs: Any) -> Optional["TelegramController"]:
+    def create(cls, *args: Any, **kwargs: Any) -> TelegramController | None:
         """Factory that returns a controller or ``None`` if credentials are missing."""
         try:
             return cls(*args, **kwargs)
@@ -305,51 +306,47 @@ class TelegramController:
         self,
         *,
         # providers
-        status_provider: Callable[[], Dict[str, Any]],
-        positions_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        actives_provider: Optional[Callable[[], List[Any]]] = None,
-        diag_provider: Optional[
-            Callable[[], Dict[str, Any]]
-        ] = None,  # detailed (/check)
-        logs_provider: Optional[Callable[[int], List[str]]] = None,
-        last_signal_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
-        compact_diag_provider: Optional[
-            Callable[[], Dict[str, Any]]
-        ] = None,  # NEW: compact (/diag)
-        risk_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        limits_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        risk_reset_today: Optional[Callable[[], None]] = None,
-        bars_provider: Optional[Callable[[int], str]] = None,
-        quotes_provider: Optional[Callable[..., str]] = None,
-        probe_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        trace_provider: Optional[Callable[[int], None]] = None,
-        selftest_provider: Optional[Callable[[str], str]] = None,
-        backtest_provider: Optional[Callable[[Optional[str]], str]] = None,
-        filecheck_provider: Optional[Callable[[str], str]] = None,
-        atm_provider: Optional[Callable[[], Dict[str, Any]]] = None,
-        l1_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+        status_provider: Callable[[], dict[str, Any]],
+        positions_provider: Callable[[], dict[str, Any]] | None = None,
+        actives_provider: Callable[[], list[Any]] | None = None,
+        diag_provider: Callable[[], dict[str, Any]] | None = None,  # detailed (/check)
+        logs_provider: Callable[[int], list[str]] | None = None,
+        last_signal_provider: Callable[[], dict[str, Any] | None] | None = None,
+        compact_diag_provider: Callable[[], dict[str, Any]] | None = None,  # NEW: compact (/diag)
+        risk_provider: Callable[[], dict[str, Any]] | None = None,
+        limits_provider: Callable[[], dict[str, Any]] | None = None,
+        risk_reset_today: Callable[[], None] | None = None,
+        bars_provider: Callable[[int], str] | None = None,
+        quotes_provider: Callable[..., str] | None = None,
+        probe_provider: Callable[[], dict[str, Any]] | None = None,
+        trace_provider: Callable[[int], None] | None = None,
+        selftest_provider: Callable[[str], str] | None = None,
+        backtest_provider: Callable[[str | None], str] | None = None,
+        filecheck_provider: Callable[[str], str] | None = None,
+        atm_provider: Callable[[], dict[str, Any]] | None = None,
+        l1_provider: Callable[[], dict[str, Any] | None] | None = None,
         # controls
-        runner_pause: Optional[Callable[[], None]] = None,
-        runner_resume: Optional[Callable[[], None]] = None,
-        runner_tick: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
-        cancel_all: Optional[Callable[[], None]] = None,
-        open_trades_provider: Optional[Callable[[], List[Dict[str, Any]]]] = None,
-        cancel_trade: Optional[Callable[[str], None]] = None,
-        reconcile_once: Optional[Callable[[], int]] = None,
+        runner_pause: Callable[[], None] | None = None,
+        runner_resume: Callable[[], None] | None = None,
+        runner_tick: Callable[..., dict[str, Any] | None] | None = None,
+        cancel_all: Callable[[], None] | None = None,
+        open_trades_provider: Callable[[], list[dict[str, Any]]] | None = None,
+        cancel_trade: Callable[[str], None] | None = None,
+        reconcile_once: Callable[[], int] | None = None,
         # bot/strategy mutators
-        set_live_mode: Optional[Callable[[bool], None]] = None,
-        set_min_score: Optional[Callable[[int], None]] = None,
-        set_conf_threshold: Optional[Callable[[float], None]] = None,
-        set_atr_period: Optional[Callable[[int], None]] = None,
-        set_sl_mult: Optional[Callable[[float], None]] = None,
-        set_tp_mult: Optional[Callable[[float], None]] = None,
-        set_trend_boosts: Optional[Callable[[float, float], None]] = None,
-        set_range_tighten: Optional[Callable[[float, float], None]] = None,
+        set_live_mode: Callable[[bool], None] | None = None,
+        set_min_score: Callable[[int], None] | None = None,
+        set_conf_threshold: Callable[[float], None] | None = None,
+        set_atr_period: Callable[[int], None] | None = None,
+        set_sl_mult: Callable[[float], None] | None = None,
+        set_tp_mult: Callable[[float], None] | None = None,
+        set_trend_boosts: Callable[[float, float], None] | None = None,
+        set_range_tighten: Callable[[float, float], None] | None = None,
         http_timeout: float = 20.0,
     ) -> None:
         tg = getattr(settings, "telegram", object())
-        self._token: Optional[str] = getattr(tg, "bot_token", None)
-        self._chat_id: Optional[int] = int(getattr(tg, "chat_id", 0) or 0)
+        self._token: str | None = getattr(tg, "bot_token", None)
+        self._chat_id: int | None = int(getattr(tg, "chat_id", 0) or 0)
         if not self._token or not self._chat_id:
             raise RuntimeError(
                 "TelegramController: TELEGRAM__BOT_TOKEN or TELEGRAM__CHAT_ID missing"
@@ -398,12 +395,12 @@ class TelegramController:
         self._set_range_tighten = set_range_tighten
 
         # polling state
-        self._poll_thread: Optional[threading.Thread] = None
+        self._poll_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._started = False
-        self._last_update_id: Optional[int] = None
-        self._last_summary_date: Optional[date] = None
-        self._last_eod_summary_date: Optional[date] = None
+        self._last_update_id: int | None = None
+        self._last_summary_date: date | None = None
+        self._last_eod_summary_date: date | None = None
 
         # allowlist
         extra = getattr(tg, "extra_admin_ids", []) or []
@@ -411,14 +408,14 @@ class TelegramController:
 
         # rate-limit / backoff
         self._send_min_interval = 0.9
-        self._last_sends: List[tuple[float, str]] = []
+        self._last_sends: list[tuple[float, str]] = []
         self._backoff = 1.0
         self._backoff_max = 20.0
 
         # heartbeat (auto-edit) state
         self._hb_lock = threading.Lock()
-        self._hb_by_chat: Dict[int, Dict[str, Any]] = {}
-        self._hb_thread: Optional[threading.Thread] = None
+        self._hb_by_chat: dict[int, dict[str, Any]] = {}
+        self._hb_thread: threading.Thread | None = None
         self._hb_run = False
 
     # --------------- outbound helpers ---------------
@@ -442,7 +439,7 @@ class TelegramController:
     def _send(
         self,
         text: str,
-        parse_mode: Optional[str] = None,
+        parse_mode: str | None = None,
         disable_notification: bool = False,
     ) -> None:
         if not text or not text.strip():
@@ -508,7 +505,7 @@ class TelegramController:
             log.debug("Inline send failed: %s", e)
 
     # public
-    def send_message(self, text: str, *, parse_mode: Optional[str] = None) -> None:
+    def send_message(self, text: str, *, parse_mode: str | None = None) -> None:
         self._send(text, parse_mode=parse_mode)
 
     def send_eod_summary(self) -> None:
@@ -607,7 +604,7 @@ class TelegramController:
     def _authorized(self, chat_id: int) -> bool:
         return int(chat_id) in self._allowlist
 
-    def _list_commands(self) -> List[str]:
+    def _list_commands(self) -> list[str]:
         """Return all supported Telegram command strings."""
         source = inspect.getsource(self._handle_update)
         cmds = set(re.findall(r"cmd == \"(\/[\w_]+)\"", source))
@@ -670,7 +667,7 @@ class TelegramController:
         allow_off_before = getattr(settings, "allow_offhours_testing", False)
         try:
             if dry:
-                setattr(settings, "allow_offhours_testing", True)
+                settings.allow_offhours_testing = True
                 if accepts_dry:
                     res = self._runner_tick(dry=True)  # type: ignore[misc]
                 else:
@@ -688,7 +685,7 @@ class TelegramController:
             except Exception:
                 log.debug("Failed to restore live trading mode", exc_info=True)
             try:
-                setattr(settings, "allow_offhours_testing", bool(allow_off_before))
+                settings.allow_offhours_testing = bool(allow_off_before)
             except Exception:
                 log.debug(
                     "Failed to restore allow_offhours_testing flag", exc_info=True
@@ -715,7 +712,7 @@ class TelegramController:
         def mark(ok: bool) -> str:
             return "🟢" if ok else "🔴"
 
-        lines: List[str] = []
+        lines: list[str] = []
         lines.append("🔍 *Health Report*")
 
         for c in diag.get("checks", []):
@@ -731,7 +728,7 @@ class TelegramController:
         )
         return "\n".join(lines)
 
-    def _resolve_runner(self) -> Optional[StrategyRunner]:
+    def _resolve_runner(self) -> StrategyRunner | None:
         """Return the wired runner instance if available."""
 
         candidate = getattr(getattr(self, "_runner_tick", None), "__self__", None)
@@ -742,15 +739,15 @@ class TelegramController:
         except Exception:
             return None
 
-    def _quick_snapshot(self) -> Dict[str, Any]:
+    def _quick_snapshot(self) -> dict[str, Any]:
         """Collect a lightweight snapshot for quick-look commands."""
 
         try:
             tz = ZoneInfo(getattr(settings, "TZ", "Asia/Kolkata"))
         except Exception:
-            tz = timezone.utc
+            tz = UTC
 
-        snap: Dict[str, Any] = {
+        snap: dict[str, Any] = {
             "timestamp": datetime.now(tz),
             "runner_ready": False,
             "plan": {},
@@ -773,7 +770,7 @@ class TelegramController:
             snap["telemetry"] = {}
 
         signal = snap["telemetry"].get("signal", {})
-        plan: Dict[str, Any] = {}
+        plan: dict[str, Any] = {}
         if isinstance(signal, Mapping):
             plan.update(signal)
 
@@ -816,7 +813,7 @@ class TelegramController:
             equity_snapshot = runner.get_equity_snapshot()
         except Exception:
             equity_snapshot = {}
-        equity_value: Optional[float] = None
+        equity_value: float | None = None
         if isinstance(equity_snapshot, dict):
             candidate = equity_snapshot.get("equity_cached")
             if isinstance(candidate, (int, float)):
@@ -877,7 +874,7 @@ class TelegramController:
         if not reason and not reasons:
             return "All gates passed."
 
-        lines: List[str] = []
+        lines: list[str] = []
         if reason:
             lines.append(f"Blocked by: {reason}")
 
@@ -894,7 +891,7 @@ class TelegramController:
 
         return "\n".join(lines) if lines else "Blocked without detail."
 
-    def _recent_errors(self, limit: int = 20) -> List[str]:
+    def _recent_errors(self, limit: int = 20) -> list[str]:
         """Return the most recent error log lines."""
 
         paths = [
@@ -915,7 +912,7 @@ class TelegramController:
         return []
 
     def _handle_quick_commands(
-        self, cmd: str, args: List[str], chat_id: int
+        self, cmd: str, args: list[str], chat_id: int
     ) -> bool:
         """Handle compact snapshot commands added for mobile quick-checks."""
 
@@ -1249,19 +1246,8 @@ class TelegramController:
                 f"• MARKET  {'open' if snap.get('market_open') else 'closed'}  tick_age={age_txt}s",
                 f"• EQUITY  {equity}  POS={position}",
                 (
-                    "• PLAN    {side} {ot} {strike}  e={entry} sl={sl} tp1={tp1} tp2={tp2} rr={rr} "
-                    "lots={qty}×{lot}".format(
-                        side=side,
-                        ot=option_type,
-                        strike=strike,
-                        entry=entry,
-                        sl=sl,
-                        tp1=tp1,
-                        tp2=tp2,
-                        rr=rr,
-                        qty=qty,
-                        lot=lot,
-                    )
+                    f"• PLAN    {side} {option_type} {strike}  e={entry} sl={sl} tp1={tp1} tp2={tp2} rr={rr} "
+                    f"lots={qty}×{lot}"
                 ),
                 f"• QUOTE   age={age_txt}s spr={spread_txt}%",
             ]
@@ -1362,7 +1348,7 @@ class TelegramController:
         )
         return f"{header} plan={plan_line}"
 
-    def _handle_hb_toggle(self, chat_id: int, args: List[str]) -> bool:
+    def _handle_hb_toggle(self, chat_id: int, args: list[str]) -> bool:
         """Handle `/hb on|off [interval]` commands for auto-heartbeat."""
 
         if not _COMMAND_GATE.allow(chat_id, "/hb_cfg", 1.5):
@@ -1462,9 +1448,9 @@ class TelegramController:
             state["message_id"] = new_id if ok else None
 
     def _hb_send_or_edit(
-        self, chat_id: int, message_id: Optional[int], text: str
-    ) -> tuple[bool, Optional[int]]:
-        payload: Dict[str, Any] = {
+        self, chat_id: int, message_id: int | None, text: str
+    ) -> tuple[bool, int | None]:
+        payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
             "disable_web_page_preview": True,
@@ -1475,7 +1461,7 @@ class TelegramController:
         ok, result = self._hb_api_call(endpoint, payload)
         if not ok:
             return False, None
-        new_id: Optional[int] = None
+        new_id: int | None = None
         if isinstance(result, Mapping):
             msg_id = result.get("message_id")
             if isinstance(msg_id, int):
@@ -1485,8 +1471,8 @@ class TelegramController:
         return True, new_id
 
     def _hb_api_call(
-        self, endpoint: str, payload: Dict[str, Any]
-    ) -> tuple[bool, Optional[Mapping[str, Any]]]:
+        self, endpoint: str, payload: dict[str, Any]
+    ) -> tuple[bool, Mapping[str, Any] | None]:
         try:
             response = self._session.post(
                 f"{self._base}/{endpoint}", json=payload, timeout=self._timeout
@@ -1507,7 +1493,7 @@ class TelegramController:
         return True, result if isinstance(result, Mapping) else None
 
     # --------------- commands ---------------
-    def _handle_update(self, upd: Dict[str, Any]) -> None:
+    def _handle_update(self, upd: dict[str, Any]) -> None:
         # Inline callbacks
         if "callback_query" in upd:
             cq = upd["callback_query"]
@@ -1643,15 +1629,7 @@ class TelegramController:
                 f"*BROKER*  {esc(str(broker))}",
                 f"*EQUITY*  {esc(equity)}  *POS* {esc(str(position))}",
                 (
-                    "*PLAN*    {side} {ot} {strike}  e={entry} sl={sl} tp1={tp1} rr={rr}".format(
-                        side=esc(str(plan_side)),
-                        ot=esc(str(plan_ot)),
-                        strike=esc(str(plan_strike)),
-                        entry=esc(entry),
-                        sl=esc(sl),
-                        tp1=esc(tp1),
-                        rr=esc(rr),
-                    )
+                    f"*PLAN*    {esc(str(plan_side))} {esc(str(plan_ot))} {esc(str(plan_strike))}  e={esc(entry)} sl={esc(sl)} tp1={esc(tp1)} rr={esc(rr)}"
                 ),
                 f"*QUOTE*   age={esc(age_txt)}s spr={esc(spread_txt)}%",
             ]
@@ -1681,7 +1659,7 @@ class TelegramController:
             status = self._status_provider() if self._status_provider else {}
             api = status.get("api_health", {})
 
-            def fmt(name: str, d: Dict[str, Any]) -> str:
+            def fmt(name: str, d: dict[str, Any]) -> str:
                 return (
                     f"{name}: {d.get('state')} err={d.get('err_rate', 0):.2%} "
                     f"p95={d.get('p95_ms', 0)}ms n={d.get('n', 0)} open_until={d.get('open_until')}"
@@ -2475,7 +2453,7 @@ class TelegramController:
         if cmd == "/trace":
             from src.diagnostics import trace_ctl
 
-            trace_setter: Optional[Callable[[int], None]] = None
+            trace_setter: Callable[[int], None] | None = None
             if self._trace_provider:
                 trace_setter = self._trace_provider
             else:
@@ -2484,7 +2462,7 @@ class TelegramController:
                     trace_setter = lambda n: setattr(
                         runner, "trace_ticks_remaining", max(1, min(50, n))
                     )
-            ttl_override: Optional[int] = None
+            ttl_override: int | None = None
             parsed_args: list[str] = []
             for token in args:
                 stripped = str(token).strip()
@@ -2767,7 +2745,7 @@ class TelegramController:
                 except Exception as e:
                     return self._send(f"Mode error: {e}")
             else:
-                setattr(settings, "enable_live_trading", val)
+                settings.enable_live_trading = val
             msg = f"Mode set to {'LIVE' if val else 'DRY'} and rewired."
             self._send(msg)
             if runner is not None and getattr(runner, "kite", None) is None:
@@ -2823,8 +2801,8 @@ class TelegramController:
                 return self._send(f"Orders error: {e}")
             if not legs:
                 return self._send("No open trades.")
-            lines: List[str] = []
-            current: Optional[str] = None
+            lines: list[str] = []
+            current: str | None = None
             for leg in legs:
                 trade = str(leg.get("trade"))
                 if trade != current:
@@ -3030,7 +3008,7 @@ class TelegramController:
             runner = StrategyRunner.get_singleton()
             if not runner or not getattr(runner, "data_source", None):
                 return self._send("runner not ready")
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             ds = runner.data_source
             tick_dt = None
             tick_attr = getattr(ds, "last_tick_ts", None)

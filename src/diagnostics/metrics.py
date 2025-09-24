@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Deque, Dict
 from zoneinfo import ZoneInfo
 
 from src.config import settings
@@ -26,7 +25,7 @@ class Metrics:
     queue_depth: int = 0
     last_tick_ts: float = field(default_factory=time.time)
     _start_ts: float = field(default_factory=time.time)
-    _latencies_ms: Deque[float] = field(default_factory=lambda: deque(maxlen=100))
+    _latencies_ms: deque[float] = field(default_factory=lambda: deque(maxlen=100))
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def inc_ticks(self) -> None:
@@ -51,7 +50,7 @@ class Metrics:
         with self._lock:
             self._latencies_ms.append(float(ms))
 
-    def snapshot(self) -> Dict[str, float | str]:
+    def snapshot(self) -> dict[str, float | str]:
         with self._lock:
             now = time.time()
             age = now - self.last_tick_ts
@@ -155,7 +154,7 @@ class RuntimeMetrics:
             self.exposure_basis = ""
             self.unit_notional = 0.0
 
-    def snapshot(self) -> Dict[str, float | str]:
+    def snapshot(self) -> dict[str, float | str]:
         with self._lock:
             return {
                 "fills": self.fills,
@@ -202,7 +201,7 @@ def record_trade(pnl_r: float, slippage_bps: float) -> None:
         )
 
 
-def daily_summary(dt: datetime | None = None) -> Dict[str, float]:
+def daily_summary(dt: datetime | None = None) -> dict[str, float]:
     """Return aggregated trade metrics for the day."""
     path = _journal_path(dt)
     if not path.exists():

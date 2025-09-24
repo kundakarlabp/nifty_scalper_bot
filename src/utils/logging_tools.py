@@ -5,7 +5,6 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, List, Optional, Tuple
 
 from src.config import settings
 
@@ -24,7 +23,7 @@ class RateLimitFilter(logging.Filter):
     def __init__(self, interval: float = 120.0) -> None:
         super().__init__()
         self.interval = float(interval)
-        self._last: Dict[Tuple[str, str], float] = {}
+        self._last: dict[tuple[str, str], float] = {}
 
     def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - trivial
         message = record.getMessage()
@@ -44,7 +43,7 @@ class InMemoryLogHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
         self.capacity = settings.system.log_buffer_capacity
-        self._buf: Deque[Tuple[float, int, str]] = deque(maxlen=self.capacity)
+        self._buf: deque[tuple[float, int, str]] = deque(maxlen=self.capacity)
         self._lock = threading.Lock()
         self.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -58,7 +57,7 @@ class InMemoryLogHandler(logging.Handler):
         with self._lock:
             self._buf.append((time.time(), int(record.levelno), msg))
 
-    def tail(self, n: int = 60, min_level: Optional[int] = None) -> List[str]:
+    def tail(self, n: int = 60, min_level: int | None = None) -> list[str]:
         n = max(1, int(n))
         with self._lock:
             items = list(self._buf)
@@ -76,7 +75,7 @@ class StructuredDebugHandler(logging.Handler):
 
     def __init__(self, capacity: int = 200) -> None:
         super().__init__(level=logging.DEBUG)
-        self._buf: Deque[str] = deque(maxlen=max(50, capacity))
+        self._buf: deque[str] = deque(maxlen=max(50, capacity))
         self._lock = threading.Lock()
         self.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -92,7 +91,7 @@ class StructuredDebugHandler(logging.Handler):
         with self._lock:
             self._buf.append(msg)
 
-    def tail(self, n: int = 20) -> List[str]:
+    def tail(self, n: int = 20) -> list[str]:
         n = max(1, int(n))
         with self._lock:
             items = list(self._buf)
@@ -102,12 +101,12 @@ class StructuredDebugHandler(logging.Handler):
 structured_debug_handler = StructuredDebugHandler(capacity=settings.diag_ring_size)
 
 
-def get_recent_logs(n: int = 60, min_level: Optional[int] = None) -> List[str]:
+def get_recent_logs(n: int = 60, min_level: int | None = None) -> list[str]:
     """Return the last ``n`` log lines as a list of strings."""
     return log_buffer_handler.tail(n=n, min_level=min_level)
 
 
-def get_structured_debug_logs(n: int = 20) -> List[str]:
+def get_structured_debug_logs(n: int = 20) -> list[str]:
     """Return the latest structured debug log lines for Telegram delivery."""
 
     return structured_debug_handler.tail(n=n)

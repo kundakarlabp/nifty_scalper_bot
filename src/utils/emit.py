@@ -4,7 +4,6 @@ import logging
 
 from src.server.logging_utils import SimpleLogGate
 
-
 _DECISION_GATE: SimpleLogGate = SimpleLogGate(default_interval_seconds=5.0)
 
 

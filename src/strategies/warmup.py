@@ -27,7 +27,7 @@ def compute_required_bars(
         floors.append(int(atr_period) + 5)
     if hasattr(cfg, "warmup_bars"):
         try:
-            floors.append(int(getattr(cfg, "warmup_bars")))
+            floors.append(int(cfg.warmup_bars))
         except Exception:  # pragma: no cover - defensive
             pass
     return max(floors)

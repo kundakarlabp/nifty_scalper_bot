@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any
 
 try:  # pragma: no cover - optional dependency
     import kiteconnect.exceptions as kex  # type: ignore
@@ -34,9 +35,11 @@ from src.broker.interface import (
 from src.execution import broker_retry
 from src.utils.broker_errors import (
     AUTH,
-    NETWORK as NET,
     THROTTLE,
     classify_broker_error,
+)
+from src.utils.broker_errors import (
+    NETWORK as NET,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,7 +52,7 @@ class KiteBroker(Broker):
         self,
         api_key: str,
         access_token: str,
-        instrument_store: Optional[InstrumentStore] = None,
+        instrument_store: InstrumentStore | None = None,
         enable_ws: bool = True,
     ) -> None:
         self.api_key = api_key
@@ -58,7 +61,7 @@ class KiteBroker(Broker):
         self.instrument_store = instrument_store or InstrumentStore()
         self._kite: Any = None
         self._connected = False
-        self._tick_cb: Optional[Callable[[Tick], None]] = None
+        self._tick_cb: Callable[[Tick], None] | None = None
 
     # Connection and market data -------------------------------------------------
     def connect(self) -> None:
@@ -119,14 +122,14 @@ class KiteBroker(Broker):
 
     def get_positions(
         self,
-    ) -> List[Dict[str, Any]]:  # pragma: no cover - network omitted
+    ) -> list[dict[str, Any]]:  # pragma: no cover - network omitted
         if self._kite is None:
             raise BrokerError("Kite not connected")
         pos = broker_retry.call(self._kite.positions)  # type: ignore[call-arg]
         return pos.get("net", []) if isinstance(pos, dict) else pos
 
     # Mapping helpers -----------------------------------------------------------
-    def _map_order_request(self, req: OrderRequest) -> Dict[str, Any]:
+    def _map_order_request(self, req: OrderRequest) -> dict[str, Any]:
         inst = self.instrument_store.by_token(req.instrument_id)
         side = "BUY" if req.side == Side.BUY else "SELL"
         variety = inst.variety if inst else "regular"
@@ -134,7 +137,7 @@ class KiteBroker(Broker):
         exchange = inst.exchange if inst else "NFO"
         tradingsymbol = inst.symbol if inst else str(req.instrument_id)
 
-        params: Dict[str, Any] = dict(
+        params: dict[str, Any] = dict(
             variety=variety,
             exchange=exchange,
             tradingsymbol=tradingsymbol,
@@ -155,7 +158,7 @@ class KiteBroker(Broker):
             params["validity"] = "DAY"
         return params
 
-    def _map_order(self, payload: Dict[str, Any]) -> Order:
+    def _map_order(self, payload: dict[str, Any]) -> Order:
         status_map = {
             "OPEN": OrderStatus.OPEN,
             "TRIGGER PENDING": OrderStatus.OPEN,

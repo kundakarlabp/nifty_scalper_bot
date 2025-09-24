@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional, Protocol
-
+from typing import Any, Protocol
 
 from src.data.types import HistResult
 
@@ -18,9 +17,9 @@ class DataSource(Protocol):
         self, token: int, start: datetime, end: datetime, timeframe: str
     ) -> HistResult: ...
 
-    def get_last_price(self, symbol_or_token: Any) -> Optional[float]: ...
+    def get_last_price(self, symbol_or_token: Any) -> float | None: ...
 
-    def api_health(self) -> Dict[str, Dict[str, object]]: ...
+    def api_health(self) -> dict[str, dict[str, object]]: ...
 
 
 class Strategy(Protocol):

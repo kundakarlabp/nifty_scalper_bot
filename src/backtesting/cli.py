@@ -7,15 +7,13 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
 
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.data_feed import SpotFeed
-from src.backtesting.metrics import reject
 from src.backtesting.sim_connector import SimConnector
-from src.risk.limits import LimitConfig, RiskEngine
-from src.strategies.parameters import StrategyParameterSpace, StrategyParameters
 from src.backtesting.tuning import WalkForwardResult, WalkForwardSplit, WalkForwardValidator
+from src.risk.limits import LimitConfig, RiskEngine
+from src.strategies.parameters import StrategyParameters, StrategyParameterSpace
 from src.strategies.scalping_strategy import ScalpingStrategy
 from src.strategies.strategy_config import resolve_config_path, try_load
 
@@ -33,10 +31,10 @@ def daterange(start: datetime, end: datetime):
 
 def build_walkforward_windows(
     start: datetime, end: datetime, train_w: int, test_w: int
-) -> List[Tuple[datetime, datetime, datetime]]:
+) -> list[tuple[datetime, datetime, datetime]]:
     """Compute walk-forward train/test windows."""
 
-    windows: List[Tuple[datetime, datetime, datetime]] = []
+    windows: list[tuple[datetime, datetime, datetime]] = []
     cur = start
     while True:
         tr_start = cur
@@ -101,7 +99,7 @@ def main() -> None:
     tuning_cfg = cfg.raw.get("tuning", {}) if isinstance(cfg.raw, dict) else {}
     space = StrategyParameterSpace.from_config(tuning_cfg)
 
-    def _strategy_factory(params: Optional[StrategyParameters]) -> ScalpingStrategy:
+    def _strategy_factory(params: StrategyParameters | None) -> ScalpingStrategy:
         if params is None:
             return ScalpingStrategy()
         return ScalpingStrategy(params=params)
@@ -130,7 +128,7 @@ def main() -> None:
 
     results = validator.run(splits, trials=args.trials, outdir=args.out)
 
-    best_overall: Optional[WalkForwardResult] = None
+    best_overall: WalkForwardResult | None = None
     best_metric = float("-inf")
 
     for idx, result in enumerate(results, 1):

@@ -17,7 +17,7 @@ Return shapes are aligned with scalping_strategy.py:
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -83,7 +83,7 @@ def calculate_macd(
     fast: int = 12,
     slow: int = 26,
     signal: int = 9,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """MACD tuple (macd_line, signal_line, hist)."""
     s = _series(close, "close")
     if TA_AVAILABLE and MACD:
@@ -110,8 +110,8 @@ def calculate_macd(
 # ---------------------------------- ATR ----------------------------------- #
 def calculate_atr(
     high_or_df: SeriesOrDF,
-    low: Optional[pd.Series] = None,
-    close: Optional[pd.Series] = None,
+    low: pd.Series | None = None,
+    close: pd.Series | None = None,
     period: int = 14,
 ) -> pd.Series:
     """
@@ -145,11 +145,11 @@ def calculate_atr(
 # ------------------------------- SuperTrend ------------------------------- #
 def calculate_supertrend(
     high_or_df: SeriesOrDF,
-    low: Optional[pd.Series] = None,
-    close: Optional[pd.Series] = None,
+    low: pd.Series | None = None,
+    close: pd.Series | None = None,
     period: int = 10,
     multiplier: float = 3.0,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """
     SuperTrend returning (trend_dir, upper, lower).
     trend_dir is +1 for uptrend and -1 for downtrend.
@@ -216,7 +216,7 @@ def calculate_bollinger_bands(
     close: SeriesOrDF,
     window: int = 20,
     std: float = 2.0,
-) -> Tuple[pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series]:
     """
     Return the Bollinger upper and lower bands.
     """
@@ -265,10 +265,10 @@ def calculate_bb_percent(
 # ---------------------------------- ADX ----------------------------------- #
 def calculate_adx(
     high_or_df: SeriesOrDF,
-    low: Optional[pd.Series] = None,
-    close: Optional[pd.Series] = None,
+    low: pd.Series | None = None,
+    close: pd.Series | None = None,
     period: int = 14,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series]:
     """
     Return (adx, di_plus, di_minus).
     Accepts DataFrame or (high, low, close) Series.
@@ -337,10 +337,10 @@ def calculate_adx_slope(adx: SeriesOrDF, period: int = 1) -> pd.Series:
 # --------------------------------- VWAP ----------------------------------- #
 def calculate_vwap(
     high_or_df: SeriesOrDF,
-    low: Optional[pd.Series] = None,
-    close: Optional[pd.Series] = None,
-    volume: Optional[pd.Series] = None,
-    period: Optional[int] = None,
+    low: pd.Series | None = None,
+    close: pd.Series | None = None,
+    volume: pd.Series | None = None,
+    period: int | None = None,
 ) -> pd.Series:
     """
     VWAP. Accepts DataFrame or individual Series (high, low, close, volume).

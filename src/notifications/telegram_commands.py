@@ -6,9 +6,10 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pprint import pformat
-from typing import Any, Callable, Optional
+from typing import Any
 
 from src.config import settings as global_settings
 from src.diagnostics import trace_ctl
@@ -45,10 +46,10 @@ class TelegramCommands:
 
     def __init__(
         self,
-        bot_token: Optional[str],
-        chat_id: Optional[str],
-        on_cmd: Optional[Callable[[str, str], None]] = None,
-        backtest_runner: Optional[Callable[[Optional[str]], str]] = None,
+        bot_token: str | None,
+        chat_id: str | None,
+        on_cmd: Callable[[str, str], None] | None = None,
+        backtest_runner: Callable[[str | None], str] | None = None,
         *,
         settings: Any | None = None,
         source: Any | None = None,
@@ -59,9 +60,9 @@ class TelegramCommands:
         self.chat = str(chat_id or "")
         self.on_cmd = on_cmd
         self._backtest_runner = backtest_runner
-        self._offset: Optional[int] = None
+        self._offset: int | None = None
         self._running = False
-        self._th: Optional[threading.Thread] = None
+        self._th: threading.Thread | None = None
         # runtime state for UX commands
         self.basis = "premium"
         self.unit_notional = 0.0
@@ -320,9 +321,7 @@ class TelegramCommands:
                 open_orders = orders_fn() if callable(orders_fn) else None
             except Exception:
                 open_orders = None
-            if isinstance(open_orders, (list, tuple, set)):
-                snapshot["open_orders"] = len(open_orders)
-            elif isinstance(open_orders, dict):
+            if isinstance(open_orders, (list, tuple, set)) or isinstance(open_orders, dict):
                 snapshot["open_orders"] = len(open_orders)
             elif open_orders is not None:
                 try:
@@ -335,9 +334,7 @@ class TelegramCommands:
                 positions = pos_fn() if callable(pos_fn) else None
             except Exception:
                 positions = None
-            if isinstance(positions, dict):
-                snapshot["positions"] = len(positions)
-            elif isinstance(positions, (list, tuple, set)):
+            if isinstance(positions, dict) or isinstance(positions, (list, tuple, set)):
                 snapshot["positions"] = len(positions)
             elif positions:
                 snapshot["positions"] = 1

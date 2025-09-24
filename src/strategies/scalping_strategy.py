@@ -1,4 +1,3 @@
-# Path: src/strategies/scalping_strategy.py
 from __future__ import annotations
 
 import logging
@@ -7,24 +6,26 @@ import time
 import weakref
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 from random import uniform as rand_uniform
-from typing import Any, Deque, Dict, Literal, Optional, Tuple, cast
+from typing import Any, Literal, Optional, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from src.config import settings
+from src.diagnostics.metrics import runtime_metrics
 from src.execution.micro_filters import cap_for_mid, evaluate_micro
 from src.execution.order_executor import fetch_quote_with_depth
 from src.logs import structured_log
-from src.diagnostics.metrics import runtime_metrics
+from src.signals.patches import resolve_atr_band
 from src.signals.regime_detector import detect_market_regime
+from src.strategies.atr_gate import check_atr
 from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
 from src.strategies.warmup import warmup_status
-from src.signals.patches import resolve_atr_band
-from src.strategies.atr_gate import check_atr
+from src.utils import strike_selector
 from src.utils.atr_helper import compute_atr, latest_atr_value
 from src.utils.indicators import (
     calculate_adx,
@@ -34,7 +35,6 @@ from src.utils.indicators import (
     calculate_macd,
     calculate_vwap,
 )
-from src.utils import strike_selector
 from src.utils.strike_selector import (
     get_instrument_tokens,
     resolve_weekly_atm,
@@ -60,7 +60,7 @@ def _log_throttled(key: str, level: int, msg: str, *args) -> None:
         logger.log(level, msg, *args)
 
 
-def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
+def is_tue_after(threshold: dt_time, *, now: datetime | None = None) -> bool:
     """Return True if current time is Tuesday after ``threshold``."""
     now = now or datetime.now(ZoneInfo("Asia/Kolkata"))
     return now.weekday() == 1 and now.time() >= threshold
@@ -68,7 +68,7 @@ def is_tue_after(threshold: dt_time, *, now: Optional[datetime] = None) -> bool:
 
 def _token_to_symbol_and_lot(
     kite: Any, token: int
-) -> Optional[Tuple[str, int]]:
+) -> tuple[str, int] | None:
     """Return trading symbol and lot size for ``token``.
 
     Parameters
@@ -111,7 +111,7 @@ class ScoreDetails:
     """Detailed score breakdown for diagnostics."""
 
     regime: str
-    parts: Dict[str, float]
+    parts: dict[str, float]
     total: float
 
 
@@ -153,13 +153,13 @@ class RollingIndicatorBundle:
         self.atr_period = 0
         self._fast_alpha = 0.0
         self._slow_alpha = 0.0
-        self._ema_fast: Optional[float] = None
-        self._ema_slow: Optional[float] = None
-        self._atr_value: Optional[float] = None
+        self._ema_fast: float | None = None
+        self._ema_slow: float | None = None
+        self._atr_value: float | None = None
         self._atr_ready = False
-        self._atr_buffer: Deque[float] = deque()
-        self._prev_close: Optional[float] = None
-        self._close_window: Deque[float] = deque()
+        self._atr_buffer: deque[float] = deque()
+        self._prev_close: float | None = None
+        self._close_window: deque[float] = deque()
         self._sum_close = 0.0
         self._sum_sq_close = 0.0
         self._last_len = 0
@@ -196,7 +196,7 @@ class RollingIndicatorBundle:
             self._slow_alpha = 2.0 / (self.ema_slow_period + 1.0)
             self._reset_state()
 
-    def update(self, df: pd.DataFrame, cfg: Any) -> Optional[IndicatorSnapshot]:
+    def update(self, df: pd.DataFrame, cfg: Any) -> IndicatorSnapshot | None:
         if df is None or df.empty or "close" not in df.columns:
             self._reset_state()
             return None
@@ -307,11 +307,11 @@ class RollingIndicatorCache:
     """Weak cache mapping dataframes to rolling indicator bundles."""
 
     def __init__(self) -> None:
-        self._cache: "weakref.WeakKeyDictionary[pd.DataFrame, RollingIndicatorBundle]" = (
+        self._cache: weakref.WeakKeyDictionary[pd.DataFrame, RollingIndicatorBundle] = (
             weakref.WeakKeyDictionary()
         )
 
-    def snapshot(self, df: pd.DataFrame, cfg: Any) -> Optional[IndicatorSnapshot]:
+    def snapshot(self, df: pd.DataFrame, cfg: Any) -> IndicatorSnapshot | None:
         bundle = self._cache.get(df)
         if bundle is None:
             bundle = RollingIndicatorBundle()
@@ -323,8 +323,8 @@ _INDICATOR_CACHE = RollingIndicatorCache()
 
 
 def _trend_score(
-    df: pd.DataFrame, cfg: Any, snap: Optional[IndicatorSnapshot] = None
-) -> Tuple[float, ScoreDetails]:
+    df: pd.DataFrame, cfg: Any, snap: IndicatorSnapshot | None = None
+) -> tuple[float, ScoreDetails]:
     """Compute trend-following score using EMA slope."""
 
     if snap and snap.atr_ready:
@@ -343,8 +343,8 @@ def _trend_score(
 
 
 def _range_score(
-    df: pd.DataFrame, cfg: Any, snap: Optional[IndicatorSnapshot] = None
-) -> Tuple[float, ScoreDetails]:
+    df: pd.DataFrame, cfg: Any, snap: IndicatorSnapshot | None = None
+) -> tuple[float, ScoreDetails]:
     """Compute mean‑reversion score for range‑bound markets."""
 
     period = getattr(cfg, "bb_period", 20)
@@ -389,8 +389,8 @@ def _range_score(
 
 
 def compute_score(
-    df: Optional[pd.DataFrame], regime: str, cfg: Any
-) -> Tuple[float, Optional[ScoreDetails]]:
+    df: pd.DataFrame | None, regime: str, cfg: Any
+) -> tuple[float, ScoreDetails | None]:
     """Return total score and breakdown for ``regime``.
 
     Parameters
@@ -406,7 +406,7 @@ def compute_score(
     if df is None or len(df) < getattr(cfg, "warmup_bars_min", 15):
         return 0.0, None
 
-    snap: Optional[IndicatorSnapshot]
+    snap: IndicatorSnapshot | None
     try:
         snap = _INDICATOR_CACHE.snapshot(df, cfg)
     except Exception:
@@ -426,7 +426,7 @@ def compute_score(
 
 
 Side = Literal["BUY", "SELL"]
-SignalOutput = Optional[Dict[str, Any]]
+SignalOutput = Optional[dict[str, Any]]
 
 
 class EnhancedScalpingStrategy:
@@ -456,20 +456,20 @@ class EnhancedScalpingStrategy:
         self,
         *,
         params: StrategyParameters | None = None,
-        ema_fast: Optional[int] = None,
-        ema_slow: Optional[int] = None,
-        rsi_period: Optional[int] = None,
+        ema_fast: int | None = None,
+        ema_slow: int | None = None,
+        rsi_period: int | None = None,
         adx_period: int = 14,
         adx_trend_strength: int = 20,
-        atr_period: Optional[int] = None,
-        min_bars_for_signal: Optional[int] = None,
-        confidence_threshold: Optional[float] = None,
-        min_signal_score: Optional[int] = None,
-        atr_sl_multiplier: Optional[float] = None,
-        atr_tp_multiplier: Optional[float] = None,
+        atr_period: int | None = None,
+        min_bars_for_signal: int | None = None,
+        confidence_threshold: float | None = None,
+        min_signal_score: int | None = None,
+        atr_sl_multiplier: float | None = None,
+        atr_tp_multiplier: float | None = None,
     ) -> None:
         base_params = params or StrategyParameters.from_settings()
-        overrides: Dict[str, Any] = {}
+        overrides: dict[str, Any] = {}
         if ema_fast is not None:
             overrides["ema_fast"] = int(ema_fast)
         if ema_slow is not None:
@@ -528,9 +528,9 @@ class EnhancedScalpingStrategy:
         self.tp_conf_adj = float(getattr(settings.strategy, "tp_confidence_adj", 0.3))
 
         # Exportable debug snapshot
-        self._last_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
-        self._iv_window: Deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
-        self._opt_window: Deque[float] = getattr(self, "_opt_window", deque(maxlen=20))
+        self._last_debug: dict[str, Any] = {"note": "no_evaluation_yet"}
+        self._iv_window: deque[float] = getattr(self, "_iv_window", deque(maxlen=20))
+        self._opt_window: deque[float] = getattr(self, "_opt_window", deque(maxlen=20))
         self.last_atr_pct: float = 0.0
         self._next_atm_roll_ts: float = 0.0
 
@@ -553,7 +553,7 @@ class EnhancedScalpingStrategy:
     @staticmethod
     def _extract_adx_columns(
         spot_df: pd.DataFrame,
-    ) -> Tuple[Optional[pd.Series], Optional[pd.Series], Optional[pd.Series]]:
+    ) -> tuple[pd.Series | None, pd.Series | None, pd.Series | None]:
         """Return (adx, di_plus, di_minus) from spot_df; tolerant to suffix (_{n}) naming."""
         if spot_df is None or spot_df.empty:
             return None, None, None
@@ -586,7 +586,7 @@ class EnhancedScalpingStrategy:
         """Return ``val`` on a 0..1 scale, accepting percentages."""
         return val / 100.0 if val > 1 else val
 
-    def _est_iv_pct(self, S: float, K: float, T: float) -> Optional[int]:
+    def _est_iv_pct(self, S: float, K: float, T: float) -> int | None:
         """Estimate rolling IV percentile."""
         try:
             from src.risk.greeks import implied_vol_newton
@@ -603,8 +603,8 @@ class EnhancedScalpingStrategy:
         return int(round(100 * rk / max(1, len(arr) - 1)))
 
     def _iv_adx_reject_reason(
-        self, plan: Dict[str, Any], close: float
-    ) -> Optional[tuple[str, Dict[str, Any]]]:
+        self, plan: dict[str, Any], close: float
+    ) -> tuple[str, dict[str, Any]] | None:
         cfg: StrategyConfig | None = getattr(
             getattr(self, "runner", None), "strategy_cfg", None
         )
@@ -631,7 +631,7 @@ class EnhancedScalpingStrategy:
         return None
 
     # ---------- debug export ----------
-    def get_debug(self) -> Dict[str, Any]:
+    def get_debug(self) -> dict[str, Any]:
         return dict(self._last_debug)
 
     def get_parameters(self) -> StrategyParameters:
@@ -670,9 +670,9 @@ class EnhancedScalpingStrategy:
     def generate_signal(
         self,
         df: pd.DataFrame,
-        current_tick: Optional[Dict[str, Any]] = None,
-        current_price: Optional[float] = None,
-        spot_df: Optional[pd.DataFrame] = None,
+        current_tick: dict[str, Any] | None = None,
+        current_price: float | None = None,
+        spot_df: pd.DataFrame | None = None,
     ) -> SignalOutput:
         cfg: StrategyConfig | None = getattr(
             getattr(self, "runner", None), "strategy_cfg", None
@@ -682,7 +682,7 @@ class EnhancedScalpingStrategy:
 
             cfg = StrategyConfig.load(resolve_config_path())
 
-        plan: Dict[str, Any] = {
+        plan: dict[str, Any] = {
             "has_signal": False,
             "action": "NONE",
             "option_type": None,
@@ -753,12 +753,12 @@ class EnhancedScalpingStrategy:
 
         plan["_event_post_widen"] = float(getattr(self, "_event_post_widen", 0.0))
 
-        dbg: Dict[str, Any] = {"reason_block": None}
-        gate_checks: Dict[str, Any] = {}
+        dbg: dict[str, Any] = {"reason_block": None}
+        gate_checks: dict[str, Any] = {}
         plan["gates"] = gate_checks
         strategy_name = getattr(self, "strategy_name", self.__class__.__name__)
 
-        def plan_block(reason: str, **extra: Any) -> Dict[str, Any]:
+        def plan_block(reason: str, **extra: Any) -> dict[str, Any]:
             sd = plan.setdefault(
                 "score_dbg",
                 {
@@ -1026,8 +1026,8 @@ class EnhancedScalpingStrategy:
             breakout_dist_long = abs(price - swing_high) / price * 100.0
             breakout_dist_short = abs(price - swing_low) / price * 100.0
 
-            side: Optional[Side] = None
-            option_type: Optional[str] = None
+            side: Side | None = None
+            option_type: str | None = None
             reasons: list[str] = []
 
             if reg.regime == "TREND":
@@ -1170,7 +1170,7 @@ class EnhancedScalpingStrategy:
             )
             quote_id: Any | None = None
             option_token = None
-            token_map: Dict[str, int | None] = {}
+            token_map: dict[str, int | None] = {}
             option_type_key = str(option_type or "").upper()
 
             def _normalize_token(value: Any) -> int | None:
@@ -1323,7 +1323,7 @@ class EnhancedScalpingStrategy:
             )
             raw_score = sum(comps[k] * float(weights.get(k, 0.0)) for k in comps)
             max_score = sum(float(weights.get(k, 0.0)) for k in comps)
-            penalties: Dict[str, float] = {}
+            penalties: dict[str, float] = {}
             m_val = plan.get("micro")
             m = m_val if isinstance(m_val, dict) else {}
             if m.get("mode") == "SOFT":
@@ -1423,7 +1423,7 @@ class EnhancedScalpingStrategy:
                 logger.debug("instrument token lookup failed: %s", e)
             strike_info = select_strike(price, int(score))
             if not strike_info:
-                liquidity_info: Optional[Dict[str, Any]] = None
+                liquidity_info: dict[str, Any] | None = None
                 try:
                     from src.utils import strike_selector as ss
 
@@ -1556,7 +1556,7 @@ class ScalpingStrategy(EnhancedScalpingStrategy):
 
     def evaluate_from_backtest(
         self, ts: datetime, o: float, h: float, low: float, c: float, v: float
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         """Update internal buffer with a bar and reuse ``generate_signal``."""
 
         if not hasattr(self, "_bt_df"):

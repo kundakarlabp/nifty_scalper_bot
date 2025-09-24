@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run(cmd: List[str]) -> Tuple[str, int]:
+def _run(cmd: list[str]) -> tuple[str, int]:
     """Run *cmd* and return its combined output and return code."""
     proc = subprocess.run(cmd, capture_output=True, text=True)
     out = (proc.stdout + proc.stderr).strip()
@@ -42,14 +41,14 @@ def run_file_diagnostics(path: str) -> str:
     if not p.exists():
         return f"File not found: {path}"
 
-    cmds: List[Tuple[str, List[str]]] = [
+    cmds: list[tuple[str, list[str]]] = [
         ("ruff", ["ruff", str(p)]),
         ("mypy", ["mypy", str(p)]),
     ]
     if p.suffix == ".py" and (p.name.startswith("test") or "tests" in p.parts):
         cmds.append(("pytest", ["pytest", str(p)]))
 
-    results: List[str] = []
+    results: list[str] = []
     for name, cmd in cmds:
         out, code = _run(cmd)
         if code == 0:

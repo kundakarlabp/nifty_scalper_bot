@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from src.utils.reliability import RateLimiter
 
@@ -30,7 +29,7 @@ class RiskConfig:
 class RiskGuards:
     """Lightweight pre-trade checks for live trading."""
 
-    def __init__(self, config: Optional[RiskConfig] = None) -> None:
+    def __init__(self, config: RiskConfig | None = None) -> None:
         self.cfg = config or RiskConfig()
         self.rate = RateLimiter(self.cfg.max_orders_per_min)
         self._pnl_today = 0.0

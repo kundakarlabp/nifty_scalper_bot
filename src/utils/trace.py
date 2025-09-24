@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 from uuid import uuid4
 
 
@@ -12,8 +11,8 @@ class Trace:
     """Represents a logical trace for related log and diagnostic events."""
 
     trace_id: str
-    signal_id: Optional[str] = None
-    order_client_id: Optional[str] = None
+    signal_id: str | None = None
+    order_client_id: str | None = None
 
 
 def new_trace(signal_id: str | None = None) -> Trace:

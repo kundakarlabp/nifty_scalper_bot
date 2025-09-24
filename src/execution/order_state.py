@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
 
 
 class OrderState(Enum):
@@ -53,15 +52,15 @@ class OrderLeg:
     side: OrderSide
     symbol: str
     qty: int
-    limit_price: Optional[float]
+    limit_price: float | None
     state: OrderState
     filled_qty: int = 0
     avg_price: float = 0.0
-    broker_order_id: Optional[str] = None
+    broker_order_id: str | None = None
     idempotency_key: str = ""
     created_at: datetime = field(default_factory=datetime.utcnow)
-    expires_at: Optional[datetime] = None
-    reason: Optional[str] = None
+    expires_at: datetime | None = None
+    reason: str | None = None
 
     def mark_acked(self, broker_id: str) -> None:
         """Transition NEW→PENDING on broker acknowledgement."""
@@ -101,7 +100,7 @@ class OrderLeg:
             return False
         return bool(self.expires_at and now > self.expires_at)
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         """Dictionary representation for journalling/diagnostics."""
         data = asdict(self)
         data["state"] = self.state.name
@@ -115,7 +114,7 @@ class TradeFSM:
     """Finite state machine tracking a trade and its legs."""
 
     trade_id: str
-    legs: Dict[str, OrderLeg] = field(default_factory=dict)
+    legs: dict[str, OrderLeg] = field(default_factory=dict)
     status: str = "OPEN"
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
@@ -124,7 +123,7 @@ class TradeFSM:
         self.legs[leg.leg_id] = leg
         self.updated_at = datetime.utcnow()
 
-    def open_legs(self) -> List[OrderLeg]:
+    def open_legs(self) -> list[OrderLeg]:
         return [leg for leg in self.legs.values() if leg.state not in TERMINAL_STATES]
 
     def is_done(self) -> bool:
@@ -135,7 +134,7 @@ class TradeFSM:
             self.status = "CLOSED"
             self.updated_at = datetime.utcnow()
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "trade_id": self.trade_id,
             "status": self.status,

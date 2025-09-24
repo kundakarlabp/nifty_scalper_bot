@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from src.config import settings
@@ -43,7 +43,7 @@ _RESERVED_ATTRS = {
 def _iso_now() -> str:
     """Return an ISO-8601 timestamp for the current moment."""
 
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
 
 def _q(value: Any) -> str:

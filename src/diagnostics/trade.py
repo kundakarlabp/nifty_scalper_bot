@@ -2,7 +2,8 @@ from __future__ import annotations
 
 """Utilities for recording lightweight trade diagnostics."""
 
-from typing import Any, Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
+from typing import Any
 
 from src.logs import structured_log
 

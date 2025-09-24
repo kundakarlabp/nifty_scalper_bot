@@ -2,10 +2,9 @@ from __future__ import annotations
 
 """Simulated order connector for backtests."""
 
+import random
 from dataclasses import dataclass
 from datetime import datetime
-import random
-from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
 from src.config import settings
@@ -68,7 +67,7 @@ class SimConnector:
         opt_type: OptionType,
         now: datetime,
         atr_pct: float,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Return a synthetic top-of-book quote for an option."""
 
         now_tz = now if now.tzinfo else now.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -104,10 +103,10 @@ class SimConnector:
     def ioc_fill(
         self,
         side: str,
-        ob: Dict[str, float],
+        ob: dict[str, float],
         qty: int,
         jitter_ms: float | None = None,
-    ) -> Tuple[bool, float, float]:
+    ) -> tuple[bool, float, float]:
         """Simulate an IOC order using a premium mid price.
 
         Orders are executed at ``mid ± 0.5 * spread`` depending on ``side``.
@@ -129,14 +128,14 @@ class SimConnector:
         slippage = abs(price - mid)
         return True, price, slippage
 
-    def ladder_prices(self, mid: float, spread: float) -> Tuple[float, float]:
+    def ladder_prices(self, mid: float, spread: float) -> tuple[float, float]:
         """Return two ladder prices inside the spread."""
 
         return mid + 0.25 * spread, mid + 0.40 * spread
 
     def fill_limit_buy(
         self, price: float, bid: float, ask: float
-    ) -> Tuple[bool, float]:
+    ) -> tuple[bool, float]:
         """Simulate a limit buy fill."""
 
         if price >= ask:
@@ -147,7 +146,7 @@ class SimConnector:
 
     def fill_limit_sell(
         self, price: float, bid: float, ask: float
-    ) -> Tuple[bool, float]:
+    ) -> tuple[bool, float]:
         """Simulate a limit sell fill."""
 
         if price <= bid:

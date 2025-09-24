@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ def _make_synth_df(ltp: float, n: int = 30):
     return df
 
 
-def _get_last_session_close(kite, token: int) -> Optional[float]:
+def _get_last_session_close(kite, token: int) -> float | None:
     """Return previous session's closing price for ``token`` if available."""
 
     try:
@@ -141,7 +140,7 @@ def _patch_fetch_ohlc_df() -> None:
         except Exception:
             return []
 
-    setattr(cls, "_fetch_ohlc_df", wrap)
+    cls._fetch_ohlc_df = wrap
     log.info("synthetic_warmup: patched LiveKiteSource._fetch_ohlc_df")
 
 
@@ -171,7 +170,7 @@ def _patch_have_min_bars() -> None:
             pass
         return False
 
-    setattr(cls, "have_min_bars", have_min_bars)
+    cls.have_min_bars = have_min_bars
     log.info("synthetic_warmup: injected LiveKiteSource.have_min_bars")
 
 

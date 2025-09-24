@@ -4,16 +4,16 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 @dataclass
 class PersistedState:
     """In-memory representation of persisted trading state."""
 
-    open_orders: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    positions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    open_orders: dict[str, dict[str, Any]] = field(default_factory=dict)
+    positions: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class StateStore:
@@ -28,7 +28,7 @@ class StateStore:
     # ------------------------------------------------------------------
     def _load(self) -> None:
         try:  # pragma: no cover - best effort load
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.state = PersistedState(
                 open_orders=dict(data.get("open_orders", {})),
@@ -45,7 +45,7 @@ class StateStore:
             json.dump(asdict(self.state), f)
 
     # ------------------------------------------------------------------
-    def record_order(self, client_oid: str, payload: Dict[str, Any]) -> None:
+    def record_order(self, client_oid: str, payload: dict[str, Any]) -> None:
         """Persist a pending order payload keyed by client OID."""  # pragma: no cover - I/O
         self.state.open_orders[client_oid] = dict(payload)
         self._save()
@@ -59,7 +59,7 @@ class StateStore:
         """Return True if an open order with ``client_oid`` exists."""
         return client_oid in self.state.open_orders
 
-    def record_position(self, symbol: str, info: Dict[str, Any]) -> None:
+    def record_position(self, symbol: str, info: dict[str, Any]) -> None:
         """Persist an open position snapshot."""  # pragma: no cover - I/O
         self.state.positions[symbol] = dict(info)
         self._save()

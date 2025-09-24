@@ -75,7 +75,7 @@ def summarize_decision(payload: dict) -> dict:
         "regime": g.get("regime"),
         "score": _round(g.get("score")),
         "rr": _round(g.get("rr")),
-        "atr_pct": _round((g.get("atr_pct") or g.get("atr%") or g.get("atrpct"))),
+        "atr_pct": _round(g.get("atr_pct") or g.get("atr%") or g.get("atrpct")),
         "action": g.get("action"),
         "side": g.get("side"),
         "strike": g.get("strike"),

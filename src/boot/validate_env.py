@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, cast
+from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
@@ -175,7 +175,7 @@ def data_clamp_to_market_open() -> bool:
     return str(val).lower() in {"1", "true", "yes"}
 
 
-def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
+def validate_critical_settings(cfg: AppSettings | None = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
     cfg = cast(AppSettings, cfg or settings)
@@ -288,7 +288,7 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         raise ValueError("Configuration validation failed:\n" + "\n".join(errors))
 
 
-def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
+def validate_runtime_env(cfg: AppSettings | None = None) -> None:
     """Light-weight runtime checks for critical dependencies.
 
     This verifies that mandatory environment variables are present, the

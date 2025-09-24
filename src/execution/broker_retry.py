@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Callable, Optional, ParamSpec, TypeVar
+from collections.abc import Callable
+from typing import ParamSpec, TypeVar
 
 from src.utils.circuit_breaker import CircuitBreaker
 
@@ -21,7 +22,7 @@ def call(fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
     Raises the last encountered exception if all retries are exhausted or the
     circuit breaker is open.
     """
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     for i in range(3):
         if not CB.allow():
             raise RuntimeError("breaker_open")

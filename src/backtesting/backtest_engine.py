@@ -5,22 +5,23 @@ from __future__ import annotations
 import csv
 import json
 import os
+import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import random
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from src.risk.greeks import OptionType
 from src.risk.limits import Exposure, RiskEngine
+from src.strategies.parameters import StrategyParameters
 from src.strategies.strategy_config import StrategyConfig
 from src.utils import strike_selector
-from src.strategies.parameters import StrategyParameters
 
 from .data_feed import SpotFeed
 from .sim_connector import SimConnector
 
 if TYPE_CHECKING:  # pragma: no cover
-    from src.strategies.scalping_strategy import EnhancedScalpingStrategy
+    pass
 
 
 class BacktestStrategy(Protocol):
@@ -54,9 +55,7 @@ class BacktestEngine:
         sim: SimConnector,
         outdir: str,
         *,
-        strategy_factory: Optional[
-            Callable[[Optional[StrategyParameters]], BacktestStrategy]
-        ] = None,
+        strategy_factory: Callable[[StrategyParameters | None], BacktestStrategy] | None = None,
         write_results: bool = True,
     ) -> None:
         self.feed = feed
@@ -76,7 +75,7 @@ class BacktestEngine:
         start: str | None = None,
         end: str | None = None,
         *,
-        params: Optional[StrategyParameters] = None,
+        params: StrategyParameters | None = None,
     ) -> dict[str, float]:
         """Execute the backtest between ``start`` and ``end`` timestamps."""
 
@@ -351,7 +350,7 @@ class BacktestEngine:
         return Exposure()
 
     def _build_strategy(
-        self, params: Optional[StrategyParameters]
+        self, params: StrategyParameters | None
     ) -> BacktestStrategy:
         if self._strategy_factory is not None:
             return self._strategy_factory(params)

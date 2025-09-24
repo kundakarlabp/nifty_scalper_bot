@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterator, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import logging
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class SpotFeed:
         path: str,
         tz: str = "Asia/Kolkata",
         parse_dates: list[str] | None = None,
-    ) -> "SpotFeed":
+    ) -> SpotFeed:
         """Load a CSV of OHLCV data.
 
         The CSV must contain a timestamp column along with open, high, low,
@@ -114,7 +114,7 @@ class SpotFeed:
         df = df.drop(columns=["timestamp"])
         return cls(df=df, tz=ZoneInfo(tz))
 
-    def window(self, start: Optional[str], end: Optional[str]) -> "SpotFeed":
+    def window(self, start: str | None, end: str | None) -> SpotFeed:
         """Return a new feed limited to the provided window."""
 
         df = self.df
@@ -124,7 +124,7 @@ class SpotFeed:
             df = df[df.index <= pd.to_datetime(end)]
         return SpotFeed(df=df, tz=self.tz)
 
-    def iter_bars(self) -> Iterator[Tuple[datetime, float, float, float, float, float]]:
+    def iter_bars(self) -> Iterator[tuple[datetime, float, float, float, float, float]]:
         """Yield each bar as ``(ts, open, high, low, close, volume)``."""
 
         for ts, row in self.df.iterrows():

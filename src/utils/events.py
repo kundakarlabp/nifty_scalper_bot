@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore
@@ -55,16 +54,16 @@ class EventCalendar:
 
     tz: ZoneInfo
     defaults: GuardDefaults
-    events: List[EventWindow]
+    events: list[EventWindow]
     version: int
     source_path: str
     mtime: float
 
-    def active(self, now: datetime) -> List[EventWindow]:
+    def active(self, now: datetime) -> list[EventWindow]:
         """Return event windows whose guard period covers ``now``."""
         return [e for e in self.events if e.is_in_guard(now)]
 
-    def next_event(self, now: datetime) -> Optional[EventWindow]:
+    def next_event(self, now: datetime) -> EventWindow | None:
         """Return the next event whose guard starts after ``now``."""
         future = sorted(
             [e for e in self.events if e.guard_start() > now],
@@ -86,7 +85,7 @@ def _weekly_recurring(
     end_local: str,
     tz: ZoneInfo,
     horizon_days: int = 14,
-) -> List[tuple[datetime, datetime]]:
+) -> list[tuple[datetime, datetime]]:
     """Expand a simple weekly rule into concrete datetime windows."""
     wd_map = {
         "WEEKLY_MON": 0,
@@ -102,7 +101,7 @@ def _weekly_recurring(
     hh2, mm2 = map(int, end_local.split(":"))
     now = datetime.now(tz)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    out: List[tuple[datetime, datetime]] = []
+    out: list[tuple[datetime, datetime]] = []
     for d in range(horizon_days):
         day = base + timedelta(days=d)
         if day.weekday() == wd:
@@ -114,7 +113,7 @@ def _weekly_recurring(
 
 def load_calendar(path: str) -> EventCalendar:
     """Load an :class:`EventCalendar` from a YAML file located at ``path``."""
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         y = yaml.safe_load(f) or {}
     tz = ZoneInfo(y.get("tz", "Asia/Kolkata"))
     defaults = GuardDefaults(
@@ -125,7 +124,7 @@ def load_calendar(path: str) -> EventCalendar:
         ),
         block_trading=bool(y.get("defaults", {}).get("block_trading", True)),
     )
-    evs: List[EventWindow] = []
+    evs: list[EventWindow] = []
     for ev in y.get("events") or []:
         evs.append(
             EventWindow(

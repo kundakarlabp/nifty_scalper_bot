@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime
 import math
-from typing import Dict, Iterable, Optional, Tuple, Any
+from collections.abc import Iterable
+from datetime import date, datetime
+from typing import Any
 
 from src.utils.expiry import next_tuesday_expiry
 
@@ -11,10 +12,10 @@ try:
 except Exception:  # pragma: no cover
     KiteConnect = None  # type: ignore
 
-Key = Tuple[str, str, int, str]
+Key = tuple[str, str, int, str]
 
 
-def _safe_int(value: Any) -> Optional[int]:
+def _safe_int(value: Any) -> int | None:
     """Return ``int(value)`` if it can be safely parsed, otherwise ``None``."""
 
     if value is None:
@@ -33,11 +34,11 @@ class InstrumentsCache:
 
     def __init__(
         self,
-        kite: Optional[KiteConnect] = None,
+        kite: KiteConnect | None = None,
         *,
-        instruments: Optional[Iterable[dict]] = None,
+        instruments: Iterable[dict] | None = None,
     ) -> None:
-        self._by_key: Dict[Key, Dict[str, object]] = {}
+        self._by_key: dict[Key, dict[str, object]] = {}
         data = instruments
         if data is None and kite is not None:
             try:
@@ -76,7 +77,7 @@ class InstrumentsCache:
 
     def get(
         self, symbol: str, expiry: str, strike: int, kind: str
-    ) -> Optional[Dict[str, object]]:
+    ) -> dict[str, object] | None:
         key = (symbol.upper(), expiry, int(strike), kind.upper())
         return self._by_key.get(key)
 

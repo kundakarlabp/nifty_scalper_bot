@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
+from typing import Any, Protocol
 
 
 class Side(Enum):
@@ -47,10 +48,10 @@ class Tick:
     instrument_id: int
     ts: float
     ltp: Decimal
-    bid: Optional[Decimal] = None
-    ask: Optional[Decimal] = None
-    volume: Optional[int] = None
-    raw: Optional[Dict[str, Any]] = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    volume: int | None = None
+    raw: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -61,12 +62,12 @@ class OrderRequest:
     side: Side
     qty: int
     order_type: OrderType = OrderType.MARKET
-    price: Optional[Decimal] = None
-    stop_loss: Optional[Decimal] = None
-    target: Optional[Decimal] = None
+    price: Decimal | None = None
+    stop_loss: Decimal | None = None
+    target: Decimal | None = None
     tif: TimeInForce = TimeInForce.DAY
-    client_order_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    client_order_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -76,10 +77,10 @@ class Order:
     order_id: str
     status: OrderStatus
     filled_qty: int
-    avg_fill_price: Optional[Decimal] = None
-    client_order_id: Optional[str] = None
-    tif: Optional[TimeInForce] = None
-    raw: Optional[Dict[str, Any]] = None
+    avg_fill_price: Decimal | None = None
+    client_order_id: str | None = None
+    tif: TimeInForce | None = None
+    raw: dict[str, Any] | None = None
 
 
 class BrokerError(Exception):
@@ -139,5 +140,5 @@ class Broker(Protocol):
     def get_order(self, order_id: str) -> Order:
         """Fetch details for a specific order."""
 
-    def get_positions(self) -> List[Dict[str, Any]]:
+    def get_positions(self) -> list[dict[str, Any]]:
         """Return a list of open positions."""

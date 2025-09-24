@@ -3,7 +3,7 @@ from __future__ import annotations
 """Utilities for measuring data freshness."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import overload
 
 
@@ -38,8 +38,8 @@ def _to_aware_utc(dt: datetime | str | None) -> datetime | None:
         except ValueError:
             return None
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def compute(

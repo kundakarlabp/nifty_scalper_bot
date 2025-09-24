@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
+from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, Mapping, MutableMapping, Sequence
+from typing import Any
 
 __all__ = ["StructuredLogger", "structured_log"]
 
@@ -45,7 +46,7 @@ class StructuredLogger:
         if self.defaults:
             self._defaults.update({k: _normalize(v) for k, v in self.defaults.items()})
 
-    def bind(self, **fields: Any) -> "StructuredLogger":
+    def bind(self, **fields: Any) -> StructuredLogger:
         """Return a child logger with ``fields`` included on every event."""
 
         combined = dict(self._defaults)

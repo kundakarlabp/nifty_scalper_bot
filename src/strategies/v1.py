@@ -11,7 +11,7 @@ not taken.  Delegating to the well tested ``EnhancedScalpingStrategy``
 removes those fragile code paths without altering the public interface.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -20,10 +20,10 @@ from .scalping_strategy import EnhancedScalpingStrategy
 
 def v1(
     df: pd.DataFrame,
-    current_tick: Optional[Dict[str, Any]] = None,
-    current_price: Optional[float] = None,
-    spot_df: Optional[pd.DataFrame] = None,
-) -> Dict[str, Any]:
+    current_tick: dict[str, Any] | None = None,
+    current_price: float | None = None,
+    spot_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     """Generate a trade plan using the legacy ``v1`` interface.
 
     Parameters are passed directly to

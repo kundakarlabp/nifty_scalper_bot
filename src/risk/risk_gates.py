@@ -9,7 +9,7 @@ it can be unit-tested easily.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any
 
 
 @dataclass
@@ -22,10 +22,10 @@ class AccountState:
     loss_streak: int
 
 
-def evaluate(plan: dict, acct: AccountState, cfg: Any) -> Tuple[bool, List[str]]:
+def evaluate(plan: dict, acct: AccountState, cfg: Any) -> tuple[bool, list[str]]:
     """Evaluate basic risk gates for a trade plan."""
 
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     if acct.dd_rupees >= acct.max_daily_loss:
         reasons.append("daily_dd")

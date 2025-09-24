@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict
 
 
 @dataclass(slots=True)
@@ -18,7 +17,7 @@ class LogGate:
     """
 
     interval_s: float = 1.0
-    _last_emit: Dict[str, float] = field(default_factory=dict, init=False)
+    _last_emit: dict[str, float] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def __post_init__(self) -> None:

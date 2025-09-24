@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Protocol
+from typing import Any, Protocol
 
 # ---- Protocols (no imports from your code here; keep it decoupled) ----
 
@@ -35,7 +36,7 @@ class _Entry:
 
 class _BaseRegistry:
     def __init__(self) -> None:
-        self._items: Dict[str, _Entry] = {}
+        self._items: dict[str, _Entry] = {}
 
     def register(self, key: str, factory: Callable[[], Any], desc: str = "") -> None:
         k = key.strip().lower()

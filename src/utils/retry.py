@@ -5,8 +5,9 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, Optional, ParamSpec, Tuple, TypeVar
+from typing import ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,8 @@ def _compute_sleep(
     base_delay: float,
     backoff: float,
     attempt_idx: int,
-    max_delay: Optional[float],
-    jitter: Optional[float | Tuple[float, float] | Callable[[], float]],
+    max_delay: float | None,
+    jitter: float | tuple[float, float] | Callable[[], float] | None,
 ) -> float:
     """Calculate delay for a retry attempt with optional jitter.
 
@@ -51,13 +52,13 @@ def retry(
     tries: int = 3,
     delay: float = 2.0,
     backoff: float = 2.0,
-    max_delay: Optional[float] = None,
-    exceptions: Tuple[type[BaseException], ...] = (Exception,),
-    exclude_exceptions: Tuple[type[BaseException], ...] = (),
-    jitter: Optional[float | Tuple[float, float] | Callable[[], float]] = None,
-    on_retry: Optional[Callable[[int, BaseException, float], None]] = None,
+    max_delay: float | None = None,
+    exceptions: tuple[type[BaseException], ...] = (Exception,),
+    exclude_exceptions: tuple[type[BaseException], ...] = (),
+    jitter: float | tuple[float, float] | Callable[[], float] | None = None,
+    on_retry: Callable[[int, BaseException, float], None] | None = None,
     reraise: bool = True,
-    log: Optional[logging.Logger] = None,
+    log: logging.Logger | None = None,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """
     Retry decorator with exponential backoff (sync & async).
@@ -97,7 +98,7 @@ def retry(
 
             @wraps(func)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:  # type: ignore[misc]
-                last_exc: Optional[BaseException] = None
+                last_exc: BaseException | None = None
                 for attempt in range(1, tries + 1):
                     try:
                         return await func(*args, **kwargs)
@@ -142,7 +143,7 @@ def retry(
 
         @wraps(func)
         def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:  # type: ignore[misc]
-            last_exc: Optional[BaseException] = None
+            last_exc: BaseException | None = None
             for attempt in range(1, tries + 1):
                 try:
                     return func(*args, **kwargs)

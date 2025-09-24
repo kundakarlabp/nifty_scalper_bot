@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -14,8 +15,8 @@ from src.backtesting.data_feed import SpotFeed
 from src.backtesting.metrics import reject
 from src.strategies.parameters import (
     ParameterBound,
-    StrategyParameterSpace,
     StrategyParameters,
+    StrategyParameterSpace,
 )
 
 
@@ -35,7 +36,7 @@ class BayesianOptimizer:
         bounds: Sequence[ParameterBound],
         *,
         n_initial: int = 5,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
         xi: float = 0.01,
         length_scale: float = 0.25,
         noise: float = 1e-6,
@@ -51,8 +52,8 @@ class BayesianOptimizer:
         self._rng = np.random.default_rng(random_state)
         self._xs: list[np.ndarray] = []
         self._ys: list[float] = []
-        self._L: Optional[np.ndarray] = None
-        self._alpha: Optional[np.ndarray] = None
+        self._L: np.ndarray | None = None
+        self._alpha: np.ndarray | None = None
 
     def suggest(self) -> np.ndarray:
         if len(self._xs) < self.n_initial:
@@ -114,13 +115,13 @@ class BayesianOptimizer:
 class TrialResult:
     params: StrategyParameters
     score: float
-    summary: Dict[str, Any]
+    summary: dict[str, Any]
 
 
 @dataclass
 class TuningResult:
     best: TrialResult
-    trials: List[TrialResult] = field(default_factory=list)
+    trials: list[TrialResult] = field(default_factory=list)
 
 
 class BacktestTuner:
@@ -129,10 +130,10 @@ class BacktestTuner:
     def __init__(
         self,
         space: StrategyParameterSpace,
-        objective: Callable[[StrategyParameters], tuple[float, Dict[str, Any]]],
+        objective: Callable[[StrategyParameters], tuple[float, dict[str, Any]]],
         *,
         maximize: bool = True,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
         initial_samples: int = 5,
         xi: float = 0.01,
     ) -> None:
@@ -145,10 +146,10 @@ class BacktestTuner:
             random_state=random_state,
             xi=xi,
         )
-        self._trials: List[TrialResult] = []
+        self._trials: list[TrialResult] = []
 
     def tune(self, n_trials: int) -> TuningResult:
-        best: Optional[TrialResult] = None
+        best: TrialResult | None = None
         for _ in range(max(1, n_trials)):
             proposal = self._optimizer.suggest()
             params = self.space.from_vector(proposal)
@@ -171,17 +172,17 @@ class BacktestTuner:
 
 @dataclass
 class WalkForwardSplit:
-    train_start: Optional[str]
-    train_end: Optional[str]
-    test_start: Optional[str]
-    test_end: Optional[str]
+    train_start: str | None
+    train_end: str | None
+    test_start: str | None
+    test_end: str | None
 
 
 @dataclass
 class WalkForwardResult:
     split: WalkForwardSplit
     tuning: TuningResult
-    test_summary: Dict[str, Any]
+    test_summary: dict[str, Any]
 
 
 class WalkForwardValidator:
@@ -208,10 +209,10 @@ class WalkForwardValidator:
         *,
         trials: int,
         outdir: str,
-        tuner_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[WalkForwardResult]:
+        tuner_kwargs: dict[str, Any] | None = None,
+    ) -> list[WalkForwardResult]:
         os.makedirs(outdir, exist_ok=True)
-        results: List[WalkForwardResult] = []
+        results: list[WalkForwardResult] = []
         for idx, split in enumerate(splits, 1):
             fold_dir = os.path.join(outdir, f"wf_{idx:02d}")
             os.makedirs(fold_dir, exist_ok=True)
@@ -219,7 +220,7 @@ class WalkForwardValidator:
             train_dir = os.path.join(fold_dir, "train")
             os.makedirs(train_dir, exist_ok=True)
 
-            def _objective(params: StrategyParameters) -> tuple[float, Dict[str, Any]]:
+            def _objective(params: StrategyParameters) -> tuple[float, dict[str, Any]]:
                 engine = self.engine_factory(train_feed, train_dir, False)
                 summary = engine.run(
                     start=split.train_start,

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from src.config import settings
@@ -17,10 +18,10 @@ from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 logger = logging.getLogger(__name__)
 
 
-def pretrade_micro_checks(source: Any, token: Any, settings_mod: Any) -> Tuple[bool, Dict[str, Any]]:
+def pretrade_micro_checks(source: Any, token: Any, settings_mod: Any) -> tuple[bool, dict[str, Any]]:
     """Return (ok, meta) evaluating cached microstructure state for a token."""
 
-    meta: Dict[str, Any]
+    meta: dict[str, Any]
     try:
         meta = source.get_micro_state(token)
     except AttributeError:
@@ -31,11 +32,9 @@ def pretrade_micro_checks(source: Any, token: Any, settings_mod: Any) -> Tuple[b
 
     if meta.get("stale"):
         return False, {"reason": "stale_tick", **meta}
-    if not (meta.get("has_depth") or getattr(settings_mod, "ALLOW_NO_DEPTH", False)):
-        return False, {"reason": "no_quote", **meta}
-    if not meta.get("depth_ok") and not getattr(settings_mod, "ALLOW_NO_DEPTH", False):
+    if meta.get("depth_ok") is False:
         return False, {"reason": "depth_fail", **meta}
-    if not meta.get("spread_ok") and not getattr(settings_mod, "ALLOW_NO_DEPTH", False):
+    if meta.get("spread_ok") is False:
         return False, {"reason": "spread_wide", **meta}
     return True, {"reason": "ok", **meta}
 
@@ -67,7 +66,7 @@ class LimitConfig:
     skip_next_open_after_two_daily_caps: bool = True
     # Maximum realised loss in premium (rupee) terms before halting for the day.
     max_daily_loss_rupees: float = 1_000_000.0
-    no_new_after_hhmm: Optional[str] = field(
+    no_new_after_hhmm: str | None = field(
         default_factory=lambda: settings.risk.no_new_after_hhmm
     )
     eod_flatten_hhmm: str = field(
@@ -76,15 +75,15 @@ class LimitConfig:
     var_lookback_trades: int = 30
     var_confidence: float = 0.95
     cvar_confidence: float = 0.975
-    max_var_rupees: Optional[float] = None
-    max_var_pct_of_equity: Optional[float] = None
-    max_cvar_rupees: Optional[float] = None
-    max_cvar_pct_of_equity: Optional[float] = None
+    max_var_rupees: float | None = None
+    max_var_pct_of_equity: float | None = None
+    max_cvar_rupees: float | None = None
+    max_cvar_pct_of_equity: float | None = None
     volatility_ref_atr_pct: float = 2.0
     volatility_loss_min_multiplier: float = 0.5
     volatility_loss_max_multiplier: float = 1.3
-    regime_lot_multipliers: Dict[str, float] = field(default_factory=dict)
-    regime_delta_multipliers: Dict[str, float] = field(default_factory=dict)
+    regime_lot_multipliers: dict[str, float] = field(default_factory=dict)
+    regime_delta_multipliers: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.max_consec_losses == 3 and self.cooloff_losses != 3:
@@ -95,7 +94,7 @@ class LimitConfig:
 class Exposure:
     """Snapshot of current market exposure."""
 
-    lots_by_symbol: Dict[str, int] = field(default_factory=dict)
+    lots_by_symbol: dict[str, int] = field(default_factory=dict)
     notional_rupees: float = 0.0
 
 
@@ -104,7 +103,7 @@ class Block:
     """Structured risk block result returned by :meth:`RiskEngine.pre_trade_check`."""
 
     reason: str
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[Any]:
         """Allow tuple-style unpacking ``ok, reason, details = Block(...)``."""
@@ -118,7 +117,7 @@ class Block:
 
         return False
 
-    def as_tuple(self) -> Tuple[bool, str, Dict[str, Any]]:
+    def as_tuple(self) -> tuple[bool, str, dict[str, Any]]:
         """Explicit tuple representation for legacy call sites and tests."""
 
         return False, self.reason, self.details
@@ -129,16 +128,16 @@ class RiskState:
     """Mutable state tracked by :class:`RiskEngine`."""
 
     tz: str = "Asia/Kolkata"
-    session_date: Optional[str] = None
+    session_date: str | None = None
     cum_R_today: float = 0.0
     cum_loss_rupees: float = 0.0
     trades_today: int = 0
     consecutive_losses: int = 0
-    roll_R_last10: List[float] = field(default_factory=list)
-    cooloff_until: Optional[datetime] = None
-    daily_caps_hit_recent: List[str] = field(default_factory=list)
-    skip_next_open_date: Optional[str] = None
-    pnl_history_rupees: List[float] = field(default_factory=list)
+    roll_R_last10: list[float] = field(default_factory=list)
+    cooloff_until: datetime | None = None
+    daily_caps_hit_recent: list[str] = field(default_factory=list)
+    skip_next_open_date: str | None = None
+    pnl_history_rupees: list[float] = field(default_factory=list)
 
     def new_session_if_needed(self, now_ist: datetime) -> None:
         """Reset per-session counters if the date changed."""
@@ -174,7 +173,7 @@ class RiskEngine:
     def _clamp(value: float, lower: float, upper: float) -> float:
         return max(lower, min(upper, value))
 
-    def _dynamic_loss_cap(self, plan: dict) -> Optional[float]:
+    def _dynamic_loss_cap(self, plan: dict) -> float | None:
         atr_pct_raw = plan.get("atr_pct_raw") or plan.get("atr_pct")
         if atr_pct_raw is None:
             atr_pct_raw = plan.get("opt_atr_pct")
@@ -199,7 +198,7 @@ class RiskEngine:
         regime = str(plan.get("regime", "")).strip().upper()
         return regime or ""
 
-    def _lot_cap_for(self, symbol: str, regime: str) -> Tuple[int, str]:
+    def _lot_cap_for(self, symbol: str, regime: str) -> tuple[int, str]:
         cap = int(self.cfg.max_lots_per_symbol)
         source = "global"
         try:
@@ -221,7 +220,7 @@ class RiskEngine:
             source = "regime" if source == "global" else f"{source}+regime"
         return max(cap, 0), source
 
-    def _delta_cap_for(self, regime: str, *, gamma_mode: bool) -> Tuple[int, Optional[str]]:
+    def _delta_cap_for(self, regime: str, *, gamma_mode: bool) -> tuple[int, str | None]:
         cap = (
             self.cfg.max_portfolio_delta_units_gamma
             if gamma_mode
@@ -236,7 +235,7 @@ class RiskEngine:
         return max(adjusted, 0), "regime"
 
     @staticmethod
-    def _quantile(data: List[float], q: float) -> float:
+    def _quantile(data: list[float], q: float) -> float:
         if not data:
             return 0.0
         q = max(0.0, min(1.0, q))
@@ -253,7 +252,7 @@ class RiskEngine:
         upper_val = float(data[upper])
         return lower_val + (upper_val - lower_val) * (pos - lower)
 
-    def _var_metrics(self) -> Optional[Dict[str, float]]:
+    def _var_metrics(self) -> dict[str, float] | None:
         if self.cfg.var_lookback_trades <= 0:
             return None
         history = self.state.pnl_history_rupees[-self.cfg.var_lookback_trades :]
@@ -272,13 +271,13 @@ class RiskEngine:
         return {"var": float(var_q), "cvar": float(cvar_val)}
 
     @staticmethod
-    def _resolve_threshold(*values: Optional[float]) -> Optional[float]:
+    def _resolve_threshold(*values: float | None) -> float | None:
         candidates = [abs(v) for v in values if v is not None and v > 0]
         if not candidates:
             return None
         return min(candidates)
 
-    def _var_thresholds(self, equity_rupees: float) -> Tuple[Optional[float], Optional[float]]:
+    def _var_thresholds(self, equity_rupees: float) -> tuple[float | None, float | None]:
         var_cap_pct = (
             equity_rupees * float(self.cfg.max_var_pct_of_equity)
             if self.cfg.max_var_pct_of_equity is not None and equity_rupees > 0
@@ -302,7 +301,7 @@ class RiskEngine:
         now: datetime | None = None,
         equity_rupees: float,
         plan: dict,
-        runner: Optional[Any] = None,
+        runner: Any | None = None,
         exposure: Exposure,
         intended_symbol: str,
         intended_lots: int,
@@ -310,12 +309,12 @@ class RiskEngine:
         entry_price: float,
         stop_loss_price: float,
         spot_price: float,
-        quote: Optional[Dict[str, float]] = None,
-        option_mid_price: Optional[float] = None,
-        planned_delta_units: Optional[float] = None,
-        portfolio_delta_units: Optional[float] = None,
-        gamma_mode: Optional[bool] = None,
-    ) -> Block | Tuple[bool, str, Dict[str, Any]]:
+        quote: dict[str, float] | None = None,
+        option_mid_price: float | None = None,
+        planned_delta_units: float | None = None,
+        portfolio_delta_units: float | None = None,
+        gamma_mode: bool | None = None,
+    ) -> Block | tuple[bool, str, dict[str, Any]]:
         """Return (ok, reason_block, details) for a proposed trade."""
 
         when = now
@@ -328,7 +327,7 @@ class RiskEngine:
         now = when
         self.state.new_session_if_needed(now)
 
-        details: Dict[str, Any] = {}
+        details: dict[str, Any] = {}
         regime = self._regime_key(plan)
         if regime:
             details["regime"] = regime
@@ -348,14 +347,14 @@ class RiskEngine:
             "allow_min_one_lot",
         ]
 
-        def _summary_from_details() -> Dict[str, Any]:
+        def _summary_from_details() -> dict[str, Any]:
             return {
                 key: details[key]
                 for key in summary_keys
                 if key in details
             }
 
-        def _block_payload(reason: str, detail: Dict[str, Any]) -> Dict[str, Any]:
+        def _block_payload(reason: str, detail: dict[str, Any]) -> dict[str, Any]:
             payload = {
                 "reason": reason,
                 "details": detail,
@@ -372,16 +371,16 @@ class RiskEngine:
                 payload["summary"] = summary
             return payload
 
-        def _emit_block(reason: str, detail: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+        def _emit_block(reason: str, detail: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
             structured_log.event("risk_block", **_block_payload(reason, detail))
             return False, reason, detail
 
-        def _emit_block_obj(reason: str, detail: Dict[str, Any]) -> Block:
+        def _emit_block_obj(reason: str, detail: dict[str, Any]) -> Block:
             structured_log.event("risk_block", **_block_payload(reason, detail))
             return Block(reason=reason, details=detail)
 
-        def _plan_reason_detail(reason: str) -> Dict[str, Any]:
-            detail: Dict[str, Any] = {}
+        def _plan_reason_detail(reason: str) -> dict[str, Any]:
+            detail: dict[str, Any] = {}
             plan_reason_details = plan.get("reason_details")
             if isinstance(plan_reason_details, Mapping):
                 maybe_detail = plan_reason_details.get(reason)
@@ -404,7 +403,7 @@ class RiskEngine:
             detail.setdefault("source", "plan")
             return detail
 
-        def _normalize_micro_reason(raw: Any) -> Optional[str]:
+        def _normalize_micro_reason(raw: Any) -> str | None:
             if raw is None:
                 return None
             text = str(raw).strip().lower()
@@ -426,7 +425,7 @@ class RiskEngine:
             }
             return mapping.get(text)
 
-        def _micro_detail(meta: Mapping[str, Any], origin: str) -> Dict[str, Any]:
+        def _micro_detail(meta: Mapping[str, Any], origin: str) -> dict[str, Any]:
             allowed_keys = {
                 "reason",
                 "block_reason",
@@ -449,9 +448,9 @@ class RiskEngine:
             detail["origin"] = origin
             return detail
 
-        def _maybe_block_micro() -> Optional[Tuple[str, Dict[str, Any]]]:
-            reason_detail: Optional[str] = None
-            meta_detail: Dict[str, Any] = {}
+        def _maybe_block_micro() -> tuple[str, dict[str, Any]] | None:
+            reason_detail: str | None = None
+            meta_detail: dict[str, Any] = {}
             micro_meta = plan.get("micro")
             if isinstance(micro_meta, Mapping):
                 origin = "plan"
@@ -618,7 +617,7 @@ class RiskEngine:
             settings_basis.lower() == "premium" and basis_cfg == "premium"
         )
         basis = "premium" if use_premium_basis else basis_cfg
-        exposure_cap: Optional[float] = None
+        exposure_cap: float | None = None
         exposure_cap_cfg = self.cfg.max_notional_rupees
         if exposure_cap_cfg is not None:
             try:
@@ -650,7 +649,7 @@ class RiskEngine:
             exposure_cap = cap_from_equity
             cap = cap_from_equity
             price_mid = float(_mid_from_quote(quote_payload))
-            meta: Optional[Dict[str, Any]] = None
+            meta: dict[str, Any] | None = None
             allow_min_config = bool(
                 getattr(settings, "risk_allow_min_one_lot", False)
             )
@@ -870,7 +869,7 @@ class RiskEngine:
     def snapshot(self) -> dict:
         now = self._now()
         self.state.new_session_if_needed(now)
-        avg10: Optional[float] = None
+        avg10: float | None = None
         if self.state.roll_R_last10:
             tail = self.state.roll_R_last10[-10:]
             avg10 = round(sum(tail) / len(tail), 3)
@@ -894,104 +893,3 @@ class RiskEngine:
             snapshot["var_estimate"] = round(metrics["var"], 2)
             snapshot["cvar_estimate"] = round(metrics["cvar"], 2)
         return snapshot
-
-
-def pretrade_micro_checks(  # type: ignore[no-redef]
-    source: Any,
-    token: Any,
-    cfg: Any,
-) -> Tuple[bool, Dict[str, Any]]:
-    """Ensure a fresh quote is available before sizing and execution."""
-
-    info: Dict[str, Any] = {"reason": "ok"}
-
-    if token in (None, ""):
-        info["reason"] = "no_token"
-        info["block_reason"] = "no_token"
-        return False, info
-
-    if source is None:
-        info["source"] = "missing"
-        return True, info
-
-    ensure_subscribe = getattr(source, "ensure_token_subscribed", None)
-    if callable(ensure_subscribe):
-        try:
-            try:
-                ensure_subscribe(token, mode="FULL")
-            except TypeError:
-                ensure_subscribe(token)
-        except Exception:  # pragma: no cover - defensive logging guard
-            logger.debug(
-                "pretrade_micro_checks ensure_token_subscribed failed",
-                exc_info=True,
-            )
-
-    price: float | None = None
-    prime_source: str | None = None
-    prime_ts: int | None = None
-    prime_fn = getattr(source, "prime_option_quote", None)
-    if callable(prime_fn):
-        try:
-            price, prime_source, prime_ts = prime_fn(token)
-        except Exception:  # pragma: no cover - defensive logging guard
-            logger.debug(
-                "pretrade_micro_checks prime_option_quote failed",
-                exc_info=True,
-            )
-            price = None
-            prime_source = None
-            prime_ts = None
-    info["prime_price"] = price
-    info["prime_source"] = prime_source
-    info["prime_ts"] = prime_ts
-
-    quote_payload: Mapping[str, Any] | None = None
-    getter = getattr(source, "get_cached_full_quote", None)
-    if callable(getter):
-        try:
-            raw_quote = getter(token)
-        except Exception:  # pragma: no cover - defensive logging guard
-            logger.debug(
-                "pretrade_micro_checks get_cached_full_quote failed",
-                exc_info=True,
-            )
-            raw_quote = None
-        if isinstance(raw_quote, Mapping):
-            quote_payload = dict(raw_quote)
-
-    if quote_payload is None:
-        cache = getattr(source, "_option_quote_cache", None)
-        if isinstance(cache, Mapping):
-            try:
-                cached = cache.get(int(token))
-            except Exception:
-                cached = None
-            if isinstance(cached, Mapping):
-                quote_payload = dict(cached)
-
-    quote_ok = False
-    quote_src: str | None = None
-    if isinstance(quote_payload, Mapping):
-        quote_src = quote_payload.get("source")
-        for key in ("bid", "ask", "mid", "ltp"):
-            value = quote_payload.get(key)
-            try:
-                if value is not None and float(value) > 0:
-                    quote_ok = True
-                    break
-            except (TypeError, ValueError):
-                continue
-
-    info["quote_ok"] = quote_ok
-    if quote_src:
-        info["quote_source"] = quote_src
-
-    live_trading = bool(getattr(cfg, "enable_live_trading", False))
-    if live_trading and not quote_ok:
-        info["reason"] = "no_quote"
-        info["block_reason"] = "no_quote"
-        return False, info
-
-    info.setdefault("reason", "ok")
-    return True, info

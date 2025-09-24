@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from src.config import settings
 from src.diagnostics import trace_ctl
@@ -23,11 +23,11 @@ class HealthItem:
 
 
 def to_dict(
-    items: List[HealthItem],
+    items: list[HealthItem],
     *,
     last_signal: dict | None = None,
     meta: dict | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
         "ok": all(x.ok for x in items),
         "checks": [asdict(x) for x in items],
@@ -36,7 +36,7 @@ def to_dict(
     }
 
 
-def render_compact(items: List[HealthItem]) -> str:
+def render_compact(items: list[HealthItem]) -> str:
     bullets = []
     for x in items:
         dot = "🟢" if x.ok else "🔴"
@@ -45,7 +45,7 @@ def render_compact(items: List[HealthItem]) -> str:
     return head + "\n" + " · ".join(bullets)
 
 
-def render_detailed(items: List[HealthItem], *, last_signal_present: bool) -> str:
+def render_detailed(items: list[HealthItem], *, last_signal_present: bool) -> str:
     lines = ["🔍 Full system check"]
     for x in items:
         dot = "🟢" if x.ok else "🔴"
@@ -55,12 +55,12 @@ def render_detailed(items: List[HealthItem], *, last_signal_present: bool) -> st
     return "\n".join(lines)
 
 
-def snapshot_pipeline() -> Dict[str, Any]:
+def snapshot_pipeline() -> dict[str, Any]:
     """Return a compact snapshot of the trading pipeline's health."""
 
     from src.strategies.runner import StrategyRunner
 
-    base_snapshot: Dict[str, Any] = {
+    base_snapshot: dict[str, Any] = {
         "market_open": False,
         "equity": None,
         "risk": {
@@ -109,11 +109,11 @@ def snapshot_pipeline() -> Dict[str, Any]:
             snapshot["signals"][key] = plan.get(key)
 
     source = getattr(runner, "data_source", None)
-    micro_states: Dict[str, Any] = {"ce": None, "pe": None}
+    micro_states: dict[str, Any] = {"ce": None, "pe": None}
     if source is not None:
         tokens = getattr(source, "atm_tokens", (None, None)) or (None, None)
         getter = getattr(source, "get_micro_state", None)
-        for label, token in zip(("ce", "pe"), list(tokens)[:2]):
+        for label, token in zip(("ce", "pe"), list(tokens)[:2], strict=False):
             if callable(getter) and token:
                 try:
                     micro_states[label] = getter(token)
@@ -141,9 +141,7 @@ def snapshot_pipeline() -> Dict[str, Any]:
             positions = pos_fn() if callable(pos_fn) else {}
         except Exception:
             positions = {}
-        if isinstance(positions, dict):
-            snapshot["positions"] = len(positions)
-        elif isinstance(positions, (list, tuple, set)):
+        if isinstance(positions, dict) or isinstance(positions, (list, tuple, set)):
             snapshot["positions"] = len(positions)
         elif positions:
             snapshot["positions"] = 1
@@ -205,7 +203,7 @@ def trace_active() -> bool:
     if trace_ctl.active():
         return True
 
-    runner_cls: type["StrategyRunner"] | None
+    runner_cls: type[StrategyRunner] | None
     try:
         from src.strategies.runner import StrategyRunner as _StrategyRunner
     except Exception:  # pragma: no cover - defensive import guard
@@ -213,7 +211,7 @@ def trace_active() -> bool:
     else:
         runner_cls = _StrategyRunner
 
-    runner: Optional["StrategyRunner"]
+    runner: StrategyRunner | None
     if runner_cls is None:
         runner = None
     else:

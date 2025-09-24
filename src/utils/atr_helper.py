@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
-
 import pandas as pd
 
 # ---------------------------- Core ATR pieces ----------------------------
@@ -77,7 +75,7 @@ def compute_atr_df(
     return out
 
 
-def latest_atr_value(atr_series: Optional[pd.Series], default: float = 0.0) -> float:
+def latest_atr_value(atr_series: pd.Series | None, default: float = 0.0) -> float:
     """
     Return the most recent non-NaN ATR value, or `default` if unavailable.
     Helpful because ATR has NaNs in the warmup window.
@@ -100,13 +98,13 @@ def atr_sl_tp_points(
     *,
     base_sl_points: float,
     base_tp_points: float,
-    atr_value: Optional[float],
+    atr_value: float | None,
     sl_mult: float,
     tp_mult: float,
     confidence: float,
     sl_conf_adj: float = 0.2,
     tp_conf_adj: float = 0.3,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """
     Build SL/TP distances (in *points*) from ATR and confidence.
 

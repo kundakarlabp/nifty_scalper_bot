@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from src.config import settings
 
 log = logging.getLogger(__name__)
 
 
-def get_equity_estimate(kite_instance: Optional[object] = None) -> float:
+def get_equity_estimate(kite_instance: object | None = None) -> float:
     """
     Try to read available cash from Kite funds; fall back to .env default.
     Never returns NaN/negative; returns 0.0 only if everything fails.

@@ -15,7 +15,7 @@ and logging purposes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 import pandas as pd
 
@@ -63,7 +63,7 @@ def _emit_regime_event(result: RegimeResult, thresholds: dict[str, float]) -> No
         pass
 
 
-def _pick_col(df: pd.DataFrame, base: str) -> Optional[pd.Series]:
+def _pick_col(df: pd.DataFrame, base: str) -> pd.Series | None:
     """Return column ``base`` from ``df`` if present.
 
     The helper is tolerant to columns having a numeric suffix such as ``adx_14``
@@ -81,10 +81,10 @@ def _pick_col(df: pd.DataFrame, base: str) -> Optional[pd.Series]:
 def detect_market_regime(
     *,
     df: pd.DataFrame,
-    adx: Optional[pd.Series] = None,
-    di_plus: Optional[pd.Series] = None,
-    di_minus: Optional[pd.Series] = None,
-    bb_width: Optional[pd.Series] = None,
+    adx: pd.Series | None = None,
+    di_plus: pd.Series | None = None,
+    di_minus: pd.Series | None = None,
+    bb_width: pd.Series | None = None,
     adx_trend_threshold: float | None = None,
     di_delta_trend_threshold: float | None = None,
     bb_width_trend_threshold: float | None = None,

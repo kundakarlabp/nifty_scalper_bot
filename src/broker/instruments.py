@@ -5,9 +5,9 @@ from __future__ import annotations
 import csv
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,8 @@ class InstrumentStore:
     """Lookup helper for instruments loaded from a CSV file."""
 
     def __init__(self, instruments: Iterable[Instrument] = (), path: str | None = None):
-        self._by_token: Dict[int, Instrument] = {}
-        self._by_symbol: Dict[str, Instrument] = {}
+        self._by_token: dict[int, Instrument] = {}
+        self._by_symbol: dict[str, Instrument] = {}
         self._path = path
         for inst in instruments:
             self.add(inst)
@@ -41,16 +41,16 @@ class InstrumentStore:
         self._by_symbol[str(inst.symbol)] = inst
 
     @classmethod
-    def from_csv(cls, path: str) -> "InstrumentStore":
+    def from_csv(cls, path: str) -> InstrumentStore:
         """Load instruments from a CSV file."""
         items = cls._read_csv(path)
         return cls(items, path=path)
 
     @staticmethod
-    def _read_csv(path: str) -> List[Instrument]:
+    def _read_csv(path: str) -> list[Instrument]:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
-        items: List[Instrument] = []
+        items: list[Instrument] = []
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -102,30 +102,30 @@ class InstrumentStore:
         self._by_token = new_by_token
         self._by_symbol = {inst.symbol: inst for inst in new_items}
 
-    def by_token(self, token: int) -> Optional[Instrument]:
+    def by_token(self, token: int) -> Instrument | None:
         """Return instrument by token."""
         return self._by_token.get(int(token))
 
-    def by_symbol(self, symbol: str) -> Optional[Instrument]:
+    def by_symbol(self, symbol: str) -> Instrument | None:
         """Return instrument by symbol."""
         return self._by_symbol.get(str(symbol))
 
-    def tradingsymbol(self, token: int) -> Optional[str]:
+    def tradingsymbol(self, token: int) -> str | None:
         """Return trading symbol for a token."""
         inst = self.by_token(token)
         return inst.symbol if inst else None
 
-    def exchange(self, token: int) -> Optional[str]:
+    def exchange(self, token: int) -> str | None:
         """Return exchange name for a token."""
         inst = self.by_token(token)
         return inst.exchange if inst else None
 
-    def product(self, token: int) -> Optional[str]:
+    def product(self, token: int) -> str | None:
         """Return product type for a token."""
         inst = self.by_token(token)
         return inst.product if inst else None
 
-    def variety(self, token: int) -> Optional[str]:
+    def variety(self, token: int) -> str | None:
         """Return order variety for a token."""
         inst = self.by_token(token)
         return inst.variety if inst else None

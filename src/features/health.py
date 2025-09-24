@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import List, Optional
 
 import pandas as pd
 
@@ -16,12 +15,12 @@ class FeatureHealth:
     bars_ok: bool
     atr_ok: bool
     fresh_ok: bool
-    reasons: List[str]
+    reasons: list[str]
 
 
 def check(
-    ohlc: Optional[pd.DataFrame],
-    last_bar_ts: Optional[dt.datetime],
+    ohlc: pd.DataFrame | None,
+    last_bar_ts: dt.datetime | None,
     *,
     atr_period: int = 14,
     max_age_s: int = 150,
@@ -41,12 +40,12 @@ def check(
         Maximum allowed age (in seconds) of ``last_bar_ts``.
     """
 
-    reasons: List[str] = []
+    reasons: list[str] = []
     bars_ok = isinstance(ohlc, pd.DataFrame) and len(ohlc) >= atr_period + 1
     if not bars_ok:
         reasons.append("bars_short")
 
-    tz = last_bar_ts.tzinfo if last_bar_ts and last_bar_ts.tzinfo else dt.timezone.utc
+    tz = last_bar_ts.tzinfo if last_bar_ts and last_bar_ts.tzinfo else dt.UTC
     if last_bar_ts and last_bar_ts.tzinfo is None:
         last_bar_ts = last_bar_ts.replace(tzinfo=tz)
     now = dt.datetime.now(tz)

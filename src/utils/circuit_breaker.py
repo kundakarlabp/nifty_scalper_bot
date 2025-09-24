@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 try:  # pragma: no cover - during tests settings may be absent
     from src.config import settings
@@ -15,20 +15,20 @@ log = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     """Return current time as an aware UTC ``datetime``."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _as_aware_utc(dt: datetime) -> datetime:
     """Convert ``dt`` to an aware UTC ``datetime``."""
     if dt.tzinfo is None:
-        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
-        as_local = dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
-        as_utc = dt.replace(tzinfo=timezone.utc)
+        local_tz = datetime.now().astimezone().tzinfo or UTC
+        as_local = dt.replace(tzinfo=local_tz).astimezone(UTC)
+        as_utc = dt.replace(tzinfo=UTC)
         now_utc = _utcnow()
         if abs((as_local - now_utc).total_seconds()) <= abs((as_utc - now_utc).total_seconds()):
             return as_local
         return as_utc
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(UTC)
 
 
 class CircuitBreaker:
@@ -75,10 +75,10 @@ class CircuitBreaker:
         self.state: str = self.CLOSED
         self._last_state: str = self.state
         self._last_logged_state: str = self.state
-        self._latencies: Deque[int] = deque(maxlen=self.window_size)
+        self._latencies: deque[int] = deque(maxlen=self.window_size)
         self._errors = 0
         self._total = 0
-        self.open_until: Optional[datetime] = (
+        self.open_until: datetime | None = (
             None  # aware UTC time when breaker can half-open
         )
         self._half_open_successes = 0
@@ -176,7 +176,7 @@ class CircuitBreaker:
             self._transition(self.OPEN, self.HALF_OPEN, reason="cooldown_done")
             self._half_open_successes = 0
 
-    def health(self) -> Dict[str, object]:
+    def health(self) -> dict[str, object]:
         """Return current breaker metrics."""
         return {
             "state": self.state,

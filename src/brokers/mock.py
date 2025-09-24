@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any
 
 from src.broker.interface import Broker, Order, OrderRequest, OrderStatus, Tick
 
@@ -14,8 +15,8 @@ class MockBroker(Broker):
 
     def __init__(self) -> None:
         self._connected = False
-        self._tick_cb: Optional[Callable[[Tick], None]] = None
-        self._orders: Dict[str, Order] = {}
+        self._tick_cb: Callable[[Tick], None] | None = None
+        self._orders: dict[str, Order] = {}
         self._oid = 0
 
     def connect(self) -> None:  # - brief override
@@ -66,5 +67,5 @@ class MockBroker(Broker):
     def get_order(self, order_id: str) -> Order:
         return self._orders[order_id]
 
-    def get_positions(self) -> List[Dict[str, Any]]:  # pragma: no cover - unused
+    def get_positions(self) -> list[dict[str, Any]]:  # pragma: no cover - unused
         return []

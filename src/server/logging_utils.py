@@ -6,10 +6,10 @@ import random
 import threading
 import time
 from collections import defaultdict, deque
-from typing import Callable
+from collections.abc import Callable
 
 from src.boot.validate_env import _log_cred_presence
-from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
+from src.config import LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
 from src.utils.log_filters import install_warmup_filters
 from src.utils.logger_setup import setup_logging as _unified_setup
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
@@ -282,7 +282,7 @@ def _tail_logs(path: str, n: int = 200) -> list[str]:  # pragma: no cover
     """Return last ``n`` lines from ``path`` without loading entire file."""
     try:
         lines: deque[str] = deque(maxlen=n)
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 lines.append(line.rstrip("\n"))
         return list(lines)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Literal, Optional
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 OptionType = Literal["CE", "PE"]
@@ -34,7 +34,7 @@ def bs_price_delta_gamma(
     q: float,
     sigma: float,
     opt: OptionType,
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
+) -> tuple[float | None, float | None, float | None]:
     """Return Black-Scholes price, delta and gamma.
 
     Returns ``(price, delta, gamma)`` for the given inputs. ``None`` is
@@ -69,7 +69,7 @@ def implied_vol_newton(
     guess: float = 0.20,
     tol: float = 1e-4,
     max_iter: int = 20,
-) -> Optional[float]:
+) -> float | None:
     """Estimate implied volatility via Newton-Raphson iterations."""
     if mid <= 0 or S <= 0 or K <= 0 or T <= 0:
         return None
@@ -110,9 +110,9 @@ class GreekEstimate:
     """Container for estimated option greeks."""
 
     ok: bool
-    sigma: Optional[float]
-    delta: Optional[float]
-    gamma: Optional[float]
+    sigma: float | None
+    delta: float | None
+    gamma: float | None
     T_years: float
     source: str  # "iv", "atr_proxy", "guess"
 
@@ -127,7 +127,7 @@ def estimate_greeks_from_mid(
     r: float = 0.065,
     q: float = 0.0,
     tz: str = "Asia/Kolkata",
-    atr_pct: Optional[float] = None,
+    atr_pct: float | None = None,
 ) -> GreekEstimate:
     """Estimate greeks for an option from its mid price.
 

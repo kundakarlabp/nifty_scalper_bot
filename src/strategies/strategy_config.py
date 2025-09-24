@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
@@ -25,19 +25,19 @@ def _parse_time(s: str) -> time:
 class StrategyConfig:
     """Dataclass representing the declarative strategy configuration."""
 
-    raw: Dict[str, Any]
+    raw: dict[str, Any]
     version: int
     name: str
     tz: str
     trading_windows: list
-    no_trade: Dict[str, Any]
+    no_trade: dict[str, Any]
     atr_min: float
     atr_max: float
     mtf_confirm: bool
     iv_percentile_limit: int
     adx_min_trend: int
     depth_min_lots: int
-    micro: Dict[str, Any]
+    micro: dict[str, Any]
     min_oi: int
     max_median_spread_pct: float
     delta_min: float
@@ -69,7 +69,7 @@ class StrategyConfig:
     score_gate: float = 0.30
 
     @classmethod
-    def load(cls, path: str) -> "StrategyConfig":
+    def load(cls, path: str) -> StrategyConfig:
         """Load configuration from ``path``.
 
         If ``path`` does not exist, gracefully fall back to the default
@@ -78,7 +78,7 @@ class StrategyConfig:
         from crashing startup when an environment variable is misconfigured.
         """
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
         except FileNotFoundError:
             fallback = resolve_config_path()
@@ -146,7 +146,7 @@ class StrategyConfig:
         return cfg
 
     @classmethod
-    def try_load(cls, path: str | None) -> "StrategyConfig":
+    def try_load(cls, path: str | None) -> StrategyConfig:
         """Locate and load a strategy config, seeding defaults if missing."""
         candidates: list[str | None] = [
             path,
@@ -220,7 +220,7 @@ def resolve_config_path(
     return default_path
 
 
-def try_load(path: str | None, current: Optional[StrategyConfig]) -> StrategyConfig:
+def try_load(path: str | None, current: StrategyConfig | None) -> StrategyConfig:
     """Attempt to load config; fall back to ``current`` on failure."""
     try:
         cfg = StrategyConfig.try_load(path)

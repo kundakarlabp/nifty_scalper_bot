@@ -1,4 +1,3 @@
-# Path: src/strategies/runner.py
 from __future__ import annotations
 
 import hashlib
@@ -9,28 +8,23 @@ import os
 import tempfile
 import threading
 import time
-from decimal import Decimal
 from collections import deque
-from dataclasses import dataclass, asdict
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
+from decimal import Decimal
 from enum import Enum
-from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
     ClassVar,
-    Deque,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Tuple,
 )
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from src import diagnostics
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.data_feed import SpotFeed
 from src.backtesting.sim_connector import SimConnector
@@ -38,54 +32,53 @@ from src.backtesting.synth import make_synth_1m
 from src.broker.interface import OrderRequest, Tick
 from src.config import settings
 from src.data.broker_source import BrokerDataSource
-from src import diagnostics
 from src.diagnostics import healthkit, trace_ctl
-from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
+from src.diagnostics.metrics import metrics, record_trade, runtime_metrics
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
-from src.logs import structured_log
 from src.execution.order_executor import OrderManager, OrderReconciler
-from src.state import StateStore
 from src.features.indicators import atr_pct
+from src.logs import structured_log
 from src.logs.journal import Journal
 from src.options.contract_registry import InstrumentRegistry
 from src.options.instruments_cache import InstrumentsCache
 from src.options.resolver import OptionResolver
-from src.risk import guards, risk_gates
-from src.risk.position_sizing import PositionSizer
+from src.risk import guards, limits, risk_gates
 from src.risk.cooldown import LossCooldownManager
 from src.risk.greeks import (  # noqa: F401
     estimate_greeks_from_mid,
     next_weekly_expiry_ist,
 )
-from src.risk import limits
 from src.risk.limits import Exposure, LimitConfig, RiskEngine
-from src.signals.patches import resolve_atr_band
-from src.strategies.atr_gate import check_atr
-from src.strategies.registry import init_default_registries
-from src.strategies.scalping_strategy import compute_score, _log_throttled
+from src.risk.position_sizing import PositionSizer
 from src.server.logging_setup import log_event
 from src.server.logging_utils import SimpleLogGate
+from src.signals.patches import resolve_atr_band
+from src.state import StateStore
+from src.strategies.atr_gate import check_atr
+from src.strategies.registry import init_default_registries
+from src.strategies.scalping_strategy import _log_throttled, compute_score
 from src.strategies.strategy_config import (
     StrategyConfig,
     resolve_config_path,
     try_load,
 )
 from src.utils import strike_selector
+from src.utils.emit import emit_decision, emit_micro
 from src.utils.env import env_flag
 from src.utils.events import EventWindow, load_calendar
 from src.utils.freshness import compute as compute_freshness
 from src.utils.indicators import calculate_adx, calculate_bb_width
+from src.utils.logging_tools import structured_debug_handler
 from src.utils.market_time import (
     is_market_open,
     prev_session_bounds,
     prev_session_last_20m,
 )
 from src.utils.time_windows import TZ, floor_to_minute
-from src.utils.logging_tools import structured_debug_handler
-from src.utils.emit import emit_decision, emit_micro
 
-from .warmup import check as warmup_check, required_bars
+from .warmup import check as warmup_check
+from .warmup import required_bars
 
 # Optional broker SDK (graceful if not installed)
 try:
@@ -177,8 +170,8 @@ class Orchestrator:
         max_ticks: int = 1000,
         min_eval_interval_s: float = 0.0,
         stale_tick_timeout_s: float = 3.0,
-        on_stale: Optional[Callable[[], None]] = None,
-        risk_config: Optional[guards.RiskConfig] = None,
+        on_stale: Callable[[], None] | None = None,
+        risk_config: guards.RiskConfig | None = None,
     ) -> None:
         self.data_source = data_source
         self.executor = executor
@@ -186,7 +179,7 @@ class Orchestrator:
         self.min_eval_interval_s = float(min_eval_interval_s)
         self.stale_tick_timeout_s = float(stale_tick_timeout_s)
         self.on_stale = on_stale
-        self._tick_queue: Deque[Tick] = deque(maxlen=max_ticks)
+        self._tick_queue: deque[Tick] = deque(maxlen=max_ticks)
         self._last_eval = 0.0
         self._last_tick = time.time()
         self._paused = False
@@ -335,7 +328,7 @@ class RiskState:
     day_realized_loss: float = 0.0
     day_realized_pnl: float = 0.0
     # If set, trading is halted until this timestamp after hitting loss streak
-    loss_cooldown_until: Optional[datetime] = None
+    loss_cooldown_until: datetime | None = None
 
 
 @dataclass
@@ -358,12 +351,12 @@ class StrategyRunner:
     TelegramController is provided by main.py; here we only consume it.
     """
 
-    _SINGLETON: ClassVar["StrategyRunner" | None] = None
+    _SINGLETON: ClassVar[StrategyRunner | None] = None
 
     # ---------------- init ----------------
     def __init__(
         self,
-        kite: Optional[KiteConnect] = None,
+        kite: KiteConnect | None = None,
         telegram_controller: Any = None,
         strategy_cfg_path: str | None = None,
     ) -> None:
@@ -377,7 +370,7 @@ class StrategyRunner:
         self.telegram_controller = telegram_controller
 
         StrategyRunner._SINGLETON = self
-        self._ohlc_cache: Optional[pd.DataFrame] = None
+        self._ohlc_cache: pd.DataFrame | None = None
         self.ready = False
         self._warm = None
         self._fresh = None
@@ -478,7 +471,7 @@ class StrategyRunner:
         self.option_resolver = OptionResolver(
             self.instruments, self.kite, registry=self.instrument_registry
         )
-        self._last_option: Optional[dict] = None
+        self._last_option: dict | None = None
 
         self._position_sizer = PositionSizer()
 
@@ -536,7 +529,7 @@ class StrategyRunner:
 
             shadow_settings = self.settings
             try:
-                setattr(shadow_settings, "enable_live_trading", False)
+                shadow_settings.enable_live_trading = False
             except Exception:
                 pass
             return OrderExecutor(
@@ -558,13 +551,13 @@ class StrategyRunner:
         )
         self.strategy = self.components.strategy
         try:
-            setattr(self.strategy, "runner", self)
+            self.strategy.runner = self
         except Exception:
             pass
         self.data_source = self.components.data_provider
         self.source = self.components.data_provider
         try:
-            setattr(self.data_source, "_runner", self)
+            self.data_source._runner = self
         except Exception:
             pass
         if hasattr(self.data_source, "connect"):
@@ -576,7 +569,7 @@ class StrategyRunner:
         if hasattr(self.order_executor, "state_store") and not self.order_executor.state_store:
             self.order_executor.state_store = self.state_store
         snap = self.state_store.snapshot()
-        live_orders: Dict[str, Any] = {}
+        live_orders: dict[str, Any] = {}
         if getattr(self.order_executor, "kite", None):
             try:  # pragma: no cover - network
                 for o in self.order_executor.kite.orders() or []:
@@ -728,17 +721,17 @@ class StrategyRunner:
 
         # State + debug
         self._paused: bool = False
-        self._last_signal_debug: Dict[str, Any] = {"note": "no_evaluation_yet"}
-        self._last_flow_debug: Dict[str, Any] = {"note": "no_flow_yet"}
-        self.last_plan: Optional[Dict[str, Any]] = None
-        self.last_spot: Optional[float] = None
+        self._last_signal_debug: dict[str, Any] = {"note": "no_evaluation_yet"}
+        self._last_flow_debug: dict[str, Any] = {"note": "no_flow_yet"}
+        self.last_plan: dict[str, Any] | None = None
+        self.last_spot: float | None = None
         self._log_signal_changes_only = (
             os.getenv("LOG_SIGNAL_CHANGES_ONLY", "true").lower() != "false"
         )
-        self._last_reason_block: Optional[str] = None
-        self._last_has_signal: Optional[bool] = None
+        self._last_reason_block: str | None = None
+        self._last_has_signal: bool | None = None
         self.eval_count: int = 0
-        self.last_eval_ts: Optional[str] = None
+        self.last_eval_ts: str | None = None
         self.trace_ticks_remaining: int = 0
         self.hb_enabled: bool = True
         self._gate = getattr(self, "_gate", SimpleLogGate())
@@ -746,7 +739,7 @@ class StrategyRunner:
         self._gate.set("structured", 10.0)
         self._gate.set("loop.info", 1.0)
         self._prev_score_bucket: str | None = None
-        self._last_regime: Optional[str] = None
+        self._last_regime: str | None = None
         # monotonic ms clock of last live tick (or bridged quote)
         self._last_tick_ms: int = int(time.monotonic() * 1000)
         self._micro_ok_last_ms: int = 0
@@ -766,17 +759,17 @@ class StrategyRunner:
         if self._watchdog_poll_ms < 0:
             self._watchdog_poll_ms = 0
         self._last_watchdog_run_ms: int = 0
-        self._last_atr_state: Optional[str] = None
-        self._last_confidence_zone: Optional[str] = None
+        self._last_atr_state: str | None = None
+        self._last_confidence_zone: str | None = None
         self.market_open: bool = is_market_open(self._now_ist())
 
         # Runtime flags
-        self._last_error: Optional[str] = None
+        self._last_error: str | None = None
         self._last_signal_at: float = 0.0
         # ensure off-hours notification is not spammed
         self._offhours_notified: bool = False
         # track last notification to avoid spamming identical messages
-        self._last_notification: Tuple[str, float] = ("", 0.0)
+        self._last_notification: tuple[str, float] = ("", 0.0)
         self._last_hb_ts: float = 0.0
 
         self._last_diag_emit_ts: float = 0.0
@@ -859,7 +852,7 @@ class StrategyRunner:
             self._last_diag_emit_ts = now
             self._emit_diag(plan)
 
-    def _shadow_blockers(self, plan: Dict[str, Any]) -> list[str]:
+    def _shadow_blockers(self, plan: dict[str, Any]) -> list[str]:
         """Non-fatal conditions that would block if score passed."""
 
         shadows: list[str] = []
@@ -1129,7 +1122,7 @@ class StrategyRunner:
 
         return tokens
 
-    def _quote_ready_barrier(self, flow: Dict[str, Any]) -> bool:
+    def _quote_ready_barrier(self, flow: dict[str, Any]) -> bool:
         """Ensure latest quotes are available before strategy evaluation."""
 
         ds = getattr(self, "data_source", None)
@@ -1567,7 +1560,7 @@ class StrategyRunner:
         return (self._now_ms() - last_ok) > hysteresis_ms
 
     @staticmethod
-    def _flag_transient_no_quote(plan: Dict[str, Any]) -> None:
+    def _flag_transient_no_quote(plan: dict[str, Any]) -> None:
         """Annotate ``plan`` to indicate a transient ``no_quote`` condition."""
 
         reasons = plan.setdefault("reasons", [])
@@ -2244,13 +2237,13 @@ class StrategyRunner:
 
         if strike is not None:
             try:
-                setattr(ds, "current_atm_strike", strike)
+                ds.current_atm_strike = strike
             except Exception:
                 pass
 
         if expiry is not None:
             try:
-                setattr(ds, "current_atm_expiry", expiry)
+                ds.current_atm_expiry = expiry
             except Exception:
                 pass
 
@@ -2290,7 +2283,7 @@ class StrategyRunner:
 
         tokens[idx] = coerced_token
         try:
-            setattr(ds, "atm_tokens", tuple(tokens))
+            ds.atm_tokens = tuple(tokens)
         except Exception:
             # Fallback for data sources storing tokens as mutable sequences
             try:
@@ -2298,11 +2291,11 @@ class StrategyRunner:
                 while len(current) < 2:
                     current.append(None)
                 current[idx] = coerced_token
-                setattr(ds, "atm_tokens", tuple(current))
+                ds.atm_tokens = tuple(current)
             except Exception:
                 pass
 
-    def _record_plan(self, plan: Dict[str, Any]) -> None:
+    def _record_plan(self, plan: dict[str, Any]) -> None:
         """Record the latest plan snapshot and emit gated logs."""
 
         # Structured plan blobs are large; keep them DEBUG by default, surface at
@@ -2438,7 +2431,7 @@ class StrategyRunner:
             structured_log.event("runner_phase", phase=phase.value)
 
     # ---------------- main loop entry ----------------
-    def process_tick(self, tick: Optional[Dict[str, Any]]) -> None:
+    def process_tick(self, tick: dict[str, Any] | None) -> None:
         self.eval_count += 1
         if (self.eval_count % 30) == 0:
             self._maybe_hot_reload_cfg()
@@ -2456,7 +2449,7 @@ class StrategyRunner:
                 "last_plan": self.last_plan or {},
             }
             self.journal.save_checkpoint(snap)
-        self.last_eval_ts = datetime.now(timezone.utc).isoformat()
+        self.last_eval_ts = datetime.now(UTC).isoformat()
         if isinstance(tick, Mapping) and tick:
             self._mark_tick_activity()
 
@@ -2493,7 +2486,7 @@ class StrategyRunner:
         except Exception:
             self.log.debug("watchdog_error", exc_info=True)
 
-        flow: Dict[str, Any] = {
+        flow: dict[str, Any] = {
             "within_window": False,
             "paused": self._paused,
             "data_ok": False,
@@ -2506,7 +2499,7 @@ class StrategyRunner:
             "executed": False,
             "reason_block": None,
         }
-        signal_for_log: Dict[str, Any] | None = None
+        signal_for_log: dict[str, Any] | None = None
         self._last_error = None
         self._set_phase(RunnerPhase.PRIME_QUOTES)
 
@@ -2566,7 +2559,7 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         tick_now = datetime.now(TZ)
         self._run_tick_watchdog()
         for cb in [
@@ -2695,7 +2688,7 @@ class StrategyRunner:
                 return
             flow["data_ok"] = True
             # Event guard pre-check to hint strategy
-            active_events: List[EventWindow] = []
+            active_events: list[EventWindow] = []
             event_block = False
             self._event_post_widen = 0.0
             if self.event_guard_enabled and self.event_cal:
@@ -2706,7 +2699,7 @@ class StrategyRunner:
                         (ev.post_widen_spread_pct for ev in active_events),
                         default=0.0,
                     )
-            setattr(self.strategy, "_event_post_widen", self._event_post_widen)
+            self.strategy._event_post_widen = self._event_post_widen
 
             # ---- plan
             plan = self.strategy.generate_signal(df, current_tick=tick)
@@ -2746,7 +2739,7 @@ class StrategyRunner:
             max_tick_lag = int(getattr(self.strategy_cfg, "max_tick_lag_s", 8))
             max_bar_lag = int(getattr(self.strategy_cfg, "max_bar_lag_s", 75))
 
-            def _update_fresh(plan_map: Dict[str, Any]) -> None:
+            def _update_fresh(plan_map: dict[str, Any]) -> None:
                 plan_map["tick_lag_s"] = self._fresh.tick_lag_s
                 plan_map["bar_lag_s"] = self._fresh.bar_lag_s
                 plan_map["lag_s"] = self._fresh.bar_lag_s
@@ -2956,9 +2949,7 @@ class StrategyRunner:
                 ask_ok = (
                     quote_ready_status.ask is not None and float(quote_ready_status.ask) > 0.0
                 )
-                if not (bid_ok and ask_ok):
-                    need_micro_wait = True
-                elif not quote_ready_status.ok and quote_ready_status.reason in {
+                if not (bid_ok and ask_ok) or not quote_ready_status.ok and quote_ready_status.reason in {
                     "invalid_token",
                     "no_quote",
                 }:
@@ -3018,7 +3009,7 @@ class StrategyRunner:
             if score_val == 0.0:
                 bar_count = int(plan.get("bar_count") or 0)
                 regime = plan.get("regime")
-                min_bars = int(getattr(settings.strategy, "min_bars_for_signal"))
+                min_bars = int(settings.strategy.min_bars_for_signal)
                 if bar_count < min_bars or regime == "NO_TRADE":
                     self.log.debug(
                         "Scoring skipped: bar_count=%s regime=%s",
@@ -3293,9 +3284,9 @@ class StrategyRunner:
                 if ds is not None:
                     try:
                         if option_type == "PE":
-                            setattr(ds, "_current_pe_token", plan.get("token"))
+                            ds._current_pe_token = plan.get("token")
                         elif option_type == "CE":
-                            setattr(ds, "_current_ce_token", plan.get("token"))
+                            ds._current_ce_token = plan.get("token")
                         # Keep atm_tokens coherent for subscriptions/streaming
                         if hasattr(ds, "atm_tokens"):
                             ce_cur = getattr(ds, "_current_ce_token", None)
@@ -3307,9 +3298,9 @@ class StrategyRunner:
                                 except Exception:
                                     pass
                             try:
-                                setattr(ds, "atm_tokens", tuple(toks))
+                                ds.atm_tokens = tuple(toks)
                             except Exception:
-                                setattr(ds, "atm_tokens", toks)
+                                ds.atm_tokens = toks
                     except Exception:
                         self.log.debug("token resync failed", exc_info=True)
                 # Informative log; DO NOT set reason_block or return.
@@ -3498,7 +3489,7 @@ class StrategyRunner:
 
             fetch_ltp = None
             if hasattr(self.data_source, "get_last_price"):
-                fetch_ltp = getattr(self.data_source, "get_last_price")
+                fetch_ltp = self.data_source.get_last_price
 
             quote_dict, quote_mode = get_option_quote_safe(
                 option=opt,
@@ -3851,7 +3842,7 @@ class StrategyRunner:
             entry = plan.get("entry") or plan.get("entry_price") or 0.0
             sl = plan.get("sl") or plan.get("stop_loss") or 0.0
 
-            planned_delta_units: Optional[float] = None
+            planned_delta_units: float | None = None
             if (
                 plan.get("has_signal")
                 and plan.get("strike")
@@ -3915,7 +3906,7 @@ class StrategyRunner:
                 if not existing_block_reason:
                     plan["reason_block"] = reason
                 # Snapshot reasons to avoid mutating shared references from upstream signals.
-                existing_reasons: List[str] = list(plan.get("reasons", []))
+                existing_reasons: list[str] = list(plan.get("reasons", []))
                 risk_reason = f"risk:{reason}" if reason else "risk"
                 if risk_reason not in existing_reasons:
                     existing_reasons.append(risk_reason)
@@ -3939,7 +3930,7 @@ class StrategyRunner:
                 return
 
             plan_token = plan.get("token") or plan.get("option_token")
-            micro_guard: Dict[str, Any] = {}
+            micro_guard: dict[str, Any] = {}
             micro_ok = True
             if plan_token is not None:
                 try:
@@ -4589,17 +4580,17 @@ class StrategyRunner:
         self._set_phase(RunnerPhase.IDLE)
 
     # one-shot tick used by Telegram
-    def runner_tick(self, *, dry: bool = False) -> Dict[str, Any]:
+    def runner_tick(self, *, dry: bool = False) -> dict[str, Any]:
         prev = bool(settings.allow_offhours_testing)
         try:
             if dry:
-                setattr(settings, "allow_offhours_testing", True)
+                settings.allow_offhours_testing = True
             self.process_tick(tick=None)
             return dict(self._last_flow_debug)
         finally:
-            setattr(settings, "allow_offhours_testing", prev)
+            settings.allow_offhours_testing = prev
 
-    def get_current_atm(self) -> Dict[str, dict]:
+    def get_current_atm(self) -> dict[str, dict]:
         under = self.last_spot or 0.0
         if under <= 0 or not self.option_resolver:
             return {}
@@ -4609,7 +4600,7 @@ class StrategyRunner:
             for k in ("CE", "PE")
         }
 
-    def get_current_l1(self) -> Optional[Dict[str, Any]]:
+    def get_current_l1(self) -> dict[str, Any] | None:
         if not self.kite:
             return None
         atm = self.get_current_atm().get("CE")
@@ -4621,7 +4612,7 @@ class StrategyRunner:
         except Exception:
             return None
 
-    def get_probe_info(self) -> Dict[str, Any]:
+    def get_probe_info(self) -> dict[str, Any]:
         plan = self.last_plan or {}
         return {
             "start": plan.get("probe_window_from"),
@@ -4633,7 +4624,7 @@ class StrategyRunner:
             "source": plan.get("data_source"),
         }
 
-    def run_backtest(self, csv_path: Optional[str] = None) -> str:
+    def run_backtest(self, csv_path: str | None = None) -> str:
         """Run backtest on a CSV file and return a summary string."""
         try:
             path = (
@@ -4671,7 +4662,7 @@ class StrategyRunner:
             self.log.error("Backtest failed: %s", e, exc_info=False)
             return f"Backtest error: {e}"
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         """Perform lightweight self-checks and return status snapshot."""
         self._refresh_equity_if_due(silent=True)
         try:
@@ -4776,7 +4767,7 @@ class StrategyRunner:
             else float(settings.risk.default_equity)
         )
 
-    def _risk_gates_for(self, signal: Dict[str, Any]) -> Dict[str, bool]:
+    def _risk_gates_for(self, signal: dict[str, Any]) -> dict[str, bool]:
         gates = {
             "market_hours": True,
             "equity_floor": True,
@@ -4869,8 +4860,8 @@ class StrategyRunner:
         equity: float,
         spot_price: float | None = None,
         delta: float | None = None,
-        quote: Dict | None = None,
-    ) -> Tuple[int, Dict]:
+        quote: dict | None = None,
+    ) -> tuple[int, dict]:
         entry_f = float(entry)
         stop_f = float(stop)
         lot_size_i = int(lot_size)
@@ -4959,7 +4950,7 @@ class StrategyRunner:
             self.log.debug("record_trade failed", exc_info=True)
 
     # ---------------- data helpers ----------------
-    def _fetch_spot_ohlc(self) -> Optional[pd.DataFrame]:
+    def _fetch_spot_ohlc(self) -> pd.DataFrame | None:
         """
         Build SPOT OHLC frame using LiveKiteSource with configured lookback.
         If no valid token is configured or broker returns empty data, synthesize a 1-bar DF from LTP.
@@ -5192,16 +5183,16 @@ class StrategyRunner:
                 pass
             else:
                 try:
-                    setattr(self.settings.instruments, "nifty_lot_size", int(self.lot_size))
+                    self.settings.instruments.nifty_lot_size = int(self.lot_size)
                 except Exception:
                     pass
         else:
             try:
-                setattr(self.settings.instruments, "nifty_lot_size", int(self.lot_size))
+                self.settings.instruments.nifty_lot_size = int(self.lot_size)
             except Exception:
                 pass
 
-    def _within_trading_window(self, adx_val: Optional[float] = None) -> bool:
+    def _within_trading_window(self, adx_val: float | None = None) -> bool:
         """Return ``True`` if current IST time falls within the configured window.
 
         Start and end times are sourced from the environment via ``settings``
@@ -5284,11 +5275,11 @@ class StrategyRunner:
             "portfolio": getattr(self, "portfolio_greeks", None),
         }
 
-    def _build_plan_snapshot(self) -> Dict[str, Any]:
+    def _build_plan_snapshot(self) -> dict[str, Any]:
         """Return the latest plan augmented with optional market data diagnostics."""
 
         plan = dict(self.last_plan or {})
-        snapshot: Dict[str, Any] = {"plan": plan}
+        snapshot: dict[str, Any] = {"plan": plan}
 
         def _coerce_token(value: Any) -> Any:
             if value in (None, ""):
@@ -5358,7 +5349,7 @@ class StrategyRunner:
                     pe_token = _coerce_token(getattr(ds, "_current_pe_token", None))
             explicit_token = ce_token if option_type == "CE" else pe_token
 
-        micro_state: Dict[str, Any]
+        micro_state: dict[str, Any]
         get_micro = getattr(source, "get_micro_state", None) if source is not None else None
         if explicit_token is None:
             micro_state = {"reason": "no_token"}
@@ -5396,7 +5387,7 @@ class StrategyRunner:
         if isinstance(micro_state, Mapping):
             depth_ok = micro_state.get("depth_ok")
 
-        micro_for_plan: Dict[str, Any]
+        micro_for_plan: dict[str, Any]
         if isinstance(micro_state, Mapping):
             micro_for_plan = dict(micro_state)
         else:
@@ -5440,7 +5431,7 @@ class StrategyRunner:
 
         return snapshot
 
-    def get_last_signal_debug(self) -> Dict[str, Any]:
+    def get_last_signal_debug(self) -> dict[str, Any]:
         return dict(self.last_plan or {})
 
     def get_recent_bars(self, n: int = 5) -> str:
@@ -5472,24 +5463,24 @@ class StrategyRunner:
         self.trace_ticks_remaining = 0
 
     # detailed bundle used by /check
-    def build_diag(self) -> Dict[str, Any]:
+    def build_diag(self) -> dict[str, Any]:
         return self._build_diag_bundle()
 
-    def get_last_flow_debug(self) -> Dict[str, Any]:
+    def get_last_flow_debug(self) -> dict[str, Any]:
         return dict(self._last_flow_debug)
 
-    def ohlc_window(self) -> Optional[pd.DataFrame]:
+    def ohlc_window(self) -> pd.DataFrame | None:
         """Return the cached OHLC window, if any."""
 
         return self._ohlc_cache
 
     @classmethod
-    def get_singleton(cls) -> Optional["StrategyRunner"]:
+    def get_singleton(cls) -> StrategyRunner | None:
         """Return the most recently created runner instance, if any."""
 
         return cls._SINGLETON
 
-    def debug_snapshot(self) -> Dict[str, Any]:
+    def debug_snapshot(self) -> dict[str, Any]:
         """Return a lightweight state snapshot for diagnostics."""
 
         df = self._ohlc_cache
@@ -5508,7 +5499,7 @@ class StrategyRunner:
             "rr_threshold": getattr(self.strategy_cfg, "rr_threshold", None),
         }
 
-    def open_trades_provider(self) -> List[Dict[str, Any]]:
+    def open_trades_provider(self) -> list[dict[str, Any]]:
         """Return a snapshot of open legs suitable for Telegram diagnostics."""
 
         snapshot_fn = getattr(self.order_executor, "open_legs_snapshot", None)
@@ -5531,9 +5522,9 @@ class StrategyRunner:
             return 0
         return int(reconciler.step(self.now_ist))
 
-    def _build_diag_bundle(self) -> Dict[str, Any]:
+    def _build_diag_bundle(self) -> dict[str, Any]:
         """Health cards for /diag (compact) and /check (detailed)."""
-        checks: List[Dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
 
         # Strategy and data provider info
         checks.append(
@@ -5677,7 +5668,7 @@ class StrategyRunner:
                 "qty": leg.qty,
                 "avg": leg.avg_price,
                 "age_s": int(
-                    (datetime.now(timezone.utc) - leg.created_at).total_seconds()
+                    (datetime.now(UTC) - leg.created_at).total_seconds()
                 ),
                 "status": fsm.status,
             }
@@ -5709,7 +5700,7 @@ class StrategyRunner:
         return bundle
 
     # compact one-line summary for /diag
-    def get_compact_diag_summary(self) -> Dict[str, Any]:
+    def get_compact_diag_summary(self) -> dict[str, Any]:
         """Concise status for /diag without building the full multiline text."""
         bundle = self._build_diag_bundle()
         flow = bundle.get("last_flow", {}) if isinstance(bundle, dict) else {}
@@ -5761,7 +5752,7 @@ class StrategyRunner:
             },
         }
 
-    def get_equity_snapshot(self) -> Dict[str, Any]:
+    def get_equity_snapshot(self) -> dict[str, Any]:
         return {
             "use_live_equity": bool(settings.risk.use_live_equity),
             "equity_cached": round(float(self._equity_cached_value), 2),
@@ -5770,7 +5761,7 @@ class StrategyRunner:
             "refresh_seconds": int(settings.risk.equity_refresh_seconds),
         }
 
-    def get_status_snapshot(self) -> Dict[str, Any]:
+    def get_status_snapshot(self) -> dict[str, Any]:
         try:
             pos = getattr(self.executor, "get_positions_kite", lambda: {})() or {}
         except Exception:
@@ -5902,7 +5893,7 @@ class StrategyRunner:
             }
         return diag
 
-    def risk_snapshot(self) -> Dict[str, Any]:
+    def risk_snapshot(self) -> dict[str, Any]:
         snap = self.risk_engine.snapshot()
         snap["exposure"] = {
             "notional_rupees": round(self._notional_rupees(), 2),
@@ -5918,8 +5909,8 @@ class StrategyRunner:
         self.risk_engine.state.cooloff_until = None
         self.risk_engine.state.roll_R_last10.clear()
 
-    def _lots_by_symbol(self) -> Dict[str, int]:
-        lots: Dict[str, int] = {}
+    def _lots_by_symbol(self) -> dict[str, int]:
+        lots: dict[str, int] = {}
         for fsm in getattr(self.order_executor, "open_trades", lambda: [])():
             for leg in fsm.open_legs():
                 lots[leg.symbol] = lots.get(leg.symbol, 0) + math.ceil(
@@ -5979,7 +5970,7 @@ class StrategyRunner:
                 total += side * delta * lot * contracts
         return total
 
-    def sizing_test(self, entry: float, sl: float) -> Dict[str, Any]:
+    def sizing_test(self, entry: float, sl: float) -> dict[str, Any]:
         qty, diag = self._calculate_quantity_diag(
             entry=float(entry),
             stop=float(sl),
@@ -6240,7 +6231,7 @@ class StrategyRunner:
         Flip live mode and (if enabling) ensure a live broker session is present, then rewire executor and data source safely.
         """
         try:
-            setattr(settings, "enable_live_trading", bool(val))
+            settings.enable_live_trading = bool(val)
         except Exception:
             self.log.debug("Unable to set enable_live_trading flag", exc_info=True)
 
@@ -6283,7 +6274,7 @@ class StrategyRunner:
                 if hasattr(self.data_source, "set_kite"):
                     self.data_source.set_kite(self.kite)
                 else:
-                    setattr(self.data_source, "kite", self.kite)
+                    self.data_source.kite = self.kite
                 self.data_source.connect()
             except Exception as e:
                 self.log.warning("Data source connect failed: %s", e)

@@ -3,7 +3,8 @@ from __future__ import annotations
 import random
 import threading
 import time
-from typing import Callable, Iterable, Optional, Type, TypeVar
+from collections.abc import Callable, Iterable
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -64,10 +65,10 @@ def retry(
     attempts: int = 3,
     base: float = 0.25,
     max_sleep: float = 2.0,
-    only: Optional[Iterable[Type[BaseException]]] = None,
+    only: Iterable[type[BaseException]] | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Retry decorator with exponential backoff."""
-    only_tuple: tuple[Type[BaseException], ...] = tuple(only or (Exception,))
+    only_tuple: tuple[type[BaseException], ...] = tuple(only or (Exception,))
 
     def deco(fn: Callable[..., T]) -> Callable[..., T]:
         def wrap(*a: object, **k: object) -> T:

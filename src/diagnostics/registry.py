@@ -10,8 +10,9 @@ Telegram or log consumption.
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -21,12 +22,12 @@ class CheckResult:
     name: str
     ok: bool
     msg: str
-    details: Dict[str, Any]
-    fix: Optional[str] = None
+    details: dict[str, Any]
+    fix: str | None = None
     took_ms: int = 0
 
 
-_registry: Dict[str, Callable[[], CheckResult]] = {}
+_registry: dict[str, Callable[[], CheckResult]] = {}
 
 
 def register(
@@ -59,13 +60,13 @@ def run(name: str) -> CheckResult:
     return result
 
 
-def run_all() -> List[CheckResult]:
+def run_all() -> list[CheckResult]:
     """Run all registered diagnostic checks and return their results."""
 
     return [run(n) for n in sorted(_registry)]
 
 
-def to_json(results: List[CheckResult]) -> str:
+def to_json(results: list[CheckResult]) -> str:
     """Serialize a list of :class:`CheckResult` objects to JSON."""
 
     return json.dumps([asdict(r) for r in results], default=str, ensure_ascii=False)

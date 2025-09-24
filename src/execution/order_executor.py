@@ -1,17 +1,17 @@
-# Path: src/execution/order_executor.py
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
 import random
-import hashlib
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from src.data.source import get_option_quote_safe
 from src.logs.journal import Journal
@@ -28,14 +28,13 @@ from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.reliability import RateLimiter
 
 from .micro_filters import ENTRY_WAIT_S, MICRO_SPREAD_CAP, depth_to_lots
-
 from .order_state import (
+    TERMINAL_STATES,
     LegType,
     OrderLeg,
     OrderSide,
     OrderState,
     TradeFSM,
-    TERMINAL_STATES,
 )
 
 # --- Optional broker SDK (graceful fallback in paper mode) ---
@@ -115,7 +114,7 @@ def _round_to_step(qty: int, step: int) -> int:
         return int(qty)
 
 
-def _chunks(total: int, chunk: int) -> List[int]:
+def _chunks(total: int, chunk: int) -> list[int]:
     """Split a quantity into exchange-compliant child orders."""
     if total <= 0:
         return []
@@ -129,7 +128,7 @@ def _chunks(total: int, chunk: int) -> List[int]:
     return out
 
 
-_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_QUOTE_CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 _QUOTE_ERR_RL = RateLimiter(5)
 _AUTH_WARNED = False
@@ -168,8 +167,8 @@ def _safe_kite_call(
 
 
 def fetch_quote_with_depth(
-    kite: Optional[KiteConnect], tsym: str, cb: Optional[CircuitBreaker] = None
-) -> Dict[str, Any]:
+    kite: KiteConnect | None, tsym: str, cb: CircuitBreaker | None = None
+) -> dict[str, Any]:
     """Return quote with depth for the given trading symbol."""
     if not kite or not tsym:
         return {
@@ -185,10 +184,10 @@ def fetch_quote_with_depth(
             "source": "none",
         }
     symbol_key = f"NFO:{tsym}"
-    option_stub: Dict[str, Any] = {"tradingsymbol": tsym}
-    ltp_cache: Dict[str, Optional[float]] = {}
+    option_stub: dict[str, Any] = {"tradingsymbol": tsym}
+    ltp_cache: dict[str, float | None] = {}
 
-    def _fetch_rest(identifier: Any) -> Optional[float]:
+    def _fetch_rest(identifier: Any) -> float | None:
         key = str(identifier)
         if key in ltp_cache:
             return ltp_cache[key]
@@ -202,7 +201,7 @@ def fetch_quote_with_depth(
                 log.warning("ltp() failed for %s: %s", identifier, e)
             ltp_cache[key] = None
             return None
-        price: Optional[float] = None
+        price: float | None = None
         if isinstance(data, dict):
             entry = data.get(identifier)
             if entry is None:
@@ -221,7 +220,7 @@ def fetch_quote_with_depth(
     bid5 = ask5 = 0
     ltp = 0.0
     oi = ts = None
-    quote_dict: Dict[str, Any] | None = None
+    quote_dict: dict[str, Any] | None = None
     mode = "no_quote"
     for attempt in range(2):
         try:
@@ -333,7 +332,7 @@ def fetch_quote_with_depth(
 class KiteOrderConnector:
     """Thin wrapper exposing create/modify/cancel/reconcile operations."""
 
-    def __init__(self, kite: Optional[KiteConnect]) -> None:
+    def __init__(self, kite: KiteConnect | None) -> None:
         self.kite = kite
 
     def create_order(self, **payload: Any) -> Any:
@@ -362,9 +361,9 @@ class OrderManager:
 
     def __init__(
         self,
-        place_fn: Callable[[Dict[str, Any]], Optional[str]],
+        place_fn: Callable[[dict[str, Any]], str | None],
         *,
-        kite: Optional[KiteConnect] = None,
+        kite: KiteConnect | None = None,
         tick_size: float = 0.05,
         max_slip_ticks: int = 5,
         fill_timeout_ms: int = 5000,
@@ -374,8 +373,8 @@ class OrderManager:
         self.tick_size = float(tick_size)
         self.max_slip_ticks = int(max_slip_ticks)
         self.fill_timeout_ms = int(fill_timeout_ms)
-        self.orders: Dict[str, OrderLeg] = {}
-        self._seen: Set[str] = set()
+        self.orders: dict[str, OrderLeg] = {}
+        self._seen: set[str] = set()
 
     @staticmethod
     def make_client_oid(
@@ -387,8 +386,8 @@ class OrderManager:
         return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
     def calc_limit_price(
-        self, side: OrderSide, qty: int, quote: Dict[str, Any]
-    ) -> Tuple[float, float]:
+        self, side: OrderSide, qty: int, quote: dict[str, Any]
+    ) -> tuple[float, float]:
         """Compute limit price and slippage hint."""
         tick = float(quote.get("tick", self.tick_size))
         max_slip = tick * self.max_slip_ticks
@@ -418,7 +417,7 @@ class OrderManager:
         slip = abs(price - best)
         return price, slip
 
-    def submit(self, payload: Dict[str, Any]) -> Optional[str]:
+    def submit(self, payload: dict[str, Any]) -> str | None:
         symbol = str(payload.get("symbol") or "")
         side = OrderSide(str(payload.get("action", "BUY")).upper())
         qty = int(payload.get("quantity", 0))
@@ -450,7 +449,7 @@ class OrderManager:
                 + timedelta(milliseconds=self.fill_timeout_ms),
             )
             leg.broker_order_id = rid
-            setattr(leg, "slippage_hint", slip)
+            leg.slippage_hint = slip
             self.orders[client_oid] = leg
             self._seen.add(client_oid)
         return rid
@@ -460,7 +459,7 @@ class OrderManager:
         client_oid: str,
         filled_qty: int,
         avg_price: float,
-        quote: Dict[str, Any],
+        quote: dict[str, Any],
     ) -> None:
         leg = self.orders.get(client_oid)
         if not leg:
@@ -477,7 +476,7 @@ class OrderManager:
                 "client_oid": client_oid,
             }
             self._place_fn(payload)
-            setattr(leg, "slippage_hint", slip)
+            leg.slippage_hint = slip
         else:
             leg.on_fill(avg_price)
 
@@ -496,7 +495,7 @@ class OrderManager:
 
 
 def micro_ok(
-    quote: Dict[str, Any],
+    quote: dict[str, Any],
     qty_lots: int,
     lot_size: int,
     max_spread_pct: float,
@@ -504,7 +503,7 @@ def micro_ok(
     *,
     side: str | None = None,
     depth_min_lots: float | int = 0.0,
-) -> Tuple[bool, Dict[str, Any]]:
+) -> tuple[bool, dict[str, Any]]:
     """Evaluate microstructure guard for an option quote."""
 
     def _as_float(val: Any) -> float:
@@ -519,11 +518,11 @@ def micro_ok(
         except (TypeError, ValueError):
             return 0
 
-    def _depth_values(raw: Any) -> List[int]:
+    def _depth_values(raw: Any) -> list[int]:
         if raw in (None, ""):
             return []
         if isinstance(raw, Mapping):
-            values: List[int] = []
+            values: list[int] = []
             for item in raw.values():
                 if isinstance(item, Mapping):
                     values.append(_as_int(item.get("quantity")))
@@ -561,7 +560,7 @@ def micro_ok(
     order_units = qty_lots_i * lot_size_i
     depth_multiplier = max(float(depth_mult), 0.0)
 
-    def _log_no_quote() -> Tuple[bool, Dict[str, Any]]:
+    def _log_no_quote() -> tuple[bool, dict[str, Any]]:
         meta_no_quote = {
             "spread_pct": None,
             "cap_pct": round(max_spread_cap * 100.0, 3),
@@ -609,7 +608,7 @@ def micro_ok(
 
     spread_frac = (ask - bid) / mid if mid > 0 else float("inf")
     spread_ok = math.isfinite(spread_frac) and spread_frac <= max_spread_cap
-    spread_pct_value: Optional[float] = (
+    spread_pct_value: float | None = (
         spread_frac * 100.0 if math.isfinite(spread_frac) else None
     )
 
@@ -690,14 +689,14 @@ def micro_ok(
         )
 
     require_depth_flag = bool(getattr(settings.executor, "require_depth", False))
-    depth_ok: Optional[bool] = None
+    depth_ok: bool | None = None
     if require_depth_flag:
         depth_ok = depth_available >= int(required_units)
 
     depth_missing = available_bid <= 0 and available_ask <= 0
 
     ok = spread_ok and (depth_ok is not False)
-    block_reason: Optional[str] = None
+    block_reason: str | None = None
     if not spread_ok:
         block_reason = "spread"
     elif depth_ok is False:
@@ -775,19 +774,19 @@ class _OrderRecord:
     entry_price: float
     tick_size: float = 0.05
 
-    client_oid: Optional[str] = None
-    trace_id: Optional[str] = None
+    client_oid: str | None = None
+    trace_id: str | None = None
     is_open: bool = True
     filled_qty: int = 0
 
     # SL GTT
-    sl_gtt_id: Optional[int] = None
-    sl_price: Optional[float] = None
+    sl_gtt_id: int | None = None
+    sl_price: float | None = None
 
     # TPs (optional split)
-    tp1_order_id: Optional[str] = None
-    tp2_order_id: Optional[str] = None
-    tp_price: Optional[float] = None
+    tp1_order_id: str | None = None
+    tp2_order_id: str | None = None
+    tp_price: float | None = None
     tp1_done: bool = False
 
     # broker params
@@ -810,8 +809,8 @@ class _OrderRecord:
     r_value: float = 0.0
 
     # children
-    child_order_ids: List[str] = field(default_factory=list)
-    sizing: Optional[Dict[str, Any]] = None
+    child_order_ids: list[str] = field(default_factory=list)
+    sizing: dict[str, Any] | None = None
 
     @property
     def record_id(self) -> str:
@@ -836,14 +835,14 @@ class _QueueItem:
     mid: float
     spr: float
     step_idx: int = 0
-    placed_order_id: Optional[str] = None
-    placed_at_ms: Optional[int] = None
-    acked_at_ms: Optional[int] = None
+    placed_order_id: str | None = None
+    placed_at_ms: int | None = None
+    acked_at_ms: int | None = None
     retries: int = 0
-    plan_ts_iso: Optional[str] = None
-    idempotency_key: Optional[str] = None
+    plan_ts_iso: str | None = None
+    idempotency_key: str | None = None
 
-    def ladder_prices(self) -> List[float]:
+    def ladder_prices(self) -> list[float]:
         # Never cross; step0 = mid + 0.25*spr ; step1 = mid + 0.40*spr
         return [self.mid + 0.25 * self.spr, self.mid + 0.40 * self.spr]
 
@@ -867,11 +866,11 @@ class OrderExecutor:
 
     def __init__(
         self,
-        kite: Optional[KiteConnect] | Any,
+        kite: KiteConnect | None | Any,
         telegram_controller: Any = None,
-        on_trade_closed: Optional[Callable[[float], None]] = None,
-        journal: Optional[Journal] = None,
-        state_store: Optional[StateStore] = None,
+        on_trade_closed: Callable[[float], None] | None = None,
+        journal: Journal | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
         """Create a new executor.
 
@@ -892,9 +891,9 @@ class OrderExecutor:
         self.kite = kite
         self._live = kite is not None
         self.telegram = telegram_controller
-        self._active: Dict[str, _OrderRecord] = {}
+        self._active: dict[str, _OrderRecord] = {}
         self.state_store = state_store
-        self.last_error: Optional[str] = None
+        self.last_error: str | None = None
 
         # execution config (default-safe if settings missing)
         ex = getattr(settings, "executor", object()) if settings else object()
@@ -926,7 +925,7 @@ class OrderExecutor:
         self._micro_ok_ts_by_token: dict[int, int] = {}  # token -> last OK ms
 
         # track last notification to throttle duplicates
-        self._last_notification: Tuple[str, float] = ("", 0.0)
+        self._last_notification: tuple[str, float] = ("", 0.0)
         self.logger = log
 
         # FSM + router queueing
@@ -958,37 +957,37 @@ class OrderExecutor:
 
         self.cb_orders = CircuitBreaker("orders")
         self.cb_modify = CircuitBreaker("modify")
-        self._fsms: Dict[str, TradeFSM] = {}
-        self._idemp_map: Dict[str, str] = {}
-        self._queues: Dict[str, Deque["_QueueItem"]] = {}
-        self._inflight_symbols: Dict[str, int] = {}
-        self._ack_lat_ms: List[int] = []
-        self._order_ts: Deque[float] = deque()
+        self._fsms: dict[str, TradeFSM] = {}
+        self._idemp_map: dict[str, str] = {}
+        self._queues: dict[str, deque[_QueueItem]] = {}
+        self._inflight_symbols: dict[str, int] = {}
+        self._ack_lat_ms: list[int] = []
+        self._order_ts: deque[float] = deque()
         self.max_orders_per_min = int(
             getattr(
                 cfg, "MAX_ORDERS_PER_MIN", getattr(settings, "MAX_ORDERS_PER_MIN", 20)
             )
         )
         self.on_trade_closed = on_trade_closed
-        self._closed_trades: Set[str] = set()
+        self._closed_trades: set[str] = set()
         self.journal = journal
         self._event_lock = threading.Lock()
-        self._order_events: Deque[Dict[str, Any]] = deque(maxlen=500)
+        self._order_events: deque[dict[str, Any]] = deque(maxlen=500)
 
     def micro_ok(
         self,
         *,
-        quote: Dict[str, Any],
+        quote: dict[str, Any],
         qty_lots: int,
         lot_size: int,
         max_spread_pct: float,
         depth_mult: int,
-        side: Optional[str] = None,
-    ) -> Tuple[bool, Dict[str, Any]]:
+        side: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
         """Evaluate the option microstructure with a single retry on thin depth."""
 
         attempts = 0
-        local_quote: Dict[str, Any] = dict(quote)
+        local_quote: dict[str, Any] = dict(quote)
         symbol = None
         if isinstance(local_quote, Mapping):
             symbol = (
@@ -997,7 +996,7 @@ class OrderExecutor:
                 or local_quote.get("tsym")
             )
         last_ok: bool = False
-        last_meta: Dict[str, Any] = {}
+        last_meta: dict[str, Any] = {}
 
         while attempts < 2:
             ok, meta = micro_ok(
@@ -1031,13 +1030,13 @@ class OrderExecutor:
     def micro_decision(
         self,
         *,
-        quote: Dict[str, Any],
+        quote: dict[str, Any],
         qty_lots: int,
         lot_size: int,
         max_spread_pct: float,
         depth_mult: int,
-        side: Optional[str] = None,
-    ) -> Tuple[bool, Dict[str, Any]]:
+        side: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
         """Evaluate microstructure using a pre-supplied quote snapshot."""
 
         return micro_ok(
@@ -1061,7 +1060,7 @@ class OrderExecutor:
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, Mapping):
-            out: Dict[str, Any] = {}
+            out: dict[str, Any] = {}
             for idx, (key, val) in enumerate(value.items()):
                 if idx >= 20:
                     break
@@ -1070,7 +1069,7 @@ class OrderExecutor:
                 )
             return out
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            items: List[Any] = []
+            items: list[Any] = []
             for idx, item in enumerate(value):
                 if idx >= 20:
                     break
@@ -1079,7 +1078,7 @@ class OrderExecutor:
         return str(value)
 
     def _emit_order_event(self, event: str, **fields: Any) -> None:
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "event": event,
             "ts": datetime.utcnow().isoformat(),
         }
@@ -1088,13 +1087,13 @@ class OrderExecutor:
         with self._event_lock:
             self._order_events.append(record)
 
-    def get_order_events(self) -> List[Dict[str, Any]]:
+    def get_order_events(self) -> list[dict[str, Any]]:
         """Return a snapshot of recently emitted order events."""
 
         with self._event_lock:
             return list(self._order_events)
 
-    def drain_order_events(self) -> List[Dict[str, Any]]:
+    def drain_order_events(self) -> list[dict[str, Any]]:
         """Return and clear the buffered order events."""
 
         with self._event_lock:
@@ -1110,7 +1109,7 @@ class OrderExecutor:
         return round(math.floor(px / tick + 1e-9) * tick, 2)
 
     @staticmethod
-    def _mid_spread(bid: float, ask: float) -> Tuple[Optional[float], Optional[float]]:
+    def _mid_spread(bid: float, ask: float) -> tuple[float | None, float | None]:
         if not bid or not ask or bid <= 0 or ask <= 0 or ask <= bid:
             return None, None
         mid = (bid + ask) / 2.0
@@ -1123,7 +1122,7 @@ class OrderExecutor:
             self._ack_lat_ms = self._ack_lat_ms[-500:]
 
     @staticmethod
-    def _p95(arr: List[int]) -> Optional[int]:
+    def _p95(arr: list[int]) -> int | None:
         if not arr:
             return None
         a = sorted(arr)
@@ -1131,18 +1130,18 @@ class OrderExecutor:
         return a[k]
 
     # ----------- live/paper control ----------
-    def set_live_broker(self, kite: Optional[KiteConnect]) -> None:
+    def set_live_broker(self, kite: KiteConnect | None) -> None:
         """Hot-swap Kite session (None => paper)."""
         with self._lock:
             self.kite = kite
             self._live = kite is not None
 
     # Back-compat alias used by some runners
-    def set_kite(self, kite: Optional[KiteConnect]) -> None:
+    def set_kite(self, kite: KiteConnect | None) -> None:
         self.set_live_broker(kite)
 
     # ----------- public info ----------
-    def get_active_orders(self) -> List[_OrderRecord]:
+    def get_active_orders(self) -> list[_OrderRecord]:
         """Return a snapshot of open records; touch broker for fresh state."""
         self.last_error = None
         with self._lock:
@@ -1161,7 +1160,7 @@ class OrderExecutor:
         with self._lock:
             return sum(1 for r in self._active.values() if r.is_open)
 
-    def get_positions_kite(self) -> Dict[str, Any]:
+    def get_positions_kite(self) -> dict[str, Any]:
         self.last_error = None
         if not self.kite or not getattr(settings, "PORTFOLIO_READS", True):
             return {}
@@ -1173,7 +1172,7 @@ class OrderExecutor:
         )
         return {p.get("tradingsymbol"): p for p in data.get("day", [])}
 
-    def get_margins_kite(self) -> Dict[str, Any]:
+    def get_margins_kite(self) -> dict[str, Any]:
         """Return account margin snapshot from Kite."""
         self.last_error = None
         if not self.kite or not getattr(settings, "PORTFOLIO_READS", True):
@@ -1186,7 +1185,7 @@ class OrderExecutor:
         )
 
     # ----------- quotes diagnostics ----------
-    def _fetch_quote(self, token: int) -> Dict[str, Any]:
+    def _fetch_quote(self, token: int) -> dict[str, Any]:
         if not self.kite:
             return {
                 "ltp": 0.0,
@@ -1257,7 +1256,7 @@ class OrderExecutor:
         ce_token, pe_token = tokens
         token_map = {"ce": ce_token, "pe": pe_token}
         types = [opt.lower()] if opt.lower() in ("ce", "pe") else ["ce", "pe"]
-        lines: List[str] = [f"ATM strike {int(strike)}"]
+        lines: list[str] = [f"ATM strike {int(strike)}"]
         for t in types:
             token = token_map.get(t)
             if not token:
@@ -1337,7 +1336,7 @@ class OrderExecutor:
         return f"mid={mid:.2f} spread%={meta.get('spread_pct')} depth_ok={meta.get('depth_ok')} steps={steps} {result}"
 
     # ----------- entry API (runner calls place_order with payload) ----------
-    def place_order(self, payload: Dict[str, Any]) -> Optional[str]:
+    def place_order(self, payload: dict[str, Any]) -> str | None:
         """
         payload = {
           action: 'BUY'|'SELL',
@@ -1576,8 +1575,8 @@ class OrderExecutor:
             return rec.record_id
 
         # LIVE MODE
-        child_ids: List[str] = []
-        record_id: Optional[str] = None
+        child_ids: list[str] = []
+        record_id: str | None = None
 
         for idx, q in enumerate(parts):
             params = dict(
@@ -1699,7 +1698,7 @@ class OrderExecutor:
         return rec.record_id
 
     def _poll_until_terminal(
-        self, order_ids: List[str], rec: _OrderRecord, client_oid: str
+        self, order_ids: list[str], rec: _OrderRecord, client_oid: str
     ) -> None:
         """Poll order status until it reaches a terminal state."""
         for oid in order_ids:
@@ -1789,8 +1788,8 @@ class OrderExecutor:
         else:
             q_tp1, q_tp2 = 0, qty
 
-        res1: Dict[str, Any] = {}
-        res2: Dict[str, Any] = {}
+        res1: dict[str, Any] = {}
+        res2: dict[str, Any] = {}
 
         if q_tp1 > 0:
             res1 = self._place_with_cb(
@@ -1834,10 +1833,10 @@ class OrderExecutor:
 
         def _tp_attempt_meta(
             quantity: int,
-            order_id: Optional[str],
-            res: Optional[Dict[str, Any]],
-        ) -> Dict[str, Any]:
-            meta: Dict[str, Any] = {
+            order_id: str | None,
+            res: dict[str, Any] | None,
+        ) -> dict[str, Any]:
+            meta: dict[str, Any] = {
                 "qty": int(quantity),
                 "order_id": order_id,
             }
@@ -1939,7 +1938,7 @@ class OrderExecutor:
         *,
         current_price: float,
         atr: float,
-        atr_multiplier: Optional[float] = None,
+        atr_multiplier: float | None = None,
     ) -> None:
         with self._lock:
             rec = self._active.get(record_id)
@@ -1983,7 +1982,7 @@ class OrderExecutor:
         )
 
     # ----------- polling / OCO enforcement ----------
-    def sync_and_enforce_oco(self) -> List[Tuple[str, float]]:
+    def sync_and_enforce_oco(self) -> list[tuple[str, float]]:
         """Refresh order state and enforce OCO-style exits.
 
         If the broker lacks native one-cancels-other support, this method
@@ -1993,7 +1992,7 @@ class OrderExecutor:
         """
         if not self.kite:
             return []
-        fills: List[Tuple[str, float]] = []
+        fills: list[tuple[str, float]] = []
         try:
             omap = {
                 o.get("order_id"): o
@@ -2235,7 +2234,7 @@ class OrderExecutor:
                 r.breakeven_ticks = self.breakeven_ticks
 
     # ----------- FSM/queue helpers ----------
-    def create_trade_fsm(self, plan: Dict[str, Any]) -> TradeFSM:
+    def create_trade_fsm(self, plan: dict[str, Any]) -> TradeFSM:
         """Build a TradeFSM from a strategy plan."""
         trade_id = str(plan.get("trade_id") or int(time.time() * 1000))
         side = (
@@ -2308,7 +2307,7 @@ class OrderExecutor:
         self._enqueue_router(leg, quote, None)
 
     def _enqueue_router(
-        self, leg: OrderLeg, quote: Dict[str, float], plan_ts_iso: Optional[str]
+        self, leg: OrderLeg, quote: dict[str, float], plan_ts_iso: str | None
     ) -> bool:
         bid = quote.get("bid", 0.0)
         ask = quote.get("ask", 0.0)
@@ -2333,7 +2332,7 @@ class OrderExecutor:
         )
         return True
 
-    def open_trades(self) -> List[TradeFSM]:
+    def open_trades(self) -> list[TradeFSM]:
         return [fsm for fsm in self._fsms.values() if fsm.status == "OPEN"]
 
     def get_or_create_fsm(self, trade_id: str) -> TradeFSM:
@@ -2344,7 +2343,7 @@ class OrderExecutor:
             self._fsms[trade_id] = fsm
         return fsm
 
-    def attach_leg_from_journal(self, fsm: TradeFSM, leg_dict: Dict[str, Any]) -> None:
+    def attach_leg_from_journal(self, fsm: TradeFSM, leg_dict: dict[str, Any]) -> None:
         """Attach a leg restored from journal without placing a new order."""
         state_str = str(leg_dict.get("state", "NEW"))
         if state_str == "ACK":
@@ -2382,7 +2381,7 @@ class OrderExecutor:
             self._idemp_map[leg.idempotency_key] = leg.leg_id
 
     # ---------------- state restore ----------------
-    def restore_record(self, client_oid: str, payload: Dict[str, Any]) -> None:
+    def restore_record(self, client_oid: str, payload: dict[str, Any]) -> None:
         """Recreate an active order record from a persisted payload."""
         symbol = str(payload.get("symbol", ""))
         action = str(payload.get("action")) or str(payload.get("side", "BUY"))
@@ -2423,17 +2422,17 @@ class OrderExecutor:
         with self._lock:
             self._active[rec.record_id] = rec
 
-    def open_legs_snapshot(self) -> List[Dict[str, Any]]:
+    def open_legs_snapshot(self) -> list[dict[str, Any]]:
         """Return a compact snapshot of open legs for checkpoints."""
-        snap: List[Dict[str, Any]] = []
+        snap: list[dict[str, Any]] = []
         for fsm in self._fsms.values():
             for leg in fsm.open_legs():
                 created = leg.created_at
-                age_s: Optional[int] = None
+                age_s: int | None = None
                 if isinstance(created, datetime):
                     if created.tzinfo is not None:
-                        ref = datetime.utcnow().replace(tzinfo=timezone.utc)
-                        delta = ref - created.astimezone(timezone.utc)
+                        ref = datetime.utcnow().replace(tzinfo=UTC)
+                        delta = ref - created.astimezone(UTC)
                     else:
                         delta = datetime.utcnow() - created
                     age_s = max(0, int(delta.total_seconds()))
@@ -2459,8 +2458,8 @@ class OrderExecutor:
         if not fsm:
             return
 
-        cancelled_ids: Set[str] = set()
-        records: List[Tuple[str, _OrderRecord]] = []
+        cancelled_ids: set[str] = set()
+        records: list[tuple[str, _OrderRecord]] = []
         with self._lock:
             for rid, rec in self._active.items():
                 for leg in fsm.legs.values():
@@ -2480,7 +2479,7 @@ class OrderExecutor:
 
             queue = self._queues.get(leg.symbol)
             if queue:
-                new_q: Deque[_QueueItem] = deque()
+                new_q: deque[_QueueItem] = deque()
                 for qi in queue:
                     if qi.leg_id != leg.leg_id:
                         new_q.append(qi)
@@ -2540,8 +2539,8 @@ class OrderExecutor:
                 return True
         return False
 
-    def _cancel_record_orders(self, rec: _OrderRecord) -> Set[str]:
-        cancelled: Set[str] = set()
+    def _cancel_record_orders(self, rec: _OrderRecord) -> set[str]:
+        cancelled: set[str] = set()
         for oid in (
             rec.tp1_order_id,
             rec.tp2_order_id,
@@ -2605,7 +2604,7 @@ class OrderExecutor:
             return 0.0
         return pnl_rupees / risk_rupees
 
-    def step_queue(self, now: Optional[datetime] = None) -> None:
+    def step_queue(self, now: datetime | None = None) -> None:
         now_ms = self._now_ms()
         for sym, q in list(self._queues.items()):
             if (
@@ -2625,7 +2624,7 @@ class OrderExecutor:
                 symbol=sym, qty=qi.qty, price=tgt, tag=idemp
             )
 
-            leg_obj: Optional[OrderLeg] = None
+            leg_obj: OrderLeg | None = None
             for fsm in self._fsms.values():
                 leg_obj = fsm.legs.get(qi.leg_id)
                 if leg_obj:
@@ -2754,7 +2753,7 @@ class OrderExecutor:
         }
 
     def _place_leg(self, leg: OrderLeg) -> None:
-        order_id: Optional[str] = None
+        order_id: str | None = None
         if self.kite and hasattr(self.kite, "create_order"):
             try:
                 resp = self.kite.create_order(leg, idempotency_key=leg.idempotency_key)
@@ -2807,7 +2806,7 @@ class OrderExecutor:
 
     def _build_place_request(
         self, *, symbol: str, qty: int, price: float, tag: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return {
             "variety": self.variety,
             "exchange": self.exchange,
@@ -2820,13 +2819,13 @@ class OrderExecutor:
             "tag": tag,
         }
 
-    def _place_with_cb(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def _place_with_cb(self, req: dict[str, Any]) -> dict[str, Any]:
         """Place order via broker with circuit breaker and retries."""
 
         attempts = 0
-        retry_delays: List[int] = []
+        retry_delays: list[int] = []
 
-        def single() -> Dict[str, Any]:
+        def single() -> dict[str, Any]:
             nonlocal attempts
             attempts += 1
             if not self.cb_orders.allow():
@@ -2873,10 +2872,10 @@ class OrderExecutor:
         res["retry_delays_ms"] = retry_delays if retry_delays else None
         return res
 
-    def _modify_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
+    def _modify_with_cb(self, order_id: str, **kwargs: Any) -> dict[str, Any]:
         """Modify order via broker with breaker and retries."""
 
-        def single() -> Dict[str, Any]:
+        def single() -> dict[str, Any]:
             if not self.cb_modify.allow():
                 return {
                     "ok": False,
@@ -2909,14 +2908,14 @@ class OrderExecutor:
 
     def _cancel_with_cb(
         self, order_id: str, *, reason: str | None = None, **kwargs: Any
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Cancel order via broker with breaker and retries."""
 
         order_ref = str(order_id)
         if order_ref:
             log_event("order.cancel", "info", id=order_ref, reason=reason or "")
 
-        def single() -> Dict[str, Any]:
+        def single() -> dict[str, Any]:
             if not self.cb_modify.allow():
                 return {
                     "ok": False,
@@ -2947,13 +2946,13 @@ class OrderExecutor:
             res = single()
         return res
 
-    def api_health(self) -> Dict[str, Dict[str, object]]:
+    def api_health(self) -> dict[str, dict[str, object]]:
         """Return current API breaker health."""
         return {"orders": self.cb_orders.health(), "modify": self.cb_modify.health()}
 
     # ----------- util ----------
     @staticmethod
-    def _infer_symbol(payload: Dict[str, Any]) -> Optional[str]:
+    def _infer_symbol(payload: dict[str, Any]) -> str | None:
         """
         If not provided, compose a reasonable NFO symbol from strike & option_type.
         Example placeholder: NIFTY24500CE  (expiry not encoded here).
@@ -3016,7 +3015,7 @@ class OrderReconciler:
         for o in orders:
             tag = str(o.get("tag") or "")
             oid = o.get("order_id")
-            leg: Optional[OrderLeg] = None
+            leg: OrderLeg | None = None
             # match by order id
             if oid:
                 for fsm in self.store._fsms.values():
@@ -3044,7 +3043,7 @@ class OrderReconciler:
                 leg.mark_acked(oid)
             self.store.on_order_acked(leg.symbol, leg.leg_id)
             event_type = None
-            payload: Dict[str, Any] = {}
+            payload: dict[str, Any] = {}
             if status in {"COMPLETE", "FILLED"} or filled_qty >= leg.qty:
                 leg.on_fill(avg_price)
                 order_ref = str(oid or leg.broker_order_id or leg.idempotency_key or "")

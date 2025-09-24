@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Optional
 
 from src.options.contract_registry import InstrumentRegistry
 from src.utils.expiry import next_tuesday_expiry
 from src.utils.strike_selector import (
-    resolve_weekly_atm,
     _fetch_instruments_nfo,
     _infer_step,
     _nearest_strike,
+    resolve_weekly_atm,
 )
 
 from .instruments_cache import InstrumentsCache
@@ -35,7 +34,7 @@ class OptionResolver:
     def __init__(
         self,
         cache: InstrumentsCache,
-        kite: Optional[KiteConnect] = None,
+        kite: KiteConnect | None = None,
         registry: InstrumentRegistry | None = None,
     ) -> None:
         self.cache = cache
@@ -54,7 +53,7 @@ class OptionResolver:
             expiry_dt = next_tuesday_expiry(now_ist)
         expiry = expiry_dt.date().isoformat()
 
-        meta: Optional[Dict[str, object]] = None
+        meta: dict[str, object] | None = None
         if self.registry is not None:
             reg_meta = self.registry.lookup(under_symbol, expiry, strike, kind)
             if reg_meta:

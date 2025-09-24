@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any
 from uuid import uuid4
 
 from src.broker.interface import Broker, OrderRequest, OrderType, Side, TimeInForce
@@ -20,18 +21,18 @@ class BrokerOrderExecutor:
     def __init__(
         self,
         broker: Broker,
-        instrument_id_mapper: Optional[Callable[[str], int]] = None,
+        instrument_id_mapper: Callable[[str], int] | None = None,
     ) -> None:
         self.broker = broker
         self.instrument_id_mapper = instrument_id_mapper
-        self._id_cache: Dict[str, str] = {}
+        self._id_cache: dict[str, str] = {}
         self.log = logging.getLogger(self.__class__.__name__)
 
     # ------------------------------------------------------------------
     def place_order(
         self,
         req: OrderRequest | Mapping[str, Any],
-        instrument_id_mapper: Optional[Callable[[str], int]] = None,
+        instrument_id_mapper: Callable[[str], int] | None = None,
     ) -> str:
         """Place an order and return the broker order ID."""
         order = (
@@ -117,7 +118,7 @@ class BrokerOrderExecutor:
     def _coerce_request(
         self,
         payload: Mapping[str, Any],
-        mapper_override: Optional[Callable[[str], int]] = None,
+        mapper_override: Callable[[str], int] | None = None,
     ) -> OrderRequest:
         data = dict(payload)
         token = data.get("instrument_id")

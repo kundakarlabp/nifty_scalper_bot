@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Dict, Mapping
 
 
 @dataclass(frozen=True)
@@ -11,7 +11,7 @@ class ScoreInfo:
     """Holds the total score and individual feature contributions."""
 
     total: float
-    items: Dict[str, float]
+    items: dict[str, float]
 
 
 def compute_score(
@@ -33,7 +33,7 @@ def compute_score(
         Total score and per-feature contributions, both rounded to 6 decimals.
     """
 
-    items: Dict[str, float] = {}
+    items: dict[str, float] = {}
     w_map = weights or {}
     f_map = features or {}
     for key, weight in w_map.items():

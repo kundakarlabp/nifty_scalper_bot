@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import csv
 import os
-from typing import Dict
 
 
-def log(tr: Dict[str, object]) -> None:
+def log(tr: dict[str, object]) -> None:
     """Append a trade record to ``trade_log.csv``."""
     fn = "trade_log.csv"
     hdr = [

@@ -8,13 +8,13 @@ import io
 import logging
 import os
 import zipfile
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, Iterator, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
-from zoneinfo import ZoneInfo
 
 from src.utils.expiry import last_tuesday_of_month
 
@@ -48,10 +48,10 @@ class InstrumentRegistry:
     ) -> None:
         self._source = Path(source) if source and _is_file_path(source) else source
         self._tz = tz or IST
-        self._contracts: Dict[Tuple[str, str, int, str], Contract] = {}
-        self._expiries: Dict[str, list[datetime]] = {}
-        self._lot_by_symbol: Dict[str, int] = {}
-        self._lot_by_symbol_expiry: Dict[Tuple[str, str], int] = {}
+        self._contracts: dict[tuple[str, str, int, str], Contract] = {}
+        self._expiries: dict[str, list[datetime]] = {}
+        self._lot_by_symbol: dict[str, int] = {}
+        self._lot_by_symbol_expiry: dict[tuple[str, str], int] = {}
         self._checksum: str | None = None
         self._last_refresh: datetime | None = None
 
@@ -101,7 +101,7 @@ class InstrumentRegistry:
             self._expiries[symbol] = deduped
 
         self._checksum = checksum
-        self._last_refresh = datetime.now(timezone.utc)
+        self._last_refresh = datetime.now(UTC)
 
     # ------------------------------------------------------------------
     def lookup(

@@ -7,12 +7,14 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any
 
 from flask import Flask, Response, request
 
-from src.diagnostics.metrics import metrics as core_metrics, runtime_metrics
+from src.diagnostics.metrics import metrics as core_metrics
+from src.diagnostics.metrics import runtime_metrics
 from src.strategies.runner import StrategyRunner
 from src.utils import ringlog
 from src.utils.freshness import compute as compute_freshness
@@ -21,16 +23,16 @@ app = Flask(__name__)
 log = logging.getLogger(__name__)
 
 # Filled by run(callback=...)
-_status_callback: Optional[Callable[[], Dict[str, Any]]] = None
+_status_callback: Callable[[], dict[str, Any]] | None = None
 _start_ts = time.time()
 
 _DEFAULT_DIAG_TAIL = 50
 
 
-def _resolve_last_tick_dt(ds: Any) -> Optional[datetime]:
+def _resolve_last_tick_dt(ds: Any) -> datetime | None:
     """Return the latest tick timestamp as ``datetime`` if available."""
 
-    last_tick_dt: Optional[datetime] = None
+    last_tick_dt: datetime | None = None
     tick_attr = getattr(ds, "last_tick_ts", None)
     if callable(tick_attr):
         try:
@@ -50,13 +52,13 @@ def _resolve_last_tick_dt(ds: Any) -> Optional[datetime]:
 
 
 @app.route("/live", methods=["GET"])
-def live() -> Tuple[Dict[str, Any], int]:
+def live() -> tuple[dict[str, Any], int]:
     """Liveness probe: returns 200 as long as the process is up."""
     return {"status": "live", "uptime_sec": int(time.time() - _start_ts)}, 200
 
 
 @app.route("/ready", methods=["GET"])
-def ready() -> Tuple[Dict[str, Any], int]:
+def ready() -> tuple[dict[str, Any], int]:
     """Readiness probe requiring broker session and fresh tick data."""
 
     runner = StrategyRunner.get_singleton()
@@ -84,7 +86,7 @@ def ready() -> Tuple[Dict[str, Any], int]:
         max_bar_lag_s=int(getattr(runner.strategy_cfg, "max_bar_lag_s", 75)),
     )
     watchdog = getattr(ds, "tick_watchdog", None)
-    red_details: Dict[str, Any] = {}
+    red_details: dict[str, Any] = {}
     red_flag = False
     if callable(watchdog):
         red_flag = bool(watchdog())
@@ -93,7 +95,7 @@ def ready() -> Tuple[Dict[str, Any], int]:
             if callable(details_fn):
                 red_details = details_fn()
     if not fresh.ok or red_flag:
-        resp: Dict[str, Any] = {
+        resp: dict[str, Any] = {
             "status": "down",
             "reason": "stale",
             "tick_lag_s": fresh.tick_lag_s,
@@ -106,12 +108,12 @@ def ready() -> Tuple[Dict[str, Any], int]:
 
 # Explicit HEAD route to avoid framework quirks on some platforms
 @app.route("/health", methods=["HEAD"])
-def health_head() -> Tuple[Response, int]:
+def health_head() -> tuple[Response, int]:
     """HEAD /health for ultra-cheap probe."""
     return Response(status=200), 200
 
 
-def _metrics_snapshot() -> Dict[str, Any]:
+def _metrics_snapshot() -> dict[str, Any]:
     """Return runtime metrics enriched with live trading data."""
     runner = StrategyRunner.get_singleton()
     if runner is not None:
@@ -154,8 +156,8 @@ def _prometheus_metrics() -> str:
             if last:
                 tick_age = (datetime.utcnow() - last).total_seconds()
             try:
-                api_h: Dict[str, Any] = getattr(ds, "api_health", lambda: {})()
-                quote_h: Dict[str, Any] = api_h.get("quote") or {}
+                api_h: dict[str, Any] = getattr(ds, "api_health", lambda: {})()
+                quote_h: dict[str, Any] = api_h.get("quote") or {}
                 state = str(quote_h.get("state", "CLOSED"))
                 breaker = {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}.get(state, 0)
             except Exception:
@@ -176,7 +178,7 @@ def _prometheus_metrics() -> str:
     return "\n".join(lines) + "\n"
 
 
-def _plan_summary(plan: Mapping[str, Any]) -> Dict[str, Any]:
+def _plan_summary(plan: Mapping[str, Any]) -> dict[str, Any]:
     """Return a compact plan summary guarding against missing keys."""
 
     opt_type = plan.get("option_type") or plan.get("ot") or "-"
@@ -219,7 +221,7 @@ def _plan_summary(plan: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _parse_tail_limit(raw: Optional[str]) -> Optional[int]:
+def _parse_tail_limit(raw: str | None) -> int | None:
     """Return sanitized tail limit from query params."""
 
     if raw is None:
@@ -237,7 +239,7 @@ def _parse_tail_limit(raw: Optional[str]) -> Optional[int]:
 
 
 @app.route("/health", methods=["GET"])
-def health_get() -> Tuple[Dict[str, Any], int]:
+def health_get() -> tuple[dict[str, Any], int]:
     """Return lightweight health status."""
     try:
         diag = _status_callback() if _status_callback else {}
@@ -260,13 +262,13 @@ def health_get() -> Tuple[Dict[str, Any], int]:
 
 
 @app.route("/diag/last", methods=["GET"])
-def diag_last() -> Tuple[Dict[str, Any], int]:
+def diag_last() -> tuple[dict[str, Any], int]:
     """Return the most recent diagnostics records from the structured log ring."""
 
     try:
         limit = _parse_tail_limit(request.args.get("limit"))
         records = ringlog.tail(None if limit is None else limit)
-        resp: Dict[str, Any] = {
+        resp: dict[str, Any] = {
             "ok": ringlog.enabled(),
             "limit": limit,
             "count": len(records),
@@ -280,7 +282,7 @@ def diag_last() -> Tuple[Dict[str, Any], int]:
 
 
 @app.route("/status", methods=["GET"])
-def status_get() -> Tuple[Dict[str, Any], int]:
+def status_get() -> tuple[dict[str, Any], int]:
     """Return extended status information."""
     try:
         diag = _status_callback() if _status_callback else {}
@@ -302,7 +304,7 @@ def status_get() -> Tuple[Dict[str, Any], int]:
 
 
 @app.route("/metrics", methods=["GET"])
-def metrics_get() -> Tuple[Response, int]:
+def metrics_get() -> tuple[Response, int]:
     """Return runtime execution metrics in Prometheus format."""
     try:
         text = _prometheus_metrics()
@@ -313,7 +315,7 @@ def metrics_get() -> Tuple[Response, int]:
 
 
 @app.route("/plan", methods=["GET"])
-def plan_get() -> Tuple[Dict[str, Any], int]:
+def plan_get() -> tuple[dict[str, Any], int]:
     """Expose the latest plan summary for quick diagnostics."""
 
     runner = StrategyRunner.get_singleton()
@@ -328,9 +330,9 @@ def plan_get() -> Tuple[Dict[str, Any], int]:
 
 
 def run(
-    callback: Optional[Callable[[], Dict[str, Any]]] = None,
-    host: Optional[str] = None,
-    port: Optional[int] = None,
+    callback: Callable[[], dict[str, Any]] | None = None,
+    host: str | None = None,
+    port: int | None = None,
 ) -> None:
     """
     Start the health server in the current thread.

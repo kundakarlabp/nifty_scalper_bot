@@ -18,7 +18,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
 
 from src.config import RiskSettings
 
@@ -38,9 +37,9 @@ class CooldownState:
         Timestamp of the last cool-down trigger, ``None`` if never triggered.
     """
 
-    active_until: Optional[datetime]
+    active_until: datetime | None
     severity: float
-    last_trigger: Optional[datetime]
+    last_trigger: datetime | None
 
 
 class LossCooldownManager:
@@ -55,8 +54,8 @@ class LossCooldownManager:
     def __init__(self, cfg: RiskSettings) -> None:
         self._cfg = cfg
         self._level: float = 0.0
-        self._active_until: Optional[datetime] = None
-        self._last_trigger: Optional[datetime] = None
+        self._active_until: datetime | None = None
+        self._last_trigger: datetime | None = None
 
     # ------------------------------------------------------------------
     # state helpers
@@ -123,7 +122,7 @@ class LossCooldownManager:
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def active_until(self, now: datetime) -> Optional[datetime]:
+    def active_until(self, now: datetime) -> datetime | None:
         """Return the current cool-down expiry if it is still active."""
 
         if self._active_until is None:
@@ -141,7 +140,7 @@ class LossCooldownManager:
         streak: int,
         day_loss: float,
         max_daily_loss: float | None,
-    ) -> Optional[datetime]:
+    ) -> datetime | None:
         """Update state after a trade and return the cool-down expiry.
 
         Parameters

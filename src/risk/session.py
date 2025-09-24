@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.config import RiskSettings, settings
 
@@ -32,8 +32,8 @@ class Trade:
     entry_time: datetime = field(default_factory=datetime.now)
 
     # Filled on close
-    exit_price: Optional[float] = None
-    exit_time: Optional[datetime] = None
+    exit_price: float | None = None
+    exit_time: datetime | None = None
     pnl: float = 0.0
     fees: float = 0.0
     net_pnl: float = 0.0
@@ -96,8 +96,8 @@ class TradingSession:
         self.lot_size = int(lot_size or settings.instruments.nifty_lot_size)
 
         # order_id -> Trade
-        self.active_trades: Dict[str, Trade] = {}
-        self.trade_history: List[Trade] = []
+        self.active_trades: dict[str, Trade] = {}
+        self.trade_history: list[Trade] = []
 
     # ---------------------------- trade flow ---------------------------- #
 
@@ -229,7 +229,7 @@ class TradingSession:
             return 0.0
 
     # Convenience status for UIs/Telegram if needed
-    def to_status_dict(self) -> Dict[str, Any]:
+    def to_status_dict(self) -> dict[str, Any]:
         return {
             "session_date": datetime.now().date().isoformat(),
             "account_size": self.current_equity,

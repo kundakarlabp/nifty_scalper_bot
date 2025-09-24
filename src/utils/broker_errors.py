@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Utilities for classifying broker error messages."""
 
-from typing import Any, Optional
+from typing import Any
 
 AUTH = "AUTH"
 THROTTLE = "THROTTLE"
@@ -41,7 +41,7 @@ _KEY_NETWORK = [
 ]
 
 
-def classify_broker_error(exc_or_msg: Any, status: Optional[int] = None) -> str:
+def classify_broker_error(exc_or_msg: Any, status: int | None = None) -> str:
     """Return a coarse classification for broker errors.
 
     Parameters

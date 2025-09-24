@@ -1,4 +1,3 @@
-# Path: src/main.py
 from __future__ import annotations
 
 import hashlib
@@ -8,18 +7,19 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, cast
+from typing import Any, cast
 
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.server.logging_utils import _setup_logging as _setup_logging_boot  # noqa: E402
 from src.server.logging_setup import log_event  # noqa: E402
+from src.server.logging_utils import _setup_logging as _setup_logging_boot  # noqa: E402
 
 _setup_logging = _setup_logging_boot
 _setup_logging_boot()
@@ -31,7 +31,7 @@ log_event(
     git_sha=os.getenv("GIT_SHA", "unknown"),
     build_id=os.getenv("RAILWAY_BUILD_ID", "unknown"),
     log_format=log_format_env or ("json" if log_json_env else "logfmt"),
-    started_at=datetime.now(timezone.utc).isoformat(),
+    started_at=datetime.now(UTC).isoformat(),
 )
 
 from src.boot.validate_env import (  # noqa: E402
@@ -45,7 +45,6 @@ import src.boot.synthetic_warmup  # noqa: E402,F401  # apply synthetic warmup pa
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
 from src.config import settings  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
-from src.diagnostics import healthkit  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
 from src.notifications.telegram_commands import TelegramCommands  # noqa: E402
 from src.server import health  # noqa: E402
@@ -81,7 +80,7 @@ class _NoopTelegram:
 # -----------------------------
 # KiteConnect Builder
 # -----------------------------
-def _build_kite_session() -> Optional["KiteConnect"]:
+def _build_kite_session() -> KiteConnect | None:
     log = logging.getLogger("main")
     if not settings.enable_live_trading:
         if not broker_connect_for_data():
@@ -331,7 +330,7 @@ def main() -> int:
     _wire_real_telegram(runner)
 
     # Telegram commands
-    cmd_listener: Optional[TelegramCommands] = None  # pragma: no cover
+    cmd_listener: TelegramCommands | None = None  # pragma: no cover
     if settings.telegram.bot_token and settings.telegram.chat_id:  # pragma: no cover
         cmd_listener = TelegramCommands(  # pragma: no cover
             settings.telegram.bot_token,  # pragma: no cover
@@ -381,7 +380,7 @@ def main() -> int:
                 ).values()
             )
             metrics.set_queue_depth(qd)
-            flow: Dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
+            flow: dict[str, Any] = getattr(runner, "get_last_flow_debug", lambda: {})()
             if isinstance(flow, dict):
                 # Keep loop quiet; Runner already emits hb/plan/decision in a controlled cadence.
                 log.debug("loop.eval")

@@ -10,15 +10,14 @@ the guard rails already enforced by the live configuration models.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Sequence, cast
+from typing import Any, cast
 
 import numpy as np
-
 from pydantic import ValidationError
 
-from src.config import settings
-from src.config import StrategySettings
+from src.config import StrategySettings, settings
 
 
 @dataclass(frozen=True)
@@ -37,7 +36,7 @@ class StrategyParameters:
     def from_settings(
         cls,
         strategy_settings: StrategySettings | None = None,
-    ) -> "StrategyParameters":
+    ) -> StrategyParameters:
         """Create a parameter set from an existing :class:`StrategySettings`."""
 
         cfg = strategy_settings or settings.strategy
@@ -52,12 +51,12 @@ class StrategyParameters:
         )
 
     @classmethod
-    def from_settings_model(cls, cfg: StrategySettings) -> "StrategyParameters":
+    def from_settings_model(cls, cfg: StrategySettings) -> StrategyParameters:
         """Alternate constructor for convenience inside validators."""
 
         return cls.from_settings(cfg)
 
-    def as_settings_update(self) -> Dict[str, float | int]:
+    def as_settings_update(self) -> dict[str, float | int]:
         """Return a dictionary that can update ``StrategySettings`` fields."""
 
         return {
@@ -137,7 +136,7 @@ class StrategyParameterSpace:
         cfg: Mapping[str, object] | None = None,
         *,
         base_settings: StrategySettings | None = None,
-    ) -> "StrategyParameterSpace":
+    ) -> StrategyParameterSpace:
         """Build a space using optional overrides from a config mapping."""
 
         base = base_settings or settings.strategy
@@ -187,12 +186,12 @@ class StrategyParameterSpace:
         self._rng = np.random.default_rng(seed)
 
     def sample(self) -> StrategyParameters:
-        candidate: Dict[str, float | int] = {}
+        candidate: dict[str, float | int] = {}
         for bound in self._bounds:
             val = bound.sample(self._rng)
             candidate[bound.name] = int(val) if bound.is_int else val
         return self.ensure_valid(
-            StrategyParameters(**cast(Dict[str, Any], candidate))
+            StrategyParameters(**cast(dict[str, Any], candidate))
         )
 
     def ensure_valid(self, params: StrategyParameters) -> StrategyParameters:
@@ -201,7 +200,7 @@ class StrategyParameterSpace:
         try:
             validated = StrategySettings(**data)
         except ValidationError:
-            clipped: Dict[str, float | int] = {}
+            clipped: dict[str, float | int] = {}
             for bound in self._bounds:
                 raw = getattr(params, bound.name)
                 val = float(np.clip(raw, bound.low, bound.high))
@@ -239,11 +238,11 @@ class StrategyParameterSpace:
                 if tp_bound is not None:
                     tp = min(max(tp, tp_bound.low), tp_bound.high)
                 clipped["atr_tp_multiplier"] = float(tp)
-            safe_kwargs: Dict[str, float | int] = {}
+            safe_kwargs: dict[str, float | int] = {}
             for bound in self._bounds:
                 val = clipped.get(bound.name, getattr(params, bound.name))
                 safe_kwargs[bound.name] = int(val) if bound.is_int else float(val)
-            safe = StrategyParameters(**cast(Dict[str, Any], safe_kwargs))
+            safe = StrategyParameters(**cast(dict[str, Any], safe_kwargs))
             data.update(safe.as_settings_update())
             validated = StrategySettings(**data)
         return StrategyParameters.from_settings(validated)
@@ -256,9 +255,9 @@ class StrategyParameterSpace:
         return np.asarray(values, dtype=float)
 
     def from_vector(self, vec: Iterable[float]) -> StrategyParameters:
-        values: Dict[str, float | int] = {}
-        for bound, frac in zip(self._bounds, vec):
+        values: dict[str, float | int] = {}
+        for bound, frac in zip(self._bounds, vec, strict=False):
             denorm = bound.denormalize(float(frac))
             values[bound.name] = int(denorm) if bound.is_int else denorm
-        return self.ensure_valid(StrategyParameters(**cast(Dict[str, Any], values)))
+        return self.ensure_valid(StrategyParameters(**cast(dict[str, Any], values)))
 

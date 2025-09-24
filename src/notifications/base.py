@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 
 class Notifier(ABC):
@@ -14,6 +14,6 @@ class Notifier(ABC):
         """Send a plain text message."""
         raise NotImplementedError
 
-    def send_json(self, payload: Dict[str, Any]) -> None:
+    def send_json(self, payload: dict[str, Any]) -> None:
         """Send a structured payload as a string representation."""
         self.send(str(payload))

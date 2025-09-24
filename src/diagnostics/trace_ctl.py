@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Optional
 
 _TRACE_ON = False
 _TRACE_UNTIL = 0.0
 
 
-def _resolve_ttl(ttl_sec: Optional[int]) -> int:
+def _resolve_ttl(ttl_sec: int | None) -> int:
     """Return a sane TTL using ``ttl_sec`` or environment defaults."""
 
     if ttl_sec is not None:
@@ -28,7 +27,7 @@ def _resolve_ttl(ttl_sec: Optional[int]) -> int:
     return 600
 
 
-def enable(ttl_sec: Optional[int] = None) -> None:
+def enable(ttl_sec: int | None = None) -> None:
     """Enable trace output until ``ttl_sec`` seconds from now."""
 
     global _TRACE_ON, _TRACE_UNTIL

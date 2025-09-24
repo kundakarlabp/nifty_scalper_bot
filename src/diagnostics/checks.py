@@ -8,30 +8,31 @@ implementation focuses on ``check_data_window`` and quote diagnostics.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
-
-import pandas as pd
+from collections.abc import Mapping
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.logs import structured_log
+import pandas as pd
+
 from src.diagnostics.registry import CheckResult, register
+from src.logs import structured_log
 from src.utils import ringlog
 
 
 def emit_quote_diag(
     *,
     token: int,
-    symbol: Optional[str] = None,
-    sub_mode: Optional[str] = None,
-    bid: Optional[float] = None,
-    ask: Optional[float] = None,
-    bid_qty: Optional[int] = None,
-    ask_qty: Optional[int] = None,
-    last_tick_age_ms: Optional[float] = None,
+    symbol: str | None = None,
+    sub_mode: str | None = None,
+    bid: float | None = None,
+    ask: float | None = None,
+    bid_qty: int | None = None,
+    ask_qty: int | None = None,
+    last_tick_age_ms: float | None = None,
     retries: int = 0,
     reason: str = "unknown",
-    source: Optional[str] = None,
-    extra: Optional[Mapping[str, Any]] = None,
+    source: str | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> None:
     """Emit a structured diagnostic record summarizing quote readiness."""
 
@@ -59,7 +60,7 @@ IST = ZoneInfo("Asia/Kolkata")
 TRACE_RING = ringlog
 
 # Map ``reason_block`` codes to human-readable descriptions used by diagnostics.
-REASON_MAP: Dict[str, str] = {
+REASON_MAP: dict[str, str] = {
     "cap_lt_one_lot": "premium cap too small for 1 lot",
 }
 
@@ -67,7 +68,7 @@ REASON_MAP: Dict[str, str] = {
 def _summary(**values: Any) -> str:
     """Render ``values`` as a compact ``key=value`` string."""
 
-    parts: List[str] = []
+    parts: list[str] = []
     for key, value in values.items():
         if value in {None, ""}:
             val = "-"
@@ -97,7 +98,7 @@ def _ok(
 ) -> CheckResult:
     """Helper to build a successful :class:`CheckResult`."""
 
-    payload: Dict[str, Any] = dict(details)
+    payload: dict[str, Any] = dict(details)
     summary_text = msg if summary is None else summary
     payload.setdefault("summary", str(summary_text))
     return CheckResult(name=name, ok=True, msg=msg, details=payload)
@@ -113,7 +114,7 @@ def _bad(
 ) -> CheckResult:
     """Helper to build a failed :class:`CheckResult`."""
 
-    payload: Dict[str, Any] = dict(details)
+    payload: dict[str, Any] = dict(details)
     summary_text = msg if summary is None else summary
     payload.setdefault("summary", str(summary_text))
     return CheckResult(name=name, ok=False, msg=msg, fix=fix, details=payload)
