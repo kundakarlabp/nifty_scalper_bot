@@ -219,7 +219,15 @@ class TelegramCommands:
 
         settings_obj = self.settings
         try:
-            cap_pct = float(getattr(settings_obj, "EXPOSURE_CAP_PCT", 0.0))
+            cap_pct = float(
+                getattr(
+                    settings_obj,
+                    "RISK__EXPOSURE_CAP_PCT",
+                    getattr(settings_obj, "EXPOSURE_CAP_PCT", 0.0),
+                )
+            )
+            if cap_pct <= 1.0:
+                cap_pct *= 100.0
         except Exception:
             cap_pct = 0.0
 

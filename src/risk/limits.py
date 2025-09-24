@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
-from src.config import settings
+from src.config import RISK__EXPOSURE_CAP_PCT, settings
 from src.logs import structured_log
 from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
 
@@ -687,7 +687,13 @@ class RiskEngine:
                     "cap": round(cap, 2),
                     "cap_abs": cap_abs_value,
                     "equity_cap_pct": round(
-                        float(getattr(settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.0)),
+                        float(
+                            getattr(
+                                settings,
+                                "RISK__EXPOSURE_CAP_PCT",
+                                RISK__EXPOSURE_CAP_PCT,
+                            )
+                        ),
                         4,
                     ),
                     "lots": int(lots),
