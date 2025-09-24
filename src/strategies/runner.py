@@ -44,6 +44,7 @@ from src.diagnostics.metrics import metrics, runtime_metrics, record_trade
 from src.execution.broker_executor import BrokerOrderExecutor
 from src.execution.micro_filters import evaluate_micro
 from src.logs import structured_log
+from src.diagnostics.checks import emit_tick_watchdog
 from src.execution.order_executor import OrderManager, OrderReconciler
 from src.state import StateStore
 from src.features.indicators import atr_pct
@@ -1361,6 +1362,14 @@ class StrategyRunner:
         if age_ms > watchdog_ms:
             detail.update({"ok": False, "reason": "stale_tick"})
             if self._lg.ok("watchdog.stale_tick"):
+                emit_tick_watchdog(
+                    status="alert",
+                    component="strategy_runner",
+                    source=type(self).__name__,
+                    reason="health",
+                    tick_age_ms=age_ms,
+                    threshold_ms=watchdog_ms,
+                )
                 self.log.warning(
                     "watchdog.stale_tick",
                     extra={"tick_age_ms": age_ms, "threshold_ms": watchdog_ms},
@@ -1442,6 +1451,18 @@ class StrategyRunner:
 
         if not tokens:
             return
+
+        emit_tick_watchdog(
+            status="nudge",
+            component="strategy_runner",
+            source=type(self).__name__,
+            reason="idle_tick",
+            tick_age_ms=now_ms - last_tick_ms,
+            threshold_ms=watchdog_ms,
+            poll_ms=poll_ms,
+            market_open=getattr(self, "market_open", False),
+            tokens=tokens,
+        )
 
         self._last_watchdog_run_ms = now_ms
         ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
