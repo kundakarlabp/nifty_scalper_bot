@@ -233,10 +233,11 @@ def _get_spot_ltp(kite: Optional[KiteConnect], symbol: str) -> Optional[float]:
 # -----------------------------------------------------------------------------
 def _infer_step(trade_symbol: str) -> int:
     """
-    Infer option strike step with overrides from configuration.
-
-    ``settings.instruments.strike_step`` wins when set; otherwise the
-    option-selector profile provides defaults (banknifty vs. fallback).
+    Infer option strike step. Override via settings.instruments.strike_step if present.
+    Defaults:
+      - NIFTY / FINNIFTY: 50
+      - BANKNIFTY: 100
+      - else: 50
     """
     inst = getattr(settings, "instruments", object())
     step = getattr(inst, "strike_step", None)
@@ -615,11 +616,16 @@ def get_instrument_tokens(
                         "NIFTY contract lot size mismatch", extra={"lot_size": lot_size}
                     )
                 if lot_size <= 0:
-                    logger.warning(
-                        "NIFTY lot size missing; defaulting to legacy 75",
-                        extra={"symbol": trade_symbol},
-                    )
                     lot_size = 75
+            else:
+                if lot_size <= 0:
+                    try:
+                        configured_lot = int(
+                            getattr(settings.instruments, "nifty_lot_size", 0)
+                        )
+                    except Exception:
+                        configured_lot = 0
+                    lot_size = configured_lot if configured_lot > 0 else 0
             if lot_size <= 0:
                 logger.warning(
                     "strike_selector: unable to resolve lot size",
