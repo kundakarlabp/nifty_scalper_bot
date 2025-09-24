@@ -117,10 +117,14 @@ def test_strategy_emits_score_and_block_events(monkeypatch: pytest.MonkeyPatch) 
         lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
     )
     monkeypatch.setattr(
-        "src.strategies.scalping_strategy.evaluate_micro",
-        lambda *args, **kwargs: {"spread_pct": 0.05, "depth_ok": True, "mode": "SOFT"},
+        "src.strategies.scalping_strategy.micro_check",
+        lambda *args, **kwargs: {
+            "spread_pct": 0.05,
+            "depth_ok": True,
+            "mode": "SOFT",
+            "cap_pct": 0.10,
+        },
     )
-    monkeypatch.setattr("src.strategies.scalping_strategy.cap_for_mid", lambda *args, **kwargs: 0.10)
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
     assert not plan.get("reason_block")

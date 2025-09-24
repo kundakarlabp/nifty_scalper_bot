@@ -22,9 +22,9 @@ def test_strategy_allows_clamped_min_atr(monkeypatch):
     monkeypatch.setattr(ss, "compute_atr", lambda *a, **k: pd.Series([0.06] * len(df), index=df.index))
 
     monkeypatch.setattr(ss, "fetch_quote_with_depth", lambda *args, **kwargs: {"bid": 100.0, "ask": 100.0})
-    monkeypatch.setattr(ss, "evaluate_micro", lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True})
+    monkeypatch.setattr(ss, "micro_check", lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True})
     monkeypatch.setattr(ss, "resolve_weekly_atm", lambda price: {"ce": ("SYMCE", 1), "pe": ("SYMPE", 1)})
-    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 0.0)
+    # cap handled via micro_check
     monkeypatch.setattr(ss, "select_strike", lambda price, score: ("SYM", 100))
     monkeypatch.setattr(ss, "detect_market_regime", lambda **k: SimpleNamespace(regime="TREND"))
     monkeypatch.setattr(ss, "compute_score", lambda df, regime, cfg: (1.0, None))
@@ -66,7 +66,7 @@ def test_strategy_allows_unbounded_atr_max(monkeypatch):
     monkeypatch.setattr(ss, "fetch_quote_with_depth", lambda *args, **kwargs: {"bid": 100.0, "ask": 100.0})
     monkeypatch.setattr(
         ss,
-        "evaluate_micro",
+        "micro_check",
         lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True},
     )
     monkeypatch.setattr(
@@ -74,7 +74,7 @@ def test_strategy_allows_unbounded_atr_max(monkeypatch):
         "resolve_weekly_atm",
         lambda price: {"ce": ("SYMCE", 1), "pe": ("SYMPE", 1)},
     )
-    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 0.0)
+    # cap handled via micro_check
     monkeypatch.setattr(ss, "select_strike", lambda price, score: ("SYM", 100))
     monkeypatch.setattr(ss, "detect_market_regime", lambda **k: SimpleNamespace(regime="TREND"))
     monkeypatch.setattr(ss, "compute_score", lambda df, regime, cfg: (1.0, None))
