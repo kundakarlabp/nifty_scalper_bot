@@ -5,6 +5,7 @@ import datetime as dt
 import logging
 import os
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -57,6 +58,12 @@ _warn_perm_once = False
 
 _hist_log_suppressor = LogSuppressor()
 _tick_log_suppressor = LogSuppressor(window_sec=180.0)
+
+
+def monotonic_ms() -> int:
+    """Return the current monotonic timestamp in milliseconds."""
+
+    return int(time.monotonic() * 1000.0)
 
 
 def _as_float(val: Any) -> float:
@@ -1003,6 +1010,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._quotes: dict[int, QuoteState] = {}
         self._full_depth_tokens: set[int] = set()
         self._stale_tokens: set[int] = set()
+        self._tick_lock = threading.Lock()
         self.settings = self._build_micro_settings()
         self._cache = _TTLCache(ttl_sec=4.0)
         self.cb_hist = CircuitBreaker("historical")
@@ -1010,10 +1018,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
+        # Monotonic timestamp (ms) for the most recent tick heartbeat.
+        self._last_tick_ts_ms: int | None = None
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
         self._ok_snap: dict[int, deque[float]] = {}
         # Tokens we have attempted to subscribe to via FULL depth.
         self._subscribed: set[int] = set()
+        # Track the highest subscription mode requested for each token.
+        self._subscribed_tokens: dict[int, str] = {}
         self._last_bar_open_ts = None
         self._tf_seconds = 60
         self._last_backfill: Optional[dt.datetime] = None
@@ -1079,6 +1091,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
     @last_tick_ts.setter
     def last_tick_ts(self, value: float | None) -> None:
         self._last_tick_epoch = value
+
+    def get_last_tick_age_ms(self) -> int | None:
+        """Return the age of the most recent tick heartbeat in milliseconds."""
+
+        with self._tick_lock:
+            ts_ms = self._last_tick_ts_ms
+        if ts_ms is None:
+            return None
+        return max(monotonic_ms() - int(ts_ms), 0)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1170,6 +1191,34 @@ class LiveKiteSource(DataSource, BaseDataSource):
         else:
             self.log.debug(event)
 
+    def subscribe(self, tokens: Sequence[int], mode: str | None = None) -> bool:
+        """Subscribe to ``tokens`` while tracking the requested mode."""
+
+        payload: list[int] = []
+        for token in tokens:
+            try:
+                token_i = int(token)
+            except Exception:
+                continue
+            if token_i <= 0:
+                continue
+            payload.append(token_i)
+        if not payload:
+            return False
+        success = _subscribe_tokens(self, payload, mode=mode)
+        if success:
+            mode_label = _normalize_mode(mode)
+            try:
+                self.log.info(
+                    "data.subscribe",
+                    extra={"mode": mode_label, "tokens": payload},
+                )
+            except Exception:
+                self.log.info(
+                    "data.subscribe mode=%s tokens=%s", mode_label, payload
+                )
+        return success
+
     def _subscribe_tokens_full(self, tokens: list[int]) -> None:
         if not tokens:
             return
@@ -1190,11 +1239,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 continue
             seen.add(token)
             ordered_payload.append(token)
-        if hasattr(self, "_subscribed"):
-            try:
-                self._subscribed.update(ordered_payload)
-            except Exception:
-                pass
+        _prepare_subscription_tokens(self, ordered_payload, "FULL", force=True)
         subscribed = False
         mode_applied = False
         candidates = [
@@ -1225,7 +1270,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             if subscribed and mode_applied:
                 break
         if not (subscribed and mode_applied):
-            _subscribe_tokens(self, ordered_payload)
+            _force_subscribe_tokens(self, ordered_payload)
         self.log.info("data.subscribe", extra={"mode": "FULL", "tokens": ordered_payload})
 
     def disconnect(self) -> None:
@@ -1337,8 +1382,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
             val = v.get("last_price")
             price = float(val) if isinstance(val, (int, float)) else None
             if price is not None:
-                self._last_tick_ts = datetime.utcnow()
-                self.last_tick_ts = time.time()
+                now_dt = datetime.utcnow()
+                now_epoch = time.time()
+                now_mono_ms = monotonic_ms()
+                with self._tick_lock:
+                    self._last_tick_ts = now_dt
+                    self.last_tick_ts = now_epoch
+                    self._last_tick_ts_ms = now_mono_ms
             return price
         except Exception as e:
             lat = int((time.monotonic() - t0) * 1000)
@@ -1426,10 +1476,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if isinstance(depth_raw, Mapping):
             payload["depth"] = depth_raw
 
-        self._option_quote_cache[token] = payload
-        if bid > 0.0 and ask > 0.0:
-            dq = self._ok_snap.setdefault(token, deque(maxlen=8))
-            dq.append(time.time())
+        now_ts = time.time()
+        with self._tick_lock:
+            self._option_quote_cache[token] = payload
+            if bid > 0.0 and ask > 0.0:
+                dq = self._ok_snap.setdefault(token, deque(maxlen=8))
+                dq.append(now_ts)
 
     def _on_tick(self, tick: Mapping[str, Any]) -> None:
         token_raw = tick.get("instrument_token") or tick.get("token")
@@ -1513,12 +1565,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
             spread_pct=spread_pct,
             has_depth=bool(has_depth),
         )
-        self._quotes[token] = state
-        self._stale_tokens.discard(token)
+        first_full_depth = False
+        with self._tick_lock:
+            existing_full = token in self._full_depth_tokens
+            self._quotes[token] = state
+            self._stale_tokens.discard(token)
+            if has_depth:
+                if not existing_full:
+                    first_full_depth = True
+                self._full_depth_tokens.add(token)
         if has_depth:
             force_trace = self._trace_force()
-            if token not in self._full_depth_tokens:
-                self._full_depth_tokens.add(token)
+            if first_full_depth:
                 key_ready = f"tick_full_ready:{token}"
                 if self._gate.should_emit(key_ready, force=force_trace):
                     self.log.debug(
@@ -1579,8 +1637,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 runner.on_market_tick()
             except Exception:
                 pass
-        self._last_tick_ts = datetime.utcnow()
-        self.last_tick_ts = time.time()
+        now_dt = datetime.utcnow()
+        now_epoch = time.time()
+        now_mono_ms = monotonic_ms()
+        with self._tick_lock:
+            self._last_tick_ts = now_dt
+            self.last_tick_ts = now_epoch
+            self._last_tick_ts_ms = now_mono_ms
         if self.hist_mode == "live_warmup" and self.bar_builder:
             try:
                 self.bar_builder.on_tick(tick)
@@ -1592,7 +1655,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             token_i = int(token)
         except Exception:
             token_i = token if isinstance(token, int) else 0
-        q = self._quotes.get(token_i)
+        with self._tick_lock:
+            q = self._quotes.get(token_i)
         if not q:
             return {
                 "stale": True,
@@ -1624,8 +1688,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
         spread_cap = float(getattr(self.settings, "SPREAD_MAX_PCT", 1.0))
         spread_ok = bool(q.spread_pct is not None and q.spread_pct <= spread_cap)
         if stale:
-            if token_i not in self._stale_tokens:
-                self._stale_tokens.add(token_i)
+            added = False
+            with self._tick_lock:
+                if token_i not in self._stale_tokens:
+                    self._stale_tokens.add(token_i)
+                    added = True
+            if added:
                 key = f"tick_stale:{token_i}"
                 if self._gate.should_emit(key, force=self._trace_force()):
                     self.log.debug(
@@ -1637,7 +1705,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         },
                     )
         else:
-            self._stale_tokens.discard(token_i)
+            with self._tick_lock:
+                self._stale_tokens.discard(token_i)
         return {
             "stale": stale,
             "age": round(age, 3),
@@ -1669,20 +1738,21 @@ class LiveKiteSource(DataSource, BaseDataSource):
             token_i = 0
         within = max(float(within_s), 0.0)
         needed = max(int(min_snapshots), 0)
-        dq = self._ok_snap.get(token_i) if token_i else None
+        with self._tick_lock:
+            dq_ref = self._ok_snap.get(token_i) if token_i else None
+            subscribed = token_i in self._subscribed if token_i else False
+        dq_list = list(dq_ref) if dq_ref else []
         now = time.time()
         recent = 0
-        last_ok_ts = None
-        if dq:
-            last_ok_ts = dq[-1] if dq else None
-            recent = sum(1 for ts in dq if (now - float(ts)) <= within)
-        subscribed = token_i in self._subscribed if token_i else False
+        last_ok_ts = dq_list[-1] if dq_list else None
+        if dq_list:
+            recent = sum(1 for ts in dq_list if (now - float(ts)) <= within)
         ready = subscribed and recent >= needed and needed > 0
         return {
             "token": token_i,
             "ready": bool(ready or (needed == 0 and subscribed)),
             "recent": int(recent),
-            "total": int(len(dq) if dq else 0),
+            "total": int(len(dq_list)),
             "needed": needed,
             "ttl_s": within,
             "subscribed": subscribed,
@@ -1758,7 +1828,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._subscribe_tokens_full(tokens)
         except Exception:
             try:
-                _subscribe_tokens(self, tokens, mode="FULL")
+                _force_subscribe_tokens(self, tokens, mode="FULL")
             except Exception:
                 self.log.debug("resubscribe_current.failed", exc_info=True)
 
@@ -1774,7 +1844,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             token_i = int(token)
         except Exception:
             return None
-        q = self._quotes.get(token_i)
+        with self._tick_lock:
+            q = self._quotes.get(token_i)
         if not q:
             return None
         age = max(time.time() - q.ts, 0.0)
@@ -1798,7 +1869,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             token_i = int(token)
         except Exception:
             return None, None, None, None, None
-        state = self._quotes.get(int(token_i))
+        with self._tick_lock:
+            state = self._quotes.get(token_i)
+        if not state or state.bid in {None, 0.0} or state.ask in {None, 0.0}:
+            seeded = self._seed_from_snapshot(token_i)
+            if seeded is not None:
+                state = seeded
         if not state:
             return None, None, None, None, None
         ts_ms = int(max(state.ts, 0.0) * 1000.0)
@@ -1810,15 +1886,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
         payload: Mapping[str, Any] | None,
         *,
         ts_ms: int | None = None,
-    ) -> None:
+    ) -> QuoteState | None:
         if payload is None:
-            return
+            return None
         try:
             token_i = int(token)
         except Exception:
-            return
+            return None
         if token_i <= 0:
-            return
+            return None
         bid = _as_float(payload.get("bid"))
         ask = _as_float(payload.get("ask"))
         bid_qty = _as_int(payload.get("bid_qty"))
@@ -1855,7 +1931,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             ref = (bid + ask) / 2.0
             spread_pct = abs(ask - bid) / max(ref, 1e-6) * 100.0
         has_depth = bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0
-        self._quotes[token_i] = QuoteState(
+        state = QuoteState(
             token=token_i,
             ts=float(ts_val) / 1000.0,
             monotonic_ts=time.monotonic(),
@@ -1866,6 +1942,30 @@ class LiveKiteSource(DataSource, BaseDataSource):
             spread_pct=spread_pct,
             has_depth=has_depth,
         )
+        with self._tick_lock:
+            self._quotes[token_i] = state
+            self._stale_tokens.discard(token_i)
+        return state
+
+    def _seed_from_snapshot(self, token: int | str) -> QuoteState | None:
+        """Seed the in-memory quote cache from the last snapshot payload."""
+
+        try:
+            token_i = int(token)
+        except Exception:
+            return None
+        if token_i <= 0:
+            return None
+        with self._tick_lock:
+            cached = self._option_quote_cache.get(token_i)
+            snapshot = dict(cached) if isinstance(cached, Mapping) else None
+        if not snapshot:
+            return None
+        ts_ms_val = snapshot.get("ts_ms")
+        ts_ms = int(ts_ms_val) if isinstance(ts_ms_val, int) else _to_epoch_ms(
+            snapshot.get("timestamp")
+        )
+        return self._update_quote_state_from_payload(token_i, snapshot, ts_ms=ts_ms)
 
     def ensure_quote_ready(
         self,
@@ -1936,15 +2036,41 @@ class LiveKiteSource(DataSource, BaseDataSource):
             ),
         )
 
-        def _state_status(state: QuoteState | None) -> QuoteReadyStatus | None:
-            if not state or state.bid is None or state.ask is None:
+        def _state_status() -> QuoteReadyStatus | None:
+            state: QuoteState | None
+            source_hint: str | None = None
+            with self._tick_lock:
+                state = self._quotes.get(token_i)
+            if (
+                state is None
+                or state.bid is None
+                or state.bid == 0.0
+                or state.ask is None
+                or state.ask == 0.0
+            ):
+                seeded = self._seed_from_snapshot(token_i)
+                if seeded is not None:
+                    state = seeded
+                    source_hint = "snapshot"
+            else:
+                source_hint = "live"
+            if (
+                state is None
+                or state.bid is None
+                or state.bid == 0.0
+                or state.ask is None
+                or state.ask == 0.0
+            ):
                 return None
+            bid = cast(float, state.bid)
+            ask = cast(float, state.ask)
             mono = getattr(state, "monotonic_ts", None)
+            age_ms: int
             if mono is not None:
-                age_ms = int(max(0.0, (time.monotonic() - float(mono)) * 1000.0))
+                age_ms = int(max(monotonic_ms() - int(float(mono) * 1000.0), 0))
             else:
                 age_ms = int(max(0.0, (time.time() - float(state.ts)) * 1000.0))
-            ok = age_ms <= stale_ms and state.bid > 0 and state.ask > 0
+            ok = age_ms <= stale_ms and bid > 0 and ask > 0
             reason = "ready" if ok else "stale_quote"
             return QuoteReadyStatus(
                 ok=ok,
@@ -1954,7 +2080,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 bid_qty=state.bid_qty,
                 ask_qty=state.ask_qty,
                 last_tick_age_ms=age_ms,
-                source=mode_norm,
+                source=source_hint or mode_norm,
             )
 
         ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
@@ -1978,7 +2104,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:
                 self.log.debug("ensure_quote_ready.subscribe_failed", exc_info=True)
 
-            state_status = _state_status(self._quotes.get(token_i))
+            state_status = _state_status()
             if state_status is not None:
                 status = state_status
                 if status.last_tick_age_ms is not None and status.last_tick_age_ms > stale_ms:
@@ -1988,7 +2114,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         self.log.debug("ensure_quote_ready.resubscribe_failed", exc_info=True)
             if status.ok:
                 status.retries = attempt
-                self._last_quote_ready_attempt[token_i] = time.time()
+                self._last_quote_ready_attempt[token_i] = time.monotonic()
                 emit_quote_diag(
                     token=token_i,
                     symbol=symbol,
@@ -2017,12 +2143,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         self.log.debug("ensure_quote_ready.snapshot_failed", exc_info=True)
                     snapshot_taken = True
                     time.sleep(0.1)
-                state_status = _state_status(self._quotes.get(token_i))
+                state_status = _state_status()
                 if state_status is not None:
                     status = state_status
                 if status.ok:
                     status.retries = attempt
-                    self._last_quote_ready_attempt[token_i] = time.time()
+                    self._last_quote_ready_attempt[token_i] = time.monotonic()
                     emit_quote_diag(
                         token=token_i,
                         symbol=symbol,
@@ -2052,9 +2178,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.resubscribe_if_stale(token_i)
             except Exception:
                 self.log.debug("ensure_quote_ready.resubscribe_failed", exc_info=True)
-        status.source = mode_norm
+        status.source = status.source or mode_norm
         status.reason = status.reason or "no_quote"
-        self._last_quote_ready_attempt[token_i] = time.time()
+        self._last_quote_ready_attempt[token_i] = time.monotonic()
         emit_quote_diag(
             token=token_i,
             symbol=symbol,
@@ -2079,29 +2205,38 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return
         if token_i <= 0:
             return
-        state = self._quotes.get(token_i)
+        with self._tick_lock:
+            state = self._quotes.get(token_i)
         stale_ms = int(
             getattr(settings, "MICRO__STALE_MS", getattr(_cfg, "MICRO__STALE_MS", 1500))
         )
-        now = time.time()
+        now_mono = time.monotonic()
+        now_wall = time.time()
         age_ms: float | None = None
+        if state is None or state.bid in {None, 0.0} or state.ask in {None, 0.0}:
+            state = self._seed_from_snapshot(token_i)
         if state is not None:
             mono = getattr(state, "monotonic_ts", None)
             if mono is not None:
-                age_ms = (time.monotonic() - float(mono)) * 1000.0
+                age_ms = max((now_mono - float(mono)) * 1000.0, 0.0)
             else:
-                age_ms = (now - float(state.ts)) * 1000.0
-            if age_ms <= stale_ms:
+                age_ms = max((now_wall - float(state.ts)) * 1000.0, 0.0)
+            if (
+                age_ms is not None
+                and age_ms <= stale_ms
+                and state.bid not in {None, 0.0}
+                and state.ask not in {None, 0.0}
+            ):
                 return
         last = self._last_quote_ready_attempt.get(token_i, 0.0)
-        if now - last < 0.5:
+        if now_mono - float(last) < 0.5:
             return
         ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
         try:
             if callable(ensure_subscribe):
-                ensure_subscribe(token_i, mode="FULL")
+                ensure_subscribe(token_i, mode="FULL", force=True)
             else:
-                _subscribe_tokens(self, [token_i], mode="FULL")
+                _force_subscribe_tokens(self, [token_i], mode="FULL")
             try:
                 structured_log.event(
                     "ws_resubscribe",
@@ -2111,7 +2246,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
             except Exception:
                 self.log.debug("resubscribe_if_stale.log_failed", exc_info=True)
-            self._last_quote_ready_attempt[token_i] = now
+            self._last_quote_ready_attempt[token_i] = now_mono
         except Exception:
             self.log.debug("resubscribe_if_stale.ensure_failed", exc_info=True)
 
@@ -2849,8 +2984,77 @@ def _to_date(val: Any) -> dt.date:
     return dt.datetime.strptime(str(val), "%Y-%m-%d").date()
 
 
+def _normalize_mode(mode: str | None) -> str:
+    if mode is None:
+        return "FULL"
+    text = str(mode).strip()
+    return text.upper() if text else "FULL"
+
+
+def _mode_rank(mode: str | None) -> int:
+    normalized = _normalize_mode(mode)
+    if normalized in {"FULL", "DEPTH"}:
+        return 2
+    if normalized in {"QUOTE", "LTP"}:
+        return 1
+    return 0
+
+
+def _prepare_subscription_tokens_unlocked(
+    obj: Any, tokens: list[int], mode: str, *, force: bool
+) -> list[int]:
+    try:
+        subscribed = getattr(obj, "_subscribed")
+        if isinstance(subscribed, set):
+            subscribed.update(tokens)
+    except Exception:
+        pass
+    store = getattr(obj, "_subscribed_tokens", None)
+    if not isinstance(store, dict):
+        if hasattr(obj, "_subscribed_tokens"):
+            try:
+                setattr(obj, "_subscribed_tokens", {tok: mode for tok in tokens})
+            except Exception:
+                pass
+        return list(tokens)
+    rank_new = _mode_rank(mode)
+    filtered: list[int] = []
+    for token in tokens:
+        prev = store.get(token)
+        prev_rank = _mode_rank(prev) if prev is not None else -1
+        if force:
+            if prev is None or rank_new >= prev_rank:
+                store[token] = mode
+            else:
+                store[token] = prev
+            filtered.append(token)
+            continue
+        if prev is None:
+            store[token] = mode
+            filtered.append(token)
+            continue
+        if rank_new > prev_rank:
+            store[token] = mode
+            filtered.append(token)
+    return filtered
+
+
+def _prepare_subscription_tokens(
+    obj: Any, tokens: list[int], mode: str, *, force: bool
+) -> list[int]:
+    lock = getattr(obj, "_tick_lock", None)
+    if lock is not None and hasattr(lock, "__enter__"):
+        try:
+            with lock:
+                return _prepare_subscription_tokens_unlocked(obj, tokens, mode, force=force)
+        except RuntimeError:
+            # Lock already held; fall back to unlocked path
+            pass
+    return _prepare_subscription_tokens_unlocked(obj, tokens, mode, force=force)
+
+
 def _subscribe_tokens(
-    obj: Any, tokens: list[int], *, mode: str | None = None
+    obj: Any, tokens: list[int], *, mode: str | None = None, force: bool = False
 ) -> bool:
     if not tokens:
         return False
@@ -2858,11 +3062,14 @@ def _subscribe_tokens(
     if not seen:
         return False
     payload = list(seen)
-    if hasattr(obj, "_subscribed"):
-        try:
-            obj._subscribed.update(payload)
-        except Exception:
-            pass
+    normalized_mode = _normalize_mode(mode)
+    payload = _prepare_subscription_tokens(
+        obj, payload, normalized_mode, force=force
+    )
+    if not payload and not force:
+        return True
+    if not payload:
+        return False
 
     def _iter_targets(source: Any) -> list[Any]:
         targets: list[Any] = []
@@ -2887,6 +3094,12 @@ def _subscribe_tokens(
 
     for target in _iter_targets(obj):
         for name in ("subscribe_tokens", "subscribe", "subscribe_l1"):
+            if (
+                name == "subscribe"
+                and target is obj
+                and hasattr(target, "_subscribed_tokens")
+            ):
+                continue
             fn = getattr(target, name, None)
             if callable(fn):
                 try:
@@ -2926,18 +3139,29 @@ def _subscribe_tokens(
         return True
 
     broker = getattr(obj, "broker", None)
-    if broker and _subscribe_tokens(broker, tokens, mode=mode):
+    if broker and _subscribe_tokens(broker, tokens, mode=mode, force=force):
         return True
 
     kite = getattr(obj, "kite", None)
-    if kite and _subscribe_tokens(kite, tokens, mode=mode):
+    if kite and _subscribe_tokens(kite, tokens, mode=mode, force=force):
         return True
 
     return False
 
 
+def _force_subscribe_tokens(
+    obj: Any, tokens: list[int], *, mode: str | None = None
+) -> bool:
+    try:
+        return _subscribe_tokens(obj, tokens, mode=mode, force=True)
+    except TypeError as exc:
+        if "force" not in str(exc):
+            raise
+        return _subscribe_tokens(obj, tokens, mode=mode)
+
+
 def ensure_token_subscribed(
-    self: Any, token: int | str, *, mode: str | None = None
+    self: Any, token: int | str, *, mode: str | None = None, force: bool = False
 ) -> bool:
     """Ensure ``token`` is subscribed via the underlying broker."""
 
@@ -2949,7 +3173,11 @@ def ensure_token_subscribed(
     if token_i <= 0:
         return False
 
-    if _subscribe_tokens(self, [token_i], mode=mode):
+    if force:
+        success = _force_subscribe_tokens(self, [token_i], mode=mode)
+    else:
+        success = _subscribe_tokens(self, [token_i], mode=mode)
+    if success:
         if hasattr(self, "_subscribed"):
             try:
                 self._subscribed.add(token_i)
@@ -2958,13 +3186,18 @@ def ensure_token_subscribed(
         return True
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
-    if broker and _subscribe_tokens(broker, [token_i], mode=mode):
-        if hasattr(self, "_subscribed"):
-            try:
-                self._subscribed.add(token_i)
-            except Exception:
-                pass
-        return True
+    if broker:
+        if force:
+            broker_success = _force_subscribe_tokens(broker, [token_i], mode=mode)
+        else:
+            broker_success = _subscribe_tokens(broker, [token_i], mode=mode)
+        if broker_success:
+            if hasattr(self, "_subscribed"):
+                try:
+                    self._subscribed.add(token_i)
+                except Exception:
+                    pass
+            return True
     return False
 
 
@@ -3086,7 +3319,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     if callable(subscribe_full):
         subscribe_full(tokens)
     else:
-        _subscribe_tokens(self, tokens)
+        _force_subscribe_tokens(self, tokens)
     if hasattr(logger, "info"):
         try:
             logger.info(
@@ -3104,7 +3337,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
         if callable(subscribe_full):
             subscribe_full(missing)
         else:
-            _subscribe_tokens(self, missing)
+            _force_subscribe_tokens(self, missing)
         time.sleep(0.1)
 
 
@@ -3140,7 +3373,7 @@ def auto_resubscribe_atm(self: Any) -> None:
         except Exception:
             subscribed = False
     if not subscribed:
-        subscribed = _subscribe_tokens(self, missing)
+        subscribed = _force_subscribe_tokens(self, missing)
     if subscribed:
         log.info("auto_resubscribe_atm: resubscribed tokens=%s", missing)
     else:
