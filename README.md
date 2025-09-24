@@ -56,7 +56,7 @@ nifty_scalper_bot/
    pip install -r requirements.txt
    ```
 
-3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Zerodha API key/secret, a short‑lived access token and your Telegram bot token/ID.
+3. **Create a `.env` file** based on `.env.example` and populate the required fields.  At a minimum you will need your Kite API key/secret, a short‑lived access token and your Telegram bot token/ID.
 
    Pydantic stores validation artifacts under
    `~/.config/pydantic/settings/nifty_scalper_bot` by default.  Ensure this
@@ -150,7 +150,7 @@ The per-trade premium cap can be driven by equity or a fixed rupee limit:
 EXPOSURE_CAP_SOURCE=equity
 EXPOSURE_CAP_PCT=40              # ₹100k equity ⇒ ₹40k cap
 EXPOSURE_CAP_ABS=0               # disable absolute fallback cap
-RISK__MAX_POSITION_SIZE_PCT=0.40  # per-trade cap tied to equity
+RISK__MAX_POSITION_SIZE_PCT=0.02  # per-trade cap tied to equity
 # Enabled by default; set to false to disable the single-lot premium override
 RISK__ALLOW_MIN_ONE_LOT=true
 

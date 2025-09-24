@@ -1060,6 +1060,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._atm_reconnect_hook_set = False
         self._last_quote_ready_attempt: dict[int, float] = {}
         self._resubscribe_failures: int = 0
+        self._last_force_reconnect_ts: float = 0.0
 
     def _build_micro_settings(self) -> SimpleNamespace:
         try:
@@ -1342,6 +1343,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     attempt=attempt,
                     extra=payload_ctx,
                 )
+                try:
+                    self._replay_atm_after_reconnect()
+                except Exception:
+                    self.log.debug(
+                        "data.replay_tokens_post_reconnect_failed", exc_info=True
+                    )
                 break
 
     def reconnect_ws(
@@ -1925,6 +1932,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
         failure_count = self._resubscribe_failures
         if failure_count >= 3:
             context = {"failures": failure_count, "tokens": list(tokens)}
+            now = time.time()
+            min_gap = 15.0
+            elapsed = now - getattr(self, "_last_force_reconnect_ts", 0.0)
+            if elapsed < min_gap:
+                context["wait_s"] = round(min_gap - elapsed, 3)
+                self.log.info(
+                    "resubscribe_current.reconnect_debounce", extra=context
+                )
+                return
+            self._last_force_reconnect_ts = now
             self.log.warning("resubscribe_current.force_reconnect", extra=context)
             try:
                 self.reconnect_with_backoff(
@@ -1935,6 +1952,50 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.log.error("resubscribe_current.reconnect_failed", exc_info=True)
             finally:
                 self._resubscribe_failures = 0
+
+    def _replay_atm_after_reconnect(self) -> None:
+        """Replay current ATM subscriptions and log the active tokens."""
+
+        atm = getattr(self, "atm_tokens", ()) or ()
+        tokens: list[int] = []
+        for tok in atm:
+            if tok is None:
+                continue
+            try:
+                tok_int = int(tok)
+            except Exception:
+                continue
+            if tok_int > 0 and tok_int not in tokens:
+                tokens.append(tok_int)
+
+        strike = getattr(self, "current_atm_strike", None)
+        expiry = getattr(self, "current_atm_expiry", None)
+        context: dict[str, object] = {"tokens": tokens}
+        if strike:
+            try:
+                context["strike"] = int(strike)
+            except Exception:
+                context["strike"] = strike
+        if expiry:
+            try:
+                context["expiry"] = expiry.isoformat()
+            except Exception:
+                context["expiry"] = str(expiry)
+
+        if not tokens:
+            self.log.info("data.replay_tokens", extra=context)
+            return
+
+        try:
+            self._subscribe_tokens_full(tokens)
+        except Exception:
+            try:
+                _force_subscribe_tokens(self, tokens, mode="FULL")
+            except Exception:
+                self.log.debug("data.replay_tokens_failed", exc_info=True)
+                return
+
+        self.log.info("data.replay_tokens", extra=context)
 
     def get_last_tick_ts(self) -> float | None:
         """Return epoch seconds for the last processed tick."""

@@ -13,11 +13,11 @@ def _reload_validate_env():
     return importlib.reload(validate_env)
 
 
-def test_runtime_env_accepts_legacy_zerodha_env_names(monkeypatch):
+def test_runtime_env_accepts_kite_env_names(monkeypatch):
     env = {
-        "ZERODHA_API_KEY": "key",
-        "ZERODHA_API_SECRET": "secret",
-        "ZERODHA_ACCESS_TOKEN": "token",
+        "KITE_API_KEY": "key",
+        "KITE_API_SECRET": "secret",
+        "KITE_ACCESS_TOKEN": "token",
         "ENABLE_LIVE_TRADING": "true",
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "123",

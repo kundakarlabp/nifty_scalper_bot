@@ -1,5 +1,6 @@
-import pytest
 from datetime import datetime, timedelta
+
+import pytest
 
 from src import main as main_mod
 from src.config import settings
@@ -8,11 +9,11 @@ from src.strategies.runner import StrategyRunner
 
 def _prep_live_env(monkeypatch):
     if not (
-        settings.zerodha.api_key
-        and settings.zerodha.api_secret
-        and settings.zerodha.access_token
+        settings.kite.api_key
+        and settings.kite.api_secret
+        and settings.kite.access_token
     ):
-        pytest.skip("Zerodha credentials not provided")
+        pytest.skip("Kite credentials not provided")
 
     monkeypatch.setattr(settings, "enable_live_trading", True)
     monkeypatch.setattr(settings.telegram, "bot_token", "x")

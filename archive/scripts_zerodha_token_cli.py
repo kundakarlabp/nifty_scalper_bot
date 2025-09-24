@@ -35,7 +35,7 @@ except Exception as e:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--env", default=".env", help="Path to .env file (default: ./.env)")
-    ap.add_argument("--write-env", action="store_true", help="Write ZERODHA__ACCESS_TOKEN into .env")
+    ap.add_argument("--write-env", action="store_true", help="Write KITE_ACCESS_TOKEN into .env")
     ap.add_argument("--request-token", help="Provide request_token non-interactively")
     ap.add_argument("--open", action="store_true", help="Open login URL in a browser")
     args = ap.parse_args()
@@ -44,8 +44,8 @@ def main() -> None:
     if env_path.exists():
         load_dotenv(env_path)
 
-    api_key = os.getenv("ZERODHA__API_KEY") or input("ZERODHA__API_KEY: ").strip()
-    api_secret = os.getenv("ZERODHA__API_SECRET") or getpass("ZERODHA__API_SECRET (hidden): ").strip()
+    api_key = os.getenv("KITE_API_KEY") or input("KITE_API_KEY: ").strip()
+    api_secret = os.getenv("KITE_API_SECRET") or getpass("KITE_API_SECRET (hidden): ").strip()
 
     kite = KiteConnect(api_key=api_key)
     login_url = kite.login_url()
@@ -75,10 +75,10 @@ def main() -> None:
         lines = []
         if env_path.exists():
             lines = env_path.read_text().splitlines()
-            lines = [ln for ln in lines if not ln.startswith("ZERODHA__ACCESS_TOKEN=")]
-        lines.append(f"ZERODHA__ACCESS_TOKEN={access_token}")
+            lines = [ln for ln in lines if not ln.startswith("KITE_ACCESS_TOKEN=")]
+        lines.append(f"KITE_ACCESS_TOKEN={access_token}")
         env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"\nWrote ZERODHA__ACCESS_TOKEN to {env_path}")
+        print(f"\nWrote KITE_ACCESS_TOKEN to {env_path}")
 
 if __name__ == "__main__":
     main()

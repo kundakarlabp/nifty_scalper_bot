@@ -27,9 +27,9 @@ from src.data.types import HistResult, HistStatus
 def test_load_from_env():
     """Tests that settings are correctly loaded from environment variables."""
     test_env = {
-        "ZERODHA__API_KEY": "test_key",
-        "ZERODHA__API_SECRET": "test_secret",
-        "ZERODHA__ACCESS_TOKEN": "test_token",
+        "KITE_API_KEY": "test_key",
+        "KITE_API_SECRET": "test_secret",
+        "KITE_ACCESS_TOKEN": "test_token",
         "TELEGRAM__BOT_TOKEN": "test_bot_token",
         "TELEGRAM__CHAT_ID": "12345",
         "RISK__MAX_DAILY_DRAWDOWN_PCT": "0.1",
@@ -39,9 +39,9 @@ def test_load_from_env():
         "QUOTE_WARMUP_TRIES": "3",
         "QUOTE_WARMUP_SLEEP_MS": "250",
     }
-    with mock.patch.dict(os.environ, test_env):
-        settings = AppSettings()
-        assert settings.zerodha.api_key == "test_key"
+    with mock.patch.dict(os.environ, test_env, clear=True):
+        settings = AppSettings(_env_file=None)
+        assert settings.kite.api_key == "test_key"
         assert settings.telegram.chat_id == 12345
         assert settings.risk.max_daily_drawdown_pct == 0.1
         assert settings.risk.risk_per_trade == 0.02
@@ -66,9 +66,9 @@ def test_default_values():
     """Tests that default values are used when environment variables are not set."""
     # Ensure these are not in the environment
     test_env = {
-        "ZERODHA__API_KEY": "test_key",
-        "ZERODHA__API_SECRET": "test_secret",
-        "ZERODHA__ACCESS_TOKEN": "test_token",
+        "KITE_API_KEY": "test_key",
+        "KITE_API_SECRET": "test_secret",
+        "KITE_ACCESS_TOKEN": "test_token",
         "TELEGRAM__BOT_TOKEN": "test_bot_token",
         "TELEGRAM__CHAT_ID": "12345",
     }
@@ -86,12 +86,12 @@ def test_default_values():
         assert settings.strategy.rr_threshold == 1.5  # Default risk-reward threshold
         assert settings.EXPOSURE_BASIS == "premium"
         assert settings.EXPOSURE_CAP_SOURCE == "equity"
-        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.40
-        assert settings.RISK__EXPOSURE_CAP_PCT == pytest.approx(0.40)
+        assert settings.EXPOSURE_CAP_PCT_OF_EQUITY == 0.02
+        assert settings.RISK__EXPOSURE_CAP_PCT == pytest.approx(0.02)
         assert settings.PREMIUM_CAP_PER_TRADE == 10000.0
         assert settings.risk.exposure_basis == "premium"
         assert settings.risk.exposure_cap_source == "equity"
-        assert settings.risk.exposure_cap_pct_of_equity == 0.40
+        assert settings.risk.exposure_cap_pct_of_equity == 0.02
         assert settings.risk.premium_cap_per_trade == 10000.0
         assert settings.risk.allow_min_one_lot is True
         assert settings.cadence_min_interval_s == pytest.approx(0.3)
@@ -103,9 +103,9 @@ def test_default_values():
 
 def test_exposure_env_overrides():
     env = {
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "1",
         "RISK__EXPOSURE_BASIS": "underlying",
@@ -129,9 +129,9 @@ def test_exposure_env_overrides():
 
 def test_risk_exposure_cap_envs(monkeypatch):
     env = {
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "1",
         "RISK__EXPOSURE_CAP_PCT": "55",
@@ -182,9 +182,9 @@ def test_load_settings_creates_validation_dir(tmp_path, monkeypatch):
 def test_telegram_disabled_without_creds():
     """Telegram should auto-disable when credentials are missing."""
     env = {
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
@@ -203,9 +203,9 @@ def test_legacy_env_names_supported():
     }
     with mock.patch.dict(os.environ, env, clear=True):
         settings = AppSettings(_env_file=None)
-        assert settings.zerodha.api_key == "old_key"
-        assert settings.zerodha.api_secret == "old_secret"
-        assert settings.zerodha.access_token == "old_token"
+        assert settings.kite.api_key == "old_key"
+        assert settings.kite.api_secret == "old_secret"
+        assert settings.kite.access_token == "old_token"
         assert settings.telegram.bot_token == "old_bot"
         assert settings.telegram.chat_id == 12345
 
@@ -223,9 +223,9 @@ def test_warmup_bars_env():
 
 def test_cadence_env_overrides() -> None:
     env = {
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "1",
         "CADENCE_MIN_INTERVAL_S": "0.2",
@@ -241,9 +241,9 @@ def test_cadence_env_overrides() -> None:
 
 def test_cadence_min_not_greater_than_max() -> None:
     env = {
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "bot",
         "TELEGRAM__CHAT_ID": "1",
         "CADENCE_MIN_INTERVAL_S": "2.0",
@@ -280,9 +280,9 @@ def test_portfolio_reads_alias():
 def test_enable_trading_alias():
     env = {
         "ENABLE_TRADING": "true",
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "1",
     }
@@ -315,8 +315,8 @@ def test_skip_broker_validation_allows_missing_creds(caplog):
     assert any("SKIP_BROKER_VALIDATION" in r.message for r in caplog.records)
 
 
-def test_zerodha_creds_required_when_live():
-    """Zerodha credentials must be present when live trading is enabled."""
+def test_kite_creds_required_when_live():
+    """Kite credentials must be present when live trading is enabled."""
     env = {
         "ENABLE_LIVE_TRADING": "true",
         "SKIP_BROKER_VALIDATION": "false",
@@ -336,11 +336,11 @@ def test_zerodha_creds_required_when_live():
             with pytest.raises(ValueError) as exc:
                 validate_env.validate_critical_settings()
     msg = str(exc.value)
-    assert "ZERODHA__API_KEY" in msg and "KITE_API_KEY" in msg
+    assert "KITE_API_KEY" in msg and "KITE_ACCESS_TOKEN" in msg
 
 
-def test_zerodha_creds_optional_when_paper():
-    """Zerodha credentials are not required in paper trading mode."""
+def test_kite_creds_optional_when_paper():
+    """Kite credentials are not required in paper trading mode."""
     env = {
         "ENABLE_LIVE_TRADING": "false",
         "TELEGRAM__BOT_TOKEN": "bot",
@@ -376,9 +376,9 @@ def test_invalid_instrument_token_detected(monkeypatch):
     env = {
         "ENABLE_LIVE_TRADING": "true",
         "SKIP_BROKER_VALIDATION": "false",
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "123",
     }
@@ -441,9 +441,9 @@ def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
 
     env = {
         "ENABLE_LIVE_TRADING": "true",
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "123",
         "INSTRUMENTS__INSTRUMENT_TOKEN": "111",
@@ -540,9 +540,9 @@ def test_lookback_less_than_min_bars():
 def test_instrument_token_validation_skips_on_network_error(monkeypatch):
     env = {
         "ENABLE_LIVE_TRADING": "true",
-        "ZERODHA__API_KEY": "k",
-        "ZERODHA__API_SECRET": "s",
-        "ZERODHA__ACCESS_TOKEN": "t",
+        "KITE_API_KEY": "k",
+        "KITE_API_SECRET": "s",
+        "KITE_ACCESS_TOKEN": "t",
         "TELEGRAM__BOT_TOKEN": "b",
         "TELEGRAM__CHAT_ID": "123",
         "INSTRUMENTS__INSTRUMENT_TOKEN": "111",

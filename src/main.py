@@ -92,10 +92,10 @@ def _build_kite_session() -> Optional["KiteConnect"]:
     if KiteConnect is None:
         raise RuntimeError("ENABLE_LIVE_TRADING=true but kiteconnect not installed.")
 
-    api_key = settings.zerodha.api_key
-    access_token = settings.zerodha.access_token
+    api_key = settings.kite.api_key
+    access_token = settings.kite.access_token
     if not api_key or not access_token:
-        raise RuntimeError("Missing Zerodha credentials for broker data.")
+        raise RuntimeError("Missing Kite credentials for broker data.")
 
     kite = KiteConnect(api_key=str(api_key))
     kite.set_access_token(str(access_token))

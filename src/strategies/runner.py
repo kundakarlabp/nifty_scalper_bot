@@ -769,9 +769,9 @@ class StrategyRunner:
         self._last_micro_ok_ts: float | None = None
         self._last_micro_ok: dict[str, Any] | None = None
         try:
-            self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "2000"))
+            self._tick_watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "180000"))
         except (TypeError, ValueError):
-            self._tick_watchdog_ms = 2000
+            self._tick_watchdog_ms = 180000
         if self._tick_watchdog_ms < 0:
             self._tick_watchdog_ms = 0
         try:
@@ -1456,9 +1456,9 @@ class StrategyRunner:
         if ds is None:
             return True, detail
         try:
-            watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "45000"))
+            watchdog_ms = int(os.getenv("TICK_WATCHDOG_MS", "180000"))
         except (TypeError, ValueError):
-            watchdog_ms = 45000
+            watchdog_ms = 180000
         watchdog_ms = max(watchdog_ms, 0)
         detail.update({"threshold_ms": watchdog_ms})
         if watchdog_ms == 0:
@@ -1509,10 +1509,10 @@ class StrategyRunner:
 
         try:
             watchdog_ms = int(
-                os.getenv("TICK_WATCHDOG_MS", str(getattr(self, "_tick_watchdog_ms", 2000)))
+                os.getenv("TICK_WATCHDOG_MS", str(getattr(self, "_tick_watchdog_ms", 180000)))
             )
         except (TypeError, ValueError):
-            watchdog_ms = getattr(self, "_tick_watchdog_ms", 2000)
+            watchdog_ms = getattr(self, "_tick_watchdog_ms", 180000)
         if watchdog_ms <= 0:
             return
         if not getattr(self, "market_open", False):
@@ -2607,7 +2607,7 @@ class StrategyRunner:
         try:
             now_ms = int(time.monotonic() * 1000)
             idle_ms = now_ms - getattr(self, "_last_tick_ms", now_ms)
-            if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "2000")):
+            if self.market_open and idle_ms > int(os.getenv("TICK_WATCHDOG_MS", "180000")):
                 tok: int | None = None
                 last_plan = getattr(self, "_last_plan", None)
                 if isinstance(last_plan, dict):
@@ -4727,11 +4727,15 @@ class StrategyRunner:
                 qsnap = getattr(ds, "quote_snapshot", None)
                 tok: Any | None = None
                 try:
-                    tok = (self._last_plan or {}).get("token")
+                    tok = plan.get("token") or plan.get("option_token")
                 except Exception:
                     tok = None
                 if not tok:
-                    tok = plan.get("token") or plan.get("option_token")
+                    try:
+                        last_plan = self._last_plan or {}
+                        tok = last_plan.get("token") or last_plan.get("option_token")
+                    except Exception:
+                        tok = None
                 max_age = float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "1500"))
                 max_spread = float(os.getenv("ORDER_MAX_SPREAD_PCT", "0.35"))
                 retries = int(os.getenv("ORDER_MICRO_RETRIES", "3"))
@@ -6567,10 +6571,10 @@ class StrategyRunner:
             self.log.warning(msg)
             raise RuntimeError(msg)
 
-        api_key = getattr(settings.zerodha, "api_key", None)
-        access_token = getattr(settings.zerodha, "access_token", None)
+        api_key = getattr(settings.kite, "api_key", None)
+        access_token = getattr(settings.kite, "access_token", None)
         if not api_key or not access_token:
-            msg = "Zerodha credentials missing; cannot enter live."
+            msg = "Kite credentials missing; cannot enter live."
             self.log.error(msg)
             raise RuntimeError(msg)
 
