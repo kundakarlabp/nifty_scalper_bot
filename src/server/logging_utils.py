@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from typing import Callable
 
 from src.boot.validate_env import _log_cred_presence
-from src.config import LOG_LEVEL, LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
+from src.config import LOG_MIN_INTERVAL_SEC, LOG_SAMPLE_RATE, settings
 from src.utils.log_filters import install_warmup_filters
 from src.utils.logger_setup import setup_logging as _unified_setup
 from src.utils.logging_tools import RateLimitFilter, log_buffer_handler
