@@ -26,11 +26,8 @@ def test_premium_targets_are_computed(strategy_config, monkeypatch):
         lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
     )
     monkeypatch.setattr(
-        "src.strategies.scalping_strategy.evaluate_micro",
+        "src.strategies.scalping_strategy.micro_check",
         lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"},
-    )
-    monkeypatch.setattr(
-        "src.strategies.scalping_strategy.cap_for_mid", lambda mid, cfg: 1.0
     )
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))

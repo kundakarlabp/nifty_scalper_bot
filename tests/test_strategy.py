@@ -224,16 +224,12 @@ def test_micro_failures_block_trade_even_in_soft_mode(
         "src.strategies.scalping_strategy.select_strike",
         lambda price, score: type("SI", (), {"strike": int(round(price / 50.0) * 50)})(),
     )
-    monkeypatch.setattr(
-        "src.strategies.scalping_strategy.cap_for_mid", lambda mid, cfg: 1.0
-    )
-
     def _micro(*args: object, **kwargs: object) -> dict:
         payload = dict(micro_payload)
         payload.setdefault("cap_pct", 1.0)
         return payload
 
-    monkeypatch.setattr("src.strategies.scalping_strategy.evaluate_micro", _micro)
+    monkeypatch.setattr("src.strategies.scalping_strategy.micro_check", _micro)
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
 
@@ -266,11 +262,8 @@ def test_uses_data_source_atm_tokens(
         lambda *args, **kwargs: {"bid": 100.0, "ask": 100.5, "bid_qty": 100, "ask_qty": 100},
     )
     monkeypatch.setattr(
-        "src.strategies.scalping_strategy.evaluate_micro",
-        lambda *args, **kwargs: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"},
-    )
-    monkeypatch.setattr(
-        "src.strategies.scalping_strategy.cap_for_mid", lambda mid, cfg: 1.0
+        "src.strategies.scalping_strategy.micro_check",
+        lambda *args, **kwargs: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD", "cap_pct": 1.0},
     )
 
     plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))

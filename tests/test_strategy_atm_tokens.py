@@ -32,10 +32,9 @@ def test_strategy_uses_prepared_atm_tokens(monkeypatch) -> None:
     monkeypatch.setattr(ss, "_token_to_symbol_and_lot", lambda k, t: ("FOO", 50))
     monkeypatch.setattr(
         ss,
-        "evaluate_micro",
+        "micro_check",
         lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"},
     )
-    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 1.0)
     monkeypatch.setattr(
         ss,
         "resolve_weekly_atm",
@@ -88,9 +87,8 @@ def test_strategy_rolls_on_strike_drift(monkeypatch) -> None:
         ss, "compute_atr", lambda *a, **k: pd.Series([0.06] * len(df), index=df.index)
     )
     monkeypatch.setattr(
-        ss, "evaluate_micro", lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"}
+        ss, "micro_check", lambda *a, **k: {"spread_pct": 0.1, "depth_ok": True, "mode": "HARD"}
     )
-    monkeypatch.setattr(ss, "cap_for_mid", lambda mid, cfg: 1.0)
     monkeypatch.setattr(
         ss,
         "resolve_weekly_atm",

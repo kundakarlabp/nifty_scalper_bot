@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.config import settings
-from src.execution.micro_filters import cap_for_mid, evaluate_micro
+from src.signals.micro_filters import micro_check
 from src.execution.order_executor import fetch_quote_with_depth
 from src.logs import structured_log
 from src.diagnostics.metrics import runtime_metrics
@@ -1276,8 +1276,7 @@ class EnhancedScalpingStrategy:
             else:
                 plan["opt_atr"] = None
                 plan["opt_atr_pct"] = None
-            cap_pct = cap_for_mid(mid, cfg)
-            micro = evaluate_micro(
+            micro = micro_check(
                 q,
                 lot_size=lot_sz,
                 atr_pct=atr_pct_val,
@@ -1286,28 +1285,36 @@ class EnhancedScalpingStrategy:
             )
             if not isinstance(micro, dict):
                 micro = {}
-            micro_reason = micro.get("reason") if isinstance(micro, dict) else None
-            if micro_reason == "no_quote":
-                micro["would_block"] = False
-            micro["cap_pct"] = cap_pct
             plan["micro"] = micro
             plan["lot_size"] = lot_sz
-            sp = micro.get("spread_pct") if isinstance(micro, dict) else None
-            cap = micro.get("cap_pct") if isinstance(micro, dict) else None
-            depth_flag = micro.get("depth_ok") if isinstance(micro, dict) else None
-            depth_ok = bool(depth_flag) if depth_flag is not None else True
-            over_spread = bool(sp is not None and cap is not None and sp > cap)
-            ok_micro = not (over_spread or not depth_ok)
+
+            spread_pct = micro.get("spread_pct")
+            cap_pct = micro.get("cap_pct")
+            depth_flag = micro.get("depth_ok")
+            depth_ok = True if depth_flag is None else bool(depth_flag)
+            would_block = bool(micro.get("would_block"))
+            reason = str(micro.get("reason") or "ok")
+
+            over_spread = (
+                spread_pct is not None
+                and cap_pct is not None
+                and spread_pct > cap_pct
+            )
+            should_block = (over_spread or not depth_ok) and (
+                micro.get("mode") == "HARD" or would_block
+            )
+
             gate_checks["microstructure"] = {
-                "ok": bool(ok_micro),
+                "ok": not would_block,
                 "mode": micro.get("mode"),
-                "spread_pct": sp,
-                "cap_pct": cap,
+                "reason": reason,
+                "spread_pct": spread_pct,
+                "cap_pct": cap_pct,
                 "depth_ok": depth_ok,
+                "would_block": would_block,
             }
-            if not ok_micro and (
-                micro.get("mode") == "HARD" or micro.get("would_block")
-            ):
+
+            if should_block:
                 return plan_block("microstructure", micro=micro)
 
             comps = {

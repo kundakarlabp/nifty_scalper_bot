@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import math
-import os
-import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict, Optional, Tuple
 
@@ -14,6 +11,13 @@ from src.config import (
     settings,
 )
 from src.logs import structured_log
+from src.signals.micro_filters import (
+    cap_for_mid,
+    depth_required_lots,
+    micro_check,
+    _quote_reference_price,
+    _top5_quantities,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,28 +63,6 @@ def micro_from_l1(
     spread_pct = (ask - bid) / mid * 100.0
     depth_ok = min(bq, sq) >= depth_min_lots * lot_size
     return spread_pct, depth_ok, {"bid": bid, "ask": ask, "bid5": bq, "ask5": sq}
-
-
-def _quote_reference_price(data: Mapping[str, Any] | None) -> float:
-    """Return a positive reference price from ``data`` if available."""
-
-    if not isinstance(data, Mapping):
-        return 0.0
-
-    fallback: float = 0.0
-    for key in ("ltp", "mid", "last_price", "close", "close_price"):
-        value = data.get(key)
-        if value is None:
-            continue
-        try:
-            price = float(value)
-        except (TypeError, ValueError):
-            continue
-        if price > 0.0:
-            return price
-        if fallback == 0.0 and price != 0.0:
-            fallback = price
-    return fallback
 
 
 def micro_from_quote(
@@ -151,42 +133,6 @@ def depth_to_lots(depth: Any, *, lot_size: int) -> Optional[float]:
         return None
 
 
-def _micro_cfg(cfg: Any) -> Dict[str, Any]:
-    """Extract the ``micro`` configuration section from ``cfg``.
-
-    Accepts either a mapping containing ``micro`` or an object with a
-    ``micro`` attribute. Missing values yield an empty dict.
-    """
-
-    if hasattr(cfg, "micro"):
-        return getattr(cfg, "micro") or {}
-    if isinstance(cfg, dict):
-        return cfg.get("micro", {})
-    return {}
-
-
-def cap_for_mid(mid: float, cfg: Any) -> float:
-    """Return the spread cap (%) for a given mid price using ``cfg``."""
-
-    micro = _micro_cfg(cfg)
-    if not micro.get("dynamic", True):
-        return float(micro.get("max_spread_pct", 1.0))
-    cap = float(micro.get("max_spread_pct", 1.0))
-    for row in micro.get("table", []):
-        try:
-            if mid >= float(row.get("min_mid")):
-                cap = float(row.get("cap_pct"))
-        except Exception:
-            continue
-    return cap
-
-
-def depth_required_lots(atr_pct: float) -> int:
-    """Determine minimum depth (in lots) required based on ATR%."""
-
-    return 1 if atr_pct >= 0.02 else 2
-
-
 def evaluate_micro(
     q: Optional[Dict[str, Any]],
     *,
@@ -200,310 +146,59 @@ def evaluate_micro(
     trace_id: Optional[str] = None,
     mode_override: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Evaluate microstructure metrics and gating conditions.
+    """Evaluate microstructure metrics and gating conditions."""
 
-    Returns a dictionary with spread %, depth flag and gating decision.
-    """
+    micro = micro_check(
+        q,
+        lot_size=lot_size,
+        atr_pct=atr_pct,
+        cfg=cfg,
+        side=side,
+        lots=lots,
+        depth_multiplier=depth_multiplier,
+        require_depth=require_depth,
+        mode_override=mode_override,
+    )
 
-    micro_cfg = _micro_cfg(cfg)
-    if mode_override is not None:
-        mode = str(mode_override).upper() or "HARD"
-    else:
-        mode = str(micro_cfg.get("mode", "HARD")).upper()
-    if mode not in {"HARD", "SOFT"}:
-        mode = "HARD"
-    hard = mode == "HARD"
-    side_norm = str(side).upper() if side else None
-
-    lots_val: int
-    if lots is not None:
-        lots_val = max(int(lots), 0)
-    elif micro_cfg.get("depth_min_lots") is not None:
-        try:
-            lots_val = max(int(micro_cfg.get("depth_min_lots", 0)), 0)
-        except Exception:
-            lots_val = depth_required_lots(float(atr_pct or 0.0))
-    else:
-        lots_val = depth_required_lots(float(atr_pct or 0.0))
-
-    lot_units = max(int(lot_size), 0)
-    need_units = lots_val * lot_units
-
-    if depth_multiplier is not None:
-        depth_mult = float(depth_multiplier)
-    elif micro_cfg.get("depth_multiplier") is not None:
-        try:
-            depth_mult = float(micro_cfg.get("depth_multiplier", MICRO__DEPTH_MULTIPLIER))
-        except Exception:
-            depth_mult = float(getattr(settings, "MICRO__DEPTH_MULTIPLIER", MICRO__DEPTH_MULTIPLIER))
-    else:
-        depth_mult = float(getattr(settings, "MICRO__DEPTH_MULTIPLIER", MICRO__DEPTH_MULTIPLIER))
-
-    if require_depth is not None:
-        require_depth_flag = bool(require_depth)
-    elif micro_cfg.get("require_depth") is not None:
-        require_depth_flag = bool(micro_cfg.get("require_depth"))
-    else:
-        require_depth_flag = bool(getattr(settings, "MICRO__REQUIRE_DEPTH", MICRO__REQUIRE_DEPTH))
-    required_units = int(math.ceil(need_units * depth_mult)) if need_units else 0
-
-    base_context: Dict[str, Any] = {
+    need_units = (micro.get("need_lots") or 0) * (micro.get("lot_size") or 0)
+    payload = {
         "trace_id": trace_id,
-        "mode": mode,
-        "side": side_norm,
-        "need_lots": lots_val,
-        "lot_size": lot_units,
+        "mode": micro.get("mode"),
+        "side": micro.get("side"),
+        "need_lots": micro.get("need_lots"),
+        "lot_size": micro.get("lot_size"),
         "need_units": need_units,
-        "depth_multiplier": depth_mult,
-        "require_depth": require_depth_flag,
+        "depth_multiplier": micro.get("depth_multiplier"),
+        "require_depth": micro.get("require_depth"),
         "atr_pct": float(atr_pct) if atr_pct is not None else None,
-    }
-    cap_default = float(micro_cfg.get("max_spread_pct", 1.0))
-    exposure_cap_pct = float(
-        getattr(settings, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)
-    )
-
-    def emit(event: str, **fields: Any) -> None:
-        payload = dict(base_context)
-        payload.update(fields)
-        structured_log.event(event, **payload)
-
-    def log_outcome(outcome: str, **fields: Any) -> None:
-        metrics = dict(fields)
-        metrics.setdefault("required_qty", required_units)
-        emit("micro_eval", **metrics)
-        emit(outcome, **metrics)
-
-    if not q:
-        log_outcome(
-            "micro_wait",
-            reason="no_quote",
-            spread_pct=None,
-            cap_pct=exposure_cap_pct,
-            depth_ok=None,
-            depth_available=None,
-            available_bid_qty=None,
-            available_ask_qty=None,
-            spread_block=None,
-            depth_block=None,
-            raw_block=True,
-            would_block=True,
-        )
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": True,
-        }
-
-    bid = _as_float(q.get("bid"))
-    ask = _as_float(q.get("ask"))
-    bid5 = _top5_quantities(q.get("bid5_qty"), [])
-    ask5 = _top5_quantities(q.get("ask5_qty"), [])
-    available_bid = sum(bid5)
-    available_ask = sum(ask5)
-    ltp = _quote_reference_price(q)
-
-    age_ms: float | None = None
-    ts_raw = q.get("age_ms")
-    if ts_raw is not None:
-        try:
-            age_ms = float(ts_raw)
-        except (TypeError, ValueError):
-            age_ms = None
-    if age_ms is None:
-        ts_val = q.get("ts_ms") or q.get("timestamp")
-        if isinstance(ts_val, (int, float)):
-            ts_ms_val = float(ts_val)
-            if ts_ms_val < 1e12:
-                ts_ms_val *= 1000.0
-            age_ms = max(0.0, time.time() * 1000.0 - ts_ms_val)
-
-    if bid <= 0.0 or ask <= 0.0:
-        log_outcome(
-            "micro_wait",
-            reason="no_quote",
-            spread_pct=None,
-            cap_pct=exposure_cap_pct,
-            depth_ok=None,
-            depth_available=None,
-            available_bid_qty=available_bid,
-            available_ask_qty=available_ask,
-            spread_block=None,
-            depth_block=None,
-            raw_block=True,
-            would_block=True,
-            bid=bid,
-            ask=ask,
-            last_tick_age_ms=age_ms,
-        )
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": True,
-            "last_tick_age_ms": age_ms,
-        }
-
-    if age_ms is not None and age_ms > float(getattr(settings, "MICRO__STALE_MS", MICRO__STALE_MS)):
-        log_outcome(
-            "micro_wait",
-            reason="stale_quote",
-            spread_pct=None,
-            cap_pct=exposure_cap_pct,
-            depth_ok=None,
-            depth_available=None,
-            available_bid_qty=available_bid,
-            available_ask_qty=available_ask,
-            spread_block=None,
-            depth_block=None,
-            raw_block=True,
-            would_block=True,
-            bid=bid,
-            ask=ask,
-            last_tick_age_ms=age_ms,
-        )
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "stale_quote",
-            "would_block": True,
-            "last_tick_age_ms": age_ms,
-        }
-
-    if not bid5 or not ask5:
-        log_outcome(
-            "micro_wait",
-            reason="no_depth",
-            spread_pct=None,
-            cap_pct=exposure_cap_pct,
-            depth_ok=None,
-            depth_available=None,
-            available_bid_qty=available_bid,
-            available_ask_qty=available_ask,
-            spread_block=None,
-            depth_block=None,
-            raw_block=True,
-            would_block=True,
-            bid=bid,
-            ask=ask,
-            last_tick_age_ms=age_ms,
-        )
-        return {
-            "spread_pct": None,
-            "depth_ok": None,
-            "mode": mode,
-            "reason": "no_quote",
-            "would_block": True,
-            "last_tick_age_ms": age_ms,
-        }
-
-    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
-    if mid is None and ltp > 0:
-        mid = ltp
-    if bid <= 0.0 or ask <= 0.0:
-        spread_pct = 999.0
-    else:
-        ref_price = ltp if ltp > 0 else (mid or 0.0)
-        spread_pct = abs(ask - bid) / max(ref_price, 1e-6) * 100.0
-    cap = cap_for_mid(mid or 0.0, cfg)
-
-    if side_norm == "SELL":
-        depth_available = available_bid
-    elif side_norm == "BUY":
-        depth_available = available_ask
-    else:
-        depth_available = min(available_bid, available_ask)
-
-    depth_requirement = required_units
-    if require_depth_flag:
-        depth_ok = depth_available >= depth_requirement
-    else:
-        depth_ok = True
-
-    spread_block = spread_pct is None or (spread_pct > cap)
-    depth_block = depth_ok is False
-    raw_block = spread_block or depth_block
-    final_block = raw_block
-    reason = "spread" if spread_block else "depth" if depth_block else "ok"
-
-    log_outcome(
-        "micro_block" if final_block else "micro_pass",
-        reason=reason,
-        spread_pct=spread_pct,
-            cap_pct=exposure_cap_pct,
-        depth_ok=depth_ok,
-        depth_available=depth_available,
-        available_bid_qty=available_bid,
-        available_ask_qty=available_ask,
-        spread_block=spread_block,
-        depth_block=depth_block,
-        raw_block=raw_block,
-        would_block=final_block,
-        bid=bid,
-        ask=ask,
-        mid=mid,
-        last_tick_age_ms=age_ms,
-    )
-
-    return {
-        "mid": mid,
-        "spread_pct": spread_pct,
-        "cap_pct": float(getattr(settings, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)),
-        "depth_ok": depth_ok,
-        "need_lots": lots_val,
-        "lot_size": lot_units,
-        "required_qty": required_units,
-        "depth_available": depth_available,
-        "bid_top5": bid5,
-        "ask_top5": ask5,
-        "bid": bid,
-        "ask": ask,
-        "side": side_norm,
-        "depth_multiplier": depth_mult,
-        "require_depth": require_depth_flag,
-        "mode": mode,
-        "reason": reason,
-        "would_block": final_block,
-        "last_tick_age_ms": age_ms,
+        "spread_pct": micro.get("spread_pct"),
+        "cap_pct": micro.get("cap_pct"),
+        "exposure_cap_pct": micro.get("exposure_cap_pct"),
+        "depth_ok": micro.get("depth_ok"),
+        "depth_available": micro.get("depth_available"),
+        "available_bid_qty": micro.get("available_bid_qty"),
+        "available_ask_qty": micro.get("available_ask_qty"),
+        "spread_block": micro.get("spread_block"),
+        "depth_block": micro.get("depth_block"),
+        "raw_block": micro.get("raw_block"),
+        "would_block": micro.get("would_block"),
+        "reason": micro.get("reason"),
+        "bid": micro.get("bid"),
+        "ask": micro.get("ask"),
+        "mid": micro.get("mid"),
+        "last_tick_age_ms": micro.get("last_tick_age_ms"),
+        "required_qty": micro.get("required_qty"),
     }
 
+    structured_log.event("micro_eval", **payload)
+    reason = str(micro.get("reason") or "")
+    if reason in {"no_quote", "stale_quote", "no_depth"}:
+        structured_log.event("micro_wait", **payload)
+    elif micro.get("would_block"):
+        structured_log.event("micro_block", **payload)
+    else:
+        structured_log.event("micro_pass", **payload)
 
-def _as_float(val: Any) -> float:
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _as_int(val: Any) -> int:
-    try:
-        return int(float(val))
-    except (TypeError, ValueError):
-        return 0
+    return micro
 
 
-def _top5_quantities(raw: Any, fallback_levels: Sequence[Any]) -> list[int]:
-    """Return sanitized top-5 depth quantities as integers."""
-
-    values: list[int] = []
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
-        for item in list(raw)[:5]:
-            if isinstance(item, Mapping):
-                qty = _as_int(item.get("quantity"))
-            else:
-                qty = _as_int(item)
-            values.append(max(qty, 0))
-    if values:
-        return values
-
-    for lvl in list(fallback_levels)[:5]:
-        if isinstance(lvl, Mapping):
-            qty = _as_int(lvl.get("quantity"))
-        else:
-            qty = _as_int(getattr(lvl, "quantity", 0))
-        values.append(max(qty, 0))
-    return values
