@@ -66,7 +66,7 @@ def test_evaluate_micro_blocks_spread_even_in_soft_mode():
     result = evaluate_micro(quote, lot_size=50, atr_pct=0.03, cfg=cfg, side="BUY")
     assert result["mode"] == "SOFT"
     assert result["depth_ok"] is True
-    assert result["spread_pct"] > result["cap_pct"]
+    assert result["spread_pct"] > result["spread_cap_pct"]
     assert result["would_block"] is True
 
 

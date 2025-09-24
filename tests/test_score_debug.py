@@ -172,7 +172,12 @@ def test_score_command_reports_when_breakdown_empty(monkeypatch: pytest.MonkeyPa
 def test_shadow_blockers_detects_issues() -> None:
     runner = StrategyRunner(telegram_controller=DummyTelegram())
     plan = {
-        "micro": {"mode": "SOFT", "spread_pct": 1.2, "cap_pct": 1.0, "depth_ok": False},
+        "micro": {
+            "mode": "SOFT",
+            "spread_pct": 1.2,
+            "spread_cap_pct": 1.0,
+            "depth_ok": False,
+        },
         "rr": 1.0,
     }
     shadows = runner._shadow_blockers(plan)

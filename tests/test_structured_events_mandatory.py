@@ -122,7 +122,7 @@ def test_strategy_emits_score_and_block_events(monkeypatch: pytest.MonkeyPatch) 
             "spread_pct": 0.05,
             "depth_ok": True,
             "mode": "SOFT",
-            "cap_pct": 0.10,
+            "spread_cap_pct": 0.10,
         },
     )
 

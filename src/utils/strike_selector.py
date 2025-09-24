@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 _nifty_lot_warned = False
+_nifty_lot_missing_warned = False
 
 
 # -----------------------------------------------------------------------------
@@ -535,7 +536,7 @@ def get_instrument_tokens(
         strike_selected = target
         lot_size = 0
 
-        global _nifty_lot_warned
+        global _nifty_lot_warned, _nifty_lot_missing_warned
 
         for attempt in range(2):
             expiry_candidate, bucket = _select_expiry_bucket(
@@ -615,13 +616,22 @@ def get_instrument_tokens(
                 lot_size = max(lot_candidates, key=lot_candidates.count)
             symbol_upper = trade_symbol.upper()
             if symbol_upper == "NIFTY":
-                if lot_size and lot_size != 75 and not _nifty_lot_warned:
-                    logger.warning(
-                        "NIFTY contract lot size mismatch; forcing 75",
-                        extra={"lot_size": lot_size or 0, "symbol": trade_symbol},
-                    )
-                    _nifty_lot_warned = True
-                lot_size = 75 if lot_size != 75 else lot_size
+                if lot_size and lot_size != 75:
+                    if not _nifty_lot_warned:
+                        logger.warning(
+                            "NIFTY contract lot size mismatch; forcing 75",
+                            extra={"lot_size": lot_size or 0, "symbol": trade_symbol},
+                        )
+                        _nifty_lot_warned = True
+                    lot_size = 75
+                elif lot_size <= 0:
+                    if not _nifty_lot_missing_warned:
+                        logger.warning(
+                            "NIFTY contract missing lot size; defaulting to 75",
+                            extra={"symbol": trade_symbol},
+                        )
+                        _nifty_lot_missing_warned = True
+                    lot_size = 75
             if lot_size <= 0:
                 logger.warning(
                     "strike_selector: unable to resolve lot size",

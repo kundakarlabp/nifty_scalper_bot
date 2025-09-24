@@ -566,7 +566,7 @@ def micro_ok(
     def _log_no_quote() -> Tuple[bool, Dict[str, Any]]:
         meta_no_quote = {
             "spread_pct": None,
-            "cap_pct": round(max_spread_cap * 100.0, 3),
+            "spread_cap_pct": round(max_spread_cap * 100.0, 3),
             "spread_ok": None,
             "depth_ok": None,
             "bid5": 0,
@@ -638,7 +638,7 @@ def micro_ok(
             "spread_pct": round(spread_pct_value, 3)
             if spread_pct_value is not None
             else None,
-            "cap_pct": round(max_spread_cap * 100.0, 3),
+            "spread_cap_pct": round(max_spread_cap * 100.0, 3),
             "spread_ok": spread_ok,
             "depth_ok": None,
             "bid5": available_bid,
@@ -673,7 +673,7 @@ def micro_ok(
             qty_lots_i,
             order_units,
             spread_for_log,
-            meta_no_depth["cap_pct"],
+            meta_no_depth["spread_cap_pct"],
             True,
             "skip:no_depth",
             source,
@@ -707,7 +707,7 @@ def micro_ok(
 
     meta = {
         "spread_pct": round(spread_pct_value, 3) if spread_pct_value is not None else None,
-        "cap_pct": round(max_spread_cap * 100.0, 3),
+        "spread_cap_pct": round(max_spread_cap * 100.0, 3),
         "spread_ok": spread_ok,
         "depth_ok": depth_ok,
         "bid5": available_bid,
@@ -741,7 +741,7 @@ def micro_ok(
             qty_lots_i,
             order_units,
             spread_for_log,
-            meta["cap_pct"],
+            meta["spread_cap_pct"],
             required_units,
             depth_available,
             ok,
@@ -755,7 +755,7 @@ def micro_ok(
             qty_lots_i,
             order_units,
             spread_for_log,
-            meta["cap_pct"],
+            meta["spread_cap_pct"],
             ok,
             block_reason,
             source,
@@ -1284,7 +1284,7 @@ class OrderExecutor:
             ask = float(q.get("ask") or 0.0)
             lines.append(
                 f"{t.upper()} tsym={tsym} src={q.get('source')} ltp={q.get('ltp')} bid={bid} ask={ask} "
-                f"spread%={meta.get('spread_pct')} cap%={meta.get('cap_pct')} bid5={meta.get('bid5')} "
+                f"spread%={meta.get('spread_pct')} cap%={meta.get('spread_cap_pct')} bid5={meta.get('bid5')} "
                 f"ask5={meta.get('ask5')} req={meta.get('required_qty')} avail={meta.get('depth_available')} "
                 f"oi={q.get('oi')} micro={'OK' if ok else 'FAIL'} reason={meta.get('block_reason')}"
             )

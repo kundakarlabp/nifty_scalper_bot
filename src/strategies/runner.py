@@ -852,7 +852,7 @@ class StrategyRunner:
             msg += (
                 " micro={spread%:%s cap%%:%s depth_ok:%s req:%s avail:%s side:%s}" % (
                     micro.get("spread_pct"),
-                    micro.get("cap_pct"),
+                    micro.get("spread_cap_pct"),
                     micro.get("depth_ok"),
                     micro.get("required_qty"),
                     micro.get("depth_available"),
@@ -884,7 +884,7 @@ class StrategyRunner:
         m = plan.get("micro") or {}
         if m.get("mode") == "SOFT":
             sp = m.get("spread_pct")
-            cap = m.get("cap_pct")
+            cap = m.get("spread_cap_pct")
             if sp is not None and cap is not None and sp > cap:
                 shadows.append(f"micro_spread {sp:.2f}%>{cap:.2f}%")
             if m.get("depth_ok") is False:
@@ -2006,7 +2006,8 @@ class StrategyRunner:
                 "side": plan_data.get("side"),
                 "strike": plan_data.get("strike") or plan_data.get("atm_strike"),
                 "lots": plan_data.get("qty_lots") or plan_data.get("lots"),
-                "cap_pct": plan_data.get("cap_pct"),
+                "spread_cap_pct": plan_data.get("spread_cap_pct"),
+                "risk_cap_pct": plan_data.get("risk_cap_pct"),
                 "reason_block": reason_value,
                 "entry": plan_data.get("entry") or plan_data.get("opt_entry"),
                 "sl": plan_data.get("sl") or plan_data.get("opt_sl"),
@@ -3904,6 +3905,8 @@ class StrategyRunner:
                 micro = dict(self._last_micro_ok)
                 self._last_micro_ok_ts = now_ts
             plan["spread_pct"] = micro.get("spread_pct")
+            plan["spread_cap_pct"] = micro.get("spread_cap_pct")
+            plan["risk_cap_pct"] = micro.get("risk_cap_pct")
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
             plan["quote_src"] = quote_dict.get("source", "kite")
@@ -4052,7 +4055,8 @@ class StrategyRunner:
                     0.5
                     if (
                         micro.get("spread_pct")
-                        and micro.get("spread_pct") > micro.get("cap_pct")
+                        and micro.get("spread_cap_pct")
+                        and micro.get("spread_pct") > micro.get("spread_cap_pct")
                     )
                     else 0.0
                 )

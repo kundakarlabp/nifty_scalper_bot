@@ -1287,9 +1287,11 @@ class EnhancedScalpingStrategy:
                 micro = {}
             plan["micro"] = micro
             plan["lot_size"] = lot_sz
+            plan["spread_cap_pct"] = micro.get("spread_cap_pct")
+            plan["risk_cap_pct"] = micro.get("risk_cap_pct")
 
             spread_pct = micro.get("spread_pct")
-            cap_pct = micro.get("cap_pct")
+            spread_cap_pct = micro.get("spread_cap_pct")
             depth_flag = micro.get("depth_ok")
             depth_ok = True if depth_flag is None else bool(depth_flag)
             would_block = bool(micro.get("would_block"))
@@ -1297,8 +1299,8 @@ class EnhancedScalpingStrategy:
 
             over_spread = (
                 spread_pct is not None
-                and cap_pct is not None
-                and spread_pct > cap_pct
+                and spread_cap_pct is not None
+                and spread_pct > spread_cap_pct
             )
             should_block = (over_spread or not depth_ok) and (
                 micro.get("mode") == "HARD" or would_block
@@ -1309,7 +1311,7 @@ class EnhancedScalpingStrategy:
                 "mode": micro.get("mode"),
                 "reason": reason,
                 "spread_pct": spread_pct,
-                "cap_pct": cap_pct,
+                "spread_cap_pct": spread_cap_pct,
                 "depth_ok": depth_ok,
                 "would_block": would_block,
             }
@@ -1335,7 +1337,7 @@ class EnhancedScalpingStrategy:
             m = m_val if isinstance(m_val, dict) else {}
             if m.get("mode") == "SOFT":
                 sp2 = m.get("spread_pct")
-                cap2 = m.get("cap_pct")
+                cap2 = m.get("spread_cap_pct")
                 if sp2 is not None and cap2 is not None and sp2 > cap2:
                     penalties["micro_spread"] = 0.1
                 if m.get("depth_ok") is False:

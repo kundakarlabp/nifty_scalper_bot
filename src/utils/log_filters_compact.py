@@ -80,7 +80,8 @@ def summarize_decision(payload: dict) -> dict:
         "side": g.get("side"),
         "strike": g.get("strike"),
         "lots": g.get("lots") or g.get("lot_size"),
-        "cap_pct": _round(g.get("cap_pct")),
+        "spread_cap_pct": _round(g.get("spread_cap_pct")),
+        "risk_cap_pct": _round(g.get("risk_cap_pct")),
         "reason_block": g.get("reason_block") or g.get("reason"),
         "entry": g.get("entry"),
         "sl": g.get("sl"),
@@ -94,6 +95,9 @@ def summarize_micro(payload: dict) -> dict:
         "event": "micro",
         "depth_ok": m.get("depth_ok"),
         "spread_pct": _round(m.get("spread_pct")),
+        "spread_cap_pct": _round(m.get("spread_cap_pct")),
+        "would_block": m.get("would_block"),
+        "reason": m.get("reason"),
         "quote": "ok" if m.get("tick_ltp_only") or m.get("tick_full") else "missing",
     }
 
