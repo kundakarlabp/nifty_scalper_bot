@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from src.data.source import get_option_quote_safe
+from src.logs import structured_log
 from src.logs.journal import Journal
 from src.server.logging_setup import LogSuppressor, log_event
 from src.state import StateStore
@@ -1392,6 +1393,143 @@ class OrderExecutor:
             self.last_error = "qty_rounded_to_zero"
             return None
 
+        mode = "live" if self.kite else "paper"
+
+        raw_strategy = getattr(self, "strategy_name", None)
+        if not raw_strategy:
+            strategy_obj = getattr(self, "strategy", None)
+            if isinstance(strategy_obj, str):
+                raw_strategy = strategy_obj
+            elif strategy_obj is not None:
+                raw_strategy = (
+                    getattr(strategy_obj, "name", "")
+                    or strategy_obj.__class__.__name__
+                )
+        strategy_name = str(raw_strategy or "")
+
+        def _status_value(status: Any, key: str, default: Any = None) -> Any:
+            if status is None:
+                return default
+            if isinstance(status, Mapping):
+                return status.get(key, default)
+            return getattr(status, key, default)
+
+        readiness_status: Any = None
+        readiness_payload: Dict[str, Any] = {}
+        readiness_diag_fields: Dict[str, Any] = {}
+        readiness_ok: Optional[bool] = None
+
+        data_source = getattr(self, "data_source", None)
+        runner_singleton: Any | None = None
+        if data_source is None:
+            runner_ref = getattr(self, "runner", None)
+            if runner_ref is not None:
+                data_source = getattr(runner_ref, "data_source", None)
+        if data_source is None:
+            try:
+                from src.strategies.runner import StrategyRunner  # type: ignore
+            except Exception:
+                runner_singleton = None
+            else:
+                try:
+                    runner_singleton = StrategyRunner.get_singleton()
+                except Exception:
+                    runner_singleton = None
+            if data_source is None and runner_singleton is not None:
+                data_source = getattr(runner_singleton, "data_source", None)
+
+        ensure_ready = getattr(data_source, "ensure_quote_ready", None)
+        if callable(ensure_ready) and token > 0:
+            for attempt in range(2):
+                try:
+                    readiness_status = ensure_ready(
+                        token,
+                        mode="FULL",
+                        symbol=symbol,
+                    )
+                except Exception:
+                    readiness_status = None
+                    log.debug(
+                        "ensure_quote_ready failed token=%s attempt=%d",
+                        token,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                if readiness_status is not None:
+                    ok_raw = _status_value(readiness_status, "ok")
+                    if ok_raw is not None and bool(ok_raw):
+                        break
+                if attempt == 0:
+                    time.sleep(0.05)
+
+            ok_raw = _status_value(readiness_status, "ok")
+            readiness_ok = None if ok_raw is None else bool(ok_raw)
+            readiness_payload = {
+                "ok": readiness_ok,
+                "reason": _status_value(readiness_status, "reason"),
+                "age_ms": _status_value(readiness_status, "last_tick_age_ms"),
+                "retries": _status_value(readiness_status, "retries"),
+                "source": _status_value(readiness_status, "source"),
+                "bid": _status_value(readiness_status, "bid"),
+                "ask": _status_value(readiness_status, "ask"),
+                "bid_qty": _status_value(readiness_status, "bid_qty"),
+                "ask_qty": _status_value(readiness_status, "ask_qty"),
+            }
+            readiness_diag_fields = {
+                "quote_ready_ok": readiness_payload["ok"],
+                "quote_ready_reason": readiness_payload["reason"],
+                "quote_ready_age_ms": readiness_payload["age_ms"],
+                "quote_ready_retries": readiness_payload["retries"],
+                "quote_ready_source": readiness_payload["source"],
+            }
+
+            if readiness_ok is False:
+                reason = str(readiness_payload.get("reason") or "quote_not_ready")
+                self.last_error = f"quote_not_ready:{reason}"
+                structured_log.event(
+                    "execution_block",
+                    reason="quote_not_ready",
+                    symbol=symbol,
+                    token=int(token) if token else None,
+                    side=action,
+                    qty=int(qty),
+                    mode=mode,
+                    strategy=strategy_name or None,
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                    quote_ready=readiness_payload,
+                )
+                log_event(
+                    "order.block",
+                    "warning",
+                    side=action,
+                    token=token or "",
+                    qty=qty,
+                    price=float(price),
+                    mode=mode,
+                    strategy=strategy_name,
+                    reason=reason,
+                    quote_ready_ok=readiness_payload.get("ok"),
+                    quote_ready_reason=readiness_payload.get("reason"),
+                    quote_ready_age_ms=readiness_payload.get("age_ms"),
+                    quote_ready_retries=readiness_payload.get("retries"),
+                    quote_ready_source=readiness_payload.get("source"),
+                )
+                self._emit_order_event(
+                    "quote_not_ready",
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                    symbol=symbol,
+                    action=action,
+                    qty=qty,
+                    mode=mode,
+                    reason=reason,
+                    quote_ready=readiness_payload,
+                    sizing=sizing_raw,
+                    instrument_token=token,
+                )
+                return None
+
         if self.kite:
             try:
                 qd = fetch_quote_with_depth(self.kite, symbol, self.cb_orders)
@@ -1475,18 +1613,6 @@ class OrderExecutor:
                     bid, ask, depth = refresh_cb()
                 time.sleep(2)
 
-        mode = "live" if self.kite else "paper"
-        raw_strategy = getattr(self, "strategy_name", None)
-        if not raw_strategy:
-            strategy_obj = getattr(self, "strategy", None)
-            if isinstance(strategy_obj, str):
-                raw_strategy = strategy_obj
-            elif strategy_obj is not None:
-                raw_strategy = (
-                    getattr(strategy_obj, "name", "")
-                    or strategy_obj.__class__.__name__
-                )
-        strategy_name = str(raw_strategy or "")
         log_event(
             "order.new",
             "info",
@@ -1496,6 +1622,8 @@ class OrderExecutor:
             price=float(price),
             mode=mode,
             strategy=strategy_name,
+            quote_ready=readiness_payload or None,
+            **readiness_diag_fields,
         )
         if self.kite:
             parts = _chunks(
@@ -1517,6 +1645,7 @@ class OrderExecutor:
             child_order_qtys=parts,
             sizing=sizing_raw,
             instrument_token=token,
+            quote_ready=readiness_payload or None,
         )
 
         if not self.kite:
