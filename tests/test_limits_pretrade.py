@@ -122,6 +122,7 @@ def test_allow_min_one_lot_override(monkeypatch):
     cfg = LimitConfig(exposure_basis="premium")
     eng = RiskEngine(cfg)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "RISK__EXPOSURE_CAP_PCT", 0.20, raising=False)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     monkeypatch.setattr(app_settings.risk, "allow_min_one_lot", True, raising=False)
     args = _basic_args()
@@ -146,6 +147,7 @@ def test_allow_min_one_lot_disabled_blocks(monkeypatch):
     cfg = LimitConfig(exposure_basis="premium")
     eng = RiskEngine(cfg)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "RISK__EXPOSURE_CAP_PCT", 0.20, raising=False)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_ABS", 0.0, raising=False)
     monkeypatch.setattr(app_settings.risk, "allow_min_one_lot", False, raising=False)
     args = _basic_args()
@@ -171,6 +173,7 @@ def test_equity_cap_limits_aggregate_exposure(monkeypatch):
     eng = RiskEngine(cfg)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_SOURCE", "equity", raising=False)
     monkeypatch.setattr(app_settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.20, raising=False)
+    monkeypatch.setattr(app_settings, "RISK__EXPOSURE_CAP_PCT", 0.20, raising=False)
     exposure = Exposure(notional_rupees=9_000.0)
     args = _basic_args()
     plan = args["plan"]

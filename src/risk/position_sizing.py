@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple, Literal, cast
+from typing import Any, Dict, Iterator, Tuple, Literal, cast
 import logging
 import math
 
@@ -70,16 +70,54 @@ def _resolve_equity_for_cap(
     return equity_value, equity_source
 
 
+def _validate_lot_size(lot_size: int) -> None:
+    """Warn when the provided lot size looks suspicious for NIFTY contracts."""
+
+    try:
+        configured_nifty_lot = int(
+            getattr(settings.instruments, "nifty_lot_size", 50)
+        )
+    except Exception:  # pragma: no cover - extremely defensive
+        configured_nifty_lot = 50
+
+    if lot_size <= 0:
+        return
+
+    allowed_sizes = {configured_nifty_lot, 10, 15, 25, 40, 50, 75, 100}
+    allowed_sizes = {size for size in allowed_sizes if size > 0}
+    if lot_size not in allowed_sizes:
+        try:
+            structured_log.event(
+                "lot_size_unexpected",
+                lot_size=int(lot_size),
+                expected=int(configured_nifty_lot),
+            )
+        except Exception:  # pragma: no cover - logging should not explode sizing
+            logger.warning(
+                "position_sizer: unexpected nifty lot size", extra={"lot_size": lot_size}
+            )
+        else:
+            logger.warning(
+                "position_sizer: unexpected nifty lot size",
+                extra={
+                    "lot_size": lot_size,
+                    "expected": sorted(allowed_sizes),
+                    "configured": configured_nifty_lot,
+                },
+            )
+
+
 def lots_from_premium_cap(
     runner,
     quote: dict,
     lot_size: int,
     max_lots: int,
-) -> Tuple[int, float, float, str]:
+) -> Tuple[int, float, float, str, SizingBlock | None]:
     from src.config import settings as _settings
 
     price = float(_mid_from_quote(quote or {}))
     lot_size_int = int(lot_size)
+    _validate_lot_size(lot_size_int)
 
     equity_live: float | None = None
     use_live_equity = bool(getattr(getattr(_settings, "risk", None), "use_live_equity", True))
@@ -93,7 +131,7 @@ def lots_from_premium_cap(
             logger.debug("lots_from_premium_cap: live equity fetch failed: %s", exc)
 
     sizer = PositionSizer()
-    cap_info = sizer.compute_exposure_cap(
+    cap_info, cap_block = sizer.compute_exposure_cap(
         equity_live=equity_live,
         unit_premium=price,
         lot_size=lot_size_int,
@@ -118,13 +156,36 @@ def lots_from_premium_cap(
     if price <= 0:
         unit_notional = 0.0
 
-    return lots, unit_notional, exposure_cap, eq_source
+    return lots, unit_notional, exposure_cap, eq_source, cap_block
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
     """Return estimated ₹ risk for the given trade parameters."""
 
     return abs(float(entry) - float(sl)) * int(lot_size) * int(lots)
+
+
+@dataclass(frozen=True)
+class SizingBlock:
+    """Structured sizing block result for premium exposure caps."""
+
+    reason: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Allow tuple-style unpacking ``ok, reason, details = SizingBlock(...)``."""
+
+        yield False
+        yield self.reason
+        yield self.details
+
+    def __bool__(self) -> bool:  # pragma: no cover - falsy sentinel behaviour
+        return False
+
+    def as_tuple(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Explicit tuple representation for interoperability with legacy code."""
+
+        return False, self.reason, self.details
 
 
 @dataclass(frozen=True)
@@ -248,7 +309,7 @@ class PositionSizer:
         equity_live: float | None,
         unit_premium: float,
         lot_size: int,
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], SizingBlock | None]:
         """Compute the exposure cap, cost of one lot, and affordable lots."""
 
         s = self.settings
@@ -258,18 +319,9 @@ class PositionSizer:
         cap_abs_setting = float(
             _coerce_float(getattr(s, "EXPOSURE_CAP_ABS", 0.0)) or 0.0
         )
-        cap_pct_setting = _coerce_float(
-            getattr(s, "EXPOSURE_CAP_PCT_OF_EQUITY", None)
+        cap_pct_fraction = float(
+            getattr(s, "RISK__EXPOSURE_CAP_PCT", settings.RISK__EXPOSURE_CAP_PCT)
         )
-        if cap_pct_setting is None:
-            cap_pct_setting = _coerce_float(
-                getattr(getattr(s, "risk", None), "exposure_cap_pct_of_equity", None)
-            )
-        cap_pct_setting = float(cap_pct_setting or 0.0)
-        if cap_pct_setting > 1.0:
-            cap_pct_fraction = cap_pct_setting / 100.0
-        else:
-            cap_pct_fraction = cap_pct_setting
 
         lot_size_int = int(lot_size)
         unit_price = float(_coerce_float(unit_premium) or 0.0)
@@ -279,6 +331,7 @@ class PositionSizer:
         equity_source: str | None = None
         cap_value: float
         lots_affordable: int
+        cap_block: SizingBlock | None = None
 
         if basis != "premium":
             cap_value = float("inf")
@@ -321,6 +374,36 @@ class PositionSizer:
                 min_equity_needed = float("inf")
 
         cap_abs_val = cap_abs_setting if cap_abs_setting > 0 else None
+        if (
+            basis == "premium"
+            and math.isfinite(cap_value)
+            and one_lot_cost > 0
+            and cap_value < one_lot_cost
+        ):
+            min_eq_detail = (
+                float(min_equity_needed)
+                if math.isfinite(min_equity_needed)
+                else None
+            )
+            cap_block = SizingBlock(
+                reason="cap_lt_one_lot",
+                details={
+                    "basis": basis,
+                    "cap": float(cap_value),
+                    "cap_pct": float(cap_pct_fraction),
+                    "cap_abs": cap_abs_val,
+                    "one_lot_cost": float(one_lot_cost),
+                    "one_lot_premium": float(one_lot_cost),
+                    "lots_affordable": int(max(0, lots_affordable)),
+                    "cap_source": cap_source,
+                    "eq_source": equity_source,
+                    "equity": None if equity_value is None else float(equity_value),
+                    "min_equity_for_one_lot": min_eq_detail,
+                    "allow_min_one_lot": bool(self.params.allow_min_one_lot),
+                    "lot_size": lot_size_int,
+                    "unit_price": unit_price,
+                },
+            )
 
         return {
             "basis": basis,
@@ -333,7 +416,7 @@ class PositionSizer:
             "one_lot_cost": float(one_lot_cost),
             "lots_affordable": int(max(0, lots_affordable)),
             "min_equity_for_one_lot": min_equity_needed,
-        }
+        }, cap_block
     @classmethod
     def from_settings(
         cls,
@@ -365,6 +448,7 @@ class PositionSizer:
         delta: float | None = None,
         quote: Dict | None = None,
     ) -> Tuple[int, int, Dict]:
+        _validate_lot_size(int(lot_size))
         mid = _mid_from_quote(quote) if quote else float(entry_price)
         sl_points_spot = (
             float(spot_sl_points)
@@ -427,7 +511,7 @@ class PositionSizer:
         )
 
         if sp.exposure_basis == "premium":
-            cap_info = self.compute_exposure_cap(
+            cap_info, cap_block = self.compute_exposure_cap(
                 equity_live=si.equity,
                 unit_premium=si.entry_price,
                 lot_size=si.lot_size,
@@ -480,7 +564,9 @@ class PositionSizer:
                 )
             else:
                 lots = 0
-                block_reason = "cap_lt_one_lot"
+                block_reason = (
+                    cap_block.reason if cap_block is not None else "cap_lt_one_lot"
+                )
                 logger.info(
                     "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
                     sp.exposure_basis,

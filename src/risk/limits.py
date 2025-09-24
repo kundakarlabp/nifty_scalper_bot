@@ -637,7 +637,7 @@ class RiskEngine:
                 "mid": option_mid_price if option_mid_price is not None else entry_price
             }
             runner_for_cap = runner or SimpleNamespace(equity_amount=equity_rupees)
-            lots, unit_notional, cap, eq_source = lots_from_premium_cap(
+            lots, unit_notional, cap, eq_source, cap_block = lots_from_premium_cap(
                 runner_for_cap,
                 quote_payload,
                 lot_size,
@@ -687,7 +687,7 @@ class RiskEngine:
                     "cap": round(cap, 2),
                     "cap_abs": cap_abs_value,
                     "equity_cap_pct": round(
-                        float(getattr(settings, "EXPOSURE_CAP_PCT_OF_EQUITY", 0.0)),
+                        float(getattr(settings, "RISK__EXPOSURE_CAP_PCT", 0.0)),
                         4,
                     ),
                     "lots": int(lots),
@@ -698,6 +698,16 @@ class RiskEngine:
                     "current_lots": int(current_lots),
                     "max_lots_per_symbol": int(self.cfg.max_lots_per_symbol),
                 }
+                if cap_block is not None:
+                    block_details = dict(cap_block.details)
+                    if "one_lot_cost" in block_details:
+                        block_details.setdefault(
+                            "unit_notional", round(float(block_details["one_lot_cost"]), 2)
+                        )
+                    block_details.setdefault("cap", round(cap, 2))
+                    block_details.setdefault("cap_abs", cap_abs_value)
+                    block_details.setdefault("lots", int(lots))
+                    meta.update(block_details)
                 if cap_abs_value is None:
                     meta["cap_abs"] = None
             if settings_basis.lower() == "premium" and lots <= 0:
