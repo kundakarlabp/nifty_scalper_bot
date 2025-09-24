@@ -1026,6 +1026,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts_ms: int | None = None
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
+        self._next_ws_resubscribe: dict[int, float] = {}
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
         self._ok_snap: dict[int, deque[float]] = {}
         # Tokens we have attempted to subscribe to via FULL depth.
@@ -2322,6 +2323,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 getattr(_cfg, "WS_RESUBSCRIBE_MIN_INTERVAL_MS", 15000),
             )
         )
+        min_interval_ms = max(int(min_interval_ms), 10_000)
+        min_interval_ms = min(min_interval_ms, 15_000)
+        next_allowed = self._next_ws_resubscribe.get(token_i)
+        if next_allowed is not None and now_mono < float(next_allowed):
+            return
         last_resub = self._last_ws_resub_ms.get(token_i, 0)
         if now_ms - int(last_resub) < max(min_interval_ms, 0):
             return
@@ -2342,6 +2348,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self.log.debug("resubscribe_if_stale.log_failed", exc_info=True)
             self._last_quote_ready_attempt[token_i] = now_mono
             self._last_ws_resub_ms[token_i] = now_ms
+            interval_s = min(float(min_interval_ms) / 1000.0, 15.0)
+            if interval_s < 15.0:
+                interval_s += random.uniform(0.0, 15.0 - interval_s)
+            self._next_ws_resubscribe[token_i] = now_mono + interval_s
         except Exception:
             self.log.debug("resubscribe_if_stale.ensure_failed", exc_info=True)
 

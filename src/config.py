@@ -1342,10 +1342,10 @@ class AppSettings(BaseSettings):
         default_factory=lambda: str(os.getenv("RISK__EXPOSURE_CAP_SOURCE", "equity")).lower(),
         validation_alias=AliasChoices("RISK__EXPOSURE_CAP_SOURCE"),
     )
-    # Percent of equity allowed per trade (converted to ratio for risk model).
-    EXPOSURE_CAP_PCT: float = Field(
-        default_factory=lambda: float(
-            os.getenv("RISK__EXPOSURE_CAP_PCT", str(DEFAULT_EXPOSURE_CAP_PCT))
+    # Percent of equity allowed per trade (stored as a ratio for risk model).
+    RISK__EXPOSURE_CAP_PCT: float = Field(
+        default_factory=lambda: _coerce_pct_env(
+            "RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT
         ),
         validation_alias=AliasChoices("RISK__EXPOSURE_CAP_PCT"),
     )
@@ -1443,6 +1443,21 @@ class AppSettings(BaseSettings):
             raise ValueError("QUOTE_WARMUP_SLEEP_MS must be >= 0")
         return val
 
+    @field_validator("RISK__EXPOSURE_CAP_PCT", mode="before")
+    @classmethod
+    def _v_app_exposure_cap_pct(cls, v: object) -> float:
+        if v in {None, "", "null"}:
+            return _coerce_pct_env("RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT)
+        try:
+            val = float(v) if isinstance(v, (int, float)) else float(str(v))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("RISK__EXPOSURE_CAP_PCT must be numeric") from exc
+        if val > 1.0:
+            val = val / 100.0
+        if val <= 0 or val > 1:
+            raise ValueError("RISK__EXPOSURE_CAP_PCT must be within (0, 1]")
+        return val
+
     @field_validator("EXPOSURE_BASIS", mode="before")
     @classmethod
     def _v_app_exposure_basis(cls, v: object) -> str:
@@ -1460,18 +1475,6 @@ class AppSettings(BaseSettings):
                 "EXPOSURE_CAP_SOURCE must be 'equity', 'absolute', or legacy 'env'"
             )
         return val
-
-    @field_validator("EXPOSURE_CAP_PCT")
-    @classmethod
-    def _v_app_exposure_cap_pct(cls, v: float) -> float:
-        pct = float(v)
-        if pct <= 0:
-            raise ValueError("EXPOSURE_CAP_PCT must be > 0")
-        if pct <= 1.0:
-            pct *= 100.0
-        if pct > 100.0:
-            raise ValueError("EXPOSURE_CAP_PCT must be <= 100")
-        return pct
 
     @field_validator("EXPOSURE_CAP_ABS")
     @classmethod
@@ -1555,14 +1558,7 @@ class AppSettings(BaseSettings):
     def EXPOSURE_CAP_PCT_OF_EQUITY(self) -> float:
         """Return the exposure cap as a ratio for legacy callers."""
 
-        pct = float(self.EXPOSURE_CAP_PCT)
-        return pct / 100.0
-
-    @property
-    def RISK__EXPOSURE_CAP_PCT(self) -> float:
-        """Unified exposure cap ratio consumed by micro + risk gates."""
-
-        return float(self.EXPOSURE_CAP_PCT_OF_EQUITY)
+        return float(self.RISK__EXPOSURE_CAP_PCT)
 
     instruments_csv: str = Field(
         default_factory=lambda: str(
@@ -1615,7 +1611,7 @@ class AppSettings(BaseSettings):
         if cap_source == "env":
             cap_source = "absolute"
         self.risk.exposure_cap_source = cap_source
-        self.risk.exposure_cap_pct_of_equity = self.EXPOSURE_CAP_PCT_OF_EQUITY
+        self.risk.exposure_cap_pct_of_equity = self.RISK__EXPOSURE_CAP_PCT
         self.risk.exposure_cap_abs = self.EXPOSURE_CAP_ABS
         self.risk.premium_cap_per_trade = self.PREMIUM_CAP_PER_TRADE
         min_floor_env = env_any("RISK_MIN_EQUITY_FLOOR", "MIN_EQUITY_FLOOR")

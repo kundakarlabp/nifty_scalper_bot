@@ -65,7 +65,10 @@ def snapshot_pipeline() -> Dict[str, Any]:
         "equity": None,
         "risk": {
             "daily_dd": None,
-            "cap_pct": float(getattr(settings, "EXPOSURE_CAP_PCT", 0.0)),
+            "cap_pct": float(
+                getattr(settings, "RISK__EXPOSURE_CAP_PCT", 0.0)
+            )
+            * 100.0,
         },
         "signals": {"regime": None, "atr_pct": None, "score": None},
         "micro": {"ce": None, "pe": None},

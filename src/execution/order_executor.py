@@ -1667,7 +1667,79 @@ class OrderExecutor:
             if final_ok is False or final_status is None:
                 final_quote_payload = final_payload
 
-        if final_quote_payload is not None:
+        quote_block_payload: Optional[Dict[str, Any]] = final_quote_payload
+
+        if quote_block_payload is None:
+            prime_fn = getattr(data_source, "prime_option_quote", None)
+            token_for_quote_raw = payload.get("token_for_quote")
+            token_for_quote_i: Optional[int]
+            try:
+                token_for_quote_i = int(token_for_quote_raw)
+            except Exception:
+                token_for_quote_i = None
+            if (not token_for_quote_i or token_for_quote_i <= 0) and token > 0:
+                token_for_quote_i = int(token)
+            if callable(prime_fn) and token_for_quote_i:
+                stale_limit_exec = int(
+                    getattr(settings, "MICRO__STALE_MS", CONFIG_MICRO_STALE_MS)
+                )
+                prime_payload: Optional[Dict[str, Any]] = None
+                prime_ok = False
+                for attempt in range(2):
+                    try:
+                        prime_price, prime_source, prime_ts = prime_fn(
+                            int(token_for_quote_i)
+                        )
+                    except Exception:
+                        prime_price, prime_source, prime_ts = None, None, None
+                        log.debug(
+                            "prime_option_quote before execution failed", exc_info=True
+                        )
+                    age_ms: Optional[int] = None
+                    if prime_ts is not None:
+                        try:
+                            age_ms = int(
+                                max(
+                                    0,
+                                    int(time.time() * 1000) - int(prime_ts),
+                                )
+                            )
+                        except Exception:
+                            age_ms = None
+                    prime_payload = {
+                        "ok": False,
+                        "reason": None,
+                        "age_ms": age_ms,
+                        "retries": attempt,
+                        "source": prime_source,
+                        "bid": None,
+                        "ask": None,
+                        "bid_qty": None,
+                        "ask_qty": None,
+                        "price": prime_price,
+                        "ts_ms": prime_ts,
+                        "stage": "prime_check",
+                    }
+                    if (
+                        prime_price is not None
+                        and age_ms is not None
+                        and age_ms <= stale_limit_exec
+                    ):
+                        prime_payload["ok"] = True
+                        prime_ok = True
+                        break
+                    if prime_price is None:
+                        prime_payload["reason"] = "prime_missing"
+                    elif age_ms is None:
+                        prime_payload["reason"] = "prime_unknown_age"
+                    else:
+                        prime_payload["reason"] = "prime_stale"
+                    if attempt == 0:
+                        time.sleep(0.05)
+                if not prime_ok and prime_payload is not None:
+                    quote_block_payload = prime_payload
+
+        if quote_block_payload is not None:
             structured_log.event(
                 "execution_block",
                 reason="no_quote_at_execution",
@@ -1679,7 +1751,7 @@ class OrderExecutor:
                 strategy=strategy_name or None,
                 trace_id=trace_id,
                 client_oid=client_oid or None,
-                quote_ready=final_quote_payload,
+                quote_ready=quote_block_payload,
             )
             log_event(
                 "order.block",
@@ -1691,11 +1763,11 @@ class OrderExecutor:
                 mode=mode,
                 strategy=strategy_name,
                 reason="no_quote_at_execution",
-                quote_ready_ok=final_quote_payload.get("ok"),
-                quote_ready_reason=final_quote_payload.get("reason"),
-                quote_ready_age_ms=final_quote_payload.get("age_ms"),
-                quote_ready_retries=final_quote_payload.get("retries"),
-                quote_ready_source=final_quote_payload.get("source"),
+                quote_ready_ok=quote_block_payload.get("ok"),
+                quote_ready_reason=quote_block_payload.get("reason"),
+                quote_ready_age_ms=quote_block_payload.get("age_ms"),
+                quote_ready_retries=quote_block_payload.get("retries"),
+                quote_ready_source=quote_block_payload.get("source"),
             )
             self._emit_order_event(
                 "no_quote_at_execution",
@@ -1706,7 +1778,7 @@ class OrderExecutor:
                 qty=qty,
                 mode=mode,
                 reason="no_quote_at_execution",
-                quote_ready=final_quote_payload,
+                quote_ready=quote_block_payload,
                 sizing=sizing_raw,
                 instrument_token=token,
             )

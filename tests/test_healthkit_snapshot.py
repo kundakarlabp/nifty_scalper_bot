@@ -22,7 +22,7 @@ def test_snapshot_pipeline_no_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     assert snap["equity"] is None
     assert snap["risk"]["daily_dd"] is None
     assert snap["risk"]["cap_pct"] == pytest.approx(
-        float(getattr(settings, "EXPOSURE_CAP_PCT", 0.0))
+        float(getattr(settings, "RISK__EXPOSURE_CAP_PCT", 0.0)) * 100.0
     )
 
 

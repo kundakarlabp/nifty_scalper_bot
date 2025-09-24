@@ -148,7 +148,7 @@ The per-trade premium cap can be driven by equity or a fixed rupee limit:
 ```bash
 # equity-based (default): 40% of account equity
 EXPOSURE_CAP_SOURCE=equity
-EXPOSURE_CAP_PCT=40              # ₹100k equity ⇒ ₹40k cap
+RISK__EXPOSURE_CAP_PCT=40        # ₹100k equity ⇒ ₹40k cap
 EXPOSURE_CAP_ABS=0               # disable absolute fallback cap
 RISK__MAX_POSITION_SIZE_PCT=0.40  # per-trade cap tied to equity
 # Enabled by default; set to false to disable the single-lot premium override

@@ -41,7 +41,7 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
         LOG_DIAG_DEFAULT_SEC=5,
         LOG_TRACE_DEFAULT_SEC=7,
         LOG_MAX_LINES_REPLY=10,
-        EXPOSURE_CAP_PCT=5.0,
+        RISK__EXPOSURE_CAP_PCT=0.05,
     )
 
     class DummySource:
@@ -115,7 +115,7 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
 def test_diag_with_source_only() -> None:
     dummy_settings = SimpleNamespace(
         LOG_MAX_LINES_REPLY=10,
-        EXPOSURE_CAP_PCT=2.5,
+        RISK__EXPOSURE_CAP_PCT=0.025,
     )
 
     class DummySource:
