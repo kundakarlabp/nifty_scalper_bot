@@ -96,12 +96,9 @@ except Exception:
 
 # Optional live data source (graceful if not present)
 try:
-    from src.data.source import LiveKiteSource, get_option_quote_safe  # type: ignore
+    from src.data.source import LiveKiteSource  # type: ignore
 except Exception:  # pragma: no cover - defensive import guard
     LiveKiteSource = None  # type: ignore
-
-    def get_option_quote_safe(*args: Any, **kwargs: Any) -> tuple[None, str]:  # type: ignore
-        return None, "no_quote"
 
 
 logger = logging.getLogger(__name__)
@@ -2652,7 +2649,7 @@ class StrategyRunner:
             "reason_block": None,
         }
         token_for_quote: int | None = None
-        lot_size_for_plan: int | None = None
+        lot_size: int | None = None
         signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
         self._cycle_guard_token += 1
@@ -3044,6 +3041,19 @@ class StrategyRunner:
                 warmed_plan_snapshot = self._ensure_token_subscribed_and_quote(
                     plan_token_for_warm
                 )
+                ds_for_prime = getattr(self, "data_source", None)
+                if ds_for_prime is not None and not getattr(
+                    ds_for_prime, "atm_tokens", None
+                ):
+                    try:
+                        coerced_token = int(plan_token_for_warm)
+                    except (TypeError, ValueError):
+                        coerced_token = None
+                    if coerced_token is not None:
+                        try:
+                            setattr(ds_for_prime, "atm_tokens", (coerced_token,))
+                        except Exception:
+                            setattr(ds_for_prime, "atm_tokens", [coerced_token])
             prime_ok, prime_err, prime_tokens = self._prime_atm_quotes()
             if not prime_ok:
                 should_block = self._should_block_no_quote(
@@ -3366,13 +3376,21 @@ class StrategyRunner:
                 try:
                     plan["lot_size"] = int(lot_size_resolved)
                 except Exception:
-                    plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
+                    plan["lot_size"] = int(
+                        getattr(
+                            self.settings.instruments,
+                            "nifty_lot_size",
+                            self.lot_size,
+                        )
+                    )
             else:
-                plan["lot_size"] = int(getattr(self.settings.instruments, "nifty_lot_size", self.lot_size))
+                plan["lot_size"] = int(
+                    getattr(self.settings.instruments, "nifty_lot_size", self.lot_size)
+                )
             try:
-                lot_size_for_plan = int(plan.get("lot_size", 0) or 0)
+                lot_size = int(plan.get("lot_size", 0) or 0)
             except Exception:
-                lot_size_for_plan = None
+                lot_size = None
             ds = getattr(self, "data_source", None)
             atm_strike = getattr(ds, "current_atm_strike", None)
             if atm_strike is None:
@@ -3417,15 +3435,14 @@ class StrategyRunner:
 
             option_type = str(plan.get("option_type") or plan.get("side_hint") or "").upper()
             token_map: dict[str, int | None] = {"CE": ce_token, "PE": pe_token}
-            plan["token"] = token_map.get(option_type)
-            if plan["token"] is None and token is not None:
-                try:
-                    plan["token"] = int(token)
-                except (TypeError, ValueError):
-                    plan["token"] = None
-            token_for_quote = _coerce_token(plan.get("token") or plan.get("option_token"))
-            if token_for_quote is None:
-                token_for_quote = _coerce_token(token)
+            raw_token: Any | None = token_map.get(option_type)
+            if raw_token is None:
+                raw_token = plan.get("option_token")
+            if raw_token is None:
+                raw_token = plan.get("token")
+            if raw_token is None:
+                raw_token = token
+            token_for_quote = _coerce_token(raw_token)
             if token_for_quote is not None:
                 plan["token"] = token_for_quote
             else:
@@ -3472,7 +3489,6 @@ class StrategyRunner:
                             "debounce_sec": debounce_sec,
                         },
                     )
-                    plan["token"] = pe_token if option_type == "PE" else ce_token
                     plan.setdefault("reasons", []).append("token_debounce")
                     flow["reason_block"] = "token_debounce"
                     self._record_plan(plan)
@@ -3557,17 +3573,15 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
-            if lot_size_for_plan is None:
+            if lot_size is None:
                 try:
-                    lot_size_for_plan = int(plan.get("lot_size", self.lot_size))
+                    lot_size = int(plan.get("lot_size", self.lot_size))
                 except Exception:
-                    lot_size_for_plan = None
+                    lot_size = None
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
-                subscribe_token: Any | None = (
-                    token_for_quote if token_for_quote is not None else token
-                )
+                subscribe_token: Any | None = token_for_quote
                 if subscribe_token:
                     try:
                         try:
@@ -3637,6 +3651,54 @@ class StrategyRunner:
                     bbo_bid = bbo_ask = None
                     bbo_bid_qty = bbo_ask_qty = None
                     bbo_ts_ms = None
+            if (
+                bbo_bid is None
+                and bbo_ask is None
+                and self.kite is not None
+                and opt.get("tradingsymbol")
+            ):
+                try:
+                    ts = opt["tradingsymbol"]
+                    resp = self.kite.quote([f"NFO:{ts}"])  # type: ignore[attr-defined]
+                    raw_quote = resp.get(f"NFO:{ts}") if isinstance(resp, Mapping) else None
+                    if isinstance(raw_quote, Mapping):
+                        depth = raw_quote.get("depth")
+                        if isinstance(depth, Mapping):
+                            buy_levels = depth.get("buy")
+                            sell_levels = depth.get("sell")
+                            if (
+                                isinstance(buy_levels, list)
+                                and buy_levels
+                                and isinstance(buy_levels[0], Mapping)
+                            ):
+                                try:
+                                    bbo_bid = float(buy_levels[0].get("price"))
+                                except (TypeError, ValueError):
+                                    bbo_bid = None
+                                try:
+                                    bbo_bid_qty = int(buy_levels[0].get("quantity"))
+                                except (TypeError, ValueError):
+                                    bbo_bid_qty = None
+                            if (
+                                isinstance(sell_levels, list)
+                                and sell_levels
+                                and isinstance(sell_levels[0], Mapping)
+                            ):
+                                try:
+                                    bbo_ask = float(sell_levels[0].get("price"))
+                                except (TypeError, ValueError):
+                                    bbo_ask = None
+                                try:
+                                    bbo_ask_qty = int(sell_levels[0].get("quantity"))
+                                except (TypeError, ValueError):
+                                    bbo_ask_qty = None
+                        if prime_price is None:
+                            try:
+                                prime_price = float(raw_quote.get("last_price"))
+                            except (TypeError, ValueError):
+                                prime_price = None
+                except Exception:
+                    self.log.debug("kite_quote_bbo_failed", exc_info=True)
             last_tick_age_ms: int | None = None
             if quote_ready_status is not None:
                 try:
@@ -3732,45 +3794,44 @@ class StrategyRunner:
                     self._set_phase(RunnerPhase.IDLE)
                     return
                 self._flag_transient_no_quote(plan)
-            raw_quote: dict[str, Any] | None = None
-            if self.kite is not None and opt.get("tradingsymbol"):
+            quote_mode = "BBO"
+            quote_dict: dict[str, Any] = {"source": "bbo"}
+            if prime_price is not None:
                 try:
-                    ts = opt["tradingsymbol"]
-                    resp = self.kite.quote([f"NFO:{ts}"])  # type: ignore[attr-defined]
-                    raw = resp.get(f"NFO:{ts}") if isinstance(resp, dict) else None
-                    if isinstance(raw, dict):
-                        raw_quote = dict(raw)
-                        raw_quote.setdefault("source", "kite")
-                except Exception:
-                    raw_quote = None
-
-            fetch_ltp = None
-            if hasattr(self.data_source, "get_last_price"):
-                fetch_ltp = getattr(self.data_source, "get_last_price")
-
-            quote_dict, quote_mode = get_option_quote_safe(
-                option=opt,
-                quote=raw_quote,
-                fetch_ltp=fetch_ltp,
-            )
-            if quote_dict:
-                quote_dict = dict(quote_dict)
-            else:
-                quote_dict = {}
+                    quote_dict["ltp"] = float(prime_price)
+                except (TypeError, ValueError):
+                    pass
             if bbo_bid is not None:
-                quote_dict["bid"] = bbo_bid
+                try:
+                    quote_dict["bid"] = float(bbo_bid)
+                except (TypeError, ValueError):
+                    pass
             if bbo_ask is not None:
-                quote_dict["ask"] = bbo_ask
+                try:
+                    quote_dict["ask"] = float(bbo_ask)
+                except (TypeError, ValueError):
+                    pass
             if bbo_bid_qty is not None:
-                quote_dict["bid_qty"] = bbo_bid_qty
+                try:
+                    quote_dict["bid_qty"] = int(bbo_bid_qty)
+                except (TypeError, ValueError):
+                    pass
             if bbo_ask_qty is not None:
-                quote_dict["ask_qty"] = bbo_ask_qty
+                try:
+                    quote_dict["ask_qty"] = int(bbo_ask_qty)
+                except (TypeError, ValueError):
+                    pass
+            if "bid" in quote_dict and "ask" in quote_dict:
+                try:
+                    quote_dict["mid"] = (quote_dict["bid"] + quote_dict["ask"]) / 2.0
+                except Exception:
+                    quote_dict.pop("mid", None)
             if last_tick_age_ms is not None:
                 quote_dict["age_ms"] = last_tick_age_ms
                 quote_dict.setdefault("last_tick_age_ms", last_tick_age_ms)
             if bbo_ts_ms is not None:
                 quote_dict.setdefault("ts_ms", bbo_ts_ms)
-            if not quote_dict:
+            if len(quote_dict) == 1 and quote_dict.get("source") == "bbo":
                 should_block = self._should_block_no_quote(
                     plan, warmed_snapshot=warmed_quote_snapshot
                 )
@@ -3873,14 +3934,14 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
-            lot_size_for_micro = lot_size_for_plan
+            lot_size_for_micro = lot_size
             if not isinstance(lot_size_for_micro, int) or lot_size_for_micro <= 0:
                 try:
                     lot_size_for_micro = int(plan.get("lot_size", self.lot_size))
                 except Exception:
                     lot_size_for_micro = self.lot_size
             plan["lot_size"] = lot_size_for_micro
-            lot_size_for_plan = lot_size_for_micro
+            lot_size = lot_size_for_micro
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=int(lot_size_for_micro or self.lot_size),
@@ -3906,7 +3967,7 @@ class StrategyRunner:
             plan["spread_pct"] = micro.get("spread_pct")
             plan["depth_ok"] = micro.get("depth_ok")
             plan["micro"] = micro
-            plan["quote_src"] = quote_dict.get("source", "kite")
+            plan["quote_src"] = quote_dict.get("source", "bbo")
             plan["quote_mode"] = quote_mode
             plan["quote"] = quote_dict
             plan["quote_age_s"] = self._normalize_quote_age(quote_dict)
