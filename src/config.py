@@ -37,7 +37,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-DEFAULT_EXPOSURE_CAP_PCT = 40.0
+DEFAULT_EXPOSURE_CAP_PCT = 2.0
 def _coerce_pct_env(name: str, default_pct: float) -> float:
     """Return an environment percentage converted to a fraction."""
 
@@ -128,39 +128,18 @@ def build_log_gate() -> "LogGate":
 # ================= Sub-models =================
 
 
-class ZerodhaSettings(BaseModel):
+class KiteSettings(BaseModel):
     api_key: str = ""
     api_secret: str = ""
     access_token: str = ""
 
     @classmethod
-    def from_env(cls) -> "ZerodhaSettings":
-        """Load legacy flat env vars if present."""
+    def from_env(cls) -> "KiteSettings":
+        """Load broker credentials from the canonical KITE_* variables."""
         return cls(
-            api_key=(
-                env_any(
-                    "ZERODHA__API_KEY",
-                    "ZERODHA_API_KEY",
-                    "KITE_API_KEY",
-                )
-                or ""
-            ),
-            api_secret=(
-                env_any(
-                    "ZERODHA__API_SECRET",
-                    "ZERODHA_API_SECRET",
-                    "KITE_API_SECRET",
-                )
-                or ""
-            ),
-            access_token=(
-                env_any(
-                    "ZERODHA__ACCESS_TOKEN",
-                    "ZERODHA_ACCESS_TOKEN",
-                    "KITE_ACCESS_TOKEN",
-                )
-                or ""
-            ),
+            api_key=env_any("KITE_API_KEY") or "",
+            api_secret=env_any("KITE_API_SECRET") or "",
+            access_token=env_any("KITE_ACCESS_TOKEN") or "",
         )
 
 
@@ -575,7 +554,7 @@ class RiskSettings(BaseModel):
     max_trades_per_day: int = 12
     consecutive_loss_limit: int = 3
     max_daily_drawdown_pct: float = 0.04
-    max_position_size_pct: float = 0.40
+    max_position_size_pct: float = 0.02
     trading_window_start: str = "09:15"
     trading_window_end: str = "15:30"
     loss_cooldown_minutes: int = Field(
@@ -1630,7 +1609,7 @@ class AppSettings(BaseSettings):
     COOLOFF_MINUTES: int = 45
     JOURNAL_DB_PATH: str = "data/journal.sqlite"
 
-    zerodha: ZerodhaSettings = Field(default_factory=ZerodhaSettings.from_env)
+    kite: KiteSettings = Field(default_factory=KiteSettings.from_env)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings.from_env)
     data: DataSettings = DataSettings()  # type: ignore[call-arg]
     instruments: InstrumentsSettings = InstrumentsSettings()
@@ -2113,14 +2092,14 @@ def load_settings() -> AppSettings:
     os.environ.setdefault("PYDANTIC_SETTINGS_DIR", str(validation_dir))
     load_dotenv(override=False)
     cfg = AppSettings(
-        zerodha=ZerodhaSettings.from_env(),
+        kite=KiteSettings.from_env(),
         telegram=TelegramSettings.from_env(),
     )  # type: ignore[call-arg]
     _apply_env_overrides(cfg)
     snap = cfg.model_dump()
     for k in ("api_key", "api_secret", "access_token"):
-        if k in snap.get("zerodha", {}):
-            snap["zerodha"][k] = "***"
+        if k in snap.get("kite", {}):
+            snap["kite"][k] = "***"
     if "telegram" in snap and "bot_token" in snap["telegram"]:
         snap["telegram"]["bot_token"] = "***"
     logging.getLogger("config").info("settings snapshot: %s", snap)

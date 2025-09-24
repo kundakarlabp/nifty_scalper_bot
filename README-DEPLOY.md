@@ -4,7 +4,7 @@
 
 ## One-time
 1. Add repository secrets or Railway variables for:
-   - `ZERODHA__API_KEY`, `ZERODHA__ACCESS_TOKEN`
+   - `KITE_API_KEY`, `KITE_ACCESS_TOKEN`
    - `TELEGRAM__BOT_TOKEN`, `TELEGRAM__CHAT_ID`
    - `ENABLE_LIVE_TRADING=true` (enable live trades; default is true; alias `ENABLE_TRADING`)
    - `DATA__TIME_FILTER_START=09:20`, `DATA__TIME_FILTER_END=15:25`

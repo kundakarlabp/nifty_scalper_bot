@@ -1,9 +1,9 @@
 # Runbook
 
-## Rotate Zerodha tokens
+## Rotate Kite tokens
 1. `./manage_bot.sh token`
 2. Follow the URL to log in and retrieve the `request_token`.
-3. Paste the token when prompted; `.env` is updated with `ZERODHA__ACCESS_TOKEN`.
+3. Paste the token when prompted; `.env` is updated with `KITE_ACCESS_TOKEN`.
 4. Restart the bot.
 
 ## Kill switch

@@ -183,13 +183,13 @@ class SizingParams:
     """
     risk_per_trade: fraction of equity to risk per trade (e.g., 0.01 = 1%, 0.006 = 0.6%)
     min_lots / max_lots: hard clamps on lots
-    max_position_size_pct: cap notional exposure vs equity (e.g., 0.40 = 40%)
+    max_position_size_pct: cap notional exposure vs equity (e.g., 0.02 = 2%)
     """
 
     risk_per_trade: float = 0.01
     min_lots: int = 1
     max_lots: int = 10
-    max_position_size_pct: float = 0.40
+    max_position_size_pct: float = 0.02
     exposure_basis: Literal["underlying", "premium"] = field(
         default_factory=lambda: cast(
             Literal["underlying", "premium"], settings.EXPOSURE_BASIS

@@ -40,29 +40,17 @@ SKIP_BROKER_VALIDATION: bool = str(
 ).lower() in {"1", "true", "yes"}
 
 
-ZERODHA_API_KEY_ALIASES: tuple[str, ...] = (
-    "ZERODHA__API_KEY",
-    "ZERODHA_API_KEY",
-    "KITE_API_KEY",
-)
-ZERODHA_API_SECRET_ALIASES: tuple[str, ...] = (
-    "ZERODHA__API_SECRET",
-    "ZERODHA_API_SECRET",
-    "KITE_API_SECRET",
-)
-ZERODHA_ACCESS_TOKEN_ALIASES: tuple[str, ...] = (
-    "ZERODHA__ACCESS_TOKEN",
-    "ZERODHA_ACCESS_TOKEN",
-    "KITE_ACCESS_TOKEN",
-)
+KITE_API_KEY_NAMES: tuple[str, ...] = ("KITE_API_KEY",)
+KITE_API_SECRET_NAMES: tuple[str, ...] = ("KITE_API_SECRET",)
+KITE_ACCESS_TOKEN_NAMES: tuple[str, ...] = ("KITE_ACCESS_TOKEN",)
 INSTRUMENTS_CSV_ALIASES: tuple[str, ...] = (
     "INSTRUMENTS__CSV",
     "INSTRUMENTS_CSV",
 )
 
-API_KEY = env_any(*ZERODHA_API_KEY_ALIASES)
-API_SECRET = env_any(*ZERODHA_API_SECRET_ALIASES)
-ACCESS_TOKEN = env_any(*ZERODHA_ACCESS_TOKEN_ALIASES)
+API_KEY = env_any(*KITE_API_KEY_NAMES)
+API_SECRET = env_any(*KITE_API_SECRET_NAMES)
+ACCESS_TOKEN = env_any(*KITE_ACCESS_TOKEN_NAMES)
 
 # Deployment environment flags
 # True when running on Railway (detected via known env vars)
@@ -189,17 +177,17 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
 
     # Live trading requires broker credentials
     if cfg.enable_live_trading:
-        if not cfg.zerodha.api_key:
+        if not cfg.kite.api_key:
             errors.append(
-                "ZERODHA__API_KEY (or ZERODHA_API_KEY/KITE_API_KEY) is required when ENABLE_LIVE_TRADING=true",
+                "KITE_API_KEY is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.zerodha.api_secret:
+        if not cfg.kite.api_secret:
             errors.append(
-                "ZERODHA__API_SECRET (or ZERODHA_API_SECRET/KITE_API_SECRET) is required when ENABLE_LIVE_TRADING=true",
+                "KITE_API_SECRET is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.zerodha.access_token:
+        if not cfg.kite.access_token:
             errors.append(
-                "ZERODHA__ACCESS_TOKEN (or ZERODHA_ACCESS_TOKEN/KITE_ACCESS_TOKEN) is required when ENABLE_LIVE_TRADING=true",
+                "KITE_ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true",
             )
 
     # Telegram configuration (required only when enabled)
@@ -226,8 +214,8 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         token = int(getattr(cfg.instruments, "instrument_token", 0) or 0)
         src = None
         try:
-            kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
-            kite.set_access_token(str(cfg.zerodha.access_token))
+            kite = KiteConnect(api_key=str(cfg.kite.api_key))
+            kite.set_access_token(str(cfg.kite.access_token))
             src = LiveKiteSource(kite=kite)
             try:
                 src.connect()
@@ -302,9 +290,9 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
 
     # --- required environment variables ---
     required = [
-        ZERODHA_API_KEY_ALIASES,
-        ZERODHA_API_SECRET_ALIASES,
-        ZERODHA_ACCESS_TOKEN_ALIASES,
+        KITE_API_KEY_NAMES,
+        KITE_API_SECRET_NAMES,
+        KITE_ACCESS_TOKEN_NAMES,
     ]
     if cfg.enable_live_trading and not _skip_validation():
         for keys in required:
@@ -321,8 +309,8 @@ def validate_runtime_env(cfg: Optional[AppSettings] = None) -> None:
     # --- broker connectivity & tokens ---
     if cfg.enable_live_trading and KiteConnect is not None and not _skip_validation():
         try:
-            kite = KiteConnect(api_key=str(cfg.zerodha.api_key))
-            kite.set_access_token(str(cfg.zerodha.access_token))
+            kite = KiteConnect(api_key=str(cfg.kite.api_key))
+            kite.set_access_token(str(cfg.kite.access_token))
             # avoid network calls; simply ensure object creation succeeded
             _ = Decimal("0")  # exercise Decimal import for mypy
         except Exception as exc:  # pragma: no cover - defensive
