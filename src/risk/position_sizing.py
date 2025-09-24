@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple, Literal, cast
+from typing import Any, Dict, Iterator, Tuple, Literal, cast
 import logging
 import math
 
@@ -10,6 +10,41 @@ from src.config import RISK__EXPOSURE_CAP_PCT, settings
 from src.logs import structured_log
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SizingBlock:
+    """Structured block reason returned by sizing helpers."""
+
+    reason: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Allow tuple-style unpacking similar to :class:`risk.limits.Block`."""
+
+        yield False
+        yield self.reason
+        yield self.details
+
+    def __bool__(self) -> bool:
+        """Blocks are always falsy so they can short-circuit flows."""
+
+        return False
+
+
+_VALID_NIFTY_LOT_SIZES = {25, 50, 75}
+
+
+def _validate_lot_size(lot_size: int) -> int:
+    """Return ``lot_size`` as ``int`` while warning on unexpected values."""
+
+    lot_size_int = int(lot_size)
+    if lot_size_int <= 0:
+        logger.warning("lot_size must be positive; received %s", lot_size)
+        return lot_size_int
+    if lot_size_int not in _VALID_NIFTY_LOT_SIZES:
+        logger.warning("Unexpected NIFTY lot size: %s", lot_size_int)
+    return lot_size_int
 
 
 def _mid_from_quote(q: dict) -> float:
@@ -75,11 +110,13 @@ def lots_from_premium_cap(
     quote: dict,
     lot_size: int,
     max_lots: int,
-) -> Tuple[int, float, float, str]:
+) -> Tuple[int, float, float, str, SizingBlock | None]:
     from src.config import settings as _settings
 
+    """Return lot sizing outcome alongside exposure metadata and optional block."""
+
     price = float(_mid_from_quote(quote or {}))
-    lot_size_int = int(lot_size)
+    lot_size_int = _validate_lot_size(lot_size)
 
     equity_live: float | None = None
     use_live_equity = bool(getattr(getattr(_settings, "risk", None), "use_live_equity", True))
@@ -104,6 +141,9 @@ def lots_from_premium_cap(
     lots_affordable = int(cap_info.get("lots_affordable", 0))
     lots = min(int(max_lots), max(0, lots_affordable))
     eq_source = str(cap_info.get("eq_source") or cap_info.get("equity_source") or "default")
+    block = cap_info.get("block")
+    if not isinstance(block, SizingBlock):
+        block = None
 
     if cap_info.get("basis") == "premium":
         logger.info(
@@ -118,7 +158,7 @@ def lots_from_premium_cap(
     if price <= 0:
         unit_notional = 0.0
 
-    return lots, unit_notional, exposure_cap, eq_source
+    return lots, unit_notional, exposure_cap, eq_source, block
 
 
 def estimate_r_rupees(entry: float, sl: float, lot_size: int, lots: int) -> float:
@@ -258,13 +298,7 @@ class PositionSizer:
         cap_abs_setting = float(
             _coerce_float(getattr(s, "EXPOSURE_CAP_ABS", 0.0)) or 0.0
         )
-        cap_pct_setting = _coerce_float(
-            getattr(s, "RISK__EXPOSURE_CAP_PCT", None)
-        )
-        if cap_pct_setting is None:
-            cap_pct_setting = _coerce_float(
-                getattr(getattr(s, "risk", None), "exposure_cap_pct_of_equity", None)
-            )
+        cap_pct_setting = _coerce_float(getattr(s, "RISK__EXPOSURE_CAP_PCT", None))
         if cap_pct_setting is None:
             cap_pct_setting = RISK__EXPOSURE_CAP_PCT
         cap_pct_fraction = float(cap_pct_setting)
@@ -279,6 +313,8 @@ class PositionSizer:
         equity_source: str | None = None
         cap_value: float
         lots_affordable: int
+
+        block: SizingBlock | None = None
 
         if basis != "premium":
             cap_value = float("inf")
@@ -322,6 +358,34 @@ class PositionSizer:
 
         cap_abs_val = cap_abs_setting if cap_abs_setting > 0 else None
 
+        if (
+            basis == "premium"
+            and one_lot_cost > 0
+            and math.isfinite(cap_value)
+            and cap_value < one_lot_cost
+        ):
+            block_eq = float(equity_value or 0.0)
+            block_details = {
+                "basis": basis,
+                "price": round(unit_price, 2),
+                "unit_notional": round(one_lot_cost, 2),
+                "cap": round(cap_value, 2),
+                "cap_abs": round(cap_abs_val, 2) if cap_abs_val else None,
+                "equity_cap_pct": round(cap_pct_fraction, 4),
+                "lot_size": lot_size_int,
+                "lots": int(max(0, lots_affordable)),
+                "equity": block_eq,
+                "eq_source": equity_source or cap_source,
+                "cap_source": cap_source,
+                "min_equity_for_one_lot": (
+                    round(min_equity_needed, 2)
+                    if math.isfinite(min_equity_needed)
+                    else float("inf")
+                ),
+                "reason": "cap_lt_one_lot",
+            }
+            block = SizingBlock("cap_lt_one_lot", block_details)
+
         return {
             "basis": basis,
             "cap_source": cap_source,
@@ -333,6 +397,7 @@ class PositionSizer:
             "one_lot_cost": float(one_lot_cost),
             "lots_affordable": int(max(0, lots_affordable)),
             "min_equity_for_one_lot": min_equity_needed,
+            "block": block,
         }
     @classmethod
     def from_settings(
@@ -371,10 +436,11 @@ class PositionSizer:
             if spot_sl_points is not None
             else abs(float(spot_price or 0.0) - float(stop_loss))
         )
+        lot_size_int = _validate_lot_size(lot_size)
         si = SizingInputs(
             entry_price=float(mid),
             stop_loss=float(stop_loss),
-            lot_size=int(lot_size),
+            lot_size=lot_size_int,
             equity=float(equity),
             spot_price=float(spot_price or 0.0),
             spot_sl_points=sl_points_spot,
@@ -441,6 +507,9 @@ class PositionSizer:
             )
             cap_abs = float(cap_info.get("cap_abs") or 0.0)
             eq_source = str(cap_info.get("eq_source") or "na")
+            cap_block = cap_info.get("block")
+            if not isinstance(cap_block, SizingBlock):
+                cap_block = None
         else:
             unit_notional = (si.spot_price or si.entry_price) * si.lot_size
             if sp.max_position_size_pct > 0 and unit_notional > 0:
@@ -456,6 +525,7 @@ class PositionSizer:
             )
             cap_abs = 0.0
             eq_source = "na"
+            cap_block = None
 
         max_lots_limit = sp.max_lots
         calc_lots = min(max_lots_exposure, max_lots_risk, max_lots_limit)
@@ -467,6 +537,7 @@ class PositionSizer:
             calc_lots,
         )
         lots = calc_lots
+        block_reason = cap_block.reason if cap_block else ""
         if sp.exposure_basis == "premium" and max_lots_exposure < 1:
             if sp.allow_min_one_lot and si.equity >= unit_notional:
                 lots = sp.min_lots
@@ -480,7 +551,8 @@ class PositionSizer:
                 )
             else:
                 lots = 0
-                block_reason = "cap_lt_one_lot"
+                if not block_reason:
+                    block_reason = "cap_lt_one_lot"
                 logger.info(
                     "sizer block: basis=%s unit=%.2f lots=%d cap=%.2f",
                     sp.exposure_basis,

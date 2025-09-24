@@ -12,7 +12,11 @@ from zoneinfo import ZoneInfo
 
 from src.config import RISK__EXPOSURE_CAP_PCT, settings
 from src.logs import structured_log
-from src.risk.position_sizing import _mid_from_quote, lots_from_premium_cap
+from src.risk.position_sizing import (
+    SizingBlock,
+    _mid_from_quote,
+    lots_from_premium_cap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -637,7 +641,7 @@ class RiskEngine:
                 "mid": option_mid_price if option_mid_price is not None else entry_price
             }
             runner_for_cap = runner or SimpleNamespace(equity_amount=equity_rupees)
-            lots, unit_notional, cap, eq_source = lots_from_premium_cap(
+            lots, unit_notional, cap, eq_source, cap_block = lots_from_premium_cap(
                 runner_for_cap,
                 quote_payload,
                 lot_size,
@@ -676,36 +680,45 @@ class RiskEngine:
                     cap,
                 )
             if lots <= 0:
-                cap_abs_value = (
-                    round(cap_abs_setting, 2) if cap_abs_setting > 0 else None
-                )
-                meta = {
-                    "reason": "cap_lt_one_lot",
-                    "basis": basis,
-                    "price": round(price_mid, 2),
-                    "unit_notional": round(unit_notional, 2),
-                    "cap": round(cap, 2),
-                    "cap_abs": cap_abs_value,
-                    "equity_cap_pct": round(
-                        float(
-                            getattr(
-                                settings,
-                                "RISK__EXPOSURE_CAP_PCT",
-                                RISK__EXPOSURE_CAP_PCT,
-                            )
+                if isinstance(cap_block, SizingBlock):
+                    meta = {"reason": cap_block.reason, **cap_block.details}
+                else:
+                    cap_abs_value = (
+                        round(cap_abs_setting, 2) if cap_abs_setting > 0 else None
+                    )
+                    meta = {
+                        "reason": "cap_lt_one_lot",
+                        "basis": basis,
+                        "price": round(price_mid, 2),
+                        "unit_notional": round(unit_notional, 2),
+                        "cap": round(cap, 2),
+                        "cap_abs": cap_abs_value,
+                        "equity_cap_pct": round(
+                            float(
+                                getattr(
+                                    settings,
+                                    "RISK__EXPOSURE_CAP_PCT",
+                                    RISK__EXPOSURE_CAP_PCT,
+                                )
+                            ),
+                            4,
                         ),
-                        4,
-                    ),
-                    "lots": int(lots),
-                    "lot_size": int(lot_size),
-                    "equity": float(equity_rupees),
-                    "eq_source": eq_source,
-                    "available_lots": int(available_lots),
-                    "current_lots": int(current_lots),
-                    "max_lots_per_symbol": int(self.cfg.max_lots_per_symbol),
-                }
-                if cap_abs_value is None:
-                    meta["cap_abs"] = None
+                        "lots": int(lots),
+                        "lot_size": int(lot_size),
+                        "equity": float(equity_rupees),
+                        "eq_source": eq_source,
+                        "available_lots": int(available_lots),
+                        "current_lots": int(current_lots),
+                        "max_lots_per_symbol": int(self.cfg.max_lots_per_symbol),
+                    }
+                    if cap_abs_value is None:
+                        meta["cap_abs"] = None
+                if meta is not None:
+                    meta["cap"] = round(cap, 2)
+                    meta.setdefault("available_lots", int(available_lots))
+                    meta.setdefault("current_lots", int(current_lots))
+                    meta.setdefault("max_lots_per_symbol", int(self.cfg.max_lots_per_symbol))
+                    meta.setdefault("equity", float(equity_rupees))
             if settings_basis.lower() == "premium" and lots <= 0:
                 if meta and meta.get("reason") == "cap_lt_one_lot":
                     logger.info("block_cap_lt_one_lot %s", meta)
