@@ -39,7 +39,11 @@ from src.config import settings
 from src.data.base_source import BaseDataSource
 from src.data.types import HistResult, HistStatus
 from src.diagnostics import healthkit
-from src.diagnostics.checks import emit_quote_diag
+from src.diagnostics.checks import (
+    emit_quote_diag,
+    emit_tick_watchdog,
+    emit_ws_reconnect,
+)
 from src.logs import structured_log
 from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
@@ -1285,29 +1289,72 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 log.debug("LiveKiteSource: kite close failed", exc_info=True)
         log.info("LiveKiteSource: disconnected from Kite.")
 
-    def reconnect_with_backoff(self) -> None:
+    def reconnect_with_backoff(
+        self,
+        *,
+        reason: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
         delay = self._reconnect_backoff
+        attempt = 0
+        source_name = type(self).__name__
+        payload_ctx = dict(context or {})
         while True:
+            attempt += 1
+            emit_ws_reconnect(
+                status="attempt",
+                component="data_source",
+                source=source_name,
+                reason=reason,
+                attempt=attempt,
+                backoff_ms=int(round(delay * 1000)),
+                extra=payload_ctx,
+            )
             try:
                 self.disconnect()
                 self.connect()
-                self._reconnect_backoff = 1.0
-                break
-            except Exception:
+            except Exception as exc:
+                next_delay = min(delay * 2.0, 60.0)
+                emit_ws_reconnect(
+                    status="retry",
+                    component="data_source",
+                    source=source_name,
+                    reason=reason,
+                    attempt=attempt,
+                    backoff_ms=int(round(delay * 1000)),
+                    next_backoff_ms=int(round(next_delay * 1000)),
+                    extra={**payload_ctx, "error": str(exc)},
+                )
                 time.sleep(delay + random.uniform(0, 0.5))
-                delay = min(delay * 2.0, 60.0)
+                delay = next_delay
                 self._reconnect_backoff = delay
+            else:
+                self._reconnect_backoff = 1.0
+                emit_ws_reconnect(
+                    status="success",
+                    component="data_source",
+                    source=source_name,
+                    reason=reason,
+                    attempt=attempt,
+                    extra=payload_ctx,
+                )
+                break
 
-    def reconnect_ws(self) -> None:
+    def reconnect_ws(
+        self,
+        *,
+        reason: str | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
         """Reconnect the streaming channel after a detected tick stall."""
 
-        self.reconnect_with_backoff()
+        self.reconnect_with_backoff(reason=reason, context=context)
 
     def maybe_refresh_session(self, now: datetime | None = None) -> None:
         now = now or datetime.now(TZ)
         key = (now.hour, now.minute)
         if key in {(12, 30), (14, 30)} and key != self._last_refresh_min:
-            self.reconnect_with_backoff()
+            self.reconnect_with_backoff(reason="session_refresh")
             self._last_refresh_min = key
 
     def tick_watchdog(self, max_age_s: float = 3.0) -> bool:
@@ -1328,10 +1375,38 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 bucket = round(lag)
                 if _tick_log_suppressor.should_log("warn", "tick_stale", bucket):
                     log.warning("tick_stale", {"tick_lag": lag})
+                lag_ms = int(round(lag * 1000.0))
+                threshold_ms = int(round(tick_max_lag_s * 1000.0))
+                emit_tick_watchdog(
+                    status="trigger",
+                    component="data_source",
+                    source=type(self).__name__,
+                    reason="stale_tick",
+                    tick_age_ms=lag_ms,
+                    threshold_ms=threshold_ms,
+                    extra={"action": "reconnect_ws"},
+                )
                 try:
-                    self.reconnect_ws()
+                    self.reconnect_ws(
+                        reason="tick_watchdog",
+                        context={
+                            "tick_age_ms": lag_ms,
+                            "threshold_ms": threshold_ms,
+                        },
+                    )
                     log.info("tick_reconnect_attempt", {"tick_lag": lag})
                 except Exception as exc:  # pragma: no cover - defensive reconnect guard
+                    emit_ws_reconnect(
+                        status="error",
+                        component="data_source",
+                        source=type(self).__name__,
+                        reason="tick_watchdog",
+                        extra={
+                            "error": str(exc),
+                            "tick_age_ms": lag_ms,
+                            "threshold_ms": threshold_ms,
+                        },
+                    )
                     log.error("tick_reconnect_error", {"err": str(exc), "tick_lag": lag})
 
         ts = self._last_tick_ts

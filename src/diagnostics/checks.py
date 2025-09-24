@@ -8,7 +8,8 @@ implementation focuses on ``check_data_window`` and quote diagnostics.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+import math
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -51,6 +52,109 @@ def emit_quote_diag(
     if extra:
         payload.update(dict(extra))
     structured_log.event("quote_diag", **payload)
+
+
+def _normalize_ms(value: Any) -> int | None:
+    """Normalize ``value`` into integer milliseconds when possible."""
+
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num):
+        return None
+    if num < 0:
+        num = 0.0
+    return int(round(num))
+
+
+def _normalize_tokens(tokens: Optional[Sequence[Any]]) -> list[int] | None:
+    """Convert ``tokens`` into a deduplicated list of positive integers."""
+
+    if not tokens:
+        return None
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for raw in tokens:
+        try:
+            token = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if token <= 0 or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered or None
+
+
+def emit_ws_reconnect(
+    *,
+    status: str,
+    component: Optional[str] = None,
+    source: Optional[str] = None,
+    reason: Optional[str] = None,
+    attempt: Optional[int] = None,
+    backoff_ms: Optional[Any] = None,
+    next_backoff_ms: Optional[Any] = None,
+    tick_age_ms: Optional[Any] = None,
+    threshold_ms: Optional[Any] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Emit a structured reconnect diagnostic covering retry state."""
+
+    status_str = str(status)
+    payload: dict[str, Any] = {
+        "status": status_str,
+        "stage": status_str,
+        "component": component,
+        "source": source,
+        "reason": reason,
+        "attempt": attempt,
+        "backoff_ms": _normalize_ms(backoff_ms),
+        "next_backoff_ms": _normalize_ms(next_backoff_ms),
+        "tick_age_ms": _normalize_ms(tick_age_ms),
+        "threshold_ms": _normalize_ms(threshold_ms),
+    }
+    if extra:
+        payload.update(dict(extra))
+    structured_log.event("ws_reconnect", **payload)
+
+
+def emit_tick_watchdog(
+    *,
+    status: str,
+    component: Optional[str] = None,
+    source: Optional[str] = None,
+    reason: Optional[str] = None,
+    tick_age_ms: Optional[Any] = None,
+    threshold_ms: Optional[Any] = None,
+    poll_ms: Optional[Any] = None,
+    market_open: Optional[bool] = None,
+    tokens: Optional[Sequence[Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Emit a structured watchdog diagnostic covering tick freshness."""
+
+    status_str = str(status)
+    token_list = _normalize_tokens(tokens)
+    payload: dict[str, Any] = {
+        "status": status_str,
+        "stage": status_str,
+        "component": component,
+        "source": source,
+        "reason": reason,
+        "tick_age_ms": _normalize_ms(tick_age_ms),
+        "threshold_ms": _normalize_ms(threshold_ms),
+        "poll_ms": _normalize_ms(poll_ms),
+        "market_open": bool(market_open) if market_open is not None else None,
+        "tokens": token_list,
+        "token_count": len(token_list) if token_list is not None else None,
+    }
+    if extra:
+        payload.update(dict(extra))
+    structured_log.event("tick_watchdog", **payload)
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -163,6 +267,8 @@ def check_data_window() -> CheckResult:
 
 __all__ = [
     "emit_quote_diag",
+    "emit_ws_reconnect",
+    "emit_tick_watchdog",
     "check_data_window",
     "TRACE_RING",
     "REASON_MAP",
