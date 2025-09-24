@@ -30,6 +30,7 @@ from pydantic import (
     AliasChoices,
     BaseModel,
     Field,
+    FieldValidationInfo,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -38,6 +39,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_EXPOSURE_CAP_PCT = 40.0
+DEFAULT_EXPOSURE_CAP_RATIO = DEFAULT_EXPOSURE_CAP_PCT / 100.0
+
+
 def _coerce_pct_env(name: str, default_pct: float) -> float:
     """Return an environment percentage converted to a fraction."""
 
@@ -1600,7 +1604,6 @@ class AppSettings(BaseSettings):
     RISK_FREE_RATE: float = 0.065
 
     def model_post_init(self, __context: object) -> None:  # pragma: no cover - sync risk
-        del __context
         try:
             self.system.log_buffer_capacity = int(self.diag_ring_size)
         except Exception:
