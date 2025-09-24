@@ -1024,6 +1024,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_epoch: float | None = None
         # Monotonic timestamp (ms) for the most recent tick heartbeat.
         self._last_tick_ts_ms: int | None = None
+        # Debounce websocket resubscribe attempts per token.
+        self._last_ws_resub_ms: dict[int, float] = {}
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
         self._ok_snap: dict[int, deque[float]] = {}
         # Tokens we have attempted to subscribe to via FULL depth.
@@ -2283,10 +2285,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         with self._tick_lock:
             state = self._quotes.get(token_i)
         stale_ms = int(
-            getattr(settings, "MICRO__STALE_MS", getattr(_cfg, "MICRO__STALE_MS", 1500))
+            getattr(settings, "MICRO__STALE_MS", getattr(_cfg, "MICRO__STALE_MS", 3500))
         )
         now_mono = time.monotonic()
         now_wall = time.time()
+        now_ms = monotonic_ms()
         age_ms: float | None = None
         if state is None or state.bid in {None, 0.0} or state.ask in {None, 0.0}:
             state = self._seed_from_snapshot(token_i)
@@ -2306,6 +2309,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
         last = self._last_quote_ready_attempt.get(token_i, 0.0)
         if now_mono - float(last) < 0.5:
             return
+        min_interval_ms = int(
+            getattr(
+                settings,
+                "WS_RESUBSCRIBE_MIN_INTERVAL_MS",
+                getattr(_cfg, "WS_RESUBSCRIBE_MIN_INTERVAL_MS", 15000),
+            )
+        )
+        last_resub = self._last_ws_resub_ms.get(token_i, 0)
+        if now_ms - int(last_resub) < max(min_interval_ms, 0):
+            return
         ensure_subscribe = getattr(self, "ensure_token_subscribed", None)
         try:
             if callable(ensure_subscribe):
@@ -2322,6 +2335,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             except Exception:
                 self.log.debug("resubscribe_if_stale.log_failed", exc_info=True)
             self._last_quote_ready_attempt[token_i] = now_mono
+            self._last_ws_resub_ms[token_i] = now_ms
         except Exception:
             self.log.debug("resubscribe_if_stale.ensure_failed", exc_info=True)
 

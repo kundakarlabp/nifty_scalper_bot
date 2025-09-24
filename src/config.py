@@ -74,7 +74,10 @@ MICRO__REQUIRE_DEPTH: bool = (
     os.getenv("MICRO__REQUIRE_DEPTH", "false").lower() == "true"
 )
 MICRO__DEPTH_MULTIPLIER: float = float(os.getenv("MICRO__DEPTH_MULTIPLIER", "5.0"))
-MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "1500"))
+MICRO__STALE_MS: int = int(os.getenv("MICRO__STALE_MS", "3500"))
+WS_RESUBSCRIBE_MIN_INTERVAL_MS: int = int(
+    os.getenv("WS_RESUBSCRIBE_MIN_INTERVAL_MS", "15000")
+)
 
 # Single source for risk exposure cap (decimal fraction)
 RISK__EXPOSURE_CAP_PCT: float = _coerce_pct_env(
@@ -279,7 +282,7 @@ class InstrumentConfig(BaseModel):
     trade_exchange: str = "NFO"
     instrument_token: int = 256265
     spot_token: int = 256265
-    nifty_lot_size: int = 50
+    nifty_lot_size: int = 75
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10
@@ -331,7 +334,7 @@ class InstrumentsSettings(BaseModel):
     spot_token: int = (
         256265  # optional explicit spot token (helps with logs/diagnostics)
     )
-    nifty_lot_size: int = 50
+    nifty_lot_size: int = 75
     strike_range: int = 0
     min_lots: int = 1
     max_lots: int = 10

@@ -181,7 +181,7 @@ def micro_check(
         )
 
     required_units = int(math.ceil(need_units * depth_mult)) if need_units else 0
-    exposure_cap_pct = float(
+    risk_cap_pct = float(
         getattr(settings, "RISK__EXPOSURE_CAP_PCT", RISK__EXPOSURE_CAP_PCT)
     )
     stale_ms_limit = float(getattr(settings, "MICRO__STALE_MS", MICRO__STALE_MS))
@@ -195,7 +195,7 @@ def micro_check(
         "depth_multiplier": depth_mult,
         "require_depth": require_depth_flag,
         "cap_pct": cap_for_mid(0.0, cfg),
-        "exposure_cap_pct": exposure_cap_pct,
+        "risk_cap_pct": risk_cap_pct,
         "spread_cap_pct": None,
         "spread_pct": None,
         "depth_ok": None,

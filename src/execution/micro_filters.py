@@ -173,7 +173,7 @@ def evaluate_micro(
         "atr_pct": float(atr_pct) if atr_pct is not None else None,
         "spread_pct": micro.get("spread_pct"),
         "cap_pct": micro.get("cap_pct"),
-        "exposure_cap_pct": micro.get("exposure_cap_pct"),
+        "risk_cap_pct": micro.get("risk_cap_pct"),
         "depth_ok": micro.get("depth_ok"),
         "depth_available": micro.get("depth_available"),
         "available_bid_qty": micro.get("available_bid_qty"),
