@@ -1058,6 +1058,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._option_quote_cache: dict[int, dict[str, Any]] = {}
         self._atm_reconnect_hook_set = False
         self._last_quote_ready_attempt: dict[int, float] = {}
+        self._resubscribe_failures: int = 0
 
     def _build_micro_settings(self) -> SimpleNamespace:
         try:
@@ -1900,7 +1901,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         tokens = list(getattr(self, "_subscribed", set()) or [])
         if not tokens:
+            self._resubscribe_failures = 0
             return
+        success = False
         try:
             self._subscribe_tokens_full(tokens)
         except Exception:
@@ -1908,6 +1911,29 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 _force_subscribe_tokens(self, tokens, mode="FULL")
             except Exception:
                 self.log.debug("resubscribe_current.failed", exc_info=True)
+            else:
+                success = True
+        else:
+            success = True
+
+        if success:
+            self._resubscribe_failures = 0
+            return
+
+        self._resubscribe_failures += 1
+        failure_count = self._resubscribe_failures
+        if failure_count >= 3:
+            context = {"failures": failure_count, "tokens": list(tokens)}
+            self.log.warning("resubscribe_current.force_reconnect", extra=context)
+            try:
+                self.reconnect_with_backoff(
+                    reason="resubscribe_failed",
+                    context=context,
+                )
+            except Exception:
+                self.log.error("resubscribe_current.reconnect_failed", exc_info=True)
+            finally:
+                self._resubscribe_failures = 0
 
     def get_last_tick_ts(self) -> float | None:
         """Return epoch seconds for the last processed tick."""
