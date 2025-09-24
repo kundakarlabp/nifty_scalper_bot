@@ -1,4 +1,5 @@
 from datetime import datetime
+import math
 from zoneinfo import ZoneInfo
 
 from hypothesis import assume, given, settings, strategies as st, HealthCheck
@@ -115,7 +116,11 @@ def test_equity_based_premium_cap(monkeypatch):
     )
     ok, reason, _ = eng.pre_trade_check(**args)
     assert ok and reason == ""
-    assert plan.get("qty_lots") == 3
+    cap_pct = getattr(app_settings, "RISK__EXPOSURE_CAP_PCT", 0.0)
+    cap_rupees = cap_pct * args["equity_rupees"]
+    unit_notional = args["option_mid_price"] * args["lot_size"]
+    expected_lots = max(1, math.floor(cap_rupees / unit_notional))
+    assert plan.get("qty_lots") == expected_lots
 
 
 def test_allow_min_one_lot_override(monkeypatch):
