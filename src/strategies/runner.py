@@ -162,6 +162,18 @@ class RunnerPhase(Enum):
     MONITOR = "MONITOR"
 
 
+# ------------------------------ State enum --------------------------------
+
+
+class State(Enum):
+    """High-level decision states for the strategy runner."""
+
+    PRIME_QUOTES = "PRIME_QUOTES"
+    EVALUATE = "EVALUATE"
+    PLACE = "PLACE"
+    MONITOR = "MONITOR"
+
+
 # ============================== Orchestrator ==============================
 
 
@@ -420,6 +432,11 @@ class StrategyRunner:
             )
         except (TypeError, ValueError):
             self._micro_ok_hysteresis_ms = 2000
+
+        # Single-cycle evaluation guard
+        self._cycle_guard_token: int = 0
+        self._cycle_guard_sections: dict[str, int] = {}
+        self._last_micro_wait_cycle: int = -1
 
         self._heartbeat_interval = float(
             getattr(self.settings, "heartbeat_interval_sec", 30.0)
@@ -1128,6 +1145,113 @@ class StrategyRunner:
                     _push(getattr(ds, attr, None))
 
         return tokens
+
+    def _single_cycle_allow(self, section: str) -> bool:
+        """Allow ``section`` to run once per scheduler cycle."""
+
+        current = self._cycle_guard_token
+        last = self._cycle_guard_sections.get(section)
+        if last == current:
+            return False
+        self._cycle_guard_sections[section] = current
+        return True
+
+    def _prime_quote_cycle(self, flow: Dict[str, Any]) -> dict[str, Any]:
+        """Attempt to ensure quotes are ready before evaluation."""
+
+        ds = getattr(self, "data_source", None)
+        ensure_ready = getattr(ds, "ensure_quote_ready", None) if ds else None
+        tokens = self._candidate_quote_tokens()
+        detail_tokens: dict[int, dict[str, Any]] = {}
+        status_cache: dict[int, Any] = {}
+        ready_info: dict[str, Any] | None = None
+        failure_info: dict[str, Any] | None = None
+        checked = 0
+
+        def _status_map(token: int, status: Any) -> dict[str, Any]:
+            info = {
+                "token": token,
+                "ok": False,
+                "reason": "no_quote",
+                "last_tick_age_ms": None,
+                "retries": None,
+                "bid": None,
+                "ask": None,
+            }
+            if status is None:
+                return info
+            info.update(
+                {
+                    "ok": bool(getattr(status, "ok", False)),
+                    "reason": getattr(status, "reason", "no_quote"),
+                    "last_tick_age_ms": getattr(status, "last_tick_age_ms", None),
+                    "retries": getattr(status, "retries", None),
+                    "bid": getattr(status, "bid", None),
+                    "ask": getattr(status, "ask", None),
+                }
+            )
+            return info
+
+        if not tokens or not callable(ensure_ready):
+            detail = {
+                "tokens": detail_tokens,
+                "summary": {"checked": len(tokens), "ready_count": 0},
+            }
+            self._last_quote_ready_detail = detail
+            self._quote_ready_cache = {}
+            self._last_quote_ready_ok = True
+            flow["prime_quotes"] = {
+                "ok": True,
+                "checked": len(tokens),
+                "detail": detail,
+            }
+            return {"ok": True}
+
+        mode = getattr(self.settings, "QUOTES__MODE", "FULL")
+        symbol = self.under_symbol
+        for raw in tokens:
+            try:
+                token = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if token <= 0:
+                continue
+            checked += 1
+            try:
+                try:
+                    status = ensure_ready(token, mode, symbol=symbol)
+                except TypeError:
+                    status = ensure_ready(token)
+            except Exception:
+                self.log.debug("prime.ensure_quote_ready_failed", exc_info=True)
+                status = None
+            info = _status_map(token, status)
+            detail_tokens[token] = dict(info)
+            status_cache[token] = status
+            if info["ok"]:
+                ready_info = info
+                break
+            failure_info = failure_info or info
+
+        ready_count = 1 if ready_info else 0
+        detail = {
+            "tokens": detail_tokens,
+            "summary": {"checked": checked, "ready_count": ready_count},
+        }
+        self._last_quote_ready_detail = detail
+        self._quote_ready_cache = status_cache
+        self._last_quote_ready_ok = bool(ready_info)
+        result = ready_info or failure_info or {"ok": True, "reason": None}
+        if "ok" not in result:
+            result = dict(result)
+            result["ok"] = bool(ready_info)
+        flow["prime_quotes"] = {
+            "ok": bool(result.get("ok")),
+            "token": result.get("token"),
+            "reason": result.get("reason"),
+            "detail": detail,
+        }
+        return result
 
     def _quote_ready_barrier(self, flow: Dict[str, Any]) -> bool:
         """Ensure latest quotes are available before strategy evaluation."""
@@ -2508,6 +2632,9 @@ class StrategyRunner:
         }
         signal_for_log: Dict[str, Any] | None = None
         self._last_error = None
+        self._cycle_guard_token += 1
+        current_state = State.PRIME_QUOTES
+        flow["state"] = current_state.value
         self._set_phase(RunnerPhase.PRIME_QUOTES)
 
         healthy, watchdog_detail = self._health_and_watchdogs()
@@ -2523,6 +2650,31 @@ class StrategyRunner:
             )
             self._set_phase(RunnerPhase.IDLE)
             return
+
+        prime_ready = self._prime_quote_cycle(flow)
+        if not bool(prime_ready.get("ok", True)):
+            reason = prime_ready.get("reason") or "no_quote"
+            flow["reason_block"] = flow.get("reason_block") or reason
+            token_val = prime_ready.get("token")
+            if self._last_micro_wait_cycle != self._cycle_guard_token:
+                structured_log.event(
+                    "micro_wait",
+                    reason=reason,
+                    token=token_val,
+                    last_tick_age_ms=prime_ready.get("last_tick_age_ms"),
+                    retries=prime_ready.get("retries"),
+                )
+                self._last_micro_wait_cycle = self._cycle_guard_token
+            self._last_flow_debug = flow
+            self._log_decisive_event(
+                label="blocked",
+                signal=signal_for_log,
+                reason_block=flow.get("reason_block"),
+            )
+            self._set_phase(RunnerPhase.IDLE)
+            return
+        current_state = State.EVALUATE
+        flow["state"] = current_state.value
 
         if not self._quote_ready_barrier(flow):
             flow["reason_block"] = flow.get("reason_block") or "no_quote"
@@ -2994,6 +3146,16 @@ class StrategyRunner:
                 )
                 flow["reason_block"] = plan["reason_block"]
                 self._record_plan(plan)
+                self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
+                self._set_phase(RunnerPhase.IDLE)
+                return
+            if not self._single_cycle_allow("score"):
+                flow["reason_block"] = flow.get("reason_block") or "cycle_guard"
                 self._last_flow_debug = flow
                 self._log_decisive_event(
                     label="blocked",
@@ -3598,6 +3760,16 @@ class StrategyRunner:
             micro_mode = "HARD" if score_for_micro >= min_score_env else "SOFT"
             plan["micro_mode"] = micro_mode
 
+            if not self._single_cycle_allow("micro"):
+                flow["reason_block"] = flow.get("reason_block") or "cycle_guard"
+                self._last_flow_debug = flow
+                self._log_decisive_event(
+                    label="blocked",
+                    signal=signal_for_log,
+                    reason_block=flow.get("reason_block"),
+                )
+                self._set_phase(RunnerPhase.IDLE)
+                return
             micro = evaluate_micro(
                 q=quote_dict,
                 lot_size=int(plan.get("lot_size", self.lot_size)),
