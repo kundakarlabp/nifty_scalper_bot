@@ -18,13 +18,12 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from statistics import median
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, TypeVar, cast
 
 from src.config import OptionSelectorSettings, settings
 from src.risk.greeks import OptionType, bs_price_delta_gamma, implied_vol_newton
-from src.utils.expiry import next_tuesday_expiry
 from src.utils.market_time import IST, is_market_open as _market_is_open
 
 try:
@@ -277,6 +276,7 @@ def resolve_weekly_atm(
     instruments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Tuple[str, int]]:
     """Resolve current-week ATM option trading symbols and lot size."""
+
     trade_symbol = str(getattr(settings.instruments, "trade_symbol", ""))
     step = _infer_step(trade_symbol)
     strike = _nearest_strike(spot, step)
@@ -286,21 +286,15 @@ def resolve_weekly_atm(
             nfo = _fetch_instruments_nfo(None) or []
         except Exception:
             nfo = []
-    expiry = _pick_expiry(
+    expiry, bucket = _select_expiry_bucket(
         datetime.now(IST),
         nfo,
         trade_symbol,
     )
     ce_sym = pe_sym = None
     lot: Optional[int] = None
-    for row in nfo:
+    for row in bucket:
         try:
-            if row.get("segment") != "NFO-OPT":
-                continue
-            if row.get("name") != trade_symbol:
-                continue
-            if expiry and not str(row.get("expiry", "")).startswith(expiry):
-                continue
             if int(row.get("strike", 0)) != strike:
                 continue
             lot = lot or int(row.get("lot_size", 0) or 0)
@@ -320,91 +314,117 @@ def resolve_weekly_atm(
     return out
 
 
-def _resolve_weekly_expiry_from_dump(
-    nfo_instruments: List[Dict[str, Any]], trade_symbol: str
-) -> Optional[str]:
-    """
-    From the live instrument dump, collect expiries for the given name/symbol and
-    pick the nearest one >= today (IST). Return 'YYYY-MM-DD' or None.
-    """
-    if not nfo_instruments:
+def _stringify_expiry(expiry: Any) -> Optional[str]:
+    """Return the broker-provided expiry coerced to ``str`` if present."""
+
+    if expiry in (None, ""):
+        return None
+    if isinstance(expiry, (datetime, date)):
+        return expiry.isoformat()
+    try:
+        text = str(expiry).strip()
+    except Exception:
+        return None
+    return text or None
+
+
+def _expiry_as_date(expiry: Any) -> Optional[date]:
+    """Return ``expiry`` as a ``date`` when parsable."""
+
+    if isinstance(expiry, datetime):
+        return expiry.date()
+    if isinstance(expiry, date):
+        return expiry
+    if expiry in (None, ""):
+        return None
+    try:
+        text = str(expiry).strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    text = text.split()[0]
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
         return None
 
-    now = datetime.now(IST)
-    target = next_tuesday_expiry(now).date()
-    expiries: set[str] = set()
 
-    for row in nfo_instruments:
+def _group_by_expiry(
+    dump: List[Dict[str, Any]], trade_symbol: str
+) -> Dict[str, Dict[str, Any]]:
+    """Return instrument rows grouped by expiry for ``trade_symbol``."""
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in dump:
         try:
             if row.get("segment") != "NFO-OPT":
                 continue
-            if row.get("name") != trade_symbol:
+            if str(row.get("name", "")).upper() != trade_symbol.upper():
                 continue
-            expiry = row.get("expiry")
-            if not expiry:
+            expiry_val = row.get("expiry")
+            expiry_str = _stringify_expiry(expiry_val)
+            if not expiry_str:
                 continue
-            expiries.add(str(expiry)[:10])
+            bucket = grouped.setdefault(
+                expiry_str,
+                {"rows": [], "date": _expiry_as_date(expiry_val)},
+            )
+            if bucket.get("date") is None:
+                bucket["date"] = _expiry_as_date(expiry_val)
+            bucket["rows"].append(row)
         except Exception:
             continue
-
-    if not expiries:
-        return None
-
-    sorted_exp = sorted(expiries)
-    for exp in sorted_exp:
-        try:
-            d = datetime.strptime(exp, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        if d >= target:
-            return exp
-    # else, all past—return last known (unexpected but better than None)
-    return sorted_exp[-1]
+    return grouped
 
 
-def _next_weekly_expiry(now: Optional[datetime] = None) -> str:
-    """Return upcoming Tuesday in IST as ``YYYY-MM-DD``.
-
-    Used as a lightweight fallback when the full instrument dump is unavailable.
-    """
-    return next_tuesday_expiry(now).date().isoformat()
-
-
-def _same_day_expiry(now: datetime) -> Optional[str]:
-    """Return today's expiry if we are on an expiry day before cutoff."""
-    exp = next_tuesday_expiry(now)
-    if exp.date() == now.date():
-        return now.date().isoformat()
-    return None
-
-
-def _nearest_expiry(
+def _select_expiry_bucket(
     now: datetime, dump: List[Dict[str, Any]], trade_symbol: str
-) -> Optional[str]:
-    """Resolve the nearest expiry from the instrument dump or fallback."""
-    exp = _resolve_weekly_expiry_from_dump(dump, trade_symbol)
-    if exp is not None:
-        return exp
-    return _next_weekly_expiry(now)
+) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    """Pick an expiry bucket using broker metadata and configuration."""
 
+    grouped = _group_by_expiry(dump, trade_symbol)
+    if not grouped:
+        return None, []
 
-def _pick_expiry(
-    now: datetime, dump: List[Dict[str, Any]], trade_symbol: str
-) -> Optional[str]:
-    """Choose an expiry according to configuration with safe fallbacks."""
-    mode = getattr(
-        getattr(settings, "strategy", object()), "option_expiry_mode", "nearest"
-    )
+    today = now.date()
+    candidates: List[tuple[str, Optional[date], List[Dict[str, Any]]]] = []
+    for exp, meta in grouped.items():
+        candidates.append((exp, meta.get("date"), meta.get("rows", [])))
+
+    def _sort_key(item: tuple[str, Optional[date], List[Dict[str, Any]]]) -> tuple[int, int, str]:
+        exp_str, exp_dt, _rows = item
+        if exp_dt is not None:
+            return (0, exp_dt.toordinal(), exp_str)
+        return (1, 0, exp_str)
+
+    candidates.sort(key=_sort_key)
+
+    mode = str(
+        getattr(getattr(settings, "strategy", object()), "option_expiry_mode", "nearest")
+    ).lower()
+
+    future = [c for c in candidates if c[1] is None or c[1] >= today]
+
     if mode == "today":
-        exp = _same_day_expiry(now)
-        if exp is None:
-            exp = _nearest_expiry(now, dump, trade_symbol)
-        return exp
-    if mode == "nearest":
-        return _nearest_expiry(now, dump, trade_symbol)
+        for exp_str, exp_dt, rows in candidates:
+            if exp_dt and exp_dt == today:
+                return exp_str, rows
+        if future:
+            return future[0][0], future[0][2]
+        return candidates[0][0], candidates[0][2]
+
     if mode == "next":
-        return _next_weekly_expiry(now)
-    return None
+        if len(future) >= 2:
+            return future[1][0], future[1][2]
+        if future:
+            return future[-1][0], future[-1][2]
+        return candidates[-1][0], candidates[-1][2]
+
+    # default: nearest expiry
+    if future:
+        return future[0][0], future[0][2]
+    return candidates[-1][0], candidates[-1][2]
 
 
 # -----------------------------------------------------------------------------
@@ -466,6 +486,8 @@ def get_instrument_tokens(
                 "expiry": None,
                 "tokens": {"ce": None, "pe": None},
                 "atm_tokens": {"ce": None, "pe": None},
+                "prewarm_contracts": {"ce": {}, "pe": {}},
+                "prewarm_tokens": {"ce": [], "pe": []},
             }
 
         # --- ATM rounding and target selection ---
@@ -488,125 +510,187 @@ def get_instrument_tokens(
                 "spot_price": float(px),
                 "atm_strike": atm,
                 "target_strike": target,
-                "expiry": _next_weekly_expiry(),
+                "expiry": None,
                 "tokens": {"ce": None, "pe": None},
                 "atm_tokens": {"ce": None, "pe": None},
+                "prewarm_contracts": {"ce": {}, "pe": {}},
+                "prewarm_tokens": {"ce": [], "pe": []},
             }
 
-        expiry = _pick_expiry(
-            datetime.now(IST),
-            nfo,
-            trade_symbol,
-        )
+        def _extract_tokens(payload: Mapping[int, Dict[str, Any]]) -> List[int]:
+            toks: List[int] = []
+            for contract in payload.values():
+                tok = _coerce_int(contract.get("token"))
+                if tok is not None:
+                    toks.append(tok)
+            return toks
 
-        instrument_rows: Dict[int, Dict[str, Any]] = {}
-        lot_candidates: list[int] = []
+        expiry: Optional[str] = None
+        contracts: Dict[str, Dict[str, Any]] = {}
+        prewarm_contracts: Dict[str, Dict[int, Dict[str, Any]]] = {"ce": {}, "pe": {}}
+        prewarm_tokens: Dict[str, List[int]] = {"ce": [], "pe": []}
+        ce_token = pe_token = atm_ce = atm_pe = None
+        strike_selected = target
+        lot_size = 0
 
-        def _register_row(row: Mapping[str, Any]) -> None:
-            token_int = _coerce_int(row.get("instrument_token"))
-            if token_int is None:
-                return
-            if token_int not in instrument_rows:
-                instrument_rows[token_int] = dict(row)
-            lot_int = _coerce_int(row.get("lot_size")) or 0
-            if lot_int > 0:
-                lot_candidates.append(lot_int)
-
-        def _scan(
-            dump: List[Dict[str, Any]],
-        ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
-            ce_tok = pe_tok = atm_ce_tok = atm_pe_tok = None
-            for row in dump:
-                try:
-                    if row.get("segment") != "NFO-OPT":
-                        continue
-                    if row.get("name") != trade_symbol:
-                        continue
-                    if expiry and not str(row.get("expiry", "")).startswith(expiry):
-                        continue
-                    strike_val = row.get("strike")
-                    if strike_val is None:
-                        continue
-                    strike = int(strike_val)
-                    itype = row.get("instrument_type")
-                    _register_row(row)
-                    if strike == target:
-                        if itype == "CE":
-                            ce_tok = row.get("instrument_token")
-                        elif itype == "PE":
-                            pe_tok = row.get("instrument_token")
-                    if strike == atm:
-                        if itype == "CE":
-                            atm_ce_tok = row.get("instrument_token")
-                        elif itype == "PE":
-                            atm_pe_tok = row.get("instrument_token")
-                except Exception:
-                    continue
-            return ce_tok, pe_tok, atm_ce_tok, atm_pe_tok
-
-        ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
-
-        if not ce_token or not pe_token:
-            global _instruments_cache, _instruments_cache_ts
-            _instruments_cache, _instruments_cache_ts = None, 0.0
-            nfo = _fetch_instruments_nfo(kite_instance) or []
-            expiry = _pick_expiry(
+        for attempt in range(2):
+            expiry_candidate, bucket = _select_expiry_bucket(
                 datetime.now(IST),
                 nfo,
                 trade_symbol,
             )
-            ce_token, pe_token, atm_ce, atm_pe = _scan(nfo)
+            expiry = expiry_candidate
+            if not bucket:
+                logger.warning(
+                    "Unable to locate expiry bucket for trade symbol %s", trade_symbol
+                )
+                break
 
-        using_atm = False
-        if not ce_token and atm_ce:
-            ce_token = atm_ce
-            using_atm = True
-        if not pe_token and atm_pe:
-            pe_token = atm_pe
-            using_atm = True
-        strike_selected = atm if using_atm else target
+            contracts_by_strike: Dict[int, Dict[str, Mapping[str, Any]]] = {}
+            instrument_rows: Dict[int, Dict[str, Any]] = {}
+            lot_candidates: list[int] = []
 
-        lot_size = 0
-        if lot_candidates:
-            lot_size = max(lot_candidates, key=lot_candidates.count)
-        symbol_upper = trade_symbol.upper()
-        try:
-            configured_nifty_lot = int(getattr(settings.instruments, "nifty_lot_size", 50))
-        except Exception:
-            configured_nifty_lot = 50
-        if symbol_upper == "NIFTY":
-            lot_size = configured_nifty_lot if configured_nifty_lot > 0 else 50
-        elif lot_size <= 0:
-            lot_size = configured_nifty_lot if configured_nifty_lot > 0 else 50
-        allowed_lot_sizes = {10, 15, 25, 40, 50, 100, configured_nifty_lot}
-        if lot_size not in allowed_lot_sizes:
-            logger.warning(
-                "strike_selector: unusual lot size resolved",
-                extra={"symbol": trade_symbol, "lot_size": lot_size},
-            )
+            for row in bucket:
+                try:
+                    token_int = _coerce_int(row.get("instrument_token"))
+                    if token_int is None:
+                        continue
+                    instrument_rows[token_int] = dict(row)
+                    strike_val = _coerce_int(row.get("strike"))
+                    if strike_val is None:
+                        continue
+                    opt_type = str(row.get("instrument_type", "")).upper()
+                    if opt_type not in {"CE", "PE"}:
+                        continue
+                    contracts_by_strike.setdefault(strike_val, {})[opt_type] = row
+                    lot_val = _coerce_int(row.get("lot_size"))
+                    if lot_val:
+                        lot_candidates.append(lot_val)
+                except Exception:
+                    continue
 
-        def _build_contract(token_val: Optional[int]) -> Dict[str, Any] | None:
-            token_int = _coerce_int(token_val)
-            if token_int is None:
-                return None
-            row = instrument_rows.get(token_int, {})
-            strike_val = _coerce_int(row.get("strike"))
-            return {
-                "symbol": trade_symbol,
-                "token": token_int,
-                "tradingsymbol": row.get("tradingsymbol"),
-                "expiry": expiry,
-                "strike": strike_val if strike_val is not None else strike_selected,
-                "lot_size": lot_size,
+            def _find_token(target_strike: int, option_type: str) -> Optional[int]:
+                row = contracts_by_strike.get(target_strike, {}).get(option_type)
+                if not row:
+                    return None
+                return _coerce_int(row.get("instrument_token"))
+
+            def _contract_from_row(
+                row: Mapping[str, Any], fallback_strike: int
+            ) -> Dict[str, Any]:
+                expiry_val = _stringify_expiry(row.get("expiry"))
+                strike_val = _coerce_int(row.get("strike")) or fallback_strike
+                lot_val = _coerce_int(row.get("lot_size"))
+                return {
+                    "symbol": trade_symbol,
+                    "token": _coerce_int(row.get("instrument_token")),
+                    "tradingsymbol": row.get("tradingsymbol"),
+                    "expiry": expiry_val,
+                    "strike": strike_val,
+                    "segment": row.get("segment"),
+                    "instrument_type": row.get("instrument_type"),
+                    "lot_size": lot_val,
+                }
+
+            ce_token = _find_token(target, "CE")
+            pe_token = _find_token(target, "PE")
+            atm_ce = _find_token(atm, "CE")
+            atm_pe = _find_token(atm, "PE")
+
+            using_atm = False
+            if not ce_token and atm_ce:
+                ce_token = atm_ce
+                using_atm = True
+            if not pe_token and atm_pe:
+                pe_token = atm_pe
+                using_atm = True
+            strike_selected = atm if using_atm else target
+
+            lot_size = 0
+            if lot_candidates:
+                lot_size = max(lot_candidates, key=lot_candidates.count)
+            symbol_upper = trade_symbol.upper()
+            if symbol_upper == "NIFTY":
+                if lot_size and lot_size != 75:
+                    logger.warning(
+                        "NIFTY contract lot size mismatch", extra={"lot_size": lot_size}
+                    )
+                if lot_size <= 0:
+                    lot_size = 75
+            else:
+                if lot_size <= 0:
+                    try:
+                        configured_lot = int(
+                            getattr(settings.instruments, "nifty_lot_size", 0)
+                        )
+                    except Exception:
+                        configured_lot = 0
+                    lot_size = configured_lot if configured_lot > 0 else 0
+            if lot_size <= 0:
+                logger.warning(
+                    "strike_selector: unable to resolve lot size",
+                    extra={"symbol": trade_symbol},
+                )
+
+            def _build_contract(token_val: Optional[int]) -> Dict[str, Any] | None:
+                token_int = _coerce_int(token_val)
+                if token_int is None:
+                    return None
+                row = instrument_rows.get(token_int)
+                if not row:
+                    return None
+                contract = _contract_from_row(row, strike_selected)
+                contract["lot_size"] = (
+                    lot_size if lot_size > 0 else contract.get("lot_size")
+                )
+                return contract
+
+            contracts = {}
+            ce_contract = _build_contract(ce_token)
+            pe_contract = _build_contract(pe_token)
+            if ce_contract:
+                contracts["ce"] = ce_contract
+            if pe_contract:
+                contracts["pe"] = pe_contract
+
+            prewarm_contracts = {"ce": {}, "pe": {}}
+            for offset in (-1, 0, 1):
+                strike_val = atm + offset * step
+                for opt_type in ("CE", "PE"):
+                    contract_row = contracts_by_strike.get(strike_val, {}).get(opt_type)
+                    if contract_row is None:
+                        continue
+                    contract = _contract_from_row(contract_row, strike_val)
+                    if lot_size > 0 and (contract.get("lot_size") in (None, 0)):
+                        contract["lot_size"] = lot_size
+                    prewarm_contracts[opt_type.lower()][strike_val] = contract
+
+            prewarm_tokens = {
+                "ce": _extract_tokens(prewarm_contracts["ce"]),
+                "pe": _extract_tokens(prewarm_contracts["pe"]),
             }
 
-        contracts: Dict[str, Dict[str, Any]] = {}
-        ce_contract = _build_contract(ce_token)
-        pe_contract = _build_contract(pe_token)
-        if ce_contract:
-            contracts["ce"] = ce_contract
-        if pe_contract:
-            contracts["pe"] = pe_contract
+            if ce_token and pe_token:
+                break
+            if attempt == 0:
+                global _instruments_cache, _instruments_cache_ts
+                _instruments_cache, _instruments_cache_ts = None, 0.0
+                nfo = _fetch_instruments_nfo(kite_instance) or []
+                continue
+            break
+
+        if not expiry:
+            return {
+                "spot_token": spot_token,
+                "spot_price": float(px),
+                "atm_strike": atm,
+                "target_strike": target,
+                "expiry": None,
+                "tokens": {"ce": None, "pe": None},
+                "atm_tokens": {"ce": None, "pe": None},
+                "prewarm_contracts": {"ce": {}, "pe": {}},
+                "prewarm_tokens": {"ce": [], "pe": []},
+            }
 
         result = {
             "spot_token": int(spot_token),
@@ -618,6 +702,8 @@ def get_instrument_tokens(
             "atm_tokens": {"ce": atm_ce, "pe": atm_pe},
             "lot_size": lot_size,
             "contracts": contracts,
+            "prewarm_contracts": prewarm_contracts,
+            "prewarm_tokens": prewarm_tokens,
         }
 
         if not ce_token or not pe_token:
