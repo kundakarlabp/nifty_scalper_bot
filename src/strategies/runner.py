@@ -3547,15 +3547,36 @@ class StrategyRunner:
                 )
                 self._set_phase(RunnerPhase.IDLE)
                 return
+            token_for_quote: int | None = None
+            for candidate in (plan.get("token"), plan.get("option_token"), token):
+                if candidate in (None, "", 0):
+                    continue
+                try:
+                    token_for_quote = int(candidate)
+                except (TypeError, ValueError):
+                    continue
+                else:
+                    break
+            if token_for_quote is not None:
+                plan["token"] = token_for_quote
             ensure_subscribe = getattr(ds, "ensure_token_subscribed", None)
             if callable(ensure_subscribe):
-                try:
+                subscribe_token: Any | None = (
+                    token_for_quote if token_for_quote is not None else token
+                )
+                if subscribe_token:
                     try:
-                        ensure_subscribe(token, mode="FULL")
-                    except TypeError:
-                        ensure_subscribe(token)
-                except Exception:
-                    self.log.debug("ensure_token_subscribed failed", exc_info=True)
+                        try:
+                            ensure_subscribe(
+                                subscribe_token,
+                                mode="FULL",
+                            )
+                        except TypeError:
+                            ensure_subscribe(
+                                subscribe_token
+                            )
+                    except Exception:
+                        self.log.debug("ensure_token_subscribed failed", exc_info=True)
             ensure_ready_fn = getattr(ds, "ensure_ready", None)
             if callable(ensure_ready_fn) and token_for_quote:
                 try:
@@ -3577,12 +3598,11 @@ class StrategyRunner:
             prime_ts: int | None = None
             prime_fn = getattr(ds, "prime_option_quote", None)
             require_prime = bool(getattr(self.settings, "enable_live_trading", False))
-            token_for_quote = plan.get("token")
             quote_ready_status = None
-            ensure_ready_fn = getattr(ds, "ensure_quote_ready", None)
-            if callable(ensure_ready_fn) and token_for_quote:
+            ensure_quote_ready_fn = getattr(ds, "ensure_quote_ready", None)
+            if callable(ensure_quote_ready_fn) and token_for_quote:
                 try:
-                    quote_ready_status = ensure_ready_fn(
+                    quote_ready_status = ensure_quote_ready_fn(
                         token_for_quote,
                         getattr(self.settings, "QUOTES__MODE", "FULL"),
                         symbol=str(
@@ -3593,6 +3613,27 @@ class StrategyRunner:
                 except Exception:
                     self.log.debug("ensure_quote_ready failed", exc_info=True)
                     quote_ready_status = None
+            bbo_bid: float | None = None
+            bbo_ask: float | None = None
+            bbo_bid_qty: int | None = None
+            bbo_ask_qty: int | None = None
+            bbo_ts_ms: int | None = None
+            get_last_bbo = getattr(ds, "get_last_bbo", None)
+            if callable(get_last_bbo) and token_for_quote:
+                try:
+                    (
+                        bbo_bid,
+                        bbo_ask,
+                        bbo_bid_qty,
+                        bbo_ask_qty,
+                        bbo_ts_ms,
+                    ) = get_last_bbo(token_for_quote)
+                except Exception:
+                    self.log.debug("get_last_bbo failed", exc_info=True)
+                    bbo_bid = bbo_ask = None
+                    bbo_bid_qty = bbo_ask_qty = None
+                    bbo_ts_ms = None
+            last_tick_age_ms: int | None = None
             if quote_ready_status is not None:
                 try:
                     plan["quote_ready"] = asdict(quote_ready_status)
@@ -3633,6 +3674,26 @@ class StrategyRunner:
                     )
                     self._set_phase(RunnerPhase.IDLE)
                     return
+                if quote_ready_status.last_tick_age_ms is not None:
+                    try:
+                        last_tick_age_ms = int(quote_ready_status.last_tick_age_ms)
+                    except Exception:
+                        last_tick_age_ms = None
+            if last_tick_age_ms is None:
+                get_age = getattr(ds, "get_last_tick_age_ms", None)
+                if callable(get_age):
+                    try:
+                        age_candidate = get_age()
+                    except Exception:
+                        age_candidate = None
+                    if isinstance(age_candidate, (int, float)):
+                        last_tick_age_ms = int(age_candidate)
+            if last_tick_age_ms is None and bbo_ts_ms is not None:
+                try:
+                    now_ms = int(time.time() * 1000)
+                    last_tick_age_ms = max(now_ms - int(bbo_ts_ms), 0)
+                except Exception:
+                    last_tick_age_ms = None
             if callable(prime_fn) and token_for_quote:
                 try:
                     prime_price, prime_src, prime_ts = prime_fn(token_for_quote)
@@ -3688,6 +3749,23 @@ class StrategyRunner:
                 quote=raw_quote,
                 fetch_ltp=fetch_ltp,
             )
+            if quote_dict:
+                quote_dict = dict(quote_dict)
+            else:
+                quote_dict = {}
+            if bbo_bid is not None:
+                quote_dict["bid"] = bbo_bid
+            if bbo_ask is not None:
+                quote_dict["ask"] = bbo_ask
+            if bbo_bid_qty is not None:
+                quote_dict["bid_qty"] = bbo_bid_qty
+            if bbo_ask_qty is not None:
+                quote_dict["ask_qty"] = bbo_ask_qty
+            if last_tick_age_ms is not None:
+                quote_dict["age_ms"] = last_tick_age_ms
+                quote_dict.setdefault("last_tick_age_ms", last_tick_age_ms)
+            if bbo_ts_ms is not None:
+                quote_dict.setdefault("ts_ms", bbo_ts_ms)
             if not quote_dict:
                 should_block = self._should_block_no_quote(
                     plan, warmed_snapshot=warmed_quote_snapshot

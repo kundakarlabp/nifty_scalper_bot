@@ -58,9 +58,10 @@ except ImportError:
 
 # --- Local imports (settings is optional for tests) ---
 try:
-    from src.config import settings
+    from src.config import MICRO__STALE_MS as CONFIG_MICRO_STALE_MS, settings
 except ImportError:  # pragma: no cover
     settings = None  # type: ignore
+    CONFIG_MICRO_STALE_MS = 3500
 
 # --- Optional market data fallback ---
 try:  # pragma: no cover - optional dependency
@@ -1475,12 +1476,24 @@ class OrderExecutor:
                 "bid_qty": _status_value(readiness_status, "bid_qty"),
                 "ask_qty": _status_value(readiness_status, "ask_qty"),
             }
+            stale_limit = int(
+                getattr(settings, "MICRO__STALE_MS", CONFIG_MICRO_STALE_MS)
+            ) if settings else int(CONFIG_MICRO_STALE_MS)
+            age_val = readiness_payload.get("age_ms")
+            if (
+                readiness_ok
+                and isinstance(age_val, (int, float))
+                and age_val > stale_limit
+            ):
+                readiness_ok = False
+                readiness_payload["ok"] = False
+                readiness_payload["reason"] = "stale_quote"
             readiness_diag_fields = {
-                "quote_ready_ok": readiness_payload["ok"],
-                "quote_ready_reason": readiness_payload["reason"],
-                "quote_ready_age_ms": readiness_payload["age_ms"],
-                "quote_ready_retries": readiness_payload["retries"],
-                "quote_ready_source": readiness_payload["source"],
+                "quote_ready_ok": readiness_payload.get("ok"),
+                "quote_ready_reason": readiness_payload.get("reason"),
+                "quote_ready_age_ms": readiness_payload.get("age_ms"),
+                "quote_ready_retries": readiness_payload.get("retries"),
+                "quote_ready_source": readiness_payload.get("source"),
             }
 
             if readiness_ok is False:

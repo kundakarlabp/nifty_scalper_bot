@@ -34,12 +34,12 @@ def test_setup_gtt_orders_emits_postfill_event() -> None:
     assert postfill["tp_order_ids"] == [None, None]
 
     tp_meta = postfill["tp_meta"]
-    assert tp_meta["tp1"]["qty"] == 50
+    assert tp_meta["tp1"]["qty"] == 75
     assert tp_meta["tp1"]["attempts"] == 1
     assert tp_meta["tp1"]["retries"] == 0
     assert tp_meta["tp1"]["retry_delays_ms"] is None
 
-    assert tp_meta["tp2"]["qty"] == 100
+    assert tp_meta["tp2"]["qty"] == 75
     assert tp_meta["tp2"]["attempts"] == 1
     assert tp_meta["tp2"]["retries"] == 0
     assert tp_meta["tp2"]["retry_delays_ms"] is None

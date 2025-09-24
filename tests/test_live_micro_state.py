@@ -24,7 +24,7 @@ def patched_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
     settings_stub = SimpleNamespace(
         micro=SimpleNamespace(depth_min_lots=1, max_spread_pct=5.0),
-        instruments=SimpleNamespace(nifty_lot_size=50),
+        instruments=SimpleNamespace(nifty_lot_size=75),
         TICK_MAX_LAG_S=5.0,
         TICK_STALE_SECONDS=0.75,
         build_log_gate=lambda interval_s=None: _Gate(),

@@ -56,7 +56,7 @@ def test_live_kite_source_structured_events(monkeypatch: pytest.MonkeyPatch) -> 
         source_mod,
         "settings",
         SimpleNamespace(
-            instruments=SimpleNamespace(nifty_lot_size=50),
+            instruments=SimpleNamespace(nifty_lot_size=75),
             strategy=SimpleNamespace(max_tick_lag_s=0.1),
         ),
         raising=False,
