@@ -24,7 +24,17 @@ def _capacity() -> int:
         return 512
 
 
-_BUFFER: Deque[dict[str, Any]] = deque(maxlen=_capacity())
+_BUFFER: Deque[dict[str, Any]] | None = None
+
+
+def _buffer() -> Deque[dict[str, Any]]:
+    """Return the ring buffer, creating or resizing it on demand."""
+
+    global _BUFFER
+    cap = _capacity()
+    if _BUFFER is None or (_BUFFER.maxlen or 0) != cap:
+        _BUFFER = deque(maxlen=cap)
+    return _BUFFER
 
 
 def enabled() -> bool:
@@ -41,13 +51,13 @@ def append(record: dict[str, Any]) -> None:
 
     if not enabled():
         return
-    _BUFFER.append(dict(record))
+    _buffer().append(dict(record))
 
 
 def tail(limit: int | None = None) -> list[dict[str, Any]]:
     """Return the newest ``limit`` records (or all records when ``None``)."""
 
-    data = list(_BUFFER)
+    data = list(_buffer())
     if limit is None or limit >= len(data):
         return data
     if limit <= 0:
@@ -64,13 +74,14 @@ def snapshot() -> list[dict[str, Any]]:
 def clear() -> None:
     """Remove all records from the ring buffer."""
 
-    _BUFFER.clear()
+    _buffer().clear()
 
 
 def capacity() -> int:
     """Return the maximum number of records stored in the buffer."""
 
-    return _BUFFER.maxlen or _capacity()
+    buf = _buffer()
+    return buf.maxlen or _capacity()
 
 
 __all__ = ["append", "tail", "snapshot", "clear", "capacity", "enabled"]

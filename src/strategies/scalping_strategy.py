@@ -53,6 +53,31 @@ _last_log_ts = {
     "generated": 0.0,
 }
 
+_DEFAULT_MARKET_OPEN = dt_time(9, 15)
+_DEFAULT_MARKET_CLOSE = dt_time(15, 30)
+
+
+def _resolve_market_tz() -> ZoneInfo:
+    """Return the trading timezone configured for the application."""
+
+    tz_name = getattr(settings, "tz", "Asia/Kolkata")
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        # Fallback to IST if an invalid timezone sneaks through configuration.
+        return ZoneInfo("Asia/Kolkata")
+
+
+def _parse_hhmm(text: Any, fallback: dt_time) -> dt_time:
+    """Parse an ``HH:MM`` string into :class:`datetime.time`."""
+
+    if isinstance(text, dt_time):
+        return text
+    try:
+        return datetime.strptime(str(text), "%H:%M").time()
+    except (TypeError, ValueError):
+        return fallback
+
 def _log_throttled(key: str, level: int, msg: str, *args) -> None:
     now = time.time()
     if now - _last_log_ts.get(key, 0.0) >= _LOG_EVERY:
@@ -586,6 +611,49 @@ class EnhancedScalpingStrategy:
         """Return ``val`` on a 0..1 scale, accepting percentages."""
         return val / 100.0 if val > 1 else val
 
+    @staticmethod
+    def _market_window() -> tuple[dt_time, dt_time]:
+        """Return the configured trading session start/end times."""
+
+        start_raw = getattr(settings.risk, "trading_window_start", "09:15")
+        end_raw = getattr(settings.risk, "trading_window_end", "15:30")
+        start = _parse_hhmm(start_raw, _DEFAULT_MARKET_OPEN)
+        end = _parse_hhmm(end_raw, _DEFAULT_MARKET_CLOSE)
+        return start, end
+
+    def _market_hours_status(
+        self, *, now: Optional[datetime] = None
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Evaluate whether trading is currently allowed."""
+
+        allow_offhours = bool(getattr(settings, "allow_offhours_testing", False))
+        tz = _resolve_market_tz()
+        if now is None:
+            now_local = datetime.now(tz)
+        else:
+            now_local = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
+        start, end = self._market_window()
+        current_time = now_local.time()
+        if start <= end:
+            within_window = start <= current_time <= end
+        else:
+            within_window = current_time >= start or current_time <= end
+        is_weekday = now_local.weekday() < 5
+        ok = (within_window and is_weekday) or allow_offhours
+        diagnostics = {
+            "now": now_local.isoformat(),
+            "tz": getattr(tz, "key", str(tz)),
+            "weekday": now_local.weekday(),
+            "is_weekday": is_weekday,
+            "within_window": within_window,
+            "window": {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            },
+            "allow_offhours_testing": allow_offhours,
+        }
+        return ok, diagnostics
+
     def _est_iv_pct(self, S: float, K: float, T: float) -> Optional[int]:
         """Estimate rolling IV percentile."""
         try:
@@ -847,6 +915,26 @@ class EnhancedScalpingStrategy:
             except Exception:  # pragma: no cover - defensive logging guard
                 pass
             return plan
+
+        market_ok, market_diag = self._market_hours_status()
+        plan["market_hours"] = market_diag
+        plan["market_open"] = market_ok
+        gate_checks["market_hours"] = {"ok": market_ok, **market_diag}
+        dbg["market_hours"] = gate_checks["market_hours"]
+        if not market_ok:
+            plan["reasons"].append("market_closed")
+            _log_throttled(
+                "market_hours_block",
+                logging.INFO,
+                "Skipping signal evaluation: market closed (now=%s)",
+                market_diag.get("now"),
+            )
+            return plan_block(
+                "market_closed",
+                reasons=list(plan["reasons"]),
+                market_open=False,
+                market_hours=market_diag,
+            )
 
         try:
             if df is None or df.empty:

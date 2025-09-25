@@ -1,11 +1,13 @@
 """Unit tests for the enhanced scalping strategy."""
 
 from __future__ import annotations
-import pytest
-import pandas as pd
-import numpy as np
 
-from src.config import StrategySettings
+import numpy as np
+import pandas as pd
+import pytest
+from freezegun import freeze_time
+
+from src.config import StrategySettings, settings
 from src.strategies.scalping_strategy import EnhancedScalpingStrategy
 from src.strategies.warmup import compute_required_bars
 from src.strategies.strategy_config import StrategyConfig, resolve_config_path
@@ -22,6 +24,79 @@ def strategy_config() -> StrategySettings:
         atr_sl_multiplier=1.5,
         atr_tp_multiplier=3.0,
     )
+
+
+@freeze_time("2024-08-05 08:59:00+05:30")
+def test_generate_signal_blocks_before_market_open(
+    strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strategy must abstain from trading before the opening bell."""
+
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    monkeypatch.setattr(settings, "allow_offhours_testing", False, raising=False)
+    df = create_test_dataframe(trending_up=True)
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    assert plan["reason_block"] == "market_closed"
+    assert plan["market_open"] is False
+    market_gate = plan.get("gates", {}).get("market_hours", {})
+    assert market_gate.get("ok") is False
+    assert market_gate.get("within_window") is False
+
+
+@freeze_time("2024-08-05 10:00:00+05:30")
+def test_generate_signal_allows_during_market_hours(
+    strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Within trading hours the market gate should stay open."""
+
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    monkeypatch.setattr(settings, "allow_offhours_testing", False, raising=False)
+    df = create_test_dataframe(trending_up=True)
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    market_gate = plan.get("gates", {}).get("market_hours", {})
+    assert market_gate.get("ok") is True
+    assert market_gate.get("within_window") is True
+
+
+@freeze_time("2024-08-10 11:00:00+05:30")
+def test_generate_signal_blocks_on_weekends(
+    strategy_config: StrategySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No trades should be evaluated on non-trading days."""
+
+    strategy = EnhancedScalpingStrategy(
+        min_signal_score=strategy_config.min_signal_score,
+        confidence_threshold=strategy_config.confidence_threshold,
+        atr_period=strategy_config.atr_period,
+        atr_sl_multiplier=strategy_config.atr_sl_multiplier,
+        atr_tp_multiplier=strategy_config.atr_tp_multiplier,
+    )
+    monkeypatch.setattr(settings, "allow_offhours_testing", False, raising=False)
+    df = create_test_dataframe(trending_up=True)
+
+    plan = strategy.generate_signal(df, current_price=float(df["close"].iloc[-1]))
+
+    assert plan["reason_block"] == "market_closed"
+    assert plan["market_open"] is False
+    market_gate = plan.get("gates", {}).get("market_hours", {})
+    assert market_gate.get("ok") is False
+    assert market_gate.get("is_weekday") is False
 
 
 def create_test_dataframe(length: int = 100, trending_up: bool = True, constant_price: bool = False) -> pd.DataFrame:
