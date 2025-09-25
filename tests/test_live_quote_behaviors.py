@@ -241,6 +241,7 @@ def test_resubscribe_if_stale_escalates_after_three_cycles(
 
     monkeypatch.setattr(src, "reconnect_ws", _reconnect)
     src.ensure_token_subscribed = lambda *_a, **_k: True  # type: ignore[attr-defined]
+    src.prime_option_quote = lambda *_a, **_k: (None, None, None)  # type: ignore[assignment]
 
     with src._ws_state_lock:  # noqa: SLF001 - ensure snapshot includes token
         src._subs.add(token)
@@ -256,6 +257,78 @@ def test_resubscribe_if_stale_escalates_after_three_cycles(
     escalate_payloads = [payload for name, payload in events if name == "ws_reconnect_escalate"]
     assert escalate_payloads
     assert escalate_payloads[-1]["tokens"] == [token]
+
+
+def test_resubscribe_if_stale_throttles_escalate_per_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(source.settings, "MICRO__STALE_MS", 50, raising=False)
+    monkeypatch.setattr(source.settings, "WS_STALE_WINDOW_MS", 5_000, raising=False)
+    monkeypatch.setattr(source.settings, "WS_RECONNECT_MIN_GAP_S", 0.0, raising=False)
+
+    now = {"wall": 10_000.0, "mono": 5_000.0}
+
+    def _advance(seconds: float) -> None:
+        now["wall"] += seconds
+        now["mono"] += seconds
+
+    monkeypatch.setattr(source.time, "time", lambda: now["wall"])
+    monkeypatch.setattr(source.time, "monotonic", lambda: now["mono"])
+    monkeypatch.setattr(source, "monotonic_ms", lambda: int(now["mono"] * 1000))
+
+    src = LiveKiteSource(kite=None)
+    token = 2222
+    stale_mono = now["mono"] - 10.0
+
+    with src._tick_lock:  # noqa: SLF001 - deterministic cache setup
+        src._quotes[token] = _build_state(
+            token=token,
+            monotonic_ts=stale_mono,
+            bid=125.0,
+            ask=126.0,
+            bid_qty=40,
+            ask_qty=45,
+        )
+
+    reconnect_calls: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def _reconnect(*, reason: str | None = None, context: dict[str, Any] | None = None) -> None:
+        reconnect_calls.append((reason, context))
+
+    monkeypatch.setattr(src, "reconnect_ws", _reconnect)
+    src.ensure_token_subscribed = lambda *_a, **_k: True  # type: ignore[attr-defined]
+    src.prime_option_quote = lambda *_a, **_k: (None, None, None)  # type: ignore[assignment]
+
+    with src._ws_state_lock:  # noqa: SLF001 - ensure snapshot includes token
+        src._subs.add(token)
+
+    def _cycle() -> None:
+        src._last_quote_ready_attempt[token] = 0.0  # noqa: SLF001 - force retry
+        src._last_ws_resub_ms[token] = 0  # noqa: SLF001 - bypass debounce
+        src.resubscribe_if_stale(token)
+
+    for _ in range(3):
+        _cycle()
+        _advance(1.1)
+
+    assert reconnect_calls and reconnect_calls[-1][0] == "stale_x3"
+
+    first_escalate_count = len(reconnect_calls)
+
+    for _ in range(3):
+        _advance(1.1)
+        _cycle()
+
+    assert len(reconnect_calls) == first_escalate_count
+
+    _advance(6.0)
+
+    for _ in range(3):
+        _cycle()
+        _advance(1.1)
+
+    assert len(reconnect_calls) == first_escalate_count + 1
+    assert reconnect_calls[-1][0] == "stale_x3"
 
 
 def test_resubscribe_current_reconnects_after_repeated_failures(

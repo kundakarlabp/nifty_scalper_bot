@@ -1036,6 +1036,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._ws_resub_window_ms: dict[int, int] = {}
         self._ws_stale_counts: dict[int, int] = {}
         self._ws_stale_first_ms: dict[int, int] = {}
+        self._ws_last_escalate_ms: dict[int, int] = {}
         self._last_rest_seed_ms: dict[int, int] = {}
         self._last_heartbeat_ms: int = 0
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
@@ -1252,6 +1253,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         with self._ws_state_lock:
             self._ws_stale_counts.pop(token, None)
             self._ws_stale_first_ms.pop(token, None)
+            self._ws_last_escalate_ms.pop(token, None)
 
     def _reset_all_ws_stale_counters(self) -> None:
         """Clear stale counters across all tokens."""
@@ -1275,6 +1277,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         )
         now_ms = monotonic_ms()
         with self._ws_state_lock:
+            last_escalate_ms = int(self._ws_last_escalate_ms.get(token, 0))
             first = int(self._ws_stale_first_ms.get(token, 0))
             if not first or now_ms - first > window_ms:
                 first = now_ms
@@ -1283,6 +1286,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 count = self._ws_stale_counts.get(token, 0) + 1
             self._ws_stale_first_ms[token] = first
             self._ws_stale_counts[token] = count
+            suppress = bool(last_escalate_ms and now_ms - last_escalate_ms < window_ms)
+
+        if suppress:
+            return False
 
         if count < 3 or now_ms - first > window_ms:
             return False
@@ -1311,6 +1318,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
             "tokens": tokens_snapshot,
         }
         self._last_force_reconnect_ts = now
+        with self._ws_state_lock:
+            self._ws_last_escalate_ms[token] = now_ms
         try:
             self.reconnect_ws(reason="stale_x3", context=context)
             structured_log.event(
