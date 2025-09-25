@@ -283,7 +283,7 @@ class BacktestRunner:
 
 def main():
     """Entry point for the backtest script."""
-    validate_critical_settings()
+    validate_critical_settings(settings)
     # Use the nifty_ohlc.csv file provided in the repo; generate synthetic data if missing
     csv_file = project_root / "src" / "data" / "nifty_ohlc.csv"
     load_and_prepare_data(csv_file)

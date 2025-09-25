@@ -308,7 +308,7 @@ def test_skip_broker_validation_allows_missing_creds(caplog):
         with mock.patch("src.config.settings", settings), mock.patch(
             "src.boot.validate_env.settings", settings
         ), caplog.at_level(logging.WARNING):
-            validate_env.validate_critical_settings()
+            validate_env.validate_critical_settings(settings)
     import importlib
     import src.boot.validate_env as validate_env
     importlib.reload(validate_env)
@@ -334,7 +334,7 @@ def test_kite_creds_required_when_live():
             "src.boot.validate_env.settings", settings
         ):
             with pytest.raises(ValueError) as exc:
-                validate_env.validate_critical_settings()
+                validate_env.validate_critical_settings(settings)
     msg = str(exc.value)
     assert "KITE_API_KEY" in msg and "KITE_ACCESS_TOKEN" in msg
 
@@ -352,7 +352,7 @@ def test_kite_creds_optional_when_paper():
         "src.boot.validate_env.settings", settings
     ):
         # Should not raise
-        validate_critical_settings()
+        validate_critical_settings(settings)
 
 
 def test_negative_chat_id_allowed():
@@ -368,7 +368,7 @@ def test_negative_chat_id_allowed():
         "src.boot.validate_env.settings", settings
     ):
         # Should not raise for negative IDs
-        validate_critical_settings()
+        validate_critical_settings(settings)
         assert settings.telegram.chat_id == -12345
 
 
@@ -405,7 +405,7 @@ def test_invalid_instrument_token_detected(monkeypatch):
         ), monkeypatch.context() as m:
             m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
             with pytest.raises(ValueError) as exc:
-                validate_env.validate_critical_settings()
+                validate_env.validate_critical_settings(settings)
         assert "valid F&O token" in str(exc.value)
 
 
@@ -477,7 +477,7 @@ def test_valid_token_with_no_candles_falls_back_to_ltp(monkeypatch):
         m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
         m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         # Should not raise
-        validate_critical_settings()
+        validate_critical_settings(settings)
 
 
 def test_instrument_settings_portfolio_lookup():
@@ -533,7 +533,7 @@ def test_lookback_less_than_min_bars():
             "src.boot.validate_env.settings", settings
         ):
             with pytest.raises(ValueError) as exc:
-                validate_env.validate_critical_settings()
+                validate_env.validate_critical_settings(settings)
         assert "LOOKBACK_MINUTES" in str(exc.value)
 
 
@@ -573,7 +573,7 @@ def test_instrument_token_validation_skips_on_network_error(monkeypatch):
         m.setattr("src.boot.validate_env.LiveKiteSource", DummySource)
         m.setattr("src.boot.validate_env.KiteConnect", DummyKite)
         # Should not raise even though fetch_ohlc errors
-        validate_critical_settings()
+        validate_critical_settings(settings)
 
 
 def test_invalid_timeframe_defaults_to_minute(caplog):

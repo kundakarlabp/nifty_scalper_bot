@@ -163,29 +163,50 @@ def data_clamp_to_market_open() -> bool:
     return str(val).lower() in {"1", "true", "yes"}
 
 
-def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
+def validate_critical_settings(cfg: AppSettings) -> None:
     """Perform runtime checks on essential configuration values."""
 
-    cfg = cast(AppSettings, cfg or settings)
+    log = logging.getLogger(__name__)
+
+    kite_cfg = getattr(cfg, "kite", None)
+    live = bool(getattr(cfg, "enable_live_trading", False))
+    api_key = getattr(kite_cfg, "api_key", None) if kite_cfg is not None else None
+    api_secret = getattr(kite_cfg, "api_secret", None) if kite_cfg is not None else None
+    access_token = (
+        getattr(kite_cfg, "access_token", None) if kite_cfg is not None else None
+    )
+
+    have_key = bool(api_key)
+    have_secret = bool(api_secret)
+    have_token = bool(access_token)
+
+    log.info(
+        "env_probe live=%s have_key=%s have_secret=%s have_access=%s",
+        live,
+        have_key,
+        have_secret,
+        have_token,
+    )
+
     errors: list[str] = []
 
     if _skip_validation():
-        logging.getLogger(__name__).warning(
+        log.warning(
             "SKIP_BROKER_VALIDATION=true: proceeding without live creds",
         )
         return
 
     # Live trading requires broker credentials
-    if cfg.enable_live_trading:
-        if not cfg.kite.api_key:
+    if live:
+        if not have_key:
             errors.append(
                 "KITE_API_KEY is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.kite.api_secret:
+        if not have_secret:
             errors.append(
                 "KITE_API_SECRET is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.kite.access_token:
+        if not have_token:
             errors.append(
                 "KITE_ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true",
             )

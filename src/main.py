@@ -43,7 +43,7 @@ from src.boot.validate_env import (  # noqa: E402
 seed_env_from_defaults()
 import src.boot.synthetic_warmup  # noqa: E402,F401  # apply synthetic warmup patch
 import src.strategies.patches  # noqa: E402,F401  # activate runtime patches
-from src.config import settings  # noqa: E402
+from src.config import AppSettings, settings  # noqa: E402
 from src.diagnostics.file_check import run_file_diagnostics  # noqa: E402
 from src.diagnostics import healthkit  # noqa: E402
 from src.diagnostics.metrics import metrics  # noqa: E402
@@ -274,7 +274,7 @@ def _install_signal_handlers(_runner: StrategyRunner) -> None:
 
 def main() -> int:
     try:
-        validate_critical_settings()
+        validate_critical_settings(cast(AppSettings, settings))
     except Exception as e:
         logging.getLogger("main").error(
             "\u274c Config validation failed: %s", e, exc_info=True
