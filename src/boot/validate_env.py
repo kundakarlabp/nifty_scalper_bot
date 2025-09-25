@@ -56,6 +56,9 @@ ACCESS_TOKEN = env_any(*KITE_ACCESS_TOKEN_NAMES)
 # True when running on Railway (detected via known env vars)
 IS_HOSTED_RAILWAY = bool(env_any("RAILWAY_PROJECT_ID", "RAILWAY_STATIC_URL"))
 
+_FALLBACK_WARNINGS_EMITTED: set[str] = set()
+_ENV_PROBE_LOGGED = False
+
 
 def seed_env_from_defaults(path: str = "config/defaults.yaml") -> None:
     """Populate ``os.environ`` with values from a defaults YAML file.
@@ -166,38 +169,86 @@ def data_clamp_to_market_open() -> bool:
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
+    materialized = AppSettings()  # type: ignore[call-arg]
     if cfg is None:
         loader = getattr(settings, "_load", None)
         if callable(loader):
             cfg = cast(AppSettings, loader())
         else:  # pragma: no cover - defensive fallback
             cfg = cast(AppSettings, settings)
-    cfg = cast(AppSettings, cfg)
+    cfg = cast(AppSettings, cfg or materialized)
 
-    sentinel = object()
+    def _is_present(val: object) -> bool:
+        if isinstance(val, bool):
+            return bool(val)
+        return bool(val and str(val).strip())
 
-    def _alias_or(field: str, fallback: object) -> object:
-        value = getattr(cfg, field, sentinel)
-        return fallback if value is sentinel else value
+    def _resolve_primary(primary: str) -> object | None:
+        value = getattr(cfg, primary, None)
+        if _is_present(value):
+            return value
+        attr = {
+            "KITE_API_KEY": "api_key",
+            "KITE_API_SECRET": "api_secret",
+            "KITE_ACCESS_TOKEN": "access_token",
+        }.get(primary)
+        if attr is None:
+            return None
+        kite_cfg = getattr(cfg, "kite", None)
+        nested = getattr(kite_cfg, attr, None)
+        return nested if _is_present(nested) else None
 
-    live = bool(_alias_or("ENABLE_LIVE_TRADING", cfg.enable_live_trading))
-    have_key = bool(_alias_or("KITE_API_KEY", cfg.kite.api_key))
-    have_secret = bool(_alias_or("KITE_API_SECRET", cfg.kite.api_secret))
-    have_token = bool(_alias_or("KITE_ACCESS_TOKEN", cfg.kite.access_token))
+    def _warn_fallback_once(primary: str, fallback: str) -> None:
+        if primary in _FALLBACK_WARNINGS_EMITTED:
+            return
+        logging.getLogger(__name__).warning(
+            "Using %s as fallback for missing %s", fallback, primary
+        )
+        _FALLBACK_WARNINGS_EMITTED.add(primary)
 
-    logging.getLogger(__name__).info(
-        "env_probe live=%s have_key=%s have_secret=%s have_access=%s",
-        live,
-        have_key,
-        have_secret,
-        have_token,
-        extra={
-            "live": live,
-            "have_key": have_key,
-            "have_secret": have_secret,
-            "have_access": have_token,
-        },
-    )
+    def _resolve_credential(primary: str, fallback: str) -> tuple[object | None, bool]:
+        value = _resolve_primary(primary)
+        if _is_present(value):
+            return value, False
+        fallback_val = getattr(cfg, fallback, None)
+        if _is_present(fallback_val):
+            _warn_fallback_once(primary, fallback)
+            return fallback_val, True
+        return None, False
+
+    live = bool(cfg.enable_live_trading)
+    live_flag = getattr(cfg, "ENABLE_LIVE_TRADING", None)
+    fields_set: set[str] = getattr(cfg, "model_fields_set", set())
+    if isinstance(live_flag, bool) and "ENABLE_LIVE_TRADING" in fields_set:
+        live = live_flag
+
+    key_value, _ = _resolve_credential("KITE_API_KEY", "ZERODHA_API_KEY")
+    secret_value, _ = _resolve_credential("KITE_API_SECRET", "ZERODHA_API_SECRET")
+    token_value, _ = _resolve_credential("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN")
+
+    have_key = _is_present(key_value)
+    have_secret = _is_present(secret_value)
+    have_token = _is_present(token_value)
+
+    resolved_api_key = str(key_value).strip() if have_key else ""
+    resolved_access_token = str(token_value).strip() if have_token else ""
+
+    global _ENV_PROBE_LOGGED
+    if not _ENV_PROBE_LOGGED:
+        logging.getLogger(__name__).info(
+            "env_probe live=%s have_key=%s have_secret=%s have_access=%s",
+            live,
+            have_key,
+            have_secret,
+            have_token,
+            extra={
+                "live": live,
+                "have_key": have_key,
+                "have_secret": have_secret,
+                "have_access": have_token,
+            },
+        )
+        _ENV_PROBE_LOGGED = True
 
     if _skip_validation():
         logging.getLogger(__name__).warning(
@@ -205,22 +256,23 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         )
         return
 
-    errors: list[str] = []
-
-    # Live trading requires broker credentials
     if live:
+        missing = []
         if not have_key:
-            errors.append(
-                "KITE_API_KEY is required when ENABLE_LIVE_TRADING=true",
-            )
+            missing.append("KITE_API_KEY")
         if not have_secret:
-            errors.append(
-                "KITE_API_SECRET is required when ENABLE_LIVE_TRADING=true",
-            )
+            missing.append("KITE_API_SECRET")
         if not have_token:
-            errors.append(
-                "KITE_ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true",
+            missing.append("KITE_ACCESS_TOKEN")
+        if missing:
+            missing_csv = ", ".join(missing)
+            raise ValueError(
+                "ENABLE_LIVE_TRADING=true requires KITE_API_KEY, KITE_API_SECRET, "
+                "and the daily KITE_ACCESS_TOKEN; missing: "
+                f"{missing_csv}"
             )
+
+    errors: list[str] = []
 
     # Telegram configuration (required only when enabled)
     if cfg.telegram.enabled:
@@ -237,7 +289,7 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
 
     # Instrument token sanity check (only in live mode with deps available)
     if (
-        cfg.enable_live_trading
+        live
         and not cfg.allow_offhours_testing
         and KiteConnect is not None
         and LiveKiteSource is not None
@@ -246,8 +298,10 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         token = int(getattr(cfg.instruments, "instrument_token", 0) or 0)
         src = None
         try:
-            kite = KiteConnect(api_key=str(cfg.kite.api_key))
-            kite.set_access_token(str(cfg.kite.access_token))
+            kite = KiteConnect(api_key=resolved_api_key or str(cfg.kite.api_key))
+            kite.set_access_token(
+                resolved_access_token or str(cfg.kite.access_token)
+            )
             src = LiveKiteSource(kite=kite)
             try:
                 src.connect()

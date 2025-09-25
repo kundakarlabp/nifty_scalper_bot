@@ -1204,6 +1204,23 @@ def _risk_settings_factory() -> RiskSettings:
 
 
 class AppSettings(BaseSettings):
+    # Canonical env-sourced fields
+    ENABLE_LIVE_TRADING: bool = False
+    KITE_API_KEY: str | None = None
+    KITE_API_SECRET: str | None = None
+    KITE_ACCESS_TOKEN: str | None = None
+    ZERODHA_API_KEY: str | None = None
+    ZERODHA_API_SECRET: str | None = None
+    ZERODHA_ACCESS_TOKEN: str | None = None
+    LOT_SIZE_DEFAULT: int = 75
+    EXPIRY_DOW: str = "TUE"
+    CONTRACT_MASTER_SOURCE: Literal["broker", "file"] = "broker"
+    CONTRACT_MASTER_PATH: str | None = None
+    WATCHDOG_STALE_MS: int = 3500
+    RECONNECT_DEBOUNCE_MS: int = 10000
+    STALE_X_N: int = 3
+    STALE_WINDOW_MS: int = 60000
+
     # General optional settings
     app_env: str = "production"
     ai_provider: str = ""
