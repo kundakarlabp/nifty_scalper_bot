@@ -1216,9 +1216,11 @@ class EnhancedScalpingStrategy:
                         "PE": _normalize_token(raw_pe),
                     }
                     if normalized_token is not None:
-                        res = _token_to_symbol_and_lot(
-                            getattr(settings, "kite", None), normalized_token
-                        )
+                        broker = getattr(ds, "kite", None) or getattr(ds, "broker", None)
+                        runner_obj = getattr(self, "runner", None)
+                        if broker is None and runner_obj is not None:
+                            broker = getattr(runner_obj, "kite", None)
+                        res = _token_to_symbol_and_lot(broker, normalized_token)
                     else:
                         res = None
                     if res:
