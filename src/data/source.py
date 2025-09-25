@@ -620,6 +620,17 @@ class QuoteReadyStatus:
     source: str | None = None
 
 
+@dataclass(frozen=True)
+class _WatchdogConfig:
+    """Configuration for websocket freshness watchdog escalation."""
+
+    stale_ms: int
+    stale_cycles: int
+    stale_window_ms: int
+    resub_debounce_ms: int
+    reconnect_debounce_ms: int
+
+
 class _TTLCache:
     """
     Extremely simple per‑(token,interval) cache to soften historical_data pressure
@@ -1048,9 +1059,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
-        self._ws_stale_counts: dict[int, int] = {}
-        self._ws_stale_first_ms: dict[int, int] = {}
-        self._ws_last_escalate_ms: dict[int, int] = {}
         self._last_rest_seed_ms: dict[int, int] = {}
         self._last_heartbeat_ms: int = 0
         # Rolling ok snapshots for tokens with valid bid+ask quotes.
@@ -1088,6 +1096,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_quote_ready_attempt: dict[int, float] = {}
         self._resubscribe_failures: int = 0
         self._last_force_reconnect_ts: float = 0.0
+        # Global watchdog counters (monotonic seconds) shared across tokens.
+        self._watchdog_stale_count: int = 0
+        self._watchdog_first_stale_mono: float | None = None
+        self._watchdog_last_resub_mono: float | None = None
+        self._watchdog_last_reconnect_mono: float | None = None
 
     def _build_micro_settings(self) -> SimpleNamespace:
         try:
@@ -1116,6 +1129,43 @@ class LiveKiteSource(DataSource, BaseDataSource):
             TICK_STALE_SECONDS=max(tick_stale, 0.0),
             DEPTH_MIN_QTY=max(depth_min_qty, 0),
             SPREAD_MAX_PCT=max(spread_max, 0.0),
+        )
+
+    def _watchdog_config(self) -> _WatchdogConfig:
+        """Return sanitized watchdog thresholds sourced from settings/env."""
+
+        cfg_module = globals().get("_cfg")
+
+        def _read(name: str, default: int) -> int:
+            candidate: Any = None
+            try:
+                candidate = getattr(settings, name)
+            except Exception:
+                candidate = None
+            if candidate is None and cfg_module is not None:
+                candidate = getattr(cfg_module, name, None)
+            if candidate is None:
+                return default
+            try:
+                value = int(float(candidate))
+            except Exception:
+                return default
+            return value
+
+        stale_ms = max(_read("WATCHDOG_STALE_MS", 5_000), 10)
+        stale_cycles = max(_read("STALE_X_N", 3), 1)
+        stale_window_ms = max(_read("STALE_WINDOW_MS", 60_000), stale_ms)
+        resub_debounce_ms = max(_read("RESUB_DEBOUNCE_MS", 12_000), 100)
+        reconnect_debounce_ms = max(
+            _read("RECONNECT_DEBOUNCE_MS", 18_000),
+            resub_debounce_ms + 100,
+        )
+        return _WatchdogConfig(
+            stale_ms=stale_ms,
+            stale_cycles=stale_cycles,
+            stale_window_ms=stale_window_ms,
+            resub_debounce_ms=resub_debounce_ms,
+            reconnect_debounce_ms=reconnect_debounce_ms,
         )
 
     @property
@@ -1293,16 +1343,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Clear stale counters for ``token`` after a fresh tick."""
 
         with self._ws_state_lock:
-            self._ws_stale_counts.pop(token, None)
-            self._ws_stale_first_ms.pop(token, None)
-            self._ws_last_escalate_ms.pop(token, None)
+            # Reset global watchdog counters on genuine websocket ticks.
+            self._watchdog_stale_count = 0
+            self._watchdog_first_stale_mono = None
+            self._watchdog_last_resub_mono = None
 
     def _reset_all_ws_stale_counters(self) -> None:
         """Clear stale counters across all tokens."""
 
         with self._ws_state_lock:
-            self._ws_stale_counts.clear()
-            self._ws_stale_first_ms.clear()
+            self._watchdog_stale_count = 0
+            self._watchdog_first_stale_mono = None
+            self._watchdog_last_resub_mono = None
 
     def _record_ws_stale_event(
         self,
@@ -1313,69 +1365,111 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> bool:
         """Increment stale counters and escalate to reconnect when needed."""
 
-        window_ms = max(
-            int(getattr(settings, "WS_STALE_WINDOW_MS", getattr(_cfg, "WS_STALE_WINDOW_MS", 60000))),
-            1000,
-        )
-        now_ms = monotonic_ms()
+        cfg = self._watchdog_config()
+        min_age_ms = self.get_last_tick_age_ms()
+        if min_age_ms is None:
+            return False
+
+        threshold = max(int(cfg.stale_ms), int(threshold_ms))
+        age_val = int(min_age_ms)
+        if age_val <= threshold:
+            return False
+
+        now_mono = time.monotonic()
+        window_s = max(cfg.stale_window_ms / 1000.0, 1.0)
+        resub_debounce_s = max(cfg.resub_debounce_ms / 1000.0, 0.001)
+        reconnect_debounce_s = max(cfg.reconnect_debounce_ms / 1000.0, resub_debounce_s)
+
         with self._ws_state_lock:
-            last_escalate_ms = int(self._ws_last_escalate_ms.get(token, 0))
-            first = int(self._ws_stale_first_ms.get(token, 0))
-            if not first or now_ms - first > window_ms:
-                first = now_ms
-                count = 1
-            else:
-                count = self._ws_stale_counts.get(token, 0) + 1
-            self._ws_stale_first_ms[token] = first
-            self._ws_stale_counts[token] = count
-            suppress = bool(last_escalate_ms and now_ms - last_escalate_ms < window_ms)
+            if (
+                self._watchdog_first_stale_mono is None
+                or now_mono - self._watchdog_first_stale_mono > window_s
+            ):
+                self._watchdog_first_stale_mono = now_mono
+                self._watchdog_stale_count = 0
 
-        if suppress:
-            return False
+            should_resub = (
+                self._watchdog_last_resub_mono is None
+                or now_mono - self._watchdog_last_resub_mono > resub_debounce_s
+            )
+            stale_count = self._watchdog_stale_count
 
-        if count < 3 or now_ms - first > window_ms:
-            return False
-
-        min_gap = max(
-            float(
-                getattr(
-                    settings,
-                    "WS_RECONNECT_MIN_GAP_S",
-                    getattr(_cfg, "WS_RECONNECT_MIN_GAP_S", 15.0),
+        if should_resub:
+            tokens_snapshot = self._snapshot_subscriptions()
+            with self._ws_state_lock:
+                self._watchdog_stale_count += 1
+                stale_count = self._watchdog_stale_count
+                self._watchdog_last_resub_mono = now_mono
+            try:
+                self.resubscribe_current()
+            except Exception:
+                self.log.debug("watchdog.resubscribe_error", exc_info=True)
+            structured_log.event(
+                "ws_resubscribe",
+                reason="watchdog_stale",
+                stale_count=int(stale_count),
+                last_tick_age_ms=age_val,
+                debounce_ms=int(cfg.resub_debounce_ms),
+                tokens=tokens_snapshot,
+            )
+            try:
+                self.log.info(
+                    "ws_resubscribe",
+                    extra={
+                        "reason": "watchdog_stale",
+                        "stale_count": int(stale_count),
+                        "last_tick_age_ms": age_val,
+                        "tokens": tokens_snapshot,
+                        "debounce_ms": int(cfg.resub_debounce_ms),
+                    },
                 )
-            ),
-            1.0,
-        )
-        now = time.time()
-        if now - getattr(self, "_last_force_reconnect_ts", 0.0) < min_gap:
+            except Exception:
+                self.log.info(
+                    "ws_resubscribe reason=%s stale_count=%s age_ms=%s tokens=%s",
+                    "watchdog_stale",
+                    int(stale_count),
+                    age_val,
+                    tokens_snapshot,
+                )
+            return False
+
+        with self._ws_state_lock:
+            stale_count = self._watchdog_stale_count
+            can_reconnect = (
+                stale_count >= cfg.stale_cycles
+                and (
+                    self._watchdog_last_reconnect_mono is None
+                    or now_mono - self._watchdog_last_reconnect_mono > reconnect_debounce_s
+                )
+            )
+            if can_reconnect:
+                self._watchdog_last_reconnect_mono = now_mono
+
+        if not can_reconnect:
             return False
 
         tokens_snapshot = self._snapshot_subscriptions()
         context = {
             "token": int(token),
-            "stale_count": int(count),
-            "window_ms": int(window_ms),
-            "tick_age_ms": int(age_ms) if age_ms is not None else None,
-            "threshold_ms": int(threshold_ms),
+            "stale_count": int(stale_count),
+            "window_ms": int(cfg.stale_window_ms),
+            "tick_age_ms": age_val,
+            "threshold_ms": int(threshold),
             "tokens": tokens_snapshot,
         }
-        self._last_force_reconnect_ts = now
-        with self._ws_state_lock:
-            self._ws_last_escalate_ms[token] = now_ms
+        structured_log.event(
+            "ws_reconnect",
+            stage="attempt",
+            reason="stale_xN",
+            stale_count=int(stale_count),
+            last_tick_age_ms=age_val,
+            tokens=tokens_snapshot,
+        )
         try:
-            self.reconnect_ws(reason="stale_x3", context=context)
-            structured_log.event(
-                "ws_reconnect_escalate",
-                reason="stale_x3",
-                token=int(token),
-                stale_count=int(count),
-                window_ms=int(window_ms),
-                tick_age_ms=int(age_ms) if age_ms is not None else None,
-                subs_count=len(tokens_snapshot),
-                tokens=tokens_snapshot,
-            )
+            self.reconnect_ws(reason="stale_xN", context=context)
         except Exception:
-            self.log.error("ws_reconnect.escalation_failed", extra=context, exc_info=True)
+            self.log.debug("watchdog.ws_reconnect_failed", exc_info=True)
+            return False
         return True
 
     def _maybe_seed_via_rest(
