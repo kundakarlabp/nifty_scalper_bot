@@ -41,9 +41,9 @@ def _build_state(
 def test_get_last_tick_age_ms_uses_monotonic(monkeypatch: pytest.MonkeyPatch) -> None:
     src = LiveKiteSource(kite=None)
     with src._tick_lock:  # noqa: SLF001 - accessed for deterministic setup
-        src._last_tick_ts_ms = 500
+        src._last_any_tick_mono = 0.5
 
-    monkeypatch.setattr(source, "monotonic_ms", lambda: 2_000)
+    monkeypatch.setattr(source.time, "monotonic", lambda: 2.0)
 
     assert src.get_last_tick_age_ms() == 1_500
 
