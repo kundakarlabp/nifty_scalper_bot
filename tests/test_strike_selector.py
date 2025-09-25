@@ -9,7 +9,13 @@ from unittest.mock import MagicMock
 import pytest
 from freezegun import freeze_time
 
-from src.utils.strike_selector import is_market_open, get_instrument_tokens
+from src.utils.strike_selector import (
+    StrikeSelectorContext,
+    configure_strike_selector,
+    get_instrument_tokens,
+    is_market_open,
+    reset_cached_selection,
+)
 import src.utils.strike_selector as strike_selector
 from src.config import settings
 
@@ -216,3 +222,35 @@ def test_today_mode_falls_back_to_next_expiry(mock_kite, monkeypatch):
     tokens = get_instrument_tokens(kite_instance=mock_kite)
     assert tokens is not None
     assert tokens["expiry"] == "2024-08-06"
+
+
+@pytest.fixture(autouse=True)
+def _reset_cache():
+    reset_cached_selection()
+    inst = settings.instrument()
+    configure_strike_selector(
+        StrikeSelectorContext(
+            trade_symbol=str(inst.trade_symbol),
+            spot_symbol=str(inst.spot_symbol),
+            spot_token=int(inst.instrument_token),
+            strike_step=0,
+            strike_range=int(inst.strike_range),
+            lot_size=int(getattr(inst, "lot_size", inst.nifty_lot_size)),
+            expiry_mode=str(getattr(settings.strategy, "option_expiry_mode", "nearest")),
+        )
+    )
+    yield
+    reset_cached_selection()
+    inst = settings.instrument()
+    configure_strike_selector(
+        StrikeSelectorContext(
+            trade_symbol=str(inst.trade_symbol),
+            spot_symbol=str(inst.spot_symbol),
+            spot_token=int(inst.instrument_token),
+            strike_step=0,
+            strike_range=int(inst.strike_range),
+            lot_size=int(getattr(inst, "lot_size", inst.nifty_lot_size)),
+            expiry_mode=str(getattr(settings.strategy, "option_expiry_mode", "nearest")),
+        )
+    )
+

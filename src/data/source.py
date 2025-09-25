@@ -8,8 +8,8 @@ import random
 import threading
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
@@ -50,7 +50,12 @@ from src.utils.atr_helper import compute_atr
 from src.utils.circuit_breaker import CircuitBreaker
 from src.utils.indicators import calculate_vwap
 from src.utils.market_time import prev_session_bounds
-from src.utils.strike_selector import _nearest_strike
+from src.utils.strike_selector import (
+    ATMSnapshot,
+    _nearest_strike,
+    configure_strike_selector,
+    strike_selector_context,
+)
 from src.utils.time_windows import TZ
 
 if TYPE_CHECKING:
@@ -3941,8 +3946,7 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     if have_tokens and drift < drift_pts and not roll:
         return
 
-    if drift >= drift_pts or roll:
-        log.info("atm_roll: reason=%s", "drift" if drift >= drift_pts else "expiry")
+    roll_reason = "drift" if drift >= drift_pts else "expiry"
 
     broker = getattr(self, "kite", None) or getattr(self, "broker", None)
     items = _refresh_instruments_nfo(broker)
@@ -3981,9 +3985,60 @@ def ensure_atm_tokens(self: Any, underlying: str | None = None) -> None:
     self.current_atm_strike = strike
     self.current_atm_expiry = expiry
     self._atm_resolve_date = today
+    try:
+        base_ctx = strike_selector_context()
+
+        def _snapshot_provider() -> ATMSnapshot | None:
+            try:
+                ce_raw, pe_raw = getattr(self, "atm_tokens", (None, None))
+                strike_val = getattr(self, "current_atm_strike", None)
+                expiry_val = getattr(self, "current_atm_expiry", None)
+                if strike_val is None:
+                    return None
+                ce_val = int(ce_raw) if ce_raw is not None else None
+                pe_val = int(pe_raw) if pe_raw is not None else None
+                if isinstance(expiry_val, (datetime, date)):
+                    expiry_text = expiry_val.isoformat()
+                elif expiry_val is None:
+                    expiry_text = ""
+                else:
+                    expiry_text = str(expiry_val)
+                return ATMSnapshot(
+                    strike=int(strike_val),
+                    tokens=(ce_val, pe_val),
+                    expiry=expiry_text,
+                    lot_size=base_ctx.lot_size,
+                )
+            except Exception:
+                if isinstance(expiry, (datetime, date)):
+                    fallback_expiry = expiry.isoformat()
+                elif expiry is None:
+                    fallback_expiry = ""
+                else:
+                    fallback_expiry = str(expiry)
+                return ATMSnapshot(
+                    strike=int(strike),
+                    tokens=(ce_token, pe_token),
+                    expiry=fallback_expiry,
+                    lot_size=base_ctx.lot_size,
+                )
+
+        configure_strike_selector(
+            replace(base_ctx, atm_snapshot_provider=_snapshot_provider)
+        )
+    except Exception:
+        pass
+    expiry_obj = expiry
+    if isinstance(expiry_obj, (datetime, date)):
+        expiry_text = expiry_obj.isoformat()
+    elif expiry_obj is None:
+        expiry_text = ""
+    else:
+        expiry_text = str(expiry_obj)
     log.info(
-        "ATM tokens resolved: expiry=%s, strike=%d, ce=%d, pe=%d",
-        expiry.isoformat(),
+        "atm_roll: reason=%s expiry=%s strike=%d ce=%d pe=%d",
+        roll_reason,
+        expiry_text,
         int(strike),
         ce_token,
         pe_token,
