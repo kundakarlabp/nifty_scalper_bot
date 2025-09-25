@@ -7,7 +7,7 @@ import os
 import random
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -86,6 +86,15 @@ def _as_int(val: Any) -> int:
         return int(val)
     except (TypeError, ValueError):
         return 0
+
+
+def _normalize_token(token: Any) -> int | Any:
+    """Return ``token`` coerced to ``int`` when possible."""
+
+    try:
+        return int(token)
+    except Exception:
+        return token
 
 
 def _to_epoch_ms(value: Any) -> int | None:
@@ -1024,15 +1033,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
-        # Monotonic timestamp (ms) for the most recent tick heartbeat.
-        self._last_tick_ts_ms: int | None = None
-        # Monotonic timestamp (ms) for any tick across subscribed tokens.
-        self._last_any_tick_ms: int | None = None
+        # Monotonic timestamp for the most recent tick heartbeat.
+        self._last_tick_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
+        # Monotonic timestamp of the most recent tick across any token.
+        self._last_any_tick_mono: float | None = None
         # Epoch timestamp of the most recent tick across any token.
         self._last_any_tick_epoch: float | None = None
         # Per-token tick heartbeats for watchdog/diagnostics.
         self._token_last_tick_epoch: dict[int, float] = {}
-        self._token_last_tick_ms: dict[int, int] = {}
+        self._stale_count: defaultdict[int, int] = defaultdict(int)
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
@@ -1116,30 +1125,57 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def last_tick_ts(self, value: float | None) -> None:
         self._last_tick_epoch = value
 
-    def get_last_tick_age_ms(self) -> int | None:
-        """Return the age of the most recent tick heartbeat in milliseconds."""
+    def last_tick_age_ms(self) -> int | None:
+        """Return the global age of the most recent websocket tick."""
 
         with self._tick_lock:
-            ts_ms = self._last_any_tick_ms or self._last_tick_ts_ms
-            token_ticks = dict(self._token_last_tick_ms)
+            last_any = self._last_any_tick_mono
+        if last_any is None:
+            return None
+        return int(max((time.monotonic() - last_any) * 1000.0, 0))
+
+    def last_token_age_ms(self, token: int | str) -> int | None:
+        """Return the age of the most recent tick for ``token`` in milliseconds."""
+
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
+            return None
+        with self._tick_lock:
+            ts = self._last_tick_mono.get(token_i)
+        if ts is None:
+            return None
+        return int(max((time.monotonic() - ts) * 1000.0, 0))
+
+    def min_age_across_subs_ms(self) -> int | None:
+        """Return the minimum tick age across all subscribed tokens."""
+
         with self._ws_state_lock:
             subs_snapshot = list(self._subs)
-        now_ms = monotonic_ms()
+        with self._tick_lock:
+            last_any = self._last_any_tick_mono
+            tick_map = {k: v for k, v in self._last_tick_mono.items() if v is not None}
+        if not subs_snapshot and last_any is None:
+            return None
+        now_m = time.monotonic()
         ages: list[int] = []
-        for token in subs_snapshot:
-            try:
-                token_i = int(token)
-            except Exception:
+        for raw_token in subs_snapshot:
+            token = _normalize_token(raw_token)
+            if not isinstance(token, int):
                 continue
-            token_ts = token_ticks.get(token_i)
-            if token_ts is None:
+            ts = tick_map.get(token)
+            if ts is None:
                 continue
-            ages.append(max(now_ms - int(token_ts), 0))
+            ages.append(int(max((now_m - ts) * 1000.0, 0)))
         if ages:
             return min(ages)
-        if ts_ms is None:
+        if last_any is None:
             return None
-        return max(now_ms - int(ts_ms), 0)
+        return int(max((now_m - last_any) * 1000.0, 0))
+
+    def get_last_tick_age_ms(self) -> int | None:
+        """Compatibility shim for legacy callers relying on this name."""
+
+        return self.min_age_across_subs_ms()
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1236,9 +1272,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         with self._ws_state_lock:
             for token in tokens:
-                try:
-                    token_i = int(token)
-                except Exception:
+                token_i = _normalize_token(token)
+                if not isinstance(token_i, int):
                     continue
                 if token_i > 0:
                     self._subs.add(token_i)
@@ -1256,6 +1291,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self._ws_stale_counts.pop(token, None)
             self._ws_stale_first_ms.pop(token, None)
             self._ws_last_escalate_ms.pop(token, None)
+            self._stale_count.pop(token, None)
 
     def _reset_all_ws_stale_counters(self) -> None:
         """Clear stale counters across all tokens."""
@@ -1263,6 +1299,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         with self._ws_state_lock:
             self._ws_stale_counts.clear()
             self._ws_stale_first_ms.clear()
+            self._stale_count.clear()
 
     def _record_ws_stale_event(
         self,
@@ -1288,6 +1325,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 count = self._ws_stale_counts.get(token, 0) + 1
             self._ws_stale_first_ms[token] = first
             self._ws_stale_counts[token] = count
+            self._stale_count[token] = count
             suppress = bool(last_escalate_ms and now_ms - last_escalate_ms < window_ms)
 
         if suppress:
@@ -1735,11 +1773,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return
-        tokens = getattr(self, "atm_tokens", ())
+        tokens = tuple(_normalize_token(t) for t in getattr(self, "atm_tokens", ()) or ())
         if tokens and token not in tokens:
             return
 
@@ -1824,9 +1861,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return False
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return False
         runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
         if runner and hasattr(runner, "on_market_tick"):
@@ -1837,7 +1873,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         now_epoch = time.time()
         now_dt = datetime.utcnow()
         now_monotonic = time.monotonic()
-        now_mono_ms = int(now_monotonic * 1000.0)
         depth = tick.get("depth") if isinstance(tick, Mapping) else None
         bid = ask = None
         bid_qty = ask_qty = None
@@ -1916,11 +1951,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self._full_depth_tokens.add(token)
             self._last_tick_ts = now_dt
             self.last_tick_ts = now_epoch
-            self._last_tick_ts_ms = now_mono_ms
             self._last_any_tick_epoch = now_epoch
-            self._last_any_tick_ms = now_mono_ms
             self._token_last_tick_epoch[token] = now_epoch
-            self._token_last_tick_ms[token] = now_mono_ms
+            self._last_tick_mono[token] = now_monotonic
+            self._last_any_tick_mono = now_monotonic
+            self._stale_count[token] = 0
+        self._last_any_tick_mono = now_monotonic
         self._reset_ws_stale_counter(token)
         self._stale_tick_checks = 0
         key_seen = f"tick_seen:{token}"
