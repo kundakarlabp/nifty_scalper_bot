@@ -40,6 +40,16 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# --- load .env early ---
+try:  # pragma: no cover - best effort load
+    from dotenv import find_dotenv, load_dotenv  # pip install python-dotenv
+
+    env_path = find_dotenv(usecwd=True)
+    load_dotenv(env_path, override=False)
+except Exception:  # pragma: no cover - optional dependency
+    pass
+# -----------------------
+
 from src.server.logging_utils import _setup_logging as _setup_logging_boot  # noqa: E402
 from src.server.logging_setup import log_event  # noqa: E402
 
