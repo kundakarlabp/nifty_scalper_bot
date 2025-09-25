@@ -2010,6 +2010,11 @@ class AppSettings(BaseSettings):
     def system_position_sync_interval(self) -> int:
         return self.system.position_sync_interval
 
+    def instrument(self, symbol: str | None = None) -> InstrumentConfig:
+        """Return instrument configuration for ``symbol`` or the primary instrument."""
+
+        return self.instruments.instrument(symbol)
+
 
 def _apply_env_overrides(cfg: AppSettings) -> None:
     """Apply environment-based overrides to the loaded settings."""
