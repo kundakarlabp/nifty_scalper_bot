@@ -8,6 +8,7 @@ import random
 import hashlib
 import threading
 import time
+import inspect
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -20,12 +21,15 @@ from src.server.logging_setup import LogSuppressor, log_event
 from src.state import StateStore
 from src.utils.broker_errors import (
     AUTH,
+    NETWORK,
     SUBSCRIPTION,
     THROTTLE,
     UNKNOWN,
     classify_broker_error,
 )
 from src.utils.circuit_breaker import CircuitBreaker
+from src.utils.market_time import is_market_open
+from src.utils.microstructure import evaluate_microstructure, LOT_SIZE_DEFAULT
 from src.utils.reliability import RateLimiter
 
 from .micro_filters import ENTRY_WAIT_S, MICRO_SPREAD_CAP, depth_to_lots
@@ -498,7 +502,7 @@ class OrderManager:
 
 
 def micro_ok(
-    quote: Dict[str, Any],
+    quote: Mapping[str, Any] | None,
     qty_lots: int,
     lot_size: int,
     max_spread_pct: float,
@@ -506,264 +510,156 @@ def micro_ok(
     *,
     side: str | None = None,
     depth_min_lots: float | int = 0.0,
+    data_source: Any | None = None,
+    trace_id: str | None = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Evaluate microstructure guard for an option quote."""
 
-    def _as_float(val: Any) -> float:
-        try:
-            return float(val)
-        except (TypeError, ValueError):
-            return 0.0
+    spread_cap_ratio = float(max_spread_pct)
+    if spread_cap_ratio > 1.0:
+        spread_cap_ratio /= 100.0
 
-    def _as_int(val: Any) -> int:
-        try:
-            return int(float(val))
-        except (TypeError, ValueError):
-            return 0
-
-    def _depth_values(raw: Any) -> List[int]:
-        if raw in (None, ""):
-            return []
-        if isinstance(raw, Mapping):
-            values: List[int] = []
-            for item in raw.values():
-                if isinstance(item, Mapping):
-                    values.append(_as_int(item.get("quantity")))
-                else:
-                    values.append(_as_int(item))
-            return [max(v, 0) for v in values if v]
-        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
-            values = []
-            for item in list(raw)[:5]:
-                if isinstance(item, Mapping):
-                    values.append(_as_int(item.get("quantity")))
-                else:
-                    values.append(_as_int(item))
-            return [max(v, 0) for v in values if v]
-        return [max(_as_int(raw), 0)]
-
-    def _get(obj: Any, key: str, default: Any = None) -> Any:
-        if isinstance(obj, Mapping):
-            return obj.get(key, default)
-        return getattr(obj, key, default)
-
-    side_norm = str(side).upper() if side else None
-    bid = _as_float(_get(quote, "bid", 0.0))
-    ask = _as_float(_get(quote, "ask", 0.0))
-    ltp = _as_float(_get(quote, "ltp", 0.0))
-    source = _get(quote, "source")
-    ts_ms = _get(quote, "ts_ms")
-    ts_val = _get(quote, "timestamp")
-
-    ms = float(max_spread_pct)
-    max_spread_cap = ms if ms <= 1.0 else ms / 100.0
-
-    qty_lots_i = max(int(qty_lots), 0)
-    lot_size_i = max(int(lot_size), 0)
-    order_units = qty_lots_i * lot_size_i
+    lot_size_val = int(lot_size) if lot_size and int(lot_size) > 0 else LOT_SIZE_DEFAULT
+    order_lots = max(int(qty_lots), 0)
     depth_multiplier = max(float(depth_mult), 0.0)
-
-    def _log_no_quote() -> Tuple[bool, Dict[str, Any]]:
-        meta_no_quote = {
-            "spread_pct": None,
-            "spread_cap_pct": round(max_spread_cap * 100.0, 3),
-            "spread_ok": None,
-            "depth_ok": None,
-            "bid5": 0,
-            "ask5": 0,
-            "bid": bid,
-            "ask": ask,
-            "ltp": ltp,
-            "source": source,
-            "required_qty": 0,
-            "available_bid_qty": 0,
-            "available_ask_qty": 0,
-            "side": side_norm,
-            "depth_available": 0,
-            "depth_multiplier": depth_multiplier,
-            "order_qty": 0,
-            "depth_missing": True,
-            "has_quote": False,
-            "block_reason": None,
-            "skipped": True,
-            "skip_reason": "no_quote",
-            "ts_ms": ts_ms,
-            "timestamp": ts_val,
-        }
-        log.info(
-            "micro_decision side=%s lots=%d units=%d spread%%=na cap%%=%.3f depth=na ok=%s reason=%s src=%s",
-            side_norm or "BOTH",
-            qty_lots_i,
-            order_units,
-            max_spread_cap * 100.0,
-            True,
-            "skip:no_quote",
-            source,
-        )
-        return True, meta_no_quote
-
-    if bid <= 0.0 or ask <= 0.0:
-        return _log_no_quote()
-
-    mid = (bid + ask) / 2.0
-    if mid <= 0.0:
-        return _log_no_quote()
-
-    spread_frac = (ask - bid) / mid if mid > 0 else float("inf")
-    spread_ok = math.isfinite(spread_frac) and spread_frac <= max_spread_cap
-    spread_pct_value: Optional[float] = (
-        spread_frac * 100.0 if math.isfinite(spread_frac) else None
+    min_depth_lots = max(float(depth_min_lots), 0.0)
+    required_lots = max(
+        int(math.ceil(order_lots * depth_multiplier)),
+        int(math.ceil(min_depth_lots)),
     )
 
-    depth_min_lots_f = max(float(depth_min_lots), 0.0)
-    min_depth_units = int(depth_min_lots_f * lot_size_i) if lot_size_i > 0 else 0
-    required_units = max(int(order_units * depth_multiplier), min_depth_units)
+    decision = evaluate_microstructure(
+        quote or {},
+        required_lots=required_lots,
+        spread_cap_pct=spread_cap_ratio,
+        side=side,
+        data_source=data_source,
+        trace_id=trace_id,
+    )
 
-    bid_depth_values = _depth_values(_get(quote, "bid5_qty", []))
-    ask_depth_values = _depth_values(_get(quote, "ask5_qty", []))
-    if not bid_depth_values:
-        fallback_bid = _as_int(_get(quote, "bid_qty", 0))
-        if fallback_bid > 0:
-            bid_depth_values = [fallback_bid]
-    if not ask_depth_values:
-        fallback_ask = _as_int(_get(quote, "ask_qty", 0))
-        if fallback_ask > 0:
-            ask_depth_values = [fallback_ask]
+    bid = decision.get("bid")
+    ask = decision.get("ask")
+    source = None
+    if isinstance(quote, Mapping):
+        source = quote.get("source")
 
-    available_bid = sum(bid_depth_values)
-    available_ask = sum(ask_depth_values)
-
-    if available_bid <= 0 and available_ask <= 0 and spread_ok:
-        meta_no_depth = {
-            "spread_pct": round(spread_pct_value, 3)
-            if spread_pct_value is not None
-            else None,
-            "spread_cap_pct": round(max_spread_cap * 100.0, 3),
-            "spread_ok": spread_ok,
-            "depth_ok": None,
-            "bid5": available_bid,
-            "ask5": available_ask,
-            "bid": bid,
-            "ask": ask,
-            "ltp": ltp,
-            "source": source,
-            "required_qty": 0,
-            "available_bid_qty": available_bid,
-            "available_ask_qty": available_ask,
-            "side": side_norm,
-            "depth_available": 0,
-            "depth_multiplier": depth_multiplier,
-            "order_qty": order_units,
-            "depth_missing": True,
-            "has_quote": bid > 0.0 and ask > 0.0,
-            "block_reason": None,
-            "skipped": True,
-            "skip_reason": "no_depth",
-            "ts_ms": ts_ms,
-            "timestamp": ts_val,
-        }
-        spread_for_log = (
-            meta_no_depth["spread_pct"]
-            if meta_no_depth["spread_pct"] is not None
-            else float("nan")
-        )
-        log.info(
-            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth=0 ok=%s reason=%s src=%s",
-            side_norm or "BOTH",
-            qty_lots_i,
-            order_units,
-            spread_for_log,
-            meta_no_depth["spread_cap_pct"],
-            True,
-            "skip:no_depth",
-            source,
-        )
-        return True, meta_no_depth
-
-    if side_norm == "BUY":
-        depth_available = available_ask
-    elif side_norm == "SELL":
-        depth_available = available_bid
+    available_bid = decision.get("available_bid_qty")
+    available_ask = decision.get("available_ask_qty")
+    depth_available_units: Optional[int] = None
+    if decision.get("side") == "SELL":
+        depth_available_units = available_bid
+    elif decision.get("side") == "BUY":
+        depth_available_units = available_ask
     else:
-        depth_available = (
-            min(available_bid, available_ask)
-            if order_units
-            else max(available_bid, available_ask)
-        )
+        candidates = [
+            val for val in (available_bid, available_ask) if isinstance(val, int)
+        ]
+        if candidates:
+            depth_available_units = min(candidates)
 
-    require_depth_flag = bool(getattr(settings.executor, "require_depth", False))
-    depth_ok: Optional[bool] = None
-    if require_depth_flag:
-        depth_ok = depth_available >= int(required_units)
+    order_units = order_lots * lot_size_val
+    required_units = required_lots * lot_size_val
+    spread_pct = decision.get("spread_pct")
+    spread_ok = (
+        spread_pct is not None and decision.get("spread_cap_pct") is not None
+        and spread_pct <= decision["spread_cap_pct"]
+    )
+    depth_ok = decision.get("depth_ok")
+    raw_reason = decision.get("reason")
+    friendly_reason_map = {
+        "no_quote": "no_bbo",
+        "wide_spread": "spread_exceeds_cap",
+        "stale_quote": "stale_quote",
+        "insufficient_depth": "insufficient_depth",
+        None: None,
+    }
+    reason = friendly_reason_map.get(raw_reason, raw_reason)
+    decision_ok = bool(decision.get("ok"))
 
-    depth_missing = available_bid <= 0 and available_ask <= 0
+    require_depth_flag = True
+    try:
+        executor_cfg = getattr(settings, "executor", None) if settings else None
+        if executor_cfg is not None:
+            require_depth_flag = bool(getattr(executor_cfg, "require_depth", True))
+    except Exception:
+        require_depth_flag = True
 
-    ok = spread_ok and (depth_ok is not False)
-    block_reason: Optional[str] = None
-    if not spread_ok:
-        block_reason = "spread"
-    elif depth_ok is False:
-        block_reason = "depth_thin"
+    skip_reason: Optional[str] = None
+    if raw_reason == "no_quote":
+        skip_reason = "no_quote"
 
-    meta = {
-        "spread_pct": round(spread_pct_value, 3) if spread_pct_value is not None else None,
-        "spread_cap_pct": round(max_spread_cap * 100.0, 3),
+    block_reason_map = {"insufficient_depth": "depth_thin", "wide_spread": "spread_wide"}
+    block_reason_val = block_reason_map.get(raw_reason, raw_reason)
+
+    meta: Dict[str, Any] = {
+        "spread_pct": spread_pct,
+        "spread_cap_pct": decision.get("spread_cap_pct"),
         "spread_ok": spread_ok,
         "depth_ok": depth_ok,
-        "bid5": available_bid,
-        "ask5": available_ask,
         "bid": bid,
         "ask": ask,
-        "ltp": ltp,
+        "mid": decision.get("mid"),
+        "ltp": float(quote.get("ltp")) if isinstance(quote, Mapping) and quote.get("ltp") else None,
         "source": source,
         "required_qty": required_units,
         "available_bid_qty": available_bid,
         "available_ask_qty": available_ask,
-        "side": side_norm,
-        "depth_available": depth_available,
+        "side": decision.get("side"),
+        "depth_available": depth_available_units,
         "depth_multiplier": depth_multiplier,
         "order_qty": order_units,
-        "depth_missing": depth_missing,
-        "has_quote": True,
-        "block_reason": block_reason,
-        "ts_ms": ts_ms,
-        "timestamp": ts_val,
+        "depth_missing": available_bid is None and available_ask is None,
+        "has_quote": bid is not None and ask is not None,
+        "block_reason": block_reason_val,
+        "reason": reason,
+        "raw_reason": raw_reason,
+        "age_ms": decision.get("age_ms"),
+        "trace_id": trace_id,
     }
 
-    spread_for_log = (
-        meta["spread_pct"] if meta["spread_pct"] is not None else float("nan")
+    if skip_reason is not None:
+        meta.update(
+            {
+                "skipped": True,
+                "skip_reason": skip_reason,
+                "spread_ok": None,
+                "depth_ok": None,
+                "block_reason": None,
+                "depth_available": meta.get("depth_available") or 0,
+            }
+        )
+        return True, meta
+
+    meta.setdefault("skipped", False)
+    meta.setdefault("skip_reason", None)
+
+    if not require_depth_flag:
+        meta["depth_ok"] = None
+        if reason == "insufficient_depth":
+            meta["block_reason"] = None
+            return True, meta
+
+    spread_for_log = spread_pct * 100.0 if spread_pct is not None else float("nan")
+    cap_for_log = (
+        decision.get("spread_cap_pct") * 100.0
+        if decision.get("spread_cap_pct") is not None
+        else float("nan")
     )
 
-    if require_depth_flag:
-        log.info(
-            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth_req=%d depth_avail=%d ok=%s reason=%s src=%s",
-            side_norm or "BOTH",
-            qty_lots_i,
-            order_units,
-            spread_for_log,
-            meta["spread_cap_pct"],
-            required_units,
-            depth_available,
-            ok,
-            block_reason,
-            source,
-        )
-    else:
-        log.info(
-            "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth=na ok=%s reason=%s src=%s",
-            side_norm or "BOTH",
-            qty_lots_i,
-            order_units,
-            spread_for_log,
-            meta["spread_cap_pct"],
-            ok,
-            block_reason,
-            source,
-        )
+    log.info(
+        "micro_decision side=%s lots=%d units=%d spread%%=%.3f cap%%=%.3f depth=%s ok=%s reason=%s src=%s",
+        meta["side"] or "BOTH",
+        order_lots,
+        order_units,
+        spread_for_log,
+        cap_for_log,
+        depth_available_units if depth_available_units is not None else "na",
+        decision.get("ok"),
+        reason,
+        source,
+    )
 
-    if depth_ok is False or not spread_ok:
-        return False, meta
-    return True, meta
+    return decision_ok, meta
 
 
 # ------------------- in-memory order record -------------------
@@ -960,6 +856,7 @@ class OrderExecutor:
 
         self.cb_orders = CircuitBreaker("orders")
         self.cb_modify = CircuitBreaker("modify")
+        self.cb_auth = CircuitBreaker("auth")
         self._fsms: Dict[str, TradeFSM] = {}
         self._idemp_map: Dict[str, str] = {}
         self._queues: Dict[str, Deque["_QueueItem"]] = {}
@@ -1000,6 +897,11 @@ class OrderExecutor:
             )
         last_ok: bool = False
         last_meta: Dict[str, Any] = {}
+        data_source = getattr(self, "data_source", None)
+        trace_id_val = None
+        raw_trace = local_quote.get("trace_id") if isinstance(local_quote, Mapping) else None
+        if raw_trace not in (None, ""):
+            trace_id_val = str(raw_trace)
 
         while attempts < 2:
             ok, meta = micro_ok(
@@ -1010,6 +912,8 @@ class OrderExecutor:
                 depth_mult=depth_mult,
                 side=side,
                 depth_min_lots=self.depth_min_lots,
+                data_source=data_source,
+                trace_id=trace_id_val,
             )
             last_ok, last_meta = ok, meta
             if ok or meta.get("depth_ok") is not False or not meta.get("spread_ok"):
@@ -1049,6 +953,9 @@ class OrderExecutor:
             max_spread_pct=max_spread_pct,
             depth_mult=depth_mult,
             side=side,
+            depth_min_lots=self.depth_min_lots,
+            data_source=getattr(self, "data_source", None),
+            trace_id=str(quote.get("trace_id")) if quote.get("trace_id") not in (None, "") else None,
         )
 
     # ----------- event helpers ----------
@@ -1079,6 +986,48 @@ class OrderExecutor:
                 items.append(OrderExecutor._sanitize_event_value(item, depth=depth + 1))
             return items
         return str(value)
+
+    @staticmethod
+    def _mask_order_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+        sensitive_keys = {"tag", "client_oid", "idempotency_key"}
+        masked: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in sensitive_keys and isinstance(value, str):
+                if len(value) <= 4:
+                    masked[key] = "*" * len(value)
+                else:
+                    masked[key] = f"{value[:4]}…{value[-2:]}"
+            else:
+                masked[key] = value
+        return masked
+
+    def _log_order_request(
+        self, kind: str, payload: Mapping[str, Any], *, trace_id: Optional[str]
+    ) -> None:
+        masked = self._mask_order_payload(payload)
+        structured_log.event(
+            f"order_{kind}",
+            trace_id=trace_id,
+            payload=masked,
+        )
+        log_event(
+            f"order.{kind}",
+            "info",
+            trace_id=trace_id or "",
+            payload=masked,
+        )
+
+    @staticmethod
+    def _invoke_with_trace_id(
+        fn: Callable[..., Any], *args: Any, trace_id: Optional[str] = None, **kwargs: Any
+    ) -> Any:
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn(*args, **kwargs)
+        if "trace_id" in sig.parameters:
+            return fn(*args, trace_id=trace_id, **kwargs)
+        return fn(*args, **kwargs)
 
     def _emit_order_event(self, event: str, **fields: Any) -> None:
         record: Dict[str, Any] = {
@@ -1138,6 +1087,7 @@ class OrderExecutor:
         with self._lock:
             self.kite = kite
             self._live = kite is not None
+            self.cb_auth.reset()
 
     # Back-compat alias used by some runners
     def set_kite(self, kite: Optional[KiteConnect]) -> None:
@@ -1586,6 +1536,47 @@ class OrderExecutor:
                 )
                 return None
 
+        allow_offhours = bool(getattr(settings, "allow_offhours_testing", False)) if settings else False
+        if not allow_offhours:
+            now_utc = datetime.now(timezone.utc)
+            if not is_market_open(now_utc):
+                self.last_error = "market_closed"
+                structured_log.event(
+                    "execution_block",
+                    reason="market_closed",
+                    symbol=symbol,
+                    token=int(token) if token else None,
+                    side=action,
+                    qty=int(qty),
+                    mode=mode,
+                    strategy=strategy_name or None,
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                )
+                log_event(
+                    "order.block",
+                    "warning",
+                    side=action,
+                    token=token or "",
+                    qty=qty,
+                    price=float(price),
+                    mode=mode,
+                    strategy=strategy_name,
+                    reason="market_closed",
+                )
+                self._emit_order_event(
+                    "market_closed",
+                    trace_id=trace_id,
+                    client_oid=client_oid or None,
+                    symbol=symbol,
+                    action=action,
+                    qty=qty,
+                    mode=mode,
+                    sizing=sizing_raw,
+                    instrument_token=token,
+                )
+                return None
+
         if (bid is None or ask is None) and self.kite:
             try:
                 qd = fetch_quote_with_depth(self.kite, symbol, self.cb_orders)
@@ -1601,43 +1592,97 @@ class OrderExecutor:
             waited = False
             attempts = 0
             while True:
-                mid = (float(bid) + float(ask)) / 2.0
-                spread = float(ask) - float(bid)
-                spread_pct = spread / mid * 100.0 if mid > 0 else float("inf")
-                depth_lots = depth_to_lots(depth, lot_size=self.lot_size) or 0.0
-                if spread_pct <= MICRO_SPREAD_CAP and depth_lots >= qty_lots:
+                quote_snapshot: Dict[str, Any] = {
+                    "bid": bid,
+                    "ask": ask,
+                    "depth": depth,
+                    "bid_qty": payload.get("bid_qty"),
+                    "ask_qty": payload.get("ask_qty"),
+                    "bid5_qty": payload.get("bid5_qty"),
+                    "ask5_qty": payload.get("ask5_qty"),
+                    "source": payload.get("quote_src") or "payload",
+                    "trace_id": trace_id,
+                }
+                cap_value = float(MICRO_SPREAD_CAP)
+                spread_cap_ratio = cap_value / 100.0 if cap_value > 0 else 0.0
+
+                ok, meta = micro_ok(
+                    quote=quote_snapshot,
+                    qty_lots=qty_lots,
+                    lot_size=self.lot_size or LOT_SIZE_DEFAULT,
+                    max_spread_pct=spread_cap_ratio,
+                    depth_mult=int(self.depth_multiplier),
+                    side=action,
+                    depth_min_lots=self.depth_min_lots,
+                    data_source=data_source,
+                    trace_id=trace_id,
+                )
+                if ok:
+                    mid_val = meta.get("mid")
+                    if mid_val is None and bid is not None and ask is not None:
+                        mid_val = (float(bid) + float(ask)) / 2.0
+                    if mid_val is None:
+                        mid_val = float(price)
                     if action == "BUY":
-                        px = mid * (1.0 + self.entry_slip)
+                        px = mid_val * (1.0 + self.entry_slip)
                         price = min(float(ask), px)
                     else:
-                        px = mid * (1.0 - self.entry_slip)
+                        px = mid_val * (1.0 - self.entry_slip)
                         price = max(float(bid), px)
                     price = _round_to_tick(price, self.tick_size)
                     self.last_error = "micro_wait" if waited else None
                     break
+
+                reason = meta.get("reason") or "micro_block"
+                spread_pct_ratio = meta.get("spread_pct") or 0.0
+                spread_pct = spread_pct_ratio * 100.0
+                depth_display = meta.get("depth_available")
                 if time.monotonic() >= deadline or (
                     self.micro_retry_limit > 0
                     and attempts >= int(self.micro_retry_limit)
                 ):
                     self.last_error = "micro_block"
                     log.info(
-                        "entry blocked: micro_block spread%%=%.2f depth_lots=%.2f qty_lots=%s",
+                        "entry blocked: micro_block reason=%s spread%%=%.2f depth=%s qty_lots=%s",
+                        reason,
                         spread_pct,
-                        depth_lots,
+                        depth_display,
                         qty_lots,
                     )
                     return None
+
                 waited = True
                 self.last_error = "micro_wait"
                 attempts += 1
                 log.info(
-                    "waiting for micro: spread%%=%.2f depth_lots=%.2f qty_lots=%s",
+                    "waiting for micro: reason=%s spread%%=%.2f depth=%s qty_lots=%s",
+                    reason,
                     spread_pct,
-                    depth_lots,
+                    depth_display,
                     qty_lots,
                 )
                 if callable(refresh_cb):
-                    bid, ask, depth = refresh_cb()
+                    refreshed = refresh_cb()
+                    if isinstance(refreshed, Mapping):
+                        bid = refreshed.get("bid", bid)
+                        ask = refreshed.get("ask", ask)
+                        depth = refreshed.get("depth", depth)
+                    elif isinstance(refreshed, Sequence) and not isinstance(
+                        refreshed, (str, bytes, bytearray)
+                    ):
+                        values = list(refreshed)
+                        if values:
+                            if len(values) > 0:
+                                bid = values[0]
+                            if len(values) > 1:
+                                ask = values[1]
+                            if len(values) > 2:
+                                depth = values[2]
+                    elif refreshed is not None:
+                        try:
+                            bid, ask, depth = refreshed  # type: ignore[misc]
+                        except Exception:
+                            pass
                 time.sleep(2)
 
         final_quote_payload: Dict[str, Any] | None = None
@@ -1899,7 +1944,9 @@ class OrderExecutor:
             if client_oid:
                 params["tag"] = client_oid
 
-            res = self._place_with_cb(params)
+            res = self._invoke_with_trace_id(
+                self._place_with_cb, params, trace_id=trace_id
+            )
             if not res.get("ok"):
                 self.last_error = f"place_order: {res.get('reason')}"
                 log.error("place_order failed: %s", res.get("reason"))
@@ -2074,7 +2121,10 @@ class OrderExecutor:
         for old in (rec.tp1_order_id, rec.tp2_order_id):
             if old:
                 res_cancel = self._cancel_with_cb(
-                    old, variety=rec.variety, reason="refresh_tp"
+                    old,
+                    variety=rec.variety,
+                    reason="refresh_tp",
+                    trace_id=rec.trace_id,
                 )
                 if not res_cancel.get("ok"):
                     log.debug(
@@ -2098,7 +2148,8 @@ class OrderExecutor:
         res2: Dict[str, Any] = {}
 
         if q_tp1 > 0:
-            res1 = self._place_with_cb(
+            res1 = self._invoke_with_trace_id(
+                self._place_with_cb,
                 {
                     "variety": rec.variety,
                     "exchange": rec.exchange,
@@ -2108,7 +2159,8 @@ class OrderExecutor:
                     "product": rec.product,
                     "order_type": "LIMIT",
                     "price": tp_price,
-                }
+                },
+                trace_id=rec.trace_id,
             )
             if res1.get("ok"):
                 rec.tp1_order_id = res1.get("order_id")
@@ -2116,7 +2168,8 @@ class OrderExecutor:
                 self.last_error = f"tp1: {res1.get('reason')}"
                 log.error("TP1 failed: %s", res1.get("reason"))
         if q_tp2 > 0:
-            res2 = self._place_with_cb(
+            res2 = self._invoke_with_trace_id(
+                self._place_with_cb,
                 {
                     "variety": rec.variety,
                     "exchange": rec.exchange,
@@ -2126,7 +2179,8 @@ class OrderExecutor:
                     "product": rec.product,
                     "order_type": "LIMIT",
                     "price": tp_price,
-                }
+                },
+                trace_id=rec.trace_id,
             )
             if res2.get("ok"):
                 rec.tp2_order_id = res2.get("order_id")
@@ -2467,10 +2521,12 @@ class OrderExecutor:
                 "validity": "IOC",
                 "tag": "eod_close",
             }
-            res = self._place_with_cb(req)
+            res = self._invoke_with_trace_id(self._place_with_cb, req, trace_id=None)
             if not res.get("ok"):
                 req.pop("validity", None)
-                res = self._place_with_cb(req)
+                res = self._invoke_with_trace_id(
+                    self._place_with_cb, req, trace_id=None
+                )
             log.info("eod_close: %s qty=%s ok=%s", tsym, qty, res.get("ok"))
         log.info("All open executor orders cancelled.")
 
@@ -2793,7 +2849,7 @@ class OrderExecutor:
                     order_id = str(qi.placed_order_id) if qi.placed_order_id else ""
                     if order_id and order_id not in cancelled_ids:
                         res = self._cancel_with_cb(
-                            order_id, reason="cancel_trade_queue"
+                            order_id, reason="cancel_trade_queue", trace_id=None
                         )
                         if not res.get("ok"):
                             log.debug(
@@ -2816,7 +2872,7 @@ class OrderExecutor:
             broker_id = str(leg.broker_order_id) if leg.broker_order_id else ""
             if broker_id and broker_id not in cancelled_ids:
                 res = self._cancel_with_cb(
-                    broker_id, reason="cancel_trade_leg"
+                    broker_id, reason="cancel_trade_leg", trace_id=None
                 )
                 if not res.get("ok"):
                     log.debug(
@@ -2856,7 +2912,10 @@ class OrderExecutor:
                 continue
             order_id = str(oid)
             res = self._cancel_with_cb(
-                order_id, variety=rec.variety, reason="cancel_record_orders"
+                order_id,
+                variety=rec.variety,
+                reason="cancel_record_orders",
+                trace_id=rec.trace_id,
             )
             if not res.get("ok"):
                 log.debug(
@@ -2949,7 +3008,9 @@ class OrderExecutor:
                     log.debug("Journal append failed: %s", e)
 
             t0 = self._now_ms()
-            res = self._place_with_cb(req)
+            res = self._invoke_with_trace_id(
+                self._place_with_cb, req, trace_id=None
+            )
             if not res.get("ok"):
                 delay = self.router_backoff_ms * (1 + qi.retries) + random.randint(
                     0, 25
@@ -3017,7 +3078,9 @@ class OrderExecutor:
                 if qi.step_idx == 0:
                     targets = qi.ladder_prices()
                     new_px = self._round_to_tick(targets[1])
-                    mod = self._modify_with_cb(qi.placed_order_id, price=new_px)
+                    mod = self._modify_with_cb(
+                        qi.placed_order_id, price=new_px, trace_id=None
+                    )
                     self.logger.info(
                         f"ROUTER modify {sym} leg={qi.leg_id} step=1 px={new_px:.2f} res={mod.get('ok')}"
                     )
@@ -3025,7 +3088,7 @@ class OrderExecutor:
                     qi.placed_at_ms = self._now_ms()
                 else:
                     self._cancel_with_cb(
-                        qi.placed_order_id, reason="ack_timeout"
+                        qi.placed_order_id, reason="ack_timeout", trace_id=None
                     )
                     self.logger.info(
                         f"ROUTER cancel {sym} leg={qi.leg_id} reason=ack_timeout"
@@ -3041,7 +3104,7 @@ class OrderExecutor:
                 and (now_ms - qi.acked_at_ms) > self.router_fill_timeout_ms
             ):
                 self._cancel_with_cb(
-                    qi.placed_order_id, reason="fill_timeout"
+                    qi.placed_order_id, reason="fill_timeout", trace_id=None
                 )
                 self.logger.info(
                     f"ROUTER cancel {sym} leg={qi.leg_id} reason=fill_timeout"
@@ -3110,6 +3173,23 @@ class OrderExecutor:
             ]
         )
 
+    def _classify_broker_error(
+        self, exc: Exception
+    ) -> Tuple[str, bool, str]:
+        """Return (reason, is_transient, category) for broker exceptions."""
+
+        reason = str(exc)
+        category = classify_broker_error(exc)
+        if category == AUTH:
+            cooldown = int(os.getenv("BREAKER_AUTH_COOLDOWN_S", "60"))
+            if self.cb_auth.allow():
+                log.warning("auth breaker open due to broker error: %s", reason)
+            self.cb_auth.force_open(max(cooldown, 0))
+            return reason, False, category
+        if category in {THROTTLE, NETWORK}:
+            return reason, True, category
+        return reason, self._is_transient(reason), category
+
     def _build_place_request(
         self, *, symbol: str, qty: int, price: float, tag: str
     ) -> Dict[str, Any]:
@@ -3125,15 +3205,27 @@ class OrderExecutor:
             "tag": tag,
         }
 
-    def _place_with_cb(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def _place_with_cb(
+        self, req: Dict[str, Any], *, trace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Place order via broker with circuit breaker and retries."""
 
         attempts = 0
         retry_delays: List[int] = []
+        self._log_order_request("submit", req, trace_id=trace_id)
 
         def single() -> Dict[str, Any]:
             nonlocal attempts
             attempts += 1
+            if not self.cb_auth.allow():
+                return {
+                    "ok": False,
+                    "reason": "auth_breaker_open",
+                    "cb": self.cb_auth.health(),
+                    "lat_ms": None,
+                    "transient": False,
+                    "error_category": AUTH,
+                }
             if not self.cb_orders.allow():
                 return {
                     "ok": False,
@@ -3154,14 +3246,21 @@ class OrderExecutor:
                 return {"ok": True, "order_id": oid, "lat_ms": lat}
             except BROKER_EXCEPTIONS as e:  # pragma: no cover - broker errors
                 lat = int((time.monotonic() - t0) * 1000)
-                self.cb_orders.record_failure(lat, reason=str(e))
-                return {"ok": False, "reason": str(e), "lat_ms": lat}
+                reason, transient, category = self._classify_broker_error(e)
+                self.cb_orders.record_failure(lat, reason=reason)
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "lat_ms": lat,
+                    "transient": transient,
+                    "error_category": category,
+                }
 
         res = single()
         retry_idx = 0
         while (
             not res.get("ok")
-            and self._is_transient(str(res.get("reason", "")))
+            and res.get("transient", False)
             and retry_idx < self.max_place_retries
         ):
             base_delay_ms = self.retry_backoff_ms * (2**retry_idx)
@@ -3176,12 +3275,26 @@ class OrderExecutor:
         res["attempts"] = attempts
         res["retries"] = max(0, attempts - 1)
         res["retry_delays_ms"] = retry_delays if retry_delays else None
+        res.setdefault("error_category", None)
         return res
 
-    def _modify_with_cb(self, order_id: str, **kwargs: Any) -> Dict[str, Any]:
+    def _modify_with_cb(
+        self, order_id: str, *, trace_id: Optional[str] = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Modify order via broker with breaker and retries."""
 
+        self._log_order_request("modify", {"order_id": order_id, **kwargs}, trace_id=trace_id)
+
         def single() -> Dict[str, Any]:
+            if not self.cb_auth.allow():
+                return {
+                    "ok": False,
+                    "reason": "auth_breaker_open",
+                    "cb": self.cb_auth.health(),
+                    "lat_ms": None,
+                    "transient": False,
+                    "error_category": AUTH,
+                }
             if not self.cb_modify.allow():
                 return {
                     "ok": False,
@@ -3196,32 +3309,57 @@ class OrderExecutor:
                 return {"ok": True, "resp": resp, "lat_ms": lat}
             except BROKER_EXCEPTIONS as e:  # pragma: no cover
                 lat = int((time.monotonic() - t0) * 1000)
-                self.cb_modify.record_failure(lat, reason=str(e))
-                return {"ok": False, "reason": str(e), "lat_ms": lat}
+                reason, transient, category = self._classify_broker_error(e)
+                self.cb_modify.record_failure(lat, reason=reason)
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "lat_ms": lat,
+                    "transient": transient,
+                    "error_category": category,
+                }
 
         res = single()
         attempt = 0
         while (
             not res.get("ok")
-            and self._is_transient(str(res.get("reason", "")))
+            and res.get("transient", False)
             and attempt < self.max_modify_retries
         ):
             delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
             time.sleep(delay + random.uniform(0, 0.025))
             attempt += 1
             res = single()
+        res.setdefault("error_category", None)
         return res
 
     def _cancel_with_cb(
-        self, order_id: str, *, reason: str | None = None, **kwargs: Any
+        self,
+        order_id: str,
+        *,
+        reason: str | None = None,
+        trace_id: Optional[str] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Cancel order via broker with breaker and retries."""
 
         order_ref = str(order_id)
         if order_ref:
             log_event("order.cancel", "info", id=order_ref, reason=reason or "")
+        self._log_order_request(
+            "cancel", {"order_id": order_id, "reason": reason, **kwargs}, trace_id=trace_id
+        )
 
         def single() -> Dict[str, Any]:
+            if not self.cb_auth.allow():
+                return {
+                    "ok": False,
+                    "reason": "auth_breaker_open",
+                    "cb": self.cb_auth.health(),
+                    "lat_ms": None,
+                    "transient": False,
+                    "error_category": AUTH,
+                }
             if not self.cb_modify.allow():
                 return {
                     "ok": False,
@@ -3236,25 +3374,37 @@ class OrderExecutor:
                 return {"ok": True, "resp": resp, "lat_ms": lat}
             except BROKER_EXCEPTIONS as e:  # pragma: no cover
                 lat = int((time.monotonic() - t0) * 1000)
-                self.cb_modify.record_failure(lat, reason=str(e))
-                return {"ok": False, "reason": str(e), "lat_ms": lat}
+                reason_msg, transient, category = self._classify_broker_error(e)
+                self.cb_modify.record_failure(lat, reason=reason_msg)
+                return {
+                    "ok": False,
+                    "reason": reason_msg,
+                    "lat_ms": lat,
+                    "transient": transient,
+                    "error_category": category,
+                }
 
         res = single()
         attempt = 0
         while (
             not res.get("ok")
-            and self._is_transient(str(res.get("reason", "")))
+            and res.get("transient", False)
             and attempt < self.max_modify_retries
         ):
             delay = (self.retry_backoff_ms * (2**attempt)) / 1000.0
             time.sleep(delay + random.uniform(0, 0.025))
             attempt += 1
             res = single()
+        res.setdefault("error_category", None)
         return res
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return current API breaker health."""
-        return {"orders": self.cb_orders.health(), "modify": self.cb_modify.health()}
+        return {
+            "orders": self.cb_orders.health(),
+            "modify": self.cb_modify.health(),
+            "auth": self.cb_auth.health(),
+        }
 
     # ----------- util ----------
     @staticmethod
