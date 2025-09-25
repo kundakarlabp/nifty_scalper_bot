@@ -13,6 +13,28 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
 
+_ENV_FILE_PATH: str | None = None
+_ENV_FILE_ERROR: Exception | None = None
+
+try:
+    from dotenv import find_dotenv, load_dotenv  # type: ignore
+
+    try:
+        _found_env = find_dotenv(usecwd=True)
+    except TypeError:
+        # ``usecwd`` was added in newer python-dotenv versions; fall back gracefully.
+        _found_env = find_dotenv()
+
+    if _found_env:
+        load_dotenv(_found_env, override=False)
+        os.environ.setdefault("APP_LOADED_ENV_FILE", _found_env)
+        _ENV_FILE_PATH = _found_env
+except Exception as exc:  # pragma: no cover - defensive guard for optional dependency
+    _ENV_FILE_ERROR = exc
+    logging.getLogger("main.bootstrap").debug(
+        "dotenv bootstrap skipped: %s", exc, exc_info=True
+    )
+
 # Ensure project root in sys.path when executed as a script
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -33,6 +55,26 @@ log_event(
     log_format=log_format_env or ("json" if log_json_env else "logfmt"),
     started_at=datetime.now(timezone.utc).isoformat(),
 )
+
+if _ENV_FILE_ERROR is not None:
+    log_event(
+        "app.envfile",
+        "warning",
+        path=_ENV_FILE_PATH or "not-found",
+        error=str(_ENV_FILE_ERROR),
+    )
+elif _ENV_FILE_PATH is not None:
+    log_event(
+        "app.envfile",
+        "info",
+        path=_ENV_FILE_PATH,
+    )
+else:
+    log_event(
+        "app.envfile",
+        "info",
+        path="not-found",
+    )
 
 from src.boot.validate_env import (  # noqa: E402
     broker_connect_for_data,

@@ -1684,7 +1684,11 @@ class AppSettings(BaseSettings):
         return v
 
     model_config = SettingsConfigDict(
-        env_file=".env",  # used locally; Railway uses real env vars
+        env_file=(
+            ".env",
+            "/app/.env",
+            "/workspace/.env",
+        ),
         env_file_encoding="utf-8",
         case_sensitive=False,
         env_nested_delimiter="__",  # e.g., TELEGRAM__BOT_TOKEN

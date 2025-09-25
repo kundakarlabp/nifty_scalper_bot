@@ -167,7 +167,18 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
     cfg = cast(AppSettings, cfg or settings)
-    errors: list[str] = []
+    live = bool(cfg.enable_live_trading)
+    have_key = bool(cfg.kite.api_key)
+    have_secret = bool(cfg.kite.api_secret)
+    have_token = bool(cfg.kite.access_token)
+
+    logging.getLogger(__name__).info(
+        "env_probe live=%s have_key=%s have_secret=%s have_access=%s",
+        live,
+        have_key,
+        have_secret,
+        have_token,
+    )
 
     if _skip_validation():
         logging.getLogger(__name__).warning(
@@ -175,17 +186,19 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         )
         return
 
+    errors: list[str] = []
+
     # Live trading requires broker credentials
-    if cfg.enable_live_trading:
-        if not cfg.kite.api_key:
+    if live:
+        if not have_key:
             errors.append(
                 "KITE_API_KEY is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.kite.api_secret:
+        if not have_secret:
             errors.append(
                 "KITE_API_SECRET is required when ENABLE_LIVE_TRADING=true",
             )
-        if not cfg.kite.access_token:
+        if not have_token:
             errors.append(
                 "KITE_ACCESS_TOKEN is required when ENABLE_LIVE_TRADING=true",
             )
