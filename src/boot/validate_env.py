@@ -166,11 +166,24 @@ def data_clamp_to_market_open() -> bool:
 def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
     """Perform runtime checks on essential configuration values."""
 
-    cfg = cast(AppSettings, cfg or settings)
-    live = bool(cfg.enable_live_trading)
-    have_key = bool(cfg.kite.api_key)
-    have_secret = bool(cfg.kite.api_secret)
-    have_token = bool(cfg.kite.access_token)
+    if cfg is None:
+        loader = getattr(settings, "_load", None)
+        if callable(loader):
+            cfg = cast(AppSettings, loader())
+        else:  # pragma: no cover - defensive fallback
+            cfg = cast(AppSettings, settings)
+    cfg = cast(AppSettings, cfg)
+
+    sentinel = object()
+
+    def _alias_or(field: str, fallback: object) -> object:
+        value = getattr(cfg, field, sentinel)
+        return fallback if value is sentinel else value
+
+    live = bool(_alias_or("ENABLE_LIVE_TRADING", cfg.enable_live_trading))
+    have_key = bool(_alias_or("KITE_API_KEY", cfg.kite.api_key))
+    have_secret = bool(_alias_or("KITE_API_SECRET", cfg.kite.api_secret))
+    have_token = bool(_alias_or("KITE_ACCESS_TOKEN", cfg.kite.access_token))
 
     logging.getLogger(__name__).info(
         "env_probe live=%s have_key=%s have_secret=%s have_access=%s",
@@ -178,6 +191,12 @@ def validate_critical_settings(cfg: Optional[AppSettings] = None) -> None:
         have_key,
         have_secret,
         have_token,
+        extra={
+            "live": live,
+            "have_key": have_key,
+            "have_secret": have_secret,
+            "have_access": have_token,
+        },
     )
 
     if _skip_validation():
