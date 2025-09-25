@@ -584,3 +584,41 @@ def health_check(kite: Optional[KiteConnect], spot_symbol: str) -> Dict[str, Any
     except Exception as e:
         logger.error("[health_check] %s", e, exc_info=True)
         return {"overall_status": "ERROR", "message": str(e), "checks": {}}
+
+# ---------------- Market hours (simple, no exchange_calendars) ----------------
+def is_market_open(start_str: str = "09:15", end_str: str = "15:30") -> bool:
+    """Return True if local time is Mon–Fri and within [start_str, end_str] (HH:MM, 24h)."""
+    from datetime import datetime
+    try:
+        now = datetime.now()
+        if now.weekday() > 4:  # Sat/Sun
+            return False
+        start_t = datetime.strptime(start_str, "%H:%M").time()
+        end_t = datetime.strptime(end_str, "%H:%M").time()
+        return start_t <= now.time() <= end_t
+    except Exception:
+        # Fail-open to avoid unexpectedly blocking the bot; logs elsewhere will show details
+        return True
+
+# Back-compat alias used by older code paths
+def is_trading_hours() -> bool:
+    return is_market_open()
+
+# ---------------- Market hours (simple, no exchange_calendars) ----------------
+def is_market_open(start_str: str = "09:15", end_str: str = "15:30") -> bool:
+    """Return True if local time is Mon–Fri and within [start_str, end_str] (HH:MM, 24h)."""
+    from datetime import datetime
+    try:
+        now = datetime.now()
+        if now.weekday() > 4:  # Sat/Sun
+            return False
+        start_t = datetime.strptime(start_str, "%H:%M").time()
+        end_t = datetime.strptime(end_str, "%H:%M").time()
+        return start_t <= now.time() <= end_t
+    except Exception:
+        # Fail-open to avoid unexpectedly blocking the bot
+        return True
+
+# Back-compat alias used by older code paths
+def is_trading_hours() -> bool:
+    return is_market_open()
