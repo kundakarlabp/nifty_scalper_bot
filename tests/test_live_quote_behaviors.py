@@ -159,17 +159,97 @@ def test_resubscribe_if_stale_triggers_force(monkeypatch: pytest.MonkeyPatch) ->
 
     src.ensure_token_subscribed = _ensure  # type: ignore[attr-defined]
 
-    events: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        source.structured_log,
-        "event",
-        lambda *a, **k: events.append(k),
-    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _record(event: str, **payload: Any) -> None:
+        events.append((event, payload))
+
+    monkeypatch.setattr(source.structured_log, "event", _record)
 
     src.resubscribe_if_stale(token)
 
     assert calls == [(token, "FULL", True)]
-    assert events and events[-1]["reason"] == "stale_quote"
+    assert any(
+        name == "ws_resubscribe" and payload.get("reason") == "stale_quote"
+        for name, payload in events
+    )
+
+
+def test_resubscribe_if_stale_seeds_via_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(source.settings, "MICRO__STALE_MS", 1_000, raising=False)
+    src = LiveKiteSource(kite=None)
+    token = 999
+    stale_mono = time.monotonic() - 10.0
+
+    with src._tick_lock:  # noqa: SLF001 - deterministic setup
+        src._quotes[token] = _build_state(
+            token=token,
+            monotonic_ts=stale_mono,
+            bid=130.0,
+            ask=131.0,
+            bid_qty=15,
+            ask_qty=20,
+        )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _record(event: str, **payload: Any) -> None:
+        events.append((event, payload))
+
+    monkeypatch.setattr(source.structured_log, "event", _record)
+
+    def _prime(_token: int) -> tuple[float, str, int]:
+        return 140.0, "rest_quote", int(time.time() * 1000)
+
+    monkeypatch.setattr(src, "prime_option_quote", _prime)
+    src.ensure_token_subscribed = lambda *_a, **_k: True  # type: ignore[attr-defined]
+
+    src.resubscribe_if_stale(token)
+
+    assert any(name == "quote_seed" for name, _payload in events)
+
+
+def test_resubscribe_if_stale_escalates_after_three_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(source.settings, "MICRO__STALE_MS", 50, raising=False)
+    src = LiveKiteSource(kite=None)
+    token = 1001
+    past_mono = time.monotonic() - 20.0
+
+    with src._tick_lock:  # noqa: SLF001 - deterministic setup
+        src._quotes[token] = _build_state(
+            token=token,
+            monotonic_ts=past_mono,
+            bid=150.0,
+            ask=151.0,
+            bid_qty=30,
+            ask_qty=35,
+        )
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _record(event: str, **payload: Any) -> None:
+        events.append((event, payload))
+
+    monkeypatch.setattr(source.structured_log, "event", _record)
+
+    reconnect_calls: list[tuple[str | None, dict[str, Any] | None]] = []
+
+    def _reconnect(*, reason: str | None = None, context: dict[str, Any] | None = None) -> None:
+        reconnect_calls.append((reason, context))
+
+    monkeypatch.setattr(src, "reconnect_ws", _reconnect)
+    src.ensure_token_subscribed = lambda *_a, **_k: True  # type: ignore[attr-defined]
+
+    for _ in range(3):
+        src._last_quote_ready_attempt[token] = 0.0  # noqa: SLF001 - force retry
+        src._last_ws_resub_ms[token] = 0  # noqa: SLF001 - bypass debounce
+        src.resubscribe_if_stale(token)
+
+    assert reconnect_calls
+    assert reconnect_calls[-1][0] == "stale_x3"
+    assert any(name == "ws_reconnect_escalate" for name, _payload in events)
 
 
 def test_resubscribe_current_reconnects_after_repeated_failures(
