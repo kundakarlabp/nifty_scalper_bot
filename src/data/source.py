@@ -589,7 +589,7 @@ class _CacheEntry:
 class QuoteState:
     token: int
     ts: float
-    monotonic_ts: float
+    monotonic_ts: float | None
     bid: float | None
     ask: float | None
     bid_qty: int | None
@@ -1026,6 +1026,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_epoch: float | None = None
         # Monotonic timestamp (ms) for the most recent tick heartbeat.
         self._last_tick_ts_ms: int | None = None
+        # Epoch timestamp of the most recent tick across any token.
+        self._last_any_tick_epoch: float | None = None
+        # Per-token tick heartbeats for watchdog/diagnostics.
+        self._token_last_tick_epoch: dict[int, float] = {}
+        self._token_last_tick_ms: dict[int, int] = {}
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
@@ -1113,9 +1118,25 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         with self._tick_lock:
             ts_ms = self._last_tick_ts_ms
+            token_ticks = dict(self._token_last_tick_ms)
+        with self._ws_state_lock:
+            subs_snapshot = list(self._subs)
+        now_ms = monotonic_ms()
+        ages: list[int] = []
+        for token in subs_snapshot:
+            try:
+                token_i = int(token)
+            except Exception:
+                continue
+            token_ts = token_ticks.get(token_i)
+            if token_ts is None:
+                continue
+            ages.append(max(now_ms - int(token_ts), 0))
+        if ages:
+            return min(ages)
         if ts_ms is None:
             return None
-        return max(monotonic_ms() - int(ts_ms), 0)
+        return max(now_ms - int(ts_ms), 0)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1694,14 +1715,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 return None
             val = v.get("last_price")
             price = float(val) if isinstance(val, (int, float)) else None
-            if price is not None:
-                now_dt = datetime.utcnow()
-                now_epoch = time.time()
-                now_mono_ms = monotonic_ms()
-                with self._tick_lock:
-                    self._last_tick_ts = now_dt
-                    self.last_tick_ts = now_epoch
-                    self._last_tick_ts_ms = now_mono_ms
             return price
         except Exception as e:
             lat = int((time.monotonic() - t0) * 1000)
@@ -1772,6 +1785,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         )
         ts_ms = _to_epoch_ms(ts_val) or int(time.time() * 1000)
 
+        now_monotonic = time.monotonic()
         payload: dict[str, Any] = {
             "bid": bid,
             "ask": ask,
@@ -1785,6 +1799,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             "ts_ms": ts_ms,
             "source": "ws",
             "mode": "mid" if mid > 0.0 else ("ltp" if ltp > 0.0 else "bid" if bid > 0.0 else "ask"),
+            "monotonic_ts": now_monotonic,
         }
         if isinstance(depth_raw, Mapping):
             payload["depth"] = depth_raw
@@ -1796,21 +1811,24 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 dq = self._ok_snap.setdefault(token, deque(maxlen=8))
                 dq.append(now_ts)
 
-    def _on_tick(self, tick: Mapping[str, Any]) -> None:
+    def _on_tick(self, tick: Mapping[str, Any]) -> bool:
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
-            return
+            return False
         try:
             token = int(token_raw)
         except Exception:
-            return
+            return False
         runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
         if runner and hasattr(runner, "on_market_tick"):
             try:
                 runner.on_market_tick()
             except Exception:
                 pass
-        now = time.time()
+        now_epoch = time.time()
+        now_dt = datetime.utcnow()
+        now_monotonic = time.monotonic()
+        now_mono_ms = int(now_monotonic * 1000.0)
         depth = tick.get("depth") if isinstance(tick, Mapping) else None
         bid = ask = None
         bid_qty = ask_qty = None
@@ -1869,8 +1887,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 spread_pct = None
         state = QuoteState(
             token=token,
-            ts=now,
-            monotonic_ts=time.monotonic(),
+            ts=now_epoch,
+            monotonic_ts=now_monotonic,
             bid=bid,
             ask=ask,
             bid_qty=bid_qty,
@@ -1887,7 +1905,32 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 if not existing_full:
                     first_full_depth = True
                 self._full_depth_tokens.add(token)
+            self._last_tick_ts = now_dt
+            self.last_tick_ts = now_epoch
+            self._last_tick_ts_ms = now_mono_ms
+            self._last_any_tick_epoch = now_epoch
+            self._token_last_tick_epoch[token] = now_epoch
+            self._token_last_tick_ms[token] = now_mono_ms
         self._reset_ws_stale_counter(token)
+        key_seen = f"tick_seen:{token}"
+        if self._gate.should_emit(key_seen, force=self._trace_force()):
+            payload = {
+                "token": token,
+                "mode": "FULL" if has_depth else "LTP",
+                "depth": "Y" if has_depth else "N",
+                "age_ms": 0,
+            }
+            self._emit_tick_log("data.tick_seen", payload)
+            try:
+                structured_log.event(
+                    "tick_seen",
+                    token=int(token),
+                    mode="FULL" if has_depth else "LTP",
+                    depth=bool(has_depth),
+                    age_ms=0,
+                )
+            except Exception:
+                pass
         if has_depth:
             force_trace = self._trace_force()
             if first_full_depth:
@@ -1919,6 +1962,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
         else:
             self._emit_tick_log("data.tick_ltp_only", {"token": token})
+        return True
 
     def get_cached_full_quote(
         self, token: int | str
@@ -1951,13 +1995,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 runner.on_market_tick()
             except Exception:
                 pass
-        now_dt = datetime.utcnow()
-        now_epoch = time.time()
-        now_mono_ms = monotonic_ms()
-        with self._tick_lock:
-            self._last_tick_ts = now_dt
-            self.last_tick_ts = now_epoch
-            self._last_tick_ts_ms = now_mono_ms
         if self.hist_mode == "live_warmup" and self.bar_builder:
             try:
                 self.bar_builder.on_tick(tick)
@@ -2338,10 +2375,16 @@ class LiveKiteSource(DataSource, BaseDataSource):
             ref = (bid + ask) / 2.0
             spread_pct = abs(ask - bid) / max(ref, 1e-6) * 100.0
         has_depth = bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0
+        monotonic_raw = payload.get("monotonic_ts") if isinstance(payload, Mapping) else None
+        monotonic_val: float | None
+        if isinstance(monotonic_raw, (int, float)):
+            monotonic_val = float(monotonic_raw)
+        else:
+            monotonic_val = None
         state = QuoteState(
             token=token_i,
             ts=float(ts_val) / 1000.0,
-            monotonic_ts=time.monotonic(),
+            monotonic_ts=monotonic_val,
             bid=bid if bid > 0 else None,
             ask=ask if ask > 0 else None,
             bid_qty=bid_qty if bid_qty > 0 else None,
