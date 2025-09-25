@@ -1056,6 +1056,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_any_tick_epoch: float | None = None
         # Per-token monotonic timestamps for watchdog/diagnostics.
         self._last_tick_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
+        # Per-token stale counters managed by the watchdog.
+        self._stale_count: defaultdict[int, int] = defaultdict(int)
+        self._stale_first_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
+        self._stale_last_resub_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
@@ -1096,10 +1100,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_quote_ready_attempt: dict[int, float] = {}
         self._resubscribe_failures: int = 0
         self._last_force_reconnect_ts: float = 0.0
-        # Global watchdog counters (monotonic seconds) shared across tokens.
-        self._watchdog_stale_count: int = 0
-        self._watchdog_first_stale_mono: float | None = None
-        self._watchdog_last_resub_mono: float | None = None
+        # Global watchdog reconnect debounce (monotonic seconds).
         self._watchdog_last_reconnect_mono: float | None = None
 
     def _build_micro_settings(self) -> SimpleNamespace:
@@ -1343,18 +1344,17 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Clear stale counters for ``token`` after a fresh tick."""
 
         with self._ws_state_lock:
-            # Reset global watchdog counters on genuine websocket ticks.
-            self._watchdog_stale_count = 0
-            self._watchdog_first_stale_mono = None
-            self._watchdog_last_resub_mono = None
+            self._stale_count[token] = 0
+            self._stale_first_mono[token] = None
+            self._stale_last_resub_mono[token] = None
 
     def _reset_all_ws_stale_counters(self) -> None:
         """Clear stale counters across all tokens."""
 
         with self._ws_state_lock:
-            self._watchdog_stale_count = 0
-            self._watchdog_first_stale_mono = None
-            self._watchdog_last_resub_mono = None
+            self._stale_count.clear()
+            self._stale_first_mono.clear()
+            self._stale_last_resub_mono.clear()
 
     def _record_ws_stale_event(
         self,
@@ -1380,26 +1380,23 @@ class LiveKiteSource(DataSource, BaseDataSource):
         resub_debounce_s = max(cfg.resub_debounce_ms / 1000.0, 0.001)
         reconnect_debounce_s = max(cfg.reconnect_debounce_ms / 1000.0, resub_debounce_s)
 
+        resubscribe = False
+        stale_count = 0
         with self._ws_state_lock:
-            if (
-                self._watchdog_first_stale_mono is None
-                or now_mono - self._watchdog_first_stale_mono > window_s
-            ):
-                self._watchdog_first_stale_mono = now_mono
-                self._watchdog_stale_count = 0
+            first_seen = self._stale_first_mono[token]
+            if first_seen is None or now_mono - float(first_seen) > window_s:
+                self._stale_first_mono[token] = now_mono
+                self._stale_count[token] = 0
 
-            should_resub = (
-                self._watchdog_last_resub_mono is None
-                or now_mono - self._watchdog_last_resub_mono > resub_debounce_s
-            )
-            stale_count = self._watchdog_stale_count
+            last_resub = self._stale_last_resub_mono[token]
+            if last_resub is None or now_mono - float(last_resub) > resub_debounce_s:
+                resubscribe = True
+                self._stale_count[token] = int(self._stale_count[token]) + 1
+                self._stale_last_resub_mono[token] = now_mono
+            stale_count = int(self._stale_count[token])
 
-        if should_resub:
+        if resubscribe:
             tokens_snapshot = self._snapshot_subscriptions()
-            with self._ws_state_lock:
-                self._watchdog_stale_count += 1
-                stale_count = self._watchdog_stale_count
-                self._watchdog_last_resub_mono = now_mono
             try:
                 self.resubscribe_current()
             except Exception:
@@ -1407,6 +1404,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
             structured_log.event(
                 "ws_resubscribe",
                 reason="watchdog_stale",
+                token=int(token),
                 stale_count=int(stale_count),
                 last_tick_age_ms=age_val,
                 debounce_ms=int(cfg.resub_debounce_ms),
@@ -1417,6 +1415,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     "ws_resubscribe",
                     extra={
                         "reason": "watchdog_stale",
+                        "token": int(token),
                         "stale_count": int(stale_count),
                         "last_tick_age_ms": age_val,
                         "tokens": tokens_snapshot,
@@ -1425,8 +1424,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 )
             except Exception:
                 self.log.info(
-                    "ws_resubscribe reason=%s stale_count=%s age_ms=%s tokens=%s",
+                    "ws_resubscribe reason=%s token=%s stale_count=%s age_ms=%s tokens=%s",
                     "watchdog_stale",
+                    int(token),
                     int(stale_count),
                     age_val,
                     tokens_snapshot,
@@ -1434,9 +1434,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return False
 
         with self._ws_state_lock:
-            stale_count = self._watchdog_stale_count
+            stale_count = int(self._stale_count[token])
+            first_seen_mono = self._stale_first_mono[token]
+            within_window = (
+                first_seen_mono is not None and now_mono - float(first_seen_mono) <= window_s
+            )
             can_reconnect = (
                 stale_count >= cfg.stale_cycles
+                and within_window
                 and (
                     self._watchdog_last_reconnect_mono is None
                     or now_mono - self._watchdog_last_reconnect_mono > reconnect_debounce_s
@@ -1757,8 +1762,15 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Return ``True`` when consecutive tick gaps exceed the watchdog threshold."""
 
         self._emit_ws_heartbeat()
-        heartbeat_ts = self.last_tick_ts
-        now = time.time()
+        age_ms = self.last_tick_age_ms()
+        if age_ms is None:
+            ts_dt = self._last_tick_ts
+            if ts_dt is not None:
+                age_ms = int(max((datetime.utcnow() - ts_dt).total_seconds() * 1000.0, 0.0))
+        if age_ms is None:
+            self._stale_tick_checks = 0
+            return False
+
         tick_max_lag_s = float(
             getattr(
                 settings,
@@ -1766,58 +1778,52 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 getattr(getattr(settings, "strategy", None), "max_tick_lag_s", max_age_s),
             )
         )
-        if heartbeat_ts:
-            lag = now - heartbeat_ts
-            if lag > tick_max_lag_s:
-                bucket = round(lag)
-                if _tick_log_suppressor.should_log("warn", "tick_stale", bucket):
-                    log.warning("tick_stale", {"tick_lag": lag})
-                lag_ms = int(round(lag * 1000.0))
-                threshold_ms = int(round(tick_max_lag_s * 1000.0))
-                emit_tick_watchdog(
-                    status="trigger",
+        lag_s = float(age_ms) / 1000.0
+        threshold_ms = int(round(tick_max_lag_s * 1000.0))
+        if lag_s > tick_max_lag_s:
+            bucket = round(lag_s)
+            if _tick_log_suppressor.should_log("warn", "tick_stale", bucket):
+                log.warning("tick_stale", {"tick_lag": lag_s})
+            emit_tick_watchdog(
+                status="trigger",
+                component="data_source",
+                source=type(self).__name__,
+                reason="stale_tick",
+                tick_age_ms=int(age_ms),
+                threshold_ms=threshold_ms,
+                extra={"action": "reconnect_ws"},
+            )
+            try:
+                self.reconnect_ws(
+                    reason="tick_watchdog",
+                    context={
+                        "tick_age_ms": int(age_ms),
+                        "threshold_ms": threshold_ms,
+                    },
+                )
+                log.info("tick_reconnect_attempt", {"tick_lag": lag_s})
+            except Exception as exc:  # pragma: no cover - defensive reconnect guard
+                emit_ws_reconnect(
+                    status="error",
                     component="data_source",
                     source=type(self).__name__,
-                    reason="stale_tick",
-                    tick_age_ms=lag_ms,
-                    threshold_ms=threshold_ms,
-                    extra={"action": "reconnect_ws"},
+                    reason="tick_watchdog",
+                    extra={
+                        "error": str(exc),
+                        "tick_age_ms": int(age_ms),
+                        "threshold_ms": threshold_ms,
+                    },
                 )
-                try:
-                    self.reconnect_ws(
-                        reason="tick_watchdog",
-                        context={
-                            "tick_age_ms": lag_ms,
-                            "threshold_ms": threshold_ms,
-                        },
-                    )
-                    log.info("tick_reconnect_attempt", {"tick_lag": lag})
-                except Exception as exc:  # pragma: no cover - defensive reconnect guard
-                    emit_ws_reconnect(
-                        status="error",
-                        component="data_source",
-                        source=type(self).__name__,
-                        reason="tick_watchdog",
-                        extra={
-                            "error": str(exc),
-                            "tick_age_ms": lag_ms,
-                            "threshold_ms": threshold_ms,
-                        },
-                    )
-                    log.error("tick_reconnect_error", {"err": str(exc), "tick_lag": lag})
+                log.error("tick_reconnect_error", {"err": str(exc), "tick_lag": lag_s})
 
-        ts = self._last_tick_ts
-        if ts is None:
-            return False
-        age = (datetime.utcnow() - ts).total_seconds()
-        if age > max_age_s:
+        if lag_s > max_age_s:
             self._stale_tick_checks += 1
         else:
             self._stale_tick_checks = 0
         if self._stale_tick_checks >= self._stale_tick_thresh:
             structured_log.event(
                 "stale_block",
-                age_s=round(age, 3) if age is not None else None,
+                age_s=round(lag_s, 3),
                 checks=int(self._stale_tick_checks),
                 threshold_checks=int(self._stale_tick_thresh),
                 max_age_s=float(max_age_s),
@@ -1826,9 +1832,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
         return False
 
     def tick_watchdog_details(self) -> dict[str, float | int | None]:
-        ts = self._last_tick_ts
-        age = (datetime.utcnow() - ts).total_seconds() if ts else None
-        return {"age": age, "checks": self._stale_tick_checks}
+        age_ms = self.last_tick_age_ms()
+        if age_ms is None:
+            ts_dt = self._last_tick_ts
+            if ts_dt is not None:
+                age_ms = int(max((datetime.utcnow() - ts_dt).total_seconds() * 1000.0, 0.0))
+        age_s = (float(age_ms) / 1000.0) if age_ms is not None else None
+        return {"age": age_s, "checks": self._stale_tick_checks}
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
         """Return circuit breaker health for broker APIs."""
@@ -2157,10 +2167,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 "last_tick_ts": None,
                 "reason": "no_quote",
             }
-        now = time.time()
-        age = max(now - q.ts, 0.0)
+        wall_age = max(time.time() - q.ts, 0.0)
+        age_ms = self.last_token_age_ms(token_i)
+        if age_ms is not None:
+            age_s = max(float(age_ms) / 1000.0, wall_age)
+        else:
+            age_s = wall_age
         tick_stale = float(getattr(self.settings, "TICK_STALE_SECONDS", 5.0))
-        stale = age > tick_stale
+        stale = age_s is None or age_s > tick_stale
         depth_min_qty = int(getattr(self.settings, "DEPTH_MIN_QTY", 0))
         depth_ok = bool(
             q.has_depth
@@ -2184,17 +2198,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         "data.tick_stale",
                         extra={
                             "token": token_i,
-                            "age": round(age, 3),
+                            "age": round(age_s or 0.0, 3),
                             "threshold": tick_stale,
                         },
                     )
         else:
             with self._tick_lock:
                 self._stale_tokens.discard(token_i)
+        age_val = round(age_s, 3) if age_s is not None else None
         return {
             "stale": stale,
-            "age": round(age, 3),
-            "age_sec": round(age, 3),
+            "age": age_val,
+            "age_sec": age_val,
             "has_depth": q.has_depth,
             "depth_ok": depth_ok,
             "spread_pct": q.spread_pct,
@@ -2421,7 +2436,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             q = self._quotes.get(token_i)
         if not q:
             return None
-        age = max(time.time() - q.ts, 0.0)
+        wall_age = max(time.time() - q.ts, 0.0)
+        age_ms = self.last_token_age_ms(token_i)
+        if age_ms is not None:
+            age = max(float(age_ms) / 1000.0, wall_age)
+        else:
+            age = wall_age
         return {
             "token": token_i,
             "bid": q.bid,
