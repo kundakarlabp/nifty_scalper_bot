@@ -7,7 +7,7 @@ import os
 import random
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -69,6 +69,15 @@ def monotonic_ms() -> int:
     """Return the current monotonic timestamp in milliseconds."""
 
     return int(time.monotonic() * 1000.0)
+
+
+def _normalize_token(token: Any) -> int | Any:
+    """Best-effort coercion of ``token`` to ``int`` for map lookups."""
+
+    try:
+        return int(token)
+    except Exception:
+        return token
 
 
 def _as_float(val: Any) -> float:
@@ -624,7 +633,10 @@ class _TTLCache:
     def get(
         self, token: int, interval: str, start: datetime, end: datetime
     ) -> Optional[pd.DataFrame]:
-        key = (int(token), interval)
+        token_norm = _normalize_token(token)
+        if not isinstance(token_norm, int):
+            return None
+        key = (token_norm, interval)
         ent = self._data.get(key)
         if not ent:
             return None
@@ -649,7 +661,10 @@ class _TTLCache:
         fetched_window: Tuple[datetime, datetime],
         requested_window: Tuple[datetime, datetime],
     ) -> None:
-        key = (int(token), interval)
+        token_norm = _normalize_token(token)
+        if not isinstance(token_norm, int):
+            return
+        key = (token_norm, interval)
         self._data[key] = _CacheEntry(
             df=df.copy(),
             ts=time.time(),
@@ -1024,15 +1039,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
-        # Monotonic timestamp (ms) for the most recent tick heartbeat.
-        self._last_tick_ts_ms: int | None = None
-        # Monotonic timestamp (ms) for any tick across subscribed tokens.
-        self._last_any_tick_ms: int | None = None
+        # Monotonic timestamp (seconds) of the most recent tick heartbeat.
+        self._last_any_tick_mono: float | None = None
         # Epoch timestamp of the most recent tick across any token.
         self._last_any_tick_epoch: float | None = None
-        # Per-token tick heartbeats for watchdog/diagnostics.
-        self._token_last_tick_epoch: dict[int, float] = {}
-        self._token_last_tick_ms: dict[int, int] = {}
+        # Per-token monotonic timestamps for watchdog/diagnostics.
+        self._last_tick_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
@@ -1117,29 +1129,56 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_epoch = value
 
     def get_last_tick_age_ms(self) -> int | None:
-        """Return the age of the most recent tick heartbeat in milliseconds."""
+        """Return the minimum age across subscribed tokens in milliseconds."""
 
+        return self.min_age_across_subs_ms()
+
+    def last_tick_age_ms(self) -> int | None:
+        """Return the age of the most recent tick across any token."""
+
+        now_m = time.monotonic()
         with self._tick_lock:
-            ts_ms = self._last_any_tick_ms or self._last_tick_ts_ms
-            token_ticks = dict(self._token_last_tick_ms)
+            ts = self._last_any_tick_mono
+        if ts is None:
+            return None
+        return max(int((now_m - float(ts)) * 1000.0), 0)
+
+    def last_token_age_ms(self, token: int | str) -> int | None:
+        """Return the age of the last tick for ``token`` in milliseconds."""
+
+        token_norm = _normalize_token(token)
+        if not isinstance(token_norm, int):
+            return None
+        now_m = time.monotonic()
+        with self._tick_lock:
+            ts = self._last_tick_mono.get(token_norm)
+        if ts is None:
+            return None
+        return max(int((now_m - float(ts)) * 1000.0), 0)
+
+    def min_age_across_subs_ms(self) -> int | None:
+        """Return the minimum tick age across all tracked subscriptions."""
+
+        now_m = time.monotonic()
+        with self._tick_lock:
+            per_token = dict(self._last_tick_mono)
+            last_any = self._last_any_tick_mono
         with self._ws_state_lock:
             subs_snapshot = list(self._subs)
-        now_ms = monotonic_ms()
         ages: list[int] = []
         for token in subs_snapshot:
-            try:
-                token_i = int(token)
-            except Exception:
+            token_norm = _normalize_token(token)
+            if not isinstance(token_norm, int):
                 continue
-            token_ts = token_ticks.get(token_i)
-            if token_ts is None:
+            ts = per_token.get(token_norm)
+            if ts is None:
                 continue
-            ages.append(max(now_ms - int(token_ts), 0))
+            ages.append(max(int((now_m - float(ts)) * 1000.0), 0))
         if ages:
             return min(ages)
-        if ts_ms is None:
+        if last_any is None:
             return None
-        return max(now_ms - int(ts_ms), 0)
+        return max(int((now_m - float(last_any)) * 1000.0), 0)
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1178,7 +1217,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
                         "LiveKiteSource connect: ensure_atm_tokens failed: %s", e
                     )
                     self._last_auth_warn = time.time()
-            tokens_now = [int(t) for t in getattr(self, "atm_tokens", ()) if t]
+            tokens_now: list[int] = []
+            for t in getattr(self, "atm_tokens", ()):
+                token_norm = _normalize_token(t)
+                if isinstance(token_norm, int) and token_norm > 0:
+                    tokens_now.append(token_norm)
             if tokens_now:
                 self._subscribe_tokens_full(tokens_now)
                 if not self._atm_reconnect_hook_set:
@@ -1236,12 +1279,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         with self._ws_state_lock:
             for token in tokens:
-                try:
-                    token_i = int(token)
-                except Exception:
-                    continue
-                if token_i > 0:
-                    self._subs.add(token_i)
+                token_norm = _normalize_token(token)
+                if isinstance(token_norm, int) and token_norm > 0:
+                    self._subs.add(token_norm)
 
     def _snapshot_subscriptions(self) -> list[int]:
         """Return the sorted list of currently tracked subscriptions."""
@@ -1417,13 +1457,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         payload: list[int] = []
         for token in tokens:
-            try:
-                token_i = int(token)
-            except Exception:
+            token_norm = _normalize_token(token)
+            if not isinstance(token_norm, int) or token_norm <= 0:
                 continue
-            if token_i <= 0:
-                continue
-            payload.append(token_i)
+            payload.append(token_norm)
         if not payload:
             return False
         success = _subscribe_tokens(self, payload, mode=mode)
@@ -1454,12 +1491,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
             return
         payload: list[int] = []
         for token in tokens:
-            if token is None:
+            token_norm = _normalize_token(token)
+            if not isinstance(token_norm, int) or token_norm <= 0:
                 continue
-            try:
-                payload.append(int(token))
-            except Exception:
-                continue
+            payload.append(token_norm)
         if not payload:
             return
         ordered_payload: list[int] = []
@@ -1735,9 +1770,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return
         tokens = getattr(self, "atm_tokens", ())
         if tokens and token not in tokens:
@@ -1824,9 +1858,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return False
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return False
         runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
         if runner and hasattr(runner, "on_market_tick"):
@@ -1837,7 +1870,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         now_epoch = time.time()
         now_dt = datetime.utcnow()
         now_monotonic = time.monotonic()
-        now_mono_ms = int(now_monotonic * 1000.0)
         depth = tick.get("depth") if isinstance(tick, Mapping) else None
         bid = ask = None
         bid_qty = ask_qty = None
@@ -1916,11 +1948,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self._full_depth_tokens.add(token)
             self._last_tick_ts = now_dt
             self.last_tick_ts = now_epoch
-            self._last_tick_ts_ms = now_mono_ms
             self._last_any_tick_epoch = now_epoch
-            self._last_any_tick_ms = now_mono_ms
-            self._token_last_tick_epoch[token] = now_epoch
-            self._token_last_tick_ms[token] = now_mono_ms
+            self._last_any_tick_mono = now_monotonic
+            self._last_tick_mono[token] = now_monotonic
         self._reset_ws_stale_counter(token)
         self._stale_tick_checks = 0
         key_seen = f"tick_seen:{token}"
@@ -1980,9 +2010,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> dict[str, Any] | None:
         """Return a copy of the cached FULL quote for ``token`` if available."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
 
         cached = self._option_quote_cache.get(token_i)
@@ -2013,9 +2042,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 log.debug("bar_builder.on_tick failed", exc_info=True)
 
     def get_micro_state(self, token: int) -> dict[str, Any]:
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             token_i = token if isinstance(token, int) else 0
         with self._tick_lock:
             q = self._quotes.get(token_i)
@@ -2235,14 +2263,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
         atm = getattr(self, "atm_tokens", ()) or ()
         atm_tokens: list[int] = []
         for tok in atm:
-            if tok is None:
+            tok_norm = _normalize_token(tok)
+            if not isinstance(tok_norm, int) or tok_norm <= 0:
                 continue
-            try:
-                tok_int = int(tok)
-            except Exception:
-                continue
-            if tok_int > 0 and tok_int not in atm_tokens:
-                atm_tokens.append(tok_int)
+            if tok_norm not in atm_tokens:
+                atm_tokens.append(tok_norm)
 
         strike = getattr(self, "current_atm_strike", None)
         expiry = getattr(self, "current_atm_expiry", None)
@@ -2295,9 +2320,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def quote_snapshot(self, token: int | str) -> dict[str, Any] | None:
         """Return a lightweight quote summary for Telegram diagnostics."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
         with self._tick_lock:
             q = self._quotes.get(token_i)
@@ -2320,9 +2344,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> tuple[float | None, float | None, int | None, int | None, int | None]:
         """Return the last seen best-bid/ask tuple for ``token``."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None, None, None, None, None
         with self._tick_lock:
             state = self._quotes.get(token_i)
@@ -2345,9 +2368,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> QuoteState | None:
         if payload is None:
             return None
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
         if token_i <= 0:
             return None
@@ -2414,9 +2436,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def _seed_from_snapshot(self, token: int | str) -> QuoteState | None:
         """Seed the in-memory quote cache from the last snapshot payload."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
         if token_i <= 0:
             return None
@@ -2448,11 +2469,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> QuoteReadyStatus:
         """Ensure ``token`` has a live best-bid/offer before strategy evaluation."""
 
-        try:
-            token_i = int(token)
-        except Exception:
-            return QuoteReadyStatus(ok=False, reason="invalid_token")
-        if token_i <= 0:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int) or token_i <= 0:
             return QuoteReadyStatus(ok=False, reason="invalid_token")
 
         mode_pref = mode or getattr(settings, "QUOTES__MODE", getattr(_cfg, "QUOTES__MODE", "FULL"))
@@ -2676,9 +2694,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def resubscribe_if_stale(self, token: int | str) -> None:
         """Resubscribe to ``token`` if the cached quote appears stale."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return
         if token_i <= 0:
             return
@@ -2774,9 +2791,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def prime_option_quote(
         self, token: int | str
     ) -> tuple[float | None, str | None, int | None]:
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None, None, None
 
         def _emit_snapshot(
@@ -3607,7 +3623,11 @@ def _subscribe_tokens(
 ) -> bool:
     if not tokens:
         return False
-    seen: set[int] = {int(t) for t in tokens if t is not None}
+    seen: set[int] = set()
+    for token in tokens:
+        token_norm = _normalize_token(token)
+        if isinstance(token_norm, int) and token_norm > 0:
+            seen.add(token_norm)
     if not seen:
         return False
     payload = list(seen)
@@ -3714,9 +3734,8 @@ def ensure_token_subscribed(
 ) -> bool:
     """Ensure ``token`` is subscribed via the underlying broker."""
 
-    try:
-        token_i = int(token)
-    except Exception:
+    token_i = _normalize_token(token)
+    if not isinstance(token_i, int):
         return False
 
     if token_i <= 0:
