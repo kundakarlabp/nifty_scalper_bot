@@ -397,6 +397,90 @@ class TelegramCommands:
 
         return snapshot
 
+    def _subscription_lines(self) -> list[str]:
+        source = self.source
+        if source is None:
+            return ["subs=unavailable"]
+        getter = getattr(source, "subscription_modes", None)
+        if not callable(getter):
+            getter = getattr(source, "diag_subscriptions", None)
+        if not callable(getter):
+            return ["subs=unavailable"]
+        try:
+            snapshot = list(getter())
+        except Exception as exc:  # pragma: no cover - defensive
+            return [f"subs_error={exc}"]
+        if not snapshot:
+            return ["subs_count=0 none"]
+        ordered = sorted(snapshot, key=lambda item: item[0])
+        details = " ".join(f"{token}={mode}" for token, mode in ordered)
+        return [f"subs_count={len(snapshot)} {details}"]
+
+    def _ws_diag_lines(self) -> list[str]:
+        source = self.source
+        if source is None:
+            return ["diag=unavailable"]
+        getter = getattr(source, "ws_diag_snapshot", None)
+        if not callable(getter):
+            return ["diag=unavailable"]
+        try:
+            snapshot = getter()
+        except Exception as exc:  # pragma: no cover - defensive
+            return [f"diag_error={exc}"]
+        ws_connected = snapshot.get("ws_connected")
+        subs_count = snapshot.get("subs_count")
+        last_tick_age = snapshot.get("last_tick_age_ms")
+        reconnect_left = snapshot.get("reconnect_debounce_left_ms")
+        per_token = snapshot.get("per_token_age_ms") or {}
+        stale_counts = snapshot.get("stale_counts") or {}
+
+        def _fmt_bool(flag: Any) -> str:
+            return "1" if bool(flag) else "0"
+
+        def _fmt_int(val: Any) -> str:
+            try:
+                return str(int(val))
+            except Exception:
+                return "na"
+
+        def _fmt_map(mapping: dict[Any, Any]) -> str:
+            if not mapping:
+                return "none"
+            parts = []
+            for key in sorted(mapping):
+                parts.append(f"{key}={mapping[key]}")
+            return " ".join(str(p) for p in parts)
+
+        line = (
+            "ws_connected="
+            + _fmt_bool(ws_connected)
+            + f" subs_count={_fmt_int(subs_count)}"
+            + f" last_tick_age_ms={_fmt_int(last_tick_age)}"
+            + f" reconnect_debounce_left_ms={_fmt_int(reconnect_left)}"
+            + f" per_token_age_ms={_fmt_map(per_token)}"
+            + f" stale_counts={_fmt_map(stale_counts)}"
+        )
+        return [line]
+
+    def _trigger_fresh_reconnect(self) -> str:
+        source = self.source
+        if source is None:
+            return "fresh reconnect unavailable"
+        handler = getattr(source, "force_hard_reconnect", None)
+        context = {"origin": "telegram"}
+        try:
+            if callable(handler):
+                handler(reason="telegram_fresh", context=context)
+            else:
+                fallback = getattr(source, "reconnect_ws", None)
+                if not callable(fallback):
+                    return "fresh reconnect unavailable"
+                fallback(reason="telegram_fresh", context=context)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("fresh reconnect failed")
+            return f"fresh reconnect failed: {exc}"
+        return "fresh reconnect requested"
+
     def _handle_cmd(self, cmd: str, arg: str) -> bool:
         """Handle built-in commands when no external handler is wired."""
 
@@ -404,6 +488,17 @@ class TelegramCommands:
             return False
 
         reply = self._send
+        if cmd == "/subs":
+            for line in self._subscription_lines():
+                reply(line)
+            return True
+        if cmd == "/diag":
+            for line in self._ws_diag_lines():
+                reply(line)
+            return True
+        if cmd == "/fresh":
+            reply(self._trigger_fresh_reconnect())
+            return True
         if cmd == "/logs":
             parts = [p for p in arg.split() if p]
             if not parts or parts[0].lower() == "off":
@@ -441,18 +536,6 @@ class TelegramCommands:
             reply(
                 f"🟢 Trace enabled (auto-off by TTL) for {seconds}s."
             )
-            return True
-        if cmd == "/diag":
-            try:
-                snapshot = self._diag_snapshot()
-            except Exception as exc:
-                reply(f"Diag snapshot failed: {exc}")
-                return True
-            text = format_block(
-                snapshot,
-                max_lines=int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 30)),
-            )
-            reply(text)
             return True
         if cmd == "/micro":
             ce, pe = self._current_tokens()

@@ -48,6 +48,7 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
         def __init__(self) -> None:
             self.atm_tokens = (111, 222)
             self._current_tokens: tuple[int, int] | None = None
+            self.fresh_calls = 0
 
         def current_tokens(self) -> tuple[int, int] | None:
             return self._current_tokens
@@ -64,6 +65,22 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
                 "ask": token + 2,
                 "phase": phase,
             }
+
+        def subscription_modes(self) -> list[tuple[int, str]]:
+            return [(111, "FULL"), (222, "QUOTE")]
+
+        def ws_diag_snapshot(self) -> dict[str, object]:
+            return {
+                "ws_connected": True,
+                "subs_count": 2,
+                "last_tick_age_ms": 123,
+                "per_token_age_ms": {111: 10, 222: 20},
+                "stale_counts": {111: 1},
+                "reconnect_debounce_left_ms": 5000,
+            }
+
+        def force_hard_reconnect(self, *, reason: str, context: dict[str, object]) -> None:
+            self.fresh_calls += 1
 
     source = DummySource()
     tc = TelegramCommands("t", "1", settings=dummy_settings, source=source)
@@ -84,8 +101,26 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     assert tc._diag_until_ts == 0.0
     assert tc._trace_until_ts == 0.0
 
+    start_idx = len(sent)
+    assert tc._handle_cmd("/subs", "") is True
+    subs_lines = sent[start_idx:]
+    assert len(subs_lines) == 1
+    assert subs_lines[0] == "subs_count=2 111=FULL 222=QUOTE"
+
+    start_idx = len(sent)
     assert tc._handle_cmd("/diag", "") is True
-    assert sent[-1].startswith("```")
+    diag_lines = sent[start_idx:]
+    assert len(diag_lines) == 1
+    diag_text = diag_lines[0]
+    assert diag_text.startswith("ws_connected=1")
+    assert "per_token_age_ms=111=10 222=20" in diag_text
+    assert "stale_counts=111=1" in diag_text
+
+    start_idx = len(sent)
+    assert tc._handle_cmd("/fresh", "") is True
+    assert sent[start_idx] == "fresh reconnect requested"
+    assert source.fresh_calls == 1
+
     snapshot = tc._diag_snapshot()
     assert snapshot["risk"]["cap_pct"] == 5.0
 
@@ -132,7 +167,7 @@ def test_diag_with_source_only() -> None:
     assert tc._handle_cmd("/diag", "") is True
     assert sent, "Expected /diag to produce output"
     text = sent[-1]
-    assert text.startswith("```")
+    assert text.startswith("diag=") or text.startswith("ws_connected=")
     snapshot = tc._diag_snapshot()
     assert snapshot["risk"]["cap_pct"] == 2.5
     assert snapshot["micro"]["ce"]["token"] == 111
