@@ -172,6 +172,12 @@ def _fetch_instruments_nfo(
         logger.debug("Kite instance missing; cannot fetch instruments (shadow mode).")
         return None
 
+    if not hasattr(kite, "instruments"):
+        logger.debug(
+            "Kite instance missing instruments() API; treating as unavailable.",
+        )
+        return None
+
     try:
         call_key = "kite-instruments-nfo"
         # Correct signature for Kite: instruments(exchange)

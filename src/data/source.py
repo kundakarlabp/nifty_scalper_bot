@@ -1026,6 +1026,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_epoch: float | None = None
         # Monotonic timestamp (ms) for the most recent tick heartbeat.
         self._last_tick_ts_ms: int | None = None
+        # Monotonic timestamp (ms) for any tick across subscribed tokens.
+        self._last_any_tick_ms: int | None = None
         # Epoch timestamp of the most recent tick across any token.
         self._last_any_tick_epoch: float | None = None
         # Per-token tick heartbeats for watchdog/diagnostics.
@@ -1117,7 +1119,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Return the age of the most recent tick heartbeat in milliseconds."""
 
         with self._tick_lock:
-            ts_ms = self._last_tick_ts_ms
+            ts_ms = self._last_any_tick_ms or self._last_tick_ts_ms
             token_ticks = dict(self._token_last_tick_ms)
         with self._ws_state_lock:
             subs_snapshot = list(self._subs)
@@ -1325,8 +1327,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
             )
         except Exception:
             self.log.error("ws_reconnect.escalation_failed", extra=context, exc_info=True)
-        finally:
-            self._reset_all_ws_stale_counters()
         return True
 
     def _maybe_seed_via_rest(
@@ -1596,7 +1596,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     tokens_replayed=subs_snapshot,
                     subs_count=len(subs_snapshot),
                 )
-                self._reset_all_ws_stale_counters()
                 break
 
     def reconnect_ws(
@@ -1910,9 +1909,11 @@ class LiveKiteSource(DataSource, BaseDataSource):
             self.last_tick_ts = now_epoch
             self._last_tick_ts_ms = now_mono_ms
             self._last_any_tick_epoch = now_epoch
+            self._last_any_tick_ms = now_mono_ms
             self._token_last_tick_epoch[token] = now_epoch
             self._token_last_tick_ms[token] = now_mono_ms
         self._reset_ws_stale_counter(token)
+        self._stale_tick_checks = 0
         key_seen = f"tick_seen:{token}"
         if self._gate.should_emit(key_seen, force=self._trace_force()):
             payload = {
@@ -2331,6 +2332,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         payload: Mapping[str, Any] | None,
         *,
         ts_ms: int | None = None,
+        reset_ws_stale: bool = True,
     ) -> QuoteState | None:
         if payload is None:
             return None
@@ -2396,7 +2398,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         with self._tick_lock:
             self._quotes[token_i] = state
             self._stale_tokens.discard(token_i)
-        self._reset_ws_stale_counter(token_i)
+        if reset_ws_stale:
+            self._reset_ws_stale_counter(token_i)
         return state
 
     def _seed_from_snapshot(self, token: int | str) -> QuoteState | None:
@@ -2417,7 +2420,14 @@ class LiveKiteSource(DataSource, BaseDataSource):
         ts_ms = int(ts_ms_val) if isinstance(ts_ms_val, int) else _to_epoch_ms(
             snapshot.get("timestamp")
         )
-        return self._update_quote_state_from_payload(token_i, snapshot, ts_ms=ts_ms)
+        source_label = str(snapshot.get("source", "") or "").lower()
+        reset_ws = source_label.startswith("ws") or source_label == "kite_ws"
+        return self._update_quote_state_from_payload(
+            token_i,
+            snapshot,
+            ts_ms=ts_ms,
+            reset_ws_stale=reset_ws,
+        )
 
     def ensure_quote_ready(
         self,
@@ -2786,27 +2796,45 @@ class LiveKiteSource(DataSource, BaseDataSource):
         except Exception:
             cached = None
         if cached:
-            ts_ms_cached = cached.get("ts_ms")
-            ts_ms = ts_ms_cached if isinstance(ts_ms_cached, int) else _to_epoch_ms(cached.get("timestamp"))
-            for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
-                val = cached.get(key)
-                if isinstance(val, (int, float)) and val > 0:
-                    if ts_ms is None:
-                        ts_ms = int(time.time() * 1000)
-                    source_label = f"ws_{label}"
-                    cached_mode = cached.get("mode")
-                    mode_str = (
-                        str(cached_mode)
-                        if cached_mode is not None and cached_mode != ""
-                        else None
-                    )
-                    _emit_snapshot(
-                        price=float(val),
-                        source=source_label,
-                        ts_ms=ts_ms,
-                        mode=mode_str,
-                    )
-                    return float(val), source_label, ts_ms
+            cached_source = str(cached.get("source") or "").lower()
+            if not cached_source.startswith("ws"):
+                ts_ms_cached = cached.get("ts_ms")
+                ts_ms = (
+                    ts_ms_cached
+                    if isinstance(ts_ms_cached, int)
+                    else _to_epoch_ms(cached.get("timestamp"))
+                )
+                for key, label in (
+                    ("mid", "mid"),
+                    ("ltp", "ltp"),
+                    ("bid", "bid"),
+                    ("ask", "ask"),
+                ):
+                    val = cached.get(key)
+                    if isinstance(val, (int, float)) and val > 0:
+                        if ts_ms is None:
+                            ts_ms = int(time.time() * 1000)
+                        cached_mode = cached.get("mode")
+                        mode_str = (
+                            str(cached_mode)
+                            if cached_mode is not None and cached_mode != ""
+                            else None
+                        )
+                        source_label = cached.get("source")
+                        if not source_label:
+                            if label == "ltp":
+                                source_label = "rest_ltp"
+                            elif label == "mid":
+                                source_label = "rest_mid"
+                            else:
+                                source_label = label
+                        _emit_snapshot(
+                            price=float(val),
+                            source=str(source_label),
+                            ts_ms=ts_ms,
+                            mode=mode_str,
+                        )
+                        return float(val), str(source_label), ts_ms
 
         quote_payload: dict[str, Any] | None = None
         if self.kite:
@@ -2859,7 +2887,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
         quote_dict["ts_ms"] = ts_ms
         quote_dict.setdefault("source", quote_payload.get("source", "kite"))
         self._option_quote_cache[token_i] = quote_dict
-        self._update_quote_state_from_payload(token_i, quote_dict, ts_ms=ts_ms)
+        self._update_quote_state_from_payload(
+            token_i,
+            quote_dict,
+            ts_ms=ts_ms,
+            reset_ws_stale=False,
+        )
 
         for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
             val = quote_dict.get(key)
@@ -2895,7 +2928,12 @@ class LiveKiteSource(DataSource, BaseDataSource):
             merged["ts_ms"] = ts_ms
             merged.setdefault("source", "rest")
             self._option_quote_cache[token_i] = merged
-            self._update_quote_state_from_payload(token_i, merged, ts_ms=ts_ms)
+            self._update_quote_state_from_payload(
+                token_i,
+                merged,
+                ts_ms=ts_ms,
+                reset_ws_stale=False,
+            )
             _emit_snapshot(
                 price=float(rest_ltp),
                 source="rest_ltp",

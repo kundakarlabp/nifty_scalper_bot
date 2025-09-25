@@ -69,13 +69,13 @@ def test_live_kite_source_structured_events(monkeypatch: pytest.MonkeyPatch) -> 
 
     price, source, ts_ms = ds.prime_option_quote(token)
     assert price == pytest.approx(101.25)
-    assert source == "ws_ltp"
+    assert source == "rest_ltp"
     assert ts_ms == now_ms
 
     snapshot = recorder.last("market_data_snapshot")
     assert snapshot["token"] == token
     assert snapshot["price"] == pytest.approx(101.25)
-    assert snapshot["source"] == "ws_ltp"
+    assert snapshot["source"] == "rest_ltp"
 
     ds._last_tick_ts = datetime.utcnow() - timedelta(seconds=2)
     ds._stale_tick_checks = 0
