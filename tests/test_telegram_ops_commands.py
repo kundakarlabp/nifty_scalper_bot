@@ -48,6 +48,7 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
         def __init__(self) -> None:
             self.atm_tokens = (111, 222)
             self._current_tokens: tuple[int, int] | None = None
+            self.reconnects: list[dict[str, object]] = []
 
         def current_tokens(self) -> tuple[int, int] | None:
             return self._current_tokens
@@ -64,6 +65,25 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
                 "ask": token + 2,
                 "phase": phase,
             }
+
+        def get_subscription_snapshot(self) -> list[dict[str, object]]:
+            return [
+                {"token": 111, "mode": "FULL"},
+                {"token": 222, "mode": "QUOTE"},
+            ]
+
+        def ws_diag_snapshot(self) -> dict[str, object]:
+            return {
+                "ws_connected": True,
+                "subs_count": 2,
+                "last_tick_age_ms": 42,
+                "per_token_age_ms": {111: 10, 222: 15},
+                "stale_counts": {111: 1},
+                "reconnect_debounce_left_ms": 5000,
+            }
+
+        def reconnect_with_backoff(self, **kwargs: object) -> None:
+            self.reconnects.append(kwargs)
 
     source = DummySource()
     tc = TelegramCommands("t", "1", settings=dummy_settings, source=source)
@@ -84,7 +104,15 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     assert tc._diag_until_ts == 0.0
     assert tc._trace_until_ts == 0.0
 
+    assert tc._handle_cmd("/subs", "") is True
+    subs_output = sent[-1]
+    assert "111 FULL" in subs_output and "222 QUOTE" in subs_output
+
     assert tc._handle_cmd("/diag", "") is True
+    diag_output = sent[-1]
+    assert "ws_connected=" in diag_output and "stale_counts=" in diag_output
+
+    assert tc._handle_cmd("/diagfull", "") is True
     assert sent[-1].startswith("```")
     snapshot = tc._diag_snapshot()
     assert snapshot["risk"]["cap_pct"] == 5.0
@@ -111,6 +139,9 @@ def test_debug_windows_and_diagnostics(monkeypatch) -> None:
     assert "bid" in quotes_after
     assert "\"phase\": \"after\"" in quotes_after
 
+    assert tc._handle_cmd("/fresh", "") is True
+    assert source.reconnects and source.reconnects[-1]["reason"] == "telegram_fresh"
+
 
 def test_diag_with_source_only() -> None:
     dummy_settings = SimpleNamespace(
@@ -125,6 +156,16 @@ def test_diag_with_source_only() -> None:
         def get_micro_state(self, token: int) -> dict[str, int]:
             return {"token": token, "depth_ok": 1}
 
+        def ws_diag_snapshot(self) -> dict[str, object]:
+            return {
+                "ws_connected": False,
+                "subs_count": 1,
+                "last_tick_age_ms": None,
+                "per_token_age_ms": {},
+                "stale_counts": {},
+                "reconnect_debounce_left_ms": 0,
+            }
+
     tc = TelegramCommands("t", "1", settings=dummy_settings, source=DummySource())
     sent: list[str] = []
     tc._send = lambda msg: sent.append(msg)
@@ -132,7 +173,9 @@ def test_diag_with_source_only() -> None:
     assert tc._handle_cmd("/diag", "") is True
     assert sent, "Expected /diag to produce output"
     text = sent[-1]
-    assert text.startswith("```")
+    assert "ws_connected=" in text
+    assert tc._handle_cmd("/diagfull", "") is True
+    assert sent[-1].startswith("```")
     snapshot = tc._diag_snapshot()
     assert snapshot["risk"]["cap_pct"] == 2.5
     assert snapshot["micro"]["ce"]["token"] == 111

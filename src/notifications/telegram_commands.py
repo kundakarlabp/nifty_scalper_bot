@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime
 from pprint import pformat
-from typing import Any, Callable, Optional, SupportsFloat, cast
+from typing import Any, Callable, Iterable, Mapping, Optional, SupportsFloat, cast
 
 from src.config import settings as global_settings
 from src.diagnostics import trace_ctl
@@ -442,7 +442,91 @@ class TelegramCommands:
                 f"🟢 Trace enabled (auto-off by TTL) for {seconds}s."
             )
             return True
+        if cmd == "/subs":
+            source = self.source
+            sub_snapshot: list[dict[str, Any]] = []
+            if source is not None:
+                getter = getattr(source, "get_subscription_snapshot", None)
+                if callable(getter):
+                    try:
+                        raw_snapshot = getter()
+                    except Exception:
+                        sub_snapshot = []
+                    else:
+                        if isinstance(raw_snapshot, Iterable):
+                            sub_snapshot = [
+                                dict(item)
+                                for item in raw_snapshot
+                                if isinstance(item, Mapping)
+                            ]
+                        else:
+                            sub_snapshot = []
+                if not sub_snapshot:
+                    store = getattr(source, "_subscribed_tokens", None)
+                    if isinstance(store, Mapping):
+                        temp: list[tuple[int, str]] = []
+                        for token, mode in store.items():
+                            try:
+                                token_i = int(token)
+                            except Exception:
+                                continue
+                            norm = str(mode).upper() if mode else "FULL"
+                            temp.append((token_i, norm))
+                        temp.sort(key=lambda item: item[0])
+                        sub_snapshot = [
+                            {"token": token, "mode": mode} for token, mode in temp
+                        ]
+            if not sub_snapshot:
+                reply("subs: none")
+                return True
+            lines = [
+                f"{item.get('token')} {str(item.get('mode') or 'FULL').upper()}"
+                for item in sub_snapshot
+            ]
+            reply("\n".join(lines))
+            return True
         if cmd == "/diag":
+            source = self.source
+            diag_raw: Mapping[str, Any] | None = None
+            if source is not None:
+                diag_fn = getattr(source, "ws_diag_snapshot", None)
+                if callable(diag_fn):
+                    try:
+                        diag_data = diag_fn()
+                    except Exception:
+                        diag_data = None
+                    if isinstance(diag_data, Mapping):
+                        diag_raw = diag_data
+
+            diag = dict(diag_raw or {})
+
+            def _fmt_pairs(data: Any) -> str:
+                if isinstance(data, Mapping):
+                    if not data:
+                        return "-"
+                    parts: list[str] = []
+                    for key in sorted(data):
+                        parts.append(f"{key}:{data[key]}")
+                    return ",".join(parts)
+                return "-"
+
+            ws_connected = "1" if diag.get("ws_connected") else "0"
+            subs_count = int(diag.get("subs_count") or 0)
+            last_tick_age = diag.get("last_tick_age_ms")
+            per_token = _fmt_pairs(diag.get("per_token_age_ms") or {})
+            stale_counts = _fmt_pairs(diag.get("stale_counts") or {})
+            debounce_left = diag.get("reconnect_debounce_left_ms")
+            line = (
+                f"ws_connected={ws_connected} "
+                f"subs_count={subs_count} "
+                f"last_tick_age_ms={last_tick_age} "
+                f"per_token_age_ms={per_token} "
+                f"stale_counts={stale_counts} "
+                f"reconnect_debounce_left_ms={debounce_left}"
+            )
+            reply(line)
+            return True
+        if cmd == "/diagfull":
             try:
                 snapshot = self._diag_snapshot()
             except Exception as exc:
@@ -511,6 +595,26 @@ class TelegramCommands:
                 f"lots={self.lots} caps={self.caps}"
             )
             self._send(msg)
+            return True
+        if cmd == "/fresh":
+            source = self.source
+            if source is None:
+                reply("source unavailable")
+                return True
+            reconnect = getattr(source, "reconnect_with_backoff", None)
+            if not callable(reconnect):
+                reply("reconnect unsupported")
+                return True
+            try:
+                setattr(source, "_last_force_reconnect_ts", 0.0)
+            except Exception:
+                pass
+            try:
+                reconnect(reason="telegram_fresh", context={"via": "telegram"})
+            except Exception as exc:
+                reply(f"reconnect failed: {exc}")
+            else:
+                reply("🔁 Hard reconnect triggered.")
             return True
         if cmd == "/backtest":
             if not self._backtest_runner:

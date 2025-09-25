@@ -81,7 +81,6 @@ WS_RESUBSCRIBE_MIN_INTERVAL_MS: int = int(
 WS_RESUBSCRIBE_MAX_INTERVAL_MS: int = int(
     os.getenv("WS_RESUBSCRIBE_MAX_INTERVAL_MS", "15000")
 )
-
 # Single source for risk exposure cap (decimal fraction)
 RISK__EXPOSURE_CAP_PCT: float = _coerce_pct_env(
     "RISK__EXPOSURE_CAP_PCT", DEFAULT_EXPOSURE_CAP_PCT
@@ -116,6 +115,33 @@ def env_any(*names: str, default: str | None = None) -> str | None:
         if val:
             return val
     return default
+
+
+WATCHDOG_STALE_MS: int = int(
+    env_any("WATCHDOG_STALE_MS", "MICRO__STALE_MS", default="3500") or 3500
+)
+STALE_WINDOW_MS: int = int(
+    env_any("STALE_WINDOW_MS", "WS_STALE_WINDOW_MS", default="60000") or 60000
+)
+STALE_X_N: int = int(env_any("STALE_X_N", default="3") or 3)
+_raw_reconnect_ms = env_any("RECONNECT_DEBOUNCE_MS")
+if _raw_reconnect_ms is None:
+    gap_s = env_any("WS_RECONNECT_MIN_GAP_S")
+    if gap_s is not None:
+        try:
+            _raw_reconnect_ms = str(int(float(gap_s) * 1000.0))
+        except (TypeError, ValueError):
+            logging.getLogger(__name__).warning(
+                "Invalid WS_RECONNECT_MIN_GAP_S: %s", gap_s
+            )
+RECONNECT_DEBOUNCE_MS: int = 15000
+if _raw_reconnect_ms is not None:
+    try:
+        RECONNECT_DEBOUNCE_MS = int(float(_raw_reconnect_ms))
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Invalid RECONNECT_DEBOUNCE_MS: %s", _raw_reconnect_ms
+        )
 
 
 if TYPE_CHECKING:

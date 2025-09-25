@@ -1249,6 +1249,22 @@ class LiveKiteSource(DataSource, BaseDataSource):
         with self._ws_state_lock:
             return sorted(self._subs)
 
+    def get_subscription_snapshot(self) -> list[dict[str, object]]:
+        """Return list of {token, mode} for active websocket subscriptions."""
+
+        with self._ws_state_lock:
+            store = dict(getattr(self, "_subscribed_tokens", {}))
+        pairs: list[tuple[int, str]] = []
+        for token, mode in store.items():
+            try:
+                token_i = int(token)
+            except Exception:
+                continue
+            normalized = _normalize_mode(str(mode) if mode is not None else None)
+            pairs.append((token_i, normalized))
+        pairs.sort(key=lambda item: item[0])
+        return [{"token": token, "mode": mode} for token, mode in pairs]
+
     def _reset_ws_stale_counter(self, token: int) -> None:
         """Clear stale counters for ``token`` after a fresh tick."""
 
@@ -1273,10 +1289,24 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> bool:
         """Increment stale counters and escalate to reconnect when needed."""
 
-        window_ms = max(
-            int(getattr(settings, "WS_STALE_WINDOW_MS", getattr(_cfg, "WS_STALE_WINDOW_MS", 60000))),
-            1000,
+        window_ms_raw = getattr(
+            settings,
+            "STALE_WINDOW_MS",
+            getattr(_cfg, "STALE_WINDOW_MS", 60000),
         )
+        limit_raw = getattr(
+            settings,
+            "STALE_X_N",
+            getattr(_cfg, "STALE_X_N", 3),
+        )
+        try:
+            window_ms = max(int(window_ms_raw), 1000)
+        except Exception:
+            window_ms = 60000
+        try:
+            limit = max(int(limit_raw), 1)
+        except Exception:
+            limit = 3
         now_ms = monotonic_ms()
         with self._ws_state_lock:
             last_escalate_ms = int(self._ws_last_escalate_ms.get(token, 0))
@@ -1293,21 +1323,21 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if suppress:
             return False
 
-        if count < 3 or now_ms - first > window_ms:
+        if count < limit or now_ms - first > window_ms:
             return False
 
-        min_gap = max(
-            float(
-                getattr(
-                    settings,
-                    "WS_RECONNECT_MIN_GAP_S",
-                    getattr(_cfg, "WS_RECONNECT_MIN_GAP_S", 15.0),
-                )
-            ),
-            1.0,
+        debounce_raw = getattr(
+            settings,
+            "RECONNECT_DEBOUNCE_MS",
+            getattr(_cfg, "RECONNECT_DEBOUNCE_MS", 15000),
         )
+        try:
+            debounce_ms = max(int(debounce_raw), 0)
+        except Exception:
+            debounce_ms = 15000
         now = time.time()
-        if now - getattr(self, "_last_force_reconnect_ts", 0.0) < min_gap:
+        elapsed_ms = (now - getattr(self, "_last_force_reconnect_ts", 0.0)) * 1000.0
+        if debounce_ms > 0 and elapsed_ms < debounce_ms:
             return False
 
         tokens_snapshot = self._snapshot_subscriptions()
@@ -1337,6 +1367,83 @@ class LiveKiteSource(DataSource, BaseDataSource):
         except Exception:
             self.log.error("ws_reconnect.escalation_failed", extra=context, exc_info=True)
         return True
+
+    def ws_diag_snapshot(self) -> dict[str, Any]:
+        """Return lightweight websocket diagnostics for Telegram commands."""
+
+        try:
+            debounce_raw = getattr(
+                settings,
+                "RECONNECT_DEBOUNCE_MS",
+                getattr(_cfg, "RECONNECT_DEBOUNCE_MS", 15000),
+            )
+            debounce_ms = max(int(debounce_raw), 0)
+        except Exception:
+            debounce_ms = 15000
+        try:
+            stale_cap = max(
+                int(
+                    getattr(
+                        settings,
+                        "WATCHDOG_STALE_MS",
+                        getattr(_cfg, "WATCHDOG_STALE_MS", 3500),
+                    )
+                ),
+                0,
+            )
+        except Exception:
+            stale_cap = 3500
+
+        with self._ws_state_lock:
+            subs_snapshot = sorted(self._subs)
+            stale_counts = dict(self._ws_stale_counts)
+        with self._tick_lock:
+            token_ticks = dict(self._token_last_tick_ms)
+            last_any_ms = self._last_any_tick_ms or self._last_tick_ts_ms
+        now_ms = monotonic_ms()
+        last_tick_age: int | None = None
+        if last_any_ms is not None:
+            try:
+                last_tick_age = max(now_ms - int(last_any_ms), 0)
+            except Exception:
+                last_tick_age = None
+        per_token_age: dict[int, int] = {}
+        for token in sorted(set(token_ticks) | set(subs_snapshot)):
+            ts_val = token_ticks.get(token)
+            if ts_val is None:
+                continue
+            try:
+                per_token_age[token] = max(now_ms - int(ts_val), 0)
+            except Exception:
+                continue
+        stale_counts_fmt: dict[int, int] = {}
+        for token, count in stale_counts.items():
+            try:
+                stale_counts_fmt[int(token)] = int(count)
+            except Exception:
+                continue
+        last_force = getattr(self, "_last_force_reconnect_ts", 0.0)
+        now_wall = time.time()
+        debounce_left = 0
+        if debounce_ms > 0 and last_force:
+            elapsed_ms = (now_wall - float(last_force)) * 1000.0
+            remaining = int(debounce_ms - elapsed_ms)
+            if remaining > 0:
+                debounce_left = remaining
+
+        ws_connected = bool(
+            last_tick_age is not None and (stale_cap <= 0 or last_tick_age <= stale_cap)
+        )
+
+        return {
+            "ws_connected": ws_connected,
+            "subs": subs_snapshot,
+            "subs_count": len(subs_snapshot),
+            "last_tick_age_ms": last_tick_age,
+            "per_token_age_ms": per_token_age,
+            "stale_counts": stale_counts_fmt,
+            "reconnect_debounce_left_ms": debounce_left,
+        }
 
     def _maybe_seed_via_rest(
         self,
@@ -2209,10 +2316,18 @@ class LiveKiteSource(DataSource, BaseDataSource):
         if failure_count >= 3:
             context = {"failures": failure_count, "tokens": list(tokens)}
             now = time.time()
-            min_gap = 15.0
-            elapsed = now - getattr(self, "_last_force_reconnect_ts", 0.0)
-            if elapsed < min_gap:
-                context["wait_s"] = round(min_gap - elapsed, 3)
+            debounce_raw = getattr(
+                settings,
+                "RECONNECT_DEBOUNCE_MS",
+                getattr(_cfg, "RECONNECT_DEBOUNCE_MS", 15000),
+            )
+            try:
+                debounce_ms = max(int(debounce_raw), 0)
+            except Exception:
+                debounce_ms = 15000
+            elapsed = (now - getattr(self, "_last_force_reconnect_ts", 0.0)) * 1000.0
+            if debounce_ms > 0 and elapsed < debounce_ms:
+                context["wait_s"] = round((debounce_ms - elapsed) / 1000.0, 3)
                 self.log.info(
                     "resubscribe_current.reconnect_debounce", extra=context
                 )

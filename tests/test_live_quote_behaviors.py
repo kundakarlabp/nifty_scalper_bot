@@ -264,7 +264,9 @@ def test_resubscribe_if_stale_throttles_escalate_per_window(
 ) -> None:
     monkeypatch.setattr(source.settings, "MICRO__STALE_MS", 50, raising=False)
     monkeypatch.setattr(source.settings, "WS_STALE_WINDOW_MS", 5_000, raising=False)
+    monkeypatch.setattr(source.settings, "STALE_WINDOW_MS", 5_000, raising=False)
     monkeypatch.setattr(source.settings, "WS_RECONNECT_MIN_GAP_S", 0.0, raising=False)
+    monkeypatch.setattr(source.settings, "RECONNECT_DEBOUNCE_MS", 0, raising=False)
 
     now = {"wall": 10_000.0, "mono": 5_000.0}
 
