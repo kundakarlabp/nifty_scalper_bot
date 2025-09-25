@@ -148,7 +148,7 @@ class KiteSettings(BaseModel):
 
 class TelegramSettings(BaseModel):
     # Telegram is COMPULSORY in your deployment
-    enabled: bool = True
+    enabled: bool = False
     bot_token: str = ""
     chat_id: int = 0  # store as int to match controller usage
 
@@ -172,8 +172,11 @@ class TelegramSettings(BaseModel):
             else bool(token and chat)
         )
         if not token or chat == 0:
-            if enabled_env is None:
-                enabled = False
+            if enabled_env is not None and str(enabled_env).lower() not in {"0", "false"}:
+                logging.getLogger("config").warning(
+                    "Telegram credentials missing; disabling notifications"
+                )
+            enabled = False
         return cls(
             enabled=enabled,
             bot_token=str(token or ""),
@@ -184,11 +187,7 @@ class TelegramSettings(BaseModel):
     @classmethod
     def _v_chat_id(cls, v: int, info: ValidationInfo) -> int:
         """Ensure chat_id is provided when Telegram is enabled."""
-        if info.data.get("enabled", True) and v == 0:
-            raise ValueError(
-                "TELEGRAM__CHAT_ID must be a non-zero integer when TELEGRAM__ENABLED is true"
-            )
-        return v
+        return int(v)
 
 
 class DataSettings(BaseModel):
@@ -1709,6 +1708,7 @@ class AppSettings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         env_nested_delimiter="__",  # e.g., TELEGRAM__BOT_TOKEN
+        env_ignore_empty=True,
         extra="ignore",
     )
 
