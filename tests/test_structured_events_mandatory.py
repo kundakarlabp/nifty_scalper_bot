@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
@@ -77,6 +78,10 @@ def test_live_kite_source_structured_events(monkeypatch: pytest.MonkeyPatch) -> 
     assert snapshot["price"] == pytest.approx(101.25)
     assert snapshot["source"] == "ws_ltp"
 
+    stale_mono = time.monotonic() - 2.0
+    with ds._tick_lock:  # noqa: SLF001 - test setup
+        ds._last_any_tick_mono = stale_mono
+        ds._last_tick_mono[token] = stale_mono
     ds._last_tick_ts = datetime.utcnow() - timedelta(seconds=2)
     ds._stale_tick_checks = 0
     ds._stale_tick_thresh = 1

@@ -7,7 +7,7 @@ import os
 import random
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -69,6 +69,15 @@ def monotonic_ms() -> int:
     """Return the current monotonic timestamp in milliseconds."""
 
     return int(time.monotonic() * 1000.0)
+
+
+def _normalize_token(token: Any) -> int | Any:
+    """Best-effort normalization of instrument tokens to integers."""
+
+    try:
+        return int(token)
+    except Exception:
+        return token
 
 
 def _as_float(val: Any) -> float:
@@ -1024,13 +1033,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         self._last_tick_ts: Optional[datetime] = None
         # Epoch timestamp (seconds) of the most recent tick heartbeat.
         self._last_tick_epoch: float | None = None
-        # Monotonic timestamp (ms) for the most recent tick heartbeat.
-        self._last_tick_ts_ms: int | None = None
-        # Epoch timestamp of the most recent tick across any token.
-        self._last_any_tick_epoch: float | None = None
-        # Per-token tick heartbeats for watchdog/diagnostics.
-        self._token_last_tick_epoch: dict[int, float] = {}
-        self._token_last_tick_ms: dict[int, int] = {}
+        # Monotonic timestamps tracked per token and globally for freshness.
+        self._last_tick_mono: defaultdict[int, float | None] = defaultdict(lambda: None)
+        self._last_any_tick_mono: float | None = None
+        self._stale_count: defaultdict[int, int] = defaultdict(int)
         # Debounce websocket resubscribe attempts per token.
         self._last_ws_resub_ms: dict[int, float] = {}
         self._ws_resub_window_ms: dict[int, int] = {}
@@ -1113,30 +1119,59 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def last_tick_ts(self, value: float | None) -> None:
         self._last_tick_epoch = value
 
-    def get_last_tick_age_ms(self) -> int | None:
-        """Return the age of the most recent tick heartbeat in milliseconds."""
+    def last_tick_age_ms(self) -> int | None:
+        """Return milliseconds since any token tick was observed."""
 
         with self._tick_lock:
-            ts_ms = self._last_tick_ts_ms
-            token_ticks = dict(self._token_last_tick_ms)
+            last_any = self._last_any_tick_mono
+        if last_any is None:
+            return None
+        age = (time.monotonic() - float(last_any)) * 1000.0
+        return int(age) if age > 0.0 else 0
+
+    def last_token_age_ms(self, token: int | str) -> int | None:
+        """Return milliseconds since ``token`` last produced a tick."""
+
+        token_norm = _normalize_token(token)
+        if not isinstance(token_norm, int):
+            return None
+        with self._tick_lock:
+            ts = self._last_tick_mono.get(token_norm)
+        if ts is None:
+            return None
+        age = (time.monotonic() - float(ts)) * 1000.0
+        return int(age) if age > 0.0 else 0
+
+    def min_age_across_subs_ms(self) -> int | None:
+        """Return the freshest tick age across subscribed tokens."""
+
         with self._ws_state_lock:
             subs_snapshot = list(self._subs)
-        now_ms = monotonic_ms()
+        with self._tick_lock:
+            mono_snapshot = {tok: ts for tok, ts in self._last_tick_mono.items() if ts is not None}
+            last_any = self._last_any_tick_mono
+        now = time.monotonic()
         ages: list[int] = []
         for token in subs_snapshot:
-            try:
-                token_i = int(token)
-            except Exception:
+            token_norm = _normalize_token(token)
+            if not isinstance(token_norm, int):
                 continue
-            token_ts = token_ticks.get(token_i)
-            if token_ts is None:
+            ts = mono_snapshot.get(token_norm)
+            if ts is None:
                 continue
-            ages.append(max(now_ms - int(token_ts), 0))
+            age_val = (now - float(ts)) * 1000.0
+            ages.append(int(age_val) if age_val > 0.0 else 0)
         if ages:
             return min(ages)
-        if ts_ms is None:
+        if last_any is None:
             return None
-        return max(now_ms - int(ts_ms), 0)
+        age_global = (now - float(last_any)) * 1000.0
+        return int(age_global) if age_global > 0.0 else 0
+
+    def get_last_tick_age_ms(self) -> int | None:
+        """Return the minimum tick age across current subscriptions."""
+
+        return self.min_age_across_subs_ms()
 
     # ---- lifecycle ----
     def connect(self) -> None:
@@ -1233,11 +1268,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         with self._ws_state_lock:
             for token in tokens:
-                try:
-                    token_i = int(token)
-                except Exception:
-                    continue
-                if token_i > 0:
+                token_i = _normalize_token(token)
+                if isinstance(token_i, int) and token_i > 0:
                     self._subs.add(token_i)
 
     def _snapshot_subscriptions(self) -> list[int]:
@@ -1408,11 +1440,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
 
         payload: list[int] = []
         for token in tokens:
-            try:
-                token_i = int(token)
-            except Exception:
-                continue
-            if token_i <= 0:
+            token_i = _normalize_token(token)
+            if not isinstance(token_i, int) or token_i <= 0:
                 continue
             payload.append(token_i)
         if not payload:
@@ -1447,10 +1476,10 @@ class LiveKiteSource(DataSource, BaseDataSource):
         for token in tokens:
             if token is None:
                 continue
-            try:
-                payload.append(int(token))
-            except Exception:
+            token_i = _normalize_token(token)
+            if not isinstance(token_i, int) or token_i <= 0:
                 continue
+            payload.append(token_i)
         if not payload:
             return
         ordered_payload: list[int] = []
@@ -1620,8 +1649,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
         """Return ``True`` when consecutive tick gaps exceed the watchdog threshold."""
 
         self._emit_ws_heartbeat()
-        heartbeat_ts = self.last_tick_ts
-        now = time.time()
+        age_ms = self.last_tick_age_ms()
         tick_max_lag_s = float(
             getattr(
                 settings,
@@ -1629,13 +1657,13 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 getattr(getattr(settings, "strategy", None), "max_tick_lag_s", max_age_s),
             )
         )
-        if heartbeat_ts:
-            lag = now - heartbeat_ts
+        if age_ms is not None:
+            lag = age_ms / 1000.0
             if lag > tick_max_lag_s:
                 bucket = round(lag)
                 if _tick_log_suppressor.should_log("warn", "tick_stale", bucket):
                     log.warning("tick_stale", {"tick_lag": lag})
-                lag_ms = int(round(lag * 1000.0))
+                lag_ms = int(round(age_ms))
                 threshold_ms = int(round(tick_max_lag_s * 1000.0))
                 emit_tick_watchdog(
                     status="trigger",
@@ -1669,10 +1697,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     )
                     log.error("tick_reconnect_error", {"err": str(exc), "tick_lag": lag})
 
-        ts = self._last_tick_ts
-        if ts is None:
+        if age_ms is None:
             return False
-        age = (datetime.utcnow() - ts).total_seconds()
+        age = age_ms / 1000.0
         if age > max_age_s:
             self._stale_tick_checks += 1
         else:
@@ -1689,8 +1716,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         return False
 
     def tick_watchdog_details(self) -> dict[str, float | int | None]:
-        ts = self._last_tick_ts
-        age = (datetime.utcnow() - ts).total_seconds() if ts else None
+        age_ms = self.last_tick_age_ms()
+        age = age_ms / 1000.0 if age_ms is not None else None
         return {"age": age, "checks": self._stale_tick_checks}
 
     def api_health(self) -> Dict[str, Dict[str, object]]:
@@ -1727,9 +1754,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return
         tokens = getattr(self, "atm_tokens", ())
         if tokens and token not in tokens:
@@ -1816,9 +1842,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
         token_raw = tick.get("instrument_token") or tick.get("token")
         if token_raw is None:
             return False
-        try:
-            token = int(token_raw)
-        except Exception:
+        token = _normalize_token(token_raw)
+        if not isinstance(token, int):
             return False
         runner = getattr(self, "_runner", None) or getattr(self, "owner", None)
         if runner and hasattr(runner, "on_market_tick"):
@@ -1829,7 +1854,6 @@ class LiveKiteSource(DataSource, BaseDataSource):
         now_epoch = time.time()
         now_dt = datetime.utcnow()
         now_monotonic = time.monotonic()
-        now_mono_ms = int(now_monotonic * 1000.0)
         depth = tick.get("depth") if isinstance(tick, Mapping) else None
         bid = ask = None
         bid_qty = ask_qty = None
@@ -1908,10 +1932,9 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 self._full_depth_tokens.add(token)
             self._last_tick_ts = now_dt
             self.last_tick_ts = now_epoch
-            self._last_tick_ts_ms = now_mono_ms
-            self._last_any_tick_epoch = now_epoch
-            self._token_last_tick_epoch[token] = now_epoch
-            self._token_last_tick_ms[token] = now_mono_ms
+            self._last_tick_mono[token] = now_monotonic
+            self._last_any_tick_mono = now_monotonic
+            self._stale_count[token] = 0
         self._reset_ws_stale_counter(token)
         key_seen = f"tick_seen:{token}"
         if self._gate.should_emit(key_seen, force=self._trace_force()):
@@ -1970,9 +1993,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> dict[str, Any] | None:
         """Return a copy of the cached FULL quote for ``token`` if available."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
 
         cached = self._option_quote_cache.get(token_i)
@@ -2003,10 +2025,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 log.debug("bar_builder.on_tick failed", exc_info=True)
 
     def get_micro_state(self, token: int) -> dict[str, Any]:
-        try:
-            token_i = int(token)
-        except Exception:
-            token_i = token if isinstance(token, int) else 0
+        token_i_norm = _normalize_token(token)
+        token_i = token_i_norm if isinstance(token_i_norm, int) else 0
         with self._tick_lock:
             q = self._quotes.get(token_i)
         if not q:
@@ -2285,9 +2305,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def quote_snapshot(self, token: int | str) -> dict[str, Any] | None:
         """Return a lightweight quote summary for Telegram diagnostics."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
         with self._tick_lock:
             q = self._quotes.get(token_i)
@@ -2310,9 +2329,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> tuple[float | None, float | None, int | None, int | None, int | None]:
         """Return the last seen best-bid/ask tuple for ``token``."""
 
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None, None, None, None, None
         with self._tick_lock:
             state = self._quotes.get(token_i)
@@ -2334,9 +2352,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> QuoteState | None:
         if payload is None:
             return None
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None
         if token_i <= 0:
             return None
@@ -2402,11 +2419,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def _seed_from_snapshot(self, token: int | str) -> QuoteState | None:
         """Seed the in-memory quote cache from the last snapshot payload."""
 
-        try:
-            token_i = int(token)
-        except Exception:
-            return None
-        if token_i <= 0:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int) or token_i <= 0:
             return None
         with self._tick_lock:
             cached = self._option_quote_cache.get(token_i)
@@ -2429,11 +2443,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     ) -> QuoteReadyStatus:
         """Ensure ``token`` has a live best-bid/offer before strategy evaluation."""
 
-        try:
-            token_i = int(token)
-        except Exception:
-            return QuoteReadyStatus(ok=False, reason="invalid_token")
-        if token_i <= 0:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int) or token_i <= 0:
             return QuoteReadyStatus(ok=False, reason="invalid_token")
 
         mode_pref = mode or getattr(settings, "QUOTES__MODE", getattr(_cfg, "QUOTES__MODE", "FULL"))
@@ -2755,9 +2766,8 @@ class LiveKiteSource(DataSource, BaseDataSource):
     def prime_option_quote(
         self, token: int | str
     ) -> tuple[float | None, str | None, int | None]:
-        try:
-            token_i = int(token)
-        except Exception:
+        token_i = _normalize_token(token)
+        if not isinstance(token_i, int):
             return None, None, None
 
         def _emit_snapshot(
@@ -2786,27 +2796,43 @@ class LiveKiteSource(DataSource, BaseDataSource):
         except Exception:
             cached = None
         if cached:
+            source_hint_raw = cached.get("source")
+            source_hint = str(source_hint_raw) if source_hint_raw not in {None, ""} else ""
             ts_ms_cached = cached.get("ts_ms")
-            ts_ms = ts_ms_cached if isinstance(ts_ms_cached, int) else _to_epoch_ms(cached.get("timestamp"))
+            ts_ms = (
+                ts_ms_cached
+                if isinstance(ts_ms_cached, int)
+                else _to_epoch_ms(cached.get("timestamp"))
+            )
+            skip_mid = source_hint.lower().startswith("ws")
             for key, label in (("mid", "mid"), ("ltp", "ltp"), ("bid", "bid"), ("ask", "ask")):
+                if skip_mid and label == "mid":
+                    continue
                 val = cached.get(key)
-                if isinstance(val, (int, float)) and val > 0:
-                    if ts_ms is None:
-                        ts_ms = int(time.time() * 1000)
-                    source_label = f"ws_{label}"
-                    cached_mode = cached.get("mode")
-                    mode_str = (
-                        str(cached_mode)
-                        if cached_mode is not None and cached_mode != ""
-                        else None
-                    )
-                    _emit_snapshot(
-                        price=float(val),
-                        source=source_label,
-                        ts_ms=ts_ms,
-                        mode=mode_str,
-                    )
-                    return float(val), source_label, ts_ms
+                if not (isinstance(val, (int, float)) and val > 0):
+                    continue
+                if ts_ms is None:
+                    ts_ms = int(time.time() * 1000)
+                cached_mode = cached.get("mode")
+                mode_str = (
+                    str(cached_mode)
+                    if cached_mode is not None and cached_mode != ""
+                    else None
+                )
+                if source_hint:
+                    if source_hint.lower().startswith("ws"):
+                        source_label = f"{source_hint}_{label}"
+                    else:
+                        source_label = source_hint
+                else:
+                    source_label = label if label == "mid" else f"ws_{label}"
+                _emit_snapshot(
+                    price=float(val),
+                    source=source_label,
+                    ts_ms=ts_ms,
+                    mode=mode_str,
+                )
+                return float(val), source_label, ts_ms
 
         quote_payload: dict[str, Any] | None = None
         if self.kite:
@@ -3560,7 +3586,11 @@ def _subscribe_tokens(
 ) -> bool:
     if not tokens:
         return False
-    seen: set[int] = {int(t) for t in tokens if t is not None}
+    seen: set[int] = set()
+    for token in tokens:
+        token_i = _normalize_token(token)
+        if isinstance(token_i, int) and token_i > 0:
+            seen.add(token_i)
     if not seen:
         return False
     payload = list(seen)
@@ -3667,9 +3697,8 @@ def ensure_token_subscribed(
 ) -> bool:
     """Ensure ``token`` is subscribed via the underlying broker."""
 
-    try:
-        token_i = int(token)
-    except Exception:
+    token_i = _normalize_token(token)
+    if not isinstance(token_i, int):
         return False
 
     if token_i <= 0:
