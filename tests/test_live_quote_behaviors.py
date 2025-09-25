@@ -242,6 +242,9 @@ def test_resubscribe_if_stale_escalates_after_three_cycles(
     monkeypatch.setattr(src, "reconnect_ws", _reconnect)
     src.ensure_token_subscribed = lambda *_a, **_k: True  # type: ignore[attr-defined]
 
+    with src._ws_state_lock:  # noqa: SLF001 - ensure snapshot includes token
+        src._subs.add(token)
+
     for _ in range(3):
         src._last_quote_ready_attempt[token] = 0.0  # noqa: SLF001 - force retry
         src._last_ws_resub_ms[token] = 0  # noqa: SLF001 - bypass debounce
@@ -250,6 +253,9 @@ def test_resubscribe_if_stale_escalates_after_three_cycles(
     assert reconnect_calls
     assert reconnect_calls[-1][0] == "stale_x3"
     assert any(name == "ws_reconnect_escalate" for name, _payload in events)
+    escalate_payloads = [payload for name, payload in events if name == "ws_reconnect_escalate"]
+    assert escalate_payloads
+    assert escalate_payloads[-1]["tokens"] == [token]
 
 
 def test_resubscribe_current_reconnects_after_repeated_failures(

@@ -1321,6 +1321,7 @@ class LiveKiteSource(DataSource, BaseDataSource):
                 window_ms=int(window_ms),
                 tick_age_ms=int(age_ms) if age_ms is not None else None,
                 subs_count=len(tokens_snapshot),
+                tokens=tokens_snapshot,
             )
         except Exception:
             self.log.error("ws_reconnect.escalation_failed", extra=context, exc_info=True)
