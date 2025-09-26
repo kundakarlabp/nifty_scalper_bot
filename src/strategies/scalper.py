@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping
@@ -16,6 +17,10 @@ log = logging.getLogger(__name__)
 
 PriceFetcher = Callable[[str], float]
 ExpiryResolver = Callable[[], str]
+
+
+class StaleMarketDataError(RuntimeError):
+    """Raised when a trade is attempted with stale market data."""
 
 
 def _round_to_tick(price: float, tick_size: float) -> float:
@@ -35,9 +40,89 @@ class ScalperStrategy:
     tick_size: float = 0.05
     price_fetcher: PriceFetcher = get_best_ask
     expiry_resolver: ExpiryResolver = get_next_thursday
+    market_data: Any | None = None
+    max_quote_age_seconds: float = 30.0
     _side_map: Mapping[str, str] = field(
         default_factory=lambda: {"BUY": "SELL", "SELL": "BUY"}, init=False
     )
+
+    def _extract_market_timestamp(self) -> datetime | None:
+        """Return the freshest known market-data timestamp if available."""
+
+        if self.market_data is None:
+            return None
+
+        candidates = (
+            "last_tick_dt",
+            "last_tick_ts",
+            "last_trade_time",
+            "last_trade_at",
+            "last_quote_time",
+            "last_quote_at",
+        )
+
+        for attr in candidates:
+            value = getattr(self.market_data, attr, None)
+            if callable(value):
+                try:
+                    value = value()
+                except TypeError:
+                    continue
+            ts = self._coerce_datetime(value)
+            if ts is not None:
+                return ts
+        return None
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> datetime | None:
+        """Attempt to coerce ``value`` to an aware UTC ``datetime``."""
+
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, (int, float)):
+            seconds = float(value)
+            if seconds > 1e12:
+                seconds /= 1000.0
+            if seconds > 1e10:
+                return None
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        if isinstance(value, str):
+            try:
+                normalized = value.replace("Z", "+00:00")
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        return None
+
+    def _ensure_market_data_fresh(self) -> None:
+        """Raise :class:`StaleMarketDataError` if market data is stale."""
+
+        threshold = float(self.max_quote_age_seconds)
+        if threshold <= 0:
+            return
+        last_ts = self._extract_market_timestamp()
+        if last_ts is None:
+            return
+        now = datetime.now(timezone.utc)
+        age = (now - last_ts).total_seconds()
+        if age < 0:
+            return
+        if age > threshold:
+            log.warning(
+                "Rejecting straddle trade: market data stale (age=%.1fs, limit=%.1fs)",
+                age,
+                threshold,
+            )
+            raise StaleMarketDataError(
+                f"market data stale (age={age:.1f}s > {threshold:.1f}s)"
+            )
 
     def build_option_symbols(self, strike: int | str) -> Dict[str, str]:
         """Return CE/PE trading symbols for the upcoming weekly expiry."""
@@ -75,6 +160,7 @@ class ScalperStrategy:
 
         if quantity <= 0:
             raise ValueError("quantity must be positive")
+        self._ensure_market_data_fresh()
         meta = self.build_option_symbols(strike)
         ce_symbol = meta["ce"]
         pe_symbol = meta["pe"]
@@ -152,5 +238,5 @@ class ScalperStrategy:
         return result
 
 
-__all__ = ["ScalperStrategy"]
+__all__ = ["ScalperStrategy", "StaleMarketDataError"]
 
