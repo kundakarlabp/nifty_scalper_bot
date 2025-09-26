@@ -350,19 +350,23 @@ class MarketData:
             logger.exception("ticker_connect_failed")
             raise
 
-    def _on_connect(self, ws: Any, _response: Any) -> None:  # pragma: no cover - io
+    def _on_connect(self, ws: Any, response: Any) -> None:  # pragma: no cover - io
+        """Resubscribe tokens on reconnect (critical for Railway)."""
+
+        del response  # unused but kept for KiteTicker callback signature
+
         now = time.monotonic()
         if now - self._last_connect_mono < self._reconnect_debounce_s:
             return
         self._last_connect_mono = now
 
-        tokens = self._snapshot_tokens()
-        if not tokens:
+        toks = self._snapshot_tokens()  # Snapshot current tokens
+        if not toks:
             return
         try:
-            ws.subscribe(tokens)
-            ws.set_mode(ws.MODE_FULL, tokens)
-            logger.info("ws_resubscribe tokens=%d", len(tokens))
+            ws.subscribe(toks)
+            ws.set_mode(ws.MODE_FULL, toks)  # Ensure L2 depth
+            logger.info("Resubscribed to %d tokens", len(toks))
         except Exception:  # pragma: no cover - defensive logging
             logger.exception("ws_resubscribe_failed")
 
