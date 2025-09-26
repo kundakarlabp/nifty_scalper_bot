@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def get_weekly_expiry(
@@ -12,10 +16,16 @@ def get_weekly_expiry(
 
     When today is Thursday the helper returns the same-day expiry until the
     cut-off specified by ``use_same_day_before``.  After the cut-off the expiry
-    rolls forward to the following week to avoid stale contracts.
+    rolls forward to the following week to avoid stale contracts.  Datetimes are
+    normalised to IST to match the NSE trading calendar.
     """
 
-    current = now or datetime.now()
+    current = now or datetime.now(IST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=IST)
+    else:
+        current = current.astimezone(IST)
+
     cutoff = time.fromisoformat(use_same_day_before)
     days_ahead = (3 - current.weekday()) % 7
     if days_ahead == 0 and current.time() > cutoff:

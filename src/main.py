@@ -10,10 +10,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import asdict
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
-
-from flask import Flask
 
 _ENV_FILE_PATH: str | None = None
 _ENV_FILE_ERROR: Exception | None = None
@@ -119,27 +118,48 @@ except Exception as exc:
 # -----------------------------
 # Railway health server
 # -----------------------------
-_railway_app = Flask("railway-health")
-_railway_server_started = False
+class _Health(BaseHTTPRequestHandler):
+    """Minimal health endpoint to satisfy Railway probes."""
+
+    def do_GET(self) -> None:  # pragma: no cover - network
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:  # pragma: no cover - noise
+        """Silence the default ``BaseHTTPRequestHandler`` logging."""
+
+        return
 
 
-@_railway_app.route("/health")
-def _railway_health() -> tuple[str, int]:  # pragma: no cover - network
-    return "OK", 200
+_health_server_started = False
 
 
 def _start_railway_health_server() -> None:
     """Expose a lightweight health endpoint for Railway probes."""
 
-    global _railway_server_started
-    if _railway_server_started:
+    global _health_server_started
+    if _health_server_started:
         return
 
-    threading.Thread(
-        target=lambda: _railway_app.run(host="0.0.0.0", port=8080),
-        daemon=True,
-    ).start()
-    _railway_server_started = True
+    def _serve() -> None:
+        port = int(os.environ.get("PORT", "8080"))
+        server = HTTPServer(("0.0.0.0", port), _Health)
+        try:
+            server.serve_forever()
+        except Exception:
+            logging.getLogger("main.health").warning(
+                "railway_health_server_stopped", exc_info=True
+            )
+        finally:
+            server.server_close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    _health_server_started = True
 
 
 # -----------------------------

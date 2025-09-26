@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
+import pytest
+
 from src.execution.order_executor import OrderManager
 from src.execution.order_state import OrderSide, OrderState
 
@@ -71,3 +73,33 @@ def test_limit_clamp_by_depth() -> None:
     }
     price, _ = om.calc_limit_price(OrderSide.BUY, 10, quote)
     assert price == 102.0
+
+
+def test_calc_limit_price_uses_marketable_fallback_for_buy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = DummyBroker()
+    om = OrderManager(broker.place, tick_size=0.05)
+
+    monkeypatch.setattr(om, "get_marketable_ask", lambda symbol: 201.25)
+
+    quote = {"ask": 0.0, "depth": {}, "tick": 0.05, "tradingsymbol": "NIFTY24"}
+    price, slip = om.calc_limit_price(OrderSide.BUY, 50, quote)
+
+    assert price == pytest.approx(201.25)
+    assert slip == pytest.approx(201.25)
+
+
+def test_calc_limit_price_uses_marketable_fallback_for_sell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = DummyBroker()
+    om = OrderManager(broker.place, tick_size=0.05)
+
+    monkeypatch.setattr(om, "get_marketable_ask", lambda symbol: 201.25)
+
+    quote = {"bid": 0.0, "depth": {}, "tick": 0.05, "tradingsymbol": "NIFTY24"}
+    price, slip = om.calc_limit_price(OrderSide.SELL, 50, quote)
+
+    assert price == pytest.approx(201.20)
+    assert slip == pytest.approx(201.20)

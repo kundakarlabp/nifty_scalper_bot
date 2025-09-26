@@ -4,6 +4,8 @@ import datetime as dt
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping
 
+from zoneinfo import ZoneInfo
+
 import pytest
 import pandas as pd
 
@@ -28,6 +30,9 @@ from src.strategies.scalper import ScalperStrategy, StaleMarketDataError
 from src.utils.helpers import get_next_thursday, get_weekly_expiry
 
 
+IST = ZoneInfo("Asia/Kolkata")
+
+
 @pytest.fixture(autouse=True)
 def _allow_offhours(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "allow_offhours_testing", True)
@@ -37,12 +42,12 @@ def _allow_offhours(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_weekly_expiry_same_day_before_cutoff() -> None:
-    now = dt.datetime(2024, 6, 6, 10, 0)
+    now = dt.datetime(2024, 6, 6, 10, 0, tzinfo=IST)
     assert get_weekly_expiry(now=now) == "240606"
 
 
 def test_get_weekly_expiry_rolls_forward_after_cutoff() -> None:
-    now = dt.datetime(2024, 6, 6, 16, 0)
+    now = dt.datetime(2024, 6, 6, 16, 0, tzinfo=IST)
     assert get_weekly_expiry(now=now) == "240613"
 
 

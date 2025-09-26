@@ -107,11 +107,19 @@ def _retry_call(fn, *args, tries: int = 3, base_delay: float = 0.25, **kwargs):
             delay *= 2.0
 
 
-def _round_to_tick(x: float, tick: float) -> float:
+def _round_to_tick(x: float, tick: float = 0.05) -> float:
+    """Round ``x`` to the nearest valid tick, clamped to two decimals."""
+
     try:
-        return round(float(x) / tick) * tick if tick > 0 else float(x)
+        value = float(x)
     except (TypeError, ValueError):
-        return float(x)
+        return 0.0
+
+    if tick <= 0:
+        return round(value, 2)
+
+    snapped = round(value / tick) * tick
+    return round(snapped, 2)
 
 
 def _round_to_step(qty: int, step: int) -> int:
@@ -410,19 +418,134 @@ class OrderManager:
         price = best + direction * tick
         cum = 0
         for lvl in levels:
-            qty_level = int(lvl.get("quantity", 0))
-            cum += qty_level
-            price = float(lvl.get("price", best))
+            quantity = 0
+            try:
+                quantity = int(lvl.get("quantity", 0))
+            except Exception:
+                quantity = 0
+            cum += quantity
+            try:
+                price = float(lvl.get("price", best))
+            except (TypeError, ValueError):
+                price = best
             if cum >= qty:
                 break
-        price += direction * tick
-        if side is OrderSide.BUY:
-            price = min(price, best + max_slip)
+
+        symbol = ""
+        if isinstance(quote, Mapping):
+            raw_symbol = (
+                quote.get("tradingsymbol")
+                or quote.get("symbol")
+                or quote.get("tsym")
+            )
+            if isinstance(raw_symbol, str):
+                symbol = raw_symbol
+
+        fallback_price: Optional[float] = None
+        if symbol and (best <= 0.0 or not levels):
+            fallback_price = self._marketable_price_for_side(side, symbol, tick)
+
+        if fallback_price and fallback_price > 0:
+            price = fallback_price
         else:
-            price = max(price, best - max_slip)
-        price = _round_to_tick(price, tick)
+            price += direction * tick
+            if side is OrderSide.BUY and best > 0:
+                price = min(price, best + max_slip)
+            elif side is OrderSide.SELL and best > 0:
+                price = max(price, best - max_slip)
+            price = _round_to_tick(price, tick)
+
         slip = abs(price - best)
         return price, slip
+
+    def get_option_price(self, symbol: str) -> float:
+        """Return the latest traded price for ``symbol`` when available."""
+
+        if not symbol or not self.kite:
+            return 0.0
+
+        token = f"NFO:{symbol}"
+        try:
+            data = _retry_call(self.kite.ltp, [token], tries=2)
+        except Exception as exc:  # pragma: no cover - network path
+            log.warning("ltp_unavailable %s: %s", symbol, exc)
+            return 0.0
+
+        payload = data.get(token) if isinstance(data, Mapping) else None
+        if not isinstance(payload, Mapping):
+            return 0.0
+
+        price = payload.get("last_price") or payload.get("ltp")
+        try:
+            return float(price)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def get_marketable_ask(self, symbol: str) -> float:
+        """Return a fill-friendly ask price with a 1-tick buffer."""
+
+        if not symbol or not self.kite:
+            return 0.0
+
+        symbol_key = f"NFO:{symbol}"
+        tick = self.tick_size if self.tick_size > 0 else 0.05
+        try:
+            data = _retry_call(self.kite.quote, [symbol_key], tries=2)
+        except Exception:  # pragma: no cover - network path
+            log.warning("depth_unavailable %s; falling back to LTP", symbol)
+            return self._fallback_marketable_from_ltp(symbol, tick)
+
+        payload = data.get(symbol_key) if isinstance(data, Mapping) else None
+        sells_candidates: Sequence[Any] = []
+        if isinstance(payload, Mapping):
+            depth = payload.get("depth") or {}
+            if isinstance(payload.get("tick_size"), (int, float)):
+                tick = float(payload.get("tick_size") or tick)
+            raw_sells: Any
+            if isinstance(depth, Mapping):
+                raw_sells = depth.get("sell", [])
+            else:
+                raw_sells = depth
+            if isinstance(raw_sells, Mapping):
+                sells_candidates = list(raw_sells.values())
+            elif isinstance(raw_sells, Sequence):
+                sells_candidates = list(raw_sells)
+
+        ask_px: Optional[float] = None
+        for level in sells_candidates:
+            if not isinstance(level, Mapping):
+                continue
+            try:
+                candidate = float(level.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                ask_px = candidate
+                break
+
+        if ask_px and ask_px > 0:
+            return _round_to_tick(ask_px + tick, tick)
+
+        log.warning("depth_unavailable %s; falling back to LTP", symbol)
+        return self._fallback_marketable_from_ltp(symbol, tick)
+
+    def _fallback_marketable_from_ltp(self, symbol: str, tick: float) -> float:
+        ltp = self.get_option_price(symbol)
+        if ltp <= 0:
+            return 0.0
+        tick_val = tick if tick > 0 else 0.05
+        return _round_to_tick(ltp + tick_val, tick_val)
+
+    def _marketable_price_for_side(
+        self, side: OrderSide, symbol: str, tick: float
+    ) -> Optional[float]:
+        base = self.get_marketable_ask(symbol)
+        if base <= 0:
+            return None
+        if side is OrderSide.BUY:
+            return base
+        adjusted = max(base - tick, tick)
+        return _round_to_tick(adjusted, tick)
 
     def submit(self, payload: Dict[str, Any]) -> Optional[str]:
         symbol = str(payload.get("symbol") or "")
