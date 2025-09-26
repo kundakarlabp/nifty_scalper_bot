@@ -1377,6 +1377,95 @@ class LiveKiteSource(DataSource, BaseDataSource):
                     ages.append(int((now - float(ts)) * 1000))
         return min(ages) if ages else None
 
+    def subscription_modes(self) -> dict[int, str]:
+        """Return a snapshot of websocket subscriptions and their modes."""
+
+        with self._ws_state_lock:
+            snapshot = dict(self._subscribed_tokens)
+        return snapshot
+
+    def ws_diag_snapshot(self) -> dict[str, Any]:
+        """Return a concise websocket diagnostic payload."""
+
+        ticker_candidates = [
+            getattr(self, "kite_ticker", None),
+            getattr(self, "ticker", None),
+            getattr(self, "kws", None),
+            getattr(self.kite, "ticker", None) if self.kite else None,
+        ]
+        connected = False
+        for ticker in ticker_candidates:
+            if ticker is None:
+                continue
+            probe = getattr(ticker, "is_connected", None)
+            if callable(probe):
+                try:
+                    connected = bool(probe())
+                    break
+                except Exception:
+                    continue
+            flag = getattr(ticker, "connected", None)
+            if flag is not None:
+                try:
+                    connected = bool(flag)
+                except Exception:
+                    connected = False
+                break
+        subs_snapshot: dict[int, str]
+        with self._ws_state_lock:
+            subs_snapshot = dict(self._subscribed_tokens)
+        return {
+            "connected": connected,
+            "subs_count": len(subs_snapshot),
+            "last_tick_age_ms": self.last_tick_age_ms(),
+        }
+
+    def force_hard_reconnect(self) -> None:
+        """Forcefully close and reconnect the websocket ticker."""
+
+        ticker_candidates = [
+            getattr(self, "kite_ticker", None),
+            getattr(self, "ticker", None),
+            getattr(self, "kws", None),
+            getattr(self.kite, "ticker", None) if self.kite else None,
+        ]
+        last_error: Exception | None = None
+        closed = False
+        for ticker in ticker_candidates:
+            if ticker is None:
+                continue
+            close = getattr(ticker, "close", None)
+            if callable(close):
+                try:
+                    close()
+                    closed = True
+                except Exception as exc:
+                    last_error = exc
+        time.sleep(1.0)
+        reconnected = False
+        for ticker in ticker_candidates:
+            if ticker is None:
+                continue
+            connect = getattr(ticker, "connect", None)
+            if callable(connect):
+                try:
+                    connect()
+                    reconnected = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+        if not reconnected:
+            try:
+                self.reconnect_with_backoff(reason="hard_reconnect")
+                reconnected = True
+            except Exception as exc:
+                last_error = exc
+        self._last_force_reconnect_ts = time.monotonic()
+        if last_error and not reconnected:
+            raise last_error
+        if not closed:
+            self.log.debug("force_hard_reconnect: no ticker close performed")
+
     # ---- lifecycle ----
     def connect(self) -> None:
         """Connect to broker, subscribe to SPOT token and warm up cache."""
