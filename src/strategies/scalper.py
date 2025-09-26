@@ -172,9 +172,12 @@ class ScalperStrategy:
             "pe": f"{base}{expiry}{strike_fmt}PE",
         }
 
-    def _fetch_price(self, symbol: str) -> float:
+    def _fetch_price(self, symbol: str, *, side: str = "BUY") -> float:
         quote_symbol = symbol if symbol.startswith("NFO:") else f"NFO:{symbol}"
         raw = float(self.price_fetcher(quote_symbol))
+        side_norm = side.upper()
+        if side_norm == "SELL":
+            raw = max(raw - self.tick_size, self.tick_size)
         price = _round_to_tick(raw, self.tick_size)
         if price <= 0:
             raise ValueError(f"invalid price for {symbol}: {price}")
@@ -235,13 +238,13 @@ class ScalperStrategy:
         pe_symbol = meta["pe"]
         expiry = meta["expiry"]
 
-        ce_price = self._fetch_price(ce_symbol)
-        pe_price = self._fetch_price(pe_symbol)
-        risk_side = "LONG" if side.upper() == "BUY" else "SHORT"
+        order_side = side.upper()
+        ce_price = self._fetch_price(ce_symbol, side=order_side)
+        pe_price = self._fetch_price(pe_symbol, side=order_side)
+        risk_side = "LONG" if order_side == "BUY" else "SHORT"
         ce_sl = self.risk_manager.calculate_stop_loss(ce_price, atr, side=risk_side)
         pe_sl = self.risk_manager.calculate_stop_loss(pe_price, atr, side=risk_side)
 
-        order_side = side.upper()
         ce_params = {
             "symbol": ce_symbol,
             "transaction_type": order_side,

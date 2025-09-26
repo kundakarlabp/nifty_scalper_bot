@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping
+from zoneinfo import ZoneInfo
 
 import pytest
 import pandas as pd
@@ -44,6 +45,11 @@ def test_get_weekly_expiry_same_day_before_cutoff() -> None:
 def test_get_weekly_expiry_rolls_forward_after_cutoff() -> None:
     now = dt.datetime(2024, 6, 6, 16, 0)
     assert get_weekly_expiry(now=now) == "240613"
+
+
+def test_get_weekly_expiry_handles_timezones() -> None:
+    utc_after_cutoff = dt.datetime(2024, 6, 6, 10, 0, tzinfo=ZoneInfo("UTC"))
+    assert get_weekly_expiry(now=utc_after_cutoff) == "240613"
 
 
 def test_get_next_thursday_rolls_from_weekend() -> None:
@@ -336,6 +342,23 @@ def test_scalper_strategy_complete_flow() -> None:
     assert result["pe_order_id"] == "PE456"
 
 
+def test_scalper_strategy_sell_side_limits_move_inside() -> None:
+    prices = {
+        "NFO:NIFTY24062020000CE": 101.23,
+        "NFO:NIFTY24062020000PE": 98.77,
+    }
+    strategy = _make_strategy(["CESELL", "PESELL"], prices=prices)
+
+    result = strategy.trade_straddle(20000, quantity=50, atr=10.0, side="SELL")
+
+    assert result["status"] == "complete"
+    ce_order, pe_order = strategy.order_manager.orders  # type: ignore[attr-defined]
+    assert ce_order["transaction_type"] == "SELL"
+    assert pe_order["transaction_type"] == "SELL"
+    assert ce_order["price"] == pytest.approx(101.20)
+    assert pe_order["price"] == pytest.approx(98.70)
+
+
 def test_scalper_strategy_partial_fill_ce_squares_off() -> None:
     prices = {
         "NFO:NIFTY24062020000CE": 101.23,
@@ -484,6 +507,12 @@ def test_scalper_strategy_fetch_price_handles_tick() -> None:
     prices = {"NFO:NIFTY24062020000CE": 100.07}
     strategy = _make_strategy([], prices=prices, tick=0.0)
     assert strategy._fetch_price("NIFTY24062020000CE") == pytest.approx(100.07)
+
+
+def test_scalper_strategy_fetch_price_sell_side_offsets_tick() -> None:
+    prices = {"NFO:NIFTY24062020000CE": 100.10}
+    strategy = _make_strategy([], prices=prices)
+    assert strategy._fetch_price("NIFTY24062020000CE", side="SELL") == pytest.approx(100.05)
 
 
 def test_scalper_strategy_fetch_price_validates_positive() -> None:

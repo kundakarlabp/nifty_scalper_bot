@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
 
-from flask import Flask
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _ENV_FILE_PATH: str | None = None
 _ENV_FILE_ERROR: Exception | None = None
@@ -119,26 +119,62 @@ except Exception as exc:
 # -----------------------------
 # Railway health server
 # -----------------------------
-_railway_app = Flask("railway-health")
+
+
+class _RailwayHealthHandler(BaseHTTPRequestHandler):
+    """Serve ``/health`` without pulling in Flask/Waitress."""
+
+    server_version = "RailwayHealth/1.0"
+    sys_version = ""
+
+    def do_GET(self) -> None:  # pragma: no cover - network
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:  # pragma: no cover - noise
+        return
+
+
 _railway_server_started = False
-
-
-@_railway_app.route("/health")
-def _railway_health() -> tuple[str, int]:  # pragma: no cover - network
-    return "OK", 200
+_railway_httpd: HTTPServer | None = None
 
 
 def _start_railway_health_server() -> None:
     """Expose a lightweight health endpoint for Railway probes."""
 
-    global _railway_server_started
+    global _railway_server_started, _railway_httpd
     if _railway_server_started:
         return
 
-    threading.Thread(
-        target=lambda: _railway_app.run(host="0.0.0.0", port=8080),
-        daemon=True,
-    ).start()
+    try:
+        port = int(os.environ.get("PORT", "8080"))
+    except (TypeError, ValueError):
+        port = 8080
+
+    log = logging.getLogger("main.health")
+
+    def _serve() -> None:
+        global _railway_httpd
+        try:
+            httpd = HTTPServer(("0.0.0.0", port), _RailwayHealthHandler)
+        except Exception:
+            log.warning("health_server_start_failed", exc_info=True)
+            return
+        _railway_httpd = httpd
+        with httpd:
+            try:
+                httpd.serve_forever()
+            except Exception:
+                log.warning("health_server_stopped", exc_info=True)
+            finally:
+                _railway_httpd = None
+
+    threading.Thread(target=_serve, daemon=True).start()
     _railway_server_started = True
 
 

@@ -11,6 +11,19 @@ log = logging.getLogger(__name__)
 DepthFetcher = Callable[[str], Mapping[str, object]]
 
 
+def _round_to_tick(x: float, tick: float = 0.05) -> float:
+    """Snap ``x`` to the nearest valid price increment."""
+
+    try:
+        value = float(x)
+        step = float(tick)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return round(float(x), 2)
+    if step <= 0:
+        return round(value, 2)
+    return round(round(value / step) * step, 2)
+
+
 class KiteDataFeed:
     """Minimal helper for replaying Kite subscriptions on reconnects."""
 
@@ -163,15 +176,15 @@ def get_best_ask(symbol: str, *, depth_fetcher: DepthFetcher | None = None) -> f
     fetcher = depth_fetcher or _default_depth_fetcher
     quote = fetcher(symbol)
     ask = _extract_best_ask(quote)
+    tick = _extract_tick_size(quote)
     if ask <= 0:
         fallback = _extract_ltp(quote)
         if fallback <= 0:
             raise ValueError(f"best ask unavailable for {symbol}")
-        log.warning("Depth unavailable for %s, using last traded price", symbol)
+        log.warning("depth_unavailable %s; falling back to LTP", symbol)
         ask = fallback
 
-    tick = _extract_tick_size(quote)
-    buffered = round(ask + tick, 2)
+    buffered = _round_to_tick(ask + tick, tick)
     if buffered <= 0:
         raise ValueError(f"invalid buffered ask for {symbol}")
     return buffered
