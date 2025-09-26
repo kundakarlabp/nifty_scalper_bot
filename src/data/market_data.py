@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
+from threading import RLock
 from typing import Any, Iterable, Callable, Mapping, Sequence, cast
 
-log = logging.getLogger(__name__)
+from kiteconnect import KiteTicker
+
+from src.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 DepthFetcher = Callable[[str], Mapping[str, object]]
@@ -31,9 +37,9 @@ class KiteDataFeed:
             if callable(mode_fn):
                 mode_full = getattr(ws, "MODE_FULL", getattr(self.ticker, "MODE_FULL", "full"))
                 mode_fn(mode_full, self.tokens)
-            log.info("Resubscribed to %d tokens", len(self.tokens))
+            logger.info("Resubscribed to %d tokens", len(self.tokens))
         except Exception:  # pragma: no cover - defensive logging
-            log.warning("Resubscribe on reconnect failed", exc_info=True)
+            logger.warning("Resubscribe on reconnect failed", exc_info=True)
 
     def subscribe(self, tokens: Iterable[int]) -> None:
         self.tokens = list(tokens)
@@ -68,7 +74,7 @@ def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
             if prices:
                 return min(prices)
     except Exception:  # pragma: no cover - defensive guard
-        log.debug("depth parsing failed", exc_info=True)
+        logger.debug("depth parsing failed", exc_info=True)
     ask_raw: Any = payload.get("ask", 0.0)
     if isinstance(ask_raw, (int, float, str)):
         try:
@@ -167,7 +173,7 @@ def get_best_ask(symbol: str, *, depth_fetcher: DepthFetcher | None = None) -> f
         fallback = _extract_ltp(quote)
         if fallback <= 0:
             raise ValueError(f"best ask unavailable for {symbol}")
-        log.warning("Depth unavailable for %s, using last traded price", symbol)
+        logger.warning("Depth unavailable for %s, using last traded price", symbol)
         ask = fallback
 
     tick = _extract_tick_size(quote)
@@ -177,5 +183,64 @@ def get_best_ask(symbol: str, *, depth_fetcher: DepthFetcher | None = None) -> f
     return buffered
 
 
-__all__ = ["KiteDataFeed", "get_best_ask"]
+class MarketData:
+    """Manage Kite ticker subscriptions with reconnection safeguards."""
+
+    def __init__(self, kite: Any, tokens: list[int]):
+        self.kite = kite
+        self.ticker = KiteTicker(kite.api_key, kite.access_token)
+        self._tokens = list(tokens)
+        self._tlock = RLock()
+        self._last_connect_mono = 0.0
+        self._reconnect_debounce_s = float(
+            getattr(settings, "RECONNECT_DEBOUNCE_S", 10.0)
+        )
+
+        self.ticker.on_connect = self._on_connect
+        self.ticker.on_ticks = self._on_ticks
+        self.ticker.on_error = self._on_error
+        self.ticker.on_close = self._on_close
+
+    def _snapshot_tokens(self) -> list[int]:
+        with self._tlock:
+            return list(self._tokens)
+
+    def add_tokens(self, new_tokens: list[int]) -> None:
+        with self._tlock:
+            for token in new_tokens:
+                if token not in self._tokens:
+                    self._tokens.append(token)
+        try:
+            self.ticker.subscribe(new_tokens)
+            self.ticker.set_mode(self.ticker.MODE_FULL, new_tokens)
+        except Exception:  # pragma: no cover - network/io
+            logger.exception("subscribe_failed")
+
+    def _on_connect(self, ws: Any, _response: Any) -> None:  # pragma: no cover - io
+        now = time.monotonic()
+        if now - self._last_connect_mono < self._reconnect_debounce_s:
+            return
+        self._last_connect_mono = now
+
+        tokens = self._snapshot_tokens()
+        if not tokens:
+            return
+        try:
+            ws.subscribe(tokens)
+            ws.set_mode(ws.MODE_FULL, tokens)
+            logger.info("ws_resubscribe tokens=%d", len(tokens))
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("ws_resubscribe_failed")
+
+    def _on_ticks(self, _ws: Any, _ticks: Any) -> None:  # pragma: no cover - io
+        pass
+
+    def _on_error(self, ws: Any, code: int, reason: str) -> None:  # pragma: no cover
+        logger.error("ticker_error code=%s reason=%s", code, reason)
+
+    def _on_close(self, ws: Any, code: int, reason: str) -> None:  # pragma: no cover
+        logger.warning("ticker_close code=%s reason=%s", code, reason)
+
+
+__all__ = ["KiteDataFeed", "MarketData", "get_best_ask"]
 

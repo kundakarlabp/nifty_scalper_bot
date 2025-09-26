@@ -10,6 +10,10 @@ from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optio
 log = logging.getLogger(__name__)
 
 
+FINAL_STATES = {"COMPLETE", "REJECTED", "CANCELLED"}
+OPENISH_STATES = {"OPEN", "TRIGGER PENDING", "AMO REQ RECEIVED"}
+
+
 StatusFetcher = Callable[[str], Mapping[str, Any] | str | None]
 CancelFunc = Callable[[str], None]
 PlaceFunc = Callable[[MutableMapping[str, Any]], Optional[str]]
@@ -106,12 +110,7 @@ class OrderManager:
 
     # ------------------------------------------------------------------
     def _cancel(self, order_id: str) -> None:
-        if not self._cancel_order:
-            return
-        try:
-            self._cancel_order(order_id)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            log.error("cancel_order failed for %s: %s", order_id, exc)
+        self._cancel_with_variety(order_id, {})
 
     # ------------------------------------------------------------------
     def _locate_order(self, order_id: str) -> Mapping[str, Any] | None:
@@ -179,19 +178,55 @@ class OrderManager:
         return None
 
     # ------------------------------------------------------------------
-    def _confirm_order(self, order_id: str, timeout: int = 15) -> Mapping[str, Any]:
-        """Poll order status and cancel if confirmation times out."""
+    def _cancel_with_variety(self, order_id: str, last: Mapping[str, Any]) -> None:
+        variety = None
+        if isinstance(last, Mapping):
+            variety = last.get("variety") or last.get("order_variety")
+        variety = variety or "regular"
 
-        deadline = time.monotonic() + max(timeout, 0)
-        while time.monotonic() <= deadline:
-            record = self._locate_order(order_id)
-            status = self._extract_status(record)
-            if status in {"COMPLETE", "REJECTED", "CANCELLED"}:
-                return dict(record or {"status": status})
+        if self._kite:
+            cancel_fn = getattr(self._kite, "cancel_order", None)
+            if callable(cancel_fn):
+                try:  # pragma: no cover - network
+                    cancel_fn(variety=variety, order_id=order_id)
+                    return
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    log.warning("cancel_failed order_id=%s: %s", order_id, exc)
+
+        if self._cancel_order:
+            try:
+                self._cancel_order(order_id)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.error("cancel_order failed for %s: %s", order_id, exc)
+
+    # ------------------------------------------------------------------
+    def _confirm_order(self, order_id: str, timeout: int = 15) -> Mapping[str, Any]:
+        """Poll Kite order status until completion or timeout."""
+
+        deadline = time.time() + max(timeout, 0)
+        last: Dict[str, Any] = {"order_id": order_id}
+        while time.time() < deadline:
+            try:
+                record = self._locate_order(order_id)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.error("order_poll_failed: %s", exc)
+                record = None
+
+            if record:
+                last = dict(record)
+                status = self._extract_status(record)
+                if status in FINAL_STATES:
+                    return last
             time.sleep(max(self._poll_interval, 0.5))
 
-        self._cancel(order_id)
-        return {"status": "TIMEOUT", "order_id": order_id}
+        status = self._extract_status(last)
+        if status and status not in OPENISH_STATES:
+            last.setdefault("status", status)
+            return last
+
+        self._cancel_with_variety(order_id, last)
+        last.setdefault("status", "TIMEOUT")
+        return last
 
     # ------------------------------------------------------------------
     def place_straddle_orders(
