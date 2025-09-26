@@ -78,11 +78,24 @@ class OrderManager:
     def square_off_position(
         self, symbol: str, *, side: str, quantity: int | None = None
     ) -> None:
-        """Exit an existing position, falling back to a market order."""
+        """Exit an existing position, falling back to a market order.
+
+        Parameters
+        ----------
+        symbol:
+            Tradingsymbol of the option/underlying to be squared off.
+        side:
+            The transaction side that should be used to exit the position
+            (``"BUY"`` to close shorts, ``"SELL"`` to close longs).
+        quantity:
+            Optional quantity for the closing order.
+        """
+
+        exit_side = str(side).upper()
 
         if self._square_off is not None:
             try:
-                self._square_off(symbol, side, quantity)
+                self._square_off(symbol, exit_side, quantity)
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.error("square_off callback failed for %s: %s", symbol, exc)
             return
@@ -90,10 +103,9 @@ class OrderManager:
         if not symbol:
             raise ValueError("symbol must be provided for square off")
 
-        opposite = "SELL" if side.upper() == "BUY" else "BUY"
         payload: Dict[str, Any] = {
             "symbol": symbol,
-            "transaction_type": opposite,
+            "transaction_type": exit_side,
             "order_type": "MARKET",
         }
         if quantity is not None:

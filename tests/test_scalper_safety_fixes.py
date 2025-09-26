@@ -194,7 +194,7 @@ def test_order_manager_square_off_fallback_places_market_order() -> None:
         return "SO1"
 
     manager = OrderManager(place, poll_interval=0.0)
-    manager.square_off_position("NIFTY24CE", side="BUY", quantity=25)
+    manager.square_off_position("NIFTY24CE", side="SELL", quantity=25)
 
     assert placed == [
         {
