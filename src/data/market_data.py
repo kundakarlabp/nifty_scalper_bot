@@ -278,6 +278,15 @@ class MarketData:
         except Exception:  # pragma: no cover - network/io
             logger.exception("subscribe_failed")
 
+    def connect(self) -> None:  # pragma: no cover - io
+        """Establish the Kite ticker websocket connection."""
+
+        try:
+            self.ticker.connect()
+        except Exception:
+            logger.exception("ticker_connect_failed")
+            raise
+
     def _on_connect(self, ws: Any, _response: Any) -> None:  # pragma: no cover - io
         now = time.monotonic()
         if now - self._last_connect_mono < self._reconnect_debounce_s:
