@@ -214,6 +214,68 @@ class TelegramCommands:
         except Exception:
             return None
 
+    def _format_subscriptions(self) -> str:
+        source = self.source
+        if source is None:
+            return "Subscriptions: Source unavailable"
+        getter = getattr(source, "subscription_modes", None)
+        if not callable(getter):
+            return "Subscriptions: Not available"
+        try:
+            modes = getter()
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"Subs error: {exc}"
+        if not isinstance(modes, dict) or not modes:
+            return "Subscriptions: None"
+        lines = []
+        for token, mode in sorted(modes.items(), key=lambda item: str(item[0])):
+            lines.append(f"{token}: {mode}")
+        return "Subscriptions:\n" + "\n".join(lines)
+
+    def _format_ws_diag(self) -> str:
+        source = self.source
+        if source is None:
+            return "Diag: Source unavailable"
+        getter = getattr(source, "ws_diag_snapshot", None)
+        if not callable(getter):
+            return "Diag: Legacy build"
+        try:
+            snapshot = getter() or {}
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"Diag error: {exc}"
+        connected = bool(snapshot.get("connected", False))
+        subs_count = snapshot.get("subs_count", 0)
+        try:
+            subs_count = int(subs_count)
+        except Exception:
+            subs_count = 0
+        age_ms = snapshot.get("last_tick_age_ms")
+        if age_ms is None:
+            age_display = "N/A"
+        else:
+            try:
+                age_display = str(int(age_ms))
+            except Exception:
+                age_display = str(age_ms)
+        return (
+            f"WS Connected: {connected}\n"
+            f"Subs: {subs_count}\n"
+            f"Last Tick Age: {age_display}ms"
+        )
+
+    def _force_fresh_reconnect(self) -> str:
+        source = self.source
+        if source is None:
+            return "Fresh: Source unavailable"
+        action = getattr(source, "force_hard_reconnect", None)
+        if not callable(action):
+            return "Fresh: Not implemented"
+        try:
+            action()
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"Fresh error: {exc}"
+        return "Hard reconnect initiated"
+
     def _diag_snapshot(self) -> dict[str, Any]:
         """Build a compact diagnostic snapshot for the trading pipeline."""
 
@@ -442,17 +504,11 @@ class TelegramCommands:
                 f"🟢 Trace enabled (auto-off by TTL) for {seconds}s."
             )
             return True
+        if cmd == "/subs":
+            reply(self._format_subscriptions())
+            return True
         if cmd == "/diag":
-            try:
-                snapshot = self._diag_snapshot()
-            except Exception as exc:
-                reply(f"Diag snapshot failed: {exc}")
-                return True
-            text = format_block(
-                snapshot,
-                max_lines=int(getattr(self.settings, "LOG_MAX_LINES_REPLY", 30)),
-            )
-            reply(text)
+            reply(self._format_ws_diag())
             return True
         if cmd == "/micro":
             ce, pe = self._current_tokens()
@@ -511,6 +567,9 @@ class TelegramCommands:
                 f"lots={self.lots} caps={self.caps}"
             )
             self._send(msg)
+            return True
+        if cmd == "/fresh":
+            reply(self._force_fresh_reconnect())
             return True
         if cmd == "/backtest":
             if not self._backtest_runner:
