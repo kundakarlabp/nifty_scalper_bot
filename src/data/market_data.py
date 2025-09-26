@@ -201,6 +201,68 @@ class MarketData:
         self.ticker.on_error = self._on_error
         self.ticker.on_close = self._on_close
 
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        """Return an ``NFO:``-prefixed symbol understood by Kite APIs."""
+
+        return symbol if symbol.startswith("NFO:") else f"NFO:{symbol}"
+
+    @staticmethod
+    def _round_to_tick(price: float, tick: float = 0.05) -> float:
+        """Round ``price`` to the nearest tradable ``tick``."""
+
+        if tick <= 0:
+            return round(price, 2)
+        steps = round(price / tick)
+        return round(steps * tick, 2)
+
+    def get_option_price(self, symbol: str) -> float:
+        """Return the last traded price for ``symbol`` rounded to tick size."""
+
+        quoted = self._normalize_symbol(symbol)
+        quote: Mapping[str, object] | None = None
+        try:
+            payload = self.kite.quote(quoted)
+        except Exception:  # pragma: no cover - network/io
+            logger.exception("ltp_fetch_failed %s", symbol)
+            raise
+        if isinstance(payload, Mapping):
+            raw = payload.get(quoted)
+            if isinstance(raw, Mapping):
+                quote = raw
+        price = _extract_ltp(quote)
+        if price <= 0:
+            raise ValueError(f"invalid option price for {symbol}")
+        tick = _extract_tick_size(quote)
+        return self._round_to_tick(price, tick)
+
+    def get_marketable_ask(self, symbol: str) -> float:
+        """Return an aggressive limit price to cross the spread for ``symbol``."""
+
+        quoted = self._normalize_symbol(symbol)
+        quote: Mapping[str, object] | None = None
+        try:
+            payload = self.kite.quote(quoted)
+        except Exception:  # pragma: no cover - network/io
+            logger.warning("depth_unavailable %s; falling back to LTP", symbol)
+            tick = 0.05
+            ltp = self.get_option_price(symbol)
+            return self._round_to_tick(ltp + tick, tick)
+
+        if isinstance(payload, Mapping):
+            raw = payload.get(quoted)
+            if isinstance(raw, Mapping):
+                quote = raw
+
+        tick = _extract_tick_size(quote)
+        ask = _extract_best_ask(quote)
+        if ask > 0:
+            return self._round_to_tick(ask + tick, tick)
+
+        logger.warning("depth_unavailable %s; falling back to LTP", symbol)
+        ltp = self.get_option_price(symbol)
+        return self._round_to_tick(ltp + tick, tick)
+
     def _snapshot_tokens(self) -> list[int]:
         with self._tlock:
             return list(self._tokens)

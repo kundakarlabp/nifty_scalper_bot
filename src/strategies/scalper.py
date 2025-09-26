@@ -164,10 +164,37 @@ class ScalperStrategy:
             "pe": f"{base}{expiry}{strike_fmt}PE",
         }
 
-    def _fetch_price(self, symbol: str) -> float:
+    def _fetch_price(self, symbol: str, *, order_side: str | None = None) -> float:
+        """Return the desired limit price for ``symbol``.
+
+        When ``order_side`` is ``"BUY"`` and :attr:`market_data` exposes a
+        ``get_marketable_ask`` helper, the method prefers that quote to cross
+        the spread.  For other cases the configured :attr:`price_fetcher` is
+        used directly to preserve the historical behaviour relied on in tests.
+        """
+
         quote_symbol = symbol if symbol.startswith("NFO:") else f"NFO:{symbol}"
-        raw = float(self.price_fetcher(quote_symbol))
-        price = _round_to_tick(raw, self.tick_size)
+        raw_price: float | None = None
+
+        if (
+            order_side is not None
+            and order_side.upper() == "BUY"
+            and self.market_data is not None
+        ):
+            getter = getattr(self.market_data, "get_marketable_ask", None)
+            if callable(getter):
+                try:
+                    raw_price = float(getter(symbol))
+                except Exception:  # pragma: no cover - defensive guard
+                    logger.warning(
+                        "marketable ask unavailable for %s; falling back to price fetcher",
+                        symbol,
+                    )
+
+        if raw_price is None:
+            raw_price = float(self.price_fetcher(quote_symbol))
+
+        price = _round_to_tick(raw_price, self.tick_size)
         if price <= 0:
             raise ValueError(f"invalid price for {symbol}: {price}")
         return price
@@ -230,8 +257,8 @@ class ScalperStrategy:
         pe_symbol = meta["pe"]
         expiry = meta["expiry"]
 
-        ce_price = self._fetch_price(ce_symbol)
-        pe_price = self._fetch_price(pe_symbol)
+        ce_price = self._fetch_price(ce_symbol, order_side=side)
+        pe_price = self._fetch_price(pe_symbol, order_side=side)
         risk_side = "LONG" if side.upper() == "BUY" else "SHORT"
         ce_sl = self.risk_manager.calculate_stop_loss(ce_price, atr, side=risk_side)
         pe_sl = self.risk_manager.calculate_stop_loss(pe_price, atr, side=risk_side)
