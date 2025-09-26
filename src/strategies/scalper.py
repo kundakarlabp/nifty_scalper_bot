@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping
 from zoneinfo import ZoneInfo
 
-from src.config import settings
+from config import settings
 from src.data.market_data import get_best_ask
 from src.execution.order_manager import OrderManager
 from src.risk.risk_manager import RiskManager
@@ -16,13 +16,9 @@ from src.utils.helpers import get_weekly_expiry
 logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
-_DEFAULT_STALENESS_MS = 30_000
+_DEFAULT_STALENESS_MS = getattr(settings, "max_data_staleness_ms", 30_000)
 MAX_DATA_STALENESS_MS = int(
-    getattr(
-        settings,
-        "MAX_DATA_STALENESS_MS",
-        getattr(settings, "max_data_staleness_ms", _DEFAULT_STALENESS_MS),
-    )
+    getattr(settings, "MAX_DATA_STALENESS_MS", _DEFAULT_STALENESS_MS)
 )
 
 
@@ -31,7 +27,7 @@ ExpiryResolver = Callable[[], str]
 
 
 def _is_market_hours(now: datetime | None = None) -> bool:
-    """Return ``True`` when trading is allowed for the NSE cash window."""
+    """Check if within Nifty market hours (9:15 AM - 3:25 PM IST)."""
 
     if getattr(settings, "allow_offhours_testing", False):
         return True
@@ -233,19 +229,23 @@ class ScalperStrategy:
         """Execute a straddle trade after verifying market data freshness."""
 
         if not _is_market_hours():
-            logger.info("Outside market hours. Skipping trade.")
+            logger.info("Outside market hours. Skipping.")
             return {
                 "status": "skipped",
                 "reason": "off_hours",
             }
 
-        max_age_ms = MAX_DATA_STALENESS_MS
         age_ms = self._market_data_age_ms()
+        if age_ms is None:
+            age_ms = getattr(self.market_data, "last_tick_age_ms", None)
 
-        if age_ms is None or age_ms > max_age_ms:
+        if age_ms is None:
+            age_ms = float(MAX_DATA_STALENESS_MS + 1)
+
+        if age_ms > MAX_DATA_STALENESS_MS:
             logger.warning(
-                "Data stale (%s ms). Skipping trade.",
-                age_ms,
+                "Data stale (%d ms). Skipping trade.",
+                int(age_ms),
             )
             return {
                 "status": "skipped",
