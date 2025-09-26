@@ -16,7 +16,7 @@ from src.features.range import range_score
 from src.features.indicators import atr_pct
 from src.risk.risk_manager import RiskManager
 from src.risk.risk_gates import AccountState, evaluate as evaluate_gates
-from src.strategies.scalper import ScalperStrategy
+from src.strategies.scalper import ScalperStrategy, StaleMarketDataError
 from src.utils.helpers import get_next_thursday
 from src.options.instruments_cache import InstrumentsCache, nearest_weekly_expiry, _safe_int
 
@@ -231,6 +231,7 @@ def _make_strategy(
     *,
     prices: Mapping[str, float],
     tick: float = 0.05,
+    market_data: Any | None = None,
 ) -> ScalperStrategy:
     def fetch_price(symbol: str) -> float:
         return prices[symbol]
@@ -242,6 +243,7 @@ def _make_strategy(
         expiry_resolver=lambda: "240620",
         underlying="NIFTY",
         tick_size=tick,
+        market_data=market_data,
     )
 
 
@@ -324,6 +326,36 @@ def test_scalper_strategy_requires_positive_quantity() -> None:
     strategy = _make_strategy([], prices={})
     with pytest.raises(ValueError):
         strategy.trade_straddle(20000, quantity=0, atr=1.0)
+
+
+def test_scalper_strategy_rejects_stale_market_data() -> None:
+    class DataStub(BaseDataSource):
+        pass
+
+    stale_time = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=90)
+    data = DataStub()
+    data._last_tick_ts = stale_time
+
+    prices = {"NFO:NIFTY24062020000CE": 101.23, "NFO:NIFTY24062020000PE": 98.77}
+    strategy = _make_strategy(["CE", "PE"], prices=prices, market_data=data)
+
+    with pytest.raises(StaleMarketDataError):
+        strategy.trade_straddle(20000, quantity=50, atr=10.0)
+
+
+def test_scalper_strategy_accepts_fresh_market_data() -> None:
+    class DataStub(BaseDataSource):
+        pass
+
+    fresh_time = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=5)
+    data = DataStub()
+    data._last_tick_ts = fresh_time
+
+    prices = {"NFO:NIFTY24062020000CE": 101.23, "NFO:NIFTY24062020000PE": 98.77}
+    strategy = _make_strategy(["CE123", "PE456"], prices=prices, market_data=data)
+
+    result = strategy.trade_straddle(20000, quantity=50, atr=10.0)
+    assert result["status"] == "complete"
 
 
 def test_scalper_strategy_fetch_price_handles_tick() -> None:
