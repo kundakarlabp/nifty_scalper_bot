@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping
+from typing import Any, Callable, Dict
 from zoneinfo import ZoneInfo
 
 from config import settings
@@ -63,9 +63,6 @@ class ScalperStrategy:
     expiry_resolver: ExpiryResolver = get_weekly_expiry
     max_quote_age_seconds: float = field(
         default_factory=lambda: MAX_DATA_STALENESS_MS / 1000.0
-    )
-    _side_map: Mapping[str, str] = field(
-        default_factory=lambda: {"BUY": "SELL", "SELL": "BUY"}, init=False
     )
 
     def _extract_market_timestamp(self) -> datetime | None:
@@ -286,22 +283,31 @@ class ScalperStrategy:
 
         order_side = side.upper()
         ce_params = {
+            "exchange": "NFO",
             "symbol": ce_symbol,
+            "tradingsymbol": ce_symbol,
             "transaction_type": order_side,
             "order_type": "LIMIT",
             "quantity": int(quantity),
             "price": ce_price,
+            "product": "MIS",
         }
         pe_params = {
+            "exchange": "NFO",
             "symbol": pe_symbol,
+            "tradingsymbol": pe_symbol,
             "transaction_type": order_side,
             "order_type": "LIMIT",
             "quantity": int(quantity),
             "price": pe_price,
+            "product": "MIS",
         }
 
-        ce_order_id = self.order_manager.place_order_with_confirmation(ce_params)
-        pe_order_id = self.order_manager.place_order_with_confirmation(pe_params)
+        success = self.order_manager.place_straddle_orders(ce_params, pe_params)
+        if success:
+            logger.info("✅ Straddle orders placed successfully")
+        else:
+            logger.warning("❌ Straddle placement failed")
 
         result = {
             "expiry": expiry,
@@ -311,15 +317,9 @@ class ScalperStrategy:
             "pe_price": pe_price,
             "ce_stop_loss": ce_sl,
             "pe_stop_loss": pe_sl,
-            "ce_order_id": ce_order_id,
-            "pe_order_id": pe_order_id,
         }
 
-        ce_filled = ce_order_id is not None
-        pe_filled = pe_order_id is not None
-        close_side = self._side_map.get(order_side, "SELL")
-
-        if ce_filled and pe_filled:
+        if success:
             result["status"] = "complete"
             logger.info(
                 "Placed straddle at strike %s (CE=%s, PE=%s)",
@@ -327,26 +327,10 @@ class ScalperStrategy:
                 ce_price,
                 pe_price,
             )
-            return result
+        else:
+            result["status"] = "failed"
+            logger.error("Straddle placement failed for strike %s", strike)
 
-        if ce_filled and not pe_filled:
-            self.order_manager.square_off_position(
-                ce_symbol, side=close_side, quantity=quantity
-            )
-            logger.critical("Partial fill detected; squared off CE leg for %s", ce_symbol)
-            result["status"] = "partial_ce"
-            return result
-
-        if pe_filled and not ce_filled:
-            self.order_manager.square_off_position(
-                pe_symbol, side=close_side, quantity=quantity
-            )
-            logger.critical("Partial fill detected; squared off PE leg for %s", pe_symbol)
-            result["status"] = "partial_pe"
-            return result
-
-        logger.error("Both legs failed for strike %s; aborting straddle", strike)
-        result["status"] = "failed"
         return result
 
 
