@@ -32,6 +32,7 @@ class ScalperStrategy:
     order_manager: OrderManager
     risk_manager: RiskManager
     underlying: str = "NIFTY"
+    market_data: Any | None = None
     tick_size: float = 0.05
     price_fetcher: PriceFetcher = get_best_ask
     expiry_resolver: ExpiryResolver = get_next_thursday
@@ -62,6 +63,37 @@ class ScalperStrategy:
         if price <= 0:
             raise ValueError(f"invalid price for {symbol}: {price}")
         return price
+
+    def execute_trade(
+        self,
+        strike: int | str,
+        *,
+        quantity: int,
+        atr: float,
+        side: str = "BUY",
+    ) -> Dict[str, Any]:
+        """Execute a straddle trade after verifying market data freshness."""
+
+        # === FRESHNESS GUARD (ADD THIS) ===
+        last_tick_age = getattr(self.market_data, "last_tick_age_ms", 999999)
+        if last_tick_age > 30_000:  # 30 seconds
+            log.warning(
+                "Data stale (%d ms). Skipping trade.",
+                last_tick_age,
+            )
+            return {
+                "status": "skipped",
+                "reason": "data_stale",
+                "last_tick_age_ms": last_tick_age,
+            }
+        # === END FRESHNESS GUARD ===
+
+        return self.trade_straddle(
+            strike,
+            quantity=quantity,
+            atr=atr,
+            side=side,
+        )
 
     def trade_straddle(
         self,
