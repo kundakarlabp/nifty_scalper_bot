@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 
 log = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ StatusFetcher = Callable[[str], Mapping[str, Any] | str | None]
 CancelFunc = Callable[[str], None]
 PlaceFunc = Callable[[MutableMapping[str, Any]], Optional[str]]
 SquareOffFunc = Callable[[str, str, Optional[int]], None]
+OrdersFetcher = Callable[[], Iterable[Mapping[str, Any]]]
 
 
 class OrderManager:
@@ -27,12 +28,16 @@ class OrderManager:
         cancel_order: CancelFunc | None = None,
         square_off: SquareOffFunc | None = None,
         poll_interval: float = 1.0,
+        orders_fetcher: OrdersFetcher | None = None,
+        kite: Any | None = None,
     ) -> None:
         self._place_order = place_order
         self._status_fetcher = status_fetcher
         self._cancel_order = cancel_order
         self._square_off = square_off
         self._poll_interval = max(0.0, float(poll_interval))
+        self._orders_fetcher = orders_fetcher
+        self._kite = kite
 
     # ------------------------------------------------------------------
     def place_order_with_confirmation(
@@ -49,12 +54,13 @@ class OrderManager:
 
         if not order_id:
             return None
-        if not self._status_fetcher:
+        if not self._status_fetcher and not self._orders_fetcher and not self._kite:
             return order_id
 
         deadline = time.monotonic() + max(0.0, float(max_wait_sec))
         while time.monotonic() <= deadline:
-            status = self._get_order_status(order_id)
+            record = self._locate_order(order_id)
+            status = self._extract_status(record) if record is not None else None
             if status == "COMPLETE":
                 return order_id
             if status in {"REJECTED", "CANCELLED"}:
@@ -95,25 +101,8 @@ class OrderManager:
 
     # ------------------------------------------------------------------
     def _get_order_status(self, order_id: str) -> str | None:
-        if not self._status_fetcher:
-            return None
-        try:
-            status_raw = self._status_fetcher(order_id)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            log.error("status fetch failed for %s: %s", order_id, exc)
-            return None
-
-        if isinstance(status_raw, Mapping):
-            for key in ("status", "order_status", "state"):
-                candidate = status_raw.get(key)
-                if candidate:
-                    status_raw = candidate
-                    break
-
-        if status_raw is None:
-            return None
-        status = str(status_raw).upper()
-        return status or None
+        record = self._locate_order(order_id)
+        return self._extract_status(record)
 
     # ------------------------------------------------------------------
     def _cancel(self, order_id: str) -> None:
@@ -123,6 +112,150 @@ class OrderManager:
             self._cancel_order(order_id)
         except Exception as exc:  # pragma: no cover - defensive logging
             log.error("cancel_order failed for %s: %s", order_id, exc)
+
+    # ------------------------------------------------------------------
+    def _locate_order(self, order_id: str) -> Mapping[str, Any] | None:
+        """Return the full order record when available."""
+
+        if self._orders_fetcher is not None:
+            try:
+                for order in self._orders_fetcher() or []:
+                    if str(order.get("order_id")) == str(order_id):
+                        return order
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.error("orders_fetcher failed: %s", exc)
+
+        try:
+            record = self._kite_orders(order_id)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.error("order lookup failed for %s: %s", order_id, exc)
+        else:
+            if record:
+                return record
+
+        try:
+            record = self._status_fetcher_lookup(order_id)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.error("order lookup failed for %s: %s", order_id, exc)
+        else:
+            if record:
+                return record
+        return None
+
+    def _kite_orders(self, order_id: str) -> Mapping[str, Any] | None:
+        if not self._kite:
+            return None
+        orders_fn = getattr(self._kite, "orders", None)
+        if not callable(orders_fn):
+            return None
+        try:  # pragma: no cover - network
+            orders = orders_fn()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.error("kite.orders failed: %s", exc)
+            return None
+        for order in orders or []:
+            if str(order.get("order_id")) == str(order_id):
+                return order
+        return None
+
+    def _status_fetcher_lookup(self, order_id: str) -> Mapping[str, Any] | None:
+        if not self._status_fetcher:
+            return None
+        result = self._status_fetcher(order_id)
+        if isinstance(result, Mapping):
+            return result
+        if result is None:
+            return None
+        return {"status": result}
+
+    def _extract_status(self, record: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(record, Mapping):
+            return None
+        for key in ("status", "order_status", "state"):
+            val = record.get(key)
+            if val:
+                status = str(val).upper()
+                return status or None
+        return None
+
+    # ------------------------------------------------------------------
+    def _confirm_order(self, order_id: str, timeout: int = 15) -> Mapping[str, Any]:
+        """Poll order status and cancel if confirmation times out."""
+
+        deadline = time.monotonic() + max(timeout, 0)
+        while time.monotonic() <= deadline:
+            record = self._locate_order(order_id)
+            status = self._extract_status(record)
+            if status in {"COMPLETE", "REJECTED", "CANCELLED"}:
+                return dict(record or {"status": status})
+            time.sleep(max(self._poll_interval, 0.5))
+
+        self._cancel(order_id)
+        return {"status": "TIMEOUT", "order_id": order_id}
+
+    # ------------------------------------------------------------------
+    def place_straddle_orders(
+        self,
+        ce_params: Mapping[str, Any],
+        pe_params: Mapping[str, Any],
+        *,
+        confirm_timeout: int = 15,
+    ) -> bool:
+        """Place CE/PE legs, confirm fills, and handle partial executions."""
+
+        ce_id = self.place_order_with_confirmation(ce_params, max_wait_sec=0.0)
+        pe_id = self.place_order_with_confirmation(pe_params, max_wait_sec=0.0)
+
+        ce_info = self._confirm_order(ce_id, confirm_timeout) if ce_id else {"status": "ERROR"}
+        pe_info = self._confirm_order(pe_id, confirm_timeout) if pe_id else {"status": "ERROR"}
+
+        ce_status = self._extract_status(ce_info) or str(ce_info.get("status", "")).upper()
+        pe_status = self._extract_status(pe_info) or str(pe_info.get("status", "")).upper()
+
+        ce_complete = ce_status == "COMPLETE"
+        pe_complete = pe_status == "COMPLETE"
+        if ce_complete and pe_complete:
+            return True
+
+        ce_symbol = self._resolve_symbol(ce_params)
+        pe_symbol = self._resolve_symbol(pe_params)
+        ce_side = self._resolve_side(ce_params)
+        pe_side = self._resolve_side(pe_params)
+        qty_ce = self._resolve_quantity(ce_params)
+        qty_pe = self._resolve_quantity(pe_params)
+
+        if ce_complete and not pe_complete and ce_symbol:
+            self.square_off_position(ce_symbol, side=self._opposite_side(ce_side), quantity=qty_ce)
+            log.warning("PE leg failed; squared off CE leg for %s", ce_symbol)
+        elif pe_complete and not ce_complete and pe_symbol:
+            self.square_off_position(pe_symbol, side=self._opposite_side(pe_side), quantity=qty_pe)
+            log.warning("CE leg failed; squared off PE leg for %s", pe_symbol)
+
+        return ce_complete and pe_complete
+
+    # ------------------------------------------------------------------
+    def _resolve_symbol(self, params: Mapping[str, Any]) -> str | None:
+        for key in ("symbol", "tradingsymbol"):
+            symbol = params.get(key)
+            if symbol:
+                return str(symbol)
+        return None
+
+    def _resolve_side(self, params: Mapping[str, Any]) -> str:
+        side = params.get("transaction_type") or params.get("side") or "BUY"
+        return str(side).upper()
+
+    def _resolve_quantity(self, params: Mapping[str, Any]) -> int | None:
+        qty = params.get("quantity") or params.get("qty")
+        if qty is None:
+            return None
+        try:
+            return int(qty)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+
+    def _opposite_side(self, side: str) -> str:
+        return "SELL" if str(side).upper() == "BUY" else "BUY"
 
 
 __all__ = ["OrderManager"]

@@ -3,12 +3,40 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Mapping
+from typing import Any, Iterable, Callable, Mapping, Sequence, cast
 
 log = logging.getLogger(__name__)
 
 
 DepthFetcher = Callable[[str], Mapping[str, object]]
+
+
+class KiteDataFeed:
+    """Minimal helper for replaying Kite subscriptions on reconnects."""
+
+    def __init__(self, ticker: object, *, tokens: Sequence[int] | None = None) -> None:
+        self.ticker = ticker
+        self.tokens: list[int] = list(tokens or [])
+
+    def on_connect(self, ws: object, response: object) -> None:  # pragma: no cover - io
+        """Resubscribe tokens after websocket reconnect."""
+
+        if not self.tokens:
+            return
+        try:
+            subscribe = getattr(ws, "subscribe", None)
+            if callable(subscribe):
+                subscribe(self.tokens)
+            mode_fn = getattr(ws, "set_mode", None)
+            if callable(mode_fn):
+                mode_full = getattr(ws, "MODE_FULL", getattr(self.ticker, "MODE_FULL", "full"))
+                mode_fn(mode_full, self.tokens)
+            log.info("Resubscribed to %d tokens", len(self.tokens))
+        except Exception:  # pragma: no cover - defensive logging
+            log.warning("Resubscribe on reconnect failed", exc_info=True)
+
+    def subscribe(self, tokens: Iterable[int]) -> None:
+        self.tokens = list(tokens)
 
 
 def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
@@ -17,17 +45,20 @@ def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
     if not isinstance(payload, Mapping):
         return 0.0
     try:
-        depth = payload.get("depth") or {}
+        depth = cast(Mapping[str, object], payload.get("depth") or {})
         sell_levels = depth.get("sell") if isinstance(depth, Mapping) else None
         if isinstance(sell_levels, Mapping):
             sell_levels = list(sell_levels.values())
-        levels = list(sell_levels) if sell_levels else []
+        if isinstance(sell_levels, Iterable):
+            levels = list(sell_levels)
+        else:
+            levels = []
         if levels:
             prices: list[float] = []
             for level in levels:
                 if not isinstance(level, Mapping):
                     continue
-                price_raw = level.get("price", 0.0)
+                price_raw: Any = level.get("price", 0.0)
                 try:
                     price = float(price_raw)
                 except (TypeError, ValueError):
@@ -38,7 +69,7 @@ def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
                 return min(prices)
     except Exception:  # pragma: no cover - defensive guard
         log.debug("depth parsing failed", exc_info=True)
-    ask_raw = payload.get("ask", 0.0)
+    ask_raw: Any = payload.get("ask", 0.0)
     if isinstance(ask_raw, (int, float, str)):
         try:
             ask = float(ask_raw)
@@ -47,6 +78,37 @@ def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
     else:
         ask = 0.0
     return ask if ask > 0 else 0.0
+
+
+def _extract_tick_size(payload: Mapping[str, object] | None) -> float:
+    """Return the tick size from the quote payload."""
+
+    if not isinstance(payload, Mapping):
+        return 0.05
+    tick_raw: Any = payload.get("tick_size") or payload.get("tick") or 0.05
+    try:
+        tick = float(tick_raw)
+    except (TypeError, ValueError):
+        tick = 0.05
+    return tick if tick > 0 else 0.05
+
+
+def _extract_ltp(payload: Mapping[str, object] | None) -> float:
+    """Return the last traded price from the quote payload."""
+
+    if not isinstance(payload, Mapping):
+        return 0.0
+    for key in ("last_price", "ltp", "last_traded_price"):
+        raw: Any = payload.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
 
 
 def _default_depth_fetcher(symbol: str) -> Mapping[str, object]:  # pragma: no cover
@@ -102,9 +164,18 @@ def get_best_ask(symbol: str, *, depth_fetcher: DepthFetcher | None = None) -> f
     quote = fetcher(symbol)
     ask = _extract_best_ask(quote)
     if ask <= 0:
-        raise ValueError(f"best ask unavailable for {symbol}")
-    return ask
+        fallback = _extract_ltp(quote)
+        if fallback <= 0:
+            raise ValueError(f"best ask unavailable for {symbol}")
+        log.warning("Depth unavailable for %s, using last traded price", symbol)
+        ask = fallback
+
+    tick = _extract_tick_size(quote)
+    buffered = round(ask + tick, 2)
+    if buffered <= 0:
+        raise ValueError(f"invalid buffered ask for {symbol}")
+    return buffered
 
 
-__all__ = ["get_best_ask"]
+__all__ = ["KiteDataFeed", "get_best_ask"]
 

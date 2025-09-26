@@ -1235,6 +1235,21 @@ class AppSettings(BaseSettings):
     )
     allow_offhours_testing: bool = False
     enable_time_windows: bool = True
+    max_data_staleness_ms: int = Field(
+        30_000,
+        validation_alias=AliasChoices("MAX_DATA_STALENESS_MS"),
+        description="Maximum age in milliseconds for market data freshness checks.",
+    )
+    trade_window_start: str = Field(
+        "09:20",
+        validation_alias=AliasChoices("TRADE_WINDOW_START"),
+        description="Local time to start accepting live trades.",
+    )
+    trade_window_end: str = Field(
+        "15:20",
+        validation_alias=AliasChoices("TRADE_WINDOW_END"),
+        description="Local time to stop initiating live trades.",
+    )
     tz: str = Field(
         "Asia/Kolkata", validation_alias=AliasChoices("LOG_TZ", "TZ")
     )

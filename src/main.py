@@ -13,6 +13,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
 
+from flask import Flask
+
 _ENV_FILE_PATH: str | None = None
 _ENV_FILE_ERROR: Exception | None = None
 
@@ -112,6 +114,32 @@ except Exception as exc:
         "KiteConnect import failed: %s", exc, exc_info=True
     )
     KiteConnect = None  # type: ignore
+
+
+# -----------------------------
+# Railway health server
+# -----------------------------
+_railway_app = Flask("railway-health")
+_railway_server_started = False
+
+
+@_railway_app.route("/health")
+def _railway_health() -> tuple[str, int]:  # pragma: no cover - network
+    return "OK", 200
+
+
+def _start_railway_health_server() -> None:
+    """Expose a lightweight health endpoint for Railway probes."""
+
+    global _railway_server_started
+    if _railway_server_started:
+        return
+
+    threading.Thread(
+        target=lambda: _railway_app.run(host="0.0.0.0", port=8080),
+        daemon=True,
+    ).start()
+    _railway_server_started = True
 
 
 # -----------------------------
@@ -361,6 +389,8 @@ def main() -> int:
         telegram_controller=_NoopTelegram(),
         strategy_cfg_path=cfg_path,
     )
+
+    _start_railway_health_server()
 
     threading.Thread(
         target=health.run,

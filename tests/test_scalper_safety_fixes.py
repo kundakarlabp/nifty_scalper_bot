@@ -1,31 +1,49 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any, Dict, Iterable, Iterator, Mapping, List
 from types import SimpleNamespace
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping
 
 import pytest
 import pandas as pd
 
+from src.config import settings
 from src.data.broker_source import BrokerDataSource
 from src.data.base_source import BaseDataSource
 from src.data.market_data import get_best_ask
 from src.data.types import HistResult, HistStatus
-from src.execution.order_manager import OrderManager
 from src.features.health import check
 from src.features.range import range_score
 from src.features.indicators import atr_pct
-from src.risk.risk_manager import RiskManager
+from src.options.instruments_cache import (
+    InstrumentsCache,
+    nearest_weekly_expiry,
+    _safe_int,
+)
+from src.execution.order_manager import OrderManager
 from src.risk.risk_gates import AccountState, evaluate as evaluate_gates
+from src.risk.risk_manager import RiskManager
+import src.strategies.scalper as scalper_module
 from src.strategies.scalper import ScalperStrategy, StaleMarketDataError
-from src.utils.helpers import get_next_thursday
-from src.options.instruments_cache import InstrumentsCache, nearest_weekly_expiry, _safe_int
+from src.utils.helpers import get_next_thursday, get_weekly_expiry
 
 
-def test_get_next_thursday_rolls_forward_from_thursday() -> None:
-    thursday = dt.datetime(2024, 6, 6)
-    expected = dt.datetime(2024, 6, 13).strftime("%y%m%d")
-    assert get_next_thursday(thursday) == expected
+@pytest.fixture(autouse=True)
+def _allow_offhours(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "allow_offhours_testing", True)
+    monkeypatch.setattr(settings, "trade_window_start", "00:00")
+    monkeypatch.setattr(settings, "trade_window_end", "23:59")
+    monkeypatch.setattr(settings, "max_data_staleness_ms", 30_000)
+
+
+def test_get_weekly_expiry_same_day_before_cutoff() -> None:
+    now = dt.datetime(2024, 6, 6, 10, 0)
+    assert get_weekly_expiry(now=now) == "240606"
+
+
+def test_get_weekly_expiry_rolls_forward_after_cutoff() -> None:
+    now = dt.datetime(2024, 6, 6, 16, 0)
+    assert get_weekly_expiry(now=now) == "240613"
 
 
 def test_get_next_thursday_rolls_from_weekend() -> None:
@@ -42,7 +60,7 @@ def test_get_best_ask_prefers_depth() -> None:
             "depth": {"sell": [{"price": 99.5, "quantity": 50}]},
         }
 
-    assert get_best_ask("NFO:NIFTY24", depth_fetcher=fetcher) == pytest.approx(99.5)
+    assert get_best_ask("NFO:NIFTY24", depth_fetcher=fetcher) == pytest.approx(99.55)
 
 
 def test_get_best_ask_falls_back_to_ask() -> None:
@@ -52,7 +70,7 @@ def test_get_best_ask_falls_back_to_ask() -> None:
     }
 
     assert get_best_ask("NFO:BANKNIFTY", depth_fetcher=lambda _: payload) == pytest.approx(
-        102.5
+        102.55
     )
 
 
@@ -77,7 +95,7 @@ def test_get_best_ask_handles_mapping_sell_levels() -> None:
     }
 
     ask = get_best_ask("NFO:NIFTYX", depth_fetcher=lambda _: payload)
-    assert ask == pytest.approx(101.5)
+    assert ask == pytest.approx(101.55)
 
 
 def test_get_best_ask_handles_invalid_ask_type() -> None:
@@ -88,6 +106,12 @@ def test_get_best_ask_handles_invalid_ask_type() -> None:
 def test_get_best_ask_handles_non_numeric_string() -> None:
     with pytest.raises(ValueError):
         get_best_ask("NFO:BADASK2", depth_fetcher=lambda _s: {"ask": "oops"})
+
+
+def test_get_best_ask_falls_back_to_ltp_when_depth_missing() -> None:
+    payload = {"last_price": 210.5, "tick_size": 0.05}
+    price = get_best_ask("NFO:NIFTY", depth_fetcher=lambda _s: payload)
+    assert price == pytest.approx(210.55)
 
 
 def test_order_manager_confirmation_success() -> None:
@@ -200,6 +224,56 @@ def test_order_manager_square_off_uses_callback_when_available() -> None:
     assert calls == [("NIFTY24PE", "SELL", None)]
 
 
+def test_order_manager_place_straddle_handles_partial_fill(monkeypatch: pytest.MonkeyPatch) -> None:
+    order_ids = iter(["CE1", "PE1"])
+    square_calls: list[tuple[str, str, int | None]] = []
+
+    def place(_: MutableMapping[str, Any]) -> str:
+        return next(order_ids)
+
+    manager = OrderManager(
+        place,
+        poll_interval=0.0,
+        square_off=lambda symbol, side, qty: square_calls.append((symbol, side, qty)),
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_confirm_order",
+        lambda oid, timeout=15: {"status": "COMPLETE" if oid == "CE1" else "REJECTED", "order_id": oid},
+    )
+
+    ok = manager.place_straddle_orders(
+        {"symbol": "NIFTYCE", "transaction_type": "BUY", "quantity": 25},
+        {"symbol": "NIFTYPE", "transaction_type": "BUY", "quantity": 25},
+    )
+
+    assert not ok
+    assert square_calls == [("NIFTYCE", "SELL", 25)]
+
+
+def test_order_manager_place_straddle_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    order_ids = iter(["CE2", "PE2"])
+
+    def place(_: MutableMapping[str, Any]) -> str:
+        return next(order_ids)
+
+    manager = OrderManager(place, poll_interval=0.0)
+
+    monkeypatch.setattr(
+        manager,
+        "_confirm_order",
+        lambda oid, timeout=15: {"status": "COMPLETE", "order_id": oid},
+    )
+
+    ok = manager.place_straddle_orders(
+        {"symbol": "NIFTYCE", "transaction_type": "BUY", "quantity": 25},
+        {"symbol": "NIFTYPE", "transaction_type": "BUY", "quantity": 25},
+    )
+
+    assert ok
+
+
 def test_order_manager_square_off_requires_symbol() -> None:
     manager = OrderManager(lambda payload: "OK", poll_interval=0.0)
     with pytest.raises(ValueError):
@@ -299,6 +373,20 @@ def test_execute_trade_skips_when_market_data_stale() -> None:
         "last_tick_age_ms": 45_000,
     }
     assert strategy.order_manager.orders == []  # type: ignore[attr-defined]
+
+
+def test_execute_trade_skips_outside_market_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    prices = {
+        "NFO:NIFTY24062020000CE": 101.23,
+        "NFO:NIFTY24062020000PE": 98.77,
+    }
+    strategy = _make_strategy(["CE", "PE"], prices=prices)
+    monkeypatch.setattr(settings, "allow_offhours_testing", False)
+    monkeypatch.setattr(scalper_module, "_is_market_hours", lambda now=None: False)
+
+    result = strategy.execute_trade(20000, quantity=50, atr=10.0, side="BUY")
+
+    assert result == {"status": "skipped", "reason": "off_hours"}
 
 
 def test_execute_trade_delegates_when_market_data_fresh() -> None:

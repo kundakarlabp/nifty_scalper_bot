@@ -2,21 +2,53 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping
+from zoneinfo import ZoneInfo
 
+from src.config import settings
 from src.data.market_data import get_best_ask
 from src.execution.order_manager import OrderManager
 from src.risk.risk_manager import RiskManager
-from src.utils.helpers import get_next_thursday
+from src.utils.helpers import get_weekly_expiry
 
 log = logging.getLogger(__name__)
 
 
 PriceFetcher = Callable[[str], float]
 ExpiryResolver = Callable[[], str]
+
+
+def _parse_trade_time(label: str) -> time:
+    """Return a :class:`datetime.time` parsed from ``label`` with fallbacks."""
+
+    try:
+        return time.fromisoformat(label)
+    except ValueError:  # pragma: no cover - defensive guard
+        hours, minutes = label.split(":", 1)
+        return time(int(hours), int(minutes))
+
+
+def _is_market_hours(now: datetime | None = None) -> bool:
+    """Return ``True`` when trading is allowed for the configured window."""
+
+    if getattr(settings, "allow_offhours_testing", False):
+        return True
+
+    tz_name = getattr(settings, "tz", "Asia/Kolkata")
+    tzinfo = ZoneInfo(tz_name)
+    current = (now or datetime.now(tz=tzinfo)).astimezone(tzinfo)
+    if current.weekday() >= 5:
+        return False
+
+    start_label = getattr(settings, "trade_window_start", "09:15")
+    end_label = getattr(settings, "trade_window_end", "15:30")
+    start = _parse_trade_time(str(start_label))
+    end = _parse_trade_time(str(end_label))
+    now_time = current.time()
+    return start <= now_time <= end
 
 
 class StaleMarketDataError(RuntimeError):
@@ -40,8 +72,7 @@ class ScalperStrategy:
     market_data: Any | None = None
     tick_size: float = 0.05
     price_fetcher: PriceFetcher = get_best_ask
-    expiry_resolver: ExpiryResolver = get_next_thursday
-    market_data: Any | None = None
+    expiry_resolver: ExpiryResolver = get_weekly_expiry
     max_quote_age_seconds: float = 30.0
     _side_map: Mapping[str, str] = field(
         default_factory=lambda: {"BUY": "SELL", "SELL": "BUY"}, init=False
@@ -159,9 +190,16 @@ class ScalperStrategy:
     ) -> Dict[str, Any]:
         """Execute a straddle trade after verifying market data freshness."""
 
-        # === FRESHNESS GUARD (ADD THIS) ===
-        last_tick_age = getattr(self.market_data, "last_tick_age_ms", 999999)
-        if last_tick_age > 30_000:  # 30 seconds
+        if not _is_market_hours():
+            log.info("Outside market hours. Skipping trade.")
+            return {
+                "status": "skipped",
+                "reason": "off_hours",
+            }
+
+        max_age_ms = int(getattr(settings, "max_data_staleness_ms", 30_000))
+        last_tick_age = getattr(self.market_data, "last_tick_age_ms", 999_999)
+        if last_tick_age > max_age_ms:  # 30 seconds default
             log.warning(
                 "Data stale (%d ms). Skipping trade.",
                 last_tick_age,
@@ -171,7 +209,6 @@ class ScalperStrategy:
                 "reason": "data_stale",
                 "last_tick_age_ms": last_tick_age,
             }
-        # === END FRESHNESS GUARD ===
 
         return self.trade_straddle(
             strike,
