@@ -1,5 +1,4 @@
 """Simplified scalper orchestration with confirmation and risk guards."""
-
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
@@ -14,41 +13,34 @@ from src.execution.order_manager import OrderManager
 from src.risk.risk_manager import RiskManager
 from src.utils.helpers import get_weekly_expiry
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+
+IST = ZoneInfo("Asia/Kolkata")
+_DEFAULT_STALENESS_MS = 30_000
+MAX_DATA_STALENESS_MS = int(
+    getattr(
+        settings,
+        "MAX_DATA_STALENESS_MS",
+        getattr(settings, "max_data_staleness_ms", _DEFAULT_STALENESS_MS),
+    )
+)
 
 
 PriceFetcher = Callable[[str], float]
 ExpiryResolver = Callable[[], str]
 
 
-def _parse_trade_time(label: str) -> time:
-    """Return a :class:`datetime.time` parsed from ``label`` with fallbacks."""
-
-    try:
-        return time.fromisoformat(label)
-    except ValueError:  # pragma: no cover - defensive guard
-        hours, minutes = label.split(":", 1)
-        return time(int(hours), int(minutes))
-
-
 def _is_market_hours(now: datetime | None = None) -> bool:
-    """Return ``True`` when trading is allowed for the configured window."""
+    """Return ``True`` when trading is allowed for the NSE cash window."""
 
     if getattr(settings, "allow_offhours_testing", False):
         return True
 
-    tz_name = getattr(settings, "tz", "Asia/Kolkata")
-    tzinfo = ZoneInfo(tz_name)
-    current = (now or datetime.now(tz=tzinfo)).astimezone(tzinfo)
+    current = (now or datetime.now(IST)).astimezone(IST)
     if current.weekday() >= 5:
         return False
 
-    start_label = getattr(settings, "trade_window_start", "09:15")
-    end_label = getattr(settings, "trade_window_end", "15:30")
-    start = _parse_trade_time(str(start_label))
-    end = _parse_trade_time(str(end_label))
-    now_time = current.time()
-    return start <= now_time <= end
+    return time(9, 15) <= current.time() <= time(15, 25)
 
 
 class StaleMarketDataError(RuntimeError):
@@ -147,7 +139,7 @@ class ScalperStrategy:
         if age < 0:
             return
         if age > threshold:
-            log.warning(
+            logger.warning(
                 "Rejecting straddle trade: market data stale (age=%.1fs, limit=%.1fs)",
                 age,
                 threshold,
@@ -191,23 +183,26 @@ class ScalperStrategy:
         """Execute a straddle trade after verifying market data freshness."""
 
         if not _is_market_hours():
-            log.info("Outside market hours. Skipping trade.")
+            logger.info("Outside market hours. Skipping trade.")
             return {
                 "status": "skipped",
                 "reason": "off_hours",
             }
 
-        max_age_ms = int(getattr(settings, "max_data_staleness_ms", 30_000))
-        last_tick_age = getattr(self.market_data, "last_tick_age_ms", 999_999)
-        if last_tick_age > max_age_ms:  # 30 seconds default
-            log.warning(
-                "Data stale (%d ms). Skipping trade.",
-                last_tick_age,
+        max_age_ms = MAX_DATA_STALENESS_MS
+        age_ms = None
+        if self.market_data is not None:
+            age_ms = getattr(self.market_data, "last_tick_age_ms", None)
+
+        if age_ms is None or age_ms > max_age_ms:
+            logger.warning(
+                "Data stale (%s ms). Skipping trade.",
+                age_ms,
             )
             return {
                 "status": "skipped",
                 "reason": "data_stale",
-                "last_tick_age_ms": last_tick_age,
+                "last_tick_age_ms": age_ms,
             }
 
         return self.trade_straddle(
@@ -278,7 +273,7 @@ class ScalperStrategy:
 
         if ce_filled and pe_filled:
             result["status"] = "complete"
-            log.info(
+            logger.info(
                 "Placed straddle at strike %s (CE=%s, PE=%s)",
                 strike,
                 ce_price,
@@ -290,7 +285,7 @@ class ScalperStrategy:
             self.order_manager.square_off_position(
                 ce_symbol, side=close_side, quantity=quantity
             )
-            log.critical("Partial fill detected; squared off CE leg for %s", ce_symbol)
+            logger.critical("Partial fill detected; squared off CE leg for %s", ce_symbol)
             result["status"] = "partial_ce"
             return result
 
@@ -298,11 +293,11 @@ class ScalperStrategy:
             self.order_manager.square_off_position(
                 pe_symbol, side=close_side, quantity=quantity
             )
-            log.critical("Partial fill detected; squared off PE leg for %s", pe_symbol)
+            logger.critical("Partial fill detected; squared off PE leg for %s", pe_symbol)
             result["status"] = "partial_pe"
             return result
 
-        log.error("Both legs failed for strike %s; aborting straddle", strike)
+        logger.error("Both legs failed for strike %s; aborting straddle", strike)
         result["status"] = "failed"
         return result
 
