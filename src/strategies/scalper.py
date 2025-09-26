@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timezone
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict
 from zoneinfo import ZoneInfo
@@ -24,6 +25,83 @@ MAX_DATA_STALENESS_MS = int(
 
 PriceFetcher = Callable[[str], float]
 ExpiryResolver = Callable[[], str]
+
+
+def _available_cash_equity(kite: Any) -> float:
+    """Return a conservative estimate of available cash for NFO trades."""
+
+    try:
+        margins = kite.margins("equity")
+        available = margins.get("available", {}) or {}
+        cash = float(available.get("cash") or 0.0)
+        adhoc = float(available.get("adhoc_margin") or 0.0)
+        live_balance = float(available.get("live_balance") or 0.0)
+        total = cash + adhoc
+        return total if total > 0 else live_balance
+    except Exception as exc:  # pragma: no cover - network defensive guard
+        logger.warning("margin_fetch_failed: %r", exc)
+        return 0.0
+
+
+def _straddle_required_margin_per_lot(
+    kite: Any, ce_symbol: str, pe_symbol: str, lot_size: int
+) -> float:
+    """Ask the broker for the margin impact of a single short straddle."""
+
+    legs = [
+        {
+            "exchange": "NFO",
+            "tradingsymbol": ce_symbol,
+            "transaction_type": "SELL",
+            "variety": "regular",
+            "product": "NRML",
+            "order_type": "MARKET",
+            "quantity": lot_size,
+        },
+        {
+            "exchange": "NFO",
+            "tradingsymbol": pe_symbol,
+            "transaction_type": "SELL",
+            "variety": "regular",
+            "product": "NRML",
+            "order_type": "MARKET",
+            "quantity": lot_size,
+        },
+    ]
+
+    try:  # pragma: no cover - network defensive guard
+        if hasattr(kite, "order_margins"):
+            response = kite.order_margins(legs)
+        else:
+            response = kite.basket_order_margins(legs, mode="compact")
+
+        if isinstance(response, dict):
+            aggregate = (
+                response.get("total")
+                or response.get("initial_margin")
+                or response.get("final")
+                or response.get("net")
+            )
+            if aggregate:
+                return float(aggregate)
+            orders = response.get("orders") or []
+        else:
+            orders = response or []
+
+        required = 0.0
+        for order in orders:
+            required += float(
+                order.get("total")
+                or order.get("required_margin")
+                or order.get("initial_margin")
+                or order.get("final")
+                or order.get("net")
+                or 0.0
+            )
+        return required
+    except Exception as exc:  # pragma: no cover - network defensive guard
+        logger.warning("basket_margin_failed: %r", exc)
+        return 120_000.0
 
 
 def _is_market_hours(now: datetime | None = None) -> bool:
@@ -269,11 +347,44 @@ class ScalperStrategy:
 
         if quantity <= 0:
             raise ValueError("quantity must be positive")
+        qty = int(quantity)
         self._ensure_market_data_fresh()
         meta = self.build_option_symbols(strike)
         ce_symbol = meta["ce"]
         pe_symbol = meta["pe"]
         expiry = meta["expiry"]
+
+        kite_client = getattr(self.order_manager, "kite", None)
+        if kite_client is not None:
+            lot_size_default = int(getattr(settings, "LOT_SIZE_DEFAULT", 75) or 75)
+            lot_size = max(lot_size_default, 1)
+            per_lot_margin = _straddle_required_margin_per_lot(
+                kite_client, ce_symbol, pe_symbol, lot_size
+            )
+            available_margin = _available_cash_equity(kite_client)
+            lots_required = max(1, math.ceil(qty / lot_size))
+            required_margin = per_lot_margin * lots_required
+            if available_margin < required_margin:
+                logger.warning(
+                    (
+                        "Insufficient margin for straddle: need ₹%.0f, have ₹%.0f "
+                        "(per_lot=₹%.0f, lots=%d)."
+                    ),
+                    required_margin,
+                    available_margin,
+                    per_lot_margin,
+                    lots_required,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "insufficient_margin",
+                    "required_margin": required_margin,
+                    "available_margin": available_margin,
+                    "per_lot_margin": per_lot_margin,
+                    "lots": lots_required,
+                    "ce_symbol": ce_symbol,
+                    "pe_symbol": pe_symbol,
+                }
 
         ce_price = self._fetch_price(ce_symbol, order_side=side)
         pe_price = self._fetch_price(pe_symbol, order_side=side)
@@ -288,7 +399,7 @@ class ScalperStrategy:
             "tradingsymbol": ce_symbol,
             "transaction_type": order_side,
             "order_type": "LIMIT",
-            "quantity": int(quantity),
+            "quantity": qty,
             "price": ce_price,
             "product": "MIS",
         }
@@ -298,7 +409,7 @@ class ScalperStrategy:
             "tradingsymbol": pe_symbol,
             "transaction_type": order_side,
             "order_type": "LIMIT",
-            "quantity": int(quantity),
+            "quantity": qty,
             "price": pe_price,
             "product": "MIS",
         }
