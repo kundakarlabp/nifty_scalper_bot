@@ -1,19 +1,38 @@
 # Path: src/main.py
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
-import os
 import signal
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
+
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class _Health(BaseHTTPRequestHandler):
+    """Serve a minimal health endpoint for Railway probes."""
+
+    def do_GET(self) -> None:  # pragma: no cover - network
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - noise
+        """Suppress default stderr logging from ``BaseHTTPRequestHandler``."""
+
+        return
+
 
 _ENV_FILE_PATH: str | None = None
 _ENV_FILE_ERROR: Exception | None = None
@@ -116,48 +135,14 @@ except Exception as exc:
     KiteConnect = None  # type: ignore
 
 
-class _RailwayHealthHandler(BaseHTTPRequestHandler):
-    """Serve a minimal health endpoint for Railway probes."""
+def _start_health() -> None:
+    """Expose a lightweight health endpoint for external probes."""
 
-    def do_GET(self) -> None:  # pragma: no cover - network
-        if self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - noise
-        """Suppress default stderr logging from ``BaseHTTPRequestHandler``."""
-
-        return
+    port = int(os.environ.get("PORT", "8080"))
+    HTTPServer(("0.0.0.0", port), _Health).serve_forever()
 
 
-_railway_server_started = False
-
-
-def _start_railway_health_server() -> None:
-    """Expose a lightweight health endpoint for Railway probes."""
-
-    global _railway_server_started
-    if _railway_server_started:
-        return
-
-    def _serve() -> None:
-        port = int(os.environ.get("PORT", "8080"))
-        server = HTTPServer(("0.0.0.0", port), _RailwayHealthHandler)
-        try:
-            server.serve_forever()
-        except Exception:
-            logging.getLogger("main").exception("Railway health server crashed")
-        finally:
-            with contextlib.suppress(Exception):
-                server.server_close()
-
-    threading.Thread(target=_serve, daemon=True).start()
-    _railway_server_started = True
-
+threading.Thread(target=_start_health, daemon=True).start()
 
 # -----------------------------
 # No-op Telegram fallback
@@ -406,8 +391,6 @@ def main() -> int:
         telegram_controller=_NoopTelegram(),
         strategy_cfg_path=cfg_path,
     )
-
-    _start_railway_health_server()
 
     threading.Thread(
         target=health.run,
