@@ -239,18 +239,61 @@ class OrderManager:
                 status = self._extract_status(record)
                 if status in FINAL_STATES:
                     last.setdefault("status", status)
-                    return last
+                    return self._finalise_order_record(order_id, last)
 
             time.sleep(poll_interval)
 
         status = self._extract_status(last)
         if status and status not in OPENISH_STATES:
             last.setdefault("status", status)
-            return last
+            return self._finalise_order_record(order_id, last)
 
         self._cancel_with_variety(order_id, last)
         last.setdefault("status", "TIMEOUT")
-        return last
+        return self._finalise_order_record(order_id, last)
+
+    # ------------------------------------------------------------------
+    def _finalise_order_record(
+        self, order_id: str, snapshot: Mapping[str, Any] | None
+    ) -> Mapping[str, Any]:
+        """Merge snapshot with order history and log explicit outcomes."""
+
+        merged: Dict[str, Any] = dict(snapshot or {})
+        merged.setdefault("order_id", order_id)
+
+        history_entry: Dict[str, Any] | None = None
+        history_fn = getattr(self._kite, "order_history", None) if self._kite else None
+        if callable(history_fn):
+            try:  # pragma: no cover - network defensive guard
+                history = history_fn(order_id) or []
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.warning("order_history failed for %s: %s", order_id, exc)
+            else:
+                if history:
+                    history_entry = dict(history[-1])
+
+        if history_entry:
+            merged.update(history_entry)
+            merged.setdefault("order_id", order_id)
+
+        status = str(merged.get("status") or "").upper()
+        if status == "REJECTED":
+            reason = (
+                history_entry.get("rejection_reason")
+                if history_entry
+                else merged.get("rejection_reason")
+            ) or merged.get("message") or "unknown"
+            log.error("Order REJECTED id=%s reason=%s", order_id, reason)
+        elif status == "CANCELLED":
+            log.warning("Order CANCELLED id=%s", order_id)
+        elif status == "COMPLETE":
+            log.info(
+                "Order COMPLETE id=%s avg_price=%s",
+                order_id,
+                merged.get("average_price"),
+            )
+
+        return merged or {"order_id": order_id, "status": "UNKNOWN"}
 
     # ------------------------------------------------------------------
     def place_straddle_orders(
