@@ -1,6 +1,7 @@
 # Path: src/main.py
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -8,12 +9,11 @@ import signal
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, cast
-
-from flask import Flask
 
 _ENV_FILE_PATH: str | None = None
 _ENV_FILE_ERROR: Exception | None = None
@@ -116,16 +116,25 @@ except Exception as exc:
     KiteConnect = None  # type: ignore
 
 
-# -----------------------------
-# Railway health server
-# -----------------------------
-_railway_app = Flask("railway-health")
+class _RailwayHealthHandler(BaseHTTPRequestHandler):
+    """Serve a minimal health endpoint for Railway probes."""
+
+    def do_GET(self) -> None:  # pragma: no cover - network
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - noise
+        """Suppress default stderr logging from ``BaseHTTPRequestHandler``."""
+
+        return
+
+
 _railway_server_started = False
-
-
-@_railway_app.route("/health")
-def _railway_health() -> tuple[str, int]:  # pragma: no cover - network
-    return "OK", 200
 
 
 def _start_railway_health_server() -> None:
@@ -135,10 +144,18 @@ def _start_railway_health_server() -> None:
     if _railway_server_started:
         return
 
-    threading.Thread(
-        target=lambda: _railway_app.run(host="0.0.0.0", port=8080),
-        daemon=True,
-    ).start()
+    def _serve() -> None:
+        port = int(os.environ.get("PORT", "8080"))
+        server = HTTPServer(("0.0.0.0", port), _RailwayHealthHandler)
+        try:
+            server.serve_forever()
+        except Exception:
+            logging.getLogger("main").exception("Railway health server crashed")
+        finally:
+            with contextlib.suppress(Exception):
+                server.server_close()
+
+    threading.Thread(target=_serve, daemon=True).start()
     _railway_server_started = True
 
 
