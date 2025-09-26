@@ -86,6 +86,61 @@ def _extract_best_ask(payload: Mapping[str, object] | None) -> float:
     return ask if ask > 0 else 0.0
 
 
+def _diagnose_ask_fallback_reason(payload: Mapping[str, object] | None) -> str:
+    """Return a human readable reason describing why the best ask was missing."""
+
+    if not isinstance(payload, Mapping):
+        return "quote_invalid"
+
+    reasons: list[str] = []
+    depth = payload.get("depth")
+    if not isinstance(depth, Mapping):
+        reasons.append("depth_missing")
+    else:
+        sell_levels = depth.get("sell")
+        if sell_levels is None:
+            reasons.append("sell_missing")
+        else:
+            if isinstance(sell_levels, Mapping):
+                iterable = list(sell_levels.values())
+            else:
+                iterable = sell_levels
+            if not isinstance(iterable, Iterable):
+                reasons.append("sell_invalid")
+            else:
+                levels = [level for level in iterable if isinstance(level, Mapping)]
+                if not levels:
+                    reasons.append("sell_empty")
+                else:
+                    positive_prices = []
+                    for level in levels:
+                        price_raw = level.get("price")
+                        try:
+                            price = float(cast(Any, price_raw))
+                        except (TypeError, ValueError):
+                            continue
+                        if price > 0:
+                            positive_prices.append(price)
+                    if not positive_prices:
+                        reasons.append("sell_prices_non_positive")
+
+    ask_raw = payload.get("ask")
+    if ask_raw is None:
+        reasons.append("ask_missing")
+    else:
+        try:
+            ask = float(cast(Any, ask_raw))
+        except (TypeError, ValueError):
+            reasons.append("ask_invalid")
+        else:
+            if ask <= 0:
+                reasons.append("ask_non_positive")
+
+    if not reasons:
+        return "unknown"
+    return ",".join(reasons)
+
+
 def _extract_tick_size(payload: Mapping[str, object] | None) -> float:
     """Return the tick size from the quote payload."""
 
@@ -171,9 +226,17 @@ def get_best_ask(symbol: str, *, depth_fetcher: DepthFetcher | None = None) -> f
     ask = _extract_best_ask(quote)
     if ask <= 0:
         fallback = _extract_ltp(quote)
+        reason = _diagnose_ask_fallback_reason(quote)
         if fallback <= 0:
-            raise ValueError(f"best ask unavailable for {symbol}")
-        logger.warning("Depth unavailable for %s, using last traded price", symbol)
+            raise ValueError(
+                f"best ask unavailable for {symbol} (reason={reason})"
+            )
+        logger.warning(
+            "Depth unavailable for %s, using last traded price %.2f (reason=%s)",
+            symbol,
+            fallback,
+            reason,
+        )
         ask = fallback
 
     tick = _extract_tick_size(quote)

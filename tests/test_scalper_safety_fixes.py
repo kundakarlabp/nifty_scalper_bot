@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping
 
@@ -75,13 +76,15 @@ def test_get_best_ask_falls_back_to_ask() -> None:
 
 
 def test_get_best_ask_raises_when_missing() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         get_best_ask("NFO:FOO", depth_fetcher=lambda _s: {})
+    assert "depth_missing" in str(exc.value)
 
 
 def test_get_best_ask_rejects_non_mapping_payload() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         get_best_ask("NFO:FOO", depth_fetcher=lambda _s: None)
+    assert "quote_invalid" in str(exc.value)
 
 
 def test_get_best_ask_requires_symbol() -> None:
@@ -99,19 +102,35 @@ def test_get_best_ask_handles_mapping_sell_levels() -> None:
 
 
 def test_get_best_ask_handles_invalid_ask_type() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         get_best_ask("NFO:BADASK", depth_fetcher=lambda _s: {"ask": object()})
+    assert "ask_invalid" in str(exc.value)
 
 
 def test_get_best_ask_handles_non_numeric_string() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         get_best_ask("NFO:BADASK2", depth_fetcher=lambda _s: {"ask": "oops"})
+    assert "ask_invalid" in str(exc.value)
 
 
 def test_get_best_ask_falls_back_to_ltp_when_depth_missing() -> None:
     payload = {"last_price": 210.5, "tick_size": 0.05}
     price = get_best_ask("NFO:NIFTY", depth_fetcher=lambda _s: payload)
     assert price == pytest.approx(210.55)
+
+
+def test_get_best_ask_logs_fallback_reason(caplog: pytest.LogCaptureFixture) -> None:
+    payload = {
+        "last_price": 150.25,
+        "depth": {"sell": []},
+        "tick_size": 0.05,
+    }
+
+    with caplog.at_level(logging.WARNING):
+        price = get_best_ask("NFO:NIFTY24", depth_fetcher=lambda _s: payload)
+
+    assert price == pytest.approx(150.3)
+    assert any("sell_empty" in record.message for record in caplog.records)
 
 
 def test_order_manager_confirmation_success() -> None:
