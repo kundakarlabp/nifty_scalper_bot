@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Any, Dict, Iterable, Iterator, Mapping, List
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
@@ -280,6 +281,39 @@ def test_scalper_strategy_partial_fill_ce_squares_off() -> None:
     assert manager.square_off_calls == [
         {"symbol": "NIFTY24062020000CE", "side": "SELL", "quantity": 50}
     ]
+
+
+def test_execute_trade_skips_when_market_data_stale() -> None:
+    prices = {
+        "NFO:NIFTY24062020000CE": 101.23,
+        "NFO:NIFTY24062020000PE": 98.77,
+    }
+    strategy = _make_strategy(["CE123", "PE456"], prices=prices)
+    strategy.market_data = SimpleNamespace(last_tick_age_ms=45_000)
+
+    result = strategy.execute_trade(20000, quantity=50, atr=10.0, side="BUY")
+
+    assert result == {
+        "status": "skipped",
+        "reason": "data_stale",
+        "last_tick_age_ms": 45_000,
+    }
+    assert strategy.order_manager.orders == []  # type: ignore[attr-defined]
+
+
+def test_execute_trade_delegates_when_market_data_fresh() -> None:
+    prices = {
+        "NFO:NIFTY24062020000CE": 101.23,
+        "NFO:NIFTY24062020000PE": 98.77,
+    }
+    strategy = _make_strategy(["CE321", "PE654"], prices=prices)
+    strategy.market_data = SimpleNamespace(last_tick_age_ms=500)
+
+    result = strategy.execute_trade(20000, quantity=50, atr=10.0, side="BUY")
+
+    assert result["status"] == "complete"
+    assert result["ce_order_id"] == "CE321"
+    assert result["pe_order_id"] == "PE654"
 
 
 def test_scalper_strategy_partial_fill_pe_squares_off() -> None:
