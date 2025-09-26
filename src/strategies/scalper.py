@@ -65,7 +65,9 @@ class ScalperStrategy:
     tick_size: float = 0.05
     price_fetcher: PriceFetcher = get_best_ask
     expiry_resolver: ExpiryResolver = get_weekly_expiry
-    max_quote_age_seconds: float = 30.0
+    max_quote_age_seconds: float = field(
+        default_factory=lambda: MAX_DATA_STALENESS_MS / 1000.0
+    )
     _side_map: Mapping[str, str] = field(
         default_factory=lambda: {"BUY": "SELL", "SELL": "BUY"}, init=False
     )
@@ -199,6 +201,27 @@ class ScalperStrategy:
             raise ValueError(f"invalid price for {symbol}: {price}")
         return price
 
+    def _market_data_age_ms(self) -> float | None:
+        """Return the reported ``last_tick_age_ms`` if available."""
+
+        if self.market_data is None:
+            return None
+
+        age = getattr(self.market_data, "last_tick_age_ms", None)
+        if callable(age):
+            try:
+                age = age()
+            except TypeError:  # pragma: no cover - defensive guard
+                return None
+
+        if age is None:
+            return None
+
+        try:
+            return float(age)
+        except (TypeError, ValueError):  # pragma: no cover - defensive guard
+            return None
+
     def execute_trade(
         self,
         strike: int | str,
@@ -217,9 +240,7 @@ class ScalperStrategy:
             }
 
         max_age_ms = MAX_DATA_STALENESS_MS
-        age_ms = None
-        if self.market_data is not None:
-            age_ms = getattr(self.market_data, "last_tick_age_ms", None)
+        age_ms = self._market_data_age_ms()
 
         if age_ms is None or age_ms > max_age_ms:
             logger.warning(
