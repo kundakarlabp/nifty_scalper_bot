@@ -42,6 +42,9 @@ class OrderManager:
         self._poll_interval = max(0.0, float(poll_interval))
         self._orders_fetcher = orders_fetcher
         self._kite = kite
+        # ``self.kite`` mirrors ``self._kite`` to match older integrations
+        # that accessed the broker handle directly on :class:`OrderManager`.
+        self.kite = kite
 
     # ------------------------------------------------------------------
     def place_order_with_confirmation(
@@ -212,24 +215,33 @@ class OrderManager:
                 log.error("cancel_order failed for %s: %s", order_id, exc)
 
     # ------------------------------------------------------------------
-    def _confirm_order(self, order_id: str, timeout: int = 15) -> Mapping[str, Any]:
-        """Poll Kite order status until completion or timeout."""
+    def _confirm_order(
+        self, order_id: str | None, timeout: int = 15
+    ) -> Mapping[str, Any]:
+        """Poll order status until completion or timeout then cancel."""
 
-        deadline = time.time() + max(timeout, 0)
+        if not order_id:
+            return {"order_id": order_id, "status": "ERROR"}
+
+        deadline = time.monotonic() + max(timeout, 0)
+        poll_interval = max(self._poll_interval, 0.5)
         last: Dict[str, Any] = {"order_id": order_id}
-        while time.time() < deadline:
+
+        while time.monotonic() < deadline:
             try:
                 record = self._locate_order(order_id)
             except Exception as exc:  # pragma: no cover - defensive logging
-                log.error("order_poll_failed: %s", exc)
+                log.error("order status check failed: %s", exc)
                 record = None
 
             if record:
                 last = dict(record)
                 status = self._extract_status(record)
                 if status in FINAL_STATES:
+                    last.setdefault("status", status)
                     return last
-            time.sleep(max(self._poll_interval, 0.5))
+
+            time.sleep(poll_interval)
 
         status = self._extract_status(last)
         if status and status not in OPENISH_STATES:
