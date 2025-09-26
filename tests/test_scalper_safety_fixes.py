@@ -300,17 +300,17 @@ def test_order_manager_square_off_requires_symbol() -> None:
 
 
 class DummyOrderManager:
-    def __init__(self, results: Iterable[str | None], *, square_off_ok: bool = True) -> None:
+    def __init__(self, results: Iterable[bool], *, square_off_ok: bool = True) -> None:
         self._results = iter(results)
         self.orders: list[Dict[str, Any]] = []
         self.square_off_calls: list[Dict[str, Any]] = []
         self._square_off_ok = square_off_ok
 
-    def place_order_with_confirmation(
-        self, params: Mapping[str, Any], *, max_wait_sec: float = 10.0
-    ) -> str | None:
-        self.orders.append(dict(params))
-        return next(self._results, None)
+    def place_straddle_orders(
+        self, ce_params: Mapping[str, Any], pe_params: Mapping[str, Any]
+    ) -> bool:
+        self.orders.append({"ce": dict(ce_params), "pe": dict(pe_params)})
+        return next(self._results, True)
 
     def square_off_position(
         self, symbol: str, *, side: str, quantity: int | None = None
@@ -321,7 +321,7 @@ class DummyOrderManager:
 
 
 def _make_strategy(
-    order_results: Iterable[str | None],
+    order_results: Iterable[bool],
     *,
     prices: Mapping[str, float],
     tick: float = 0.05,
@@ -346,21 +346,43 @@ def test_scalper_strategy_complete_flow() -> None:
         "NFO:NIFTY24062020000CE": 101.23,
         "NFO:NIFTY24062020000PE": 98.77,
     }
-    strategy = _make_strategy(["CE123", "PE456"], prices=prices)
+    strategy = _make_strategy([True], prices=prices)
 
     result = strategy.trade_straddle(20000, quantity=50, atr=10.0, side="BUY")
 
     assert result["status"] == "complete"
-    assert result["ce_order_id"] == "CE123"
-    assert result["pe_order_id"] == "PE456"
+    assert strategy.order_manager.orders == [  # type: ignore[attr-defined]
+        {
+            "ce": {
+                "exchange": "NFO",
+                "symbol": "NIFTY24062020000CE",
+                "tradingsymbol": "NIFTY24062020000CE",
+                "transaction_type": "BUY",
+                "order_type": "LIMIT",
+                "quantity": 50,
+                "price": pytest.approx(101.25),
+                "product": "MIS",
+            },
+            "pe": {
+                "exchange": "NFO",
+                "symbol": "NIFTY24062020000PE",
+                "tradingsymbol": "NIFTY24062020000PE",
+                "transaction_type": "BUY",
+                "order_type": "LIMIT",
+                "quantity": 50,
+                "price": pytest.approx(98.75),
+                "product": "MIS",
+            },
+        }
+    ]
 
 
-def test_scalper_strategy_partial_fill_ce_squares_off() -> None:
+def test_scalper_strategy_failure_status() -> None:
     prices = {
         "NFO:NIFTY24062020000CE": 101.23,
         "NFO:NIFTY24062020000PE": 98.77,
     }
-    manager = DummyOrderManager(["CE123", None])
+    manager = DummyOrderManager([False])
     strategy = ScalperStrategy(
         order_manager=manager,  # type: ignore[arg-type]
         risk_manager=RiskManager(),
@@ -370,10 +392,8 @@ def test_scalper_strategy_partial_fill_ce_squares_off() -> None:
 
     result = strategy.trade_straddle(20000, quantity=50, atr=10.0, side="BUY")
 
-    assert result["status"] == "partial_ce"
-    assert manager.square_off_calls == [
-        {"symbol": "NIFTY24062020000CE", "side": "SELL", "quantity": 50}
-    ]
+    assert result["status"] == "failed"
+    assert manager.square_off_calls == []
 
 
 def test_execute_trade_skips_when_market_data_stale() -> None:
@@ -381,7 +401,7 @@ def test_execute_trade_skips_when_market_data_stale() -> None:
         "NFO:NIFTY24062020000CE": 101.23,
         "NFO:NIFTY24062020000PE": 98.77,
     }
-    strategy = _make_strategy(["CE123", "PE456"], prices=prices)
+    strategy = _make_strategy([True], prices=prices)
     strategy.market_data = SimpleNamespace(last_tick_age_ms=45_000)
 
     result = strategy.execute_trade(20000, quantity=50, atr=10.0, side="BUY")
@@ -399,7 +419,7 @@ def test_execute_trade_skips_outside_market_hours(monkeypatch: pytest.MonkeyPatc
         "NFO:NIFTY24062020000CE": 101.23,
         "NFO:NIFTY24062020000PE": 98.77,
     }
-    strategy = _make_strategy(["CE", "PE"], prices=prices)
+    strategy = _make_strategy([True], prices=prices)
     monkeypatch.setattr(settings, "allow_offhours_testing", False)
     monkeypatch.setattr(scalper_module, "_is_market_hours", lambda now=None: False)
 
@@ -413,54 +433,14 @@ def test_execute_trade_delegates_when_market_data_fresh() -> None:
         "NFO:NIFTY24062020000CE": 101.23,
         "NFO:NIFTY24062020000PE": 98.77,
     }
-    strategy = _make_strategy(["CE321", "PE654"], prices=prices)
+    strategy = _make_strategy([True], prices=prices)
     strategy.market_data = SimpleNamespace(last_tick_age_ms=500)
 
     result = strategy.execute_trade(20000, quantity=50, atr=10.0, side="BUY")
 
     assert result["status"] == "complete"
-    assert result["ce_order_id"] == "CE321"
-    assert result["pe_order_id"] == "PE654"
 
 
-def test_scalper_strategy_partial_fill_pe_squares_off() -> None:
-    prices = {
-        "NFO:NIFTY24062020000CE": 101.23,
-        "NFO:NIFTY24062020000PE": 98.77,
-    }
-    manager = DummyOrderManager([None, "PE999"])
-    strategy = ScalperStrategy(
-        order_manager=manager,  # type: ignore[arg-type]
-        risk_manager=RiskManager(),
-        price_fetcher=lambda symbol: prices[symbol],
-        expiry_resolver=lambda: "240620",
-    )
-
-    result = strategy.trade_straddle(20000, quantity=25, atr=5.0, side="BUY")
-
-    assert result["status"] == "partial_pe"
-    assert manager.square_off_calls == [
-        {"symbol": "NIFTY24062020000PE", "side": "SELL", "quantity": 25}
-    ]
-
-
-def test_scalper_strategy_failure_status() -> None:
-    prices = {
-        "NFO:NIFTY24062020000CE": 101.23,
-        "NFO:NIFTY24062020000PE": 98.77,
-    }
-    manager = DummyOrderManager([None, None])
-    strategy = ScalperStrategy(
-        order_manager=manager,  # type: ignore[arg-type]
-        risk_manager=RiskManager(),
-        price_fetcher=lambda symbol: prices[symbol],
-        expiry_resolver=lambda: "240620",
-    )
-
-    result = strategy.trade_straddle(20000, quantity=10, atr=3.0, side="SELL")
-
-    assert result["status"] == "failed"
-    assert manager.square_off_calls == []
 
 
 def test_scalper_strategy_requires_positive_quantity() -> None:
@@ -478,7 +458,7 @@ def test_scalper_strategy_rejects_stale_market_data() -> None:
     data._last_tick_ts = stale_time
 
     prices = {"NFO:NIFTY24062020000CE": 101.23, "NFO:NIFTY24062020000PE": 98.77}
-    strategy = _make_strategy(["CE", "PE"], prices=prices, market_data=data)
+    strategy = _make_strategy([True], prices=prices, market_data=data)
 
     with pytest.raises(StaleMarketDataError):
         strategy.trade_straddle(20000, quantity=50, atr=10.0)
@@ -493,7 +473,7 @@ def test_scalper_strategy_accepts_fresh_market_data() -> None:
     data._last_tick_ts = fresh_time
 
     prices = {"NFO:NIFTY24062020000CE": 101.23, "NFO:NIFTY24062020000PE": 98.77}
-    strategy = _make_strategy(["CE123", "PE456"], prices=prices, market_data=data)
+    strategy = _make_strategy([True], prices=prices, market_data=data)
 
     result = strategy.trade_straddle(20000, quantity=50, atr=10.0)
     assert result["status"] == "complete"
