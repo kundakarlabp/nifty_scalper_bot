@@ -1,0 +1,22 @@
+[Unit]
+Description=Nifty Scalper Trading Bot
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/nifty-scalper.env
+ExecStart=/usr/bin/docker compose --project-name nifty-scalper -f /opt/nifty-scalper/docker-compose.yml up --build --remove-orphans
+ExecStop=/usr/bin/docker compose --project-name nifty-scalper -f /opt/nifty-scalper/docker-compose.yml down
+WorkingDirectory=/opt/nifty-scalper
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+TimeoutStopSec=60
+User=nifty
+Group=nifty
+StandardOutput=append:/var/log/nifty-scalper/bot.log
+StandardError=append:/var/log/nifty-scalper/bot.log
+
+[Install]
+WantedBy=multi-user.target

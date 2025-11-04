@@ -1,0 +1,44 @@
+groups:
+  - name: nifty_scalper_alerts
+    interval: 1m
+    rules:
+      - alert: BotDown
+        expr: up{job="nifty_scalper_bot"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Trading bot is not responding"
+          description: "Prometheus has not scraped metrics from the trading bot for 2 minutes."
+      - alert: HighErrorRate
+        expr: increase(http_server_requests_seconds_count{status!~"2.."}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated error responses"
+          description: "Non-success HTTP responses exceeded threshold in the last 5 minutes."
+      - alert: OrderLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(order_latency_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Order latency SLO breached"
+          description: "p95 order latency exceeded 500ms over the last 5 minutes."
+      - alert: TickStalenessCritical
+        expr: max(tick_staleness_seconds) > 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tick feed stale"
+          description: "No fresh ticks have been processed for at least 2 seconds."
+      - alert: ErrorBurst
+        expr: sum(increase(error_count_by_type[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Error burst detected"
+          description: "Runtime error count exceeded 10 events over the last 5 minutes."
