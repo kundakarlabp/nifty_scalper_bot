@@ -39,13 +39,9 @@ class RegimeSampler:
             period_s: Minimum seconds between repeated logs.
             tol: Absolute tolerance before detecting multiplier drift.
 
-        Returns:
-            None.
-
         Raises:
             ValueError: If ``period_s`` is non-positive.
         """
-
         LOGGER.debug(
             "Entered RegimeSampler.__init__",
             extra={"event": "regime_sampler_init", "period_s": period_s, "tol": tol},
@@ -56,6 +52,8 @@ class RegimeSampler:
         self._tol = float(tol)
         self._st = _State()
         self._lock = threading.Lock()
+        # Per-instance wall-clock guard to stop rapid repeated emissions
+        self._last_real_log_time: float | None = None
 
     def _changed(self, regime: str | None, multiplier: float | None) -> bool:
         """Return True when the new regime or multiplier differs.
@@ -66,11 +64,7 @@ class RegimeSampler:
 
         Returns:
             bool: ``True`` when a material change is detected.
-
-        Raises:
-            None.
         """
-
         try:
             if regime != self._st.last_regime:
                 return True
@@ -78,6 +72,7 @@ class RegimeSampler:
             b = multiplier
             if a is None or b is None:
                 return True
+            # absolute tolerance only; relative tolerance intentionally zero
             return not math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=self._tol)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
@@ -86,6 +81,7 @@ class RegimeSampler:
                 extra={"event": "regime_sampler_changed_error"},
                 exc_info=exc,
             )
+            # Fail-open: treat as changed so we emit and surface the error
             return True
 
     def maybe_log(
@@ -105,22 +101,21 @@ class RegimeSampler:
             multiplier: Applied multiplier for the current tick.
             extra: Optional metadata to merge into the log payload.
             level: Logger level name to call when emitting.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
         """
-
         try:
             now = monotonic()
+
+            # QUICK, inexpensive anti-spam guard (check before lock)
+            last_real = self._last_real_log_time
+            if last_real is not None and (now - last_real) < self._period_s:
+                # Too soon since the last real emission — suppress.
+                return
+
             with self._lock:
                 must_emit = False
 
-                target_multiplier = (
-                    float(multiplier) if multiplier is not None else None
-                )
+                target_multiplier = float(multiplier) if multiplier is not None else None
+
                 if self._changed(regime, target_multiplier):
                     must_emit = True
                 elif now - self._st.last_emit_t >= self._period_s:
@@ -129,18 +124,16 @@ class RegimeSampler:
                 if not must_emit:
                     return
 
+                # Update internal state and stamp the actual emission time
                 self._st.last_regime = regime
                 self._st.last_multiplier = target_multiplier
                 self._st.last_emit_t = now
+                self._last_real_log_time = now
 
             payload: dict[str, Any] = {
                 "event": "regime_multiplier_applied",
                 "regime": regime or "UNKNOWN",
-                "multiplier": (
-                    None
-                    if target_multiplier is None
-                    else round(float(target_multiplier), 6)
-                ),
+                "multiplier": None if target_multiplier is None else round(float(target_multiplier), 6),
             }
             if extra:
                 payload.update(extra)
@@ -149,6 +142,7 @@ class RegimeSampler:
             if log_fn is None:
                 log_fn = getattr(logger, "info")
             log_fn("Condition met: regime_multiplier_applied", extra=payload)
+
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "Failure in RegimeSampler.maybe_log: %s",
