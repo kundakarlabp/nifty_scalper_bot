@@ -27,6 +27,7 @@ Note:
 
 
 from __future__ import annotations
+
 import json
 import os
 import threading
@@ -79,8 +80,6 @@ try:
             return True, None
         except PydanticValidationError as exc:
             return False, str(exc)
-    PersistModelType = PersistModel
-    ValidationErrorType = PydanticValidationError
 except Exception:
     PersistModelType = type(None)
     ValidationErrorType = Exception

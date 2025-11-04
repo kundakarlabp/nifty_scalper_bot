@@ -1,9 +1,3 @@
-"""Core orchestration for the Nifty scalper trading bot.
-
-Polling mode is more reliable for Railway/Heroku/Cloud deploys; WebSocket/
-webhook should be used only on static public IP/server with trusted domain and
-TLS certificate.
-"""
 
 from __future__ import annotations
 
@@ -32,9 +26,9 @@ from typing import (
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+# Nifty Scalper Bot imports
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
-
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
@@ -75,8 +69,6 @@ from nifty_scalper_bot.infra.structured_logger import (
 )
 from nifty_scalper_bot.notifications.telegram_commands import (
     Services as TelegramCommandServices,
-)
-from nifty_scalper_bot.notifications.telegram_commands import (
     register_telegram_commands,
 )
 from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
@@ -85,6 +77,7 @@ from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
     register_webhook,
 )
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
+from nifty_scalper_bot.persistence import persistence_state
 from nifty_scalper_bot.risk import RiskManager, RiskSnapshot, RiskState
 from nifty_scalper_bot.risk.session_gate import build_session_guard
 from nifty_scalper_bot.server import selftest_router
@@ -118,6 +111,13 @@ from nifty_scalper_bot.utils.logging import get_logger, setup_logging
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
+
+"""Core orchestration for the Nifty scalper trading bot.
+
+Polling mode is more reliable for Railway/Heroku/Cloud deploys; WebSocket/
+webhook should be used only on static public IP/server with trusted domain and
+TLS certificate.
+"""
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -1602,6 +1602,8 @@ async def reconcile_positions_on_startup(
 
 
 def initialize_components(settings: Settings | None = None) -> BotContext:
+    # Initialize robust persistence module
+    persistence_state.initialize(auto_start_worker=True)
     """Initialize all components in correct order."""
 
     ensure_multiproc_dir(clear_stale=True)
