@@ -1,0 +1,1 @@
+# nifty_scalper_bot
