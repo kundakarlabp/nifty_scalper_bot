@@ -1,11 +1,14 @@
-"""Persistence and periodic flush worker for Nifty Scalper Bot (robust production-grade).
+"""
+Persistence and periodic flush worker for Nifty Scalper Bot (robust production-grade).
 
 Features:
 - Thread-safe in-memory `state` (documented) with context manager.
 - Atomic writes to disk and backup rotation.
-- Pydantic schema validation if pydantic available (fail-fast or warn depending on config).
+- Pydantic schema validation if pydantic available
+    (fail-fast or warn depending on config).
 - Optional event-driven flush, manual flush, background periodic worker.
-- Health/status API (function-based; optional embedded HTTP server via `enable_http=True`).
+- Health/status API (function-based; optional embedded HTTP server via
+    `enable_http=True`).
 - Emits throttled diagnostics via global `system_sampler`.
 - Simple metrics counters and placeholder for Prometheus export.
 - Encryption/compression stubs provided for secure storage integrations.
@@ -19,8 +22,9 @@ Usage (recommended):
 
 Note:
 - This file intentionally keeps business-model-agnostic snapshotting. If your
-  domain objects are not JSON-serializable, adapt `snapshot_for_persistence`.
+    domain objects are not JSON-serializable, adapt `snapshot_for_persistence`.
 """
+
 
 from __future__ import annotations
 import json
@@ -32,24 +36,38 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.sampler_singleton import system_sampler
 
 LOGGER = get_logger(__name__)
 
 PNL_PERSIST_PATH = Path(os.getenv("PNL_PERSIST_PATH", "data/pnl_state.json"))
-PERSIST_FLUSH_INTERVAL_S = float(os.getenv("PERSIST_FLUSH_INTERVAL_S", "10"))
-PERSIST_RETENTION_BACKUPS = int(os.getenv("PERSIST_RETENTION_BACKUPS", "3"))
-PERSIST_ENABLE_SCHEMA_VALIDATION = os.getenv("PERSIST_ENABLE_SCHEMA_VALIDATION", "true").lower() in ("1", "true", "yes")
-PERSIST_ENABLE_EMBEDDED_HTTP = os.getenv("ENABLE_EMBEDDED_HTTP_SERVER", "false").lower() in ("1", "true", "yes")
+PERSIST_FLUSH_INTERVAL_S = float(
+    os.getenv("PERSIST_FLUSH_INTERVAL_S", "10")
+)
+PERSIST_RETENTION_BACKUPS = int(
+    os.getenv("PERSIST_RETENTION_BACKUPS", "3")
+)
+PERSIST_ENABLE_SCHEMA_VALIDATION = (
+    os.getenv("PERSIST_ENABLE_SCHEMA_VALIDATION", "true").lower()
+    in ("1", "true", "yes")
+)
+PERSIST_ENABLE_EMBEDDED_HTTP = (
+    os.getenv("ENABLE_EMBEDDED_HTTP_SERVER", "false").lower()
+    in ("1", "true", "yes")
+)
 PERSIST_HTTP_HOST = os.getenv("PERSIST_HTTP_HOST", "127.0.0.1")
-PERSIST_HTTP_PORT = int(os.getenv("PERSIST_HTTP_PORT", "9234"))
+PERSIST_HTTP_PORT = int(
+    os.getenv("PERSIST_HTTP_PORT", "9234")
+)
 PERSIST_COMPRESSION = os.getenv("PERSIST_COMPRESSION", "none")
 PERSIST_ENCRYPTION = os.getenv("PERSIST_ENCRYPTION", "none")
 PERSIST_LOG_LEVEL_ON_SUCCESS = os.getenv("PERSIST_LOG_LEVEL_ON_SUCCESS", "info")
 
 try:
-    from pydantic import BaseModel, ValidationError
+    from pydantic import BaseModel
+    from pydantic import ValidationError as PydanticValidationError
     class PersistModel(BaseModel):
         last_pnl: float = 0.0
         positions: Dict[str, Any] = {}
@@ -57,16 +75,17 @@ try:
         meta: Dict[str, Any] = {}
     def validate_snapshot(obj: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         try:
-            PersistModel.parse_obj(obj)
+            PersistModel.model_validate(obj)
             return True, None
-        except ValidationError as exc:
+        except PydanticValidationError as exc:
             return False, str(exc)
+    PersistModelType = PersistModel
+    ValidationErrorType = PydanticValidationError
 except Exception:
-    PersistModel = None
-    ValidationError = Exception
+    PersistModelType = type(None)
+    ValidationErrorType = Exception
     def validate_snapshot(obj: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-        if not isinstance(obj, dict):
-            return False, "snapshot must be a dict"
+        # obj is always a dict here, so no need to check type
         return True, None
 
 _state_lock = threading.RLock()
@@ -79,7 +98,7 @@ _state: Dict[str, Any] = {
 _worker_thread: Optional[threading.Thread] = None
 _worker_stop = threading.Event()
 _metrics_lock = threading.Lock()
-_metrics = {
+_metrics: Dict[str, float] = {
     "persist_emitted_total": 0,
     "persist_suppressed_total": 0,
     "persist_errors_total": 0,
@@ -102,7 +121,10 @@ def _rotate_backups(path: Path, keep: int) -> None:
         if path.exists():
             path.replace(path.with_suffix(path.suffix + ".1"))
     except Exception:
-        LOGGER.exception("persist: backup rotation failed", extra={"event": "persist_backup_rotation_failed"})
+        LOGGER.exception(
+            "persist: backup rotation failed",
+            extra={"event": "persist_backup_rotation_failed"},
+        )
 
 def _compress_bytes(data: bytes) -> bytes:
     if PERSIST_COMPRESSION.lower() == "gzip":
@@ -112,7 +134,10 @@ def _compress_bytes(data: bytes) -> bytes:
 
 def _maybe_encrypt_bytes(data: bytes) -> bytes:
     if PERSIST_ENCRYPTION.lower() != "none":
-        LOGGER.debug("persist: encryption requested but not implemented; storing plaintext", extra={"event": "persist_encrypt_stub"})
+        LOGGER.debug(
+            "persist: encryption requested but not implemented; storing plaintext",
+            extra={"event": "persist_encrypt_stub"},
+        )
     return data
 
 def _prepare_bytes_for_write(snapshot_json: str) -> bytes:
@@ -133,7 +158,11 @@ def get_state_snapshot() -> Dict[str, Any]:
 def snapshot_for_persistence() -> Dict[str, Any]:
     return get_state_snapshot()
 
-def dump_state_to_disk(path: Optional[Path | str] = None, *, validate: bool = True) -> None:
+def dump_state_to_disk(
+    path: Optional[Path | str] = None,
+    *,
+    validate: bool = True,
+) -> None:
     global _metrics
     p = Path(path or PNL_PERSIST_PATH)
     try:
@@ -141,10 +170,16 @@ def dump_state_to_disk(path: Optional[Path | str] = None, *, validate: bool = Tr
         if validate and PERSIST_ENABLE_SCHEMA_VALIDATION:
             ok, err = validate_snapshot(snapshot)
             if not ok:
-                LOGGER.warning("persist: snapshot validation failed: %s", err, extra={"event": "persist_validation_failed"})
+                LOGGER.warning(
+                    "persist: snapshot validation failed: %s",
+                    err,
+                    extra={"event": "persist_validation_failed"},
+                )
                 with _metrics_lock:
                     _metrics["persist_suppressed_total"] += 1
-        snapshot_json = json.dumps(snapshot, ensure_ascii=False, indent=2)
+        snapshot_json = json.dumps(
+            snapshot, ensure_ascii=False, indent=2
+        )
         payload = _prepare_bytes_for_write(snapshot_json)
         _rotate_backups(p, PERSIST_RETENTION_BACKUPS)
         _atomic_write(p, payload)
@@ -158,11 +193,20 @@ def dump_state_to_disk(path: Optional[Path | str] = None, *, validate: bool = Tr
             extra={"path": str(p), "size_bytes": len(payload)},
             level=PERSIST_LOG_LEVEL_ON_SUCCESS,
         )
-        LOGGER.debug("persist: wrote snapshot to %s (bytes=%d)", str(p), len(payload), extra={"event": "persist_write_ok"})
+        LOGGER.debug(
+            "persist: wrote snapshot to %s (bytes=%d)",
+            str(p),
+            len(payload),
+            extra={"event": "persist_write_ok"},
+        )
     except Exception as exc:
         with _metrics_lock:
             _metrics["persist_errors_total"] += 1
-        LOGGER.exception("persist: failed to write state: %s", exc, extra={"event": "persist_write_failed", "trace": traceback.format_exc()})
+        LOGGER.exception(
+            "persist: failed to write state: %s",
+            exc,
+            extra={"event": "persist_write_failed", "trace": traceback.format_exc()},
+        )
         system_sampler.maybe_log(
             LOGGER,
             regime=None,
@@ -171,10 +215,18 @@ def dump_state_to_disk(path: Optional[Path | str] = None, *, validate: bool = Tr
             level="error",
         )
 
-def load_state_from_disk(path: Optional[Path | str] = None, *, validate: bool = False) -> None:
+def load_state_from_disk(
+    path: Optional[Path | str] = None,
+    *,
+    validate: bool = False,
+) -> None:
     p = Path(path or PNL_PERSIST_PATH)
     if not p.exists():
-        LOGGER.info("persist: no state file found at %s", p, extra={"event": "persist_load_missing"})
+        LOGGER.info(
+            "persist: no state file found at %s",
+            p,
+            extra={"event": "persist_load_missing"},
+        )
         return
     try:
         raw = p.read_bytes()
@@ -187,7 +239,11 @@ def load_state_from_disk(path: Optional[Path | str] = None, *, validate: bool = 
         if validate and PERSIST_ENABLE_SCHEMA_VALIDATION:
             ok, err = validate_snapshot(obj)
             if not ok:
-                LOGGER.warning("persist: loaded snapshot failed validation: %s", err, extra={"event": "persist_load_validation_failed"})
+                LOGGER.warning(
+                    "persist: loaded snapshot failed validation: %s",
+                    err,
+                    extra={"event": "persist_load_validation_failed"},
+                )
         with locked_state():
             _state.clear()
             if isinstance(obj, dict):
@@ -198,11 +254,19 @@ def load_state_from_disk(path: Optional[Path | str] = None, *, validate: bool = 
             multiplier=None,
             extra={"path": str(p), "keys": list(_state.keys())},
         )
-        LOGGER.debug("persist: loaded state from %s", p, extra={"event": "persist_load_ok"})
+        LOGGER.debug(
+            "persist: loaded state from %s",
+            p,
+            extra={"event": "persist_load_ok"},
+        )
     except Exception as exc:
         with _metrics_lock:
             _metrics["persist_errors_total"] += 1
-        LOGGER.exception("persist: failed to load state: %s", exc, extra={"event": "persist_load_failed"})
+        LOGGER.exception(
+            "persist: failed to load state: %s",
+            exc,
+            extra={"event": "persist_load_failed"},
+        )
         system_sampler.maybe_log(
             LOGGER,
             regime=None,
@@ -218,7 +282,12 @@ def update_state(updates: Dict[str, Any]) -> None:
 _event_queue: "list[Tuple[str, Dict[str, Any]]]" = []
 _event_queue_lock = threading.Lock()
 
-def flush_on_event(event_name: str, extra: Optional[Dict[str, Any]] = None, *, immediate: bool = False) -> None:
+def flush_on_event(
+    event_name: str,
+    extra: Optional[Dict[str, Any]] = None,
+    *,
+    immediate: bool = False,
+) -> None:
     extra = extra or {}
     if immediate:
         dump_state_to_disk()
@@ -238,13 +307,18 @@ def _drain_event_queue() -> Dict[str, Dict[str, Any]]:
     return out
 
 def _worker_loop(interval_s: float) -> None:
-    LOGGER.debug("persist: worker loop starting", extra={"event": "persist_worker_start", "interval_s": interval_s})
+    LOGGER.debug(
+        "persist: worker loop starting",
+        extra={"event": "persist_worker_start", "interval_s": interval_s},
+    )
     try:
         while not _worker_stop.wait(interval_s):
             events = _drain_event_queue()
             if events:
                 with locked_state():
-                    _state.setdefault("meta", {})["last_event_batch"] = {k: v["count"] for k, v in events.items()}
+                    _state.setdefault("meta", {})["last_event_batch"] = {
+                        k: v["count"] for k, v in events.items()
+                    }
             dump_state_to_disk()
             system_sampler.maybe_log(
                 LOGGER,
@@ -253,20 +327,38 @@ def _worker_loop(interval_s: float) -> None:
                 extra={"interval_s": interval_s, "events": len(events)},
             )
     except Exception:
-        LOGGER.exception("persist: worker crashed", extra={"event": "persist_worker_crash"})
+        LOGGER.exception(
+            "persist: worker crashed",
+            extra={"event": "persist_worker_crash"},
+        )
     finally:
-        LOGGER.debug("persist: worker loop exiting", extra={"event": "persist_worker_exit"})
+        LOGGER.debug(
+            "persist: worker loop exiting",
+            extra={"event": "persist_worker_exit"},
+        )
 
-def start_worker(interval_s: Optional[float] = None, *, force_restart: bool = False) -> None:
+def start_worker(
+    interval_s: Optional[float] = None,
+    *,
+    force_restart: bool = False,
+) -> None:
     global _worker_thread
     if _worker_thread and _worker_thread.is_alive():
         if not force_restart:
-            LOGGER.debug("persist: worker already running", extra={"event": "persist_worker_already"})
+            LOGGER.debug(
+                "persist: worker already running",
+                extra={"event": "persist_worker_already"},
+            )
             return
         stop_worker()
     _worker_stop.clear()
     iv = float(interval_s or PERSIST_FLUSH_INTERVAL_S)
-    _worker_thread = threading.Thread(target=_worker_loop, args=(iv,), daemon=True, name="persist-worker")
+    _worker_thread = threading.Thread(
+        target=_worker_loop,
+        args=(iv,),
+        daemon=True,
+        name="persist-worker",
+    )
     _worker_thread.start()
     system_sampler.maybe_log(
         LOGGER,
@@ -292,10 +384,10 @@ class PersistStatus:
 
 def get_status() -> PersistStatus:
     with _metrics_lock:
-        emitted = _metrics.get("persist_emitted_total", 0)
-        suppressed = _metrics.get("persist_suppressed_total", 0)
-        errors = _metrics.get("persist_errors_total", 0)
-        last_flush = _metrics.get("last_flush_epoch", 0.0)
+        emitted = int(_metrics.get("persist_emitted_total", 0))
+        suppressed = int(_metrics.get("persist_suppressed_total", 0))
+        errors = int(_metrics.get("persist_errors_total", 0))
+        last_flush = float(_metrics.get("last_flush_epoch", 0.0))
     with _state_lock:
         keys = tuple(_state.keys())
     return PersistStatus(
@@ -319,9 +411,15 @@ def manual_flush_and_report() -> Dict[str, Any]:
     )
     return {"path": str(PNL_PERSIST_PATH), "elapsed_s": elapsed}
 
-def initialize(persist_path: Optional[str] = None, *, auto_start_worker: bool = False, start_http: bool = False) -> None:
+def initialize(
+    persist_path: Optional[str] = None,
+    *,
+    auto_start_worker: bool = False,
+    start_http: bool = False,
+) -> None:
     global PNL_PERSIST_PATH
     if persist_path:
+        # PNL_PERSIST_PATH is not a true constant, allow reassignment
         PNL_PERSIST_PATH = Path(persist_path)
     load_state_from_disk()
     if auto_start_worker:
