@@ -161,6 +161,55 @@ class MarketDataManager:
 
         self._logger = get_logger(__name__)
 
+        # --- InstrumentResolver warm (non-blocking by default) -----------------
+        try:
+            if self._resolver is not None and hasattr(self._resolver, "warm"):
+                # Opt into blocking warm via env, else warm in background.
+                blocking = os.getenv("MDM_RESOLVER_WARM_BLOCKING", "").strip().lower() in {
+                    "1", "true", "yes", "on"
+                }
+                timeout_s = 5.0
+                try:
+                    timeout_s = float(os.getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "5.0"))
+                except Exception:
+                    timeout_s = 5.0
+
+                def _do_warm() -> None:
+                    try:
+                        self._logger.info("InstrumentResolver: warm() starting")
+                        self._resolver.warm()
+                        self._logger.info("InstrumentResolver: warm() completed")
+                    except Exception as exc:  # pragma: no cover - resolver warm may fail in some envs
+                        self._logger.warning(
+                            "InstrumentResolver warm() failed: %s",
+                            exc,
+                            extra={"event": "resolver_warm_error"},
+                        )
+
+                if blocking:
+                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
+                    thread.start()
+                    thread.join(timeout=timeout_s)
+                    if thread.is_alive():
+                        self._logger.warning(
+                            "InstrumentResolver warm() timed out after %.2fs",
+                            timeout_s,
+                            extra={"event": "resolver_warm_timeout"},
+                        )
+                else:
+                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
+                    thread.start()
+            else:
+                if self._resolver is not None:
+                    self._logger.debug("InstrumentResolver provided but has no warm() method")
+        except Exception as exc:
+            self._logger.error(
+                "Failed to start InstrumentResolver warm task: %s",
+                exc,
+                extra={"event": "resolver_warm_start_error"},
+            )
+        # ---------------------------------------------------------------------
+
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._latest_ticks: dict[str, dict[str, Any]] = {}
         self._history: dict[str, Deque[dict[str, Any]]] = defaultdict(
@@ -301,18 +350,44 @@ class MarketDataManager:
         if not normalized_underlying or resolver is None:
             return None
 
+        option_contracts = None
         try:
             option_contracts = resolver.option_contracts(  # type: ignore[attr-defined]
                 normalized_underlying,
                 force_refresh=force_refresh,
             )
         except AttributeError:
+            # Resolver doesn't implement option_contracts()
             return None
         except Exception as exc:  # noqa: BLE001
             self._logger.warning(
                 "option_chain_metadata_failed", extra={"error": str(exc)}
             )
             return None
+
+        # If the resolver returned nothing, attempt a one-shot warm() retry and re-fetch.
+        if not option_contracts:
+            try:
+                if hasattr(resolver, "warm"):
+                    self._logger.info(
+                        "Option chain empty — attempting resolver.warm() then retry",
+                        extra={"underlying": normalized_underlying},
+                    )
+                    with suppress(Exception):
+                        resolver.warm()
+                    # retry once
+                    option_contracts = resolver.option_contracts(
+                        normalized_underlying, force_refresh=force_refresh
+                    )
+                    if option_contracts:
+                        self._logger.info(
+                            "Resolver retry returned contracts",
+                            extra={"underlying": normalized_underlying, "count": len(option_contracts)},
+                        )
+            except Exception as exc:  # defensive
+                self._logger.debug(
+                    "Resolver retry failed", exc, extra={"event": "resolver_retry_failed"}
+                )
 
         parsed_contracts: list[dict[str, Any]] = []
         expiries: set[datetime] = set()
@@ -850,6 +925,11 @@ class MarketDataManager:
                     if isinstance(value, Mapping):
                         results[token] = dict(value)
         missing = [token for token in tokens if token not in results]
+        if missing:
+            self._logger.debug(
+                "Option quote fetch missing tokens",
+                extra={"missing_count": len(missing), "missing_tokens": missing},
+            )
         if missing and hasattr(broker, "get_quote_by_token"):
             for token in missing:
                 try:
