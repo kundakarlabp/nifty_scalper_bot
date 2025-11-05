@@ -1533,6 +1533,23 @@ class StrategyManager(_BaseStrategyManager):
             )
         return self._regime_state
 
+    def get_all_active_tokens(self) -> list:
+        """
+        Collect all tokens from all active strategies, deduplicated and sorted.
+        """
+        tokens = set()
+        for strategy in self.strategies.values():
+            if hasattr(strategy, 'tokens') and strategy.tokens:
+                valid = [t for t in strategy.tokens if isinstance(t, int) and t > 0]
+                tokens.update(valid)
+        return sorted(tokens)
+
+    def validate_tokens(self, token_list: list) -> list:
+        """
+        Filter to valid tokens only (positive integers).
+        """
+        return [t for t in token_list if isinstance(t, int) and t > 0]
+
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
         """Generate signal with confidence adjusted by strategy scores.
 
