@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 import csv
-from datetime import datetime
 import io
 import json
 import logging
 import os
 import threading
 import time
+from contextlib import suppress
+from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -905,28 +905,58 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def getavailablebalance(self, segment: str = "equity") -> float:
         """
         Return available margin balance for a Zerodha segment.
-        Returns strictly the latest available value or raises BrokerError 
+        Returns strictly the latest available value or raises BrokerError
         if not fresh. No fallback.
         """
-        normalizedsegment = str(segment or self.defaultmarginsegment).strip().lower() or self.defaultmarginsegment
-        self.LOGGER.debug("Entered ZerodhaKiteClient.getavailablebalance", extra={'event': 'zerodha_available_balance_start', 'segment': normalizedsegment})
+        normalizedsegment = (
+            str(segment or self.defaultmarginsegment).strip().lower()
+            or self.defaultmarginsegment
+        )
+        self.LOGGER.debug(
+            "Entered ZerodhaKiteClient.getavailablebalance",
+            extra={
+                "event": "zerodha_available_balance_start",
+                "segment": normalizedsegment,
+            },
+        )
         try:
             accountpayload = self.getaccountmargins(segment=normalizedsegment)
             if accountpayload:
-                summary = self.normalizemarginpayload(accountpayload, segment=normalizedsegment)
-                available = float(summary.get('available', 0.0))
+                summary = self.normalizemarginpayload(
+                    accountpayload, segment=normalizedsegment
+                )
+                available = float(summary.get("available", 0.0))
                 if available > 0:
-                    self.LOGGER.info("zerodha_available_balance_success", extra={'event': 'zerodha_available_balance_success', 'segment': normalizedsegment, 'available': available})
+                    self.LOGGER.info(
+                        "zerodha_available_balance_success",
+                        extra={
+                            "event": "zerodha_available_balance_success",
+                            "segment": normalizedsegment,
+                            "available": available,
+                        },
+                    )
                     return available
                 else:
-                    self.LOGGER.error("zerodha_available_balance_zero_or_negative", extra={'event': 'zerodha_available_balance_zero', 'segment': normalizedsegment, 'available': available})
+                    self.LOGGER.error(
+                        "zerodha_available_balance_zero_or_negative",
+                        extra={
+                            "event": "zerodha_available_balance_zero",
+                            "segment": normalizedsegment,
+                            "available": available,
+                        },
+                    )
                     raise BrokerError("Available margin is zero or negative!")
             else:
                 raise BrokerError("No account margin payload received!")
         except Exception as exc:
-            self.LOGGER.error("Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!", exc_info=exc)
-            raise BrokerError("Failed to get fresh available balance, no fallback allowed") from exc
-            
+            self.LOGGER.error(
+                "Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!",
+                exc_info=exc,
+            )
+            raise BrokerError(
+                "Failed to get fresh available balance, no fallback allowed"
+            ) from exc
+
     def _resolve_balance_fallback(self) -> float:
         """Return environment configured fallback balance figure.
 
