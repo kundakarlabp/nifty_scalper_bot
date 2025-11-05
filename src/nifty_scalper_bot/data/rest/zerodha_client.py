@@ -908,10 +908,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
         Returns strictly the latest available value, or raises BrokerError if no reliable value.
         No fallback.
         """
-    normalizedsegment = str(segment or self.defaultmarginsegment).strip().lower() or self.defaultmarginsegment
-    self.LOGGER.debug("Entered ZerodhaKiteClient.getavailablebalance", extra={'event': 'zerodha_available_balance_start', 'segment': normalizedsegment})
+        normalizedsegment = str(segment or self.defaultmarginsegment).strip().lower() or self.defaultmarginsegment
+        self.LOGGER.debug("Entered ZerodhaKiteClient.getavailablebalance", extra={'event': 'zerodha_available_balance_start', 'segment': normalizedsegment})
 
-    try:
+        try:
         accountpayload = self.getaccountmargins(segment=normalizedsegment)
         if accountpayload:
             summary = self.normalizemarginpayload(accountpayload, segment=normalizedsegment)
@@ -924,9 +924,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 raise BrokerError("Available margin is zero or negative!")
         else:
             raise BrokerError("No account margin payload received!")
-    except Exception as exc:
-        self.LOGGER.error("Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!", exc_info=exc)
-        raise BrokerError("Failed to get fresh available balance, no fallback allowed") from exc
+        except Exception as exc:
+            self.LOGGER.error("Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!", exc_info=exc)
+            raise BrokerError("Failed to get fresh available balance, no fallback allowed") from exc
 
     def _resolve_balance_fallback(self) -> float:
         """Return environment configured fallback balance figure.
