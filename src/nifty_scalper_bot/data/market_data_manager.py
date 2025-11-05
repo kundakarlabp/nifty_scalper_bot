@@ -142,10 +142,6 @@ class _OHLCBuilder:
 
 
 class MarketDataManager:
-# Default blocking warm for deterministic startup
-os.environ.setdefault("MDM_RESOLVER_WARM_BLOCKING", "1")
-os.environ.setdefault("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10")
-:
     """Central hub for normalized market data with subscriber fan-out."""
 
     def __init__(
@@ -162,6 +158,45 @@ os.environ.setdefault("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10")
         self._cache_len = cache_len
         self._duplicate_window = max(duplicate_window_ms, 0) / 1000.0
         self._resolver = resolver
+        # --- InstrumentResolver warm (WARM_INJECTED_BY_SCRIPT) -----------------
+        # Warm the resolver to populate instrument metadata cache. Background by
+        # default; can be made blocking with env MDM_RESOLVER_WARM_BLOCKING=1 and
+        # timeout via MDM_RESOLVER_WARM_TIMEOUT_SEC (seconds).
+        try:
+            resolver = getattr(self, "_resolver", None)
+            warm_fn = getattr(resolver, "warm", None) if resolver is not None else None
+            if callable(warm_fn):
+                from os import getenv
+                blocking = str(getenv("MDM_RESOLVER_WARM_BLOCKING", "0")).strip().lower() in ("1","true","yes","on")
+                try:
+                    timeout = float(getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10"))
+                except Exception:
+                    timeout = 10.0
+                # non-blocking by default: spawn background thread
+                def _bg_warm() -> None:
+                    try:
+                        warm_fn()
+                        _logger.info("InstrumentResolver warm (background) complete", extra={"event": "mdm_resolver_warm_bg_done"})
+                    except Exception as exc:
+                        _logger.warning("InstrumentResolver warm (background) failed", extra={"event": "mdm_resolver_warm_bg_failed", "error": str(exc)})
+                if blocking:
+                    _logger.info("InstrumentResolver warm (blocking) starting", extra={"event": "mdm_resolver_warm_start"})
+                    t = threading.Thread(target=lambda: warm_fn(), name="mdm-resolver-warm-block", daemon=True)
+                    t.start()
+                    t.join(timeout=timeout)
+                    if t.is_alive():
+                        _logger.warning("InstrumentResolver warm timed out (continuing)", extra={"event": "mdm_resolver_warm_timeout", "timeout": timeout})
+                    else:
+                        _logger.info("InstrumentResolver warm completed", extra={"event": "mdm_resolver_warm_done"})
+                else:
+                    _logger.info("InstrumentResolver warm scheduled (background)", extra={"event": "mdm_resolver_warm_bg_start"})
+                    bg = threading.Thread(target=_bg_warm, name="mdm-resolver-warm-bg", daemon=True)
+                    bg.start()
+        except Exception as exc:
+            # never fail initialization due to resolver warm
+            _logger.warning("InstrumentResolver warm failed to start", extra={"event": "mdm_resolver_warm_error", "error": str(exc)})
+        # WARM_INJECTED_BY_SCRIPT_END
+
         # --- InstrumentResolver warm (WARM_INJECTED_BY_SCRIPT) -----------------
         # Warm the resolver to populate instrument metadata cache. Background by
         # default; can be made blocking with env MDM_RESOLVER_WARM_BLOCKING=1 and
