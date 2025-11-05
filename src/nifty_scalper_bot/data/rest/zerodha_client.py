@@ -905,57 +905,101 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def get_available_balance(self, segment: str = "equity") -> float:
         """
         Return available margin balance for a Zerodha segment.
-        Returns strictly the latest available value or raises BrokerError
-        if not fresh. No fallback.
+
+        Returns the latest available value (positive float). Raises BrokerError on
+        any error or if the available margin is zero or negative.
         """
-        normalizedsegment = (
-            str(segment or self.default_margin_segment).strip().lower()
-            or self.default_margin_segment
+        # Normalize segment and use the configured default attribute
+        normalized_segment = (
+            str(segment or getattr(self, "_default_margin_segment", "equity"))
+            .strip()
+            .lower()
+            or getattr(self, "_default_margin_segment", "equity")
         )
-        self.LOGGER.debug(
+
+        LOGGER.debug(
             "Entered ZerodhaKiteClient.get_available_balance",
             extra={
                 "event": "zerodha_available_balance_start",
-                "segment": normalizedsegment,
+                "segment": normalized_segment,
             },
         )
+
         try:
-            accountpayload = self.get_account_margins(segment=normalizedsegment)
-            if accountpayload:
-                summary = self.normalize_margin_payload(
-                    accountpayload, segment=normalized_segment
-                )
-                available = float(summary.get("available", 0.0))
-                if available > 0:
-                    self.LOGGER.info(
-                        "zerodha_available_balance_success",
-                        extra={
-                            "event": "zerodha_available_balance_success",
-                            "segment": normalizedsegment,
-                            "available": available,
-                        },
-                    )
-                    return available
-                else:
-                    self.LOGGER.error(
-                        "zerodha_available_balance_zero_or_negative",
-                        extra={
-                            "event": "zerodha_available_balance_zero",
-                            "segment": normalizedsegment,
-                            "available": available,
-                        },
-                    )
-                    raise BrokerError("Available margin is zero or negative!")
-            else:
-                raise BrokerError("No account margin payload received!")
+            account_payload = self.get_account_margins(segment=normalized_segment)
         except Exception as exc:
-            self.LOGGER.error(
-                "Failure in ZerodhaKiteClient.get_available_balance, NO FALLBACK!",
+            LOGGER.exception(
+                "Failure fetching account margins from Zerodha",
+                extra={"event": "zerodha_available_balance_api_error", "segment": normalized_segment},
                 exc_info=exc,
             )
-            raise BrokerError(
-                "Failed to get fresh available balance, no fallback allowed"
-            ) from exc
+            raise BrokerError("Zerodha margin API error") from exc
+
+        if not account_payload:
+            LOGGER.error(
+                "No account margin payload received from Zerodha",
+                extra={"event": "zerodha_available_balance_empty_payload", "segment": normalized_segment},
+            )
+            raise BrokerError("No account margin payload received!")
+
+        try:
+            # Use the existing normalization helper; it's defensive already.
+            summary = self._normalize_margin_payload(account_payload, segment=normalized_segment)
+        except Exception as exc:
+            LOGGER.exception(
+                "Failed to normalize margin payload",
+                extra={"event": "zerodha_available_balance_normalize_error", "segment": normalized_segment},
+                exc_info=exc,
+            )
+            raise BrokerError("Failed to parse margin payload") from exc
+
+        # Defensive coercion of the available value
+        raw_available = summary.get("available")
+        if raw_available is None:
+            # Log the whole summary for diagnostics and fail explicitly
+            LOGGER.error(
+                "Missing 'available' in margin summary",
+                extra={"event": "zerodha_available_balance_missing_field", "segment": normalized_segment, "summary": summary},
+            )
+            raise BrokerError("No 'available' field in margin summary")
+
+        try:
+            available = float(raw_available)
+        except Exception as exc:
+            LOGGER.exception(
+                "Available value not numeric",
+                extra={"event": "zerodha_available_balance_non_numeric", "segment": normalized_segment, "raw_available": raw_available},
+                exc_info=exc,
+            )
+            raise BrokerError("Invalid available value from broker") from exc
+
+        LOGGER.info(
+            "zerodha_available_balance_success",
+            extra={
+                "event": "zerodha_available_balance_success",
+                "segment": normalized_segment,
+                "available": available,
+            },
+        )
+
+        # Business decision: treat non-positive as unavailable
+        if available <= 0:
+            LOGGER.error(
+                "zerodha_available_balance_zero_or_negative",
+                extra={
+                    "event": "zerodha_available_balance_zero",
+                    "segment": normalized_segment,
+                    "available": available,
+                },
+            )
+            raise BrokerError("Available margin is zero or negative!")
+
+        return available
+
+    # Backward-compatible shim (leave until callers updated)
+    def getavailablebalance(self, segment: str = "equity") -> float:
+        """Backward-compatible wrapper for legacy callers."""
+        return self.get_available_balance(segment=segment)
 
     def _resolve_balance_fallback(self) -> float:
         """Return environment configured fallback balance figure.
