@@ -902,106 +902,31 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return summary
 
-    def get_available_balance(self, segment: str = "equity") -> float:
-        """Return available margin balance for a Zerodha segment.
+    def getavailablebalance(self, segment: str = "equity") -> float:
+    """
+    Return available margin balance for a Zerodha segment.
+    Returns strictly the latest available value, or raises BrokerError if no reliable value.
+    No fallback.
+    """
+    normalizedsegment = str(segment or self.defaultmarginsegment).strip().lower() or self.defaultmarginsegment
+    self.LOGGER.debug("Entered ZerodhaKiteClient.getavailablebalance", extra={'event': 'zerodha_available_balance_start', 'segment': normalizedsegment})
 
-        Args:
-            segment: Zerodha segment identifier such as ``"equity"``.
-
-        Returns:
-            float: Available balance extracted from the margin payload.
-
-        Raises:
-            BrokerError: Propagated when the margin fetch fails.
-        """
-
-        normalized_segment = (
-            str(segment or self._default_margin_segment).strip().lower()
-            or self._default_margin_segment
-        )
-        LOGGER.debug(
-            "Entered ZerodhaKiteClient.get_available_balance",
-            extra={
-                "event": "zerodha_available_balance_start",
-                "segment": normalized_segment,
-            },
-        )
-        summary: dict[str, float] | None = None
-        account_error: Exception | None = None
-        try:
-            account_payload = self.get_account_margins(segment=normalized_segment)
-            if account_payload:
-                summary = self._normalize_margin_payload(
-                    account_payload,
-                    segment=normalized_segment,
-                )
-        except Exception as exc:  # noqa: BLE001 - continue with fallback
-            account_error = exc
-            LOGGER.error(
-                "Failure in ZerodhaKiteClient.get_available_balance account fetch: %s",
-                exc,
-                extra={
-                    "event": "zerodha_available_balance_account_error",
-                    "segment": normalized_segment,
-                },
-                exc_info=exc,
-            )
-
-        if not summary:
-            try:
-                summary = self.get_margin_summary(segment=normalized_segment)
-                if account_error is not None:
-                    LOGGER.info(
-                        "Condition met: zerodha_available_balance_summary_fallback",
-                        extra={
-                            "event": "zerodha_available_balance_summary_fallback",
-                            "segment": normalized_segment,
-                        },
-                    )
-            except Exception as exc:  # noqa: BLE001 - fallback to env
-                LOGGER.error(
-                    "Failure in ZerodhaKiteClient.get_available_balance: %s",
-                    exc,
-                    extra={
-                        "event": "zerodha_available_balance_error",
-                        "segment": normalized_segment,
-                    },
-                    exc_info=exc,
-                )
-                fallback_balance = self._resolve_balance_fallback()
-                LOGGER.warning(
-                    "Condition met: zerodha_available_balance_env_fallback",
-                    extra={
-                        "event": "zerodha_available_balance_env_fallback",
-                        "segment": normalized_segment,
-                        "fallback": fallback_balance,
-                    },
-                )
-                return fallback_balance
-
-        summary = summary or {"available": 0.0}
-        available = float(summary.get("available", 0.0))
-        if available <= 0.0:
-            fallback_balance = self._resolve_balance_fallback()
-            LOGGER.warning(
-                "Condition met: zerodha_available_balance_non_positive",
-                extra={
-                    "event": "zerodha_available_balance_non_positive",
-                    "segment": normalized_segment,
-                    "available": available,
-                    "fallback": fallback_balance,
-                },
-            )
-            return fallback_balance
-        LOGGER.info(
-            "zerodha_available_balance_success",
-            extra={
-                "event": "zerodha_available_balance_success",
-                "segment": normalized_segment,
-                "available": available,
-            },
-        )
-        return available
+    try:
+        accountpayload = self.getaccountmargins(segment=normalizedsegment)
+        if accountpayload:
+            summary = self.normalizemarginpayload(accountpayload, segment=normalizedsegment)
+            available = float(summary.get('available', 0.0))
+            if available > 0:
+                self.LOGGER.info("zerodha_available_balance_success", extra={'event': 'zerodha_available_balance_success', 'segment': normalizedsegment, 'available': available})
+                return available
+            else:
+                self.LOGGER.error("zerodha_available_balance_zero_or_negative", extra={'event': 'zerodha_available_balance_zero', 'segment': normalizedsegment, 'available': available})
+                raise BrokerError("Available margin is zero or negative!")
+        else:
+            raise BrokerError("No account margin payload received!")
+    except Exception as exc:
+        self.LOGGER.error("Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!", exc_info=exc)
+        raise BrokerError("Failed to get fresh available balance, no fallback allowed") from exc
 
     def _resolve_balance_fallback(self) -> float:
         """Return environment configured fallback balance figure.
