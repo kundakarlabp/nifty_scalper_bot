@@ -902,7 +902,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return summary
 
-    def getavailablebalance(self, segment: str = "equity") -> float:
+    def get_available_balance(self, segment: str = "equity") -> float:
         """
         Return available margin balance for a Zerodha segment.
         Returns strictly the latest available value or raises BrokerError
@@ -913,7 +913,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             or self.defaultmarginsegment
         )
         self.LOGGER.debug(
-            "Entered ZerodhaKiteClient.getavailablebalance",
+            "Entered ZerodhaKiteClient.get_available_balance",
             extra={
                 "event": "zerodha_available_balance_start",
                 "segment": normalizedsegment,
@@ -950,7 +950,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 raise BrokerError("No account margin payload received!")
         except Exception as exc:
             self.LOGGER.error(
-                "Failure in ZerodhaKiteClient.getavailablebalance, NO FALLBACK!",
+                "Failure in ZerodhaKiteClient.get_available_balance, NO FALLBACK!",
                 exc_info=exc,
             )
             raise BrokerError(
