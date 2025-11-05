@@ -40,7 +40,7 @@ tzdata>=2024.1
 
 # CLI / misc
 python-slugify>=8.0.4
-python-telegram-bot[rate-limiter]>=21.4,<22
+python-telegram-bot[rate-limiter]>=21.4,<23
 PyYAML>=6.0
 ujson>=5.8
 
