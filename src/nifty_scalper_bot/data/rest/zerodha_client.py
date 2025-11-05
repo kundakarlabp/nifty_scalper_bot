@@ -1088,10 +1088,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self, payload: Any, *, segment: str
     ) -> dict[str, float]:
         """Normalize Zerodha margin payload into balance fields.
-
-        Args:
-            payload: Raw payload returned by :meth:`get_margins`.
-            segment: Zerodha segment identifier used for selection.
+        normalizedsegment = str(segment or self._default_margin_segment).strip().lower() or self._default_margin_segment
 
         Returns:
             dict[str, float]: Mapping containing ``available``, ``used``, and ``net``.
