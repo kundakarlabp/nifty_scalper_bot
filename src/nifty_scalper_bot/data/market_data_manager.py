@@ -158,58 +158,7 @@ class MarketDataManager:
         self._cache_len = cache_len
         self._duplicate_window = max(duplicate_window_ms, 0) / 1000.0
         self._resolver = resolver
-                # --- InstrumentResolver warm (non-blocking by default) -----------------
-        try:
-            if self._resolver is not None and hasattr(self._resolver, "warm"):
-                # If user explicitly requests a blocking warm (useful in tests/startup),
-                # set env MDM_RESOLVER_WARM_BLOCKING=1 and optionally MDM_RESOLVER_WARM_TIMEOUT_SEC.
-                blocking = os.getenv("MDM_RESOLVER_WARM_BLOCKING", "").strip().lower() in {
-                    "1", "true", "yes", "on"
-                }
-                timeout_s = 5.0
-                try:
-                    timeout_s = float(os.getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "5.0"))
-                except Exception:
-                    timeout_s = 5.0
 
-                def _do_warm() -> None:
-                    try:
-                        self._logger.info("InstrumentResolver: warm() starting")
-                        self._resolver.warm()
-                        self._logger.info("InstrumentResolver: warm() completed")
-                    except Exception as exc:  # pragma: no cover - resolver warm may fail in some envs
-                        self._logger.warning(
-                            "InstrumentResolver warm() failed: %s",
-                            exc,
-                            extra={"event": "resolver_warm_error"},
-                        )
-
-                if blocking:
-                    # Blocking warm with timeout (thread.join used to avoid hanging main thread).
-                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
-                    thread.start()
-                    thread.join(timeout=timeout_s)
-                    if thread.is_alive():
-                        self._logger.warning(
-                            "InstrumentResolver warm() timed out after %.2fs",
-                            timeout_s,
-                            extra={"event": "resolver_warm_timeout"},
-                        )
-                else:
-                    # Start warm in background to avoid blocking startup
-                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
-                    thread.start()
-            else:
-                if self._resolver is not None:
-                    self._logger.debug("InstrumentResolver provided but has no warm() method")
-        except Exception as exc:  # defensive
-            self._logger.error(
-                "Failed to start InstrumentResolver warm task: %s",
-                exc,
-                extra={"event": "resolver_warm_start_error"},
-            )
-        # ---------------------------------------------------------------------
-     
         self._logger = get_logger(__name__)
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
