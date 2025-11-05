@@ -905,7 +905,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def getavailablebalance(self, segment: str = "equity") -> float:
         """
         Return available margin balance for a Zerodha segment.
-        Returns strictly the latest available value or raises BrokerError if not fresh. No fallback.
+        Returns strictly the latest available value or raises BrokerError 
+        if not fresh. No fallback.
         """
         normalizedsegment = str(segment or self.defaultmarginsegment).strip().lower() or self.defaultmarginsegment
         self.LOGGER.debug("Entered ZerodhaKiteClient.getavailablebalance", extra={'event': 'zerodha_available_balance_start', 'segment': normalizedsegment})
