@@ -141,7 +141,8 @@ class RiskManager:
         if hasattr(self, 'balance_store'):
             balance = self.balance_store.get()
             if not balance or price * qty > balance:
-                self.logger.error(f"ORDER REJECTED: Insufficient balance (need {price * qty}, have {balance})")
+                self.logger.error(f"ORDER REJECTED: Insufficient balance "
+                                  f"(need {price * qty}, have {balance})"
                 return False, "INSUFFICIENT_BALANCE"
         return True, "OK"
     
