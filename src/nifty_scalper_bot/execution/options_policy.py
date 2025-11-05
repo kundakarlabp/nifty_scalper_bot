@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import time
+import uuid
 
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 

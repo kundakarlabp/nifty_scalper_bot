@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import importlib.util
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from nifty_scalper_bot.backtest.parity import SinglePipelineParity
+from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from src.nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestConfig,
     BacktestEngine,
 )
-
-from nifty_scalper_bot.backtest.parity import SinglePipelineParity
-from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 
 
 class _ParityStrategy:

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import threading
-import time
 from collections import deque
 from dataclasses import dataclass, field
+import threading
+import time
 from typing import Any, Deque, Mapping, MutableMapping
 
 from nifty_scalper_bot.core.market_regime import (

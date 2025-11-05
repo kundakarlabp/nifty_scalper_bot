@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
-import time
 from collections import deque
 from dataclasses import dataclass
+import math
+import time
 from typing import Any, Deque, Mapping
 
 from pydantic import AliasChoices, Field

@@ -12,11 +12,11 @@ What it checks (without placing live orders):
 It prints a PASS/FAIL summary and the next step to fix each failure.
 """
 
+from contextlib import suppress  # noqa: F401
 import importlib  # noqa: F401
 import os
 import sys
 import time
-from contextlib import suppress  # noqa: F401
 
 # --- Force safe paper flags (process-local only) ------------------------------
 os.environ.setdefault("ENABLE_LIVE", "false")

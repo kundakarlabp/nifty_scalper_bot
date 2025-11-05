@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import csv
+from datetime import datetime
 import io
 import json
 import logging
 import os
 import threading
 import time
-from contextlib import suppress
-from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -95,30 +95,30 @@ class ZerodhaKiteClient(BaseBrokerClient):
         # compatibility.
         self._api_key = (
             api_key
-            or os.getenv('ZERODHA_API_KEY')
-            or os.getenv('BROKER_API_KEY')
-            or os.getenv('KITE_API_KEY')
+            or os.getenv("ZERODHA_API_KEY")
+            or os.getenv("BROKER_API_KEY")
+            or os.getenv("KITE_API_KEY")
         )
         self._api_secret = (
             api_secret
-            or os.getenv('ZERODHA_API_SECRET')
-            or os.getenv('BROKER_API_SECRET')
-            or os.getenv('KITE_API_SECRET')
+            or os.getenv("ZERODHA_API_SECRET")
+            or os.getenv("BROKER_API_SECRET")
+            or os.getenv("KITE_API_SECRET")
         )
         raw_access_token = (
             access_token
-            or os.getenv('ZERODHA_ACCESS_TOKEN')
-            or os.getenv('BROKER_ACCESS_TOKEN')
-            or os.getenv('KITE_ACCESS_TOKEN')
-            or ''
+            or os.getenv("ZERODHA_ACCESS_TOKEN")
+            or os.getenv("BROKER_ACCESS_TOKEN")
+            or os.getenv("KITE_ACCESS_TOKEN")
+            or ""
         )
         self._access_token = _sanitize_access_token(raw_access_token)
 
         if not self._api_key or not self._access_token:
             raise ConfigurationError(
-                'Zerodha credentials are not configured. '
-                'Set ZERODHA_API_KEY (or KITE_API_KEY) and '
-                'ZERODHA_ACCESS_TOKEN (or KITE_ACCESS_TOKEN) environment variables.'
+                "Zerodha credentials are not configured. "
+                "Set ZERODHA_API_KEY (or KITE_API_KEY) and "
+                "ZERODHA_ACCESS_TOKEN (or KITE_ACCESS_TOKEN) environment variables."
             )
 
         self._base_url = base_url.rstrip("/")
@@ -942,15 +942,15 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """
 
         LOGGER.debug(
-            'Entered ZerodhaKiteClient._resolve_balance_fallback',
-            extra={'event': 'zerodha_balance_fallback_enter'},
+            "Entered ZerodhaKiteClient._resolve_balance_fallback",
+            extra={"event": "zerodha_balance_fallback_enter"},
         )
         fallback_value = 1_000_000.0
         try:
             candidates = (
-                os.getenv('RISK__CAPITAL'),
-                os.getenv('RISK_CAPITAL'),
-                os.getenv('BACKTEST__CAPITAL'),
+                os.getenv("RISK__CAPITAL"),
+                os.getenv("RISK_CAPITAL"),
+                os.getenv("BACKTEST__CAPITAL"),
             )
             for candidate in candidates:
                 if candidate is None:
@@ -962,17 +962,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 break
         except Exception as exc:  # noqa: BLE001 - defensive parsing
             LOGGER.error(
-                'Failure in ZerodhaKiteClient._resolve_balance_fallback: %s',
+                "Failure in ZerodhaKiteClient._resolve_balance_fallback: %s",
                 exc,
-                extra={'event': 'zerodha_balance_fallback_error'},
+                extra={"event": "zerodha_balance_fallback_error"},
                 exc_info=exc,
             )
             fallback_value = 1_000_000.0
         LOGGER.info(
-            'Condition met: zerodha_balance_fallback_resolved',
+            "Condition met: zerodha_balance_fallback_resolved",
             extra={
-                'event': 'zerodha_balance_fallback_resolved',
-                'fallback': fallback_value,
+                "event": "zerodha_balance_fallback_resolved",
+                "fallback": fallback_value,
             },
         )
         return fallback_value

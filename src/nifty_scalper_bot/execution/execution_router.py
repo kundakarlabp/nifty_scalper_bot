@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+import time
 from typing import Literal
 
 from nifty_scalper_bot.execution.metrics import EXECUTION_LATENCY, SHADOW_DRIFT

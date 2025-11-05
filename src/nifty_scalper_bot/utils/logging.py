@@ -128,7 +128,7 @@ def setup_logging(level: str = "INFO") -> None:
         numeric_level = getattr(logging, level.upper(), logging.INFO)
         handler = logging.StreamHandler()
         handler.addFilter(EventEnricher())
-        if _resolve_bool('LOG_DEDUP_ENABLED', True):
+        if _resolve_bool("LOG_DEDUP_ENABLED", True):
             handler.addFilter(_DedupFilter())
         handler.setFormatter(
             KeyValueFormatter(
@@ -241,17 +241,17 @@ def log_throttled(
     """
 
     logger.debug(
-        'Entered log_throttled',
+        "Entered log_throttled",
         extra={
-            'event': 'logging_log_throttled_enter',
-            'log_key': key,
-            'level': level,
-            'interval': interval_sec,
+            "event": "logging_log_throttled_enter",
+            "log_key": key,
+            "level": level,
+            "interval": interval_sec,
         },
     )
     try:
         interval = (
-            _resolve_float('LOG_THROTTLE_DEFAULT_SEC', 5.0)
+            _resolve_float("LOG_THROTTLE_DEFAULT_SEC", 5.0)
             if interval_sec is None
             else float(interval_sec)
         )
@@ -264,9 +264,9 @@ def log_throttled(
         logger.log(level, msg, extra=extra or {})
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            'Failure in log_throttled: %s',
+            "Failure in log_throttled: %s",
             exc,
-            extra={'event': 'logging_log_throttled_error', 'log_key': key},
+            extra={"event": "logging_log_throttled_error", "log_key": key},
             exc_info=exc,
         )
 
@@ -298,8 +298,8 @@ def log_state_change(
     """
 
     logger.debug(
-        'Entered log_state_change',
-        extra={'event': 'logging_log_state_change_enter', 'log_key': key},
+        "Entered log_state_change",
+        extra={"event": "logging_log_state_change_enter", "log_key": key},
     )
     try:
         with _STATE_CACHE_LOCK:
@@ -307,17 +307,17 @@ def log_state_change(
             if previous == value:
                 return False
             _STATE_CACHE[key] = value
-        message = msg or f'{key} changed: {previous!r} -> {value!r}'
-        payload = {'previous_value': previous, 'current_value': value}
+        message = msg or f"{key} changed: {previous!r} -> {value!r}"
+        payload = {"previous_value": previous, "current_value": value}
         if extra:
             payload.update(extra)
         logger.log(level, message, extra=payload)
         return True
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            'Failure in log_state_change: %s',
+            "Failure in log_state_change: %s",
             exc,
-            extra={'event': 'logging_log_state_change_error', 'log_key': key},
+            extra={"event": "logging_log_state_change_error", "log_key": key},
             exc_info=exc,
         )
         return False
@@ -330,7 +330,7 @@ class _DedupFilter(logging.Filter):
         """Initialise the filter using environment configuration."""
 
         super().__init__()
-        self._window = _resolve_float('LOG_DEDUP_WINDOW_SEC', 2.0)
+        self._window = _resolve_float("LOG_DEDUP_WINDOW_SEC", 2.0)
         self._cache: dict[tuple[str, int], float] = {}
         self._lock = threading.Lock()
 
@@ -363,13 +363,13 @@ def _resolve_bool(name: str, default: bool) -> bool:
         raw = os.getenv(name)
         if raw is None:
             return default
-        return str(raw).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+        return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            'Failure in _resolve_bool for %s: %s',
+            "Failure in _resolve_bool for %s: %s",
             name,
             exc,
-            extra={'event': 'logging_resolve_bool_error', 'variable': name},
+            extra={"event": "logging_resolve_bool_error", "variable": name},
             exc_info=exc,
         )
         return default
@@ -396,19 +396,19 @@ def _resolve_float(name: str, default: float) -> float:
         return float(raw)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            'Failure in _resolve_float for %s: %s',
+            "Failure in _resolve_float for %s: %s",
             name,
             exc,
-            extra={'event': 'logging_resolve_float_error', 'variable': name},
+            extra={"event": "logging_resolve_float_error", "variable": name},
             exc_info=exc,
         )
         return float(default)
 
 
 __all__ = [
-    'get_logger',
-    'get_tracer_logger',
-    'log_state_change',
-    'log_throttled',
-    'setup_logging',
+    "get_logger",
+    "get_tracer_logger",
+    "log_state_change",
+    "log_throttled",
+    "setup_logging",
 ]

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import time
 import types
-from datetime import datetime, timezone
 from typing import Any, Sequence
 
-import pytest
 from fastapi.testclient import TestClient
+import pytest
 from telegram.constants import ParseMode
 
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot

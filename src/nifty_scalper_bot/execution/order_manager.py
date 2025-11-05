@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
-import math
-import os
-import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import json
+import math
+import os
 from pathlib import Path
 from threading import Event, RLock, Thread
+import time
 from typing import (
     TYPE_CHECKING,
     Any,

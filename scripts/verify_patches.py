@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import importlib
-import sys
 from pathlib import Path
+import sys
 from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

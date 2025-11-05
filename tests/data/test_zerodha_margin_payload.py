@@ -74,4 +74,3 @@ def test_normalize_margin_payload_extracts_nested_available() -> None:
         "used": 25_000.0,
         "net": 230_000.0,
     }
-

@@ -46,3 +46,15 @@
 {"timestamp": 1762287678.5763705, "created_ts": 3831.794370077, "request_id": "req_3831794", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_TP1", "status": "filled"}
 {"timestamp": 1762287678.6292782, "created_ts": 3831.847718931, "request_id": "req_3831847", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_SL", "status": "pending"}
 {"timestamp": 1762287678.6317518, "created_ts": 3831.847718931, "request_id": "req_3831847", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_SL", "status": "filled"}
+{"timestamp": 1762319945.397628, "created_ts": 3115.813884191, "request_id": "req_3115813", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 75, "intent": "ENTRY", "status": "pending"}
+{"timestamp": 1762319945.4005733, "created_ts": 3115.813884191, "request_id": "req_3115813", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 75, "intent": "ENTRY", "status": "filled"}
+{"timestamp": 1762319945.421573, "created_ts": 3115.837965878, "request_id": "req_3115837", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 25, "intent": "ENTRY", "status": "pending"}
+{"timestamp": 1762319945.4221585, "created_ts": 3115.837965878, "request_id": "req_3115837", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 25, "intent": "ENTRY", "status": "filled"}
+{"timestamp": 1762319945.476289, "created_ts": 3115.892708221, "request_id": "req_3115892", "symbol": "NIFTY", "side": "BUY", "quantity": 10, "intent": "ENTRY", "status": "pending"}
+{"timestamp": 1762319945.4867675, "created_ts": 3115.892708221, "request_id": "req_3115892", "symbol": "NIFTY", "side": "BUY", "quantity": 10, "intent": "ENTRY", "status": "rejected"}
+{"timestamp": 1762319945.5879807, "created_ts": 3116.004399601, "request_id": "req_3116004", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 10, "intent": "ENTRY", "status": "pending"}
+{"timestamp": 1762319945.5927665, "created_ts": 3116.004399601, "request_id": "req_3116004", "symbol": "NIFTY25OCT25000CE", "side": "BUY", "quantity": 10, "intent": "ENTRY", "status": "filled"}
+{"timestamp": 1762319945.640321, "created_ts": 3116.056686681, "request_id": "req_3116056", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_TP1", "status": "pending"}
+{"timestamp": 1762319945.6409745, "created_ts": 3116.056686681, "request_id": "req_3116056", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_TP1", "status": "filled"}
+{"timestamp": 1762319945.6915069, "created_ts": 3116.107596302, "request_id": "req_3116107", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_SL", "status": "pending"}
+{"timestamp": 1762319945.6921194, "created_ts": 3116.107596302, "request_id": "req_3116107", "symbol": "NIFTY25OCT25000CE", "side": "SELL", "quantity": 5, "intent": "EXIT_SL", "status": "filled"}

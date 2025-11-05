@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import statistics
 import typing as t
-from dataclasses import dataclass
 
 from nifty_scalper_bot.infra.metrics import METRICS, MetricsCollector
 from nifty_scalper_bot.utils.logging import get_logger

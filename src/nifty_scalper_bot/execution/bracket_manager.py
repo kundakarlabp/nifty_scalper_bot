@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import threading
 import time
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -320,13 +320,13 @@ class BracketManager:
                             },
                         )
 
-                if filled_leg == 'TARGET' and bracket_state.tp2_order_id:
+                if filled_leg == "TARGET" and bracket_state.tp2_order_id:
                     self.logger.info(
-                        'TP1 filled; TP2 remains active',
+                        "TP1 filled; TP2 remains active",
                         extra={
-                            'event': 'bracket.tp1.filled',
-                            'entry_id': entry_id,
-                            'tp2_id': bracket_state.tp2_order_id,
+                            "event": "bracket.tp1.filled",
+                            "entry_id": entry_id,
+                            "tp2_id": bracket_state.tp2_order_id,
                         },
                     )
         except Exception as exc:  # noqa: BLE001
@@ -362,11 +362,11 @@ class BracketManager:
         """
 
         self.logger.debug(
-            'Entered BracketManager._reduce_sl_quantity',
+            "Entered BracketManager._reduce_sl_quantity",
             extra={
-                'event': 'bracket.sl.reduce.enter',
-                'entry_id': entry_id,
-                'filled_qty': filled_qty,
+                "event": "bracket.sl.reduce.enter",
+                "entry_id": entry_id,
+                "filled_qty": filled_qty,
             },
         )
         if not bracket_state.stop_loss_order_id:
@@ -380,21 +380,21 @@ class BracketManager:
 
             if remaining_qty <= 0:
                 self.logger.warning(
-                    'No remaining quantity for SL reduction',
+                    "No remaining quantity for SL reduction",
                     extra={
-                        'event': 'bracket.sl.reduce.no_remaining',
-                        'entry_id': entry_id,
-                        'sl_order_id': bracket_state.stop_loss_order_id,
+                        "event": "bracket.sl.reduce.no_remaining",
+                        "entry_id": entry_id,
+                        "sl_order_id": bracket_state.stop_loss_order_id,
                     },
                 )
                 return
 
             if not isinstance(self.broker, SupportsModifyOrder):
                 self.logger.warning(
-                    'Broker does not support order modification',
+                    "Broker does not support order modification",
                     extra={
-                        'event': 'bracket.sl.reduce.unsupported',
-                        'entry_id': entry_id,
+                        "event": "bracket.sl.reduce.unsupported",
+                        "entry_id": entry_id,
                     },
                 )
                 return
@@ -406,33 +406,33 @@ class BracketManager:
             bracket_state.active_quantity = remaining_qty
 
             self.logger.info(
-                'SL quantity reduced after partial TP',
+                "SL quantity reduced after partial TP",
                 extra={
-                    'event': 'bracket.sl.reduced',
-                    'entry_id': entry_id,
-                    'sl_order_id': bracket_state.stop_loss_order_id,
-                    'filled_qty': filled_qty,
-                    'remaining_qty': remaining_qty,
-                    'cumulative_tp': bracket_state.cumulative_tp_filled,
+                    "event": "bracket.sl.reduced",
+                    "entry_id": entry_id,
+                    "sl_order_id": bracket_state.stop_loss_order_id,
+                    "filled_qty": filled_qty,
+                    "remaining_qty": remaining_qty,
+                    "cumulative_tp": bracket_state.cumulative_tp_filled,
                 },
             )
 
             if (
                 METRICS_AVAILABLE
                 and METRICS is not None
-                and hasattr(METRICS, 'bracket_sl_reductions')
+                and hasattr(METRICS, "bracket_sl_reductions")
             ):
                 METRICS.bracket_sl_reductions.inc()
 
         except Exception as exc:  # noqa: BLE001
             self.logger.error(
-                'Failed to reduce SL quantity: %s',
+                "Failed to reduce SL quantity: %s",
                 exc,
                 extra={
-                    'event': 'bracket.sl.reduce.failed',
-                    'entry_id': entry_id,
-                    'sl_order_id': bracket_state.stop_loss_order_id,
-                    'error': str(exc),
+                    "event": "bracket.sl.reduce.failed",
+                    "entry_id": entry_id,
+                    "sl_order_id": bracket_state.stop_loss_order_id,
+                    "error": str(exc),
                 },
                 exc_info=exc,
             )

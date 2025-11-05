@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import random
 import time
-from dataclasses import dataclass
 from typing import Callable, TypeVar
 
 from nifty_scalper_bot.infra.metrics import METRICS

@@ -43,6 +43,11 @@ Optional SRE-grade:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from collections.abc import Iterable
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import gc
 import html as _html
 import importlib
@@ -51,6 +56,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import platform
 import re
 import sys
@@ -58,21 +64,15 @@ import threading
 import time
 import tracemalloc
 import typing as t
-from collections import deque
-from collections.abc import Iterable
-from contextlib import suppress
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-import uvicorn
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 from telegram import Bot, Chat, InputFile, Message, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+import uvicorn
 
 from nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestSummary,

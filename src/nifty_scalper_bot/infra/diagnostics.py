@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 from collections import deque
+import logging
 from threading import RLock
 from typing import Deque, Dict, List
 

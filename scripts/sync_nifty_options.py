@@ -6,9 +6,9 @@ import sys
 import time
 import zipfile
 
+from dateutil.relativedelta import relativedelta
 import pandas as pd
 import requests
-from dateutil.relativedelta import relativedelta
 
 HEADERS = {
     "User-Agent": (

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import Enum
+import math
 from typing import Deque, Mapping, Sequence
 
 import pandas as pd

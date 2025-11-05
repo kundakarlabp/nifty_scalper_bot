@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 from dataclasses import dataclass
+import datetime as _dt
 from typing import Any, Callable
 
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject, parse_broker_error

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 import re
-import time
-from datetime import datetime, timezone
 from threading import RLock
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional, TypedDict, cast
 
 from nifty_scalper_bot.storage.hub_store import HubStore, WalEntry
@@ -214,40 +214,40 @@ class DataHub:
         """
 
         LOGGER.debug(
-            'Entered DataHub.get_account_snapshot',
-            extra={'event': 'data_hub_account_snapshot_enter', 'force': force},
+            "Entered DataHub.get_account_snapshot",
+            extra={"event": "data_hub_account_snapshot_enter", "force": force},
         )
-        fetcher = getattr(self._mdm, 'get_account_snapshot', None)
+        fetcher = getattr(self._mdm, "get_account_snapshot", None)
         if not callable(fetcher):
             LOGGER.error(
-                'data_hub_account_snapshot_missing_mdm',
-                extra={'event': 'data_hub_account_snapshot_missing_mdm'},
+                "data_hub_account_snapshot_missing_mdm",
+                extra={"event": "data_hub_account_snapshot_missing_mdm"},
             )
             return {}
         try:
             snapshot = fetcher(force=force)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                'Failure in DataHub.get_account_snapshot: %s',
+                "Failure in DataHub.get_account_snapshot: %s",
                 exc,
-                extra={'event': 'data_hub_account_snapshot_error'},
+                extra={"event": "data_hub_account_snapshot_error"},
                 exc_info=exc,
             )
             return {}
         normalized = dict(snapshot or {})
         if normalized:
             LOGGER.info(
-                'data_hub_account_snapshot_available',
+                "data_hub_account_snapshot_available",
                 extra={
-                    'event': 'data_hub_account_snapshot_available',
-                    'available': normalized.get('available'),
-                    'net': normalized.get('net'),
+                    "event": "data_hub_account_snapshot_available",
+                    "available": normalized.get("available"),
+                    "net": normalized.get("net"),
                 },
             )
         else:
             LOGGER.warning(
-                'data_hub_account_snapshot_empty',
-                extra={'event': 'data_hub_account_snapshot_empty'},
+                "data_hub_account_snapshot_empty",
+                extra={"event": "data_hub_account_snapshot_empty"},
             )
         return normalized
 
@@ -265,30 +265,30 @@ class DataHub:
         """
 
         LOGGER.debug(
-            'Entered DataHub.get_available_balance',
-            extra={'event': 'data_hub_available_balance_enter', 'force': force},
+            "Entered DataHub.get_available_balance",
+            extra={"event": "data_hub_available_balance_enter", "force": force},
         )
         balance_value: float | None = None
-        fetcher = getattr(self._mdm, 'get_available_balance', None)
+        fetcher = getattr(self._mdm, "get_available_balance", None)
         if callable(fetcher):
             try:
                 balance_value = fetcher(force=force)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error(
-                    'Failure in DataHub.get_available_balance: %s',
+                    "Failure in DataHub.get_available_balance: %s",
                     exc,
-                    extra={'event': 'data_hub_available_balance_error'},
+                    extra={"event": "data_hub_available_balance_error"},
                     exc_info=exc,
                 )
                 balance_value = None
         if balance_value is None:
             snapshot = self.get_account_snapshot(force=force)
             for key in (
-                'available',
-                'live_balance',
-                'cash',
-                'opening_balance',
-                'net',
+                "available",
+                "live_balance",
+                "cash",
+                "opening_balance",
+                "net",
             ):
                 value_option = snapshot.get(key)
                 if value_option is None:
@@ -303,16 +303,16 @@ class DataHub:
         if balance_value is not None and balance_value > 0:
             resolved_balance = float(balance_value)
             LOGGER.info(
-                'data_hub_available_balance_resolved',
+                "data_hub_available_balance_resolved",
                 extra={
-                    'event': 'data_hub_available_balance_resolved',
-                    'balance': round(resolved_balance, 2),
+                    "event": "data_hub_available_balance_resolved",
+                    "balance": round(resolved_balance, 2),
                 },
             )
             return resolved_balance
         LOGGER.warning(
-            'data_hub_available_balance_unavailable',
-            extra={'event': 'data_hub_available_balance_unavailable'},
+            "data_hub_available_balance_unavailable",
+            extra={"event": "data_hub_available_balance_unavailable"},
         )
         return None
 

@@ -16,10 +16,10 @@ clear error messages to ease troubleshooting in Railway deployments.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import time
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Set
 
@@ -1000,12 +1000,12 @@ def _build_elite_settings() -> EliteStrategiesSettings:
 
 def _build_order_settings() -> OrderSettings:
     lifecycle = OrderLifecycleSettings(
-        tp1_R=_env_float('LIFECYCLE_TP1_R', default=1.0, minimum=0.0),
-        tp1_partial=_env_float('LIFECYCLE_TP1_PARTIAL', default=0.6, minimum=0.0),
-        tp2_R_trend=_env_float('LIFECYCLE_TP2_R_TREND', default=1.8, minimum=0.0),
-        tp2_R_range=_env_float('LIFECYCLE_TP2_R_RANGE', default=1.4, minimum=0.0),
-        trail_atr_mult=_env_float('LIFECYCLE_TRAIL_ATR_MULT', default=0.8, minimum=0.0),
-        time_stop_min=_env_int('LIFECYCLE_TIME_STOP_MIN', default=12, minimum=1),
+        tp1_R=_env_float("LIFECYCLE_TP1_R", default=1.0, minimum=0.0),
+        tp1_partial=_env_float("LIFECYCLE_TP1_PARTIAL", default=0.6, minimum=0.0),
+        tp2_R_trend=_env_float("LIFECYCLE_TP2_R_TREND", default=1.8, minimum=0.0),
+        tp2_R_range=_env_float("LIFECYCLE_TP2_R_RANGE", default=1.4, minimum=0.0),
+        trail_atr_mult=_env_float("LIFECYCLE_TRAIL_ATR_MULT", default=0.8, minimum=0.0),
+        time_stop_min=_env_int("LIFECYCLE_TIME_STOP_MIN", default=12, minimum=1),
     )
     return OrderSettings(
         enable_live=_env_bool("ENABLE_LIVE", "ENABLE_LIVE_TRADING", default=False),
@@ -1348,9 +1348,9 @@ def get_settings() -> Settings:
         validate_lifecycle_config(settings_obj)
     except LifecycleConfigError as exc:
         LOGGER.error(
-            'Failure in get_settings lifecycle validation: %s',
+            "Failure in get_settings lifecycle validation: %s",
             exc,
-            extra={'event': 'settings_lifecycle_invalid'},
+            extra={"event": "settings_lifecycle_invalid"},
         )
         raise
 
@@ -1358,15 +1358,15 @@ def get_settings() -> Settings:
         validate_elite_config(settings_obj.elite)
     except EliteConfigError as exc:
         LOGGER.error(
-            'Failure in get_settings elite validation: %s',
+            "Failure in get_settings elite validation: %s",
             exc,
-            extra={'event': 'settings_elite_invalid'},
+            extra={"event": "settings_elite_invalid"},
         )
         raise
 
     LOGGER.info(
-        'Condition met: settings_validated',
-        extra={'event': 'settings_validated'},
+        "Condition met: settings_validated",
+        extra={"event": "settings_validated"},
     )
     return settings_obj
 

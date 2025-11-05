@@ -1,16 +1,15 @@
-
 from __future__ import annotations
 
 import asyncio  # Required for startup reconciliation and background tasks
-import inspect
-import os
-import random
-import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from importlib import import_module
+import inspect
+import os
 from pathlib import Path
+import random
+import time as time_module
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -29,6 +28,7 @@ from zoneinfo import ZoneInfo
 # Nifty Scalper Bot imports
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
+
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
@@ -1931,29 +1931,25 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
 
     if data_hub is None:
-        raise ConfigurationError('Data hub initialisation failed')
+        raise ConfigurationError("Data hub initialisation failed")
 
     try:
         snapshot = data_hub.get_account_snapshot(force=True)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            'init.account_snapshot_failed',
-            extra={'event': 'init.account_snapshot_failed', 'error': str(exc)},
+            "init.account_snapshot_failed",
+            extra={"event": "init.account_snapshot_failed", "error": str(exc)},
             exc_info=exc,
         )
     else:
         LOGGER.info(
-            'init.account_snapshot_ready',
+            "init.account_snapshot_ready",
             extra={
-                'event': 'init.account_snapshot_ready',
-                'available': (
-                    snapshot.get('available')
-                    if isinstance(snapshot, dict)
-                    else None
+                "event": "init.account_snapshot_ready",
+                "available": (
+                    snapshot.get("available") if isinstance(snapshot, dict) else None
                 ),
-                'net': (
-                    snapshot.get('net') if isinstance(snapshot, dict) else None
-                ),
+                "net": (snapshot.get("net") if isinstance(snapshot, dict) else None),
             },
         )
 
@@ -2139,8 +2135,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_manager.attach_data_hub(data_hub)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            'risk_manager_attach_data_hub_failed',
-            extra={'event': 'risk_manager_attach_data_hub_failed', 'error': str(exc)},
+            "risk_manager_attach_data_hub_failed",
+            extra={"event": "risk_manager_attach_data_hub_failed", "error": str(exc)},
             exc_info=exc,
         )
 
@@ -4715,3 +4711,17 @@ __all__ = [
     "get_http_app",
     "get_telegram_notifier",
 ]
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/ping")
+def ping():
+    return {"ping": "pong"}

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 from pydantic import HttpUrl
+import pytest
 
 from nifty_scalper_bot.config import env
 

@@ -15,12 +15,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from getpass import getpass
 import logging
 import os
+from pathlib import Path
 import sys
 import webbrowser
-from getpass import getpass
-from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 

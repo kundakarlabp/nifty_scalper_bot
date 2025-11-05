@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import math
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, Mapping, Sequence
 
 from telegram import Update

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass, field
 import queue
 import threading
 import time
-import weakref
-from collections import deque
-from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, Mapping, Sequence, cast
+import weakref
 
 import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.infra.metrics import METRICS

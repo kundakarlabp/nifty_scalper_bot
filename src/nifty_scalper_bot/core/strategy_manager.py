@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import time
-import typing as t
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import sqrt
 from statistics import mean, pstdev
+import time
+import typing as t
 
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
@@ -17,8 +17,6 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_generator import (
     Signal,
-)
-from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
@@ -1501,23 +1499,23 @@ class StrategyManager(_BaseStrategyManager):
             updated_at=datetime.now(timezone.utc),
         )
         payload = {
-            'event': 'regime_state_refreshed',
-            'regime': self._regime_state.regime,
-            'confidence': self._regime_state.confidence,
+            "event": "regime_state_refreshed",
+            "regime": self._regime_state.regime,
+            "confidence": self._regime_state.confidence,
         }
         change_payload = dict(payload)
         emitted_change = log_state_change(
             log,
-            key='strategy_manager.regime_state',
+            key="strategy_manager.regime_state",
             value=(self._regime_state.regime, self._regime_state.confidence),
-            msg='Condition met: regime_state_refreshed',
+            msg="Condition met: regime_state_refreshed",
             extra=change_payload,
         )
         if not emitted_change:
             log_throttled(
                 log,
-                key='strategy_manager.regime_state_refreshed',
-                msg='Condition met: regime_state_refreshed',
+                key="strategy_manager.regime_state_refreshed",
+                msg="Condition met: regime_state_refreshed",
                 interval_sec=10.0,
                 extra=dict(payload),
             )

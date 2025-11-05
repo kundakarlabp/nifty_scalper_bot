@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import gzip
-import shutil
 from datetime import datetime, timedelta, timezone
+import gzip
 from pathlib import Path
+import shutil
 
 from nifty_scalper_bot.utils.logging import get_logger
 

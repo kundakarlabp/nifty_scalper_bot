@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.utils.errors import DataStaleError

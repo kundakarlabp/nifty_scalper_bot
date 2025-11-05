@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import]
 from pydantic import BaseModel, Field, PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml  # type: ignore[import]
 
 from nifty_scalper_bot.utils.logging import get_logger
 

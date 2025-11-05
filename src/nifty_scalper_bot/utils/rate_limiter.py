@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from threading import Condition, Lock
+import time
 from typing import Dict
 
 from nifty_scalper_bot.utils.errors import RateLimitError

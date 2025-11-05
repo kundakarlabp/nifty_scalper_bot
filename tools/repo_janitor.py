@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import json
 import os
-import re
-from collections import defaultdict
 from pathlib import Path
+import re
 from typing import Dict, List, Set, Tuple
 
 ROOT = Path(os.getenv("JANITOR_ROOT", "."))

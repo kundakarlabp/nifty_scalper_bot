@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Callable, Iterable, Mapping, MutableMapping
 
 from nifty_scalper_bot.utils.errors import RateLimitError

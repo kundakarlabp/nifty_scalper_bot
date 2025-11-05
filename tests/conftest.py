@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from contextlib import suppress
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 from typing import Generator
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from nifty_scalper_bot.core.trading_switch import trading_switch
 from src.nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestConfig,
     BacktestEngine,
 )
-
-from nifty_scalper_bot.core.trading_switch import trading_switch
 
 
 @pytest.fixture(autouse=True)

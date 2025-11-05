@@ -80,24 +80,22 @@ def _get_optional_bool(name: str, default: bool) -> bool:
     raise ConfigurationError(f"Invalid boolean for {name}: {value}")
 
 
-
-
 def POLL_INTERVAL_SECS_MARKET() -> float:
     """Return polling interval in seconds when markets are open."""
 
-    return _get_optional_float('POLL_INTERVAL_SECS_MARKET', 0.5)
+    return _get_optional_float("POLL_INTERVAL_SECS_MARKET", 0.5)
 
 
 def POLL_INTERVAL_SECS_OFFHOURS() -> float:
     """Return polling interval in seconds for off-hours cadence."""
 
-    return _get_optional_float('POLL_INTERVAL_SECS_OFFHOURS', 5.0)
+    return _get_optional_float("POLL_INTERVAL_SECS_OFFHOURS", 5.0)
 
 
 def POLL_RECONNECT_CAP_SECS() -> int:
     """Return the cap for polling reconnect backoff seconds."""
 
-    return _get_optional_int('POLL_RECONNECT_CAP_SECS', 30)
+    return _get_optional_int("POLL_RECONNECT_CAP_SECS", 30)
 
 
 def _get_cred(var_primary: str, *aliases: str) -> str:

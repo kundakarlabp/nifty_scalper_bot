@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+import time
 from types import MethodType, SimpleNamespace
 from typing import Any
 

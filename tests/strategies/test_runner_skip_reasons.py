@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import nifty_scalper_bot.strategies.runner as runner_module
 from nifty_scalper_bot.options.strike_selector import SelectedContract
+import nifty_scalper_bot.strategies.runner as runner_module
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.utils.errors import OrderPlacementError

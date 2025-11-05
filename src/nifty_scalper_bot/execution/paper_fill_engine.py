@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, Mapping, cast
 
 from nifty_scalper_bot.data.data_hub import DataHub

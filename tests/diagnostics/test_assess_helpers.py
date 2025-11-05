@@ -11,10 +11,12 @@ def test_assess_suite_handles_success_and_exception() -> None:
     def failing_check() -> tuple[bool, str, dict[str, object] | None]:
         raise RuntimeError("boom")
 
-    results = assess_suite([
-        ("ok", ok_check),
-        ("fail", failing_check),
-    ])
+    results = assess_suite(
+        [
+            ("ok", ok_check),
+            ("fail", failing_check),
+        ]
+    )
 
     assert [result.name for result in results] == ["ok", "fail"]
     assert isinstance(results[0], CheckResult)

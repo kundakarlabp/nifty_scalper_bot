@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from html import escape as _escape
+import os
 from typing import Iterable, Optional, Tuple
 
 EMOJI = {

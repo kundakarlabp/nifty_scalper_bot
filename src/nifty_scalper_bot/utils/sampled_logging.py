@@ -9,9 +9,9 @@ Goals:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import threading
-from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Dict, Optional, Protocol, Tuple
 
@@ -46,7 +46,9 @@ class RegimeSampler:
         if emitted less than event_dedupe_s seconds ago). Set to 0 to disable.
     """
 
-    def __init__(self, *, period_s: float = 15.0, tol: float = 1e-6, event_dedupe_s: float = 5.0) -> None:
+    def __init__(
+        self, *, period_s: float = 15.0, tol: float = 1e-6, event_dedupe_s: float = 5.0
+    ) -> None:
         if period_s <= 0:
             raise ValueError("period_s must be > 0")
         if event_dedupe_s < 0:
@@ -72,7 +74,12 @@ class RegimeSampler:
 
         LOGGER.debug(
             "RegimeSampler initialized",
-            extra={"event": "regime_sampler_init", "period_s": self._period_s, "tol": self._tol, "event_dedupe_s": self._event_dedupe_s},
+            extra={
+                "event": "regime_sampler_init",
+                "period_s": self._period_s,
+                "tol": self._tol,
+                "event_dedupe_s": self._event_dedupe_s,
+            },
         )
 
     # --- public helpers ----------------------------------------------------
@@ -96,11 +103,16 @@ class RegimeSampler:
                 return True
             return not math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=self._tol)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failure in RegimeSampler._changed", extra={"event": "regime_sampler_changed_error", "error": str(exc)})
+            LOGGER.exception(
+                "Failure in RegimeSampler._changed",
+                extra={"event": "regime_sampler_changed_error", "error": str(exc)},
+            )
             # Fail-open: treat as change
             return True
 
-    def _event_key(self, event: str, regime: Optional[str], multiplier: Optional[float]) -> str:
+    def _event_key(
+        self, event: str, regime: Optional[str], multiplier: Optional[float]
+    ) -> str:
         """Canonical string key for per-event dedupe map."""
         mult_key = "None" if multiplier is None else f"{float(round(multiplier, 6))}"
         return f"{event}|{regime or 'UNKNOWN'}|{mult_key}"
@@ -153,7 +165,10 @@ class RegimeSampler:
                 # Per-event dedupe check (to avoid many identical messages)
                 key = self._event_key(event, regime, target_multiplier)
                 last_event_t = self._event_last_emit.get(key)
-                if last_event_t is not None and (now - last_event_t) < self._event_dedupe_s:
+                if (
+                    last_event_t is not None
+                    and (now - last_event_t) < self._event_dedupe_s
+                ):
                     # Suppress identical event within dedupe window
                     self._suppressed_count += 1
                     return
@@ -170,7 +185,11 @@ class RegimeSampler:
             payload: Dict[str, Any] = {
                 "event": event,
                 "regime": regime or "UNKNOWN",
-                "multiplier": None if target_multiplier is None else round(float(target_multiplier), 6),
+                "multiplier": (
+                    None
+                    if target_multiplier is None
+                    else round(float(target_multiplier), 6)
+                ),
             }
             if extra:
                 payload.update(extra)
@@ -182,7 +201,10 @@ class RegimeSampler:
 
         except Exception as exc:  # noqa: BLE001
             # Ensure any failure here is visible but doesn't crash the caller
-            LOGGER.exception("Failure in RegimeSampler.maybe_log", extra={"event": "regime_sampler_maybe_log_error", "error": str(exc)})
+            LOGGER.exception(
+                "Failure in RegimeSampler.maybe_log",
+                extra={"event": "regime_sampler_maybe_log_error", "error": str(exc)},
+            )
 
 
 __all__ = ["RegimeSampler"]

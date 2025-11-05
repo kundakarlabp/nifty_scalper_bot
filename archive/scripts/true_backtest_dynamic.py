@@ -25,10 +25,10 @@ Usage:
 
 from __future__ import annotations
 
-import logging
-import sys
 from datetime import datetime
+import logging
 from pathlib import Path
+import sys
 
 import pandas as pd
 

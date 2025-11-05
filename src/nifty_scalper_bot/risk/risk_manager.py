@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import threading
-import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import os
 from statistics import median
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from nifty_scalper_bot.execution.position_manager import Position
@@ -692,11 +692,11 @@ class RiskManager:
             if force_refresh:
                 age = max(time.time() - self._last_balance_refresh, 0.0)
                 self._logger.info(
-                    'Condition met: risk_balance_jit_refresh',
+                    "Condition met: risk_balance_jit_refresh",
                     extra={
-                        'event': 'risk_balance_jit_refresh',
-                        'age': round(age, 2),
-                        'threshold': round(self._balance_force_refresh, 2),
+                        "event": "risk_balance_jit_refresh",
+                        "age": round(age, 2),
+                        "threshold": round(self._balance_force_refresh, 2),
                     },
                 )
             self.refresh_account_balance(force=force_refresh)

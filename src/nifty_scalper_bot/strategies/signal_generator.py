@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, time
+import math
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
 from nifty_scalper_bot.utils.logging import get_logger

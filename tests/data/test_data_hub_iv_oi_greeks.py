@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime
+import math
 
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.utils.options_math import black_scholes_price

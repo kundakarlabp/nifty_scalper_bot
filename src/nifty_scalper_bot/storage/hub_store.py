@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import time
 from pathlib import Path
+import sqlite3
 from threading import RLock
+import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.utils.logging import get_logger

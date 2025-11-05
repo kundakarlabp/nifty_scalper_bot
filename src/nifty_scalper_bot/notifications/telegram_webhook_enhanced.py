@@ -5,11 +5,11 @@ and robust command replies (/ping, /status, /start).
 from __future__ import annotations
 
 import asyncio
-import json
-import random
 from contextlib import suppress
 from dataclasses import dataclass, field
+import json
 from logging import Logger
+import random
 from time import monotonic
 from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 

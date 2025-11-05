@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import logging
 import os
 import signal
-from functools import partial
 from typing import Any, Callable
 
 import sentry_sdk
-import uvicorn
 from sentry_sdk.integrations.logging import LoggingIntegration
+import uvicorn
 
-import nifty_scalper_bot.load_env_first  # noqa: F401
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
+import nifty_scalper_bot.load_env_first  # noqa: F401
 
 LOG = logging.getLogger("nifty_scalper_bot.main")
 

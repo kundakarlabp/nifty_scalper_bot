@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import sys
 from typing import Iterable
 
 from nifty_scalper_bot.infra.metrics import METRICS

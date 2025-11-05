@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import threading
-import time
 from contextlib import suppress
 from dataclasses import dataclass
+import threading
+import time
 from typing import Any, Iterable, Sequence
 
 from nifty_scalper_bot.utils.logging import get_logger

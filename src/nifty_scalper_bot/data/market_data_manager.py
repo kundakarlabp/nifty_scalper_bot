@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import math
-import os
-import threading
-import time
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import math
+import os
 from random import uniform
+import threading
+import time
 from typing import Any, Callable, Deque, Iterable, Mapping, Sequence, cast
 
 from nifty_scalper_bot.config.settings import get_settings
@@ -199,9 +199,15 @@ class MarketDataManager:
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
         margin_segment = (
-            get_str("ZERODHA_MARGIN_SEGMENT", "BROKER_MARGIN_SEGMENT", default="equity")
-            or "equity"
-        ).strip().lower()
+            (
+                get_str(
+                    "ZERODHA_MARGIN_SEGMENT", "BROKER_MARGIN_SEGMENT", default="equity"
+                )
+                or "equity"
+            )
+            .strip()
+            .lower()
+        )
         if margin_segment not in {"equity", "commodity"}:
             margin_segment = "equity"
         self._margin_segment = margin_segment

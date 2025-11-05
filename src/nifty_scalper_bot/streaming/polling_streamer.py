@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import math
 import threading
 import time
-from contextlib import suppress
 from typing import Any, Callable, Iterable, Sequence
 
 from nifty_scalper_bot.utils.logging import get_logger

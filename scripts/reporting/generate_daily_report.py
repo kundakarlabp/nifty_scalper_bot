@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+import sys
 from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

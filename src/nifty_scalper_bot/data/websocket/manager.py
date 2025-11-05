@@ -3,12 +3,12 @@ flexible SDK adapters."""
 
 from __future__ import annotations
 
+from collections import defaultdict
+from enum import Enum
 import random
 import threading
 import time
 import types
-from collections import defaultdict
-from enum import Enum
 from typing import Any, Callable, Iterable
 
 from nifty_scalper_bot.utils.errors import WebSocketError

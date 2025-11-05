@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
+import time
 
 from nifty_scalper_bot.utils.alerts import AlertDeduplicator
 

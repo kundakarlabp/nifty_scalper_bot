@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
 from typing import Generator
 
 import pytest

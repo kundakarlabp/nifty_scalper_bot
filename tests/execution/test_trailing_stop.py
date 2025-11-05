@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 import tempfile
 import types
-from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 

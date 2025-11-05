@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
+import math
 from typing import Dict, Literal, Optional
 
 PositionSide = Literal["FLAT", "LONG", "SHORT"]

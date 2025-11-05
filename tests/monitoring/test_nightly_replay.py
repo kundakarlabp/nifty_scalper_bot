@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
-import pytest
 from ops.monitoring.nightly_replay import run_replay
+import pytest
 
 
 def _write_sample(path: Path, *, pnl: float, latency: float, mismatches: int) -> None:

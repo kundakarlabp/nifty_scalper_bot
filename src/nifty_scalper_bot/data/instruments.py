@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from math import ceil, floor
+import os
 from typing import Any, Iterable
 
 from nifty_scalper_bot.utils.errors import BrokerError

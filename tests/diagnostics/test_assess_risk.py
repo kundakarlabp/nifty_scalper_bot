@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from tests.test_risk_manager_new import DummyPositionManager, _make_risk_manager
-
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.risk.assess_risk import assess_risk_soft_clear
+from tests.test_risk_manager_new import DummyPositionManager, _make_risk_manager
 
 
 def test_reset_on_start_clears_soft(monkeypatch):

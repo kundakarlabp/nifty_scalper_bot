@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import itertools
+from queue import Empty, PriorityQueue
 import threading
 import time
-from dataclasses import dataclass, field
-from queue import Empty, PriorityQueue
 from typing import Any, Literal
 
 from nifty_scalper_bot.execution.metrics import QUEUE_DEPTH, QUEUE_SUBMISSIONS

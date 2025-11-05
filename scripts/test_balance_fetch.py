@@ -1,11 +1,12 @@
 """Diagnostic script to validate Zerodha margin parsing."""
 
 from __future__ import annotations
+
 """Diagnostic script to validate Zerodha margin parsing."""
 
 import os
-import sys
 from pathlib import Path
+import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_PATH = PROJECT_ROOT / "src"

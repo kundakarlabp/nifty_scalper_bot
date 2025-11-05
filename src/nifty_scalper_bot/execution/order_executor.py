@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from itertools import count
+import time
 from typing import Any, Dict, Iterable, Optional, Sequence, cast
 
 from nifty_scalper_bot.config.base import RiskConfig

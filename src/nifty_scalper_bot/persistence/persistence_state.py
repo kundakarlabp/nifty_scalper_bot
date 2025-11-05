@@ -25,17 +25,16 @@ Note:
     domain objects are not JSON-serializable, adapt `snapshot_for_persistence`.
 """
 
-
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import threading
 import time
 import traceback
-from contextlib import contextmanager
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -44,48 +43,44 @@ from nifty_scalper_bot.utils.sampler_singleton import system_sampler
 LOGGER = get_logger(__name__)
 
 PNL_PERSIST_PATH = Path(os.getenv("PNL_PERSIST_PATH", "data/pnl_state.json"))
-PERSIST_FLUSH_INTERVAL_S = float(
-    os.getenv("PERSIST_FLUSH_INTERVAL_S", "10")
-)
-PERSIST_RETENTION_BACKUPS = int(
-    os.getenv("PERSIST_RETENTION_BACKUPS", "3")
-)
-PERSIST_ENABLE_SCHEMA_VALIDATION = (
-    os.getenv("PERSIST_ENABLE_SCHEMA_VALIDATION", "true").lower()
-    in ("1", "true", "yes")
-)
-PERSIST_ENABLE_EMBEDDED_HTTP = (
-    os.getenv("ENABLE_EMBEDDED_HTTP_SERVER", "false").lower()
-    in ("1", "true", "yes")
-)
+PERSIST_FLUSH_INTERVAL_S = float(os.getenv("PERSIST_FLUSH_INTERVAL_S", "10"))
+PERSIST_RETENTION_BACKUPS = int(os.getenv("PERSIST_RETENTION_BACKUPS", "3"))
+PERSIST_ENABLE_SCHEMA_VALIDATION = os.getenv(
+    "PERSIST_ENABLE_SCHEMA_VALIDATION", "true"
+).lower() in ("1", "true", "yes")
+PERSIST_ENABLE_EMBEDDED_HTTP = os.getenv(
+    "ENABLE_EMBEDDED_HTTP_SERVER", "false"
+).lower() in ("1", "true", "yes")
 PERSIST_HTTP_HOST = os.getenv("PERSIST_HTTP_HOST", "127.0.0.1")
-PERSIST_HTTP_PORT = int(
-    os.getenv("PERSIST_HTTP_PORT", "9234")
-)
+PERSIST_HTTP_PORT = int(os.getenv("PERSIST_HTTP_PORT", "9234"))
 PERSIST_COMPRESSION = os.getenv("PERSIST_COMPRESSION", "none")
 PERSIST_ENCRYPTION = os.getenv("PERSIST_ENCRYPTION", "none")
 PERSIST_LOG_LEVEL_ON_SUCCESS = os.getenv("PERSIST_LOG_LEVEL_ON_SUCCESS", "info")
 
 try:
-    from pydantic import BaseModel
-    from pydantic import ValidationError as PydanticValidationError
+    from pydantic import BaseModel, ValidationError as PydanticValidationError
+
     class PersistModel(BaseModel):
         last_pnl: float = 0.0
         positions: Dict[str, Any] = {}
         orders: Dict[str, Any] = {}
         meta: Dict[str, Any] = {}
+
     def validate_snapshot(obj: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         try:
             PersistModel.model_validate(obj)
             return True, None
         except PydanticValidationError as exc:
             return False, str(exc)
+
 except Exception:
     PersistModelType = type(None)
     ValidationErrorType = Exception
+
     def validate_snapshot(obj: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         # obj is always a dict here, so no need to check type
         return True, None
+
 
 _state_lock = threading.RLock()
 _state: Dict[str, Any] = {
@@ -104,11 +99,13 @@ _metrics: Dict[str, float] = {
     "last_flush_epoch": 0.0,
 }
 
+
 def _atomic_write(path: Path, data_bytes: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(data_bytes)
     tmp.replace(path)
+
 
 def _rotate_backups(path: Path, keep: int) -> None:
     try:
@@ -125,11 +122,14 @@ def _rotate_backups(path: Path, keep: int) -> None:
             extra={"event": "persist_backup_rotation_failed"},
         )
 
+
 def _compress_bytes(data: bytes) -> bytes:
     if PERSIST_COMPRESSION.lower() == "gzip":
         import gzip
+
         return gzip.compress(data)
     return data
+
 
 def _maybe_encrypt_bytes(data: bytes) -> bytes:
     if PERSIST_ENCRYPTION.lower() != "none":
@@ -139,23 +139,28 @@ def _maybe_encrypt_bytes(data: bytes) -> bytes:
         )
     return data
 
+
 def _prepare_bytes_for_write(snapshot_json: str) -> bytes:
     raw = snapshot_json.encode("utf-8")
     raw = _compress_bytes(raw)
     raw = _maybe_encrypt_bytes(raw)
     return raw
 
+
 @contextmanager
 def locked_state():
     with _state_lock:
         yield _state
 
+
 def get_state_snapshot() -> Dict[str, Any]:
     with locked_state():
         return json.loads(json.dumps(_state, default=str))
 
+
 def snapshot_for_persistence() -> Dict[str, Any]:
     return get_state_snapshot()
+
 
 def dump_state_to_disk(
     path: Optional[Path | str] = None,
@@ -176,9 +181,7 @@ def dump_state_to_disk(
                 )
                 with _metrics_lock:
                     _metrics["persist_suppressed_total"] += 1
-        snapshot_json = json.dumps(
-            snapshot, ensure_ascii=False, indent=2
-        )
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, indent=2)
         payload = _prepare_bytes_for_write(snapshot_json)
         _rotate_backups(p, PERSIST_RETENTION_BACKUPS)
         _atomic_write(p, payload)
@@ -214,6 +217,7 @@ def dump_state_to_disk(
             level="error",
         )
 
+
 def load_state_from_disk(
     path: Optional[Path | str] = None,
     *,
@@ -233,6 +237,7 @@ def load_state_from_disk(
             data_text = raw.decode("utf-8")
         except Exception:
             import gzip
+
             data_text = gzip.decompress(raw).decode("utf-8")
         obj = json.loads(data_text)
         if validate and PERSIST_ENABLE_SCHEMA_VALIDATION:
@@ -274,12 +279,15 @@ def load_state_from_disk(
             level="error",
         )
 
+
 def update_state(updates: Dict[str, Any]) -> None:
     with locked_state():
         _state.update(updates)
 
+
 _event_queue: "list[Tuple[str, Dict[str, Any]]]" = []
 _event_queue_lock = threading.Lock()
+
 
 def flush_on_event(
     event_name: str,
@@ -294,6 +302,7 @@ def flush_on_event(
     with _event_queue_lock:
         _event_queue.append((event_name, extra))
 
+
 def _drain_event_queue() -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     with _event_queue_lock:
@@ -304,6 +313,7 @@ def _drain_event_queue() -> Dict[str, Dict[str, Any]]:
             out[ev]["count"] += 1
             out[ev]["latest"] = ex
     return out
+
 
 def _worker_loop(interval_s: float) -> None:
     LOGGER.debug(
@@ -336,6 +346,7 @@ def _worker_loop(interval_s: float) -> None:
             extra={"event": "persist_worker_exit"},
         )
 
+
 def start_worker(
     interval_s: Optional[float] = None,
     *,
@@ -366,11 +377,13 @@ def start_worker(
         extra={"interval_s": iv},
     )
 
+
 def stop_worker(timeout_s: float = 2.0) -> None:
     _worker_stop.set()
     if _worker_thread:
         _worker_thread.join(timeout_s)
     system_sampler.maybe_log(LOGGER, regime=None, multiplier=None)
+
 
 @dataclass
 class PersistStatus:
@@ -380,6 +393,7 @@ class PersistStatus:
     errors_total: int
     loaded_keys: Tuple[str, ...]
     worker_running: bool
+
 
 def get_status() -> PersistStatus:
     with _metrics_lock:
@@ -398,6 +412,7 @@ def get_status() -> PersistStatus:
         worker_running=bool(_worker_thread and _worker_thread.is_alive()),
     )
 
+
 def manual_flush_and_report() -> Dict[str, Any]:
     start = time.time()
     dump_state_to_disk()
@@ -409,6 +424,7 @@ def manual_flush_and_report() -> Dict[str, Any]:
         extra={"elapsed_s": elapsed},
     )
     return {"path": str(PNL_PERSIST_PATH), "elapsed_s": elapsed}
+
 
 def initialize(
     persist_path: Optional[str] = None,
@@ -425,6 +441,7 @@ def initialize(
         start_worker()
     if start_http:
         pass
+
 
 __all__ = [
     "snapshot_for_persistence",

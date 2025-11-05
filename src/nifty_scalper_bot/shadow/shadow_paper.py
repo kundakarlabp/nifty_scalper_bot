@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from collections import deque
 from dataclasses import dataclass, field
+import time
 from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, Mapping, Tuple
 
 from nifty_scalper_bot.config.settings import ShadowSettings

@@ -5,10 +5,10 @@ This module provides guardrails around the underlying order manager.
 
 from __future__ import annotations
 
-import threading
-import time
 from collections import deque
 from dataclasses import dataclass, field
+import threading
+import time
 from typing import Any, Callable, Deque, Literal, Mapping
 
 from nifty_scalper_bot.config.settings import OrderSettings

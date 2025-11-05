@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import timedelta, timezone
 import json
 import math
 import os
-import statistics
-from dataclasses import dataclass
-from datetime import timedelta, timezone
 from pathlib import Path
+import statistics
 from typing import (
     TYPE_CHECKING,
     Any,

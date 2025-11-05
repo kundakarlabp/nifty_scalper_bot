@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+import time
 from typing import Callable, Optional
 
 from nifty_scalper_bot.storage.journal import AtomicKV

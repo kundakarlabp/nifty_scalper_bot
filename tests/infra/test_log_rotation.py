@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import gzip
 import os
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive

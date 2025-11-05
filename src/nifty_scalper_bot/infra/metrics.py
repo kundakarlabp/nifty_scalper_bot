@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import math
-import statistics
-import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
+import statistics
 from threading import RLock
+import time
 from typing import Callable, Deque, Dict, Iterable, Mapping, MutableMapping, Set, Tuple
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -18,27 +18,27 @@ from nifty_scalper_bot.utils.reasons import canonical
 LOGGER = get_logger(__name__)
 
 POLL_RECONNECTS = Counter(
-    'poll_reconnects_total',
-    'Total polling restarts/backoffs',
-    ['reason'],
+    "poll_reconnects_total",
+    "Total polling restarts/backoffs",
+    ["reason"],
 )
 POLL_ERRORS = Counter(
-    'poll_errors_total',
-    'Total polling errors encountered',
-    ['reason'],
+    "poll_errors_total",
+    "Total polling errors encountered",
+    ["reason"],
 )
 POLL_HEARTBEAT_SKIPS = Counter(
-    'poll_heartbeat_skips_total',
-    'Polling heartbeat misses grouped by market phase',
-    ['phase'],
+    "poll_heartbeat_skips_total",
+    "Polling heartbeat misses grouped by market phase",
+    ["phase"],
 )
 POLL_TICK_LAG_MS = Gauge(
-    'poll_tick_lag_ms',
-    'Lag in milliseconds between exchange tick timestamp and processing',
+    "poll_tick_lag_ms",
+    "Lag in milliseconds between exchange tick timestamp and processing",
 )
 POLL_LAST_TICK_TS = Gauge(
-    'poll_last_tick_epoch_ms',
-    'Epoch milliseconds of the most recent processed poll tick',
+    "poll_last_tick_epoch_ms",
+    "Epoch milliseconds of the most recent processed poll tick",
 )
 
 _TICK_LATENCY_BUCKETS = (

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+import sys
 
 try:
     from dotenv import load_dotenv
