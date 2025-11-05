@@ -141,7 +141,7 @@ class _OHLCBuilder:
         return {symbol: self.get_bars(symbol) for symbol in symbols}
 
 
-class MarketDataManager
+class MarketDataManager:
 # Default blocking warm for deterministic startup
 os.environ.setdefault("MDM_RESOLVER_WARM_BLOCKING", "1")
 os.environ.setdefault("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10")
