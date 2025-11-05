@@ -127,6 +127,24 @@ class RiskManager:
         init=False, repr=False, default=None
     )
 
+    def validate_order_strict(self, token: int, qty: int, price: float) -> tuple:
+        """
+        Strict order validation - NO FALLBACK on stale/missing data.
+        Returns (approved: bool, reason: str)
+        """
+        if hasattr(self, 'quote_store') and not self.quote_store.is_fresh(token):
+            self.logger.error(f"ORDER REJECTED: Stale/missing quote for token {token}")
+            return False, "QUOTE_STALE"
+        if hasattr(self, 'balance_store') and not self.balance_store.is_fresh():
+            self.logger.error("ORDER REJECTED: Stale/missing account balance")
+            return False, "BALANCE_STALE"
+        if hasattr(self, 'balance_store'):
+            balance = self.balance_store.get()
+            if not balance or price * qty > balance:
+                self.logger.error(f"ORDER REJECTED: Insufficient balance (need {price * qty}, have {balance})")
+                return False, "INSUFFICIENT_BALANCE"
+        return True, "OK"
+    
     def __post_init__(self) -> None:
         if self.account_balance <= 0:
             raise ValueError("account_balance must be positive")
