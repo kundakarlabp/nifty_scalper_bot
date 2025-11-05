@@ -909,8 +909,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if not fresh. No fallback.
         """
         normalizedsegment = (
-            str(segment or self.defaultmarginsegment).strip().lower()
-            or self.defaultmarginsegment
+            str(segment or self.default_margin_segment).strip().lower()
+            or self.default_margin_segment
         )
         self.LOGGER.debug(
             "Entered ZerodhaKiteClient.get_available_balance",
@@ -920,10 +920,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
             },
         )
         try:
-            accountpayload = self.getaccountmargins(segment=normalizedsegment)
+            accountpayload = self.get_account_margins(segment=normalizedsegment)
             if accountpayload:
-                summary = self.normalizemarginpayload(
-                    accountpayload, segment=normalizedsegment
+                summary = self.normalize_margin_payload(
+                    accountpayload, segment=normalized_segment
                 )
                 available = float(summary.get("available", 0.0))
                 if available > 0:
