@@ -132,13 +132,13 @@ class RiskManager:
         Strict order validation - NO FALLBACK on stale/missing data.
         Returns (approved: bool, reason: str)
         """
-        if hasattr(self, 'quote_store') and not self.quote_store.is_fresh(token):
+        if hasattr(self, "quote_store") and not self.quote_store.is_fresh(token):
             self.logger.error(f"ORDER REJECTED: Stale/missing quote for token {token}")
             return False, "QUOTE_STALE"
-        if hasattr(self, 'balance_store') and not self.balance_store.is_fresh():
+        if hasattr(self, "balance_store") and not self.balance_store.is_fresh():
             self.logger.error("ORDER REJECTED: Stale/missing account balance")
             return False, "BALANCE_STALE"
-        if hasattr(self, 'balance_store'):
+        if hasattr(self, "balance_store"):
             balance = self.balance_store.get()
             if not balance or price * qty > balance:
                 self.logger.error(
@@ -147,7 +147,7 @@ class RiskManager:
                 )
                 return False, "INSUFFICIENT_BALANCE"
         return True, "OK"
-    
+
     def __post_init__(self) -> None:
         if self.account_balance <= 0:
             raise ValueError("account_balance must be positive")
@@ -331,13 +331,13 @@ class RiskManager:
     def refresh_account_balance(self, *, force: bool = False) -> float:
         """Refresh account balance using the shared data hub cache.
 
-        If the data hub/broker cannot supply a fresh numeric balance the function
-    raises. This function is intended to be strict for live trading.
+            If the data hub/broker cannot supply a fresh numeric balance the function
+        raises. This function is intended to be strict for live trading.
         """
         self._logger.debug(
             "Entered RiskManager.refresh_account_balance",
             extra={"event": "risk_balance_refresh_start", "force": force},
-    )
+        )
 
     now = time.time()
     if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
@@ -345,7 +345,6 @@ class RiskManager:
             "Condition met: risk_balance_cache_hit",
             extra={"event": "risk_balance_cache_hit"},
         )
-        return self.account_balance
 
     hub = self._data_hub
     if hub is None:
@@ -353,7 +352,9 @@ class RiskManager:
             "RiskManager data hub not attached: refusing to trade with missing realtime account balance.",
             extra={"event": "risk_balance_no_data_hub"},
         )
-        raise RuntimeError("RiskManager: No data hub attached, cannot proceed with live trading. Balance unavailable.")
+        raise RuntimeError(
+            "RiskManager: No data hub attached, cannot proceed with live trading. Balance unavailable."
+        )
 
     # small retry wrapper
     def _try_get_balance(attempts=3):
@@ -398,7 +399,9 @@ class RiskManager:
             "RiskManager: Broker/API failed to supply balance. Trading is disallowed.",
             extra={"event": "risk_balance_broker_failure"},
         )
-        raise RuntimeError("RiskManager: Broker/API failed to supply account balance. Trading is disallowed.")
+        raise RuntimeError(
+            "RiskManager: Broker/API failed to supply account balance. Trading is disallowed."
+        )
 
     except Exception as exc:
         self._logger.error(
@@ -407,8 +410,9 @@ class RiskManager:
             extra={"event": "balance_fetch_error"},
             exc_info=True,
         )
-        raise RuntimeError("RiskManager: Exception fetching live broker balance, cannot trade.") from exc
-
+        raise RuntimeError(
+            "RiskManager: Exception fetching live broker balance, cannot trade."
+        ) from exc
 
     def _start_balance_refresher(self) -> None:
         """Start background thread that periodically refreshes balance.
