@@ -329,10 +329,10 @@ class RiskManager:
                 )
 
     def refresh_account_balance(self, *, force: bool = False) -> float:
-    self._logger.debug(
-        "Entered RiskManager.refresh_account_balance",
-        extra={"event": "risk_balance_refresh_start", "force": force},
-    )
+        self._logger.debug(
+            "Entered RiskManager.refresh_account_balance",
+            extra={"event": "risk_balance_refresh_start", "force": force},
+        )
 
     # Optional: enforce only in live mode
     # if not getattr(self, "live_mode", True):
