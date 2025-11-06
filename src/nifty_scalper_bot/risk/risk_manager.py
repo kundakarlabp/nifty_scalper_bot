@@ -329,157 +329,86 @@ class RiskManager:
                 )
 
     def refresh_account_balance(self, *, force: bool = False) -> float:
-        """Refresh account balance using the shared data hub cache.
+    self._logger.debug(
+        "Entered RiskManager.refresh_account_balance",
+        extra={"event": "risk_balance_refresh_start", "force": force},
+    )
 
-        Args:
-            force: Bypass cache and force a fresh data hub fetch when ``True``.
+    # Optional: enforce only in live mode
+    # if not getattr(self, "live_mode", True):
+    #     self._logger.debug("Non-live mode: allowing cached balance", extra={"event":"non_live_balance_ok"})
+    #     return self.account_balance
 
-        Returns:
-            float: Current balance derived from the central market data hub.
-
-        Raises:
-            None.
-        """
-
+    now = time.time()
+    if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
         self._logger.debug(
-            "Entered RiskManager.refresh_account_balance",
-            extra={"event": "risk_balance_refresh_start", "force": force},
+            "Condition met: risk_balance_cache_hit",
+            extra={"event": "risk_balance_cache_hit"},
         )
+        return self.account_balance
 
-        now = time.time()
-        if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
-            self._logger.debug(
-                "Condition met: risk_balance_cache_hit",
-                extra={"event": "risk_balance_cache_hit"},
-            )
-            return self.account_balance
+    hub = self._data_hub
+    if hub is None:
+        self._logger.error(
+            "RiskManager data hub not attached: refusing to trade with missing realtime account balance.",
+            extra={"event": "risk_balance_no_data_hub"},
+        )
+        raise RuntimeError("RiskManager: No data hub attached, cannot proceed with live trading. Balance unavailable.")
 
-        hub = self._data_hub
-        if hub is None:
-            self._logger.error(
-                "RiskManager data hub not attached",
-                extra={"event": "risk_balance_no_data_hub"},
-            )
-            fallback_balance = self._cached_balance
-            if fallback_balance <= 0:
-                fallback_balance = self.account_balance
-            if fallback_balance <= 0:
-                fallback_balance = self._resolve_env_balance_fallback()
-                self._logger.warning(
-                    "Condition met: risk_balance_env_fallback_no_hub",
-                    extra={
-                        "event": "risk_balance_env_fallback_no_hub",
-                        "fallback": round(fallback_balance, 2),
-                    },
-                )
-            else:
-                self._logger.info(
-                    "Condition met: risk_balance_cache_fallback",
-                    extra={
-                        "event": "risk_balance_cache_fallback",
-                        "balance": fallback_balance,
-                    },
-                )
-            self.account_balance = float(fallback_balance)
-            self._cached_balance = self.account_balance
-            self._last_balance_refresh = now
-            return self.account_balance
+    # small retry wrapper
+    def _try_get_balance(attempts=3):
+        delay = 0.5
+        last_exc = None
+        for _ in range(attempts):
+            try:
+                return hub.get_available_balance(force=force)
+            except Exception as e:
+                last_exc = e
+                self._logger.warning("balance_fetch_retry", extra={"err": str(e)})
+                time.sleep(delay)
+                delay *= 2
+        raise last_exc
 
-        balance: float | None = None
-        cached_balance_source: str | None = None
-        cached_balance_value: float | None = None
-        try:
-            balance = hub.get_available_balance(force=force)
-            if balance is None:
-                snapshot = hub.get_account_snapshot(force=force)
-                balance = self._extract_balance_from_payload(snapshot)
-            if balance is not None and balance > 0:
-                self.account_balance = float(balance)
-                self._cached_balance = self.account_balance
-                self._last_balance_refresh = now
-                self._logger.info(
-                    "Condition met: balance_updated_from_data_hub",
-                    extra={
-                        "event": "balance_updated",
-                        "balance": round(self.account_balance, 2),
-                    },
-                )
-                return self.account_balance
-
-            if self._cached_balance > 0:
-                cached_balance_source = "cached_balance"
-                cached_balance_value = float(self._cached_balance)
-            elif self.account_balance > 0:
-                cached_balance_source = "account_balance"
-                cached_balance_value = float(self.account_balance)
-
-            if cached_balance_value is not None and cached_balance_value > 0:
-                self._logger.debug(
-                    "Condition met: risk_balance_cached_reuse",
-                    extra={
-                        "event": "risk_balance_cached_reuse",
-                        "source": cached_balance_source,
-                        "balance": round(cached_balance_value, 2),
-                    },
-                )
-                self.account_balance = cached_balance_value
-                self._cached_balance = cached_balance_value
-                self._last_balance_refresh = now
-                return cached_balance_value
-
-            self._logger.warning(
-                "No valid balance supplied by data hub",
-                extra={"event": "risk_balance_data_hub_empty"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in RiskManager.refresh_account_balance: %s",
-                exc,
-                extra={"event": "balance_fetch_error"},
-                exc_info=exc,
-            )
-            fallback_value = cached_balance_value
-            if fallback_value is None or fallback_value <= 0:
-                for candidate in (self._cached_balance, self.account_balance):
-                    if candidate and candidate > 0:
-                        fallback_value = float(candidate)
-                        break
-            if fallback_value is None:
-                fallback_value = self._resolve_env_balance_fallback()
-                self._logger.warning(
-                    "Condition met: risk_balance_env_exception_fallback",
-                    extra={
-                        "event": "risk_balance_env_exception_fallback",
-                        "fallback": round(fallback_value, 2),
-                    },
-                )
-            self.account_balance = float(fallback_value)
-            self._cached_balance = self.account_balance
-            self._last_balance_refresh = now
-            return self.account_balance
-
-        fallback_balance = self._cached_balance
-        if fallback_balance <= 0:
-            fallback_balance = self._resolve_env_balance_fallback()
-            self._cached_balance = float(fallback_balance)
-            self.account_balance = float(fallback_balance)
-            self._logger.warning(
-                "Condition met: risk_balance_env_cache_fallback",
-                extra={
-                    "event": "risk_balance_env_cache_fallback",
-                    "fallback": round(fallback_balance, 2),
-                },
-            )
+    try:
+        balance_ret = _try_get_balance()
+        # handle tuple return (value, meta) or direct numeric
+        if isinstance(balance_ret, tuple):
+            balance = balance_ret[0]
         else:
+            balance = balance_ret
+
+        if balance is None:
+            snapshot = hub.get_account_snapshot(force=force)
+            balance = self._extract_balance_from_payload(snapshot)
+
+        if balance is not None and balance > 0:
+            self.account_balance = float(balance)
+            self._cached_balance = self.account_balance
+            self._last_balance_refresh = now
             self._logger.info(
-                "Condition met: balance_cache_fallback",
+                "Condition met: balance_updated_from_data_hub",
                 extra={
-                    "event": "balance_fallback",
-                    "balance": fallback_balance,
+                    "event": "balance_updated",
+                    "balance": round(self.account_balance, 2),
                 },
             )
-        self._last_balance_refresh = now
-        return self._cached_balance
+            return self.account_balance
+
+        self._logger.critical(
+            "RiskManager: Broker/API failed to supply balance. Trading is disallowed.",
+            extra={"event": "risk_balance_broker_failure"},
+        )
+        raise RuntimeError("RiskManager: Broker/API failed to supply account balance. Trading is disallowed.")
+
+    except Exception as exc:
+        self._logger.error(
+            "Failure in RiskManager.refresh_account_balance (exception): %s",
+            exc,
+            extra={"event": "balance_fetch_error"},
+            exc_info=True,
+        )
+        raise RuntimeError("RiskManager: Exception fetching live broker balance, cannot trade.") from exc
+
 
     def _start_balance_refresher(self) -> None:
         """Start background thread that periodically refreshes balance.
