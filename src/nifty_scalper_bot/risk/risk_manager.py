@@ -329,14 +329,14 @@ class RiskManager:
                 )
 
     def refresh_account_balance(self, *, force: bool = False) -> float:
-    """Refresh account balance using the shared data hub cache.
+        """Refresh account balance using the shared data hub cache.
 
-    If the data hub/broker cannot supply a fresh numeric balance the function
+        If the data hub/broker cannot supply a fresh numeric balance the function
     raises. This function is intended to be strict for live trading.
-    """
-    self._logger.debug(
-        "Entered RiskManager.refresh_account_balance",
-        extra={"event": "risk_balance_refresh_start", "force": force},
+        """
+        self._logger.debug(
+            "Entered RiskManager.refresh_account_balance",
+            extra={"event": "risk_balance_refresh_start", "force": force},
     )
 
     now = time.time()
