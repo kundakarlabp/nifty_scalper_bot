@@ -329,15 +329,15 @@ class RiskManager:
                 )
 
     def refresh_account_balance(self, *, force: bool = False) -> float:
-        self._logger.debug(
-            "Entered RiskManager.refresh_account_balance",
-            extra={"event": "risk_balance_refresh_start", "force": force},
-        )
+    """Refresh account balance using the shared data hub cache.
 
-    # Optional: enforce only in live mode
-    # if not getattr(self, "live_mode", True):
-    #     self._logger.debug("Non-live mode: allowing cached balance", extra={"event":"non_live_balance_ok"})
-    #     return self.account_balance
+    If the data hub/broker cannot supply a fresh numeric balance the function
+    raises. This function is intended to be strict for live trading.
+    """
+    self._logger.debug(
+        "Entered RiskManager.refresh_account_balance",
+        extra={"event": "risk_balance_refresh_start", "force": force},
+    )
 
     now = time.time()
     if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
