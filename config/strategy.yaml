@@ -1,0 +1,80 @@
+meta:
+  version: 1
+  name: "nifty_scalper_default"
+
+strategy:
+  # Accepts 0..1 or 0..100 (e.g. 70 == 0.70)
+  min_score: 0.30
+  atr_period: 14
+  weights:
+    trend: 0.4
+    momentum: 0.3
+    pullback: 0.2
+    breakout: 0.1
+
+windows:
+  timezone: "Asia/Kolkata"
+  trading:
+    - { days: [1,2,3,4,5], start: "09:25", end: "15:05" }
+  no_trade:
+    expiry_tue_late:
+      enabled: true
+      start: "14:45"
+      end:   "15:30"
+
+gates:
+  atr_pct_min: 0.015
+  atr_pct_max: 2.00
+  mtf_confirm: true
+  iv_percentile_limit: 85   # block if IVpct > limit AND score below trend min+1
+  adx_min_trend: 18         # require ADX≥18 in TREND regime
+
+micro:
+  mode: "HARD"            # HARD | SOFT
+  dynamic: true
+  max_spread_pct: 1.0     # static fallback cap
+  depth_min_lots: 1
+  table:
+    - {min_mid: 0,   cap_pct: 2.0}
+    - {min_mid: 50,  cap_pct: 1.5}
+    - {min_mid: 100, cap_pct: 1.2}
+    - {min_mid: 150, cap_pct: 1.0}
+
+thresholds:
+  min_atr_pct_nifty: 0.015
+  min_atr_pct_banknifty: 0.04
+
+options:
+  min_oi: 500000
+  max_median_spread_pct: 0.35
+  delta_min: 0.35
+  delta_max: 0.60
+
+lifecycle:
+  tp1_R_min: 1.00
+  tp1_R_max: 1.10
+  tp1_partial: 0.6
+  tp2_R_trend: 1.80
+  tp2_R_range: 1.40
+  trail_atr_mult: 0.80
+  time_stop_min: 12
+  gamma_mode:
+    enabled: true
+    tue_after: "14:45"
+    tp2_R_cap: 1.40
+    trail_atr_mult: 0.60
+    time_stop_min: 8
+
+risk:
+  per_trade_pct_max: 0.006   # fraction of CURRENT equity per trade (example: 0.006 = 0.6%)
+  max_consec_losses: 3
+  cooldown_min: 20
+
+rr_threshold: 1.5            # set to null to disable
+
+warmup:
+  min_bars: 15
+
+debug:
+  lower_score_temp: false
+

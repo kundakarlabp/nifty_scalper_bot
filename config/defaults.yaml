@@ -1,0 +1,6 @@
+strategy:
+  rr_threshold: 1.5
+  min_bars_for_signal: 15
+data:
+  lookback_minutes: 15
+  lookback_padding_bars: 5
