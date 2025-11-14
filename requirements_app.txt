@@ -1,0 +1,7 @@
+# Core bot runtime dependencies
+pydantic>=2.5,<3
+pydantic-settings>=2.2,<3
+python-dotenv>=1.0
+uvicorn>=0.29
+fastapi>=0.111
+structlog>=24.4
