@@ -1,0 +1,73 @@
+version: "3.9"
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nifty-scalper:latest
+    container_name: nifty-scalper
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Ensure IST inside container (also set in Dockerfile)
+      - TZ=Asia/Kolkata
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+      - PYTHONPATH=/app/src
+      # Optional: override mode at runtime
+      # - ENABLE_LIVE_TRADING=false  # default is true
+      # - ENABLE_TELEGRAM=true
+    volumes:
+      # Persist logs locally (optional)
+      - ./logs:/app/logs
+      - ./ops/monitoring/prometheus_multiproc:/tmp/prometheus
+    command: ["python", "-m", "nifty_scalper_bot.app"]
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nifty-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: nifty-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./ops/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+
+  # Run the test suite inside a container
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nifty-scalper:latest
+    profiles: ["test"]
+    env_file:
+      - .env
+    working_dir: /app
+    command: ["pytest"]
