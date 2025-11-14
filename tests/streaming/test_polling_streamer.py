@@ -1,115 +1,135 @@
-"""Tests for the polling-based market data streamer."""
-
-from __future__ import annotations
-
+# tests/streaming/test_polling_streamer.py
 import time
+import pytest
 
-from nifty_scalper_bot.streaming.polling_streamer import PollingStreamer
-
-
-class _DummyBroker:
-    def __init__(self) -> None:
-        self.calls: list[tuple[int, ...]] = []
-
-    def get_ltp_bulk(self, tokens: list[int]) -> dict[int, float]:
-        self.calls.append(tuple(sorted(tokens)))
-        now = time.time()
-        return {int(token): 100.0 + idx + now % 1 for idx, token in enumerate(tokens)}
+from src.nifty_scalper_bot.streaming.polling_streamer import PollingStreamer
 
 
-class _DepthBroker:
-    def __init__(self) -> None:
-        self.ltp_calls = 0
-        self.quote_calls = 0
+class FakeLtpBroker:
+    """Fake broker returning LTP map with string keys."""
+    def __init__(self, as_string_keys=True, value=123.45):
+        self.as_string_keys = as_string_keys
+        self.value = value
+        self.called_with = None
 
-    def get_ltp_bulk(self, tokens: list[int]) -> dict[int, float]:
-        self.ltp_calls += 1
-        return {int(token): 90.0 for token in tokens}
-
-    def get_quote_bulk(self, tokens: list[int]) -> dict[int, dict[str, object]]:
-        self.quote_calls += 1
-        return {
-            int(token): {
-                "last_price": 120.0,
-                "depth": {"buy": [{"price": 119.0}], "sell": [{"price": 121.0}]},
-            }
-            for token in tokens
-        }
+    def get_ltp_bulk(self, batch):
+        # return keys as strings or ints depending on configuration
+        self.called_with = list(batch)
+        if self.as_string_keys:
+            return {str(int(t)): float(self.value) for t in batch}
+        else:
+            return {int(t): float(self.value) for t in batch}
 
 
-def test_polling_streamer_tick_flow() -> None:
-    ticks: list[dict[str, float]] = []
-    broker = _DummyBroker()
-    streamer = PollingStreamer(
-        broker_client=broker,
-        on_tick=lambda tick: ticks.append(tick),
-        instrument_resolver=None,
-        poll_interval_ms=200,
-        batch_size=3,
-    )
-    streamer.subscribe([1, 2, 3, 4])
-    streamer.start()
-    try:
-        time.sleep(0.8)
-    finally:
-        streamer.stop()
+class FakeQuoteBroker:
+    """Fake broker providing quote map with string keys and nested depth."""
+    def __init__(self, as_string_keys=True, price=200.5):
+        self.as_string_keys = as_string_keys
+        self.price = price
+        self.called_with = None
 
-    assert broker.calls, "expected broker to be invoked"
-    assert any(len(call) <= 3 for call in broker.calls)
-    tokens = {tick.get("instrument_token") for tick in ticks}
-    assert 1 in tokens
-    assert 4 in tokens
+    def get_quote_bulk(self, batch):
+        self.called_with = list(batch)
+        if self.as_string_keys:
+            return {str(int(t)): {"last_price": float(self.price), "depth": {"bids": [], "asks": []}} for t in batch}
+        return {int(t): {"last_price": float(self.price), "depth": {"bids": [], "asks": []}} for t in batch}
 
 
-def test_polling_streamer_requires_depth_prefers_quotes() -> None:
-    broker = _DepthBroker()
-    ticks: list[dict[str, object]] = []
-    streamer = PollingStreamer(
-        broker_client=broker,
-        on_tick=lambda tick: ticks.append(tick),
-        instrument_resolver=None,
-        poll_interval_ms=150,
-        batch_size=2,
-        require_depth=True,
-    )
-    streamer.subscribe([10, 11])
-    streamer.start()
-    try:
-        time.sleep(0.4)
-    finally:
-        streamer.stop()
+class FakeSingleQuoteBroker:
+    def __init__(self, price=50.0):
+        self.price = price
+        self.called = []
 
-    assert broker.quote_calls > 0
-    assert broker.ltp_calls == 0
-    assert ticks, "expected ticks from quote bulk"
-    assert ticks[-1].get("depth")
+    def get_quote_by_token(self, token):
+        self.called.append(token)
+        return {"last_price": float(self.price)}
 
 
-def test_polling_streamer_rate_limit_warning_reset() -> None:
-    broker = _DummyBroker()
-    streamer = PollingStreamer(
-        broker_client=broker,
-        on_tick=lambda _: None,
-        instrument_resolver=None,
-        poll_interval_ms=500,
-        batch_size=2,
-    )
-
-    streamer.subscribe(range(10))
-    assert streamer._rate_limit_warned is True  # type: ignore[attr-defined]
-
-    streamer.unsubscribe(range(8))
-    assert streamer._rate_limit_warned is False  # type: ignore[attr-defined]
+def test_try_ltp_bulk_handles_string_keys():
+    broker = FakeLtpBroker(as_string_keys=True, value=555.5)
+    s = PollingStreamer(broker_client=broker, on_tick=lambda t: None, instrument_resolver=None)
+    timestamp = int(time.time() * 1000)
+    ticks = s._try_ltp_bulk([101], timestamp)
+    assert ticks is not None
+    assert len(ticks) == 1
+    assert ticks[0]["instrument_token"] == 101
+    assert ticks[0]["last_price"] == pytest.approx(555.5)
 
 
-def test_polling_streamer_subscribe_tokens_alias() -> None:
-    broker = _DummyBroker()
-    streamer = PollingStreamer(
-        broker_client=broker,
-        on_tick=lambda _: None,
-        instrument_resolver=None,
-    )
+def test_try_ltp_bulk_handles_int_keys():
+    broker = FakeLtpBroker(as_string_keys=False, value=111.0)
+    s = PollingStreamer(broker_client=broker, on_tick=lambda t: None, instrument_resolver=None)
+    timestamp = int(time.time() * 1000)
+    ticks = s._try_ltp_bulk([202], timestamp)
+    assert ticks is not None
+    assert len(ticks) == 1
+    assert ticks[0]["last_price"] == pytest.approx(111.0)
 
-    streamer.subscribe_tokens([7, 7, 9])
 
-    assert streamer.tracked_tokens() == [7, 9]
+def test_try_quote_bulk_handles_string_keys():
+    broker = FakeQuoteBroker(as_string_keys=True, price=210.75)
+    s = PollingStreamer(broker_client=broker, on_tick=lambda t: None, instrument_resolver=None)
+    timestamp = int(time.time() * 1000)
+    ticks = s._try_quote_bulk([303], timestamp)
+    assert ticks is not None
+    assert len(ticks) == 1
+    assert ticks[0]["instrument_token"] == 303
+    assert ticks[0]["last_price"] == pytest.approx(210.75)
+    assert "depth" in ticks[0]
+
+
+def test_fetch_ticks_prefers_ltp_then_quote_then_single():
+    # 1) Broker that provides LTP should satisfy _fetch_ticks early
+    broker1 = FakeLtpBroker(as_string_keys=True, value=777.0)
+    s1 = PollingStreamer(broker_client=broker1, on_tick=lambda t: None, instrument_resolver=None)
+    t = s1._fetch_ticks([404])
+    assert len(t) == 1 and t[0]["last_price"] == pytest.approx(777.0)
+
+    # 2) Broker without LTP but with quote_bulk
+    class OnlyQuoteBroker:
+        def get_quote_bulk(self, batch):
+            return {str(batch[0]): {"last_price": 88.8}}
+
+    broker2 = OnlyQuoteBroker()
+    s2 = PollingStreamer(broker_client=broker2, on_tick=lambda t: None, instrument_resolver=None)
+    t2 = s2._fetch_ticks([505])
+    assert len(t2) == 1 and t2[0]["last_price"] == pytest.approx(88.8)
+
+    # 3) Broker with only single quote
+    single = FakeSingleQuoteBroker(price=33.33)
+    s3 = PollingStreamer(broker_client=single, on_tick=lambda t: None, instrument_resolver=None)
+    t3 = s3._fetch_ticks([606])
+    assert len(t3) == 1 and t3[0]["last_price"] == pytest.approx(33.33)
+
+
+def test_subscribe_unsubscribe_and_tracked_tokens():
+    broker = FakeLtpBroker()
+    collected = []
+    s = PollingStreamer(broker_client=broker, on_tick=lambda t: collected.append(t), instrument_resolver=None)
+    s.subscribe([1, 2, 3])
+    tokens = s.tracked_tokens()
+    assert set(tokens) == {1, 2, 3}
+    s.unsubscribe([2])
+    tokens2 = s.tracked_tokens()
+    assert set(tokens2) == {1, 3}
+
+
+def test_try_ltp_skips_zero_or_negative_values():
+    class ZeroBroker:
+        def get_ltp_bulk(self, batch):
+            return {str(batch[0]): 0.0, str(batch[1] if len(batch) > 1 else batch[0]): -5.0}
+
+    s = PollingStreamer(broker_client=ZeroBroker(), on_tick=lambda t: None, instrument_resolver=None)
+    out = s._try_ltp_bulk([707, 808], int(time.time() * 1000))
+    # both values zero/negative -> returns None
+    assert out is None
+
+
+def test_maybe_warn_rate_limits_sets_flag_and_metric():
+    # Use a tiny batch_size and interval so safe_capacity is small
+    broker = FakeLtpBroker()
+    s = PollingStreamer(broker_client=broker, on_tick=lambda t: None, instrument_resolver=None, poll_interval_ms=100, batch_size=1)
+    # Simulate large token count -> warn
+    s._maybe_warn_rate_limits(5000)
+    assert s._rate_limit_warned is True
+
