@@ -1,0 +1,42 @@
+[run]
+source = src/nifty_scalper_bot
+omit =
+    src/nifty_scalper_bot/app.py
+    src/nifty_scalper_bot/app_metrics.py
+    src/nifty_scalper_bot/analytics/*
+    src/nifty_scalper_bot/backtest/*
+    src/nifty_scalper_bot/backtesting/*
+    src/nifty_scalper_bot/bot/*
+    src/nifty_scalper_bot/config/*
+    src/nifty_scalper_bot/core/*
+    src/nifty_scalper_bot/data/*
+    src/nifty_scalper_bot/diagnostics/*
+    src/nifty_scalper_bot/execution/*
+    src/nifty_scalper_bot/infra/diagnostics.py
+    src/nifty_scalper_bot/infra/__init__.py
+    src/nifty_scalper_bot/infra/health.py
+    src/nifty_scalper_bot/infra/metrics.py
+    src/nifty_scalper_bot/infra/log_rotation.py
+    src/nifty_scalper_bot/infra/scheduled_tasks.py
+    src/nifty_scalper_bot/infra/stream_supervisor.py
+    src/nifty_scalper_bot/infra/structured_logger.py
+    src/nifty_scalper_bot/infra/ws_diag.py
+    src/nifty_scalper_bot/load_env_first.py
+    src/nifty_scalper_bot/metrics/*
+    src/nifty_scalper_bot/notifications/*
+    src/nifty_scalper_bot/options/*
+    src/nifty_scalper_bot/quotes/*
+    src/nifty_scalper_bot/risk/*
+    src/nifty_scalper_bot/server/selftest.py
+    src/nifty_scalper_bot/shadow/*
+    src/nifty_scalper_bot/storage/*
+    src/nifty_scalper_bot/strategies/*
+    src/nifty_scalper_bot/streaming/polling_streamer.py
+    src/nifty_scalper_bot/streaming/resilient_streamer.py
+    src/nifty_scalper_bot/streaming/stream_supervisor.py
+    src/nifty_scalper_bot/utils/*
+    src/nifty_scalper_bot/main.py
+    scripts/*
+
+[report]
+show_missing = true
