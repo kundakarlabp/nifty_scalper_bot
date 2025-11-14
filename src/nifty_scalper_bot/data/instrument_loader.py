@@ -1,0 +1,479 @@
+"""Helpers for maintaining a persistent instrument universe cache."""
+
+from __future__ import annotations
+
+import csv
+import io
+import sqlite3
+import zipfile
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import IO, Any, Iterable, Iterator
+
+from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
+
+_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS instruments(
+      token INTEGER PRIMARY KEY,
+      exchange TEXT NOT NULL,
+      tradingsymbol TEXT NOT NULL,
+      lot_size INTEGER NOT NULL,
+      expiry TEXT,
+      underlying TEXT,
+      strike INTEGER,
+      opt_type TEXT,
+      updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_instruments_symbol ON instruments(tradingsymbol)",
+    "CREATE INDEX IF NOT EXISTS idx_instruments_exchange ON instruments(exchange)",
+)
+
+
+@dataclass(slots=True)
+class InstrumentUniverseStatus:
+    """Mutable snapshot describing the cached instrument universe."""
+
+    tokens: int = 0
+    options: int = 0
+    last_refresh: datetime | None = None
+    last_source: str = "bootstrap"
+    last_path: str | None = None
+
+    def record_refresh(
+        self,
+        *,
+        tokens: int,
+        options: int,
+        source: str,
+        path: str | None,
+        timestamp: datetime | None = None,
+    ) -> None:
+        """Update the refresh snapshot for reporting purposes.
+
+        Args:
+            tokens: Total resolver tokens available after the refresh.
+            options: Number of option contracts tracked after the refresh.
+            source: Human readable source label (e.g. ``"sqlite"``).
+            path: Optional path hint describing the refresh artefact.
+            timestamp: Override timestamp for ``last_refresh``; defaults to now.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+
+        LOGGER.debug(
+            "Entered InstrumentUniverseStatus.record_refresh",
+            extra={
+                "event": "instrument_universe_record_refresh",
+                "tokens": tokens,
+                "options": options,
+                "source": source,
+            },
+        )
+        self.tokens = max(0, int(tokens))
+        self.options = max(0, int(options))
+        self.last_source = source
+        self.last_path = path
+        self.last_refresh = timestamp or datetime.now(timezone.utc)
+
+
+def ensure_sqlite(path: str) -> sqlite3.Connection:
+    """Return SQLite connection for the instrument cache, creating schema."""
+
+    LOGGER.debug(
+        "Entered ensure_sqlite",
+        extra={"event": "instrument_cache_ensure_sqlite", "path": path},
+    )
+    try:
+        db_path = Path(path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(
+            str(db_path),
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        with conn:
+            for statement in _SCHEMA_STATEMENTS:
+                conn.execute(statement)
+        LOGGER.info(
+            "Condition met: instrument_cache_ready",
+            extra={
+                "event": "instrument_cache_ready",
+                "path": str(db_path),
+            },
+        )
+        return conn
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in ensure_sqlite: %s",
+            exc,
+            extra={"event": "instrument_cache_ensure_error", "path": path},
+            exc_info=exc,
+        )
+        raise
+
+
+def _decode_bytes(payload: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "iso-8859-1"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="ignore")
+
+
+def _iter_csv_rows(text: str) -> Iterator[dict[str, Any]]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return
+    header_index = -1
+    for idx, line in enumerate(lines):
+        sample = next(csv.reader([line]))
+        lowered = [token.strip().lower() for token in sample]
+        if "instrument_token" in lowered or "instrumenttoken" in lowered:
+            header_index = idx
+            break
+    if header_index < 0:
+        return
+    payload = "\n".join(lines[header_index:])
+    stream = io.StringIO(payload)
+    reader = csv.DictReader(stream)
+    for row in reader:
+        if not row:
+            continue
+        normalized: dict[str, Any] = {}
+        for key, value in row.items():
+            if key is None:
+                continue
+            safe_key = key.strip()
+            if isinstance(value, str):
+                normalized[safe_key] = value.strip()
+            else:
+                normalized[safe_key] = value
+        if normalized:
+            yield normalized
+
+
+def parse_kite_csv(fp: IO[str] | IO[bytes]) -> Iterable[dict[str, Any]]:
+    """Yield rows from a Zerodha instruments CSV or ZIP payload."""
+
+    LOGGER.debug(
+        "Entered parse_kite_csv",
+        extra={"event": "instrument_cache_parse_enter"},
+    )
+    try:
+        raw = fp.read()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in parse_kite_csv: %s",
+            exc,
+            extra={"event": "instrument_cache_parse_error"},
+            exc_info=exc,
+        )
+        raise
+    if isinstance(raw, str):
+        payload = raw.encode("utf-8")
+    else:
+        payload = bytes(raw)
+    buffer = io.BytesIO(payload)
+    try:
+        if zipfile.is_zipfile(buffer):
+            with zipfile.ZipFile(buffer) as archive:
+                for name in archive.namelist():
+                    if not name.lower().endswith(".csv"):
+                        continue
+                    with archive.open(name) as member:
+                        text = _decode_bytes(member.read())
+                        yield from _iter_csv_rows(text)
+                    return
+            text = _decode_bytes(payload)
+            yield from _iter_csv_rows(text)
+            return
+        text = _decode_bytes(payload)
+        yield from _iter_csv_rows(text)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in parse_kite_csv: %s",
+            exc,
+            extra={"event": "instrument_cache_parse_failure"},
+            exc_info=exc,
+        )
+        raise
+
+
+def _derive_underlying(tradingsymbol: str) -> str:
+    for index, char in enumerate(tradingsymbol):
+        if char.isdigit():
+            return tradingsymbol[:index].upper()
+    return tradingsymbol.upper()
+
+
+def _sanitize_opt_type(row: dict[str, Any], tradingsymbol: str) -> str | None:
+    candidates = [
+        row.get("instrument_type"),
+        row.get("option_type"),
+        row.get("instrumenttype"),
+        row.get("opt_type"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            token = str(candidate).strip().upper()
+            if token in {"CE", "PE"}:
+                return token
+    suffix = tradingsymbol[-2:].upper()
+    if suffix in {"CE", "PE"}:
+        return suffix
+    return None
+
+
+def upsert_instruments(
+    conn: sqlite3.Connection,
+    rows: Iterable[dict[str, Any]],
+) -> dict[str, int]:
+    """Upsert Zerodha instruments into the SQLite cache."""
+
+    LOGGER.debug(
+        "Entered upsert_instruments",
+        extra={"event": "instrument_cache_upsert_enter"},
+    )
+    processed = 0
+    stored = 0
+    skipped = 0
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    try:
+        with conn:
+            for raw_row in rows:
+                processed += 1
+                if not isinstance(raw_row, dict):
+                    skipped += 1
+                    continue
+                tradingsymbol = (
+                    str(raw_row.get("tradingsymbol") or raw_row.get("symbol") or "")
+                    .strip()
+                    .upper()
+                )
+                if not tradingsymbol:
+                    skipped += 1
+                    continue
+                exchange = str(raw_row.get("exchange") or "").strip().upper()
+                if exchange != "NFO":
+                    skipped += 1
+                    continue
+                if not tradingsymbol.startswith("NIFTY"):
+                    skipped += 1
+                    continue
+                if tradingsymbol.endswith("FUT"):
+                    skipped += 1
+                    continue
+                opt_type = _sanitize_opt_type(raw_row, tradingsymbol)
+                if opt_type not in {"CE", "PE"}:
+                    skipped += 1
+                    continue
+                token_value = (
+                    raw_row.get("instrument_token")
+                    or raw_row.get("token")
+                    or raw_row.get("instrumenttoken")
+                )
+                token_text = (
+                    str(token_value).strip() if token_value not in {None, ""} else ""
+                )
+                try:
+                    token_int = int(float(token_text))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                lot_size_raw = (
+                    raw_row.get("lot_size")
+                    or raw_row.get("lotsize")
+                    or raw_row.get("lotSize")
+                )
+                lot_size_text = (
+                    str(lot_size_raw).strip() if lot_size_raw not in {None, ""} else ""
+                )
+                try:
+                    lot_size = max(1, int(float(lot_size_text)))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                expiry = raw_row.get("expiry")
+                expiry_str = str(expiry).strip() if expiry else None
+                strike_raw = raw_row.get("strike") or raw_row.get("strike_price")
+                strike_value: int | None = None
+                if strike_raw not in {None, ""}:
+                    strike_text = str(strike_raw).strip()
+                    with suppress(Exception):
+                        strike_value = int(round(float(strike_text)))
+                underlying = raw_row.get("name")
+                underlying_str = (
+                    str(underlying).strip().upper()
+                    if underlying
+                    else _derive_underlying(tradingsymbol)
+                )
+                conn.execute(
+                    """
+                    INSERT INTO instruments(
+                        token,
+                        exchange,
+                        tradingsymbol,
+                        lot_size,
+                        expiry,
+                        underlying,
+                        strike,
+                        opt_type,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(token) DO UPDATE SET
+                        exchange=excluded.exchange,
+                        tradingsymbol=excluded.tradingsymbol,
+                        lot_size=excluded.lot_size,
+                        expiry=excluded.expiry,
+                        underlying=excluded.underlying,
+                        strike=excluded.strike,
+                        opt_type=excluded.opt_type,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        token_int,
+                        exchange,
+                        tradingsymbol,
+                        lot_size,
+                        expiry_str,
+                        underlying_str,
+                        strike_value,
+                        opt_type,
+                        timestamp,
+                    ),
+                )
+                stored += 1
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in upsert_instruments: %s",
+            exc,
+            extra={"event": "instrument_cache_upsert_error"},
+            exc_info=exc,
+        )
+        raise
+    options = stored
+    METRICS.record_resolver_learn(
+        count=stored,
+        label="bootstrap" if stored and processed == stored else "refresh",
+    )
+    return {
+        "processed": processed,
+        "stored": stored,
+        "skipped": skipped,
+        "options": options,
+    }
+
+
+def load_rows_for_resolver(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return broker-style rows suitable for resolver warm-up."""
+
+    LOGGER.debug(
+        "Entered load_rows_for_resolver",
+        extra={"event": "instrument_cache_load_enter"},
+    )
+    try:
+        cursor = conn.execute(
+            """
+            SELECT
+                token,
+                tradingsymbol,
+                exchange,
+                lot_size,
+                expiry,
+                strike,
+                opt_type
+            FROM instruments
+            ORDER BY token ASC
+            """
+        )
+        rows: list[dict[str, Any]] = []
+        for entry in cursor.fetchall():
+            token_int = int(entry["token"])
+            broker_row: dict[str, Any] = {
+                "instrument_token": token_int,
+                "tradingsymbol": entry["tradingsymbol"],
+                "exchange": entry["exchange"],
+                "lot_size": int(entry["lot_size"]),
+            }
+            if entry["expiry"]:
+                broker_row["expiry"] = entry["expiry"]
+            if entry["strike"] is not None:
+                broker_row["strike"] = entry["strike"]
+            if entry["opt_type"]:
+                broker_row["instrument_type"] = entry["opt_type"]
+            rows.append(broker_row)
+        return rows
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in load_rows_for_resolver: %s",
+            exc,
+            extra={"event": "instrument_cache_load_error"},
+            exc_info=exc,
+        )
+        raise
+
+
+def refresh_from_csv(
+    conn: sqlite3.Connection,
+    csv_path: str,
+) -> dict[str, Any]:
+    """Refresh the instrument cache from a Zerodha CSV dump."""
+
+    LOGGER.debug(
+        "Entered refresh_from_csv",
+        extra={"event": "instrument_cache_refresh_enter", "path": csv_path},
+    )
+    file_path = Path(csv_path)
+    if not file_path.exists():
+        LOGGER.info(
+            "Condition met: instrument_cache_refresh_missing",
+            extra={"event": "instrument_cache_refresh_missing", "path": csv_path},
+        )
+        return {"processed": 0, "stored": 0, "skipped": 0, "options": 0}
+    try:
+        with file_path.open("rb") as handle:
+            rows = list(parse_kite_csv(handle))
+        metrics: dict[str, Any] = dict(upsert_instruments(conn, rows))
+        metrics["path"] = str(file_path)
+        metrics["source"] = "csv"
+        LOGGER.info(
+            "Condition met: instrument_cache_refresh_success",
+            extra={
+                "event": "instrument_cache_refresh_success",
+                "path": str(file_path),
+                "stored": metrics.get("stored"),
+                "processed": metrics.get("processed"),
+            },
+        )
+        return metrics
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in refresh_from_csv: %s",
+            exc,
+            extra={"event": "instrument_cache_refresh_error", "path": csv_path},
+            exc_info=exc,
+        )
+        raise
+
+
+__all__ = [
+    "InstrumentUniverseStatus",
+    "ensure_sqlite",
+    "parse_kite_csv",
+    "upsert_instruments",
+    "load_rows_for_resolver",
+    "refresh_from_csv",
+]
