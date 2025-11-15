@@ -1,0 +1,15 @@
+--- a/src/nifty_scalper_bot/app.py
++++ b/src/nifty_scalper_bot/app.py
+@@ -156,6 +156,13 @@ async def initialize_bot():
+     logger.info("Registering alias command=pos handler=...")
+     
++    # Enable trading via explicit flag
++    if os.getenv("ENABLE_LIVE", "").lower() in ("1", "true"):
++        config.ENABLE_LIVE = True
++        logger.info("✅ Live trading ENABLED via environment")
++    elif os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() in ("1", "true"):
++        logger.info("✅ Out-of-hours trading ENABLED - Shadow mode will persist")
++
+     logger.info("✅ Bot started successfully (broker_ready=True, shadow=False)")
+     return bot_instance
+ 
