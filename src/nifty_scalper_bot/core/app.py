@@ -2885,7 +2885,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         logger=LOGGER,
     )
 
-# asyncio.run(reconcile_with_wait(
+# # asyncio.run(reconcile_with_wait(
 #             reconcile_positions_on_startup(
 #                 broker_client=broker_client,
 #                 position_manager=position_manager,
@@ -2995,7 +2995,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 #                         exc_info=exc,
                     )
 
-#         background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
+# #         background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
 
     def _build_health_snapshot() -> dict[str, object]:
         """Return an aggregate health snapshot for out-of-band alerts.
@@ -3270,7 +3270,7 @@ async def safe_reconcile():
     except Exception as exc:
         LOGGER.error("Startup reconciliation failed", exc_info=exc)
 
-# asyncio.create_task(safe_reconcile())
+# # asyncio.create_task(safe_reconcile())
 #     _LATEST_CTX = ctx
 #     if _HTTP_APP is not None:
 #         try:
@@ -3898,7 +3898,7 @@ async def safe_reconcile():
         logger=LOGGER,
     )
 
-# asyncio.run(reconcile_with_wait(awaitable)
+# # asyncio.run(reconcile_with_wait(awaitable)
 #                             else:
 #                                 loop.create_task(awaitable)
 #             elif settings.notifications.enabled and controller is None:
@@ -4821,11 +4821,11 @@ async def safe_reconcile():
 #         await startup_sequence(self._ctx)
 #         self._running = True
 #         self._shutdown_event.clear()
-# #         self._health_task = asyncio.create_task(
+# # #         self._health_task = asyncio.create_task(
 #             self._health_loop(), name="core-health-monitor"
 #         )
 #         if self._ctx.selfchecker is not None:
-# #             self._self_test_task = asyncio.create_task(
+# # #             self._self_test_task = asyncio.create_task(
 #                 self._self_test_loop(),
 #                 name="core-runtime-selftest",
 #             )
@@ -4858,7 +4858,7 @@ async def safe_reconcile():
 #                         extra={"event": "telegram_application_started"},
 #                     )
 #         elif self._ctx.telegram_bot is not None:
-# #             self._telegram_task = asyncio.create_task(
+# # #             self._telegram_task = asyncio.create_task(
 #                 self._ctx.telegram_bot.run(),
 #                 name="telegram-console",
 #             )
