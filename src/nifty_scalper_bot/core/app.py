@@ -36,6 +36,21 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
+import asyncio
+
+async def wait_for_components_ready(ctx: "BotContext", timeout: float = 20.0) -> bool:
+    """Wait until all critical components are attached and ready."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if (
+            ctx.risk_manager is not None
+            and ctx.data_hub is not None
+            and ctx.market_data_manager is not None
+            and ctx.position_manager is not None
+        ):
+            return True
+        await asyncio.sleep(0.25)
+    return False
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
@@ -2860,7 +2875,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
 
 #     try:
-#         asyncio.run(
+#         async def reconcile_with_wait():
+    if not await wait_for_components_ready(ctx, timeout=20.0):
+        LOGGER.warning("Components not ready before reconciliation timeout")
+    await reconcile_positions_on_startup(
+        broker_client=ctx.broker_client,
+        position_manager=ctx.position_manager,
+        order_manager=ctx.order_manager,
+        logger=LOGGER,
+    )
+
+asyncio.run(reconcile_with_wait(
 #             reconcile_positions_on_startup(
 #                 broker_client=broker_client,
 #                 position_manager=position_manager,
@@ -3863,7 +3888,17 @@ asyncio.create_task(safe_reconcile())
 #                             try:
 #                                 loop = asyncio.get_running_loop()
 #                             except RuntimeError:
-#                                 asyncio.run(awaitable)
+#                                 async def reconcile_with_wait():
+    if not await wait_for_components_ready(ctx, timeout=20.0):
+        LOGGER.warning("Components not ready before reconciliation timeout")
+    await reconcile_positions_on_startup(
+        broker_client=ctx.broker_client,
+        position_manager=ctx.position_manager,
+        order_manager=ctx.order_manager,
+        logger=LOGGER,
+    )
+
+asyncio.run(reconcile_with_wait(awaitable)
 #                             else:
 #                                 loop.create_task(awaitable)
 #             elif settings.notifications.enabled and controller is None:
