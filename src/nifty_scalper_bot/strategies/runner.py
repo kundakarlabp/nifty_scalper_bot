@@ -325,7 +325,7 @@ class StrategyRunner:
             self._running = False
             callbacks = dict(self._callbacks)
             self._callbacks.clear()
-            self._trading_paused = True
+        # self._trading_paused = True  # DISABLED - Enable trading
 
         for symbol, callback in callbacks.items():
             if self._data_hub is not None:
