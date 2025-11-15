@@ -2553,7 +2553,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     session_guard = TradingSessionGuard(
         rate_limiter=rate_limiter,
         risk_manager=risk_manager,
-        allow_out_of_hours=settings.session_allow_out_of_hours,
+        allow_out_of_hours=coalesce_bool("SESSION_ALLOW_OUT_OF_HOURS", default=True),
     )
     session_allow_override = coalesce_bool(
         "SESSION_ALLOW_OUT_OF_HOURS",
