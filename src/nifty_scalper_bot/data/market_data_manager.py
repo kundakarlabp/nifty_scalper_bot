@@ -467,7 +467,7 @@ class MarketDataManager:
         except AttributeError:
             return None
         except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
+            self._logger.error(
                 "option_chain_metadata_failed", extra={"error": str(exc)}
             )
             return None
@@ -768,7 +768,7 @@ class MarketDataManager:
                 )
                 return dict(snapshot)
 
-            self._logger.warning(
+            self._logger.error(
                 "mdm_account_snapshot_empty",
                 extra={"event": "mdm_account_snapshot_empty", "segment": segment},
             )
@@ -871,7 +871,7 @@ class MarketDataManager:
 
         snapshot = self.get_account_snapshot(force=force)
         if not isinstance(snapshot, Mapping):
-            self._logger.warning(
+            self._logger.error(
                 "mdm_available_balance_missing_snapshot",
                 extra={"event": "mdm_available_balance_missing_snapshot"},
             )
@@ -899,7 +899,7 @@ class MarketDataManager:
                 )
                 return float(numeric)
 
-        self._logger.warning(
+        self._logger.error(
             "mdm_available_balance_unavailable",
             extra={"event": "mdm_available_balance_unavailable"},
         )
@@ -1609,7 +1609,7 @@ class MarketDataManager:
 
         normalized = self._normalize_margin_payload(payload)
         if normalized is None:
-            self._logger.warning(
+            self._logger.error(
                 "Condition met: mdm_margin_refresh_no_data",
                 extra={"event": "mdm_margin_refresh_no_data"},
             )
@@ -1737,7 +1737,7 @@ class MarketDataManager:
                 continue
             if response is not None:
                 return response
-        self._logger.warning(
+        self._logger.error(
             "Condition met: mdm_margin_fetch_unsupported",
             extra={
                 "event": "mdm_margin_fetch_unsupported",
@@ -2252,8 +2252,8 @@ class MarketDataManager:
             if isinstance(ts_value, (int, float)):
                 age_ms = max(0.0, (time.time() - float(ts_value)) * 1000.0)
                 if age_ms > stale_threshold:
-                    self._logger.warning(
-                        "Stale tick dropped",  # pragma: no cover - logging path
+                    self._logger.error(
+                        "[POLL-ERR] Stale tick dropped",
                         extra={
                             "symbol": symbol,
                             "age_ms": round(age_ms, 2),
@@ -2323,7 +2323,7 @@ class MarketDataManager:
             try:
                 callback(dict(tick))
             except Exception as exc:  # noqa: BLE001
-                self._logger.warning(
+                self._logger.error(
                     "Tick callback failed",
                     extra={"symbol": symbol, "error": str(exc)},
                 )
@@ -3325,7 +3325,7 @@ class MarketDataManager:
             if token is None:
                 token = self._resolve_token(symbol)
             if token is None:
-                self._logger.warning(
+                self._logger.error(
                     "WS subscribe skipped (no token)", extra={"symbol": symbol}
                 )
                 return
@@ -3338,7 +3338,7 @@ class MarketDataManager:
         except Exception as exc:  # noqa: BLE001
             # Log both message and details so it shows up even if the logger ignores
             # 'extra'.
-            self._logger.warning(
+            self._logger.error(
                 "Failed to subscribe symbol %s: %s",
                 symbol,
                 exc,
@@ -3382,7 +3382,7 @@ class MarketDataManager:
                     self._symbol_by_token[resolved_token] = symbol
                 return resolved_token
 
-        self._logger.warning(
+        self._logger.error(
             "Failed to resolve instrument token for %s",
             symbol,
             extra={"symbol": symbol},
