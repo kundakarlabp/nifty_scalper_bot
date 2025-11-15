@@ -2171,6 +2171,7 @@ class MarketDataManager:
             self._symbol_by_token[token_int] = symbol
 
     def _handle_tick(self, tick: dict[str, Any]) -> None:
+    self._logger.info(f"[TICK] {tick.get("symbol", "?")} ltp={tick.get("ltp", "?")} ts={tick.get("timestamp", "?")}")
         raw_token = tick.get("instrument_token")
         if raw_token is None:
             raw_token = tick.get("token")
