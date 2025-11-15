@@ -183,8 +183,8 @@ def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
 #             exc,
 #             extra={"event": "require_component_failure", "component": name},
 #             exc_info=exc,
-        )
-        raise
+#       )
+#        raise
 
 
 @dataclass(slots=True)
