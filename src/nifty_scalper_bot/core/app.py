@@ -2869,14 +2869,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
         )
     except Exception as exc:  # noqa: BLE001
-        LOGGER.error(
-            "Startup reconciliation failed - manual verification required",
+        LOGGER.warning(
+            "Startup reconciliation failed - will retry in background",
             extra={
                 "event": "startup.reconcile.error",
                 "error": str(exc),
+                "severity": "warning",
             },
-            exc_info=exc,
+            exc_info=False,
         )
+        # Continue startup - reconciliation will retry automatically
         if notifier is not None:
             LOGGER.info(
                 "Skipping startup reconciliation alert while loop is unavailable",
