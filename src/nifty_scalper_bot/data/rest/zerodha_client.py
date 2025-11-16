@@ -550,6 +550,52 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         if not tokens:
             return {}
+
+        # When POLL_REQUIRE_DEPTH is enabled we prefer the /quote endpoint (depth)
+        # so that polling mode retrieves full quote payloads (bid/ask/depth) rather
+        # than LTP-only. This helps decision gates that rely on spread/orderbook.
+        require_depth = (
+            os.getenv("POLL_REQUIRE_DEPTH", "false").strip().lower() in {"1", "true", "yes"}
+        )
+        if require_depth:
+            try:
+                # get_quote_bulk already honors rate limiting and symbol resolution.
+                quote_map = self.get_quote_bulk(tokens)
+                out: dict[int, float] = {}
+                for token, payload in quote_map.items():
+                    if not isinstance(payload, Mapping):
+                        continue
+                    try:
+                        last_price = float(payload.get("last_price", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if last_price > 0:
+                        out[token] = last_price
+                if out:
+                    LOGGER.info(
+                        "zerodha_get_ltp_bulk_using_depth",
+                        extra={
+                            "event": "zerodha_get_ltp_bulk_depth_used",
+                            "count": len(out),
+                        },
+                    )
+                    return out
+                # depth fetch returned but no usable last_price values
+                LOGGER.warning(
+                    "zerodha_get_ltp_bulk_depth_no_ltp",
+                    extra={
+                        "event": "zerodha_get_ltp_bulk_depth_no_ltp",
+                        "tokens": tokens,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to ltp endpoint
+                LOGGER.warning(
+                    "Depth fetch failed, falling back to LTP-only: %s",
+                    exc,
+                    extra={"event": "zerodha_get_ltp_bulk_depth_error"},
+                )
+
+        # Fallback to the LTP-only endpoint
         symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
             return {}
@@ -569,6 +615,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
             if last_price > 0:
                 out[token] = last_price
+        LOGGER.info(
+            "zerodha_get_ltp_bulk_ltp_fallback",
+            extra={
+                "event": "zerodha_get_ltp_bulk_ltp_fallback",
+                "count": len(out),
+            },
+        )
         return out
 
     def get_quote_by_token(self, token: int) -> dict[str, Any]:
