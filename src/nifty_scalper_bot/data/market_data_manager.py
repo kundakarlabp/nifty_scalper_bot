@@ -979,7 +979,10 @@ class MarketDataManager:
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
         with self._lock:
             tick = self._latest_ticks.get(symbol)
-            return None if tick is None else dict(tick)
+            if tick is None:
+                self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", symbol)
+                return None
+            return dict(tick)
 
     def get_latest_price(self, symbol: str) -> float | None:
         tick = self.get_latest_tick(symbol)
