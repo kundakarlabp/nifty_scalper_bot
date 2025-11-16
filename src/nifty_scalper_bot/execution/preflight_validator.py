@@ -462,7 +462,6 @@ class PreFlightValidator:
         Raises:
             None.
         """
-
         self._logger.debug(
             "Entered PreFlightValidator._check_quote_staleness",
             extra={"event": "preflight_gate_quote_stale", "symbol": symbol},
@@ -473,6 +472,7 @@ class PreFlightValidator:
                 fetch = getattr(self._datahub, "get_latest_tick", None)
             tick = fetch(symbol) if callable(fetch) else None
             if not tick:
+                self._logger.warning("Quote staleness: No tick for %s", symbol)
                 return {
                     "detail": "No tick available",
                     "current_value": None,
@@ -480,6 +480,11 @@ class PreFlightValidator:
                 }
             timestamp = tick.get("timestamp")
             if timestamp is None:
+                self._logger.warning(
+                    "Quote staleness: Tick missing timestamp for %s, tick: %s",
+                    symbol,
+                    tick,
+                )
                 return {
                     "detail": "Tick missing timestamp",
                     "current_value": tick,
@@ -525,7 +530,6 @@ class PreFlightValidator:
         Raises:
             None.
         """
-
         self._logger.debug(
             "Entered PreFlightValidator._check_spread",
             extra={"event": "preflight_gate_spread", "symbol": symbol},
@@ -538,6 +542,9 @@ class PreFlightValidator:
             bid = tick.get("best_bid") or tick.get("bid")
             ask = tick.get("best_ask") or tick.get("ask")
             if bid is None or ask is None:
+                self._logger.warning(
+                    "Spread check: Missing bid/ask for %s, tick: %s", symbol, tick
+                )
                 return {
                     "detail": "Incomplete order book",
                     "current_value": tick,
@@ -547,18 +554,30 @@ class PreFlightValidator:
                 bid_f = float(bid)
                 ask_f = float(ask)
             except (TypeError, ValueError):
+                self._logger.warning(
+                    "Spread check: Spread inputs invalid for %s, tick: %s", symbol, tick
+                )
                 return {
                     "detail": "Spread inputs invalid",
                     "current_value": tick,
                     "limit": self._settings.spread_max_pct,
                 }
             if bid_f <= 0 or ask_f <= 0:
+                self._logger.warning(
+                    "Spread check: Non-positive bid/ask for %s, tick: %s", symbol, tick
+                )
                 return {
                     "detail": "Spread inputs non-positive",
                     "current_value": tick,
                     "limit": self._settings.spread_max_pct,
                 }
             if bid_f >= ask_f:
+                self._logger.warning(
+                    "Spread check: Inverted orderbook for %s, bid: %s, ask: %s",
+                    symbol,
+                    bid_f,
+                    ask_f,
+                )
                 return {
                     "detail": "Inverted order book",
                     "current_value": {"bid": bid_f, "ask": ask_f},
