@@ -347,6 +347,9 @@ class DataHub:
     # ------------------------------------------------------------------
     # Tick ingestion & fan-out
     def ingest_tick(self, tick: Mapping[str, Any]) -> None:
+        if not payload.get("best_bid") and not payload.get("bid") or not payload.get("best_ask") and not payload.get("ask") or not payload.get("ltp"):
+            LOGGER.warning("data_hub: ingest_tick - Incomplete tick fields for symbol %s: %s", symbol, payload)
+
         """Cache *tick* and fan-out to registered listeners."""
 
         payload = self._sanitize_tick(dict(tick))
