@@ -527,6 +527,13 @@ class DataHub:
         age_ms, _, _, _ = self._compute_tick_age_metrics(payload)
         return age_ms
 
+    def get_latest_tick(self, symbol: str):
+        tick = self._quotes.get(symbol)
+        if tick is None:
+            LOGGER.warning("data_hub: get_latest_tick - No tick for %s", symbol)
+            return None
+        return dict(tick)
+
     def _compute_tick_age_metrics(
         self,
         payload: Mapping[str, Any],
