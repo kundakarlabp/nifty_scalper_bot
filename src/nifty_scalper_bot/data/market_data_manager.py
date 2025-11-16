@@ -977,12 +977,6 @@ class MarketDataManager:
             self._release_subscription(symbol)
 
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
-        tick = self._latest_ticks.get(symbol)
-        if tick is None:
-            self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", symbol)
-            return None
-        return dict(tick)
-
         with self._lock:
             tick = self._latest_ticks.get(symbol)
             return None if tick is None else dict(tick)
@@ -1137,8 +1131,6 @@ class MarketDataManager:
                 quote = fetched
                 break
         if quote is None:
-        self._logger.error("MDM: pull_quote failed for symbol %s - broker returned nothing for candidates: %s", symbol, candidates)
-
             try:
                 raw_quote = self._broker.get_quote(symbol)
             except Exception as exc:  # noqa: BLE001
@@ -1156,8 +1148,6 @@ class MarketDataManager:
             if isinstance(raw_quote, Mapping):
                 quote = dict(raw_quote)
         if quote is None:
-        self._logger.error("MDM: pull_quote failed for symbol %s - broker returned nothing for candidates: %s", symbol, candidates)
-
             return {"symbol": symbol}
         with self._lock:
             previous = self._latest_ticks.get(symbol)
@@ -2245,10 +2235,6 @@ class MarketDataManager:
 
         normalized = self._normalize_tick(symbol, tick, previous)
         if normalized is None:
-            self._logger.warning("MDM: _handle_tick normalization failed - symbol=%s, tick=%s", symbol, tick)
-            return
-
-        if normalized is None:
             return
 
         if previous is None:
@@ -3290,8 +3276,6 @@ class MarketDataManager:
                 quote = fetched
                 break
         if quote is None:
-        self._logger.error("MDM: pull_quote failed for symbol %s - broker returned nothing for candidates: %s", symbol, candidates)
-
             return
         if not isinstance(quote, dict):
             quote = dict(quote)
