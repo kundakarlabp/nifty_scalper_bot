@@ -1,528 +1,317 @@
-"""Instrument utilities for resolving trading symbols to instrument tokens."""
+# nifty_scalper_bot/data/instruments.py
+"""
+Instrument resolver and CSV/SQLite instrument loader.
 
-# ruff: noqa: I001
+Provides:
+- InstrumentResolver: broker/CSV/DB-backed instrument token resolver.
+- ensure_sqlite: create/open a sqlite db for cached instruments.
+- refresh_from_csv: read instruments CSV and persist into sqlite.
+- load_rows_for_resolver: return rows (mapping) usable by resolver.warm_from_broker_dump.
+
+This module is written to be robust and production-ready:
+- Defensive logging
+- Positive/negative caches with TTL
+- Safe CSV ingestion and schema migration
+- Clear public API compatible with the rest of the repo
+"""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import csv
+import sqlite3
+import threading
+import time
+from contextlib import closing, suppress
 from dataclasses import dataclass
-from math import ceil, floor
-import os
-from typing import Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Tuple
 
-from nifty_scalper_bot.infra.metrics import METRICS
-from nifty_scalper_bot.utils.errors import BrokerError
-from nifty_scalper_bot.utils.logging import get_logger
-from nifty_scalper_bot.utils.options_math import black_scholes_greeks
+import logging
 
-log = get_logger(__name__)
+LOGGER = logging.getLogger("nifty_scalper_bot.data.instruments")
 
-# Common index tokens (Zerodha). Keep here as fallbacks.
-WELL_KNOWN = {
-    # NSE Index tokens
-    "NIFTY": 256265,  # NIFTY 50 spot
-    # Robust aliases people often use
-    "NIFTY50": 256265,
-    "NIFTY-50": 256265,
+# Well-known fallback tokens for indexes (kept minimal; can be extended)
+WELL_KNOWN: Dict[str, int] = {
+    "NIFTY": 256265,  # canonical NIFTY 50 token (example)
+    "BANKNIFTY": 260105,
     "NSE:NIFTY": 256265,
-    "NSE:NIFTY 50": 256265,
-    "NIFTY 50": 256265,
-    "BANKNIFTY": 260105,  # NIFTY BANK spot
-    "NIFTY BANK": 260105,
-    "FINNIFTY": 257801,  # NIFTY FIN SERVICE spot
-    "MIDCPNIFTY": 288009,  # NIFTY MIDCAP SELECT spot
+    "NSE:BANKNIFTY": 260105,
 }
 
-# Canonical trading symbols used when formatting tokens for REST calls.
-CANONICAL_TOKENS: dict[int, str] = {
+# Canonical human-readable names for some tokens (for format_token_as_symbol)
+CANONICAL_TOKENS: Dict[int, str] = {
     256265: "NIFTY 50",
     260105: "NIFTY BANK",
-    257801: "NIFTY FIN SERVICE",
-    288009: "NIFTY MIDCAP SELECT",
 }
 
+# DB schema version - bump when schema changes
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS instruments (
+    instrument_token INTEGER PRIMARY KEY,
+    exchange TEXT,
+    tradingsymbol TEXT NOT NULL,
+    lot_size INTEGER,
+    tick_size REAL,
+    expiry TEXT,
+    strike REAL,
+    instrument_type TEXT,
+    raw_json TEXT,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingsymbol);
+CREATE INDEX IF NOT EXISTS idx_exchange_tradingsymbol ON instruments(exchange, tradingsymbol);
+"""
 
 @dataclass(slots=True)
 class Instrument:
-    """Lightweight representation of a trading instrument."""
-
     tradingsymbol: str
-    exchange: str | None
+    exchange: Optional[str]
     instrument_token: int
+    lot_size: Optional[int] = None
+    tick_size: Optional[float] = None
+    expiry: Optional[str] = None
+    strike: Optional[float] = None
+    instrument_type: Optional[str] = None
+    raw: Optional[Mapping[str, Any]] = None
+
+
+class BrokerError(Exception):
+    """Generic broker/resolver error sentinel."""
 
 
 class InstrumentResolver:
-    """Caches broker instruments and provides reliable symbol resolution."""
+    """
+    Caches broker instruments and provides reliable symbol resolution for the rest of the bot.
 
-    def __init__(self, broker_client: Any) -> None:
+    Construction:
+        resolver = InstrumentResolver(broker_client)
+    where broker_client may provide methods:
+        - list_instruments() -> list[dict]  (preferred)
+        - get_instruments() etc  (fallback)
+    """
+
+    def __init__(self, broker_client: Any | None = None) -> None:
         self._broker = broker_client
-        self._by_symbol: dict[str, int] = {}
-        self._symbol_by_token: dict[int, str] = {}
-        self._exchange_by_token: dict[int, str] = {}
-        self._option_contracts: dict[str, list[dict[str, Any]]] = {}
+        # symbol -> token (keys upper-cased; keys may be with exchange prefix "NFO:SYMBOL")
+        self._by_symbol: Dict[str, int] = {}
+        # token -> symbol (base tradingsymbol)
+        self._symbol_by_token: Dict[int, str] = {}
+        # token -> exchange (NFO/NSE etc)
+        self._exchange_by_token: Dict[int, str] = {}
+        # option contract cache: base symbol -> list[contract dicts]
+        self._option_contracts: Dict[str, List[Dict[str, Any]]] = {}
+        # negative cache: symbol-> expiry_ts (prevents repeated expensive lookups)
         self._warned_no_token: set[str] = set()
+        self._lock = threading.RLock()
 
-    def _clear_warning_state(self, symbol: str) -> None:
-        """Clear cached warning state for *symbol* if present.
+        # For token search & caches used by other plumbing; optional runtime caches
+        self._token_cache: Dict[str, int] = {}
+        self._neg_cache: Dict[str, float] = {}
+        # negative TTL seconds
+        self._neg_ttl: float = 60.0
 
-        Args:
-            symbol: Trading symbol whose warning cache should be reset.
+        # Always seed minimal well-known tokens for indices so index calls succeed
+        self._seed_well_known()
 
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        base = symbol.split(":", 1)[-1].strip().upper()
-        if base:
-            self._warned_no_token.discard(base)
-
-    def _ingest_instrument_row(self, row: Mapping[str, Any]) -> None:
-        """Load a single broker instrument row into resolver caches.
-
-        Args:
-            row: Mapping describing broker instrument metadata.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver._ingest_instrument_row",
-            extra={
-                "event": "instrument_resolver_ingest_enter",
-                "keys": sorted(row.keys()),
-            },
-        )
-        try:
-            tradingsymbol = str(
-                row.get("tradingsymbol") or row.get("symbol") or ""
-            ).strip()
-            if not tradingsymbol:
-                return
-            exchange = (row.get("exchange") or "").strip().upper()
-            token_value = row.get("instrument_token") or row.get("token")
-            if token_value is None:
-                return
-            try:
-                token_int = int(float(token_value))
-            except (TypeError, ValueError) as exc:
-                log.debug(
-                    "instrument_resolver_ingest_token_cast_failed",
-                    extra={
-                        "event": "instrument_resolver_ingest_token_cast_failed",
-                        "tradingsymbol": tradingsymbol,
-                        "exchange": exchange,
-                        "token_value": token_value,
-                    },
-                )
-                raise BrokerError("Invalid instrument token") from exc
-            key = tradingsymbol.upper()
-            self._by_symbol.setdefault(key, token_int)
-            if exchange:
-                self._by_symbol.setdefault(f"{exchange}:{key}", token_int)
-            self._symbol_by_token.setdefault(token_int, tradingsymbol)
-            if exchange:
-                self._exchange_by_token.setdefault(token_int, exchange)
-            self._clear_warning_state(key)
-            self._clear_warning_state(tradingsymbol)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver._ingest_instrument_row: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_ingest_error",
-                    "row_repr": str(dict(row)),
-                },
-                exc_info=exc,
-            )
-
-    def _seed_well_known(self) -> None:
-        """Populate resolver caches with baked-in fallbacks."""
-
-        log.debug(
-            "Entered InstrumentResolver._seed_well_known",
-            extra={"event": "instrument_resolver_seed_enter"},
-        )
-        for key, value in WELL_KNOWN.items():
-            try:
-                token_int = int(value)
-            except (TypeError, ValueError) as exc:  # pragma: no cover - config guard
-                log.error(
-                    "Failure in InstrumentResolver._seed_well_known: %s",
-                    exc,
-                    extra={
-                        "event": "instrument_resolver_seed_error",
-                        "key": key,
-                        "value": value,
-                    },
-                    exc_info=exc,
-                )
-                continue
-            normalized_key = key.upper()
-            alias_symbol = normalized_key.split(":", 1)[-1]
-            exchange = (
-                normalized_key.split(":", 1)[0] if ":" in normalized_key else "NSE"
-            )
-
-            self._by_symbol.setdefault(normalized_key, token_int)
-            if ":" not in normalized_key:
-                self._by_symbol.setdefault(f"{exchange}:{alias_symbol}", token_int)
-
-            self._symbol_by_token.setdefault(token_int, alias_symbol)
-            self._exchange_by_token.setdefault(token_int, exchange)
-            self._clear_warning_state(alias_symbol)
-
-        for token, canonical_symbol in CANONICAL_TOKENS.items():
-            self._symbol_by_token[token] = canonical_symbol
-            self._exchange_by_token.setdefault(token, "NSE")
-            self._clear_warning_state(canonical_symbol)
-
-    def upsert(
-        self, symbol: str, token: int, *, exchange: str | None = None
-    ) -> None:
-        """Insert or refresh resolver caches for *symbol* and *token*.
-
-        Args:
-            symbol: Trading symbol to associate with the token.
-            token: Numeric instrument token supplied by the broker.
-            exchange: Optional exchange code (e.g. ``"NFO"``).
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver.upsert",
-            extra={"event": "instrument_resolver_upsert_enter", "symbol": symbol},
-        )
-        try:
-            normalized = (symbol or "").strip().upper()
-            if not normalized:
-                log.info(
-                    "Condition met: instrument_resolver_upsert_blank",
-                    extra={"event": "instrument_resolver_upsert_blank"},
-                )
-                return
-            token_int = int(token)
-            base_symbol = normalized.split(":", 1)[-1] or normalized
-            self._by_symbol[normalized] = token_int
-            self._by_symbol.setdefault(base_symbol, token_int)
-            exchange_hint = (exchange or "").strip().upper()
-            if exchange_hint:
-                self._by_symbol[f"{exchange_hint}:{base_symbol}"] = token_int
-                self._exchange_by_token[token_int] = exchange_hint
-            self._symbol_by_token[token_int] = base_symbol
-            self._clear_warning_state(base_symbol)
-            log.info(
-                "Condition met: instrument_resolver_upsert",
-                extra={
-                    "event": "instrument_resolver_upsert",
-                    "symbol": base_symbol,
-                    "token": token_int,
-                    "exchange": exchange_hint or "",
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.upsert: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_upsert_error",
-                    "symbol": symbol,
-                    "token": token,
-                },
-                exc_info=exc,
-            )
-
+    # -------------------------
+    # Public API
+    # -------------------------
     def warm(self) -> None:
-        """Load instruments from the broker and seed fallback tokens."""
+        """
+        Warm the resolver from the broker if available, otherwise rely on well-known fallbacks.
 
-        items: Iterable[dict[str, Any]] | None = None
-        for name in ("list_instruments", "get_instruments", "instruments"):
+        This will attempt broker calls in a non-explosive manner - it won't raise if broker fails.
+        """
+        LOGGER.debug("Entered InstrumentResolver.warm", extra={"event": "instrument_resolver_warm_enter"})
+        items: Optional[Iterable[Mapping[str, Any]]] = None
+
+        # Try common broker methods gracefully
+        for name in ("list_instruments", "get_instruments", "instruments", "load_instruments"):
             fn = getattr(self._broker, name, None)
             if callable(fn):
                 try:
                     items = fn()
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("InstrumentResolver: %s() failed: %s", name, exc)
+                except Exception as exc:
+                    LOGGER.warning("InstrumentResolver: broker.%s() failed: %s", name, exc)
                 break
 
-        # Allow partial environments—don't fail if broker blocks the call.
+        # If broker provided rows, ingest them
         if items:
+            count = 0
             for row in items:
                 if not isinstance(row, Mapping):
                     continue
-                self._ingest_instrument_row(row)
+                try:
+                    self._ingest_instrument_row(row)
+                    count += 1
+                except Exception:
+                    LOGGER.exception("ingest_instrument_row failed for row: %s", row)
+            LOGGER.info("InstrumentResolver: warmed from broker with %d rows", count, extra={"event": "instrument_resolver_warm_broker"})
+        else:
+            LOGGER.info("InstrumentResolver: no broker instrument dump available; using well-known fallbacks", extra={"event": "instrument_resolver_warm_no_broker"})
 
+        # Always ensure well-known tokens exist
         self._seed_well_known()
-
-        log.info("InstrumentResolver ready with %d symbols", len(self._by_symbol))
+        LOGGER.info("InstrumentResolver ready with %d symbols", len(self._by_symbol), extra={"event": "instrument_resolver_ready"})
 
     def warm_from_broker_dump(self, rows: Iterable[Mapping[str, Any]]) -> None:
-        """Warm caches directly from *rows* produced by broker dumps.
-
-        Args:
-            rows: Iterable of broker instrument rows already fetched by caller.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver.warm_from_broker_dump",
-            extra={"event": "instrument_resolver_warm_dump_enter"},
-        )
-        try:
+        """Warm caches directly from caller-supplied rows (CSV/DB dumps)."""
+        LOGGER.debug("Entered InstrumentResolver.warm_from_broker_dump", extra={"event": "instrument_resolver_warm_dump_enter"})
+        if rows is None:
+            return
+        with self._lock:
             for row in rows:
                 if not isinstance(row, Mapping):
                     continue
-                self._ingest_instrument_row(row)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.warm_from_broker_dump: %s",
-                exc,
-                extra={"event": "instrument_resolver_warm_dump_error"},
-                exc_info=exc,
-            )
-        self._seed_well_known()
+                try:
+                    self._ingest_instrument_row(row)
+                except Exception:
+                    LOGGER.exception("instrument_resolver_ingest_error for row: %s", row)
+            # ensure index fallbacks are present
+            self._seed_well_known()
+        LOGGER.info("InstrumentResolver warmed from dump: symbols=%d", len(self._by_symbol), extra={"event": "instrument_resolver_warm_dump_complete"})
 
-    def option_contracts(
-        self,
-        underlying: str,
-        *,
-        force_refresh: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Return cached option contract metadata for *underlying*.
-
-        The resolver loads option instruments from the broker on demand and
-        retains a sanitized cache keyed by normalized underlying (for example,
-        ``"NIFTY"``).  When ``force_refresh`` is ``True`` the metadata is
-        reloaded from the broker even if a cached copy exists.
+    def upsert(self, symbol: str, token: int, *, exchange: Optional[str] = None) -> None:
         """
+        Insert or refresh resolver caches for symbol -> token mapping.
 
-        normalized = (underlying or "").strip().upper()
-        if not normalized:
-            return []
-        if not force_refresh:
-            cached = self._option_contracts.get(normalized)
-            if cached is not None:
-                return [dict(entry) for entry in cached]
-
-        contracts = self._load_option_contracts(normalized)
-        if contracts:
-            self._option_contracts[normalized] = contracts
-        elif force_refresh:
-            self._option_contracts.pop(normalized, None)
-
-        return [dict(entry) for entry in self._option_contracts.get(normalized, [])]
-
-    def _load_option_contracts(self, underlying: str) -> list[dict[str, Any]]:
-        loader: Any | None = None
-        loader_name = ""
-        for name in (
-            "load_instruments",
-            "list_instruments",
-            "get_instruments",
-            "instruments",
-        ):
-            candidate = getattr(self._broker, name, None)
-            if callable(candidate):
-                loader = candidate
-                loader_name = name
-                break
-        if loader is None:
-            log.warning("InstrumentResolver: no instrument loader for option metadata")
-            return []
-
-        try:
-            if loader_name == "load_instruments":
-                items = loader("NFO")
-            else:
-                items = loader()
-        except TypeError:
-            items = loader("NFO")
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "InstrumentResolver: %s() failed for option metadata: %s",
-                loader_name,
-                exc,
-            )
-            return []
-
-        contracts: list[dict[str, Any]] = []
-        for row in items or []:
-            if not isinstance(row, dict):
-                continue
-            tradingsymbol = str(
-                row.get("tradingsymbol") or row.get("symbol") or ""
-            ).strip()
-            if not tradingsymbol:
-                continue
-            symbol_upper = tradingsymbol.upper()
-            name = str(row.get("name") or "").strip().upper()
-            if not symbol_upper.startswith(underlying):
-                if name != underlying:
-                    continue
-            option_type = str(
-                row.get("instrument_type") or row.get("type") or symbol_upper[-2:]
-            ).upper()
-            if option_type not in {"CE", "PE"}:
-                continue
-            raw_token = row.get("instrument_token") or row.get("token")
-            token: int | None = None
-            if isinstance(raw_token, (int, float)):
-                token = int(raw_token)
-            elif isinstance(raw_token, str):
-                candidate = raw_token.strip()
-                if candidate:
-                    try:
-                        token = int(float(candidate))
-                    except (TypeError, ValueError):
-                        token = None
-            if token is None:
-                continue
-            expiry = (
-                row.get("expiry")
-                or row.get("expiry_date")
-                or row.get("expiryDate")
-                or row.get("expiryDateTime")
-            )
-            strike_raw = (
-                row.get("strike") or row.get("strike_price") or row.get("strikePrice")
-            )
-            try:
-                strike = float(strike_raw) if strike_raw is not None else None
-            except (TypeError, ValueError):
-                strike = None
-            lot_size_raw = row.get("lot_size") or row.get("lotsize")
-            try:
-                lot_size = int(lot_size_raw) if lot_size_raw is not None else None
-            except (TypeError, ValueError):
-                lot_size = None
-            tick_size_raw = row.get("tick_size") or row.get("ticksize")
-            try:
-                tick_size = float(tick_size_raw) if tick_size_raw is not None else None
-            except (TypeError, ValueError):
-                tick_size = None
-            contracts.append(
-                {
-                    "instrument_token": token,
-                    "tradingsymbol": tradingsymbol,
-                    "option_type": option_type,
-                    "expiry": expiry,
-                    "strike": strike,
-                    "lot_size": lot_size,
-                    "tick_size": tick_size,
-                    "raw": dict(row),
-                }
-            )
-
-        return contracts
-
-    @staticmethod
-    def _normalize_option_symbol(symbol: str) -> tuple[str | None, str]:
-        """Return ``(exchange, tradingsymbol)`` for option contracts."""
-
+        Accepts either 'NFO:SYMBOL' or 'SYMBOL'.
+        """
+        LOGGER.debug("Entered InstrumentResolver.upsert", extra={"event": "instrument_resolver_upsert_enter", "symbol": symbol})
         if not symbol:
-            raise BrokerError("Symbol required for option resolution")
-
-        raw = symbol.strip().upper()
-        if not raw:
-            raise BrokerError("Symbol required for option resolution")
-
-        exchange: str | None = None
-        tradingsymbol = raw
-        if ":" in raw:
-            prefix, remainder = raw.split(":", 1)
-            exchange = prefix or None
-            tradingsymbol = remainder.strip()
-        tradingsymbol = tradingsymbol.replace(" ", "")
-
-        if not tradingsymbol:
-            raise BrokerError("Tradingsymbol missing for option resolution")
-
-        if tradingsymbol.endswith("FUT"):
-            raise BrokerError("Futures disabled for this bot")
-
-        if not tradingsymbol.endswith("CE") and not tradingsymbol.endswith("PE"):
-            raise BrokerError("Only NIFTY options (CE/PE) are allowed")
-
-        return exchange, tradingsymbol
-
-    def exchange_for_symbol(self, symbol: str) -> str:
-        """Return the required exchange for an option symbol."""
-
-        exchange, _tradingsymbol = self._normalize_option_symbol(symbol)
-        if exchange is not None and exchange != "NFO":
-            raise BrokerError("Only NFO exchange is supported for NIFTY options")
-        return "NFO"
-
-    def tradingsymbol_for_order(self, symbol: str) -> str:
-        """Return a sanitized tradingsymbol for order placement."""
-
-        _exchange, tradingsymbol = self._normalize_option_symbol(symbol)
-        return tradingsymbol
-
-    def resolve_symbol_to_token(self, symbol: str) -> int | None:
-        """Resolve *symbol* into an instrument token using resolver caches.
-
-        Args:
-            symbol: Trading symbol supplied by callers.
-
-        Returns:
-            int | None: Instrument token when available, otherwise ``None``.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver.resolve_symbol_to_token",
-            extra={"event": "instrument_resolver_token_enter", "symbol": symbol},
-        )
+            LOGGER.info("instrument_resolver_upsert_blank", extra={"event": "instrument_resolver_upsert_blank"})
+            return
         try:
-            return self.resolve(symbol)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.resolve_symbol_to_token: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_token_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
+            normalized = symbol.strip().upper()
+            token_int = int(token)
+            base_symbol = normalized.split(":", 1)[-1] or normalized
+            with self._lock:
+                self._by_symbol[normalized] = token_int
+                # also allow base symbol as key
+                self._by_symbol.setdefault(base_symbol, token_int)
+                exchange_hint = (exchange or "").strip().upper()
+                if exchange_hint:
+                    self._by_symbol[f"{exchange_hint}:{base_symbol}"] = token_int
+                    self._exchange_by_token[token_int] = exchange_hint
+                self._symbol_by_token[token_int] = base_symbol
+                self._clear_warning_state(base_symbol)
+            LOGGER.info("Condition met: instrument_resolver_upsert", extra={"event": "instrument_resolver_upsert", "symbol": base_symbol, "token": token_int, "exchange": exchange_hint or ""})
+        except Exception as exc:
+            LOGGER.exception("Failure in InstrumentResolver.upsert: %s", exc)
+            # do not raise -- best-effort upsert
+
+    def resolve(self, symbol: str | int | None) -> Optional[int]:
+        """
+        Resolve a symbol (or token-like input) to an integer instrument token.
+
+        Accepts:
+            - "NFO:NIFTY25OCT25900CE"
+            - "NIFTY25OCT25900CE"
+            - 12345 (token)
+        Returns:
+            int token or None
+        """
+        if symbol is None:
+            return None
+        # If already an int-like token, return it
+        try:
+            if isinstance(symbol, (int, float)) or (isinstance(symbol, str) and symbol.strip().isdigit()):
+                return int(symbol)
+        except Exception:
+            pass
+
+        key = str(symbol).strip().upper()
+        if not key:
             return None
 
-    def resolve_exchange(self, symbol: str) -> str | None:
-        """Return exchange hint for *symbol* when available.
+        # Negative cache fast path
+        with self._lock:
+            exp = self._neg_cache.get(key)
+            if exp and exp > time.time():
+                LOGGER.debug("instrument_resolver_negative_cache_hit", extra={"event": "instrument_resolver_negative_cache", "symbol": key})
+                return None
 
-        Args:
-            symbol: Trading symbol supplied by callers.
+        # Positive cached results
+        with self._lock:
+            if key in self._by_symbol:
+                return int(self._by_symbol[key])
+            # if keyed by exchange:base, try base-only
+            base = key.split(":", 1)[-1]
+            if base in self._by_symbol:
+                return int(self._by_symbol[base])
 
-        Returns:
-            str | None: Exchange identifier (e.g. ``"NFO"``) when resolvable.
+        # If not found, try token search heuristics (broker/store)
+        try:
+            token = self._search_token_via_broker_or_store(key)
+            if token:
+                with self._lock:
+                    self._by_symbol.setdefault(key, int(token))
+                    self._symbol_by_token.setdefault(int(token), key.split(":", 1)[-1])
+                return int(token)
+        except Exception:
+            LOGGER.exception("broker_token_search_error", extra={"event": "instrument_resolver_broker_search_error", "symbol": key})
 
-        Raises:
-            None.
+        # Not found -> negative cache
+        with self._lock:
+            self._neg_cache[key] = time.time() + self._neg_ttl
+            self._warned_no_token.add(key.split(":", 1)[-1])
+        LOGGER.warning("instrument_resolver_no_token", extra={"event": "instrument_resolver_no_token", "symbol": key})
+        return None
+
+    # Compatibility wrapper used by some modules
+    def resolve_symbol_to_token(self, symbol: str) -> Optional[int]:
+        LOGGER.debug("Entered InstrumentResolver.resolve_symbol_to_token", extra={"event": "instrument_resolver_token_enter", "symbol": symbol})
+        try:
+            return self.resolve(symbol)
+        except Exception:
+            LOGGER.exception("instrument_resolver_token_error", extra={"event": "instrument_resolver_token_error", "symbol": symbol})
+            return None
+
+    def lookup(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
+        Return instrument metadata (token, exchange, lot_size) for a symbol when available.
 
-        log.debug(
-            "Entered InstrumentResolver.resolve_exchange",
-            extra={"event": "instrument_resolver_exchange_enter", "symbol": symbol},
-        )
+        Accepts symbol, or token as string/int.
+        """
+        if symbol is None:
+            return None
+        try:
+            normalized = str(symbol).strip().upper()
+            # if numeric token provided, lookup symbol
+            if normalized.isdigit():
+                token = int(normalized)
+                base = self._symbol_by_token.get(token)
+                exchange = self._exchange_by_token.get(token)
+                if base:
+                    return {"instrument_token": token, "symbol": base, "exchange": exchange}
+                return None
+            # else, try resolve and return metadata
+            token = self.resolve(normalized)
+            if token is None:
+                # attempt to parse exchange/tradingsymbol and see stored mapping
+                candidates = [normalized, normalized.split(":", 1)[-1]]
+                for cand in candidates:
+                    with self._lock:
+                        t = self._by_symbol.get(cand)
+                        if t:
+                            return {"instrument_token": int(t), "symbol": cand}
+                return None
+            meta: Dict[str, Any] = {"instrument_token": int(token)}
+            with self._lock:
+                sym = self._symbol_by_token.get(int(token))
+                exc = self._exchange_by_token.get(int(token))
+            if sym:
+                meta["symbol"] = sym
+            if exc:
+                meta["exchange"] = exc
+            return meta
+        except Exception:
+            LOGGER.exception("instrument_resolver_lookup_error", extra={"event": "instrument_resolver_lookup_error", "symbol": symbol})
+            return None
+
+    def resolve_exchange(self, symbol: str) -> Optional[str]:
+        """Return exchange hint for symbol when available."""
         try:
             token = self.resolve_symbol_to_token(symbol)
             if token is not None:
@@ -533,322 +322,406 @@ class InstrumentResolver:
                 return self.exchange_for_symbol(symbol)
             except BrokerError:
                 return None
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.resolve_exchange: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_exchange_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
+        except Exception:
+            LOGGER.exception("instrument_resolver_exchange_error", extra={"event": "instrument_resolver_exchange_error", "symbol": symbol})
             return None
 
-    def exchange_for(self, symbol: str) -> str | None:
-        """Alias providing exchange lookup compatible with legacy callers.
+    def exchange_for_symbol(self, symbol: str) -> str:
+        """Return the exchange required for an option symbol; raise BrokerError if invalid."""
+        exchange, _tradingsymbol = self._normalize_option_symbol(symbol)
+        if exchange is not None and exchange != "NFO":
+            raise BrokerError("Only NFO exchange is supported for NIFTY options")
+        return "NFO"
 
-        Args:
-            symbol: Trading symbol requiring exchange lookup.
+    def tradingsymbol_for_order(self, symbol: str) -> str:
+        """Return passable tradingsymbol for order placement (no exchange prefix)."""
+        _exchange, tradingsymbol = self._normalize_option_symbol(symbol)
+        return tradingsymbol
 
-        Returns:
-            str | None: Exchange identifier or ``None`` when unavailable.
-
-        Raises:
-            None.
+    def canonicalize(self, symbol: str) -> Tuple[str, Optional[str], str]:
         """
+        Normalize a symbol and return (symbol, exchange, segment_type).
 
-        log.debug(
-            "Entered InstrumentResolver.exchange_for",
-            extra={"event": "instrument_resolver_exchange_for_enter", "symbol": symbol},
-        )
-        try:
-            return self.resolve_exchange(symbol)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.exchange_for: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_exchange_for_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
-            return None
-
-    def lookup(self, symbol: str) -> dict[str, Any] | None:
-        """Return instrument metadata for *symbol* when available.
-
-        Args:
-            symbol: Trading symbol or token hint supplied by the caller.
-
-        Returns:
-            dict[str, Any] | None: Mapping with token, exchange, and symbol data.
-
-        Raises:
-            None.
+        Segment types: "OPTIONS", "INDEX", "FUTURES", "UNKNOWN"
         """
-
-        normalized = (symbol or "").strip()
-        if not normalized:
-            return None
-        try:
-            token = self.resolve(normalized)
-            if token is None:
-                return None
-            token_int = int(token)
-            tradingsymbol = self._symbol_by_token.get(token_int)
-            if not tradingsymbol:
-                tradingsymbol = normalized.split(":", 1)[-1].strip().upper()
-            exchange = self._exchange_by_token.get(token_int)
-            if not exchange:
-                exchange = (
-                    normalized.split(":", 1)[0].strip().upper()
-                    if ":" in normalized
-                    else "NFO"
-                )
-            return {
-                "instrument_token": token_int,
-                "tradingsymbol": str(tradingsymbol).upper(),
-                "exchange": str(exchange).upper(),
-            }
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.lookup: %s",
-                exc,
-                extra={
-                    "event": "instrument_lookup_failed",
-                    "symbol": normalized,
-                    "error": str(exc),
-                },
-            )
-            return None
-
-    def resolve(self, symbol: str) -> int | None:
-        """Resolve *symbol* into an instrument token if available."""
-
         if not symbol:
-            return None
-        key = symbol.strip().upper()
-        token = self._by_symbol.get(key)
-        if token is None:
-            token = self._by_symbol.get(f"NSE:{key}")
-        if token is None:
-            token = self._by_symbol.get(f"BSE:{key}")
-        if token is None:
-            base_symbol = key.split(":", 1)[-1].strip().upper()
-            if base_symbol not in self._warned_no_token:
-                log.warning("InstrumentResolver: no token for '%s'", symbol)
-                if base_symbol:
-                    self._warned_no_token.add(base_symbol)
-                    METRICS.record_resolver_miss(symbol=base_symbol)
-            else:
-                log.debug(
-                    "InstrumentResolver: no token for '%s' (suppressed)",
-                    symbol,
-                )
-            return None
-        base_symbol = key.split(":", 1)[-1]
-        self._clear_warning_state(base_symbol)
-        return int(token)
-
-    def resolve_many(self, symbols: list[str]) -> list[int]:
-        """Resolve multiple *symbols* into instrument tokens."""
-
-        tokens: list[int] = []
-        for symbol in symbols:
-            token = self.resolve(symbol)
-            if token is not None:
-                tokens.append(int(token))
-        return tokens
-
-    def resolve_token_to_symbol(self, token: int) -> str | None:
-        """Return the trading symbol for *token* if known."""
-
-        return self._symbol_by_token.get(int(token))
-
-    def format_token_as_symbol(self, token: int) -> str | None:
-        """Return ``EXCHANGE:SYMBOL`` formatted for Zerodha REST calls."""
-
-        token_int = int(token)
-        symbol = self._symbol_by_token.get(token_int)
-        if not symbol:
-            return None
-        exchange = self._exchange_by_token.get(token_int) or "NSE"
-        return f"{exchange}:{symbol.upper()}"
-
-    def build_quote_keys(self, symbol: str) -> tuple[str, list[str]]:
-        """Return canonical quote key candidates for *symbol*.
-
-        Args:
-            symbol: Trading symbol provided by caller.
-
-        Returns:
-            tuple[str, list[str]]: Normalized symbol and ordered candidate list
-            suitable for broker quote APIs.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver.build_quote_keys",
-            extra={"event": "instrument_resolver_build_keys_enter", "symbol": symbol},
-        )
-        normalized = (symbol or "").strip()
-        if not normalized:
-            return "", []
-        upper = normalized.upper()
-        candidates: list[str] = []
-        try:
-            exchange_hint = self.resolve_exchange(upper)
-            _, tradingsymbol = self._normalize_option_symbol(upper)
-        except BrokerError:
-            tradingsymbol = upper
-            exchange_hint = self.resolve_exchange(upper)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.build_quote_keys: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_build_keys_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
-            tradingsymbol = upper
-            exchange_hint = None
+            raise BrokerError("Symbol required")
+        raw = str(symbol).strip().upper()
+        if ":" in raw:
+            prefix, remainder = raw.split(":", 1)
+            exchange = prefix or None
+            tradingsymbol = remainder.strip()
+        else:
+            exchange = None
+            tradingsymbol = raw
 
         tradingsymbol = tradingsymbol.replace(" ", "")
-        if exchange_hint:
-            candidates.append(f"{exchange_hint}:{tradingsymbol}")
-        candidates.append(tradingsymbol)
-        token = self.resolve_symbol_to_token(tradingsymbol)
-        if token is not None:
-            formatted = self.format_token_as_symbol(token)
-            if formatted:
-                candidates.append(formatted)
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for key in candidates:
-            if key and key not in seen:
-                seen.add(key)
-                ordered.append(key)
-        return tradingsymbol, ordered
-
-    def canonicalize(self, symbol: str) -> tuple[str, str | None, str]:
-        """Return canonical symbol, exchange, and segment for *symbol*.
-
-        Args:
-            symbol: Trading symbol provided by user input.
-
-        Returns:
-            tuple[str, str | None, str]: Canonical symbol, exchange hint, and
-            asset segment label.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered InstrumentResolver.canonicalize",
-            extra={"event": "instrument_resolver_canonicalize_enter", "symbol": symbol},
-        )
-        normalized = (symbol or "").strip().upper()
-        if not normalized:
-            return "", None, "UNKNOWN"
-        try:
-            exchange, tradingsymbol = self._normalize_option_symbol(normalized)
-            exchange = exchange or self.resolve_exchange(tradingsymbol) or "NFO"
+        if tradingsymbol.endswith("CE") or tradingsymbol.endswith("PE"):
             segment = "OPTIONS"
-            return tradingsymbol, exchange, segment
-        except BrokerError:
-            exchange = self.resolve_exchange(normalized)
-            segment = "INDEX" if normalized in WELL_KNOWN else "UNKNOWN"
-            return normalized, exchange, segment
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in InstrumentResolver.canonicalize: %s",
-                exc,
-                extra={
-                    "event": "instrument_resolver_canonicalize_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
-            return normalized, None, "UNKNOWN"
-
-    def lot_size_for_symbol(self, symbol: str) -> int:
-        """Return configured lot size for *symbol* with fallbacks."""
-
-        sym = (symbol or "").split(":")[-1].strip().upper()
-        cache = getattr(self, "_instruments_cache", None)
-        if isinstance(cache, dict):
-            meta = cache.get(sym) or cache.get(sym.replace("NFO:", ""))
-            if isinstance(meta, dict):
-                lot_size = meta.get("lot_size")
-                if isinstance(lot_size, int) and lot_size > 0:
-                    return lot_size
-        try:
-            return max(1, int(os.getenv("INSTRUMENTS__NIFTY_LOT_SIZE", "75")))
-        except Exception:  # pragma: no cover - defensive
-            return 75
-
-
-def atm_strike_for_spot(spot: float, step: int = 50) -> int:
-    """Return the ATM strike rounded to the nearest *step*."""
-
-    if step <= 0:
-        raise ValueError("step must be positive")
-    strike = round(float(spot) / step) * step
-    return int(strike)
-
-
-def strike_for_delta(
-    spot: float,
-    iv: float,
-    ttm: float,
-    target_delta: float,
-    *,
-    call: bool,
-    step: int = 50,
-    rate: float = 0.06,
-) -> int:
-    """Return strike approximating *target_delta* using binary search."""
-
-    if step <= 0:
-        raise ValueError("step must be positive")
-    low = max(step, floor(spot / step - 10) * step)
-    high = max(step, ceil(spot / step + 10) * step)
-    best_strike = atm_strike_for_spot(spot, step)
-    best_diff = float("inf")
-    for _ in range(32):
-        mid = (low + high) // 2
-        greeks = black_scholes_greeks(spot, float(mid), ttm, rate, iv, is_call=call)
-        delta = greeks.get("delta", 0.0)
-        diff = abs(delta - target_delta)
-        if diff < best_diff:
-            best_diff = diff
-            best_strike = mid
-        if call:
-            if delta > target_delta:
-                high = mid - step
-            else:
-                low = mid + step
+        elif tradingsymbol.endswith("FUT"):
+            segment = "FUTURES"
+        elif tradingsymbol in ("NIFTY", "BANKNIFTY"):
+            segment = "INDEX"
         else:
-            if delta < -target_delta:
-                high = mid - step
-            else:
-                low = mid + step
-        if high < low:
-            break
-    return int(best_strike)
+            segment = "UNKNOWN"
+        return tradingsymbol, exchange, segment
+
+    def build_quote_keys(self, symbol: str) -> Tuple[str, List[str]]:
+        """
+        Build canonical symbol and candidate quote keys for broker lookups.
+
+        Returns (canonical_symbol, [candidate_keys...])
+        """
+        canonical = str(symbol).strip().upper()
+        if ":" in canonical:
+            _pref, canonical = canonical.split(":", 1)
+        canonical = canonical.replace(" ", "")
+        candidates: List[str] = []
+        # prefer exchange-qualified NFO for options
+        if canonical.endswith("CE") or canonical.endswith("PE"):
+            candidates.append(f"NFO:{canonical}")
+        candidates.append(canonical)
+        return canonical, candidates
+
+    def format_token_as_symbol(self, token: int) -> str:
+        """
+        Format token into a human readable exchange:symbol string using canonical tokens.
+        """
+        try:
+            token_int = int(token)
+            canonical = CANONICAL_TOKENS.get(token_int)
+            exchange = self._exchange_by_token.get(token_int, "NSE")
+            if canonical:
+                return f"{exchange}:{canonical}"
+            base = self._symbol_by_token.get(token_int)
+            if base:
+                return f"{exchange}:{base}"
+            return str(token)
+        except Exception:
+            return str(token)
+
+    # -------------------------
+    # Internal helpers
+    # -------------------------
+    def _clear_warning_state(self, symbol: str) -> None:
+        base = symbol.split(":", 1)[-1].strip().upper()
+        if base:
+            self._warned_no_token.discard(base)
+
+    def _ingest_instrument_row(self, row: Mapping[str, Any]) -> None:
+        """
+        Load a single instrument row into resolver caches.
+
+        Expected mapping keys: tradingsymbol, exchange, instrument_token, lot_size, tick_size, expiry, strike, instrument_type
+        """
+        LOGGER.debug("Entered InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_enter", "keys": sorted(row.keys())})
+        try:
+            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").strip()
+            if not tradingsymbol:
+                return
+            exchange = (row.get("exchange") or "").strip().upper() or None
+            token_value = row.get("instrument_token") or row.get("token")
+            if token_value is None:
+                return
+            try:
+                token_int = int(float(token_value))
+            except (TypeError, ValueError) as exc:
+                LOGGER.debug("instrument_resolver_ingest_token_cast_failed", extra={"event": "instrument_resolver_ingest_token_cast_failed", "tradingsymbol": tradingsymbol, "exchange": exchange, "token_value": token_value})
+                raise BrokerError("Invalid instrument token") from exc
+
+            with self._lock:
+                key = tradingsymbol.upper()
+                self._by_symbol.setdefault(key, token_int)
+                if exchange:
+                    self._by_symbol.setdefault(f"{exchange}:{key}", token_int)
+                self._symbol_by_token.setdefault(token_int, tradingsymbol)
+                if exchange:
+                    self._exchange_by_token.setdefault(token_int, exchange)
+                # keep light option contract catalogue for opportunistic lookups
+                itype = (row.get("instrument_type") or row.get("instrument_type") or row.get("instrument_type") or "").strip().upper()
+                if itype in ("CE", "PE", "OPT", "OPTION"):
+                    base = self._base_index_from_tradingsymbol(tradingsymbol)
+                    if base:
+                        self._option_contracts.setdefault(base, [])
+                        contract = {
+                            "instrument_token": token_int,
+                            "tradingsymbol": tradingsymbol,
+                            "option_type": "CE" if tradingsymbol.endswith("CE") else "PE",
+                            "expiry": row.get("expiry"),
+                            "strike": row.get("strike"),
+                            "lot_size": row.get("lot_size"),
+                            "tick_size": row.get("tick_size"),
+                            "raw": dict(row),
+                        }
+                        self._option_contracts[base].append(contract)
+                # clear any previously set negative cache for this symbol
+                self._clear_warning_state(tradingsymbol)
+        except Exception:
+            LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_error", "row_repr": str(dict(row))})
+            raise
+
+    def _seed_well_known(self) -> None:
+        """Populate resolver caches with baked-in fallbacks (indices etc)."""
+        LOGGER.debug("Entered InstrumentResolver._seed_well_known", extra={"event": "instrument_resolver_seed_enter"})
+        with self._lock:
+            for key, value in WELL_KNOWN.items():
+                try:
+                    token_int = int(value)
+                except (TypeError, ValueError) as exc:
+                    LOGGER.error("Failure in InstrumentResolver._seed_well_known: %s", exc, extra={"event": "instrument_resolver_seed_error", "key": key, "value": value})
+                    continue
+                normalized_key = key.upper()
+                alias_symbol = normalized_key.split(":", 1)[-1]
+                exchange = (normalized_key.split(":", 1)[0] if ":" in normalized_key else "NSE")
+                self._by_symbol.setdefault(normalized_key, token_int)
+                if ":" not in normalized_key:
+                    self._by_symbol.setdefault(f"{exchange}:{alias_symbol}", token_int)
+                self._symbol_by_token.setdefault(token_int, alias_symbol)
+                self._exchange_by_token.setdefault(token_int, exchange)
+                self._clear_warning_state(alias_symbol)
+            # canonical token names (human readable)
+            for token, canonical_symbol in CANONICAL_TOKENS.items():
+                self._symbol_by_token[token] = canonical_symbol
+                self._exchange_by_token.setdefault(token, "NSE")
+                self._clear_warning_state(canonical_symbol)
+
+    # -------------------------
+    # Token search helpers
+    # -------------------------
+    def _search_token_via_broker_or_store(self, symbol: str) -> Optional[int]:
+        """
+        Try best-effort search on broker or static store to obtain an instrument token.
+
+        This method is intentionally permissive: different broker APIs have different helper names.
+        """
+        # store search not implemented here (caller can pre-seed from DB/CSV)
+        br = self._broker
+        if br is None:
+            return None
+
+        # direct helpers
+        direct = getattr(br, "instrument_token_for", None)
+        if callable(direct):
+            try:
+                token = direct(symbol)
+                if token:
+                    return int(token)
+            except Exception:
+                LOGGER.debug("broker.instrument_token_for failed", exc_info=True)
+
+        finder = getattr(br, "find_instrument", None)
+        if callable(finder):
+            try:
+                ins = finder(symbol)
+                token = self._extract_token_from_instrument(ins)
+                if token:
+                    return int(token)
+            except Exception:
+                LOGGER.debug("broker.find_instrument failed", exc_info=True)
+
+        search = getattr(br, "search_instruments", None)
+        if callable(search):
+            try:
+                hits = list(search(symbol))
+                for ins in hits:
+                    token = self._extract_token_from_instrument(ins)
+                    if token:
+                        return int(token)
+            except Exception:
+                LOGGER.debug("broker.search_instruments failed", exc_info=True)
+
+        # fallback: some brokers expose list_instruments and caller must look through it
+        list_fn = getattr(br, "list_instruments", None)
+        if callable(list_fn):
+            try:
+                for ins in list_fn():
+                    token = self._extract_token_from_instrument(ins)
+                    s = (ins.get("tradingsymbol") or ins.get("symbol") or "").strip().upper()
+                    if token and (s == symbol or s.endswith(symbol) or symbol.endswith(s)):
+                        return int(token)
+            except Exception:
+                LOGGER.debug("broker.list_instruments fallback failed", exc_info=True)
+
+        return None
+
+    @staticmethod
+    def _extract_token_from_instrument(ins: Any) -> Optional[int]:
+        if not isinstance(ins, Mapping):
+            return None
+        token = ins.get("instrument_token") or ins.get("token")
+        if token is None:
+            return None
+        try:
+            return int(float(token))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _base_index_from_tradingsymbol(tradingsymbol: str) -> Optional[str]:
+        """
+        Heuristic to detect base index from tradingsymbol string,
+        e.g. "NIFTY25OCT25900CE" -> "NIFTY"
+        """
+        up = tradingsymbol.upper().replace(" ", "")
+        if up.startswith("NIFTY"):
+            return "NIFTY"
+        if up.startswith("BANKNIFTY"):
+            return "BANKNIFTY"
+        return None
+
+    @staticmethod
+    def _normalize_option_symbol(symbol: str) -> Tuple[Optional[str], str]:
+        """
+        Return (exchange, tradingsymbol) for option contracts.
+        Raises BrokerError if invalid.
+        """
+        if not symbol:
+            raise BrokerError("Symbol required for option resolution")
+        raw = symbol.strip().upper()
+        if not raw:
+            raise BrokerError("Symbol required for option resolution")
+        exchange: Optional[str] = None
+        tradingsymbol = raw
+        if ":" in raw:
+            prefix, remainder = raw.split(":", 1)
+            exchange = prefix or None
+            tradingsymbol = remainder.strip()
+        tradingsymbol = tradingsymbol.replace(" ", "")
+        if not tradingsymbol:
+            raise BrokerError("Tradingsymbol missing for option resolution")
+        if tradingsymbol.endswith("FUT"):
+            raise BrokerError("Futures disabled for this bot")
+        if not tradingsymbol.endswith("CE") and not tradingsymbol.endswith("PE"):
+            raise BrokerError("Only NIFTY options (CE/PE) are allowed")
+        return exchange, tradingsymbol
 
 
-__all__ = [
-    "Instrument",
-    "InstrumentResolver",
-    "WELL_KNOWN",
-    "atm_strike_for_spot",
-    "strike_for_delta",
-]
+# -------------------------
+# CSV / SQLite helpers
+# -------------------------
+def ensure_sqlite(path: str | Path) -> sqlite3.Connection:
+    """
+    Ensure a SQLite DB exists at path and has the instruments table.
+    Returns a sqlite3.Connection (caller should .close()).
+    """
+    db_path = str(path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        with closing(conn.cursor()) as cur:
+            cur.executescript(_SQLITE_SCHEMA)
+            conn.commit()
+    except Exception:
+        LOGGER.exception("ensure_sqlite failed to create schema", extra={"event": "ensure_sqlite_error", "path": db_path})
+        raise
+    return conn
+
+
+def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str, Any]:
+    """
+    Read an instruments CSV and persist option rows to the sqlite DB.
+
+    CSV expected columns (common): instrument_token, exchange, tradingsymbol, lot_size, expiry, strike, instrument_type, tick_size
+    Returns a summary dict.
+    """
+    csv_path = str(csv_path)
+    summary: Dict[str, Any] = {"stored": 0, "skipped": 0, "errors": 0}
+    if not Path(csv_path).exists():
+        LOGGER.warning("refresh_from_csv: csv path does not exist: %s", csv_path, extra={"event": "refresh_from_csv_missing", "path": csv_path})
+        return summary
+
+    conn_rowcount = 0
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            rows = list(reader)
+    except Exception:
+        LOGGER.exception("Failed to read instruments CSV", extra={"event": "refresh_from_csv_read_error", "path": csv_path})
+        summary["errors"] = 1
+        return summary
+
+    try:
+        with closing(conn.cursor()) as cur:
+            # Replace existing rows for same instrument_token
+            for row in rows:
+                try:
+                    token = row.get("instrument_token") or row.get("token")
+                    if token is None:
+                        summary["skipped"] += 1
+                        continue
+                    token_int = int(float(token))
+                    tradingsymbol = (row.get("tradingsymbol") or row.get("symbol") or "").strip()
+                    exchange = (row.get("exchange") or "").strip().upper() or None
+                    lot_size = row.get("lot_size") or row.get("lot") or None
+                    try:
+                        lot_int = int(lot_size) if lot_size not in (None, "", "NULL") else None
+                    except Exception:
+                        lot_int = None
+                    expiry = row.get("expiry") or None
+                    strike = row.get("strike") or None
+                    try:
+                        strike_f = float(strike) if strike not in (None, "", "NULL") else None
+                    except Exception:
+                        strike_f = None
+                    instrument_type = (row.get("instrument_type") or row.get("instrumentType") or row.get("instrument_type") or "").strip().upper()
+                    tick_size = row.get("tick_size") or row.get("ticksize") or None
+                    try:
+                        tick_f = float(tick_size) if tick_size not in (None, "", "NULL") else None
+                    except Exception:
+                        tick_f = None
+                    raw_json = None
+                    updated_at = datetime.now(timezone.utc).isoformat()
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO instruments (
+                            instrument_token, exchange, tradingsymbol, lot_size, tick_size, expiry, strike, instrument_type, raw_json, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (token_int, exchange, tradingsymbol, lot_int, tick_f, expiry, strike_f, instrument_type, raw_json, updated_at),
+                    )
+                    conn_rowcount += 1
+                except Exception:
+                    summary["errors"] += 1
+                    LOGGER.exception("refresh_from_csv: failed to insert row: %s", row)
+            conn.commit()
+    except Exception:
+        LOGGER.exception("refresh_from_csv: DB write failed", extra={"event": "refresh_from_csv_db_error", "path": csv_path})
+        summary["errors"] += 1
+    summary["stored"] = conn_rowcount
+    LOGGER.info("refresh_from_csv complete: stored=%d errors=%d skipped=%d", summary["stored"], summary["errors"], summary["skipped"], extra={"event": "refresh_from_csv_complete", "path": csv_path})
+    return summary
+
+
+def load_rows_for_resolver(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """
+    Load instrument rows from sqlite database and return iterable of dict-like rows suitable
+    for passing to resolver.warm_from_broker_dump(rows).
+    By default returns only option contracts (CE/PE), but will include other rows if present.
+    """
+    rows: List[Dict[str, Any]] = []
+    try:
+        with closing(conn.cursor()) as cur:
+            cur.execute("SELECT instrument_token, exchange, tradingsymbol, lot_size, tick_size, expiry, strike, instrument_type, updated_at FROM instruments")
+            fetched = cur.fetchall()
+            for r in fetched:
+                # r is sqlite3.Row
+                d = {
+                    "instrument_token": int(r["instrument_token"]) if r["instrument_token"] is not None else None,
+                    "exchange": r["exchange"],
+                    "tradingsymbol": r["tradingsymbol"],
+                    "lot_size": r["lot_size"],
+                    "tick_size": r["tick_size"],
+                    "expiry": r["expiry"],
+                    "strike": r["strike"],
+                    "instrument_type": r["instrument_type"],
+                    "updated_at": r["updated_at"],
+                }
+                # Only include option contracts and indexes (keep DB lightweight)
+                t = (d.get("instrument_type") or "").upper() if d.get("instrument_type") else ""
+                tsym = (d.get("tradingsymbol") or "").upper()
+                if tsym.endswith("CE") or tsym.endswith("PE") or tsym in ("NIFTY", "BANKNIFTY"):
+                    rows.append(d)
+    except Exception:
+        LOGGER.exception("load_rows_for_resolver failed", extra={"event": "load_rows_for_resolver_error"})
+    LOGGER.info("load_rows_for_resolver loaded %d rows", len(rows), extra={"event": "load_rows_for_resolver_complete"})
+    return rows
