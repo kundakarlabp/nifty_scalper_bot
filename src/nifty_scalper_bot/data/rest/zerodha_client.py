@@ -649,7 +649,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return {}
         symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
-            return {}
+            LOGGER.error("Token-to-symbol mapping empty: tokens=%s", tokens)
+            raise ValueError(f"Token-to-symbol mapping failed for tokens:
+        {tokens}")
+            
         self._acquire_bucket(self._QUOTE_BUCKET)
         response = self._ensure_json(
             self._make_request("GET", "/quote", params={"i": symbols})
