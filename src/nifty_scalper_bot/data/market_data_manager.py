@@ -35,11 +35,6 @@ if TYPE_CHECKING:
 
 TickCallback = Callable[[dict[str, Any]], None]
 
-# Throttled fallback logging: track last fallback reason + timestamp per symbol
-# (reduces log spam when depth is repeatedly empty). Default interval 5s.
-self._last_fallback_log: dict[str, tuple[str, float]] = {}
-self._fallback_log_min_interval_sec: float = 5.0
-
 _EXPIRY_FORMATS: tuple[str, ...] = (
     "%Y-%m-%d",
     "%Y-%m-%d %H:%M",
