@@ -2940,15 +2940,34 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "notifications_enabled": settings.notifications.enabled,
         },
     )
-
+    # Reconcile positions on startup: schedule if loop running, otherwise run synchronously.
     try:
-        # This function is async already — await the coroutine instead of calling asyncio.run()
-        await reconcile_positions_on_startup(
-            broker_client=broker_client,
-            position_manager=position_manager,
-            order_manager=order_manager,
-            logger=LOGGER,
-        )
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We are inside an event loop (e.g. FastAPI startup). Schedule as background task.
+            loop.create_task(
+                reconcile_positions_on_startup(
+                    broker_client=broker_client,
+                    position_manager=position_manager,
+                    order_manager=order_manager,
+                    logger=LOGGER,
+                )
+            )
+            LOGGER.info(
+                "Scheduled reconcile_positions_on_startup as background task",
+                extra={"event": "reconcile_positions_scheduled"},
+            )
+        else:
+            # No running loop: run the coroutine to completion (blocking).
+            asyncio.run(
+                reconcile_positions_on_startup(
+                    broker_client=broker_client,
+                    position_manager=position_manager,
+                    order_manager=order_manager,
+                    logger=LOGGER,
+                )    
+            )
+            LOGGER.info("Completed reconcile_positions_on_startup (blocking run)", extra={"event": "reconcile_positions_completed"})
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "Startup reconciliation failed - will retry in background",
@@ -2959,15 +2978,19 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             },
             exc_info=False,
         )
-        # Continue startup - reconciliation will retry automatically
-        if notifier is not None:
-            LOGGER.info(
-                "Skipping startup reconciliation alert while loop is unavailable",
-                extra={
-                    "event": "startup.reconcile.alert_skipped",
-                    "reason": "startup_event_loop_unavailable",
-                },
-            )
+        # If you want to attempt a background retry, schedule a noop wrapper that will call reconcile later.
+        with suppress(Exception):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(reconcile_positions_on_startup(
+                        broker_client=broker_client,
+                        position_manager=position_manager,
+                        order_manager=order_manager,
+                        logger=LOGGER,
+                    ))
+            except Exception:
+                pass
 
     background_tasks: list[asyncio.Task[Any]] = []
     try:
