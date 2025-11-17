@@ -1149,55 +1149,55 @@ def get_http_app() -> FastAPI:
 
     app.include_router(selftest_router)
     # Ensure the instrument resolver is warmed from any broker dump / csv
-# when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
-# work before handlers or external probes rely on the resolver.
-@app.on_event("startup")
-async def _warm_instrument_resolver_on_startup() -> None:
-    try:
-        # get_latest_bot_context is defined in this module and returns the
-        # most recently created BotContext (or None).
-        ctx = get_latest_bot_context()
-        if ctx is None:
-            LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
-            return
+    # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
+    # work before handlers or external probes rely on the resolver.
+    @app.on_event("startup")
+    async def _warm_instrument_resolver_on_startup() -> None:
+        try:
+            # get_latest_bot_context is defined in this module and returns the
+            # most recently created BotContext (or None).
+            ctx = get_latest_bot_context()
+            if ctx is None:
+                LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
+                return
 
-        resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
-        if resolver is None:
-            LOGGER.debug("Resolver warm skipped: no resolver available on context", extra={"event":"resolver_warm.no_resolver"})
-            return
+            resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
+            if resolver is None:
+                LOGGER.debug("Resolver warm skipped: no resolver available on context", extra={"event":"resolver_warm.no_resolver"})
+                return
 
-        # Prefer explicit warm_from_broker_dump when available.
-        warm_fn = getattr(resolver, "warm_from_broker_dump", None)
-        if callable(warm_fn):
-            try:
-                # If warm_from_broker_dump accepts rows parameter, it can be optional;
-                # call with no args which should be implemented as an idempotent no-op when not needed.
-                warm_fn()
-                LOGGER.info("InstrumentResolver warmed via warm_from_broker_dump on HTTP startup", extra={"event": "resolver_warm.startup_success"})
-            except Exception as exc:  # defensive — do not crash startup
-                LOGGER.warning(
-                    "InstrumentResolver warm_from_broker_dump failed on startup: %s",
-                    exc,
-                    extra={"event": "resolver_warm.startup_failed"},
-                    exc_info=exc,
-                )
-        else:
-            # If explicit hook missing, fall back to any generic warm() call.
-            generic_warm = getattr(resolver, "warm", None)
-            if callable(generic_warm):
+            # Prefer explicit warm_from_broker_dump when available.
+            warm_fn = getattr(resolver, "warm_from_broker_dump", None)
+            if callable(warm_fn):
                 try:
-                    generic_warm()
-                    LOGGER.info("InstrumentResolver warmed via warm() fallback on HTTP startup", extra={"event": "resolver_warm.startup_success_fallback"})
-                except Exception as exc:
+                    # If warm_from_broker_dump accepts rows parameter, it can be optional;
+                    # call with no args which should be implemented as an idempotent no-op when not needed.
+                    warm_fn()
+                    LOGGER.info("InstrumentResolver warmed via warm_from_broker_dump on HTTP startup", extra={"event": "resolver_warm.startup_success"})
+                except Exception as exc:  # defensive — do not crash startup
                     LOGGER.warning(
-                        "InstrumentResolver warm() failed on startup: %s",
+                        "InstrumentResolver warm_from_broker_dump failed on startup: %s",
                         exc,
-                        extra={"event": "resolver_warm.startup_failed_fallback"},
+                        extra={"event": "resolver_warm.startup_failed"},
                         exc_info=exc,
                     )
-    except Exception:
-        # Defensive outer guard — log and continue; do not prevent app startup.
-        LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
+            else:
+                # If explicit hook missing, fall back to any generic warm() call.
+                generic_warm = getattr(resolver, "warm", None)
+                if callable(generic_warm):
+                    try:
+                        generic_warm()
+                        LOGGER.info("InstrumentResolver warmed via warm() fallback on HTTP startup", extra={"event": "resolver_warm.startup_success_fallback"})
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "InstrumentResolver warm() failed on startup: %s",
+                            exc,
+                            extra={"event": "resolver_warm.startup_failed_fallback"},
+                            exc_info=exc,
+                        )
+        except Exception:
+            # Defensive outer guard — log and continue; do not prevent app startup.
+            LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
 
 
     return app
