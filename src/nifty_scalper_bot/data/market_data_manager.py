@@ -1266,7 +1266,7 @@ class MarketDataManager:
         age_seconds: float | None = None
         if isinstance(ts_value, (int, float)) and ts_value > 0:
             try:
-                age_seconds = max(0.0, time.time() - float(ts_value))
+                age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - float(ts_value))
             except Exception as age_exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in probe_quote cache age: %s",
@@ -2253,7 +2253,7 @@ class MarketDataManager:
         if stale_threshold > 0:
             ts_value = normalized.get("timestamp")
             if isinstance(ts_value, (int, float)):
-                age_ms = max(0.0, (time.time() - float(ts_value)) * 1000.0)
+                age_ms = max(0.0, (datetime.now(timezone.utc).timestamp() - float(ts_value)) * 1000.0)
                 if age_ms > stale_threshold:
                     self._logger.error(
                         "[POLL-ERR] Stale tick dropped",
