@@ -196,14 +196,27 @@ class MarketDataManager:
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
         self._poll_jitter_pct = 0.0
-        self._poll_batch_ceiling = 0
+        self._pollself._account_cache_ttl = MarketDataManager._parse_float_env(
+            "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
+        )
+        self._rest_poll_interval = MarketDataManager._parse_float_env(
+            "MDM_POLL_INTERVAL_SECONDS", default=3.0, minimum=0.5
+        )
+        configured_poll_max = MarketDataManager._parse_int_env(
+            "MDM_POLL_MAX_SYMBOLS", default=5, minimum=1
+        )
+        self._tick_stale_threshold_ms = MarketDataManager._parse_int_env(
+            "TICK_STALE_MS", default=2_000, minimum=0
+        )
+        self._margin_cache_ttl = MarketDataManager._parse_float_env(
+            "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
+        )
+_batch_ceiling = 0
         self._ohlc_builder = _OHLCBuilder(maxlen=cache_len)
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
-        self._account_cache_ttl = self._parse_float_env(
-            "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
-        )
+        
         self._account_segment = _resolve_account_segment()
 
         self._margin_lock = threading.RLock()
