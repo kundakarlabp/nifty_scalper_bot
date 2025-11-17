@@ -1472,7 +1472,26 @@ class MarketDataManager:
                 normalized.get("timestamp") if isinstance(normalized, Mapping) else None
             ),
         }
+        # additional diagnostics
+        "has_depth": bool(
+                (isinstance(normalized, Mapping) and normalized.get("depth"))
+                or (isinstance(latest, Mapping) and latest.get("depth"))
+            ),
+            "source": normalized.get("_source") if isinstance(normalized, Mapping) else None,
+        }
 
+        # earlier report["cache"] is already built — ensure it includes these:
+        report["cache"].update(
+            {
+                "has_tick": latest is not None,
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "ts": ts_value,
+                "age_s": age_seconds,
+                "source": source,
+            }
+        )
         ws_enabled = self._ws is not None
         ws_connected = bool(self._ws_connected)
         poll_enabled = bool(self._rest_poll_enabled)
