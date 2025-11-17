@@ -2915,13 +2915,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
 
     try:
-        asyncio.run(
-            reconcile_positions_on_startup(
-                broker_client=broker_client,
-                position_manager=position_manager,
-                order_manager=order_manager,
-                logger=LOGGER,
-            )
+        # This function is async already — await the coroutine instead of calling asyncio.run()
+        await reconcile_positions_on_startup(
+            broker_client=broker_client,
+            position_manager=position_manager,
+            order_manager=order_manager,
+            logger=LOGGER,
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
