@@ -3012,6 +3012,14 @@ class MarketDataManager:
             seen.add(candidate)
             ordered.append(candidate)
         return ordered
+        if not ordered:
+            # mapping failure — surface immediately rather than silently fallback
+            self._logger.error(
+                "Token-to-symbol mapping empty",
+                extra={"initial": initial, "lookup_keys": lookup_keys},
+                exc_info=False,
+            )
+            raise ValueError(f"Token-to-symbol mapping failed for input: {initial[:10]}")
 
     def _broker_quote_any(self, key: str | int) -> dict[str, Any] | None:
         """Fetch a quote for the provided broker key.
