@@ -3511,8 +3511,8 @@ class MarketDataManager:
                             "REST poll fallback: depth present but buy side empty",
                             extra={"symbol": symbol, "depth": depth},
                         )
-        if ask is None:
-            ask_from_depth = self._coerce_from_depth(depth, "sell")
+                if ask is None:
+                    ask_from_depth = self._coerce_from_depth(depth, "sell")
                     if ask_from_depth is not None:
                         ask = ask_from_depth
                     else:
