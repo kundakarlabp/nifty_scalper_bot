@@ -3099,7 +3099,7 @@ class MarketDataManager:
         )
         for key in candidates:
             quote = self._broker_quote_any(key)
-            self._logger.info(
+            self.logger.info(
                 "refresh_attempt",
                 extra={
                     "symbol": symbol,
@@ -3109,6 +3109,11 @@ class MarketDataManager:
                 },
             )
             if not quote:
+                # log each failed candidate at debug level; keep failure reason
+                self._logger.debug( 
+                    "refresh candidate returned no quote",
+                    extra={"symbol": symbol, "key": key, "trace_id": trace_id},
+                )
                 continue
             now_ms = self._now_ms()
             bid = _coerce_float(quote.get("bid"))
@@ -3131,6 +3136,7 @@ class MarketDataManager:
                 "candidates": candidates,
                 "trace_id": trace_id,
             },
+            exec_info=true
         )
         return None
 
@@ -3454,7 +3460,7 @@ class MarketDataManager:
             "best_ask_price",
         )
         if bid is None:
-            for key in ("buy_price", "best_bid_price"):
+            for key in ("sell_price", "best_ask_price"):
                 candidate = _positive(tick.get(key))
                 if candidate is not None:
                     bid = candidate
@@ -3493,18 +3499,50 @@ class MarketDataManager:
                 if nested_ask is not None:
                     ask = nested_ask
                     break
-        if bid is None:
+        if bid is None or ask is None:
             depth = tick.get("depth", {})
-            bid = self._coerce_from_depth(depth, "buy")
+            if isinstance(depth, Mapping):
+                if bid is None:
+                    bid_from_depth = self._coerce_from_depth(depth, "buy")
+                    if bid_from_depth is not None:
+                        bid = bid_from_depth
+                    else:
+                        self._logger.error(
+                            "REST poll fallback: depth present but buy side empty",
+                            extra={"symbol": symbol, "depth": depth},
+                        )
         if ask is None:
-            depth = tick.get("depth", {})
-            ask = self._coerce_from_depth(depth, "sell")
+            ask_from_depth = self._coerce_from_depth(depth, "sell")
+                    if ask_from_depth is not None:
+                        ask = ask_from_depth
+                    else:
+                        self._logger.error(
+                            "REST poll fallback: depth present but sell side empty",
+                            extra={"symbol": symbol, "depth": depth},
+                        )
+            else:
+                # No structured depth: explicitly log that we will use ltp-only fallback
+                if bid is None or ask is None:
+                    self._logger.error(
+                        "REST poll fallback: depth unavailable, falling back to LTP-only",
+                        extra={"symbol": symbol, "tick": tick},
+                    )   
+               
         if previous is not None:
             if bid is None:
                 bid = previous.get("bid")
+                if bid is not None:
+                    self._logger.warning(
+                        "Fallback to previous bid value",
+                        extra={"symbol": symbol, "previous_bid": previous.get("bid")},
+                    )
             if ask is None:
                 ask = previous.get("ask")
-
+                if ask is not None:
+                    self._logger.warning(
+                        "Fallback to previous ask value",
+                        extra={"symbol": symbol, "previous_ask": previous.get("ask")},
+                    )
         timestamp = self._coerce_timestamp(tick)
 
         normalized = {
