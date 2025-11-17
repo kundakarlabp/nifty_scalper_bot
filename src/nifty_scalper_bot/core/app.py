@@ -1154,8 +1154,6 @@ def get_http_app() -> FastAPI:
     @app.on_event("startup")
     async def _warm_instrument_resolver_on_startup() -> None:
         try:
-            # get_latest_bot_context is defined in this module and returns the
-            # most recently created BotContext (or None).
             ctx = get_latest_bot_context()
             if ctx is None:
                 LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
@@ -1170,9 +1168,36 @@ def get_http_app() -> FastAPI:
             warm_fn = getattr(resolver, "warm_from_broker_dump", None)
             if callable(warm_fn):
                 try:
-                    # If warm_from_broker_dump accepts rows parameter, it can be optional;
-                    # call with no args which should be implemented as an idempotent no-op when not needed.
-                    warm_fn()
+                    # If warm_from_broker_dump expects rows, provide them from DB cache;
+                    # otherwise call no-arg. Use inspect.signature to detect parameters.
+                    import inspect
+                    sig = inspect.signature(warm_fn)
+                    if len(sig.parameters) == 0:
+                        warm_fn()
+                    else:
+                        # Attempt to load rows from configured sqlite cache (non-fatal)
+                        rows = []
+                        conn = None
+                        try:
+                            db_path = getattr(ctx, "instrument_db_path", None) or getattr(ctx, "instrument_csv_path", None)
+                            if db_path:
+                                conn = ensure_sqlite(str(db_path))
+                            if conn is not None:
+                                rows = load_rows_for_resolver(conn)
+                        except Exception as exc:  # defensive: do not crash startup
+                            LOGGER.debug("Failed to load resolver rows from DB cache: %s", exc, extra={"event":"resolver_warm.load_rows_failed"})
+                        finally:
+                            if conn is not None:
+                                with suppress(Exception):
+                                    conn.close()
+
+                        if rows:
+                            warm_fn(rows)
+                        else:
+                            # Fallback to generic warm() if no rows available.
+                            generic_warm = getattr(resolver, "warm", None)
+                            if callable(generic_warm):
+                                generic_warm()
                     LOGGER.info("InstrumentResolver warmed via warm_from_broker_dump on HTTP startup", extra={"event": "resolver_warm.startup_success"})
                 except Exception as exc:  # defensive — do not crash startup
                     LOGGER.warning(
@@ -1199,6 +1224,8 @@ def get_http_app() -> FastAPI:
             # Defensive outer guard — log and continue; do not prevent app startup.
             LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
 
+    # Register the warm handler on the FastAPI app
+    app.add_event_handler("startup", _warm_instrument_resolver_on_startup)
 
     return app
 
