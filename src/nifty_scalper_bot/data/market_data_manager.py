@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.data.instruments import InstrumentResolver
 
 TickCallback = Callable[[dict[str, Any]], None]
-self.logger = self._logger
+
 # Throttled fallback logging: track last fallback reason + timestamp per symbol
 # (reduces log spam when depth is repeatedly empty). Default interval 5s.
 self._last_fallback_log: dict[str, tuple[str, float]] = {}
