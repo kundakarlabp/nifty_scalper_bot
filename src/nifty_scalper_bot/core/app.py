@@ -35,7 +35,7 @@ from typing import (
 )
 import logging
 
-LOGGER = get_logger(__name__)
+LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
