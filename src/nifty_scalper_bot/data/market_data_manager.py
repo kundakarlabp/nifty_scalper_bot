@@ -1471,7 +1471,6 @@ class MarketDataManager:
             "ts": (
                 normalized.get("timestamp") if isinstance(normalized, Mapping) else None
             ),
-        }
         # additional diagnostics
         "has_depth": bool(
                 (isinstance(normalized, Mapping) and normalized.get("depth"))
