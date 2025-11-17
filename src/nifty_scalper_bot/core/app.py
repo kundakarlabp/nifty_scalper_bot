@@ -35,7 +35,7 @@ from typing import (
 )
 import logging
 
-LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
+LOGGER = get_logger(__name__)
 
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -1224,9 +1224,6 @@ def get_http_app() -> FastAPI:
         except Exception:
             # Defensive outer guard — log and continue; do not prevent app startup.
             LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
-
-    # Register the warm handler on the FastAPI app
-    app.add_event_handler("startup", _warm_instrument_resolver_on_startup)
 
     return app
 
