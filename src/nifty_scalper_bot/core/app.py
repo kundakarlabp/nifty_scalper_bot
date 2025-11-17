@@ -140,7 +140,7 @@ if TYPE_CHECKING:
     )
     from telegram.ext import Application
 
-LOGGER = get_logger(__name__)
+LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 _ComponentT = TypeVar("_ComponentT")
 
