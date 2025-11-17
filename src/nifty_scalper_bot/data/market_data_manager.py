@@ -196,27 +196,14 @@ class MarketDataManager:
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
         self._poll_jitter_pct = 0.0
-        self._pollself._account_cache_ttl = MarketDataManager._parse_float_env(
-            "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
-        )
-        self._rest_poll_interval = MarketDataManager._parse_float_env(
-            "MDM_POLL_INTERVAL_SECONDS", default=3.0, minimum=0.5
-        )
-        configured_poll_max = MarketDataManager._parse_int_env(
-            "MDM_POLL_MAX_SYMBOLS", default=5, minimum=1
-        )
-        self._tick_stale_threshold_ms = MarketDataManager._parse_int_env(
-            "TICK_STALE_MS", default=2_000, minimum=0
-        )
-        self._margin_cache_ttl = MarketDataManager._parse_float_env(
-            "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
-        )
-        _batch_ceiling = 0
+        self._poll_batch_ceiling = 0
         self._ohlc_builder = _OHLCBuilder(maxlen=cache_len)
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
-        
+        self._account_cache_ttl = self._parse_float_env(
+            "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
+        )
         self._account_segment = _resolve_account_segment()
 
         self._margin_lock = threading.RLock()
@@ -384,134 +371,6 @@ class MarketDataManager:
                 },
                 exc_info=exc,
             )
-
-
-# ============ ADD THIS SECTION (copy-paste) ============
-
-import re
-from typing import Optional, Dict, Any
-
-# Add to imports at top of file
-NIFTY_OPTION_RE = re.compile(r"^NIFTY\d{2}[A-Z]{3}\d{4,5}(?:CE|PE)$", re.IGNORECASE)
-
-# Add as class methods in MarketDataManager:
-
-def _is_nifty_option(self, symbol: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
-    """
-    Conservative check: return True ONLY if symbol is NIFTY option.
-    
-    Args:
-        symbol: Trading symbol string (e.g., "NIFTY20NOV2445C")
-        metadata: Optional instrument resolver metadata dict
-        
-    Returns:
-        True if valid NIFTY option, False otherwise
-    """
-    if not symbol:
-        return False
-    
-    # Fast heuristic on trading symbol strings like 'NIFTY24DEC23900CE'
-    if NIFTY_OPTION_RE.match(symbol):
-        self.logger.debug(
-            "Symbol confirmed NIFTY option (regex match)",
-            extra={"symbol": symbol, "event": "nifty_option_validated"}
-        )
-        return True
-    
-    # If metadata available, use explicit fields
-    if metadata and isinstance(metadata, dict):
-        exch = metadata.get("exchange") or metadata.get("segment") or metadata.get("exch") or ""
-        itype = metadata.get("instrument_type") or metadata.get("type") or ""
-        tradingsymbol = metadata.get("tradingsymbol") or metadata.get("symbol") or ""
-        
-        # Must be NFO exchange
-        if exch and str(exch).upper() not in ("NFO", "NSE_FO", "NFO_FO"):
-            self.logger.warning(
-                "Rejecting non-NFO instrument",
-                extra={"symbol": symbol, "exchange": exch, "event": "rejected_wrong_exchange"}
-            )
-            return False
-        
-        # Must be option instrument type
-        if itype and str(itype).upper() not in ("OPTIDX", "OPTSTK", "OPT", "OPTION"):
-            self.logger.warning(
-                "Rejecting non-option instrument type",
-                extra={"symbol": symbol, "type": itype, "event": "rejected_wrong_type"}
-            )
-            return False
-        
-        # Confirm trading symbol contains NIFTY...CE/PE
-        if tradingsymbol and NIFTY_OPTION_RE.match(tradingsymbol):
-            self.logger.debug(
-                "Symbol confirmed NIFTY option (metadata match)",
-                extra={"symbol": symbol, "tradingsymbol": tradingsymbol, "event": "nifty_option_validated"}
-            )
-            return True
-    
-    self.logger.warning(
-        "Symbol rejected: not NIFTY option",
-        extra={"symbol": symbol, "metadata": metadata, "event": "rejected_not_nifty_option"}
-    )
-    return False
-
-
-def _filter_nifty_options(self, symbols: list[str]) -> list[str]:
-    """
-    Filter symbol list to ONLY include NIFTY options.
-    Skip all futures, equity, and other instruments.
-    """
-    filtered = []
-    skipped = []
-    
-    for symbol in symbols:
-        # Try to get metadata from resolver if available
-        meta = None
-        try:
-            if hasattr(self, "resolver") and self.resolver:
-                meta = self.resolver.get(symbol, {})
-        except Exception as exc:
-            self.logger.debug(
-                "Could not fetch resolver metadata",
-                extra={"symbol": symbol, "error": str(exc)}
-            )
-            meta = None
-        
-        if self._is_nifty_option(symbol, meta):
-            filtered.append(symbol)
-        else:
-            skipped.append(symbol)
-            self.logger.warning(
-                "Skipping non-NIFTY-option symbol",
-                extra={
-                    "symbol": symbol,
-                    "metadata": meta,
-                    "event": "symbol_filtered_out"
-                }
-            )
-    
-    if skipped:
-        self.logger.warning(
-            "Filtered out %d non-NIFTY symbols: %s",
-            len(skipped),
-            skipped[:5],  # Show first 5
-            extra={"event": "symbols_filtered", "count": len(skipped)}
-        )
-    
-    if not filtered:
-        self.logger.error(
-            "After filtering, NO NIFTY options remain! Poll list empty.",
-            extra={"event": "poll_list_empty_after_filter"}
-        )
-    else:
-        self.logger.info(
-            "Poll list filtered: %d symbols after removing non-NIFTY",
-            len(filtered),
-            extra={"event": "poll_list_filtered", "final_count": len(filtered), "symbols": filtered}
-        )
-    
-    return filtered
-
-# ============ END ADDITION ============
 
     def set_unified_manager(self, manager: Any | None) -> None:
         """Attach unified manager callbacks for cache updates.
