@@ -2437,7 +2437,17 @@ class MarketDataManager:
                 exc_info=exc,
             )
             return []
-
+        # diagnostic batch log
+        try:
+            self._logger.info(
+                "REST polling batch",
+                extra={
+                    "event": "mdm_rest_poll_batch",
+                    "batch_size": len(symbols),
+                    "symbols_preview": symbols[:5],
+                    "poll_interval": float(self._rest_poll_interval),
+                },
+            )
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 
