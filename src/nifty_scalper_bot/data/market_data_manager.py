@@ -2448,6 +2448,10 @@ class MarketDataManager:
                     "poll_interval": float(self._rest_poll_interval),
                 },
             )
+        except Exception:
+            # don't let diagnostics break the loop
+            pass
+    
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 
