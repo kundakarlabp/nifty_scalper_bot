@@ -3089,7 +3089,7 @@ class MarketDataManager:
         candidates: list[str | int] = self._candidate_quote_keys(symbol)
         if not candidates:
             candidates = [symbol]
-        _logger.info(
+        self._logger.info(
             "reference_price_refresh",
             extra={
                 "symbol": symbol,
@@ -3099,7 +3099,7 @@ class MarketDataManager:
         )
         for key in candidates:
             quote = self._broker_quote_any(key)
-            _logger.info(
+            self._logger.info(
                 "refresh_attempt",
                 extra={
                     "symbol": symbol,
