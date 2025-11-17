@@ -211,7 +211,7 @@ class MarketDataManager:
         self._margin_cache_ttl = MarketDataManager._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
-_batch_ceiling = 0
+        _batch_ceiling = 0
         self._ohlc_builder = _OHLCBuilder(maxlen=cache_len)
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
