@@ -1153,88 +1153,107 @@ def get_http_app() -> FastAPI:
     # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
     # work before handlers or external probes rely on the resolver.
     @app.on_event("startup")
-    async def _warm_instrument_resolver_on_startup() -> None:
-        try:
-            ctx = get_latest_bot_context()
-            if ctx is None:
-                LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
-                return
+async def _warm_instrument_resolver_on_startup() -> None:
+    try:
+        ctx = get_latest_bot_context()
+        if ctx is None:
+            LOGGER.debug(
+                "Resolver warm skipped: no bot context available",
+                extra={"event": "resolver_warm.no_context"},
+            )
+            return
 
-            resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
-            if resolver is None:
-                LOGGER.debug("Resolver warm skipped: no resolver available on context", extra={"event":"resolver_warm.no_resolver"})
-                return
+        resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
+        if resolver is None:
+            LOGGER.debug(
+                "Resolver warm skipped: no resolver available on context",
+                extra={"event": "resolver_warm.no_resolver"},
+            )
+            return
 
-            # Prefer explicit warm_from_broker_dump when available.
-            warm_fn = getattr(resolver, "warm_from_broker_dump", None)
-            if callable(warm_fn):
-                try:
-                    # If warm_from_broker_dump expects rows, provide them from DB cache;
-                    # otherwise call no-arg. Use inspect.signature to detect parameters.
-                    import inspect
-                    sig = inspect.signature(warm_fn)
-                    if len(sig.parameters) == 0:
-                        warm_fn()
+        warm_fn = getattr(resolver, "warm_from_broker_dump", None)
+        rows = []
+        conn = None
+
+        if callable(warm_fn):
+            try:
+                db_path = (
+                    getattr(ctx, "instrument_db_path", None)
+                    or getattr(ctx, "instrument_cache_db", None)
+                    or getattr(ctx, "instrument_csv_path", None)
+                )
+
+                if db_path:
+                    conn = ensure_sqlite(str(db_path))
+                    rows = load_rows_for_resolver(conn) or []
+
+            except Exception as exc:
+                LOGGER.debug(
+                    "Failed to load resolver rows from DB cache: %s",
+                    exc,
+                    extra={"event": "resolver_warm.load_rows_failed"},
+                )
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
+
+            try:
+                want_rows = needs_rows(warm_fn)
+
+                if inspect.iscoroutinefunction(warm_fn):
+                    if want_rows:
+                        await warm_fn(rows)
                     else:
-                        # Attempt to load rows from configured sqlite cache (non-fatal)
-                        rows = []
-                        conn = None
-                        try:
-                            db_path = getattr(ctx, "instrument_db_path", None) or getattr(ctx, "instrument_csv_path", None)
-                            if db_path:
-                                conn = ensure_sqlite(str(db_path))
-                            if conn is not None:
-                                rows = load_rows_for_resolver(conn)
-                        except Exception as exc:  # defensive: do not crash startup
-                            LOGGER.debug("Failed to load resolver rows from DB cache: %s", exc, extra={"event":"resolver_warm.load_rows_failed"})
-                        finally:
-                            if conn is not None:
-                                with suppress(Exception):
-                                    conn.close()
+                        await warm_fn()
+                else:
+                    loop = asyncio.get_event_loop()
+                    if want_rows:
+                        await loop.run_in_executor(None, lambda: warm_fn(rows))
+                    else:
+                        await loop.run_in_executor(None, warm_fn)
 
-                        if rows:
-                            warm_fn(rows)
-                        else:
-                            # Fallback to generic warm() if no rows available.
-                            generic_warm = getattr(resolver, "warm", None)
-                            if callable(generic_warm):
-                                generic_warm()
-                    LOGGER.info("InstrumentResolver warmed via warm_from_broker_dump on HTTP startup", extra={"event": "resolver_warm.startup_success"})
-                except Exception as exc:  # defensive — do not crash startup
+                LOGGER.info(
+                    "InstrumentResolver warmed via warm_from_broker_dump on HTTP startup",
+                    extra={"event": "resolver_warm.startup_success"},
+                )
+
+            except Exception as exc:
+                LOGGER.warning(
+                    "InstrumentResolver warm_from_broker_dump failed on startup: %s",
+                    exc,
+                    extra={"event": "resolver_warm.startup_failed"},
+                    exc_info=exc,
+                )
+
+        else:
+            generic_warm = getattr(resolver, "warm", None)
+            if callable(generic_warm):
+                try:
+                    if inspect.iscoroutinefunction(generic_warm):
+                        await generic_warm()
+                    else:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, generic_warm)
+
+                    LOGGER.info(
+                        "InstrumentResolver warmed via warm() fallback on startup",
+                        extra={"event": "resolver_warm.startup_success_fallback"},
+                    )
+
+                except Exception as exc:
                     LOGGER.warning(
-                        "InstrumentResolver warm_from_broker_dump failed on startup: %s",
+                        "InstrumentResolver warm() failed: %s",
                         exc,
-                        extra={"event": "resolver_warm.startup_failed"},
+                        extra={"event": "resolver_warm.startup_failed_fallback"},
                         exc_info=exc,
                     )
-            else:
-                # If explicit hook missing, fall back to any generic warm() call.
-                generic_warm = getattr(resolver, "warm", None)
-                if callable(generic_warm):
-                    try:
-                        generic_warm()
-                        LOGGER.info("InstrumentResolver warmed via warm() fallback on HTTP startup", extra={"event": "resolver_warm.startup_success_fallback"})
-                    except Exception as exc:
-                        LOGGER.warning(
-                            "InstrumentResolver warm() failed on startup: %s",
-                            exc,
-                            extra={"event": "resolver_warm.startup_failed_fallback"},
-                            exc_info=exc,
-                        )
-        except Exception:
-            # Defensive outer guard — log and continue; do not prevent app startup.
-            LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
 
-    return app
-
-
-def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
-    """Return the notifier created for webhook delivery, if any."""
-
-    if _HTTP_NOTIFIER is None and _HTTP_APP is None:
-        get_http_app()
-    return _HTTP_NOTIFIER
-
+    except Exception as exc:
+        LOGGER.exception(
+            "Unexpected error while attempting to warm InstrumentResolver",
+            extra={"event": "resolver_warm.unexpected_error"},
+        )
 
 @dataclass(slots=True)
 class BotContext:
