@@ -1203,31 +1203,30 @@ def get_http_app() -> FastAPI:
                         conn.close()
 
             if callable(warm_fn):
-                want_rows = needs_rows(warm_fn)
-                try:
-                    if inspect.iscoroutinefunction(warm_fn):
-                        if want_rows:
-                            await warm_fn(rows)
-                        else:
-                            await warm_fn()
+            want_rows = needs_rows(warm_fn)
+            try:
+                if inspect.iscoroutinefunction(warm_fn):
+                    if want_rows:
+                        await warm_fn(rows)
                     else:
-                        if want_rows:
-                            await loop.run_in_executor(None, lambda: warm_fn(rows))
-                        else:
-                            await loop.run_in_executor(None, warm_fn)
+                        await warm_fn()
+                else:
+                    if want_rows:
+                        await loop.run_in_executor(None, lambda: warm_fn(rows))
+                    else:
+                        await loop.run_in_executor(None, warm_fn)
 
-                    LOGGER.info(
-                        "InstrumentResolver warmed via warm_from_broker_dump on HTTP startup",
-                        extra={"event": "resolver_warm.startup_success"},
-                    )
-                except Exception as exc:
-                    LOGGER.warning(
-                        "InstrumentResolver warm_from_broker_dump failed: %s",
-                        exc,
-                        extra={"event": "resolver_warm.startup_failed"},
-                        exc_info=exc,
-                    )
-
+                LOGGER.info(
+                    "InstrumentResolver warmed via warm_from_broker_dump on HTTP startup",
+                    extra={"event": "resolver_warm.startup_success"},
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "InstrumentResolver warm_from_broker_dump failed on startup: %s",
+                    exc,
+                    extra={"event": "resolver_warm.startup_failed"},
+                    exc_info=exc,
+                )
         else:
             generic_warm = getattr(resolver, "warm", None)
             if callable(generic_warm):
