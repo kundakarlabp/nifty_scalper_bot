@@ -1156,80 +1156,77 @@ def get_http_app() -> FastAPI:
     async def _warm_instrument_resolver_on_startup() -> None:
         try:
             ctx = get_latest_bot_context()
-        if ctx is None:
-            LOGGER.debug(
-                "Resolver warm skipped: no bot context available",
-                extra={"event": "resolver_warm.no_context"},
+            if ctx is None:
+                LOGGER.debug(
+                    "Resolver warm skipped: no bot context available",
+                    extra={"event": "resolver_warm.no_context"},
+                )
+                return
+            resolver = getattr(ctx, "instrument_resolver", None) or getattr(
+                ctx, "resolver", None
             )
-            return
-        resolver = getattr(ctx, "instrument_resolver", None) or getattr(
-            ctx, "resolver", None
-        )
-        if resolver is None:
-            LOGGER.debug(
+            if resolver is None:
+                LOGGER.debug(
                 "Resolver warm skipped: no resolver available on context",
                 extra={"event": "resolver_warm.no_resolver"},
-            )
-            return
-
-        loop = asyncio.get_running_loop()
-
-        def needs_rows(fn):
-            try:
-                sig = inspect.signature(fn)
-                return len(sig.parameters) > 0
-            except Exception:
-                return True
-
-        warm_fn = getattr(resolver, "warm_from_broker_dump", None)
-
-        rows = []
-        conn = None
-        try:
-            db_path = getattr(ctx, "instrument_db_path", None) or getattr(
-                ctx, "instrument_cache_db", None
-            ) or getattr(ctx, "instrument_csv_path", None)
-
-            if db_path:
-                conn = ensure_sqlite(str(db_path))
-                rows = load_rows_for_resolver(conn) or []
-
-        except Exception as exc:
-            LOGGER.debug(
-                "Failed to load resolver rows from DB cache: %s",
-                exc,
-                extra={"event": "resolver_warm.load_rows_failed"},
-            )
-        finally:
-            if conn is not None:
-                with suppress(Exception):
-                    conn.close()
-
-        if callable(warm_fn):
-            want_rows = needs_rows(warm_fn)
-            try:
-                if inspect.iscoroutinefunction(warm_fn):
-                    if want_rows:
-                        await warm_fn(rows)
-                    else:
-                        await warm_fn()
-                else:
-                    if want_rows:
-                        await loop.run_in_executor(None, lambda: warm_fn(rows))
-                    else:
-                        await loop.run_in_executor(None, warm_fn)
-
-                LOGGER.info(
-                    "InstrumentResolver warmed via warm_from_broker_dump on HTTP startup",
-                    extra={"event": "resolver_warm.startup_success"},
                 )
+                return
+
+            loop = asyncio.get_running_loop()
+            def needs_rows(fn):
+                try:
+                    sig = inspect.signature(fn)
+                    return len(sig.parameters) > 0
+                except Exception:
+                    return True
+            warm_fn = getattr(resolver, "warm_from_broker_dump", None)
+            rows = []
+            conn = None
+            try:
+                db_path = getattr(ctx, "instrument_db_path", None) or getattr(
+                    ctx, "instrument_cache_db", None
+                ) or getattr(ctx, "instrument_csv_path", None)
+
+                if db_path:
+                    conn = ensure_sqlite(str(db_path))
+                    rows = load_rows_for_resolver(conn) or []
+
             except Exception as exc:
-                LOGGER.warning(
-                    "InstrumentResolver warm_from_broker_dump failed: %s",
+                LOGGER.debug(
+                    "Failed to load resolver rows from DB cache: %s",
                     exc,
-                    extra={"event": "resolver_warm.startup_failed"},
-                    exc_info=exc,
+                    extra={"event": "resolver_warm.load_rows_failed"},
                 )
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
+
+            if callable(warm_fn):
+                want_rows = needs_rows(warm_fn)
+                try:
+                    if inspect.iscoroutinefunction(warm_fn):
+                        if want_rows:
+                            await warm_fn(rows)
+                        else:
+                            await warm_fn()
+                    else:
+                        if want_rows:
+                            await loop.run_in_executor(None, lambda: warm_fn(rows))
+                        else:
+                            await loop.run_in_executor(None, warm_fn)
+
+                    LOGGER.info(
+                        "InstrumentResolver warmed via warm_from_broker_dump on HTTP startup",
+                        extra={"event": "resolver_warm.startup_success"},
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "InstrumentResolver warm_from_broker_dump failed: %s",
+                        exc,
+                        extra={"event": "resolver_warm.startup_failed"},
+                        exc_info=exc,
+                    )
 
         else:
             generic_warm = getattr(resolver, "warm", None)
