@@ -1779,7 +1779,8 @@ def _get_symbols(config: AppConfig) -> list[str]:
         
     if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
         return [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
-    return [str(symbols)]
+    else: 
+        return [str(symbols)]
 
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
