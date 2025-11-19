@@ -1642,7 +1642,19 @@ def _configure_rate_limiter(cfg: Any) -> RateLimiter:
     )
     return limiter
 
+def get_nifty_expiry():
+    now = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+    # Thursday (NIFTY weekly exp) is weekday 3
+    days_ahead = 3 - now.weekday()
+    if days_ahead < 0:
+        days_ahead += 7
+    expiry = now + timedelta(days=days_ahead)
+    return expiry.strftime("%d%b%y").upper()
 
+def get_nifty_atm_strike(nifty_spot):
+    """Round to nearest 50 or 100, as in your option chain tokens."""
+    return round(nifty_spot / 50) * 50
+    
 def _get_symbols(config: AppConfig) -> list[str]:
     symbols = getattr(config, "symbols", None)
     if not symbols:
