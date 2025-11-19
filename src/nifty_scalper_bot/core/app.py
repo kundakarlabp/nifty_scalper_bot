@@ -1658,7 +1658,18 @@ def get_nifty_atm_strike(nifty_spot):
 def _get_symbols(config: AppConfig) -> list[str]:
     symbols = getattr(config, "symbols", None)
     if not symbols:
-        return ["NIFTY"]
+        try:
+            mdm = globals().get("market_data_manager")
+            nifty_spot = mdm.get_latest_price("NIFTY") if mdm else 24000
+            atm = round(nifty_spot / 50) * 50
+            expiry = get_nifty_expiry()  # Your helper from earlier
+            return [
+                f"NFO:NIFTY{expiry}{atm}CE",
+                f"NFO:NIFTY{expiry}{atm}PE"
+            ]
+        except Exception:
+            return ["NFO:NIFTY24NOV24000CE"]
+        
     if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
         return [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
     return [str(symbols)]
