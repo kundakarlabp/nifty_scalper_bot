@@ -1718,16 +1718,63 @@ def _get_symbols(config: AppConfig) -> list[str]:
             mdm = globals().get("market_data_manager")
             nifty_spot = mdm.get_latest_price("NIFTY") if mdm else 24000
             atm = round(nifty_spot / 50) * 50
-            expiry = get_nifty_expiry()  # Your helper from earlier
+            expiry = get_nifty_expiry()
+
+            # --- Minimal validation & nearest-strike fallback (very small safe logic) ---
+            # Build raw candidates (no prefix)
+            raw_ce = f"NIFTY{expiry}{int(atm)}CE"
+            raw_pe = f"NIFTY{expiry}{int(atm)}PE"
+            # locate resolver instance (if present)
+            resolver = globals().get("instrument_resolver") or globals().get("resolver")
+            if resolver is None:
+                try:
+                    from nifty_scalper_bot.data import instruments as _instr_mod  # type: ignore
+                    resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(_instr_mod, "resolver", None)
+                except Exception:
+                    resolver = None
+            # quick exact-match path
+            if resolver is not None:
+                by_symbol = getattr(resolver, "_by_symbol", {}) or {}
+                if raw_ce in by_symbol and raw_pe in by_symbol:
+                    return [f"NFO:{raw_ce}", f"NFO:{raw_pe}"]
+                # permissive nearest-strike search for same expiry and type
+                import re
+                def _strike_of(sym: str) -> int:
+                    m = re.search(r"(\d{3,6})(?:CE|PE)$", sym.upper())
+                    return int(m.group(1)) if m else 0
+                # collect CE candidates for this expiry
+                ce_cands = [s for s in by_symbol.keys() if isinstance(s, str) and s.upper().startswith("NIFTY") and s.upper().endswith("CE") and expiry in s.upper()]
+                pe_cands = [s for s in by_symbol.keys() if isinstance(s, str) and s.upper().startswith("NIFTY") and s.upper().endswith("PE") and expiry in s.upper()]
+                if ce_cands and pe_cands:
+                    # choose closest numeric strike to atm for CE and PE separately
+                    ce_best = min(ce_cands, key=lambda s: abs(_strike_of(s) - int(atm)))
+                    pe_best = min(pe_cands, key=lambda s: abs(_strike_of(s) - int(atm)))
+                    return [f"NFO:{ce_best.upper()}", f"NFO:{pe_best.upper()}"]
+            # last-resort fallback (preserve previous behavior)
+            logger = globals().get("LOGGER") or __import__("logging").getLogger(__name__)
+            logger.warning("No validated NIFTY CE/PE found in resolver; returning constructed fallback symbols", extra={"expiry": expiry, "atm": atm})
             return [
-                f"NFO:NIFTY{expiry}{atm}CE",
-                f"NFO:NIFTY{expiry}{atm}PE"
+                f"NFO:NIFTY{expiry}{int(atm)}CE",
+                f"NFO:NIFTY{expiry}{int(atm)}PE",
             ]
-        except Exception:
+        except Exception as _ex:
+            logger = globals().get("LOGGER") or __import__("logging").getLogger(__name__)
+            logger.exception("Error generating NIFTY symbols; falling back to constructed strings", exc_info=_ex)
+            # safe fallback if expiry/atm undefined
+            try:
+                _expiry = expiry
+                _atm = int(atm)
+            except Exception:
+                from datetime import datetime
+                _expiry = datetime.now().strftime("%d%b%y").upper()
+                _atm = 24000
             return [
-                f"NFO:NIFTY{expiry}{atm}CE",
-                f"NFO:NIFTY{expiry}{atm}PE",
+                f"NFO:NIFTY{_expiry}{_atm}CE",
+                f"NFO:NIFTY{_expiry}{_atm}PE",
             ]
+        # locate resolver instance (if present)
+        resolver = globals().get("instrument_resolver") or globals().get("resolver")
+        if resolver is None:
         
     if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
         return [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
