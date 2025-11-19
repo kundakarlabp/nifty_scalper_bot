@@ -13,6 +13,7 @@ import asyncio  # Required for startup reconciliation and background tasks
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
+from collections.abc import Iterable
 from importlib import import_module
 import inspect
 import os
