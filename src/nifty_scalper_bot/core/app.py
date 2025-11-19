@@ -1655,7 +1655,62 @@ def get_nifty_expiry():
 def get_nifty_atm_strike(nifty_spot):
     """Round to nearest 50 or 100, as in your option chain tokens."""
     return round(nifty_spot / 50) * 50
-    
+
+def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str = "CE") -> str | None:
+    """
+    Return the first matching tradingsymbol (without exchange prefix) present in
+    the warmed instrument resolver for the requested underlying/expiry/strike/type.
+    If none found, return None.
+    """
+    # try common resolver/global names used in the app
+    possible_names = ("instrument_resolver", "resolver", "InstrumentResolverInstance", "instrumentResolver")
+    resolver = None
+    for n in possible_names:
+        resolver = globals().get(n)
+        if resolver:
+            break
+    # If a resolver instance wasn't found in globals(), try to import the module-level resolver
+    if resolver is None:
+        try:
+            from nifty_scalper_bot.data import instruments as _instr_mod  # type: ignore
+            # module may expose an instance; try common attrs
+            resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(_instr_mod, "resolver", None)
+        except Exception:
+            resolver = None
+    if resolver is None:
+        # no warmed resolver accessible — cannot validate
+        return None
+    # Normalize check values
+    want_exp = (expiry or "").upper()
+    want_str = str(int(strike))
+    want_ot = (opt_type or "CE").upper()
+    # Fast exact candidate
+    candidate = f"NIFTY{want_exp}{want_str}{want_ot}"
+    # resolver may store keys in _by_symbol; try to inspect maps safely
+    try:
+        by_symbol = getattr(resolver, "_by_symbol", None) or getattr(resolver, " _by_symbol", None)
+        if by_symbol is None:
+            # fallback: try dict-like 'symbols' attribute
+            by_symbol = getattr(resolver, "symbols", None)
+    except Exception:
+        by_symbol = None
+    if by_symbol and candidate in by_symbol:
+        return candidate
+    # Otherwise scan for a match: same expiry + strike string + CE/PE suffix
+    if by_symbol:
+        for sym in by_symbol.keys():
+            if not isinstance(sym, str):
+                continue
+            s = sym.upper()
+            if not s.startswith("NIFTY"):
+                continue
+            if not s.endswith(want_ot):
+                continue
+            if want_exp in s and want_str in s:
+                return s
+    # nothing found
+    return None
+
 def _get_symbols(config: AppConfig) -> list[str]:
     symbols = getattr(config, "symbols", None)
     if not symbols:
