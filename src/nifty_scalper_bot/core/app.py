@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 import random
+import pytz
 import sqlite3
 import time as time_module
 from typing import (
