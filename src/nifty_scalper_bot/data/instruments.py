@@ -277,7 +277,9 @@ class InstrumentResolver:
         if symbol is None:
             return None
         try:
-            normalized = str(symbol).strip().upper()
+            strip_prefix = os.getenv("RESOLVER_STRIP_EXCHANGE_PREFIX", "true").lower() == "true"
+            if strip_prefix and ":" in normalized:
+                normalized = normalized.split(":", 1)[-1].strip()
             # if numeric token provided, lookup symbol
             if normalized.isdigit():
                 token = int(normalized)
