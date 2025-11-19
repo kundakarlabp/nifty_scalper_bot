@@ -1668,7 +1668,10 @@ def _get_symbols(config: AppConfig) -> list[str]:
                 f"NFO:NIFTY{expiry}{atm}PE"
             ]
         except Exception:
-            return ["NFO:NIFTY25NOV24000CE"]
+            return [
+                f"NFO:NIFTY{expiry}{atm}CE",
+                f"NFO:NIFTY{expiry}{atm}PE",
+            ]
         
     if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
         return [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
