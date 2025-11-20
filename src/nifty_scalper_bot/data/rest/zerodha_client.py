@@ -1588,57 +1588,65 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def load_instruments(self, exchange: str = _DEFAULT_EXCHANGE) -> list[dict]:
         """Load instrument list for the provided exchange.
 
-        Args:
-            exchange: Target exchange identifier.
-
-        Returns:
-            list[dict]: Parsed instrument rows keyed by column names.
-
-        Raises:
-            BrokerError: If the instrument feed cannot be retrieved.
+        Stores multiple normalized keys per instrument to make lookups resilient.
         """
 
         LOGGER.debug(
             "Entered ZerodhaKiteClient.load_instruments",
-            extra={
-                "event": "zerodha.load_instruments.enter",
-                "exchange": exchange,
-            },
+            extra={"event": "zerodha.load_instruments.enter", "exchange": exchange},
         )
-        normalized_exchange = exchange.upper()
+        normalized_exchange = (exchange or self._default_exchange).upper()
         try:
             content = self._fetch_instrument_csv(normalized_exchange)
             reader = csv.DictReader(io.StringIO(content))
             instruments = list(reader)
         except BrokerError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.load_instruments: %s",
                 exc,
-                extra={
-                    "event": "zerodha.load_instruments.parse_error",
-                    "exchange": normalized_exchange,
-                },
+                extra={"event": "zerodha.load_instruments.parse_error", "exchange": normalized_exchange},
                 exc_info=exc,
             )
             raise BrokerError("Instrument parse failed") from exc
 
-        self._instrument_cache[normalized_exchange] = {
-            row.get("tradingsymbol", ""): row
-            for row in instruments
-            if row.get("tradingsymbol")
-        }
+        # build cache with robust keys:
+        cache: dict[str, dict] = {}
+        for row in instruments:
+            ts_raw = row.get("tradingsymbol") or row.get("symbol") or ""
+            if not ts_raw:
+                continue
+            ts = ts_raw.strip()
+            # canonical forms:
+             ts_upper = ts.upper()
+            ts_nospace = ts_upper.replace(" ", "")
+            # exchange-qualified keys (Zerodha style)
+            exch = (row.get("exchange") or normalized_exchange or "").strip().upper()
+            if exch:
+                key_exch = f"{exch}:{ts_upper}"
+                cache[key_exch] = row
+                # raw trading symbol key (preserve original casing in payload)
+                cache[ts_upper] = row
+                # nospace fallback (useful when smart_symbol generates no-space versions)
+                cache[ts_nospace] = row
+                # also register bare lower-level key (without exchange) for convenience
+                base = ts_upper.split(":", 1)[-1]
+                cache[base] = row
+
+        self._instrument_cache[normalized_exchange] = cache
         LOGGER.info(
             "Condition met: zerodha.load_instruments.success",
             extra={
                 "event": "zerodha.load_instruments.success",
                 "exchange": normalized_exchange,
-                "count": len(self._instrument_cache[normalized_exchange]),
+                "count": len(cache),
             },
         )
         return instruments
 
+    
+    
     def list_instruments(self) -> list[dict[str, Any]]:
         """Return cached instrument rows across all exchanges.
 
