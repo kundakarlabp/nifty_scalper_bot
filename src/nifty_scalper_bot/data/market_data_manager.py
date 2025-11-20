@@ -6,23 +6,15 @@ This is a cleaned, consolidated and battle-tested reimplementation that preserve
 the original file's responsibilities while removing duplicated/legacy paths and
 making the behaviour explicit and robust.
 
-Responsibilites
+Responsibilities
 - Accepts ticks/quotes from REST / WebSocket broker clients (ZerodhaKiteClient / ZerodhaKiteWebSocket)
 - Resolves instrument tokens via attached InstrumentResolver or broker helpers
 - Normalises incoming payloads to a compact tick dictionary used by the rest of the bot
 - Maintains a small in-memory time-series history for each instrument (configurable)
 - Fan-out subscription API for other components to receive normalized ticks
 - Light-weight duplicate suppression / de-duplication window
-- Safe threading / concurrency behaviour (uses RLock and asyncio-safe queues where needed)
+- Safe threading / concurrency behaviour (uses RLock)
 - Hooks for metrics (placeholders preserved from original design)
-
-Design choices
-- Keep behaviour synchronous for compatibility with the rest of the codebase but safe
-  to call from async code (thread-safe).
-- Avoid global state. Keep per-instance caches and configurables.
-- Keep token resolution flexible: prefer InstrumentResolver if attached, otherwise
-  attempt broker.get_instrument_token / client._tokens_to_symbols paths.
-- Keep rate-limiting and retry responsibilities with the broker client, not here.
 """
 
 from __future__ import annotations
@@ -41,10 +33,8 @@ from typing import (
     Deque,
     Dict,
     Iterable,
-    Iterator,
     List,
     Mapping,
-    MutableMapping,
     Optional,
     Sequence,
     Tuple,
@@ -87,7 +77,7 @@ class MarketDataManager:
         mdm.attach_broker(zerodha_client)
         mdm.attach_resolver(instrument_resolver)
         mdm.subscribe(['NFO:NIFTY25NOV2524000CE'], callback)
-        mdm.on_tick_from_ws(payload)  # called by websocket client adapter
+        mdm.on_ws_tick(payload)  # called by websocket client adapter
         tick = mdm.get_latest('NFO:NIFTY25NOV2524000CE')
     """
 
@@ -96,9 +86,20 @@ class MarketDataManager:
         *,
         history: _HistoryConfig | None = None,
         dedupe_window_secs: float = 0.8,
+        resolver: InstrumentResolver | None = None,
+        broker: Any | None = None,
+        **kwargs: Any,
     ) -> None:
+        """
+        Args:
+            history: optional history configuration
+            dedupe_window_secs: time window to consider ticks duplicates
+            resolver: optional InstrumentResolver instance to attach immediately
+            broker: optional broker client to attach immediately
+            **kwargs: ignored (keeps constructor forward-compatible)
+        """
         self._lock = threading.RLock()
-        # subscriber map: canonical_key -> set(subscribers)
+        # subscriber map: canonical_key -> list(subscribers)
         self._subscribers: Dict[str, List[Subscriber]] = {}
         # latest tick per canonical key
         self._latest: Dict[str, Tick] = {}
@@ -119,6 +120,19 @@ class MarketDataManager:
             "ticks_emitted": 0,
             "duplicates": 0,
         }
+
+        # Immediately attach resolver/broker if provided at construction time
+        if resolver is not None:
+            try:
+                self.attach_resolver(resolver)
+            except Exception:
+                LOGGER.exception("Failed to attach resolver during init")
+        if broker is not None:
+            try:
+                self.attach_broker(broker)
+            except Exception:
+                LOGGER.exception("Failed to attach broker during init")
+
         LOGGER.debug("MarketDataManager initialized", extra={"event": "mdm_init"})
 
     # -------------------------
@@ -184,15 +198,16 @@ class MarketDataManager:
             return dict(tick) if tick is not None else None
 
     def get_history(self, symbol: str, limit: Optional[int] = None) -> List[Tick]:
-        """Return recent tick history for symbol. Returns newest first if limit given."""
+        """Return recent tick history for symbol. Returns oldest->newest slice; if limit given, returns last N."""
         key = self._normalize_symbol_key(symbol)
         with self._lock:
             dq = self._history.get(key)
             if not dq:
                 return []
-            items = list(dq)
             if limit:
-                items = items[-limit:]
+                items = list(dq)[-limit:]
+            else:
+                items = list(dq)
             return [dict(x) for x in items]
 
     # -------------------------
@@ -230,19 +245,17 @@ class MarketDataManager:
                 getter = getattr(broker, "get_instrument_token", None)
                 if callable(getter):
                     try:
-                        # broker might expect exchange and symbol; try naive call
                         token = getter(s)
                         if token:
                             return int(token)
                     except Exception:
-                        # try with default exchange prefix
+                        # try base symbol fallback
                         try:
                             token = getter(s.split(":", 1)[-1])
                             if token:
                                 return int(token)
                         except Exception:
                             LOGGER.debug("broker.get_instrument_token failed for %s", s, exc_info=True)
-                # other possible broker helper names (best-effort)
                 searcher = getattr(broker, "instrument_token_for", None)
                 if callable(searcher):
                     try:
@@ -272,9 +285,9 @@ class MarketDataManager:
             # resolver may provide mapping via format_token_as_symbol or symbol_for_token
             if self._resolver is not None:
                 try:
-                    symbol = getattr(self._resolver, "format_token_as_symbol", None)
-                    if callable(symbol):
-                        formatted = symbol(int_token)
+                    fn = getattr(self._resolver, "format_token_as_symbol", None)
+                    if callable(fn):
+                        formatted = fn(int_token)
                         if formatted:
                             self._token_symbol_cache[int_token] = formatted
                             return formatted
@@ -282,8 +295,8 @@ class MarketDataManager:
                     LOGGER.debug("resolver.format_token_as_symbol failed for token=%s", int_token, exc_info=True)
             # broker fallback: some brokers expose symbol_for_token / symbol_for_instrument
             if self._broker is not None:
-                for fn in ("symbol_for_token", "symbol_for_instrument", "symbol_for"):
-                    f = getattr(self._broker, fn, None)
+                for fn_name in ("symbol_for_token", "symbol_for_instrument", "symbol_for"):
+                    f = getattr(self._broker, fn_name, None)
                     if callable(f):
                         try:
                             formatted = f(int_token)
@@ -291,7 +304,7 @@ class MarketDataManager:
                                 self._token_symbol_cache[int_token] = str(formatted)
                                 return str(formatted)
                         except Exception:
-                            LOGGER.debug("broker %s failed for token=%s", fn, int_token, exc_info=True)
+                            LOGGER.debug("broker %s failed for token=%s", fn_name, int_token, exc_info=True)
         return None
 
     # -------------------------
@@ -306,12 +319,12 @@ class MarketDataManager:
         """
         if not payload:
             return
-        # ingest each mapping item and normalize
         for key, item in payload.items():
             try:
                 normalized_tick = self._normalize_quote_item(item, key_hint=key)
                 if normalized_tick:
                     self._process_tick(normalized_tick)
+                    self._metrics["ticks_received"] += 1
             except Exception:
                 LOGGER.exception("Failed to process rest quote for key=%s", key)
 
@@ -322,7 +335,6 @@ class MarketDataManager:
         """
         if tick_payload is None:
             return
-        # KiteTicker usually sends dicts/lists with instrument_token etc.
         if isinstance(tick_payload, list):
             for t in tick_payload:
                 if isinstance(t, Mapping):
@@ -330,6 +342,7 @@ class MarketDataManager:
                         normalized_tick = self._normalize_quote_item(t)
                         if normalized_tick:
                             self._process_tick(normalized_tick)
+                            self._metrics["ticks_received"] += 1
                     except Exception:
                         LOGGER.exception("Failed to process ws tick list item")
         elif isinstance(tick_payload, Mapping):
@@ -337,6 +350,7 @@ class MarketDataManager:
                 normalized_tick = self._normalize_quote_item(tick_payload)
                 if normalized_tick:
                     self._process_tick(normalized_tick)
+                    self._metrics["ticks_received"] += 1
             except Exception:
                 LOGGER.exception("Failed to process ws tick mapping")
 
@@ -352,12 +366,10 @@ class MarketDataManager:
         """
         canonical = tick.get("symbol_key")
         if not canonical:
-            # can't do anything without canonical key
             LOGGER.debug("Dropping tick with no canonical key", extra={"event": "mdm_drop_no_key", "tick": tick})
             return
 
         now_ts = time.time()
-        # dedupe check
         sig = _payload_signature(tick)
         with self._lock:
             last = self._dedupe.get(canonical)
@@ -387,7 +399,6 @@ class MarketDataManager:
                 lag = max(0, int(time.time() * 1000) - int(tick["ts_ms"]))
                 POLL_TICK_LAG_MS.set(lag)
         except Exception:
-            # metrics should not break processing
             LOGGER.debug("Metrics update failed", exc_info=True)
 
     def _emit_tick(self, canonical: str, tick: Tick) -> None:
@@ -396,7 +407,6 @@ class MarketDataManager:
         registered for base symbol (without exchange prefix).
         """
         with self._lock:
-            # copy list of subscribers to avoid mutation during iteration
             subs = list(self._subscribers.get(canonical, []))
             base = canonical.split(":", 1)[-1] if ":" in canonical else canonical
             subs += list(self._subscribers.get(base, []))
@@ -427,9 +437,7 @@ class MarketDataManager:
             - received_ts_ms (int)  # when we processed it
         """
         try:
-            # Accept payloads that may be mapping returned by Zerodha.quote_any OR ws tick
             payload = dict(item)
-            # If payload contains 'instrument_token', prefer that path
             instr_token = None
             if "instrument_token" in payload and payload["instrument_token"] is not None:
                 try:
@@ -437,17 +445,16 @@ class MarketDataManager:
                 except Exception:
                     instr_token = None
 
-            # Try to determine canonical symbol key
+            # Determine canonical symbol_key
             symbol_key: Optional[str] = None
             if instr_token:
-                # try to produce EXCHANGE:SYMBOL via resolver / cache
                 symbol_key = self.resolve_symbol_from_token(instr_token)
                 if not symbol_key and self._resolver is not None:
-                    # attempt to use resolver.lookup for metadata if available
                     try:
-                        meta = getattr(self._resolver, "lookup", None)
-                        if callable(meta):
-                            lookup = meta(instr_token)
+                        # resolver.lookup may return metadata
+                        lookup_fn = getattr(self._resolver, "lookup", None)
+                        if callable(lookup_fn):
+                            lookup = lookup_fn(instr_token)
                             if lookup and "symbol" in lookup:
                                 sym = lookup.get("symbol")
                                 exch = lookup.get("exchange") or "NFO"
@@ -458,7 +465,6 @@ class MarketDataManager:
 
             # key_hint may be alias like 'NFO:SYMBOL' or '256265'
             if symbol_key is None and key_hint:
-                # If key_hint is numeric token, try to resolve
                 kh = str(key_hint).strip()
                 if kh.isdigit():
                     try:
@@ -469,10 +475,9 @@ class MarketDataManager:
                     except Exception:
                         pass
                 else:
-                    # normalize textual key_hint into EXCHANGE:SYMBOL or bare SYMBOL
                     symbol_key = kh if ":" in kh else f"NFO:{kh}"
 
-            # Last resort: maybe payload has 'tradingsymbol' or 'instrument' keys
+            # fallback to tradingsymbol keys in payload
             if not symbol_key:
                 for k in ("tradingsymbol", "symbol", "instrument"):
                     cand = payload.get(k)
@@ -483,28 +488,22 @@ class MarketDataManager:
                             break
 
             if not symbol_key:
-                # cannot normalize without a symbol
                 LOGGER.debug("Unable to determine symbol for incoming payload; skipping", extra={"event": "mdm_unresolved_symbol", "payload_keys": list(payload.keys())})
                 return None
 
-            # Build canonical tick
+            # timestamp extraction heuristics
             ts_ms = None
-            # First, try explicit timestamps
             for k in ("last_trade_time", "timestamp", "ts_ms", "last_price_time", "ltp_time"):
                 v = payload.get(k)
                 if v is None:
                     continue
-                # If ISO string
                 if isinstance(v, str):
                     with suppress(Exception):
-                        # datetime.fromisoformat handles many iso formats
                         dt = datetime.fromisoformat(v)
                         ts_ms = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
                         break
-                # numeric epoch seconds or ms
                 try:
                     num = float(v)
-                    # heuristics: if > 1e12 probably ms already
                     if num > 1_000_000_000_000:
                         ts_ms = int(num)
                     elif num > 1_000_000_000:
@@ -514,30 +513,32 @@ class MarketDataManager:
                     break
                 except Exception:
                     continue
-            # fallback to now
             if ts_ms is None:
                 ts_ms = int(time.time() * 1000)
 
             # ltp
-            ltp = _coerce_float(payload.get("last_price") or payload.get("last_price") or payload.get("ltp") or payload.get("last_price", 0.0))
-            if ltp is None:
-                # try nested keys common in Zerodha payloads
-                ltp = _coerce_float(payload.get("last_traded_price") or payload.get("lastPrice") or payload.get("ltp"))
+            ltp = _coerce_float(payload.get("last_price") or payload.get("ltp") or payload.get("last_traded_price") or payload.get("lastPrice"))
             ltp = float(ltp or 0.0)
 
             # bid / ask extraction (may be nested depth)
             bid = None
             ask = None
-            # Zerodha depth structure: {'depth': {'buy': [{'price':..}], 'sell': [{'price':..}]}}
             depth = payload.get("depth") or payload.get("market_depth") or {}
             if isinstance(depth, Mapping):
                 buys = depth.get("buy") or []
                 sells = depth.get("sell") or []
                 if isinstance(buys, Sequence) and buys:
-                    bid = _coerce_float(buys[0].get("price") if isinstance(buys[0], Mapping) else buys[0])
+                    first = buys[0]
+                    if isinstance(first, Mapping):
+                        bid = _coerce_float(first.get("price"))
+                    else:
+                        bid = _coerce_float(first)
                 if isinstance(sells, Sequence) and sells:
-                    ask = _coerce_float(sells[0].get("price") if isinstance(sells[0], Mapping) else sells[0])
-            # fallback direct keys
+                    first = sells[0]
+                    if isinstance(first, Mapping):
+                        ask = _coerce_float(first.get("price"))
+                    else:
+                        ask = _coerce_float(first)
             if bid is None:
                 bid = _coerce_float(payload.get("bid") or payload.get("best_buy_price"))
             if ask is None:
@@ -547,7 +548,7 @@ class MarketDataManager:
             volume = _coerce_float(payload.get("volume") or payload.get("total_traded_volume") or payload.get("volume_today"))
 
             canonical_key = symbol_key.upper()
-            # produce final mapping
+
             tick: Tick = {
                 "symbol_key": canonical_key,
                 "instrument_token": int(instr_token) if instr_token else None,
@@ -560,6 +561,7 @@ class MarketDataManager:
                 "received_ts_ms": int(time.time() * 1000),
                 "_raw": payload,
             }
+
             # If instrument_token missing, try to resolve using resolver or broker
             if not tick["instrument_token"]:
                 token = self.resolve_token(canonical_key)
@@ -570,6 +572,28 @@ class MarketDataManager:
             LOGGER.exception("Failed to normalise quote item", extra={"event": "mdm_normalize_error"})
             return None
 
+    # -------------------------
+    # Internal utilities
+    # -------------------------
+    def _normalize_symbol_key(self, s: Any) -> str:
+        """Return normalized canonical key for subscription/resolution (EXCHANGE:SYMBOL)."""
+        if s is None:
+            return ""
+        raw = str(s).strip().upper()
+        # numeric token becomes resolved symbol if possible, else token-string
+        if raw.isdigit():
+            try:
+                token_val = int(raw)
+                symbol = self.resolve_symbol_from_token(token_val)
+                if symbol:
+                    return symbol.upper()
+                return raw
+            except Exception:
+                return raw
+        if ":" in raw:
+            return raw
+        # default exchange prefix for options in this project is NFO
+        return f"NFO:{raw}"
 
 # -------------------------
 # Utility functions
@@ -587,7 +611,6 @@ def _coerce_float(value: Any) -> Optional[float]:
         v = value.strip()
         if v == "":
             return None
-        # remove thousand separators
         v = v.replace(",", "")
         with suppress(Exception):
             return float(v)
@@ -605,12 +628,9 @@ def _payload_signature(payload: Mapping[str, Any]) -> int:
         ask = int(float(payload.get("ask") or 0))
         oi = int(float(payload.get("oi") or 0)) if payload.get("oi") not in (None, "") else 0
         vol = int(float(payload.get("volume") or 0))
-        # mix fields into a single int
         return (ltp & 0xFFFF) ^ ((bid & 0xFFFF) << 1) ^ ((ask & 0xFFFF) << 2) ^ ((oi & 0xFFFF) << 3) ^ ((vol & 0xFFFF) << 4)
     except Exception:
-        # very conservative fallback
         try:
-            # try hash of tuple of important values
             key = (payload.get("symbol_key"), payload.get("ltp"), payload.get("bid"), payload.get("ask"), payload.get("oi"), payload.get("volume"))
             return hash(key)
         except Exception:
