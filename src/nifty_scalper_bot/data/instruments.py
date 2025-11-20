@@ -110,8 +110,18 @@ class InstrumentResolver:
       - get_lot_size(symbol_or_base)
     """
 
-    def __init__(self, broker_client: Any | None = None) -> None:
-        self._broker = broker_client
+    def __init__(self, broker: Any = None, websocket: Any = None, settings: dict | None = None, *, resolver: Any = None, **kwargs) -> None:
+        """
+        MarketDataManager constructor.
+
+        Accepts resolver as kwarg for backward compatibility:
+            MarketDataManager(broker, resolver=instrument_resolver, websocket=...)
+        """
+        self._broker = broker
+        self._websocket = websocket
+        self._settings = settings or {}
+        # attach resolver if provided (backwards-compatible)
+        self._resolver = resolver
 
         # Main caches (upper-cased keys)
         self._by_symbol: Dict[str, int] = {}  # e.g. "NFO:NIFTY25OCT25900CE"
