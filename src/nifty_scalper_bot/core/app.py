@@ -1643,11 +1643,19 @@ def _configure_rate_limiter(cfg: Any) -> RateLimiter:
     )
     return limiter
 
-def get_nifty_expiry():
+def get_nifty_expiry(target_weekday: int = 1) -> str:
+    """
+    Return a human-readable expiry string for logging (keeps backward compatibility).
+    Defaults to next Tuesday (weekday=1).
+    Format: DDMMMYY uppercase (same as original), but caller should prefer using
+    smart_symbol.get_next_valid_symbols for canonical symbol construction.
+    """
+    from datetime import datetime, timedelta
+    import pytz
+
     now = datetime.now(pytz.timezone("Asia/Kolkata")).date()
-    # Thursday (NIFTY weekly exp) is weekday 3
-    days_ahead = 3 - now.weekday()
-    if days_ahead < 0:
+    days_ahead = target_weekday - now.weekday()
+    if days_ahead <= 0:
         days_ahead += 7
     expiry = now + timedelta(days=days_ahead)
     return expiry.strftime("%d%b%y").upper()
@@ -1658,81 +1666,151 @@ def get_nifty_atm_strike(nifty_spot):
 
 def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str = "CE") -> str | None:
     """
-    Return the first matching tradingsymbol (without exchange prefix) present in
-    the warmed instrument resolver for the requested underlying/expiry/strike/type.
-    If none found, return None.
+    Return a best-effort matching tradingsymbol (without exchange prefix) present
+    in the warmed instrument resolver. Checks both NFO-prefixed and unprefixed keys.
     """
-    # try common resolver/global names used in the app
+    # try to locate a resolver instance on globals or import fallback
     possible_names = ("instrument_resolver", "resolver", "InstrumentResolverInstance", "instrumentResolver")
     resolver = None
     for n in possible_names:
         resolver = globals().get(n)
         if resolver:
             break
-    # If a resolver instance wasn't found in globals(), try to import the module-level resolver
     if resolver is None:
         try:
             from nifty_scalper_bot.data import instruments as _instr_mod  # type: ignore
-            # module may expose an instance; try common attrs
             resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(_instr_mod, "resolver", None)
         except Exception:
             resolver = None
+
+    # nothing to validate against
     if resolver is None:
-        # no warmed resolver accessible — cannot validate
         return None
-    # Normalize check values
+
     want_exp = (expiry or "").upper()
     want_str = str(int(strike))
     want_ot = (opt_type or "CE").upper()
-    # Fast exact candidate
-    candidate = f"NIFTY{want_exp}{want_str}{want_ot}"
-    # resolver may store keys in _by_symbol; try to inspect maps safely
+
+    # Candidate formats to try (without exchange and with possible variations):
+    candidates_to_try = [
+        f"NIFTY{want_exp}{want_str}{want_ot}",
+        f"NIFTY{want_exp}{want_str:0>2}{want_ot}",
+        f"NIFTY{want_exp}{want_str}{want_ot}".upper(),
+    ]
+
+    # Helper to check resolver mapping safely
+    def resolver_lookup(key: str):
+        try:
+            # Many InstrumentResolver implementations expose lookup(symbol) or dict-like maps
+            lookup_fn = getattr(resolver, "lookup", None)
+            if callable(lookup_fn):
+                return lookup_fn(key)
+            # some use dict-like accessors with exchange prefix "NFO:"
+            for attr in ("_by_symbol", "symbols", "symbol_map", "_symbol_map", "_symbol_by_token"):
+                m = getattr(resolver, attr, None)
+                if isinstance(m, dict) and key in m:
+                    return m[key]
+            # also try simple get()
+            get_fn = getattr(resolver, "get", None)
+            if callable(get_fn):
+                return get_fn(key)
+        except Exception:
+            return None
+        return None
+
+    for cand in candidates_to_try:
+        # try both unprefixed and exchange-prefixed forms
+        for key in (cand, f"NFO:{cand}"):
+            meta = resolver_lookup(key)
+            if meta:
+                # return the canonical trading symbol without exchange prefix
+                ts = meta.get("tradingsymbol") or meta.get("symbol") or cand
+                return ts
+    # fallback: scan resolver keys for approximate match (safely)
     try:
-        by_symbol = getattr(resolver, "_by_symbol", None) or getattr(resolver, " _by_symbol", None)
-        if by_symbol is None:
-            # fallback: try dict-like 'symbols' attribute
-            by_symbol = getattr(resolver, "symbols", None)
+        keys = None
+        for attr in ("_by_symbol", "symbols", "keys"):
+            m = getattr(resolver, attr, None)
+            if isinstance(m, dict):
+                keys = m.keys()
+                break
+        if keys:
+            for s in keys:
+                s_up = s.upper()
+                if not s_up.startswith("NIFTY"):
+                    continue
+                if not s_up.endswith(want_ot):
+                    continue
+                if want_exp in s_up and want_str in s_up:
+                    return s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
     except Exception:
-        by_symbol = None
-    if by_symbol and candidate in by_symbol:
-        return candidate
-    # Otherwise scan for a match: same expiry + strike string + CE/PE suffix
-    if by_symbol:
-        for sym in by_symbol.keys():
-            if not isinstance(sym, str):
-                continue
-            s = sym.upper()
-            if not s.startswith("NIFTY"):
-                continue
-            if not s.endswith(want_ot):
-                continue
-            if want_exp in s and want_str in s:
-                return s
-    # nothing found
+        pass
+
     return None
 
-def _get_symbols(config: AppConfig) -> list[str]:
-    symbols = getattr(config, "symbols", None)
-    if not symbols:
-        try:
-            mdm = globals().get("market_data_manager")
-            nifty_spot = mdm.get_latest_price("NIFTY") if mdm else 24000
-            atm = round(nifty_spot / 50) * 50
-            expiry = get_nifty_expiry()  # Your helper from earlier
-            return [
-                f"NFO:NIFTY{expiry}{atm}CE",
-                f"NFO:NIFTY{expiry}{atm}PE"
-            ]
-        except Exception:
-            return [
-                f"NFO:NIFTY{expiry}{atm}CE",
-                f"NFO:NIFTY{expiry}{atm}PE",
-            ]
-        
-    if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
-        return [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
-    return [str(symbols)]
 
+def _get_symbols(config: AppConfig) -> list[str]:
+    """
+    Return a list of validated exchange-qualified symbols to be tracked by the runner.
+    Uses nifty_scalper_bot.utils.smart_symbol to generate and validate candidate symbols
+    against the warmed InstrumentResolver when available. Falls back to legacy string
+    construction only when resolver absent, and logs a warning.
+    """
+    symbols = getattr(config, "symbols", None)
+    if symbols:
+        if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
+            return [str(s).strip() for s in symbols if str(s).strip()]
+        return [str(symbols)]
+
+    # No explicit symbols in config -> build ATM CE & PE for next expiry
+    # prefer validated lookup via instrument resolver
+    try:
+        from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
+    except Exception:
+        get_next_valid_symbols = None
+
+    # try to get instrument resolver from context/globals (warmed)
+    resolver = globals().get("instrument_resolver") or globals().get("resolver")
+    instrument_map = {}
+    if resolver is not None:
+        # try to extract dict-like mapping from resolver (non-fatal)
+        try:
+            # common attributes: _by_symbol, symbols
+            instrument_map = getattr(resolver, "_by_symbol", None) or getattr(resolver, "symbols", None) or {}
+            # ensure keys are simple strings (copy)
+            if not isinstance(instrument_map, dict):
+                instrument_map = dict(instrument_map)
+        except Exception:
+            instrument_map = {}
+
+    # Determine ATM strike
+    atm = 24000
+    try:
+        mdm = globals().get("market_data_manager")
+        if mdm is not None and hasattr(mdm, "get_latest_price"):
+            nifty_spot = mdm.get_latest_price("NIFTY") or atm
+            atm = round(float(nifty_spot) / 50) * 50
+    except Exception:
+        pass
+
+    final_symbols: list[str] = []
+    # If we have the smart_symbol helper and instrument_map, use it to resolve valid entries
+    if get_next_valid_symbols is not None and instrument_map:
+        try:
+            results = get_next_valid_symbols([int(atm)], opt_types=('CE', 'PE'), instrument_map=instrument_map)
+            for inst in results:
+                # make sure to return exchange-prefixed variant (NFO:)
+                ts = inst.get("tradingsymbol") or inst.get("symbol")
+                if ts:
+                    final_symbols.append(f"NFO:{ts}")
+        except Exception as exc:
+            LOGGER.warning("smart_symbol resolution failed: %s; falling back to legacy symbol construction", exc, extra={"event":"smart_symbol_failed"})
+    # Fallback: legacy construction (keeps previous behaviour)
+    if not final_symbols:
+        expiry = get_nifty_expiry()  # legacy helper for human-readable expiry
+        final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
+
+    return final_symbols
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     cfg = getattr(config, "strategy_config", None)
