@@ -8,13 +8,12 @@ Provides:
 - refresh_from_csv: read instruments CSV and persist into sqlite.
 - load_rows_for_resolver: return rows (mapping) usable by resolver.warm_from_broker_dump.
 
-This module is written to be robust and production-ready:
-- Defensive logging
-- Positive/negative caches with TTL
-- Safe CSV ingestion and schema migration
-- Clear public API compatible with the rest of the repo
+Goals / Features:
+- Defensive logging and error containment (resolver never raises for normal lookups).
+- Positive and negative caches with configurable TTL to avoid repeated expensive broker searches.
+- Lightweight option contract catalog useful for selection/heuristics in strategy runner.
+- Robust ingestion from broker dumps / CSV rows with tolerant key handling.
 """
-
 from __future__ import annotations
 
 import csv
@@ -22,15 +21,19 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import closing, suppress
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import logging
 
 LOGGER = logging.getLogger("nifty_scalper_bot.data.instruments")
+
+# --- Configurable constants -------------------------------------------------
+_DEFAULT_NEG_TTL = 300.0  # seconds - negative cache TTL
+_NEG_TTL = float(os.getenv("NSB__INSTRUMENT_NEG_TTL", _DEFAULT_NEG_TTL))
 
 # Well-known fallback tokens for indexes (kept minimal; can be extended)
 WELL_KNOWN: Dict[str, int] = {
@@ -46,7 +49,6 @@ CANONICAL_TOKENS: Dict[int, str] = {
     260105: "NIFTY BANK",
 }
 
-# DB schema version - bump when schema changes
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS instruments (
     instrument_token INTEGER PRIMARY KEY,
@@ -65,6 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_exchange_tradingsymbol ON instruments(exchange, t
 """
 
 
+# --- Data classes -----------------------------------------------------------
 @dataclass(slots=True)
 class Instrument:
     tradingsymbol: str
@@ -82,6 +85,7 @@ class BrokerError(Exception):
     """Generic broker/resolver error sentinel."""
 
 
+# --- InstrumentResolver ----------------------------------------------------
 class InstrumentResolver:
     """
     Caches broker instruments and provides reliable symbol resolution for the rest of the bot.
@@ -91,45 +95,48 @@ class InstrumentResolver:
     where broker_client may provide methods:
         - list_instruments() -> list[dict]  (preferred)
         - get_instruments() etc  (fallback)
+
+    Methods of interest:
+        - warm(): attempt to warm caches from broker
+        - warm_from_broker_dump(rows): warm using preloaded CSV/DB dump rows
+        - upsert(symbol, token, exchange=...): insert/update mapping
+        - resolve(symbol_or_token): return instrument_token or None
+        - lookup(symbol_or_token): return metadata dict or None
+        - resolve_exchange(symbol): return exchange or None
     """
 
     def __init__(self, broker_client: Any | None = None) -> None:
         self._broker = broker_client
-        # symbol -> token (keys upper-cased; keys may be with exchange prefix "NFO:SYMBOL")
-        self._by_symbol: Dict[str, int] = {}
-        # token -> symbol (base tradingsymbol)
-        self._symbol_by_token: Dict[int, str] = {}
-        # token -> exchange (NFO/NSE etc)
-        self._exchange_by_token: Dict[int, str] = {}
-        # option contract cache: base symbol -> list[contract dicts]
+
+        # Main caches (upper-cased keys)
+        self._by_symbol: Dict[str, int] = {}  # e.g. "NFO:NIFTY25OCT25900CE" or "NIFTY25OCT25900CE"
+        self._symbol_by_token: Dict[int, str] = {}  # token -> base tradingsymbol
+        self._exchange_by_token: Dict[int, str] = {}  # token -> exchange
+
+        # Lightweight option contract catalogue: base -> [contracts]
         self._option_contracts: Dict[str, List[Dict[str, Any]]] = {}
-        # negative cache: symbol-> expiry_ts (prevents repeated expensive lookups)
+
+        # Negative cache (key -> expiry_ts) and a warned set to avoid noisy logs
+        self._neg_cache: Dict[str, float] = {}
         self._warned_no_token: set[str] = set()
+        self._neg_ttl = _NEG_TTL
+
+        # threading guard for caches
         self._lock = threading.RLock()
 
-        # For token search & caches used by other plumbing; optional runtime caches
-        self._token_cache: Dict[str, int] = {}
-        self._neg_cache: Dict[str, float] = {}
-        # negative TTL seconds
-        self._neg_ttl: float = 60.0
-
-        # Always seed minimal well-known tokens for indices so index calls succeed
+        # Immediately seed minimal well-known tokens
         self._seed_well_known()
 
-    # -------------------------
-    # Public API
-    # -------------------------
+    # ------------------------- public API ---------------------------------
     def warm(self) -> None:
         """
-        Warm the resolver from the broker if available, otherwise rely on well-known fallbacks.
-
-        This will attempt broker calls in a non-explosive manner - it won't raise if broker fails.
+        Warm the resolver from the broker if available; non-explosive on failure.
         """
         LOGGER.debug("Entered InstrumentResolver.warm", extra={"event": "instrument_resolver_warm_enter"})
         items: Optional[Iterable[Mapping[str, Any]]] = None
 
         # Try common broker methods gracefully
-        for name in ("list_instruments", "get_instruments", "instruments", "load_instruments"):
+        for name in ("list_instruments", "get_instruments", "instruments", "load_instruments", "fetch_instruments"):
             fn = getattr(self._broker, name, None)
             if callable(fn):
                 try:
@@ -138,7 +145,6 @@ class InstrumentResolver:
                     LOGGER.warning("InstrumentResolver: broker.%s() failed: %s", name, exc)
                 break
 
-        # If broker provided rows, ingest them
         if items:
             count = 0
             for row in items:
@@ -153,12 +159,15 @@ class InstrumentResolver:
         else:
             LOGGER.info("InstrumentResolver: no broker instrument dump available; using well-known fallbacks", extra={"event": "instrument_resolver_warm_no_broker"})
 
-        # Always ensure well-known tokens exist
+        # re-seed fallbacks and finish
         self._seed_well_known()
         LOGGER.info("InstrumentResolver ready with %d symbols", len(self._by_symbol), extra={"event": "instrument_resolver_ready"})
 
     def warm_from_broker_dump(self, rows: Iterable[Mapping[str, Any]]) -> None:
-        """Warm caches directly from caller-supplied rows (CSV/DB dumps)."""
+        """
+        Warm caches directly from caller-supplied rows (CSV/DB dumps).
+        Each row should be a mapping with keys like: tradingsymbol, instrument_token, exchange, strike, expiry etc.
+        """
         LOGGER.debug("Entered InstrumentResolver.warm_from_broker_dump", extra={"event": "instrument_resolver_warm_dump_enter"})
         if rows is None:
             return
@@ -170,7 +179,6 @@ class InstrumentResolver:
                     self._ingest_instrument_row(row)
                 except Exception:
                     LOGGER.exception("instrument_resolver_ingest_error for row: %s", row)
-            # ensure index fallbacks are present
             self._seed_well_known()
         LOGGER.info("InstrumentResolver warmed from dump: symbols=%d", len(self._by_symbol), extra={"event": "instrument_resolver_warm_dump_complete"})
 
@@ -180,28 +188,27 @@ class InstrumentResolver:
 
         Accepts either 'NFO:SYMBOL' or 'SYMBOL'.
         """
-        LOGGER.debug("Entered InstrumentResolver.upsert", extra={"event": "instrument_resolver_upsert_enter", "symbol": symbol})
         if not symbol:
-            LOGGER.info("instrument_resolver_upsert_blank", extra={"event": "instrument_resolver_upsert_blank"})
+            LOGGER.debug("instrument_resolver_upsert_blank called with empty symbol", extra={"event": "instrument_resolver_upsert_blank"})
             return
         try:
-            normalized = symbol.strip().upper()
+            normalized = str(symbol).strip().upper()
             token_int = int(token)
             base_symbol = normalized.split(":", 1)[-1] or normalized
-            exchange_hint = (exchange or "").strip().upper()
+            exchange_hint = (exchange or "").strip().upper() or None
             with self._lock:
-                # exchange-prefixed and bare keys
+                # Store exchange-prefixed, bare and base-only forms for flexible lookups
                 self._by_symbol[normalized] = token_int
                 self._by_symbol.setdefault(base_symbol, token_int)
                 if exchange_hint:
                     self._by_symbol.setdefault(f"{exchange_hint}:{base_symbol}", token_int)
                     self._exchange_by_token[token_int] = exchange_hint
                 self._symbol_by_token[token_int] = base_symbol
-                self._clear_warning_state(base_symbol)
+                # clear any negative/no-token state
+                self._clear_negative_cache_for_key(base_symbol)
             LOGGER.info("Condition met: instrument_resolver_upsert", extra={"event": "instrument_resolver_upsert", "symbol": base_symbol, "token": token_int, "exchange": exchange_hint or ""})
         except Exception as exc:
             LOGGER.exception("Failure in InstrumentResolver.upsert: %s", exc)
-            # do not raise -- best-effort upsert
 
     def resolve(self, symbol: str | int | None) -> Optional[int]:
         """
@@ -216,10 +223,13 @@ class InstrumentResolver:
         """
         if symbol is None:
             return None
-        # If already an int-like token, return it
+
+        # If numeric-ish, return token directly
         try:
-            if isinstance(symbol, (int, float)) or (isinstance(symbol, str) and str(symbol).strip().isdigit()):
+            if isinstance(symbol, (int, float)):
                 return int(symbol)
+            if isinstance(symbol, str) and symbol.strip().isdigit():
+                return int(symbol.strip())
         except Exception:
             pass
 
@@ -227,43 +237,43 @@ class InstrumentResolver:
         if not key:
             return None
 
+        now_ts = time.time()
         # Negative cache fast path
         with self._lock:
             exp = self._neg_cache.get(key)
-            if exp and exp > time.time():
+            if exp and exp > now_ts:
                 LOGGER.debug("instrument_resolver_negative_cache_hit", extra={"event": "instrument_resolver_negative_cache", "symbol": key})
                 return None
 
-        # Positive cached results
+        # Positive cached results (direct and base-only)
         with self._lock:
             if key in self._by_symbol:
                 return int(self._by_symbol[key])
-            # if keyed by exchange:base, try base-only
             base = key.split(":", 1)[-1]
             if base in self._by_symbol:
                 return int(self._by_symbol[base])
 
-        # If not found, try token search heuristics (broker/store)
+        # Not found in caches -> try broker/store heuristics
         try:
             token = self._search_token_via_broker_or_store(key)
             if token:
                 with self._lock:
+                    # store both exact key and base form
                     self._by_symbol.setdefault(key, int(token))
                     self._symbol_by_token.setdefault(int(token), key.split(":", 1)[-1])
                 return int(token)
         except Exception:
             LOGGER.exception("broker_token_search_error", extra={"event": "instrument_resolver_broker_search_error", "symbol": key})
 
-        # Not found -> negative cache
+        # Negative cache this miss
         with self._lock:
-            self._neg_cache[key] = time.time() + self._neg_ttl
+            self._neg_cache[key] = now_ts + self._neg_ttl
             self._warned_no_token.add(key.split(":", 1)[-1])
         LOGGER.warning("instrument_resolver_no_token", extra={"event": "instrument_resolver_no_token", "symbol": key})
         return None
 
-    # Compatibility wrapper used by some modules
     def resolve_symbol_to_token(self, symbol: str) -> Optional[int]:
-        LOGGER.debug("Entered InstrumentResolver.resolve_symbol_to_token", extra={"event": "instrument_resolver_token_enter", "symbol": symbol})
+        """Compatibility wrapper used by some modules."""
         try:
             return self.resolve(symbol)
         except Exception:
@@ -272,7 +282,7 @@ class InstrumentResolver:
 
     def lookup(self, symbol: str | int | None) -> Optional[Dict[str, Any]]:
         """
-        Return instrument metadata (token, exchange, lot_size) for a symbol when available.
+        Return instrument metadata (token, exchange, symbol) for a symbol when available.
 
         Accepts symbol, or token as string/int.
         """
@@ -280,11 +290,12 @@ class InstrumentResolver:
             return None
         try:
             normalized = str(symbol).strip().upper()
+            # If the caller provided exchange prefix, remove it optionally
             strip_prefix = os.getenv("RESOLVER_STRIP_EXCHANGE_PREFIX", "true").lower() == "true"
             if strip_prefix and ":" in normalized:
                 normalized = normalized.split(":", 1)[-1].strip()
 
-            # If numeric token provided, lookup symbol and exchange
+            # numeric token path
             if normalized.isdigit():
                 token = int(normalized)
                 base = self._symbol_by_token.get(token)
@@ -296,10 +307,9 @@ class InstrumentResolver:
                     return out
                 return None
 
-            # Try direct resolve
             token = self.resolve(normalized)
             if token is None:
-                # attempt to find base symbol without prefix
+                # try direct map lookup (without prefix)
                 candidates = [normalized, normalized.split(":", 1)[-1]]
                 with self._lock:
                     for cand in candidates:
@@ -345,13 +355,13 @@ class InstrumentResolver:
         return "NFO"
 
     def tradingsymbol_for_order(self, symbol: str) -> str:
-        """Return passable tradingsymbol for order placement (no exchange prefix)."""
+        """Return tradingsymbol suitable for order placement (no exchange prefix)."""
         _exchange, tradingsymbol = self._normalize_option_symbol(symbol)
         return tradingsymbol
 
     def canonicalize(self, symbol: str) -> Tuple[str, Optional[str], str]:
         """
-        Normalize a symbol and return (symbol, exchange, segment_type).
+        Normalize a symbol and return (tradingsymbol, exchange, segment_type).
 
         Segment types: "OPTIONS", "INDEX", "FUTURES", "UNKNOWN"
         """
@@ -411,22 +421,52 @@ class InstrumentResolver:
         except Exception:
             return str(token)
 
-    # -------------------------
-    # Internal helpers
-    # -------------------------
-    def _clear_warning_state(self, symbol: str) -> None:
+    def candidates_for_quote(self, raw: str) -> Tuple[str, ...]:
+        """
+        Helper: build candidate keys suitable for many broker.quote_any() functions.
+        """
+        canonical, keys = self.build_quote_keys(raw)
+        # include token and root as additional heuristics
+        out: List[str] = []
+        out.extend(keys)
+        with self._lock:
+            token = None
+            # try find token for canonical
+            t = self._by_symbol.get(canonical)
+            if t:
+                token = t
+            else:
+                base = canonical.split(":", 1)[-1]
+                token = self._by_symbol.get(base)
+            if token:
+                out.append(str(int(token)))
+        # unique preserve order
+        seen = set()
+        ordered = []
+        for k in out:
+            if k and k not in seen:
+                ordered.append(k)
+                seen.add(k)
+        return tuple(ordered)
+
+    # ------------------------- internal helpers ------------------------------
+    def _clear_negative_cache_for_key(self, symbol: str) -> None:
         base = symbol.split(":", 1)[-1].strip().upper()
-        if base:
+        with self._lock:
+            for k in (symbol.strip().upper(), base):
+                if k in self._neg_cache:
+                    self._neg_cache.pop(k, None)
             self._warned_no_token.discard(base)
 
     def _ingest_instrument_row(self, row: Mapping[str, Any]) -> None:
         """
         Load a single instrument row into resolver caches.
 
-        Expected mapping keys: tradingsymbol, exchange, instrument_token, lot_size, tick_size, expiry, strike, instrument_type
+        Accepts flexible keys: 'tradingsymbol'|'symbol', 'instrument_token'|'token', 'exchange',
+        'lot_size'|'lot', 'strike', 'expiry', 'instrument_type' etc.
         """
-        LOGGER.debug("Entered InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_enter", "keys": sorted(list(row.keys()))})
         try:
+            # tolerant field access
             tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").strip()
             if not tradingsymbol:
                 return
@@ -446,13 +486,16 @@ class InstrumentResolver:
                 self._by_symbol.setdefault(key, token_int)
                 if exchange:
                     self._by_symbol.setdefault(f"{exchange}:{key}", token_int)
-                # base symbol as fallback
-                self._by_symbol.setdefault(key.split(":", 1)[-1], token_int)
+                # base symbol fallback (no prefix)
+                base_key = key.split(":", 1)[-1]
+                self._by_symbol.setdefault(base_key, token_int)
+
+                # map token back to symbol and exchange if absent
                 self._symbol_by_token.setdefault(token_int, tradingsymbol)
                 if exchange:
                     self._exchange_by_token.setdefault(token_int, exchange)
 
-                # keep light option contract catalogue for opportunistic lookups
+                # record option contract metadata for lightweight lookups by base
                 itype = (row.get("instrument_type") or row.get("instrumentType") or "").strip().upper()
                 if itype in ("CE", "PE", "OPT", "OPTION"):
                     base = self._base_index_from_tradingsymbol(tradingsymbol)
@@ -475,15 +518,15 @@ class InstrumentResolver:
                             "raw": dict(row),
                         }
                         self._option_contracts[base].append(contract)
-                # clear any previously set negative cache for this symbol
-                self._clear_warning_state(tradingsymbol)
+
+                # clear negative cache for this symbol
+                self._clear_negative_cache_for_key(tradingsymbol)
         except Exception:
             LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_error", "row_repr": str(dict(row))})
             raise
 
     def _seed_well_known(self) -> None:
         """Populate resolver caches with baked-in fallbacks (indices etc)."""
-        LOGGER.debug("Entered InstrumentResolver._seed_well_known", extra={"event": "instrument_resolver_seed_enter"})
         with self._lock:
             for key, value in WELL_KNOWN.items():
                 try:
@@ -500,28 +543,29 @@ class InstrumentResolver:
                 self._by_symbol.setdefault(alias_symbol, token_int)
                 self._symbol_by_token.setdefault(token_int, alias_symbol)
                 self._exchange_by_token.setdefault(token_int, exchange)
-                self._clear_warning_state(alias_symbol)
+                self._clear_negative_cache_for_key(alias_symbol)
             # canonical token names (human readable)
             for token, canonical_symbol in CANONICAL_TOKENS.items():
-                self._symbol_by_token[token] = canonical_symbol
-                self._exchange_by_token.setdefault(token, "NSE")
-                self._clear_warning_state(canonical_symbol)
+                try:
+                    t_int = int(token)
+                except Exception:
+                    continue
+                self._symbol_by_token.setdefault(t_int, canonical_symbol)
+                self._exchange_by_token.setdefault(t_int, "NSE")
+                self._clear_negative_cache_for_key(canonical_symbol)
 
-    # -------------------------
-    # Token search helpers
-    # -------------------------
+    # ------------------------- token search helpers -------------------------
     def _search_token_via_broker_or_store(self, symbol: str) -> Optional[int]:
         """
         Try best-effort search on broker or static store to obtain an instrument token.
 
-        This method is intentionally permissive: different broker APIs have different helper names.
+        Tries a number of helper names and fallbacks, and returns the first positive token it can extract.
         """
-        br = self._broker
-        if br is None:
+        if self._broker is None:
             return None
 
-        # direct helpers
-        direct = getattr(br, "instrument_token_for", None)
+        # 1) Direct helper
+        direct = getattr(self._broker, "instrument_token_for", None)
         if callable(direct):
             try:
                 token = direct(symbol)
@@ -530,7 +574,8 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.instrument_token_for failed", exc_info=True)
 
-        finder = getattr(br, "find_instrument", None)
+        # 2) Broker find_instrument style
+        finder = getattr(self._broker, "find_instrument", None)
         if callable(finder):
             try:
                 ins = finder(symbol)
@@ -540,7 +585,8 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.find_instrument failed", exc_info=True)
 
-        search = getattr(br, "search_instruments", None)
+        # 3) search_instruments
+        search = getattr(self._broker, "search_instruments", None)
         if callable(search):
             try:
                 hits = list(search(symbol))
@@ -551,8 +597,8 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.search_instruments failed", exc_info=True)
 
-        # fallback: some brokers expose list_instruments and caller must look through it
-        list_fn = getattr(br, "list_instruments", None)
+        # 4) list_instruments fallback (iterate and match)
+        list_fn = getattr(self._broker, "list_instruments", None)
         if callable(list_fn):
             try:
                 for ins in list_fn():
@@ -569,7 +615,7 @@ class InstrumentResolver:
     def _extract_token_from_instrument(ins: Any) -> Optional[int]:
         if not isinstance(ins, Mapping):
             return None
-        token = ins.get("instrument_token") or ins.get("token")
+        token = ins.get("instrument_token") or ins.get("token") or ins.get("instrumentToken")
         if token is None:
             return None
         try:
@@ -599,20 +645,19 @@ class InstrumentResolver:
         if not symbol:
             raise BrokerError("Symbol required for option resolution")
         raw = symbol.strip().upper()
-        if not raw:
-            raise BrokerError("Symbol required for option resolution")
-        exchange: Optional[str] = None
-        tradingsymbol = raw
         if ":" in raw:
             prefix, remainder = raw.split(":", 1)
             exchange = prefix or None
             tradingsymbol = remainder.strip()
+        else:
+            exchange = None
+            tradingsymbol = raw
         tradingsymbol = tradingsymbol.replace(" ", "")
         if not tradingsymbol:
             raise BrokerError("Tradingsymbol missing for option resolution")
         if tradingsymbol.endswith("FUT"):
             raise BrokerError("Futures disabled for this bot")
-        if not tradingsymbol.endswith("CE") and not tradingsymbol.endswith("PE"):
+        if not (tradingsymbol.endswith("CE") or tradingsymbol.endswith("PE")):
             raise BrokerError("Only NIFTY options (CE/PE) are allowed")
         return exchange, tradingsymbol
 
@@ -663,7 +708,7 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
 
     try:
         with closing(conn.cursor()) as cur:
-            # Replace existing rows for same instrument_token
+            # Insert or replace rows
             for row in rows:
                 try:
                     token = row.get("instrument_token") or row.get("token")
@@ -720,7 +765,8 @@ def load_rows_for_resolver(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """
     Load instrument rows from sqlite database and return iterable of dict-like rows suitable
     for passing to resolver.warm_from_broker_dump(rows).
-    By default returns only option contracts (CE/PE), but will include other rows if present.
+
+    By default returns only option contracts (CE/PE) and known indices (keep DB lightweight).
     """
     rows: List[Dict[str, Any]] = []
     try:
@@ -728,7 +774,6 @@ def load_rows_for_resolver(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             cur.execute("SELECT instrument_token, exchange, tradingsymbol, lot_size, tick_size, expiry, strike, instrument_type, updated_at FROM instruments")
             fetched = cur.fetchall()
             for r in fetched:
-                # r is sqlite3.Row
                 d = {
                     "instrument_token": int(r["instrument_token"]) if r["instrument_token"] is not None else None,
                     "exchange": r["exchange"],
@@ -740,9 +785,9 @@ def load_rows_for_resolver(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
                     "instrument_type": r["instrument_type"],
                     "updated_at": r["updated_at"],
                 }
-                # Only include option contracts and indexes (keep DB lightweight)
                 t = (d.get("instrument_type") or "").upper() if d.get("instrument_type") else ""
                 tsym = (d.get("tradingsymbol") or "").upper()
+                # Only include option contracts and those index names we care about
                 if tsym.endswith("CE") or tsym.endswith("PE") or tsym in ("NIFTY", "BANKNIFTY"):
                     rows.append(d)
     except Exception:
