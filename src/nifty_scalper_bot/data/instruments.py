@@ -1,4 +1,4 @@
-# nifty_scalper_bot/data/instruments.py
+# src/nifty_scalper_bot/data/instruments.py
 """
 Instrument resolver and CSV/SQLite instrument loader.
 
@@ -18,6 +18,7 @@ This module is written to be robust and production-ready:
 from __future__ import annotations
 
 import csv
+import os
 import sqlite3
 import threading
 import time
@@ -25,7 +26,7 @@ from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 import logging
 
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS instruments (
 CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingsymbol);
 CREATE INDEX IF NOT EXISTS idx_exchange_tradingsymbol ON instruments(exchange, tradingsymbol);
 """
+
 
 @dataclass(slots=True)
 class Instrument:
@@ -186,13 +188,13 @@ class InstrumentResolver:
             normalized = symbol.strip().upper()
             token_int = int(token)
             base_symbol = normalized.split(":", 1)[-1] or normalized
+            exchange_hint = (exchange or "").strip().upper()
             with self._lock:
+                # exchange-prefixed and bare keys
                 self._by_symbol[normalized] = token_int
-                # also allow base symbol as key
                 self._by_symbol.setdefault(base_symbol, token_int)
-                exchange_hint = (exchange or "").strip().upper()
                 if exchange_hint:
-                    self._by_symbol[f"{exchange_hint}:{base_symbol}"] = token_int
+                    self._by_symbol.setdefault(f"{exchange_hint}:{base_symbol}", token_int)
                     self._exchange_by_token[token_int] = exchange_hint
                 self._symbol_by_token[token_int] = base_symbol
                 self._clear_warning_state(base_symbol)
@@ -216,7 +218,7 @@ class InstrumentResolver:
             return None
         # If already an int-like token, return it
         try:
-            if isinstance(symbol, (int, float)) or (isinstance(symbol, str) and symbol.strip().isdigit()):
+            if isinstance(symbol, (int, float)) or (isinstance(symbol, str) and str(symbol).strip().isdigit()):
                 return int(symbol)
         except Exception:
             pass
@@ -268,7 +270,7 @@ class InstrumentResolver:
             LOGGER.exception("instrument_resolver_token_error", extra={"event": "instrument_resolver_token_error", "symbol": symbol})
             return None
 
-    def lookup(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def lookup(self, symbol: str | int | None) -> Optional[Dict[str, Any]]:
         """
         Return instrument metadata (token, exchange, lot_size) for a symbol when available.
 
@@ -277,28 +279,35 @@ class InstrumentResolver:
         if symbol is None:
             return None
         try:
+            normalized = str(symbol).strip().upper()
             strip_prefix = os.getenv("RESOLVER_STRIP_EXCHANGE_PREFIX", "true").lower() == "true"
             if strip_prefix and ":" in normalized:
                 normalized = normalized.split(":", 1)[-1].strip()
-            # if numeric token provided, lookup symbol
+
+            # If numeric token provided, lookup symbol and exchange
             if normalized.isdigit():
                 token = int(normalized)
                 base = self._symbol_by_token.get(token)
                 exchange = self._exchange_by_token.get(token)
                 if base:
-                    return {"instrument_token": token, "symbol": base, "exchange": exchange}
+                    out = {"instrument_token": token, "symbol": base}
+                    if exchange:
+                        out["exchange"] = exchange
+                    return out
                 return None
-            # else, try resolve and return metadata
+
+            # Try direct resolve
             token = self.resolve(normalized)
             if token is None:
-                # attempt to parse exchange/tradingsymbol and see stored mapping
+                # attempt to find base symbol without prefix
                 candidates = [normalized, normalized.split(":", 1)[-1]]
-                for cand in candidates:
-                    with self._lock:
+                with self._lock:
+                    for cand in candidates:
                         t = self._by_symbol.get(cand)
                         if t:
                             return {"instrument_token": int(t), "symbol": cand}
                 return None
+
             meta: Dict[str, Any] = {"instrument_token": int(token)}
             with self._lock:
                 sym = self._symbol_by_token.get(int(token))
@@ -416,7 +425,7 @@ class InstrumentResolver:
 
         Expected mapping keys: tradingsymbol, exchange, instrument_token, lot_size, tick_size, expiry, strike, instrument_type
         """
-        LOGGER.debug("Entered InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_enter", "keys": sorted(row.keys())})
+        LOGGER.debug("Entered InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_enter", "keys": sorted(list(row.keys()))})
         try:
             tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").strip()
             if not tradingsymbol:
@@ -427,32 +436,42 @@ class InstrumentResolver:
                 return
             try:
                 token_int = int(float(token_value))
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError):
                 LOGGER.debug("instrument_resolver_ingest_token_cast_failed", extra={"event": "instrument_resolver_ingest_token_cast_failed", "tradingsymbol": tradingsymbol, "exchange": exchange, "token_value": token_value})
-                raise BrokerError("Invalid instrument token") from exc
+                return
 
             with self._lock:
                 key = tradingsymbol.upper()
+                # primary keys
                 self._by_symbol.setdefault(key, token_int)
                 if exchange:
                     self._by_symbol.setdefault(f"{exchange}:{key}", token_int)
+                # base symbol as fallback
+                self._by_symbol.setdefault(key.split(":", 1)[-1], token_int)
                 self._symbol_by_token.setdefault(token_int, tradingsymbol)
                 if exchange:
                     self._exchange_by_token.setdefault(token_int, exchange)
+
                 # keep light option contract catalogue for opportunistic lookups
-                itype = (row.get("instrument_type") or row.get("instrument_type") or row.get("instrument_type") or "").strip().upper()
+                itype = (row.get("instrument_type") or row.get("instrumentType") or "").strip().upper()
                 if itype in ("CE", "PE", "OPT", "OPTION"):
                     base = self._base_index_from_tradingsymbol(tradingsymbol)
                     if base:
                         self._option_contracts.setdefault(base, [])
+                        try:
+                            strike_val = None
+                            if row.get("strike") not in (None, "", "NULL"):
+                                strike_val = float(row.get("strike"))
+                        except Exception:
+                            strike_val = None
                         contract = {
                             "instrument_token": token_int,
                             "tradingsymbol": tradingsymbol,
                             "option_type": "CE" if tradingsymbol.endswith("CE") else "PE",
                             "expiry": row.get("expiry"),
-                            "strike": row.get("strike"),
-                            "lot_size": row.get("lot_size"),
-                            "tick_size": row.get("tick_size"),
+                            "strike": strike_val,
+                            "lot_size": row.get("lot_size") or row.get("lot"),
+                            "tick_size": row.get("tick_size") or row.get("ticksize"),
                             "raw": dict(row),
                         }
                         self._option_contracts[base].append(contract)
@@ -478,6 +497,7 @@ class InstrumentResolver:
                 self._by_symbol.setdefault(normalized_key, token_int)
                 if ":" not in normalized_key:
                     self._by_symbol.setdefault(f"{exchange}:{alias_symbol}", token_int)
+                self._by_symbol.setdefault(alias_symbol, token_int)
                 self._symbol_by_token.setdefault(token_int, alias_symbol)
                 self._exchange_by_token.setdefault(token_int, exchange)
                 self._clear_warning_state(alias_symbol)
@@ -496,7 +516,6 @@ class InstrumentResolver:
 
         This method is intentionally permissive: different broker APIs have different helper names.
         """
-        # store search not implemented here (caller can pre-seed from DB/CSV)
         br = self._broker
         if br is None:
             return None
@@ -653,6 +672,9 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
                         continue
                     token_int = int(float(token))
                     tradingsymbol = (row.get("tradingsymbol") or row.get("symbol") or "").strip()
+                    if not tradingsymbol:
+                        summary["skipped"] += 1
+                        continue
                     exchange = (row.get("exchange") or "").strip().upper() or None
                     lot_size = row.get("lot_size") or row.get("lot") or None
                     try:
@@ -665,7 +687,7 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
                         strike_f = float(strike) if strike not in (None, "", "NULL") else None
                     except Exception:
                         strike_f = None
-                    instrument_type = (row.get("instrument_type") or row.get("instrumentType") or row.get("instrument_type") or "").strip().upper()
+                    instrument_type = (row.get("instrument_type") or row.get("instrumentType") or "").strip().upper()
                     tick_size = row.get("tick_size") or row.get("ticksize") or None
                     try:
                         tick_f = float(tick_size) if tick_size not in (None, "", "NULL") else None
