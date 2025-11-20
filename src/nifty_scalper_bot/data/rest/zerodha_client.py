@@ -149,6 +149,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if limiter is None:
             self._configure_rate_limits()
 
+        # instrument cache: exchange -> mapping of many normalized keys -> row
         self._instrument_cache: dict[str, dict[str, dict[str, Any]]] = {}
         self._resolver: InstrumentResolver | None = None
         self._log_time_fn: Callable[[], float] = time.time
@@ -988,7 +989,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             dict[str, Any]: Margin payload returned by the Zerodha API.
 
         Raises:
-            BrokerError: If the broker call ultimately fails.
+            BrokerError: If the broker API call ultimately fails.
         """
 
         LOGGER.debug(
@@ -1590,7 +1591,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         Stores multiple normalized keys per instrument to make lookups resilient.
         """
-
         LOGGER.debug(
             "Entered ZerodhaKiteClient.load_instruments",
             extra={"event": "zerodha.load_instruments.enter", "exchange": exchange},
@@ -1602,7 +1602,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             instruments = list(reader)
         except BrokerError:
             raise
-        except Exception as exc:  
+        except Exception as exc:
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.load_instruments: %s",
                 exc,
@@ -1619,20 +1619,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
             ts = ts_raw.strip()
             # canonical forms:
-             ts_upper = ts.upper()
+            ts_upper = ts.upper()
             ts_nospace = ts_upper.replace(" ", "")
             # exchange-qualified keys (Zerodha style)
             exch = (row.get("exchange") or normalized_exchange or "").strip().upper()
             if exch:
                 key_exch = f"{exch}:{ts_upper}"
                 cache[key_exch] = row
-                # raw trading symbol key (preserve original casing in payload)
-                cache[ts_upper] = row
-                # nospace fallback (useful when smart_symbol generates no-space versions)
-                cache[ts_nospace] = row
-                # also register bare lower-level key (without exchange) for convenience
-                base = ts_upper.split(":", 1)[-1]
-                cache[base] = row
+            # raw trading symbol key (preserve original casing in payload)
+            cache[ts_upper] = row
+            # nospace fallback (useful when smart_symbol generates no-space versions)
+            cache[ts_nospace] = row
+            # also register bare base symbol (without exchange prefix) for convenience
+            base = ts_upper.split(":", 1)[-1]
+            cache[base] = row
 
         self._instrument_cache[normalized_exchange] = cache
         LOGGER.info(
@@ -1645,8 +1645,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return instruments
 
-    
-    
     def list_instruments(self) -> list[dict[str, Any]]:
         """Return cached instrument rows across all exchanges.
 
@@ -1760,24 +1758,76 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def get_instrument_token(
         self, symbol: str, exchange: str = _DEFAULT_EXCHANGE
     ) -> int:
-        """Get instrument token for symbol."""
+        """Get instrument token for symbol with robust fallback attempts."""
 
-        exchange = exchange.upper()
-        tradingsymbol = symbol.split(":")[-1]
+        if not symbol:
+            raise BrokerError("Missing symbol")
+
+        exchange = (exchange or self._default_exchange).upper()
+        raw = str(symbol).strip()
+        # potential candidate keys to try (ordered)
+        candidates: list[str] = []
+
+        # If symbol already contains an explicit prefix, preserve it as the first candidate
+        if ":" in raw:
+            cand = raw.upper()
+            candidates.append(cand)
+            # also push the base-only form
+            candidates.append(cand.split(":", 1)[-1])
+        else:
+            # try exchange-prefixed form
+            candidates.append(f"{exchange}:{raw.upper()}")
+            candidates.append(raw.upper())
+
+        # space-stripped variant (common mismatch)
+        candidates.append(raw.upper().replace(" ", ""))
+        # base-only (no exchange)
+        candidates.append(raw.upper().split(":", 1)[-1])
+
+        # Ensure unique while preserving order
+        seen = set()
+        ordered = []
+        for c in candidates:
+            if c and c not in seen:
+                ordered.append(c)
+                seen.add(c)
+
+        # Ensure instrument cache for exchange is loaded
         if exchange not in self._instrument_cache:
-            self.load_instruments(exchange)
+            try:
+                self.load_instruments(exchange)
+            except Exception:
+                # load failure will be handled below by fallback to resolver
+                pass
+
         exchange_cache = self._instrument_cache.get(exchange, {})
-        instrument = exchange_cache.get(tradingsymbol)
-        if not instrument:
-            raise BrokerError(f"Instrument token not found for {symbol}")
-        try:
-            return int(instrument["instrument_token"])
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
-        ) as exc:  # pragma: no cover - API invariant
-            raise BrokerError(f"Invalid instrument token for {symbol}") from exc
+
+        for cand in ordered:
+            inst = exchange_cache.get(cand)
+            if not inst:
+                # sometimes stored keys could be without exchange or with different exchange
+                # try scanning all caches for an exact match
+                for cached_exch, cache in self._instrument_cache.items():
+                    if cand in cache:
+                        inst = cache[cand]
+                        break
+            if inst:
+                try:
+                    return int(inst.get("instrument_token"))
+                except Exception:
+                    # malformed token; continue to other candidates
+                    continue
+
+        # Final fallback: if a resolver is attached, ask it to resolve token
+        if self._resolver is not None:
+            try:
+                token = self._resolver.resolve_symbol_to_token(symbol)
+                if token:
+                    return int(token)
+            except Exception:
+                LOGGER.debug("resolver.resolve_symbol_to_token failed for %s", symbol, exc_info=True)
+
+        raise BrokerError(f"Instrument token not found for {symbol}")
 
     def close(self) -> None:
         """Close underlying HTTP session."""
@@ -1787,7 +1837,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
     def _tokens_to_symbols(
         self, tokens: Iterable[int]
     ) -> tuple[list[str], dict[str, int]]:
-        """Map instrument tokens to ``EXCHANGE:SYMBOL`` identifiers."""
+        """Map instrument tokens to ``EXCHANGE:SYMBOL`` identifiers (fallbacks included)."""
 
         resolver = self._resolver
         symbols: list[str] = []
@@ -1795,11 +1845,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if resolver is None:
             return symbols, symbol_map
         for token in tokens:
-            formatted = resolver.format_token_as_symbol(int(token))
+            try:
+                formatted = resolver.format_token_as_symbol(int(token))
+            except Exception:
+                formatted = ""
             if not formatted:
+                # last resort: use numeric token string
+                s = str(int(token))
+                symbols.append(s)
+                symbol_map[s] = int(token)
                 continue
+            # ensure canonical form contains exchange prefix; if not, prefix with default exchange
+            if ":" not in formatted:
+                formatted = f"{self._default_exchange}:{formatted}"
             symbols.append(formatted)
-            symbol_map.setdefault(formatted, int(token))
+            symbol_map[formatted] = int(token)
         return symbols, symbol_map
 
     def _configure_rate_limits(self) -> None:
