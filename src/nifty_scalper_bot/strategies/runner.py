@@ -1224,29 +1224,29 @@ class StrategyRunner:
                                         canonical_sym = meta.get("tradingsymbol") or meta.get("symbol") or cand
                                         try:
                                             selection.symbol = canonical_sym
-                        except Exception:
-                            # if selection is immutable, attach metadata marker
-                            sel_meta = dict(getattr(selection, "metadata", {}) or {})
-                            sel_meta["resolved_symbol"] = canonical_sym
-                            try:
-                                selection.metadata = sel_meta
-                            except Exception:
-                                pass
-                        self._logger.info("Resolved selection candidate %s -> token=%s", key, meta.get("instrument_token") or meta.get("token"))
-                        resolved_meta = meta
-                        break
-                if resolved_meta:
-                    break
-    # If still unresolved, nullify selection so downstream logic will skip it safely
-    if resolved_meta is None:
-        self._logger.warning(
-            "Strike selector returned an unresolved symbol: %s. Selection will be ignored.",
-            getattr(selection, "symbol", selection),
-        )
-        selection = None
-except Exception:
-    self._logger.exception("Exception validating selected contract against instrument master; skipping this selection")
-    selection = None
+                                        except Exception:
+                                            # if selection is immutable, attach metadata marker
+                                            sel_meta = dict(getattr(selection, "metadata", {}) or {})
+                                            sel_meta["resolved_symbol"] = canonical_sym
+                                            try:
+                                                selection.metadata = sel_meta
+                                            except Exception:
+                                                pass
+                                        self._logger.info("Resolved selection candidate %s -> token=%s", key, meta.get("instrument_token") or meta.get("token"))
+                                        resolved_meta = meta
+                                        break
+                            if resolved_meta:
+                                break
+            # If still unresolved, nullify selection so downstream logic will skip it safely
+            if resolved_meta is None:
+                self._logger.warning(
+                    "Strike selector returned an unresolved symbol: %s. Selection will be ignored.",
+                    getattr(selection, "symbol", selection),
+                )
+                selection = None
+        except Exception:
+            self._logger.exception("Exception validating selected contract against instrument master; skipping this selection")
+            selection = None
               
                 if selection is None:
                     reason = "no contract passed strike selection"
