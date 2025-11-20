@@ -1174,6 +1174,80 @@ class StrategyRunner:
                     underlying_price=price,
                     option_type=option_type,
                 )
+                try:                 
+                    # find resolver on data hub (supports different attribute names)
+                    resolver = getattr(self._data_hub, "_resolver", None) or getattr(self._data_hub, "resolver", None) or getattr(self._data_hub, "instrument_resolver", None)
+                    resolved_meta = None
+                    
+                    if resolver is not None and selection is not None and getattr(selection, "symbol", None):
+                        # quick exact-match lookup first
+                        try:
+                            resolved_meta = resolver.lookup(selection.symbol)
+                        except Exception:
+                            # some resolvers use get or a dict; try fallback
+                            try:
+                                resolved_meta = resolver.get(selection.symbol)  # type: ignore[attr-defined]
+                                except Exception:
+                                    resolved_meta = None
+                    # If not resolved, generate candidate weekly/monthly formats and validate
+                    if resolved_meta is None and selection is not None:
+                        # prepare expiry date and strike
+                        expiry_date = getattr(selection, "expiry", None)
+                        if hasattr(expiry_date, "date"):
+                            expiry_date = expiry_date.date()
+                        try:
+                            strike_val = int(getattr(selection, "strike", getattr(selection, "strike_price", 0) or 0))
+                        except Exception:
+                            strike_val = None
+                        opt_type = getattr(selection, "option_type", getattr(selection, "opt_type", getattr(selection, "type", None)))
+
+                        candidates = []
+                        if expiry_date is not None and strike_val:
+                            try:
+                                from nifty_scalper_bot.utils.smart_symbol import generate_candidate_symbols_for_expiry
+                                candidates = generate_candidate_symbols_for_expiry(expiry_date, strike_val, opt_type or "CE")
+                            except Exception as e:
+                                self._logger.debug("smart_symbol generator failed: %s", e)   
+                        
+                        if resolver is not None and candidates:
+                            for cand in candidates:
+                                for key in (f"NFO:{cand}", cand):
+                                    try:
+                                        meta = resolver.lookup(key)
+                                    except Exception:
+                                        try:
+                                            meta = resolver.get(key)  # fallback
+                                        except Exception:
+                                            meta = None
+                                    if meta:
+                                        # replace selection symbol with canonical tradingsymbol from master
+                                        canonical_sym = meta.get("tradingsymbol") or meta.get("symbol") or cand
+                                        try:
+                                            selection.symbol = canonical_sym
+                        except Exception:
+                            # if selection is immutable, attach metadata marker
+                            sel_meta = dict(getattr(selection, "metadata", {}) or {})
+                            sel_meta["resolved_symbol"] = canonical_sym
+                            try:
+                                selection.metadata = sel_meta
+                            except Exception:
+                                pass
+                        self._logger.info("Resolved selection candidate %s -> token=%s", key, meta.get("instrument_token") or meta.get("token"))
+                        resolved_meta = meta
+                        break
+                if resolved_meta:
+                    break
+    # If still unresolved, nullify selection so downstream logic will skip it safely
+    if resolved_meta is None:
+        self._logger.warning(
+            "Strike selector returned an unresolved symbol: %s. Selection will be ignored.",
+            getattr(selection, "symbol", selection),
+        )
+        selection = None
+except Exception:
+    self._logger.exception("Exception validating selected contract against instrument master; skipping this selection")
+    selection = None
+              
                 if selection is None:
                     reason = "no contract passed strike selection"
                     self._logger.info(
