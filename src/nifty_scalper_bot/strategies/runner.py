@@ -8,6 +8,7 @@ import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -23,6 +24,7 @@ from typing import (
 )
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
