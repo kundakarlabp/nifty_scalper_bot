@@ -2,21 +2,20 @@
 """
 Utilities to generate and validate candidate NIFTY option tradingsymbols.
 
-Provides:
+Public API (used by runner.py):
 - get_next_valid_symbols(strikes, instrument_map, opt_types=('CE','PE')) -> List[dict]
-- generate_candidate_symbols(expiry_date, strike, opt_type, month_map) -> List[str]
+- generate_candidate_symbols_for_expiry(expiry_date, strike, opt_type) -> List[str]
 
-Notes:
-- Weekly format: SYMBOL + YY + M + DD + STRIKE + TYPE  (e.g. NIFTY25N2524000CE)
-  where M is single-char month code: 1-9 / O / N / D
-- Monthly format: SYMBOL + YY + MMM + STRIKE + TYPE  (e.g. NIFTY25NOV24000CE)
+Compatibility:
+This module exports both `generate_candidate_symbols` and
+`generate_candidate_symbols_for_expiry` to satisfy older import names.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo  # Python 3.9+
-from typing import Dict, List, Optional, Sequence, Tuple, Iterable
+from typing import Dict, List, Optional, Sequence, Iterable
 import logging
 
 logger = logging.getLogger(__name__)
@@ -134,6 +133,20 @@ def generate_candidate_symbols(
             seen.add(c)
             uniq.append(c)
     return uniq
+
+
+# Backwards-compatible alias expected by other modules (runner.py)
+def generate_candidate_symbols_for_expiry(expiry_date, strike: int, opt_type: str) -> List[str]:
+    """
+    Compatibility wrapper: same behaviour as generate_candidate_symbols but with
+    the older function name expected by the codebase.
+    """
+    # Accept both date and datetime; if datetime, obtain date()
+    if hasattr(expiry_date, "date"):
+        expiry = expiry_date.date() if isinstance(expiry_date, datetime) else expiry_date
+    else:
+        expiry = expiry_date
+    return generate_candidate_symbols(expiry, strike, opt_type)
 
 
 def resolve_symbol_from_master(candidates: Iterable[str], instrument_map: Dict[str, dict]) -> Optional[dict]:
