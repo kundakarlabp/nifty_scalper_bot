@@ -156,22 +156,18 @@ class _OHLCBuilder:
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
-    def __init__(
-        self,
-        broker_client: Any,
-        ws_manager: WebSocketManager | None = None,
-        *,
-        cache_len: int = 1_000,
-        duplicate_window_ms: int = 200,
-        resolver: InstrumentResolver | None = None,
-    ) -> None:
-        self._broker = broker_client
-        self._ws = ws_manager
-        self._cache_len = cache_len
-        self._duplicate_window = max(duplicate_window_ms, 0) / 1000.0
-        # Resolver may be injected during construction or attached later by app.py.
-        self._resolver = resolver
+    def __init__(self, broker: Any = None, websocket: Any = None, settings: dict | None = None, *, resolver: Any = None, **kwargs) -> None:
+        """
+        MarketDataManager constructor.
 
+        Accepts resolver as kwarg for backward compatibility:
+            MarketDataManager(broker, resolver=instrument_resolver, websocket=...)
+        """
+        self._broker = broker
+        self._websocket = websocket
+        self._settings = settings or {}
+        # attach resolver if provided (backwards-compatible)
+        self._resolver = resolver
         self._logger = get_logger(__name__)
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
