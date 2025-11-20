@@ -37,7 +37,7 @@ from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
-from nifty_scalper_bot.utils.smart_symbol import (
+from nifty_scalper_bot.utils.smart_symbols import (
     get_next_valid_symbols,
     generate_candidate_symbols_for_expiry,
 )
