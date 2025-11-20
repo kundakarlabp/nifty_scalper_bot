@@ -1187,8 +1187,8 @@ class StrategyRunner:
                             # some resolvers use get or a dict; try fallback
                             try:
                                 resolved_meta = resolver.get(selection.symbol)  # type: ignore[attr-defined]
-                                except Exception:
-                                    resolved_meta = None
+                            except Exception:
+                                resolved_meta = None
                     # If not resolved, generate candidate weekly/monthly formats and validate
                     if resolved_meta is None and selection is not None:
                         # prepare expiry date and strike
