@@ -24,7 +24,6 @@ from typing import (
 )
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
@@ -38,6 +37,7 @@ from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
+from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
