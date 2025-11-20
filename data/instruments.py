@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ LOGGER = logging.getLogger(__name__)
 @_dc.dataclass(frozen=True)
 class Resolution:
     """Final resolution returned by InstrumentResolver.resolve()."""
-    symbol: str                     # normalized input (e.g., NIFTY25OCT25900CE)
+    symbol: str                     # normalized input (e.g., NIFTY25OCT25900CE or NIFTY25N2524000CE)
     exchange: Optional[str]         # NSE / NFO / BSE (None when unknown)
     segment: Optional[str]          # 'equity' or 'derivatives' (None when unknown)
     token: Optional[int]            # broker token if found
@@ -23,7 +24,7 @@ class Resolution:
     root: Optional[str] = None      # e.g., NIFTY
     right: Optional[str] = None     # CE / PE for options
     strike: Optional[float] = None  # numeric strike for options (if any)
-    expiry_raw: Optional[str] = None  # raw YYMON (e.g., '25OCT') from parsed symbol
+    expiry_raw: Optional[str] = None  # raw YYMON or YYMDD (e.g., '25OCT' or '25N25') from parsed symbol
     candidates: Tuple[str, ...] = ()  # quote keys we propose for REST
 
 
@@ -60,12 +61,20 @@ class InstrumentResolver:
     _WS = re.compile(r"\s+")
     _EXPLICIT_EXCH = re.compile(r"^(?P<exch>[A-Za-z]{2,4}):(?P<rest>.+)$")
 
-    # Index option tradingsymbol (Zerodha/NSE F&O style):
-    #   ROOT + YY + MON + STRIKE + (CE|PE)
-    #   e.g., NIFTY25OCT25900CE, BANKNIFTY24DEC48500PE
-    _IDX_OPT = re.compile(
+    # Monthly-style index option tradingsymbol (Zerodha/NSE F&O monthly style):
+    #   ROOT + YY + MMM + STRIKE + (CE|PE)
+    #   e.g., NIFTY25OCT25900CE
+    _IDX_OPT_MONTHLY = re.compile(
         r"^(?P<root>NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY)"
         r"(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{1,6})(?P<right>CE|PE)$",
+        re.IGNORECASE,
+    )
+
+    # Weekly-style index option tradingsymbol (YY + single-char month code + DD + STRIKE + CE/PE)
+    # where month code is 1-9, O, N, D (example: NIFTY25N2524000CE -> YY=25, mcode=N, dd=25)
+    _IDX_OPT_WEEKLY = re.compile(
+        r"^(?P<root>NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY)"
+        r"(?P<yy>\d{2})(?P<mcode>[1-9OND])(?P<dd>\d{2})(?P<strike>\d{1,6})(?P<right>CE|PE)$",
         re.IGNORECASE,
     )
 
@@ -75,6 +84,12 @@ class InstrumentResolver:
     _MONTHS = {
         "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
         "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    }
+
+    # Map from single-char weekly month code to month number
+    _SINGLE_MONTH_CODE_TO_NUM: Dict[str, int] = {
+        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+        "O": 10, "N": 11, "D": 12,
     }
 
     # Known index cash aliases that brokers use for spot quotes
@@ -183,21 +198,50 @@ class InstrumentResolver:
     def _parse_index_option(
         self, ts: str
     ) -> Optional[Tuple[str, str, str, float, str]]:
-        m = self._IDX_OPT.match(ts)
-        if not m:
-            return None
-        root = m.group("root").upper()
-        yy = m.group("yy")
-        mon = m.group("mon").upper()
-        right = m.group("right").upper()
+        """
+        Parse index option symbol in either weekly or monthly formats.
 
-        if mon not in self._MONTHS:
-            return None
-        try:
-            strike = float(m.group("strike"))
-        except Exception:
-            return None
-        return root, yy, mon, strike, right
+        Returns:
+            (root, yy, mon_or_mcode_or_mcodeday, strike, right)
+
+        For weekly:
+            mon is returned as single-char month code concatenated with day, e.g. 'N25'
+            so expiry_raw will become '25N25' from caller's perspective (yy + mon field)
+
+        For monthly:
+            mon is 'NOV', 'OCT', etc.
+        """
+        # 1) Try weekly format first: ROOT + YY + M + DD + STRIKE + (CE|PE)
+        m_week = self._IDX_OPT_WEEKLY.match(ts)
+        if m_week:
+            root = m_week.group("root").upper()
+            yy = m_week.group("yy")
+            mcode = m_week.group("mcode").upper()
+            dd = m_week.group("dd")
+            right = m_week.group("right").upper()
+            try:
+                strike = float(m_week.group("strike"))
+            except Exception:
+                return None
+            # Return mon as single-char+day (e.g., 'N25') so candidates builder can interpret
+            return root, yy, f"{mcode}{dd}", strike, right
+
+        # 2) Fallback to monthly format: ROOT + YY + MMM + STRIKE + (CE|PE)
+        m_mon = self._IDX_OPT_MONTHLY.match(ts)
+        if m_mon:
+            root = m_mon.group("root").upper()
+            yy = m_mon.group("yy")
+            mon = m_mon.group("mon").upper()
+            right = m_mon.group("right").upper()
+            if mon not in self._MONTHS:
+                return None
+            try:
+                strike = float(m_mon.group("strike"))
+            except Exception:
+                return None
+            return root, yy, mon, strike, right
+
+        return None
 
     def _index_spot_aliases(self, key: str) -> Tuple[str, ...]:
         return self._INDEX_SPOT_ALIASES.get(key.upper(), ())
@@ -246,16 +290,34 @@ class InstrumentResolver:
         """
         Build a robust set of keys for broker.quote_any().
         Order matters: better keys first.
+
+        Accept both monthly and weekly-derived 'mon' values:
+        - Monthly: mon like 'NOV' -> build NFO:ROOTYYMON (monthly parent)
+        - Weekly: mon like 'N25' (mcode + dd) -> build NFO:ROOTYYMDD (weekly)
         """
         keys: List[str] = []
-        # 1) Fully qualified NFO key
-        keys.append(f"NFO:{symbol}")
+        # 1) Fully qualified trading symbol
+        keys.append(f"{exch}:{symbol}")
         # 2) Bare trading symbol (some SDKs accept without prefix)
         keys.append(symbol)
 
-        # 3) Root + variants can help some brokers’ search APIs
-        keys.append(f"NFO:{root}{yy}{mon}")
-        keys.append(root)
+        # 3) Weekly vs monthly variants
+        try:
+            if mon and len(mon) >= 2 and mon[0] in self._SINGLE_MONTH_CODE_TO_NUM and mon[1:].isdigit():
+                # mon looks like single-char + day, e.g., "N25"
+                mcode = mon[0]
+                dd = mon[1:]
+                # Build weekly-style root-based keys for broader matching
+                keys.append(f"{exch}:{root}{yy}{mcode}{dd}")
+                keys.append(f"{root}{yy}{mcode}{dd}")
+            else:
+                # Monthly-style parent keys (useful for some broker APIs)
+                keys.append(f"{exch}:{root}{yy}{mon}")
+                keys.append(root)
+        except Exception:
+            # Fallback to monthly style if anything goes wrong
+            keys.append(f"{exch}:{root}{yy}{mon}")
+            keys.append(root)
 
         # 4) Token, if known
         if token is not None:
@@ -299,7 +361,7 @@ class InstrumentResolver:
                 seen.add(k)
         return tuple(ordered)
 
-    # -------------------------------------------------------------- Token map
+    # --------------------------------------------------------------- Token map
     def _token_for_symbol(self, symbol: str) -> Optional[int]:
         """Resolve token from caches → MDM → Broker/store."""
         key = symbol.upper()
