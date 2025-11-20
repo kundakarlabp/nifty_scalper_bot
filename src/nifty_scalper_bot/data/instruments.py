@@ -8,25 +8,25 @@ Provides:
 - refresh_from_csv: read instruments CSV and persist into sqlite.
 - load_rows_for_resolver: return rows (mapping) usable by resolver.warm_from_broker_dump.
 
-Enhancements in this optimized version:
-- Configurable negative cache TTL.
-- Attach a "master symbol map" (from instrument master CSV) so resolver can validate
-  generated symbols against the exchange master list (source of truth).
-- Helpers for expiry calculation suitable for the 2025 Tuesday-expiry regime.
-- Weekly month single-character encoding (including O/N/D for Oct/Nov/Dec).
-- Holiday-aware expiry adjustment (pull-back logic).
-- Conservative and thread-safe cache handling and logging.
+Optimized / hardened version:
+- Thread-safe caches, defensive logging.
+- Option contract catalog accessible via option_contracts(base, force_refresh=False).
+- Dynamic lot_size resolution via get_lot_size(symbol_or_base).
+- Expiry parsing / weekly-monthly helpers (includes O/N/D month codes).
+- Negative cache TTL configurable via env.
 """
 from __future__ import annotations
 
 import csv
+import calendar
+import math
 import os
 import sqlite3
 import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -34,35 +34,24 @@ import logging
 
 LOGGER = logging.getLogger("nifty_scalper_bot.data.instruments")
 
-# --- Configuration ----------------------------------------------------------
+# --- Configurable constants -------------------------------------------------
 _DEFAULT_NEG_TTL = 300.0  # seconds - negative cache TTL
 _NEG_TTL = float(os.getenv("NSB__INSTRUMENT_NEG_TTL", _DEFAULT_NEG_TTL))
 
-# Well-known fallback tokens for indices (kept minimal; extend if required)
+# Well-known fallback tokens for indexes (kept minimal; can be extended)
 WELL_KNOWN: Dict[str, int] = {
-    "NIFTY": 256265,  # canonical NIFTY 50 token (example)
+    "NIFTY": 256265,  # example canonical token
     "BANKNIFTY": 260105,
     "NSE:NIFTY": 256265,
     "NSE:BANKNIFTY": 260105,
 }
 
-# Canonical human-readable names for some tokens (for format_token_as_symbol)
+# Canonical human-readable names for format_token_as_symbol
 CANONICAL_TOKENS: Dict[int, str] = {
     256265: "NIFTY 50",
     260105: "NIFTY BANK",
 }
 
-# Per-index expiry policy. target_weekday: 0=Mon,1=Tue,... weekly indicates if weekly expiry is allowed
-INDEX_EXPIRY_POLICY: Dict[str, Dict[str, Any]] = {
-    "NIFTY": {"weekly": True, "expiry_weekday": 1},  # Tuesday
-    "BANKNIFTY": {"weekly": False, "expiry_weekday": 1},  # monthly only
-    # Add other roots if needed
-}
-
-# Single-char mapping for weekly month codes (10->O, 11->N, 12->D)
-WEEKLY_MONTH_CODE: Dict[int, str] = {10: "O", 11: "N", 12: "D"}
-
-# SQLite schema
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS instruments (
     instrument_token INTEGER PRIMARY KEY,
@@ -79,6 +68,9 @@ CREATE TABLE IF NOT EXISTS instruments (
 CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingsymbol);
 CREATE INDEX IF NOT EXISTS idx_exchange_tradingsymbol ON instruments(exchange, tradingsymbol);
 """
+
+# Month code mapping for weekly option single-character month code
+_WEEKLY_MONTH_MAP: Dict[int, str] = {10: "O", 11: "N", 12: "D"}
 
 
 # --- Data classes -----------------------------------------------------------
@@ -104,54 +96,49 @@ class InstrumentResolver:
     """
     Caches broker instruments and provides reliable symbol resolution for the rest of the bot.
 
-    ctor: InstrumentResolver(broker_client: Optional[Any]) -> resolver
+    Construction:
+        resolver = InstrumentResolver(broker_client)
+
+    Public methods:
+      - warm()
+      - warm_from_broker_dump(rows)
+      - upsert(symbol, token, exchange=...)
+      - resolve(symbol_or_token)
+      - lookup(symbol_or_token)
+      - resolve_exchange(symbol)
+      - option_contracts(base, force_refresh=False)
+      - get_lot_size(symbol_or_base)
     """
 
     def __init__(self, broker_client: Any | None = None) -> None:
         self._broker = broker_client
 
-        # symbol -> token (upper-cased keys). store both "NFO:..." and bare symbols
-        self._by_symbol: Dict[str, int] = {}
+        # Main caches (upper-cased keys)
+        self._by_symbol: Dict[str, int] = {}  # e.g. "NFO:NIFTY25OCT25900CE"
+        self._symbol_by_token: Dict[int, str] = {}  # token -> base tradingsymbol
+        self._exchange_by_token: Dict[int, str] = {}  # token -> exchange
 
-        # token -> base tradingsymbol (not prefixed)
-        self._symbol_by_token: Dict[int, str] = {}
-
-        # token -> exchange hint
-        self._exchange_by_token: Dict[int, str] = {}
-
-        # lightweight option contract catalogue: base -> [contract dicts]
+        # Lightweight option contract catalogue: base -> [contracts]
+        # Each contract is a dict with minimal fields (instrument_token, tradingsymbol, expiry, strike, option_type, lot_size, tick_size, raw)
         self._option_contracts: Dict[str, List[Dict[str, Any]]] = {}
 
-        # negative cache: key -> expiry_ts
+        # Negative cache (key -> expiry_ts) and a warned set to avoid noisy logs
         self._neg_cache: Dict[str, float] = {}
         self._warned_no_token: set[str] = set()
         self._neg_ttl = _NEG_TTL
 
-        # external authoritative master symbol map (attached by MarketDataManager)
-        # mapping: "NFO:SYMBOL" or "SYMBOL" -> token
-        self._master_map: Optional[Mapping[str, int]] = None
-
-        # locks
+        # threading guard for caches
         self._lock = threading.RLock()
 
         # seed well-known tokens
         self._seed_well_known()
 
-    # -------------------- public API ---------------------------------------
-    def attach_master_map(self, master_map: Mapping[str, int]) -> None:
-        """
-        Attach a read-only master symbol->token mapping (usually parsed from Kite / instruments CSV).
-        This map is used for authoritative validation of generated symbols and for lot-size lookups.
-        """
-        with self._lock:
-            self._master_map = master_map
-        LOGGER.info("InstrumentResolver attached master instrument map (size=%d)", len(master_map) if master_map is not None else 0)
-
+    # ------------------------- public API ---------------------------------
     def warm(self) -> None:
         """
-        Warm caches from broker if possible. Non-fatal on failure.
+        Warm the resolver from the broker if available; non-explosive on failure.
         """
-        LOGGER.debug("Entered InstrumentResolver.warm", extra={"event": "instrument_resolver_warm_enter"})
+        LOGGER.debug("InstrumentResolver.warm() entered", extra={"event": "instrument_resolver_warm_enter"})
         items: Optional[Iterable[Mapping[str, Any]]] = None
 
         for name in ("list_instruments", "get_instruments", "instruments", "load_instruments", "fetch_instruments"):
@@ -172,16 +159,19 @@ class InstrumentResolver:
                     self._ingest_instrument_row(row)
                     count += 1
                 except Exception:
-                    LOGGER.exception("ingest_instrument_row failed for row: %s", row)
+                    LOGGER.exception("ingest_instrument_row failed for row")
             LOGGER.info("InstrumentResolver: warmed from broker with %d rows", count, extra={"event": "instrument_resolver_warm_broker"})
         else:
             LOGGER.info("InstrumentResolver: no broker instrument dump available; using well-known fallbacks", extra={"event": "instrument_resolver_warm_no_broker"})
+
         self._seed_well_known()
         LOGGER.info("InstrumentResolver ready with %d symbols", len(self._by_symbol), extra={"event": "instrument_resolver_ready"})
 
     def warm_from_broker_dump(self, rows: Iterable[Mapping[str, Any]]) -> None:
-        """Warm caches directly from caller-supplied rows (CSV/DB dumps)."""
-        LOGGER.debug("Entered InstrumentResolver.warm_from_broker_dump", extra={"event": "instrument_resolver_warm_dump_enter"})
+        """
+        Warm caches directly from caller-supplied rows (CSV/DB dumps).
+        """
+        LOGGER.debug("InstrumentResolver.warm_from_broker_dump entered", extra={"event": "instrument_resolver_warm_dump_enter"})
         if rows is None:
             return
         with self._lock:
@@ -191,16 +181,17 @@ class InstrumentResolver:
                 try:
                     self._ingest_instrument_row(row)
                 except Exception:
-                    LOGGER.exception("instrument_resolver_ingest_error for row: %s", row)
+                    LOGGER.exception("instrument_resolver_ingest_error for row")
             self._seed_well_known()
         LOGGER.info("InstrumentResolver warmed from dump: symbols=%d", len(self._by_symbol), extra={"event": "instrument_resolver_warm_dump_complete"})
 
     def upsert(self, symbol: str, token: int, *, exchange: Optional[str] = None) -> None:
         """
-        Add or update a symbol->token mapping. Accepts 'NFO:SYMBOL' or 'SYMBOL'.
+        Insert or refresh resolver caches for symbol -> token mapping.
+        Accepts either 'NFO:SYMBOL' or 'SYMBOL'.
         """
         if not symbol:
-            LOGGER.debug("instrument_resolver_upsert_blank called", extra={"event": "instrument_resolver_upsert_blank"})
+            LOGGER.debug("InstrumentResolver.upsert called with blank symbol")
             return
         try:
             normalized = str(symbol).strip().upper()
@@ -208,25 +199,27 @@ class InstrumentResolver:
             base_symbol = normalized.split(":", 1)[-1] or normalized
             exchange_hint = (exchange or "").strip().upper() or None
             with self._lock:
+                # Store exchange-prefixed, bare and base-only forms for flexible lookups
                 self._by_symbol[normalized] = token_int
                 self._by_symbol.setdefault(base_symbol, token_int)
                 if exchange_hint:
                     self._by_symbol.setdefault(f"{exchange_hint}:{base_symbol}", token_int)
                     self._exchange_by_token[token_int] = exchange_hint
                 self._symbol_by_token[token_int] = base_symbol
+                # clear any negative/no-token state
                 self._clear_negative_cache_for_key(base_symbol)
-            LOGGER.info("instrument_resolver_upsert: %s -> %s", base_symbol, token_int, extra={"event": "instrument_resolver_upsert"})
+            LOGGER.info("Condition met: instrument_resolver_upsert", extra={"event": "instrument_resolver_upsert", "symbol": base_symbol, "token": token_int, "exchange": exchange_hint or ""})
         except Exception:
-            LOGGER.exception("Failure in InstrumentResolver.upsert", extra={"event": "instrument_resolver_upsert_error", "symbol": symbol, "token": token})
+            LOGGER.exception("Failure in InstrumentResolver.upsert")
 
     def resolve(self, symbol: str | int | None) -> Optional[int]:
         """
-        Resolve a symbol (or numeric token) to int token. Returns None if not found.
+        Resolve a symbol (or token-like input) to an integer instrument token.
         """
         if symbol is None:
             return None
 
-        # numeric direct path
+        # numeric direct
         try:
             if isinstance(symbol, (int, float)):
                 return int(symbol)
@@ -246,14 +239,14 @@ class InstrumentResolver:
                 LOGGER.debug("instrument_resolver_negative_cache_hit", extra={"event": "instrument_resolver_negative_cache", "symbol": key})
                 return None
 
-            # positive cache exact / base-only
+        with self._lock:
             if key in self._by_symbol:
                 return int(self._by_symbol[key])
             base = key.split(":", 1)[-1]
             if base in self._by_symbol:
                 return int(self._by_symbol[base])
 
-        # attempt broker/store heuristics
+        # try broker or search heuristics
         try:
             token = self._search_token_via_broker_or_store(key)
             if token:
@@ -271,8 +264,8 @@ class InstrumentResolver:
         LOGGER.warning("instrument_resolver_no_token", extra={"event": "instrument_resolver_no_token", "symbol": key})
         return None
 
+    # compatibility wrapper
     def resolve_symbol_to_token(self, symbol: str) -> Optional[int]:
-        """Compatibility wrapper used by some modules."""
         try:
             return self.resolve(symbol)
         except Exception:
@@ -281,7 +274,7 @@ class InstrumentResolver:
 
     def lookup(self, symbol: str | int | None) -> Optional[Dict[str, Any]]:
         """
-        Return instrument metadata (instrument_token, symbol, exchange if available).
+        Return instrument metadata (token, exchange, symbol) for a symbol when available.
         """
         if symbol is None:
             return None
@@ -291,7 +284,7 @@ class InstrumentResolver:
             if strip_prefix and ":" in normalized:
                 normalized = normalized.split(":", 1)[-1].strip()
 
-            # numeric token lookup
+            # numeric token path
             if normalized.isdigit():
                 token = int(normalized)
                 base = self._symbol_by_token.get(token)
@@ -327,7 +320,6 @@ class InstrumentResolver:
             return None
 
     def resolve_exchange(self, symbol: str) -> Optional[str]:
-        """Return exchange hint for symbol when available (best-effort)."""
         try:
             token = self.resolve_symbol_to_token(symbol)
             if token is not None:
@@ -343,8 +335,8 @@ class InstrumentResolver:
             return None
 
     def exchange_for_symbol(self, symbol: str) -> str:
-        """Enforce exchange for option symbols (raise BrokerError for invalid formats)."""
-        exchange, _ = self._normalize_option_symbol(symbol)
+        """Return the exchange required for an option symbol; raise BrokerError if invalid."""
+        exchange, _tradingsymbol = self._normalize_option_symbol(symbol)
         if exchange is not None and exchange != "NFO":
             raise BrokerError("Only NFO exchange is supported for NIFTY options")
         return "NFO"
@@ -384,22 +376,20 @@ class InstrumentResolver:
     def build_quote_keys(self, symbol: str) -> Tuple[str, List[str]]:
         """
         Build canonical symbol and candidate quote keys for broker lookups.
-        Returns (canonical_symbol, [candidate_keys...])
         """
         canonical = str(symbol).strip().upper()
         if ":" in canonical:
             _pref, canonical = canonical.split(":", 1)
         canonical = canonical.replace(" ", "")
         candidates: List[str] = []
+        # prefer exchange-qualified NFO for options
         if canonical.endswith("CE") or canonical.endswith("PE"):
             candidates.append(f"NFO:{canonical}")
         candidates.append(canonical)
         return canonical, candidates
 
     def format_token_as_symbol(self, token: int) -> str:
-        """
-        Format token into a human readable exchange:symbol string using canonical tokens.
-        """
+        """Format token into a human readable exchange:symbol string using canonical tokens."""
         try:
             token_int = int(token)
             canonical = CANONICAL_TOKENS.get(token_int)
@@ -415,7 +405,7 @@ class InstrumentResolver:
 
     def candidates_for_quote(self, raw: str) -> Tuple[str, ...]:
         """
-        Build candidate keys suitable for many broker.quote_any() functions.
+        Helper: build candidate keys suitable for many broker.quote_any() functions.
         """
         canonical, keys = self.build_quote_keys(raw)
         out: List[str] = []
@@ -430,7 +420,7 @@ class InstrumentResolver:
                 token = self._by_symbol.get(base)
             if token:
                 out.append(str(int(token)))
-        # dedupe preserving order
+        # unique preserve order
         seen = set()
         ordered = []
         for k in out:
@@ -439,106 +429,13 @@ class InstrumentResolver:
                 seen.add(k)
         return tuple(ordered)
 
-    # -------------------- instrument generation & expiry helpers --------------
-    def find_expiry_dates(self, year: int, month: int, root: str, holidays: Optional[Iterable[date]] = None) -> List[date]:
-        """
-        Return candidate expiry dates for the given month/year for the provided root (e.g. "NIFTY").
-        Uses INDEX_EXPIRY_POLICY to determine the anchor weekday (e.g. Tuesday).
-        The returned list includes all weekly anchor days in the month (adjusted for holidays by pulling back).
-        """
-        holidays_set = set(holidays or [])
-        policy = INDEX_EXPIRY_POLICY.get(root.upper(), {"weekly": True, "expiry_weekday": 1})
-        weekday = int(policy.get("expiry_weekday", 1))
-        results: List[date] = []
-
-        # Start from the 1st of the month and find first matching weekday
-        try:
-            d = date(year, month, 1)
-        except Exception:
-            return results
-
-        # advance to first target weekday in month
-        while d.weekday() != weekday:
-            d += timedelta(days=1)
-
-        while d.month == month:
-            exp = d
-            # if expiry falls on holiday, push back to previous trading day(s)
-            while exp in holidays_set or exp.weekday() >= 5:  # avoid weekends
-                exp -= timedelta(days=1)
-            results.append(exp)
-            d += timedelta(days=7)
-        return results
-
-    def _weekly_month_code(self, dt: date) -> str:
-        """
-        Return single-character monthly code used in weekly instrument naming.
-        """
-        return WEEKLY_MONTH_CODE.get(dt.month, str(dt.month))  # fallback to numeric if map not present
-
-    def generate_weekly_symbol(self, root: str, expiry_dt: date, strike: int, right: str, year_two_digit: Optional[int] = None) -> str:
-        """
-        Build weekly symbol like: NIFTY25N0424000PE
-        - root: e.g. 'NIFTY'
-        - expiry_dt: actual expiry date (date object)
-        - strike: integer strike (e.g. 24000)
-        - right: 'CE' or 'PE'
-        - year_two_digit: optional override for two-digit year; default from expiry_dt
-        """
-        root_clean = root.strip().upper()
-        yy = f"{(year_two_digit if year_two_digit is not None else expiry_dt.year % 100):02d}"
-        mcode = self._weekly_month_code(expiry_dt)
-        dd = f"{expiry_dt.day:02d}"
-        strike_s = str(int(strike))
-        return f"{root_clean}{yy}{mcode}{dd}{strike_s}{right}"
-
-    def generate_monthly_symbol(self, root: str, expiry_dt: date, strike: int, right: str, year_two_digit: Optional[int] = None) -> str:
-        """
-        Build monthly symbol like: NIFTY25NOV24000PE
-        - Uses 3-letter month for monthly contracts.
-        """
-        root_clean = root.strip().upper()
-        yy = f"{(year_two_digit if year_two_digit is not None else expiry_dt.year % 100):02d}"
-        month_code = expiry_dt.strftime("%b").upper()
-        strike_s = str(int(strike))
-        return f"{root_clean}{yy}{month_code}{strike_s}{right}"
-
-    def validate_symbol_exists(self, symbol: str) -> bool:
-        """
-        Validate that a generated or requested symbol exists in authoritative master_map (if attached)
-        or in the local in-memory by_symbol caches.
-        """
-        if not symbol:
-            return False
-        key = str(symbol).strip().upper()
-        with self._lock:
-            # check local caches first
-            if key in self._by_symbol or key.split(":", 1)[-1] in self._by_symbol:
-                return True
-            # check attached master map
-            mm = self._master_map
-            if mm is not None:
-                if key in mm or key.split(":", 1)[-1] in mm:
-                    return True
-        return False
-
-    def get_lot_size_for_root(self, root: str) -> Optional[int]:
-        """
-        Return a representative lot size for the given root (e.g. 'NIFTY').
-        This uses the attached master_map if available (expects master_map values to be tokens;
-        the caller should use MarketDataManager to query lot sizes from parsed CSV).
-        NOTE: InstrumentResolver does not persist lot-size per symbol; this helper is provided
-        for convenience when master_map is enhanced by MarketDataManager.
-        """
-        # This function is intentionally conservative: resolver does not know lot sizes by default.
-        return None
-
-    # -------------------- internal helpers ---------------------------------
+    # ------------------------- small helpers --------------------------------
     def _clear_negative_cache_for_key(self, symbol: str) -> None:
         base = symbol.split(":", 1)[-1].strip().upper()
         with self._lock:
             for k in (symbol.strip().upper(), base):
-                self._neg_cache.pop(k, None)
+                if k in self._neg_cache:
+                    self._neg_cache.pop(k, None)
             self._warned_no_token.discard(base)
 
     def _ingest_instrument_row(self, row: Mapping[str, Any]) -> None:
@@ -559,7 +456,7 @@ class InstrumentResolver:
             try:
                 token_int = int(float(token_value))
             except (TypeError, ValueError):
-                LOGGER.debug("instrument_resolver_ingest_token_cast_failed", extra={"event": "instrument_resolver_ingest_token_cast_failed", "tradingsymbol": tradingsymbol, "exchange": exchange, "token_value": token_value})
+                LOGGER.debug("instrument_resolver_ingest_token_cast_failed", extra={"tradingsymbol": tradingsymbol, "exchange": exchange, "token_value": token_value})
                 return
 
             with self._lock:
@@ -577,7 +474,7 @@ class InstrumentResolver:
                 if exchange:
                     self._exchange_by_token.setdefault(token_int, exchange)
 
-                # if option contract, record light metadata
+                # record option contract metadata for lightweight lookups by base
                 itype = (row.get("instrument_type") or row.get("instrumentType") or "").strip().upper()
                 if itype in ("CE", "PE", "OPT", "OPTION"):
                     base = self._base_index_from_tradingsymbol(tradingsymbol)
@@ -601,9 +498,10 @@ class InstrumentResolver:
                         }
                         self._option_contracts[base].append(contract)
 
+                # clear negative cache for this symbol
                 self._clear_negative_cache_for_key(tradingsymbol)
         except Exception:
-            LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row", extra={"event": "instrument_resolver_ingest_error", "row_repr": str(dict(row))})
+            LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row")
             raise
 
     def _seed_well_known(self) -> None:
@@ -613,7 +511,7 @@ class InstrumentResolver:
                 try:
                     token_int = int(value)
                 except (TypeError, ValueError) as exc:
-                    LOGGER.error("Failure in InstrumentResolver._seed_well_known: %s", exc, extra={"event": "instrument_resolver_seed_error", "key": key, "value": value})
+                    LOGGER.error("Failure in InstrumentResolver._seed_well_known: %s", exc, extra={"key": key, "value": value})
                     continue
                 normalized_key = key.upper()
                 alias_symbol = normalized_key.split(":", 1)[-1]
@@ -625,6 +523,7 @@ class InstrumentResolver:
                 self._symbol_by_token.setdefault(token_int, alias_symbol)
                 self._exchange_by_token.setdefault(token_int, exchange)
                 self._clear_negative_cache_for_key(alias_symbol)
+            # canonical token names (human readable)
             for token, canonical_symbol in CANONICAL_TOKENS.items():
                 try:
                     t_int = int(token)
@@ -634,15 +533,15 @@ class InstrumentResolver:
                 self._exchange_by_token.setdefault(t_int, "NSE")
                 self._clear_negative_cache_for_key(canonical_symbol)
 
-    # -------------------- token search helpers --------------------------------
+    # ------------------------- token search helpers -------------------------
     def _search_token_via_broker_or_store(self, symbol: str) -> Optional[int]:
         """
-        Best-effort search via broker helpers or list_instruments fallback.
+        Try best-effort search on broker or static store to obtain an instrument token.
         """
         if self._broker is None:
             return None
 
-        # Direct helper
+        # 1) Direct helper
         direct = getattr(self._broker, "instrument_token_for", None)
         if callable(direct):
             try:
@@ -652,7 +551,7 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.instrument_token_for failed", exc_info=True)
 
-        # finder-style helper
+        # 2) Broker find_instrument style
         finder = getattr(self._broker, "find_instrument", None)
         if callable(finder):
             try:
@@ -663,7 +562,7 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.find_instrument failed", exc_info=True)
 
-        # search_instruments
+        # 3) search_instruments
         search = getattr(self._broker, "search_instruments", None)
         if callable(search):
             try:
@@ -675,7 +574,7 @@ class InstrumentResolver:
             except Exception:
                 LOGGER.debug("broker.search_instruments failed", exc_info=True)
 
-        # list_instruments fallback: iterate & match heuristics
+        # 4) list_instruments fallback (iterate and match)
         list_fn = getattr(self._broker, "list_instruments", None)
         if callable(list_fn):
             try:
@@ -739,8 +638,161 @@ class InstrumentResolver:
             raise BrokerError("Only NIFTY options (CE/PE) are allowed")
         return exchange, tradingsymbol
 
+    # ------------------------- New helper APIs -----------------------------
+    def option_contracts(self, base: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        Return lightweight option contract metadata for base (e.g., 'NIFTY' or 'BANKNIFTY').
 
-# ------------------------- CSV / SQLite helpers -------------------------------
+        When force_refresh=True this currently just rebuilds from in-memory cache (CSV/DB ingestion is external).
+        """
+        key = (base or "").strip().upper()
+        if not key:
+            return []
+        with self._lock:
+            lst = list(self._option_contracts.get(key) or [])
+        # return shallow copy to avoid accidental external mutation
+        return [dict(item) for item in lst]
+
+    def get_lot_size(self, symbol_or_base: str) -> Optional[int]:
+        """
+        Return a reasonable lot size for a given symbol or base index.
+
+        - If symbol_or_base is an instrument token or tradingsymbol found in caches, return its lot_size.
+        - Otherwise, for an index base (NIFTY/BANKNIFTY) return the most common lot_size among cached contracts.
+        """
+        if not symbol_or_base:
+            return None
+        key = str(symbol_or_base).strip().upper()
+        # If numeric token
+        try:
+            if key.isdigit():
+                token = int(key)
+                with self._lock:
+                    # find row in option_contracts by token
+                    for base, contracts in self._option_contracts.items():
+                        for c in contracts:
+                            if int(c.get("instrument_token") or 0) == token:
+                                lot = c.get("lot_size")
+                                return int(lot) if lot not in (None, "", "NULL") else None
+        except Exception:
+            pass
+
+        # direct symbol lookup
+        with self._lock:
+            # exact symbol
+            token = self._by_symbol.get(key)
+            if token:
+                # find in symbol_by_token if present in option_contracts
+                for base, contracts in self._option_contracts.items():
+                    for c in contracts:
+                        if int(c.get("instrument_token") or 0) == int(token):
+                            lot = c.get("lot_size")
+                            try:
+                                return int(lot) if lot not in (None, "", "NULL") else None
+                            except Exception:
+                                return None
+            # base detection fallback
+            base = key.split(":", 1)[-1]
+            base = base.replace(" ", "")
+            if base in ("NIFTY", "BANKNIFTY"):
+                # compute modal lot size across cached contracts
+                counts: Dict[int, int] = {}
+                for contract in self._option_contracts.get(base, []):
+                    lot = contract.get("lot_size")
+                    try:
+                        l = int(lot) if lot not in (None, "", "NULL") else None
+                    except Exception:
+                        l = None
+                    if l is not None:
+                        counts[l] = counts.get(l, 0) + 1
+                if counts:
+                    # return most common
+                    return max(counts.items(), key=lambda kv: kv[1])[0]
+        return None
+
+    # ------------------------- expiry & month-code helpers -----------------
+    @staticmethod
+    def _week_month_code(dt: date) -> str:
+        """
+        Return single-character month code used by exchange weekly naming:
+        months 1-9 => "1"-"9", 10->"O", 11->"N", 12->"D"
+        """
+        m = dt.month
+        if m in _WEEKLY_MONTH_MAP:
+            return _WEEKLY_MONTH_MAP[m]
+        return str(m)
+
+    @staticmethod
+    def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+        """
+        Return the date of the last given weekday (0=Mon..6=Sun) for month/year.
+        """
+        # get last day of month
+        last_day = calendar.monthrange(year, month)[1]
+        d = date(year, month, last_day)
+        offset = (d.weekday() - weekday) % 7
+        return d - timedelta(days=offset)
+
+    @staticmethod
+    def is_monthly_expiry(the_date: date, target_weekday: int = 1) -> bool:
+        """
+        Determine if the_date is the last target_weekday of its month.
+        target_weekday default=1 (Tuesday) to reflect new 2025 convention for NIFTY.
+        """
+        last = InstrumentResolver._last_weekday_of_month(the_date.year, the_date.month, target_weekday)
+        return the_date == last
+
+    @staticmethod
+    def parse_expiry_string(val: Any) -> Optional[date]:
+        """
+        Parse expiry in many common formats to a date object (UTC).
+        Accepts YYYY-MM-DD, dd-mmm-YYYY, compact formats etc.
+        """
+        if val is None:
+            return None
+        if isinstance(val, date) and not isinstance(val, datetime):
+            return val
+        s = str(val).strip()
+        if not s:
+            return None
+        # try ISO-ish
+        fmts = (
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+            "%d-%b-%Y",
+            "%d %b %Y",
+            "%d-%m-%Y",
+            "%d%b%Y",
+            "%d%b%y",
+        )
+        for f in fmts:
+            try:
+                dt = datetime.strptime(s, f)
+                return dt.date()
+            except Exception:
+                continue
+        # fallback: try numeric timestamp
+        try:
+            ts = float(s)
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.date()
+        except Exception:
+            pass
+        return None
+
+    # ------------------------- static utilities ---------------------------
+    @staticmethod
+    def _coerce(val: Any) -> Any:
+        if val in (None, "", "NULL"):
+            return None
+        return val
+
+    # ------------------------- end InstrumentResolver ---------------------
+
+# -------------------------
+# CSV / SQLite helpers
+# -------------------------
 def ensure_sqlite(path: str | Path) -> sqlite3.Connection:
     """
     Ensure a SQLite DB exists at path and has the instruments table.
@@ -762,14 +814,11 @@ def ensure_sqlite(path: str | Path) -> sqlite3.Connection:
 def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str, Any]:
     """
     Read an instruments CSV and persist option rows to the sqlite DB.
-
-    CSV expected columns (common): instrument_token, exchange, tradingsymbol, lot_size, expiry, strike, instrument_type, tick_size
     Returns a summary dict.
     """
     csv_path = str(csv_path)
     summary: Dict[str, Any] = {"stored": 0, "skipped": 0, "errors": 0}
-    p = Path(csv_path)
-    if not p.exists():
+    if not Path(csv_path).exists():
         LOGGER.warning("refresh_from_csv: csv path does not exist: %s", csv_path, extra={"event": "refresh_from_csv_missing", "path": csv_path})
         return summary
 
@@ -827,7 +876,7 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
                     conn_rowcount += 1
                 except Exception:
                     summary["errors"] += 1
-                    LOGGER.exception("refresh_from_csv: failed to insert row: %s", row)
+                    LOGGER.exception("refresh_from_csv: failed to insert row")
             conn.commit()
     except Exception:
         LOGGER.exception("refresh_from_csv: DB write failed", extra={"event": "refresh_from_csv_db_error", "path": csv_path})
