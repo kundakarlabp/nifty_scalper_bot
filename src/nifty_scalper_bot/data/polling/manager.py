@@ -29,6 +29,9 @@ TickHandler = Callable[[dict[str, object]], None]
 class PollingManager:
     """Run an asyncio loop that fetches ticks and emits observability metrics."""
 
+    # threshold for consecutive empty depth responses before emitting critical log
+    _EMPTY_DEPTH_THRESHOLD = 3
+
     def __init__(self, fetch_fn: TickFetcher, on_tick: TickHandler) -> None:
         """Initialise the polling manager with fetch and dispatch callbacks.
 
@@ -53,6 +56,9 @@ class PollingManager:
         self._poll_task: Optional[asyncio.Task[None]] = None
         self._last_success = time.monotonic()
         self._reconnect_attempt = 0
+
+        # track consecutive empty-depth responses per symbol (tradingsymbol or token)
+        self._empty_depth_counts: dict[str, int] = {}
 
     async def start(self) -> None:
         """Start the polling loop if it is not already running.
@@ -188,11 +194,80 @@ class PollingManager:
         self._reconnect_attempt = 0
         if not ticks:
             return
+
         for tick in ticks:
             exch_ts = tick.get('ts_ms') or tick.get('timestamp_ms')
             if isinstance(exch_ts, (int, float)) and exch_ts > 0:
                 lag_ms = max(0, now_ms - int(exch_ts))
                 POLL_TICK_LAG_MS.set(lag_ms)
+
+            # --- NEW: detect empty market depth / malformed tick and ignore it ---
+            try:
+                # identify symbol key: prefer tradingsymbol if present else instrument_token
+                symbol_key = None
+                if 'tradingsymbol' in tick and tick.get('tradingsymbol'):
+                    symbol_key = str(tick.get('tradingsymbol'))
+                elif 'instrument_token' in tick and tick.get('instrument_token'):
+                    symbol_key = str(tick.get('instrument_token'))
+                else:
+                    # fallback to any symbol-like key if present
+                    if 'symbol' in tick and tick.get('symbol'):
+                        symbol_key = str(tick.get('symbol'))
+
+                # detect depth structure patterns that indicate "non-existent instrument" responses:
+                # - explicit depth object with empty 'buy' and 'sell' lists
+                # - missing any ltp/price fields AND depth fields present but empty
+                is_empty_depth = False
+                buy = tick.get('buy')
+                sell = tick.get('sell')
+                ltp = (
+                    _safe_float(tick.get('ltp'))
+                    or _safe_float(tick.get('last_price'))
+                    or _safe_float(tick.get('close'))
+                    or _safe_float(tick.get('price'))
+                )
+
+                if (isinstance(buy, (list, tuple)) and isinstance(sell, (list, tuple))
+                        and len(buy) == 0 and len(sell) == 0):
+                    is_empty_depth = True
+                elif ltp is None and ((buy is not None and sell is None) or (buy is None and sell is not None)):
+                    # partial depth and no price — treat defensively as empty
+                    is_empty_depth = True
+                # else, if ltp is None and both buy/sell are empty or missing — also treat as empty
+                elif ltp is None and ((buy is None and sell is None) or (isinstance(buy, (list, tuple)) and len(buy) == 0 and sell is None) or (isinstance(sell, (list, tuple)) and len(sell) == 0 and buy is None)):
+                    is_empty_depth = True
+
+                if is_empty_depth:
+                    # increment failure counter for this symbol; default key if missing
+                    key = symbol_key or "<unknown>"
+                    prev = self._empty_depth_counts.get(key, 0) + 1
+                    self._empty_depth_counts[key] = prev
+                    POLL_ERRORS.labels(reason='empty_depth').inc()
+                    LOGGER.warning(
+                        "Ignoring empty depth tick for %s (count=%d): %s",
+                        key,
+                        prev,
+                        _short_tick_repr(tick),
+                        extra={'event': 'poll_empty_depth', 'symbol': key, 'count': prev},
+                    )
+                    # After threshold reached — log critical (ops should investigate)
+                    if prev >= self._EMPTY_DEPTH_THRESHOLD:
+                        LOGGER.critical(
+                            "Repeated empty depth responses for %s (count=%d) — likely unresolved instrument or bad symbol formatting.",
+                            key,
+                            prev,
+                            extra={'event': 'poll_empty_depth_persistent', 'symbol': key, 'count': prev},
+                        )
+                    # Do not forward this tick to downstream handlers — prevents ghost polling effects.
+                    continue
+                else:
+                    # successful tick -> reset empty depth counter for symbol (if present)
+                    if symbol_key and self._empty_depth_counts.get(symbol_key):
+                        self._empty_depth_counts.pop(symbol_key, None)
+            except Exception as exc:  # defensive: malformed tick structure
+                LOGGER.debug("Failed to evaluate tick emptiness: %s; tick=%s", exc, _short_tick_repr(tick))
+
+            # dispatch to handler
             try:
                 self._on_tick(tick)
             except Exception as exc:  # noqa: BLE001
@@ -200,3 +275,28 @@ class PollingManager:
                 # Continue processing remaining ticks even if one handler fails.
                 continue
 
+
+# --- small helpers local to this module (non-exported) -----------------
+def _safe_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _short_tick_repr(tick: dict) -> str:
+    """Return a compact representation of tick for logging while avoiding huge payloads."""
+    try:
+        parts = []
+        for k in ("tradingsymbol", "instrument_token", "ltp", "last_price", "buy", "sell"):
+            if k in tick:
+                v = tick.get(k)
+                if isinstance(v, (list, tuple)):
+                    parts.append(f"{k}=[{len(v)}]")
+                else:
+                    parts.append(f"{k}={str(v)[:60]}")
+        return ",".join(parts)
+    except Exception:
+        return "<unserializable-tick>"
