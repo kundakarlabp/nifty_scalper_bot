@@ -271,19 +271,10 @@ class RiskManager:
                 "attached": manager is not None,
             },
         )
-        if manager is not None:
-            try:
-                self._start_balance_refresher()
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in RiskManager.set_market_data_manager refresher: %s",
-                    exc,
-                    extra={
-                        "event": "risk_balance_refresher_start_error",
-                        "source": "market_data_manager",
-                    },
-                    exc_info=exc,
-                )
+        
+        # FIX APPLIED: Removed _start_balance_refresher() call from here.
+        # The balance refresher requires DataHub to be attached to work correctly.
+        # It will be started by attach_data_hub() instead.
 
     def set_unified_manager(self, manager: Any | None) -> None:
         """Attach unified manager callbacks for balance updates.
