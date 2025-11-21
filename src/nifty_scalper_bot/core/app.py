@@ -2943,6 +2943,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 "No elite strategies enabled; trading will be disabled",
                 extra={"event": "elite_strategies_missing"},
             )
+
+        # Ensure DataHub is injected into strategies that need complex metrics (IV/Greeks)
+        if elite_strategies and data_hub:
+            for strategy in elite_strategies:
+                if hasattr(strategy, "set_data_hub"):
+                    try:
+                        strategy.set_data_hub(data_hub)
+                        LOGGER.debug(f"Injected DataHub into {strategy.name}")
+                    except Exception as exc:
+                        LOGGER.warning(f"Failed to inject DataHub into {strategy.name}: {exc}")
+        
+        # Original code continues below:
+        strategy_instances: list[Any] = list(elite_strategies)
+   
     strategy_instances: list[Any] = list(elite_strategies)
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
