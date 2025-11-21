@@ -654,6 +654,11 @@ class OrderManager:
         self._load_guard_pairs()
         self._persistent_state: PersistentStateManager | None = None
         timeout_override = os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC")
+        # 4. Add Missing Initialization Safety (The Fix)
+        if override := os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC"):
+            with suppress(ValueError):
+                 # Safely parse float, ensure min 0.5s, ignore if invalid
+                 self.BRACKET_ENTRY_TIMEOUT_SEC = max(float(override), 0.5)
         if timeout_override:
             try:
                 configured_timeout = float(timeout_override)
@@ -6517,11 +6522,8 @@ class OrderManager:
         with self._lock:
             previous_status = order.status
             status = self._parse_status(payload.get("status"))
-            filled_qty = int(
-                payload.get(
-                    "filled_quantity", payload.get("filledQty", order.filled_quantity)
-                )
-            )
+            filled_qty = self._coerce_int(payload.get("filled_quantity")) or order.filled_quantity
+            
             average_price = payload.get("average_price") or payload.get("averagePrice")
             message = payload.get("status_message") or payload.get("message")
 
