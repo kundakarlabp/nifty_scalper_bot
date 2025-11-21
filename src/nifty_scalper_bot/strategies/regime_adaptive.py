@@ -506,6 +506,8 @@ class RegimeAdaptiveStrategy(Strategy):
 
             wins = [pnl for pnl in history if pnl > 0]
             losses = [abs(pnl) for pnl in history if pnl < 0]
+            
+            # FIX: Safety check for zero losses (no division)
             if not wins or not losses:
                 return 0.0
 
@@ -515,7 +517,7 @@ class RegimeAdaptiveStrategy(Strategy):
 
             avg_win = sum(wins) / len(wins)
             avg_loss = sum(losses) / len(losses)
-            if avg_loss <= 0.0:
+            if avg_loss <= 0.0: # Should be impossible now, but defensive
                 return 0.0
 
             win_loss_ratio = avg_win / avg_loss
@@ -525,8 +527,18 @@ class RegimeAdaptiveStrategy(Strategy):
             kelly_raw = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
             kelly_half = kelly_raw * 0.5
             bounded = max(0.0, min(kelly_half, 0.25))
+            self._logger.debug(
+                "Condition met: kelly_fraction_computed",
+                extra={
+                    "event": "kelly_fraction_computed",
+                    "symbol": symbol,
+                    "win_rate": round(win_rate, 4),
+                    "win_loss_ratio": round(win_loss_ratio, 4),
+                    "kelly": round(bounded, 4),
+                },
+            )
             return bounded
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._logger.error(
                 "Failure in RegimeAdaptiveStrategy._kelly_fraction: %s",
                 exc,
@@ -535,6 +547,8 @@ class RegimeAdaptiveStrategy(Strategy):
             )
             return 0.0
 
+   
+    
     def _volatility_adjustment(
         self, indicators: Mapping[str, float | tuple[float, float, float] | None]
     ) -> float:
