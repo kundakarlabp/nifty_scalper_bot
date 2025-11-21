@@ -165,6 +165,7 @@ class MarketDataManager:
         """
         self._broker = broker
         self._websocket = websocket
+        self._ws = websocket
         self._settings = settings or {}
         # attach resolver if provided (backwards-compatible)
         self._resolver = resolver
