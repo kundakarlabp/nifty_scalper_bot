@@ -3566,7 +3566,6 @@ class MarketDataManager:
                 if nested_ask is not None:
                     ask = nested_ask
                     break
-        :
             depth = tick.get("depth", {}) if isinstance(tick.get("depth"), Mapping) else {}
             buy_levels = depth.get("buy") or []
             sell_levels = depth.get("sell") or []
