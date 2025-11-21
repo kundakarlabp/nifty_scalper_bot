@@ -3462,13 +3462,7 @@ class MarketDataManager:
         except Exception:
             return None
         return None
-
-
-
-
-
-
-    
+   
     @staticmethod
     def _extract_symbol(tick: dict[str, Any]) -> str | None:
         for key in ("symbol", "tradingsymbol", "instrument"):
@@ -3483,181 +3477,80 @@ class MarketDataManager:
         tick: dict[str, Any],
         previous: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        def _positive(value: Any) -> float | None:
-            try:
-                candidate = float(value)
-            except (TypeError, ValueError):
-                return None
-            return candidate if candidate > 0 else None
-
-        ltp = self._coerce_float(tick, "ltp", "last_price", "close", "last")
-        if ltp is None or ltp <= 0:
-            for key in ("last_price", "last", "close", "ltp"):
-                candidate = _positive(tick.get(key))
-                if candidate is not None:
-                    ltp = candidate
-                    break
-        if (ltp is None or ltp <= 0) and isinstance(tick, Mapping):
-            for value in tick.values():
-                if not isinstance(value, Mapping):
-                    continue
-                nested = self._coerce_float(
-                    dict(value), "ltp", "last_price", "close", "last"
-                )
-                if nested is None or nested <= 0:
-                    for key in ("last_price", "last", "close", "ltp"):
-                        nested = _positive(value.get(key))
-                        if nested is not None:
-                            break
-                if nested is not None and nested > 0:
-                    ltp = nested
-                    break
-        if ltp is None or ltp <= 0:
+        """Normalize raw broker ticks into a standard internal format."""
+        
+        # Helper to find positive float from keys, checking nested dicts if needed
+        def _find_val(keys: tuple[str, ...], search_nested: bool = False) -> float | None:
+            # 1. Try top level
+            val = self._coerce_float(tick, *keys)
+            if val is not None and val > 0:
+                return val
+            # 2. Try nested values (common in some broker REST responses)
+            if search_nested and isinstance(tick, Mapping):
+                for value in tick.values():
+                    if isinstance(value, Mapping):
+                        val = self._coerce_float(dict(value), *keys)
+                        if val is not None and val > 0:
+                            return val
             return None
-        bid = self._coerce_float(
-            tick,
-            "best_bid",
-            "bid",
-            "buy_price",
-            "best_bid_price",
-        )
-        ask = self._coerce_float(
-            tick,
-            "best_ask",
-            "ask",
-            "sell_price",
-            "best_ask_price",
-        )
-        if bid is None:
-            for key in ("sell_price", "best_ask_price"):
-                candidate = _positive(tick.get(key))
-                if candidate is not None:
-                    bid = candidate
-                    break
-        if ask is None:
-            for key in ("sell_price", "best_ask_price"):
-                candidate = _positive(tick.get(key))
-                if candidate is not None:
-                    ask = candidate
-                    break
-        if bid is None and isinstance(tick, Mapping):
-            for value in tick.values():
-                if not isinstance(value, Mapping):
-                    continue
-                nested_bid = self._coerce_float(
-                    dict(value),
-                    "best_bid",
-                    "bid",
-                    "buy_price",
-                    "best_bid_price",
-                )
-                if nested_bid is not None:
-                    bid = nested_bid
-                    break
-        if ask is None and isinstance(tick, Mapping):
-            for value in tick.values():
-                if not isinstance(value, Mapping):
-                    continue
-                nested_ask = self._coerce_float(
-                    dict(value),
-                    "best_ask",
-                    "ask",
-                    "sell_price",
-                    "best_ask_price",
-                )
-                if nested_ask is not None:
-                    ask = nested_ask
-                    break
-                depth = tick.get("depth", {}) if isinstance(tick.get("depth"), Mapping) else {}
-                buy_levels = depth.get("buy") or []
-                sell_levels = depth.get("sell") or []
+
+        # 1. Extract LTP (Critical)
+        ltp = _find_val(("ltp", "last_price", "close", "last"), search_nested=True)
+        if ltp is None:
+            return None
+
+        # 2. Extract Bid/Ask from top-level or nested keys
+        bid = _find_val(("best_bid", "bid", "buy_price", "best_bid_price"), search_nested=True)
+        ask = _find_val(("best_ask", "ask", "sell_price", "best_ask_price"), search_nested=True)
+
+        # 3. Extract/Fallback using Depth
+        depth = tick.get("depth") if isinstance(tick.get("depth"), Mapping) else {}
 
         if bid is None:
-            bid_from_depth = self._coerce_from_depth(depth, "buy")
-            if bid_from_depth is not None:
-                bid = bid_from_depth
-            elif buy_levels:
-                # depth exists but buy-levels empty -> expected for new weekly contracts
-                self._logger.debug(
-                    "New weekly contract: buy depth empty (normal), using LTP fallback",
-                    extra={"symbol": symbol, "event": "empty_depth_normal"},
-                )
-            # else: no buy depth present -> silent, fallback to LTP later
-
-        if ask is None:
-            ask_from_depth = self._coerce_from_depth(depth, "sell")
-            if ask_from_depth is not None:
-                ask = ask_from_depth
-            elif sell_levels:
-                self._logger.debug(
-                    "New weekly contract: sell depth empty (normal), using LTP fallback",
-                    extra={"symbol": symbol, "event": "empty_depth_normal"},
-                )
-            # else: no sell depth present -> silent, fallback to LTP later            
-            depth = tick.get("depth", {})
-            if isinstance(depth, Mapping):
-                if bid is None:
-                    bid_from_depth = self._coerce_from_depth(depth, "buy")
-                    if bid_from_depth is not None:
-                        bid = bid_from_depth
-                    else:
-                        self._logger.error(
-                            "REST poll fallback: depth present but buy side empty",
-                            extra={"symbol": symbol, "depth": depth},
-                        )
-                if ask is None:
-                    ask_from_depth = self._coerce_from_depth(depth, "sell")
-                    if ask_from_depth is not None:
-                        ask = ask_from_depth
-                    else:
-                        self._logger.error(
-                            "REST poll fallback: depth present but sell side empty",
-                            extra={"symbol": symbol, "depth": depth},
-                        )
-            else:
-                # No structured depth: explicitly log that we will use ltp-only fallback                
-                    self._logger.error(
-                        "REST poll fallback: depth unavailable, falling back to LTP-only",
-                        extra={"symbol": symbol, "tick": tick},
-                    )   
-               
-        if previous is not None:
+            bid = self._coerce_from_depth(depth, "buy")
+            # Handle Empty Depth (Valid state for new contracts)
             if bid is None:
-                bid = previous.get("bid")
-                if bid is not None:
-                    self._logger.warning(
-                        "Fallback to previous bid value",
-                        extra={"symbol": symbol, "previous_bid": previous.get("bid")},
-                    )
-            if ask is None:
-                ask = previous.get("ask")
-                if ask is not None:
-                    self._logger.warning(
-                        "Fallback to previous ask value",
-                        extra={"symbol": symbol, "previous_ask": previous.get("ask")},
-                    )
-        timestamp = self._coerce_timestamp(tick)
+                buy_levels = depth.get("buy")
+                if isinstance(buy_levels, list) and not buy_levels:
+                    self._logger.debug("Depth present but buy side empty", extra={"symbol": symbol})
+                # Fallback precedence: Previous -> LTP
+                bid = previous.get("bid") if previous else ltp
 
+        if ask is None:
+            ask = self._coerce_from_depth(depth, "sell")
+            # Handle Empty Depth
+            if ask is None:
+                sell_levels = depth.get("sell")
+                if isinstance(sell_levels, list) and not sell_levels:
+                    self._logger.debug("Depth present but sell side empty", extra={"symbol": symbol})
+                # Fallback precedence: Previous -> LTP
+                ask = previous.get("ask") if previous else ltp
+
+        # Final safety fallback
+        if bid is None: bid = ltp
+        if ask is None: ask = ltp
+
+        # 4. Timestamp & Volume
+        timestamp = self._coerce_timestamp(tick)
+        
         normalized = {
             "symbol": symbol,
             "ltp": float(ltp),
-            "bid": bid,
-            "ask": ask,
+            "bid": float(bid),
+            "ask": float(ask),
             "timestamp": timestamp,
+            "depth": depth, # Preserve raw depth
         }
-        volume = self._coerce_float(
-            tick,
-            "volume_traded_today",
-            "volume_traded",
-            "volume",
-            "total_traded_volume",
-        )
-        if volume is None and previous is not None:
-            previous_volume = previous.get("volume")
-            if isinstance(previous_volume, (int, float)):
-                volume = float(previous_volume)
+
+        volume = self._coerce_float(tick, "volume_traded_today", "volume", "volume_traded", "total_traded_volume")
+        if volume is None and previous:
+            prev_vol = previous.get("volume")
+            if isinstance(prev_vol, (int, float)):
+                volume = float(prev_vol)
+        
         if volume is not None:
             normalized["volume"] = float(volume)
+
         return normalized
 
     @staticmethod
