@@ -3479,69 +3479,71 @@ class MarketDataManager:
     ) -> dict[str, Any] | None:
         """Normalize raw broker ticks into a standard internal format."""
         
-        # Helper to find positive float from keys, checking nested dicts if needed
-        def _find_val(keys: tuple[str, ...], search_nested: bool = False) -> float | None:
-            # 1. Try top level
-            val = self._coerce_float(tick, *keys)
-            if val is not None and val > 0:
-                return val
-            # 2. Try nested values (common in some broker REST responses)
-            if search_nested and isinstance(tick, Mapping):
-                for value in tick.values():
-                    if isinstance(value, Mapping):
-                        val = self._coerce_float(dict(value), *keys)
-                        if val is not None and val > 0:
-                            return val
+        # 1. Extract LTP (Last Traded Price) using safe helper
+        ltp = self._coerce_float(tick, "ltp", "last_price", "close", "last")
+        
+        # Deep search for LTP if top-level fails (common in some broker APIs)
+        if (ltp is None or ltp <= 0) and isinstance(tick, Mapping):
+            for value in tick.values():
+                if isinstance(value, Mapping):
+                    nested_ltp = self._coerce_float(value, "ltp", "last_price", "close")
+                    if nested_ltp and nested_ltp > 0:
+                        ltp = nested_ltp
+                        break
+
+        if ltp is None or ltp <= 0:
+            # Without LTP, the tick is useless
             return None
 
-        # 1. Extract LTP (Critical)
-        ltp = _find_val(("ltp", "last_price", "close", "last"), search_nested=True)
-        if ltp is None:
-            return None
+        # 2. Extract Bid/Ask from Top Level
+        bid = self._coerce_float(tick, "best_bid", "bid", "buy_price", "best_bid_price")
+        ask = self._coerce_float(tick, "best_ask", "ask", "sell_price", "best_ask_price")
 
-        # 2. Extract Bid/Ask from top-level or nested keys
-        bid = _find_val(("best_bid", "bid", "buy_price", "best_bid_price"), search_nested=True)
-        ask = _find_val(("best_ask", "ask", "sell_price", "best_ask_price"), search_nested=True)
+        # 3. Extract Depth (if present)
+        depth = tick.get("depth")
+        if not isinstance(depth, Mapping):
+            depth = {}
 
-        # 3. Extract/Fallback using Depth
-        depth = tick.get("depth") if isinstance(tick.get("depth"), Mapping) else {}
-
+        # 4. Fallback to Depth for Bid/Ask
         if bid is None:
             bid = self._coerce_from_depth(depth, "buy")
-            # Handle Empty Depth (Valid state for new contracts)
-            if bid is None:
-                buy_levels = depth.get("buy")
-                if isinstance(buy_levels, list) and not buy_levels:
-                    self._logger.debug("Depth present but buy side empty", extra={"symbol": symbol})
-                # Fallback precedence: Previous -> LTP
-                bid = previous.get("bid") if previous else ltp
-
+        
         if ask is None:
             ask = self._coerce_from_depth(depth, "sell")
-            # Handle Empty Depth
-            if ask is None:
-                sell_levels = depth.get("sell")
-                if isinstance(sell_levels, list) and not sell_levels:
-                    self._logger.debug("Depth present but sell side empty", extra={"symbol": symbol})
-                # Fallback precedence: Previous -> LTP
-                ask = previous.get("ask") if previous else ltp
 
-        # Final safety fallback
+        # 5. Handle Empty Depth Gracefully (Avoid Errors)
+        if bid is None:
+            buy_levels = depth.get("buy")
+            # If list exists but is empty -> Valid "No Buyers" state (e.g., illiquid contract)
+            if isinstance(buy_levels, list) and not buy_levels:
+                self._logger.debug("Depth present but buy side empty", extra={"symbol": symbol})
+            # Fallback: Previous > LTP
+            bid = previous.get("bid") if previous else ltp
+
+        if ask is None:
+            sell_levels = depth.get("sell")
+            # If list exists but is empty -> Valid "No Sellers" state
+            if isinstance(sell_levels, list) and not sell_levels:
+                self._logger.debug("Depth present but sell side empty", extra={"symbol": symbol})
+            # Fallback: Previous > LTP
+            ask = previous.get("ask") if previous else ltp
+
+        # Final Safety Fallback to ensure float values
         if bid is None: bid = ltp
         if ask is None: ask = ltp
 
-        # 4. Timestamp & Volume
         timestamp = self._coerce_timestamp(tick)
-        
+
         normalized = {
             "symbol": symbol,
             "ltp": float(ltp),
             "bid": float(bid),
             "ask": float(ask),
             "timestamp": timestamp,
-            "depth": depth, # Preserve raw depth
+            "depth": depth,  # Preserve raw depth
         }
-
+        
+        # 6. Volume Handling
         volume = self._coerce_float(tick, "volume_traded_today", "volume", "volume_traded", "total_traded_volume")
         if volume is None and previous:
             prev_vol = previous.get("volume")
