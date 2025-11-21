@@ -2277,15 +2277,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             try:
                 market_data_manager._handle_tick(t)
             except Exception as exc:
-                LOGGER.warning(
-                    "mdm_handle_tick_failed",
+                # Log the actual error message in the main log line so it's visible in your console
+                LOGGER.error(
+                    f"CRITICAL: mdm_handle_tick_failed -> {type(exc).__name__}: {exc}",
                     extra={
                         "event": "mdm_handle_tick_failed",
                         "err": str(exc),
                         "tick_keys": list(t.keys()),
                         "token": t.get("instrument_token") or t.get("token"),
                     },
-                    exc_info=False,
+                    exc_info=True,  # Force stack trace to show exactly where it crashed
                 )
             finally:
                 if stream_supervisor is not None:
