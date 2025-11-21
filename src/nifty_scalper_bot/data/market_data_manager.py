@@ -3399,26 +3399,32 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Helpers
 
-    def _coerce_from_depth(self, depth: Mapping[str, Any], side: str = "buy") -> Optional[float]:
-        """Return best price from depth safely, or None if not available."""
+    def _coerce_from_depth(self, depth: Mapping[str, Any], side: str) -> float | None:
+        """Safely extract best price from depth list without crashing."""
         try:
-            levels = depth.get(side) or []
-            if not isinstance(levels, Iterable):
+            if not depth: 
                 return None
-            for lvl in levels:
-                if not isinstance(lvl, Mapping):
+            
+            levels = depth.get(side)
+            # Must be a list/tuple/iterable, but NOT a string or dict
+            if not levels or not isinstance(levels, (list, tuple)):
+                return None
+                
+            for entry in levels:
+                if not isinstance(entry, Mapping):
                     continue
-                # price field in many APIs is 'price' or 'p'
-                price = lvl.get("price", lvl.get("p"))
-                if price is None:
-                    continue
-                try:
-                    p = float(price)
-                except Exception:
-                    continue
-                if p > 0:
-                    return p
+                
+                # Check multiple common keys for price
+                price = entry.get("price") or entry.get("p")
+                if price:
+                    try:
+                        val = float(price)
+                        if val > 0:
+                            return val
+                    except (ValueError, TypeError):
+                        continue
         except Exception:
+            # Swallow deep extraction errors to prevent tick stream crash
             return None
         return None
    
