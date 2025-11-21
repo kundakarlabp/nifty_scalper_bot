@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Mapping, MutableMapping
+from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping
 
 from nifty_scalper_bot.config.settings import REGIME_FILTER_BYPASS
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -56,20 +56,14 @@ class RegimeAdaptiveStrategy(Strategy):
             thresholds: Optional overrides for the built-in defaults.
             description: Human readable description exposed to orchestrator.
             market_regime: Optional shared regime detector used for fan-out.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
         """
-
         params = {
             "description": description
             or "Adaptive regime strategy combining OI/IV/ATR filters",
         }
         super().__init__("Regime Adaptive", params)
         self._market_data = market_data_manager
+        self._data_hub: Any | None = None  # Injected via set_data_hub
         self._thresholds = thresholds or AdaptiveThresholds()
         self._pnl_history: Dict[str, Deque[float]] = defaultdict(
             lambda: deque(maxlen=50)
@@ -102,17 +96,13 @@ class RegimeAdaptiveStrategy(Strategy):
             )
         )
 
+    def set_data_hub(self, data_hub: Any) -> None:
+        """Inject DataHub for access to calculated Greeks and IV."""
+        self._data_hub = data_hub
+
     # ------------------------------------------------------------------
     def get_required_indicators(self) -> list[str]:
-        """Return indicator keys required by the strategy.
-
-        Returns:
-            Ordered list of indicator keys consumed by the strategy.
-
-        Raises:
-            None.
-        """
-
+        """Return indicator keys required by the strategy."""
         return [
             "atr",
             "atr_14",
@@ -132,21 +122,7 @@ class RegimeAdaptiveStrategy(Strategy):
         current_price: float,
         position: Position | None,
     ) -> Signal | None:
-        """Generate adaptive entry signals when filters pass.
-
-        Args:
-            symbol: Instrument under evaluation.
-            indicators: Indicator snapshot supplied by the engine.
-            current_price: Latest traded price.
-            position: Active position metadata if one exists.
-
-        Returns:
-            Optional :class:`Signal` when entry is warranted.
-
-        Raises:
-            None.
-        """
-
+        """Generate adaptive entry signals when filters pass."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy.generate_signal",
             extra={"event": "regime_adaptive_generate", "symbol": symbol},
@@ -245,9 +221,10 @@ class RegimeAdaptiveStrategy(Strategy):
         stop_loss = snapshot.get("stop_loss")
         take_profit = snapshot.get("take_profit")
         if stop_loss is None or take_profit is None:
-            stop_loss, take_profit = self._ensure_rr(
-                "BUY", current_price, current_price * 0.99, 2.0
-            )
+            # Default 2.0 RR if metrics unavailable
+            stop_loss = current_price * 0.99
+            take_profit = current_price + (current_price - stop_loss) * 2.0
+            
         confidence = self._bounded_confidence(0.6 + kelly_fraction / 2.0)
         if block_multiplier != 1.0:
             confidence = self._bounded_confidence(confidence * block_multiplier)
@@ -279,19 +256,7 @@ class RegimeAdaptiveStrategy(Strategy):
 
     # ------------------------------------------------------------------
     def record_trade_result(self, symbol: str, pnl: float) -> None:
-        """Record realised *pnl* used for Kelly sizing adjustments.
-
-        Args:
-            symbol: Instrument identifier associated with the trade.
-            pnl: Realised PnL in currency units.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Record realised *pnl* used for Kelly sizing adjustments."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy.record_trade_result",
             extra={"event": "regime_record_trade", "symbol": symbol},
@@ -310,52 +275,72 @@ class RegimeAdaptiveStrategy(Strategy):
 
     # ------------------------------------------------------------------
     def _build_market_snapshot(self, symbol: str) -> MutableMapping[str, float] | None:
-        """Return snapshot including OI/IV/ATR/volume for *symbol*.
-
-        Args:
-            symbol: Instrument identifier under evaluation.
-
-        Returns:
-            Mapping of derived metrics when data is available else ``None``.
-
-        Raises:
-            None.
-        """
+        """Return snapshot including OI/IV/ATR/volume from DataHub or MDM."""
 
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy._build_market_snapshot",
             extra={"event": "regime_snapshot_enter", "symbol": symbol},
         )
-        latest = self._market_data.get_latest_tick(symbol)
+
+        # 1. Try DataHub (Primary Source - Enriched)
+        latest: dict[str, Any] = {}
+        iv = None
+        if self._data_hub:
+            try:
+                iv = self._data_hub.get_iv(symbol)
+                latest = self._data_hub.get_quote(symbol) or {}
+            except Exception:
+                pass
+        
+        # 2. Fallback to MarketDataManager (Secondary Source - Raw)
+        if not latest:
+            latest = self._market_data.get_latest_tick(symbol) or {}
+
         if not latest:
             return None
+
         snapshot: MutableMapping[str, float] = {}
-        oi_value = latest.get("open_interest")
+        
+        # Extract Open Interest
+        oi_value = latest.get("open_interest") or latest.get("oi")
         if isinstance(oi_value, (int, float)):
             snapshot["open_interest"] = float(oi_value)
-        iv = latest.get("implied_volatility")
-        if not isinstance(iv, (int, float)):
-            raw = latest.get("raw") if isinstance(latest.get("raw"), Mapping) else None
-            if isinstance(raw, Mapping):
-                iv = raw.get("implied_volatility")
+
+        # Extract Implied Volatility
+        # Use DataHub calculation if available, else raw tick
         if isinstance(iv, (int, float)):
             snapshot["iv_rank"] = float(iv) * 100.0
+        else:
+            raw_iv = latest.get("implied_volatility")
+            if not isinstance(raw_iv, (int, float)):
+                raw = latest.get("raw") if isinstance(latest.get("raw"), Mapping) else None
+                if isinstance(raw, Mapping):
+                    raw_iv = raw.get("implied_volatility")
+            if isinstance(raw_iv, (int, float)):
+                snapshot["iv_rank"] = float(raw_iv) * 100.0
+
+        # Extract ATR
         atr = latest.get("atr")
         if isinstance(atr, (int, float)):
             snapshot["atr"] = float(atr)
-        volume = latest.get("volume") or latest.get("trades")
+
+        # Extract Volume & Ratio
+        volume = latest.get("volume") or latest.get("trades") or latest.get("volume_traded")
         avg_volume = latest.get("avg_volume")
         if isinstance(volume, (int, float)):
             vol_val = float(volume)
             snapshot["volume"] = vol_val
             if isinstance(avg_volume, (int, float)) and avg_volume > 0:
                 snapshot["volume_ratio"] = vol_val / float(avg_volume)
+
+        # Extract SL/TP hints from tick (if any)
         stop_loss = latest.get("stop_loss")
         take_profit = latest.get("take_profit")
         if isinstance(stop_loss, (int, float)):
             snapshot["stop_loss"] = float(stop_loss)
         if isinstance(take_profit, (int, float)):
             snapshot["take_profit"] = float(take_profit)
+
         return snapshot
 
     def _passes_filters(
@@ -364,20 +349,7 @@ class RegimeAdaptiveStrategy(Strategy):
         snapshot: Mapping[str, float],
         indicators: Mapping[str, float | tuple[float, float, float] | None],
     ) -> tuple[bool, list[str]]:
-        """Return ``(passed, reasons)`` if the regime/flow filters pass.
-
-        Args:
-            regime: Derived market regime label.
-            snapshot: Snapshot produced by :meth:`_build_market_snapshot`.
-            indicators: Indicator payload from the engine.
-
-        Returns:
-            tuple[bool, list[str]]: ``True`` and empty reasons when all filters pass.
-
-        Raises:
-            None.
-        """
-
+        """Return ``(passed, reasons)`` if the regime/flow filters pass."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy._passes_filters",
             extra={"event": "regime_filters_enter", "regime": regime},
@@ -386,26 +358,17 @@ class RegimeAdaptiveStrategy(Strategy):
             thresholds = self._thresholds
             reasons: list[str] = []
 
-            oi_value_raw = snapshot.get("open_interest")
-            oi_value = (
-                float(oi_value_raw) if isinstance(oi_value_raw, (int, float)) else 0.0
-            )
+            oi_value = snapshot.get("open_interest", 0.0)
             if oi_value < thresholds.min_open_interest:
                 reasons.append("low_oi")
 
             volume_ratio = snapshot.get("volume_ratio")
             if volume_ratio is None:
                 volume_ratio = self._compute_volume_ratio(indicators)
-            if isinstance(volume_ratio, str):
-                try:
-                    volume_ratio = float(volume_ratio)
-                except ValueError:
-                    volume_ratio = None
-            if isinstance(volume_ratio, (int, float)):
-                volume_value = float(volume_ratio)
-            else:
-                volume_value = None
-            if volume_value is None or volume_value < thresholds.volume_multiplier:
+            
+            # Safe cast for volume check
+            vol_val = float(volume_ratio) if isinstance(volume_ratio, (int, float)) else None
+            if vol_val is None or vol_val < thresholds.volume_multiplier:
                 reasons.append("low_volume")
 
             spread_pct_raw = snapshot.get("spread_pct")
@@ -413,27 +376,14 @@ class RegimeAdaptiveStrategy(Strategy):
                 spread_pct_raw = self._extract_float(
                     indicators, ("spread_pct", "option_spread_pct", "liq_spread_pct")
                 )
-            if isinstance(spread_pct_raw, str):
-                try:
-                    spread_pct_raw = float(spread_pct_raw)
-                except ValueError:
-                    spread_pct_raw = None
             if isinstance(spread_pct_raw, (int, float)) and float(spread_pct_raw) > 1.0:
                 reasons.append("wide_spread")
 
             atr_candidate = snapshot.get("atr")
             if atr_candidate is None:
                 atr_candidate = self._extract_float(indicators, ("atr", "atr_14"))
-            if isinstance(atr_candidate, str):
-                try:
-                    atr_candidate = float(atr_candidate)
-                except ValueError:
-                    atr_candidate = None
-            atr_value = (
-                float(atr_candidate)
-                if isinstance(atr_candidate, (int, float))
-                else None
-            )
+            
+            atr_value = float(atr_candidate) if isinstance(atr_candidate, (int, float)) else None
             if (
                 atr_value is None
                 or not thresholds.atr_floor <= atr_value <= thresholds.atr_ceiling
@@ -462,24 +412,10 @@ class RegimeAdaptiveStrategy(Strategy):
 
             if bypassed_regime:
                 self._filter_stats["bypassed"] += 1
-                self._logger.info(
-                    "Condition met: regime_filters_bypassed",
-                    extra={
-                        "event": "regime_filters_bypassed",
-                        "regime": regime,
-                        "stats": dict(self._filter_stats),
-                    },
-                )
+                self._logger.info("Condition met: regime_filters_bypassed", extra={"regime": regime})
             else:
                 self._filter_stats["passed"] += 1
-                self._logger.debug(
-                    "regime_filters_passed",
-                    extra={
-                        "event": "regime_filters_passed",
-                        "regime": regime,
-                        "stats": dict(self._filter_stats),
-                    },
-                )
+                self._logger.debug("regime_filters_passed", extra={"regime": regime})
             return True, []
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -497,7 +433,6 @@ class RegimeAdaptiveStrategy(Strategy):
         regime_snapshot: RegimeSnapshot,
     ) -> MutableMapping[str, object]:
         """Merge regime adjustments from indicators and snapshot."""
-
         resolved: MutableMapping[str, object] = {}
         indicator_adjustments = indicators.get("_regime_adjustments")
         if isinstance(indicator_adjustments, Mapping):
@@ -512,7 +447,6 @@ class RegimeAdaptiveStrategy(Strategy):
         self, adjustments: Mapping[str, object]
     ) -> tuple[str, ...]:
         """Return normalised blocklist tokens from *adjustments*."""
-
         entries = adjustments.get("block") or adjustments.get("blocklist")
         tokens: list[str] = []
         if isinstance(entries, (list, tuple, set)):
@@ -529,7 +463,6 @@ class RegimeAdaptiveStrategy(Strategy):
 
     def _strategy_in_blocklist(self, entries: Iterable[str]) -> bool:
         """Return ``True`` when this strategy matches *entries*."""
-
         slug = self._strategy_slug
         aliases = {slug, "regime_adaptive", "adaptive"}
         for entry in entries:
@@ -540,7 +473,6 @@ class RegimeAdaptiveStrategy(Strategy):
 
     def _is_high_risk_regime(self, snapshot: RegimeSnapshot) -> bool:
         """Return ``True`` when *snapshot* denotes a high-risk regime."""
-
         regime = snapshot.regime.strip().lower()
         thresholds = {"event": 0.8, "volatile": 0.95}
         threshold = thresholds.get(regime)
@@ -550,7 +482,6 @@ class RegimeAdaptiveStrategy(Strategy):
 
     def _extract_sizing_multiplier(self, adjustments: Mapping[str, object]) -> float:
         """Return validated sizing multiplier from *adjustments*."""
-
         candidate = adjustments.get("sizing_multiplier")
         multiplier = 1.0
         if isinstance(candidate, (int, float)):
@@ -563,18 +494,7 @@ class RegimeAdaptiveStrategy(Strategy):
         return max(0.1, min(multiplier, 3.0))
 
     def _kelly_fraction(self, symbol: str) -> float:
-        """Return Kelly fraction derived from the rolling trade history.
-
-        Args:
-            symbol: Instrument identifier used for history lookup.
-
-        Returns:
-            Fraction between 0 and 1 representing Kelly sizing.
-
-        Raises:
-            None.
-        """
-
+        """Return Kelly fraction derived from the rolling trade history."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy._kelly_fraction",
             extra={"event": "kelly_fraction_enter", "symbol": symbol},
@@ -605,16 +525,6 @@ class RegimeAdaptiveStrategy(Strategy):
             kelly_raw = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
             kelly_half = kelly_raw * 0.5
             bounded = max(0.0, min(kelly_half, 0.25))
-            self._logger.debug(
-                "Condition met: kelly_fraction_computed",
-                extra={
-                    "event": "kelly_fraction_computed",
-                    "symbol": symbol,
-                    "win_rate": round(win_rate, 4),
-                    "win_loss_ratio": round(win_loss_ratio, 4),
-                    "kelly": round(bounded, 4),
-                },
-            )
             return bounded
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -628,18 +538,7 @@ class RegimeAdaptiveStrategy(Strategy):
     def _volatility_adjustment(
         self, indicators: Mapping[str, float | tuple[float, float, float] | None]
     ) -> float:
-        """Return volatility adjustment based on ATR regime.
-
-        Args:
-            indicators: Indicator payload containing ATR values.
-
-        Returns:
-            Multiplier applied to base lots.
-
-        Raises:
-            None.
-        """
-
+        """Return volatility adjustment based on ATR regime."""
         atr_value = self._extract_float(indicators, ("atr", "atr_14"))
         if atr_value is None:
             return 1.0
@@ -656,20 +555,7 @@ class RegimeAdaptiveStrategy(Strategy):
         indicators: Mapping[str, float | tuple[float, float, float] | None],
         snapshot: Mapping[str, float] | None,
     ) -> RegimeSnapshot | None:
-        """Delegate regime evaluation to the shared detector.
-
-        Args:
-            symbol: Instrument identifier supplied by the engine.
-            indicators: Indicator payload for the evaluation.
-            snapshot: Optional snapshot produced by :meth:`_build_market_snapshot`.
-
-        Returns:
-            Regime snapshot when detection succeeds else ``None``.
-
-        Raises:
-            None.
-        """
-
+        """Delegate regime evaluation to the shared detector."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy._resolve_regime",
             extra={"event": "regime_resolve_enter", "symbol": symbol},
@@ -680,10 +566,7 @@ class RegimeAdaptiveStrategy(Strategy):
             self._logger.error(
                 "Failure in _resolve_regime: %s",
                 exc,
-                extra={
-                    "event": "regime_resolve_error",
-                    "symbol": symbol,
-                },
+                extra={"event": "regime_resolve_error", "symbol": symbol},
             )
             return None
 
@@ -692,19 +575,7 @@ class RegimeAdaptiveStrategy(Strategy):
         indicators: Mapping[str, float | tuple[float, float, float] | None],
         keys: Iterable[str],
     ) -> float | None:
-        """Extract first numeric indicator value for *keys*.
-
-        Args:
-            indicators: Indicator payload.
-            keys: Candidate keys evaluated sequentially.
-
-        Returns:
-            Optional float when the indicator is present.
-
-        Raises:
-            None.
-        """
-
+        """Extract first numeric indicator value for *keys*."""
         for key in keys:
             value = indicators.get(key)
             if isinstance(value, (int, float)):
@@ -718,18 +589,7 @@ class RegimeAdaptiveStrategy(Strategy):
     def _compute_volume_ratio(
         self, indicators: Mapping[str, float | tuple[float, float, float] | None]
     ) -> float | None:
-        """Return volume spike ratio derived from indicator payload.
-
-        Args:
-            indicators: Indicator payload provided by the engine.
-
-        Returns:
-            Ratio when both current and average volumes are available.
-
-        Raises:
-            None.
-        """
-
+        """Return volume spike ratio derived from indicator payload."""
         volume = self._extract_float(indicators, ("volume",))
         avg_volume = self._extract_float(indicators, ("avg_volume",))
         if volume is None or avg_volume is None or avg_volume <= 0:
@@ -738,55 +598,19 @@ class RegimeAdaptiveStrategy(Strategy):
 
     # ------------------------------------------------------------------
     def set_regime_filter_bypass(self, enabled: bool) -> None:
-        """Toggle the regime filter bypass at runtime.
-
-        Args:
-            enabled: Desired bypass state.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Toggle the regime filter bypass at runtime."""
         self._logger.debug(
             "Entered RegimeAdaptiveStrategy.set_regime_filter_bypass",
-            extra={
-                "event": "regime_set_bypass",
-                "enabled": bool(enabled),
-            },
+            extra={"event": "regime_set_bypass", "enabled": bool(enabled)},
         )
         self._regime_filter_bypass = bool(enabled)
 
     def get_regime_filter_bypass(self) -> bool:
-        """Return whether the regime filter bypass is enabled.
-
-        Args:
-            None.
-
-        Returns:
-            ``True`` when bypass is active.
-
-        Raises:
-            None.
-        """
-
+        """Return whether the regime filter bypass is enabled."""
         return self._regime_filter_bypass
 
     def get_regime_filter_stats(self) -> dict[str, int]:
-        """Return a copy of the regime filter pass/fail counters.
-
-        Args:
-            None.
-
-        Returns:
-            Mapping of filter outcomes to counts.
-
-        Raises:
-            None.
-        """
-
+        """Return a copy of the regime filter pass/fail counters."""
         return dict(self._filter_stats)
 
 
