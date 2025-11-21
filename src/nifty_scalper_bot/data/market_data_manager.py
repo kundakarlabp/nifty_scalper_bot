@@ -3437,6 +3437,36 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Helpers
+
+    def _coerce_from_depth(self, depth: Mapping[str, Any], side: str = "buy") -> Optional[float]:
+        """Return best price from depth safely, or None if not available."""
+        try:
+            levels = depth.get(side) or []
+            if not isinstance(levels, Iterable):
+                return None
+            for lvl in levels:
+                if not isinstance(lvl, Mapping):
+                    continue
+                # price field in many APIs is 'price' or 'p'
+                price = lvl.get("price", lvl.get("p"))
+                if price is None:
+                    continue
+                try:
+                    p = float(price)
+                except Exception:
+                    continue
+                if p > 0:
+                    return p
+        except Exception:
+            return None
+        return None
+
+
+
+
+
+
+    
     @staticmethod
     def _extract_symbol(tick: dict[str, Any]) -> str | None:
         for key in ("symbol", "tradingsymbol", "instrument"):
@@ -3536,7 +3566,33 @@ class MarketDataManager:
                 if nested_ask is not None:
                     ask = nested_ask
                     break
-        if bid is None or ask is None:
+        :
+            depth = tick.get("depth", {}) if isinstance(tick.get("depth"), Mapping) else {}
+            buy_levels = depth.get("buy") or []
+            sell_levels = depth.get("sell") or []
+
+        if bid is None:
+            bid_from_depth = self._coerce_from_depth(depth, "buy")
+            if bid_from_depth is not None:
+                bid = bid_from_depth
+            elif buy_levels:
+                # depth exists but buy-levels empty -> expected for new weekly contracts
+                self._logger.debug(
+                    "New weekly contract: buy depth empty (normal), using LTP fallback",
+                    extra={"symbol": symbol, "event": "empty_depth_normal"},
+                )
+            # else: no buy depth present -> silent, fallback to LTP later
+
+        if ask is None:
+            ask_from_depth = self._coerce_from_depth(depth, "sell")
+            if ask_from_depth is not None:
+                ask = ask_from_depth
+            elif sell_levels:
+                self._logger.debug(
+                    "New weekly contract: sell depth empty (normal), using LTP fallback",
+                    extra={"symbol": symbol, "event": "empty_depth_normal"},
+                )
+            # else: no sell depth present -> silent, fallback to LTP later            
             depth = tick.get("depth", {})
             if isinstance(depth, Mapping):
                 if bid is None:
@@ -3559,7 +3615,7 @@ class MarketDataManager:
                         )
             else:
                 # No structured depth: explicitly log that we will use ltp-only fallback
-                if bid is None or ask is None:
+                :
                     self._logger.error(
                         "REST poll fallback: depth unavailable, falling back to LTP-only",
                         extra={"symbol": symbol, "tick": tick},
