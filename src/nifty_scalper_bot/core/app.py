@@ -1752,6 +1752,7 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
 def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
     """
     Return a list of validated exchange-qualified symbols to be tracked.
+    Uses the provided resolver to validate symbols against the broker's cache.
     """
     symbols = getattr(config, "symbols", None)
     if symbols:
@@ -1765,15 +1766,12 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
     except ImportError:
         get_next_valid_symbols = None
 
-    # FIX: Initialize 'contracts' here so it exists in all code paths
+    # FIX: Use the resolver instance directly, avoid globals()
     contracts = []
-
     if resolver is not None:
         try:
-            # Try public API first
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
-            # Fallback to internal storage
             elif hasattr(resolver, "_option_contracts"):
                 raw_map = getattr(resolver, "_option_contracts", {})
                 for c_list in raw_map.values():
@@ -1781,21 +1779,17 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
         except Exception as exc:
             LOGGER.debug("Failed to extract contracts from resolver: %s", exc)
 
-    # Determine ATM strike
-    atm = 24000
-    
+    # ATM Fallback
+    atm = 24000 
+    # (Optional: You could insert MDM price check here if available, but static start is safer)
+
     final_symbols: list[str] = []
     
-    # Attempt smart resolution
+    # ATTEMPT SMART RESOLUTION (The Fix)
     if get_next_valid_symbols is not None and contracts:
         try:
-            # Convert list of contract dicts to a map {token: contract}
-            # because smart_symbol often expects a map interface
-            contract_map = {}
-            for c in contracts:
-                t = c.get("instrument_token")
-                if t:
-                    contract_map[int(t)] = c
+            # Convert list to map for the utility
+            contract_map = {int(c["instrument_token"]): c for c in contracts if "instrument_token" in c}
             
             results = get_next_valid_symbols(
                 [int(atm)], 
@@ -1805,6 +1799,7 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
                 if ts:
+                    # Ensure NFO prefix so the system knows it's an option
                     if not ts.startswith("NFO:"):
                         final_symbols.append(f"NFO:{ts}")
                     else:
@@ -1812,12 +1807,17 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
         except Exception as exc:
             LOGGER.warning("smart_symbol resolution failed: %s", exc)
 
-    # Fallback: legacy construction
+    # Fallback: If smart resolution failed, use a GENERIC fallback 
+    # that assumes the resolver will fix it later, or log error.
     if not final_symbols:
-        expiry = get_nifty_expiry()  # Legacy helper defined in app.py
+        # Warning: This legacy fallback is likely generating invalid symbols for Zerodha
+        expiry = get_nifty_expiry() 
         final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
+        LOGGER.warning(f"Using legacy fallback symbols (may be invalid): {final_symbols}")
 
     return final_symbols
+
+
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     cfg = getattr(config, "strategy_config", None)
     if isinstance(cfg, StrategyRunnerConfig):
