@@ -3613,8 +3613,7 @@ class MarketDataManager:
                             extra={"symbol": symbol, "depth": depth},
                         )
             else:
-                # No structured depth: explicitly log that we will use ltp-only fallback
-                :
+                # No structured depth: explicitly log that we will use ltp-only fallback                
                     self._logger.error(
                         "REST poll fallback: depth unavailable, falling back to LTP-only",
                         extra={"symbol": symbol, "tick": tick},
