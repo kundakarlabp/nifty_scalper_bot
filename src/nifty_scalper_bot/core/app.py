@@ -4209,7 +4209,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     validated_symbols = _get_symbols(
         ctx.config, 
         resolver=ctx.instrument_resolver,
-        broker=ctx.broker_client
+        broker=ctx.broker_client)
     if not validated_symbols:
         LOGGER.error("No symbols generated. Bot will not trade.")
     else:
