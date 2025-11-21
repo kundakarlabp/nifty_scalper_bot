@@ -1830,7 +1830,7 @@ def _get_symbols(
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
-                instrument_map=contracts 
+                instrument_map=contract_map 
             )
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
