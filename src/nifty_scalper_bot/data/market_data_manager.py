@@ -169,6 +169,7 @@ class MarketDataManager:
         # attach resolver if provided (backwards-compatible)
         self._resolver = resolver
         self._logger = get_logger(__name__)
+        self._cache_len = cache_len
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._latest_ticks: dict[str, dict[str, Any]] = {}
