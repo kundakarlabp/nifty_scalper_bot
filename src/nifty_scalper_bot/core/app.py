@@ -1746,6 +1746,7 @@ def _get_symbols(
 ) -> list[str]:
     """
     Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    Prioritizes Weekly options derived from Live Spot Price.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1755,45 +1756,37 @@ def _get_symbols(
         return [str(symbols)]
 
     final_symbols: list[str] = []
+    atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price (Try multiple keys)
-    atm_price = 24000
+    # 2. Fetch Live Spot Price
     if broker:
         try:
-            # Try common NIFTY 50 spot symbols
-            candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            underlying = "NSE:NIFTY 50"
+            # Handle diverse broker client signatures
+            quote = getattr(broker, "get_quote", lambda x: None)(underlying) or \
+                    getattr(broker, "ltp", lambda x: None)(underlying)
+            
             ltp = 0.0
+            if quote:
+                # Handle nested dicts vs flat dicts
+                val = quote.get(underlying) if isinstance(quote, dict) else quote
+                if isinstance(val, dict):
+                    ltp_raw = val.get("last_price") or val.get("ltp") or val.get("close")
+                    ltp = float(ltp_raw) if ltp_raw else 0.0
             
-            # Attempt LTP fetch
-            if hasattr(broker, "ltp"):
-                quote = broker.ltp(candidates)
-                if quote:
-                    for key in candidates:
-                        val = quote.get(key)
-                        if isinstance(val, dict):
-                            ltp = float(val.get("last_price") or 0)
-                        elif isinstance(val, (int, float)):
-                            ltp = float(val)
-                        if ltp > 0: break
-            
-            # Fallback to Quote fetch
-            if ltp == 0 and hasattr(broker, "get_quote"):
-                quote = broker.get_quote(candidates[0])
-                if quote:
-                    val = quote.get(candidates[0]) or quote
-                    if isinstance(val, dict):
-                         ltp = float(val.get("last_price") or val.get("ltp") or 0)
-
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"Live NIFTY Spot: {ltp} -> Dynamic ATM: {atm_price}")
+                LOGGER.info(f"Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
             else:
-                LOGGER.warning(f"Live price fetch returned 0. Defaulting to {atm_price}")
-
+                LOGGER.warning(f"Could not fetch live price for {underlying}, using default 24000")
+                atm_price = 24000
         except Exception as exc:
             LOGGER.warning(f"Error fetching live price: {exc}")
+            atm_price = 24000
+    else:
+        atm_price = 24000
 
-    # 3. Generate Strikes
+    # 3. Generate Strikes (ATM +/- 2)
     strike_step = 50
     strikes_to_fetch = [
         atm_price - (2 * strike_step), 
@@ -1803,10 +1796,9 @@ def _get_symbols(
         atm_price + (2 * strike_step), 
     ]
 
-    # 4. Smart Resolution (Fixing the 'list' object error)
+    # 4. Attempt Smart Resolution (Preferred - automatically finds correct date)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
-        
         contracts = []
         if resolver:
             if hasattr(resolver, "option_contracts"):
@@ -1817,36 +1809,85 @@ def _get_symbols(
                     contracts.extend(c_list)
         
         if contracts and get_next_valid_symbols:
-            # FIX: Convert list to Dict[token, contract] for the utility
-            contract_map = {}
-            for c in contracts:
-                t = c.get("instrument_token")
-                if t: contract_map[int(t)] = c
-
+            # Pass List, not Dict
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
-                instrument_map=contract_map  # Pass DICT, not LIST
+                instrument_map=contracts 
             )
-            
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
                 if ts:
                     prefix = "NFO:" if not ts.startswith("NFO:") else ""
                     final_symbols.append(f"{prefix}{ts}")
+            
+            if final_symbols:
+                LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
 
     except Exception as exc:
-        LOGGER.warning(f"Smart resolution failed: {exc}")
+        LOGGER.warning(f"Smart symbol resolution failed: {exc}")
 
-    # 5. Fallback (Monthly)
+    # 5. Fallback: Manual Calculation (Targeting TUESDAY)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
-        yymmm = now.strftime("%y%b").upper()
+        
+        # Calculate Next Valid Tuesday (Nifty Weekly Expiry)
+        # 0=Mon, 1=Tue, ... 6=Sun
+        target_weekday = 1 # Tuesday
+        today_weekday = now.weekday() 
+        days_ahead = 0
+        
+        if today_weekday < target_weekday:
+             days_ahead = target_weekday - today_weekday
+        elif today_weekday == target_weekday:
+             # If Today is Tuesday, check time (3:30 PM cutoff)
+             if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                 days_ahead = 0 # Trade today's expiry
+             else:
+                 days_ahead = 7 # Trade next week's
+        else:
+             days_ahead = 7 - (today_weekday - target_weekday)
+             
+        next_expiry = now + datetime.timedelta(days=days_ahead)
+        
+        # Build Weekly Code (YY M DD)
+        year_short = next_expiry.strftime("%y")
+        day_str = next_expiry.strftime("%d")
+        month_map = {
+            1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6',
+            7: '7', 8: '8', 9: '9', 10: 'O', 11: 'N', 12: 'D'
+        }
+        month_code = month_map.get(next_expiry.month, str(next_expiry.month))
+        weekly_suffix = f"{year_short}{month_code}{day_str}"
+        
+        # Monthly Suffix (YYMMM)
+        monthly_suffix = now.strftime("%y%b").upper()
+
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                final_symbols.append(f"NFO:NIFTY{yymmm}{strike}{kind}")
-        LOGGER.info(f"Generated fallback monthly symbols: {final_symbols}")
+                added = False
+                
+                # A. Try Weekly First
+                weekly_sym = f"NFO:NIFTY{weekly_suffix}{strike}{kind}"
+                if resolver and resolver.resolve(weekly_sym):
+                    final_symbols.append(weekly_sym)
+                    added = True
+                    continue 
+                
+                # B. Try Monthly Second
+                if not added:
+                    monthly_sym = f"NFO:NIFTY{monthly_suffix}{strike}{kind}"
+                    if resolver and resolver.resolve(monthly_sym):
+                         final_symbols.append(monthly_sym)
+                         added = True
+                
+                # C. Last Resort: Force Weekly (Better to try than fail)
+                if not added:
+                    LOGGER.warning(f"Could not resolve {strike}{kind}, forcing Weekly: {weekly_sym}")
+                    final_symbols.append(weekly_sym)
+        
+        LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
     return final_symbols
     
