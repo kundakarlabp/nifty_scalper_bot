@@ -4315,7 +4315,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         ctx.market_data_manager,
         "market_data_manager",
     )
-    validated_symbols = _get_symbols(ctx.config, resolver=ctx.instrument_resolver)
+    validated_symbols = _get_symbols(ctx.config, resolver=ctx.instrument_resolver, broker=ctx.broker_client)
     for symbol in validated_symbols:
         strategy_runner.add_symbol(symbol)
 
