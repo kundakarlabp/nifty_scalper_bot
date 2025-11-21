@@ -2371,6 +2371,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         market_data_manager = MarketDataManager(
             broker_client,
             websocket_manager,
+            settings=settings,
             resolver=instrument_resolver,
         )
         data_hub = DataHub(
@@ -4258,7 +4259,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         "market_data_manager",
     )
 
-    for symbol in _get_symbols(ctx.config):
+    for symbol in validated_symbols:
         strategy_runner.add_symbol(symbol)
 
     order_monitor_started = False
