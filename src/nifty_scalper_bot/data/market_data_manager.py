@@ -193,7 +193,7 @@ class MarketDataManager:
         self._fallback_enabled = False
         self._poll_jitter_pct = 0.0
         self._poll_batch_ceiling = 0
-        self._ohlc_builder = _OHLCBuilder(maxlen=cache_len)
+        self._ohlc_builder = _OHLCBuilder(maxlen=self._cache_len)
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
