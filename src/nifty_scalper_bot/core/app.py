@@ -1643,22 +1643,11 @@ def _configure_rate_limiter(cfg: Any) -> RateLimiter:
     )
     return limiter
 
-def get_nifty_expiry(target_weekday: int = 1) -> str:
-    """
-    Return a human-readable expiry string for logging (keeps backward compatibility).
-    Defaults to next Tuesday (weekday=1).
-    Format: DDMMMYY uppercase (same as original), but caller should prefer using
-    smart_symbol.get_next_valid_symbols for canonical symbol construction.
-    """
-    from datetime import datetime, timedelta
-    import pytz
-
-    now = datetime.now(pytz.timezone("Asia/Kolkata")).date()
-    days_ahead = target_weekday - now.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    expiry = now + timedelta(days=days_ahead)
-    return expiry.strftime("%d%b%y").upper()
+def get_nifty_expiry() -> str:
+    """Return the current month's Nifty expiry code (e.g., 25NOV)."""
+    now = datetime.now()
+    # Get 2-digit year and upper-case short month (e.g., 25NOV)
+    return now.strftime("%y%b").upper()
 
 def get_nifty_atm_strike(nifty_spot):
     """Round to nearest 50 or 100, as in your option chain tokens."""
@@ -1749,9 +1738,16 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
     return None
 
 
-def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
+def _get_symbols(
+    config: AppConfig, 
+    resolver: InstrumentResolver | None = None, 
+    broker: Any | None = None
+) -> list[str]:
     """
     Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    
+    Strictly calculates ATM from the live underlying spot price fetched via the broker.
+    If live price cannot be determined, returns an empty list to prevent trading on stale/static data.
     """
     # 1. Explicit Configuration (Overrides auto-selection)
     symbols = getattr(config, "symbols", None)
@@ -1760,21 +1756,62 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
             return [str(s).strip() for s in symbols if str(s).strip()]
         return [str(symbols)]
 
-    # 2. Dynamic Selection (ATM, ITM, OTM)
     final_symbols: list[str] = []
+    atm_price: int | None = None
     
-    # Static ATM fallback (Update this if you have a live spot source)
-    atm_price = 24000 
-    strike_step = 50  # Nifty strike interval
-    
+    # --- FETCH LIVE SPOT PRICE (Strict Dynamic Logic) ---
+    if broker:
+        try:
+            # NIFTY 50 Spot Symbol
+            underlying = "NSE:NIFTY 50" 
+            
+            quote = None
+            # Adapt to different broker client signatures
+            if hasattr(broker, "get_quote"):
+                quote = broker.get_quote(underlying)
+            elif hasattr(broker, "ltp"):
+                quote = broker.ltp(underlying)
+            
+            ltp = 0.0
+            if quote:
+                # Handle different broker response structures
+                val = quote.get(underlying) if isinstance(quote, dict) else quote
+                if isinstance(val, dict):
+                    ltp_raw = val.get("last_price") or val.get("ltp") or val.get("close")
+                else:
+                    ltp_raw = val
+                
+                try:
+                    ltp = float(ltp_raw)
+                except (TypeError, ValueError):
+                    ltp = 0.0
+            
+            if ltp > 0:
+                # Round to nearest 50 (e.g., 26153 -> 26150)
+                atm_price = round(ltp / 50) * 50
+                LOGGER.info(f"Live NIFTY Spot: {ltp} -> Dynamic ATM Strike: {atm_price}")
+            else:
+                LOGGER.error(f"Could not fetch live price for {underlying}. Dynamic symbol generation aborted.")
+                return [] # Fail safe: don't trade if we can't see the price
+                
+        except Exception as exc:
+            LOGGER.error(f"Error fetching live spot price: {exc}. Dynamic symbol generation aborted.")
+            return [] # Fail safe
+    else:
+        LOGGER.error("No broker client provided to _get_symbols. Dynamic symbol generation aborted.")
+        return []
+
+    if atm_price is None:
+        return []
+
     # Define Range: ATM, 2 strikes ITM, 2 strikes OTM
-    # e.g. 23900, 23950, 24000, 24050, 24100
+    strike_step = 50
     strikes_to_fetch = [
-        atm_price - (2 * strike_step), # Deep ITM Call / OTM Put
-        atm_price - strike_step,       # ITM Call / OTM Put
-        atm_price,                     # ATM
-        atm_price + strike_step,       # OTM Call / ITM Put
-        atm_price + (2 * strike_step), # Deep OTM Call / ITM Put
+        atm_price - (2 * strike_step), 
+        atm_price - strike_step,       
+        atm_price,                     
+        atm_price + strike_step,       
+        atm_price + (2 * strike_step), 
     ]
 
     try:
@@ -1782,10 +1819,9 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
     except ImportError:
         get_next_valid_symbols = None
 
-    # 3. Attempt Smart Resolution
+    # 3. Attempt Smart Resolution (Weekly Preferred)
     if resolver is not None and get_next_valid_symbols is not None:
         try:
-            # Load all NIFTY option contracts
             contracts = []
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
@@ -1795,10 +1831,8 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
                     contracts.extend(c_list)
             
             if contracts:
-                # Convert list to map for utility
-                contract_map = {int(c["instrument_token"]): c for c in contracts if "instrument_token" in c}
+                contract_map = {int(c.get("instrument_token", 0)): c for c in contracts if "instrument_token" in c}
                 
-                # Fetch valid symbols for ALL calculated strikes
                 results = get_next_valid_symbols(
                     strikes_to_fetch, 
                     opt_types=('CE', 'PE'), 
@@ -1814,7 +1848,7 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
         except Exception as exc:
             LOGGER.warning("smart_symbol resolution failed: %s", exc)
 
-    # 4. Robust Fallback (If smart resolution fails, generate standard monthly symbols)
+    # 4. Robust Fallback (Monthly - Only if Smart Failed, but using Dynamic ATM)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
@@ -1822,7 +1856,6 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
         
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                # Try Monthly format
                 candidate = f"NFO:NIFTY{yymmm}{strike}{kind}"
                 # Verify it exists before adding
                 if resolver and (resolver.resolve(candidate) or resolver.resolve(candidate.replace("NFO:", ""))):
@@ -1831,10 +1864,9 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
                     # Blindly add if we can't verify, to ensure we track *something*
                     final_symbols.append(candidate)
         
-        LOGGER.info(f"Generated fallback symbol range: {len(final_symbols)} symbols")
+        LOGGER.info(f"Generated fallback monthly symbols for Dynamic ATM {atm_price}: {len(final_symbols)} symbols")
 
     return final_symbols
-
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     cfg = getattr(config, "strategy_config", None)
@@ -5344,4 +5376,5 @@ __all__ = [
     "shutdown_sequence",
     "get_http_app",
     "get_telegram_notifier",
+    "get_nifty_expiry",
 ]
