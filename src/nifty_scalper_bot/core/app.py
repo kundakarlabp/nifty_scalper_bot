@@ -2954,10 +2954,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     except Exception as exc:
                         LOGGER.warning(f"Failed to inject DataHub into {strategy.name}: {exc}")
         
-        # Original code continues below:
-        strategy_instances: list[Any] = list(elite_strategies)
-   
+          
     strategy_instances: list[Any] = list(elite_strategies)
+    # Ensure DataHub is injected into all strategies that need enriched data (IV/Greeks).
+    if strategy_instances and data_hub:
+        for strategy in strategy_instances:
+            # Check if the strategy has the required setter method (set_data_hub)
+            if hasattr(strategy, "set_data_hub"):
+                try:
+                    strategy.set_data_hub(data_hub)
+                    LOGGER.debug(f"Injected DataHub into {strategy.name}")
+                except Exception as exc:
+                    LOGGER.warning(
+                        f"Failed to inject DataHub into {strategy.name}: {exc}"
+                    )    
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
         order_manager=safe_order_manager,
