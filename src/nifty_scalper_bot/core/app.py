@@ -1752,7 +1752,6 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
 def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
     """
     Return a list of validated exchange-qualified symbols to be tracked.
-    Uses the provided resolver to validate symbols against the broker's cache.
     """
     symbols = getattr(config, "symbols", None)
     if symbols:
@@ -1760,76 +1759,52 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
             return [str(s).strip() for s in symbols if str(s).strip()]
         return [str(symbols)]
 
-    # No explicit symbols -> Build ATM CE/PE for next expiry using resolver
+    # No explicit symbols -> Build ATM CE/PE for next expiry
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
     except ImportError:
         get_next_valid_symbols = None
 
-    # Gather candidate instruments from resolver
-    candidate_instruments = []
+    # FIX: Initialize 'contracts' here so it exists in all code paths
+    contracts = []
+
     if resolver is not None:
         try:
-            # 1. Try public API if available
+            # Try public API first
             if hasattr(resolver, "option_contracts"):
-                # Load NIFTY options specifically
-                candidate_instruments.extend(resolver.option_contracts("NIFTY"))
-            # 2. Fallback to internal storage if public API fails or returns empty
+                contracts = resolver.option_contracts("NIFTY")
+            # Fallback to internal storage
             elif hasattr(resolver, "_option_contracts"):
-                contracts_map = getattr(resolver, "_option_contracts", {})
-                if contracts_map:
-                    for contracts in contracts_map.values():
-                        candidate_instruments.extend(contracts)
+                raw_map = getattr(resolver, "_option_contracts", {})
+                for c_list in raw_map.values():
+                    contracts.extend(c_list)
         except Exception as exc:
             LOGGER.debug("Failed to extract contracts from resolver: %s", exc)
 
-    # Determine ATM strike (Logic matches original intent)
+    # Determine ATM strike
     atm = 24000
-    try:
-        # Try to get live price if available in globals (legacy) or via resolver context?
-        # For simplicity/robustness in this func, we stick to the 24000 fallback 
-        # or assume the caller might have wanted dynamic ATM. 
-        # Since we don't have MDM here, we keep the existing logic or static fallback.
-        # The user's previous code had a try/except block checking globals. 
-        # We can keep that as a best-effort.
-        mdm = globals().get("market_data_manager")
-        if mdm is not None and hasattr(mdm, "get_latest_price"):
-            nifty_spot = mdm.get_latest_price("NIFTY")
-            if nifty_spot:
-                atm = round(float(nifty_spot) / 50) * 50
-    except Exception:
-        pass
-
+    
     final_symbols: list[str] = []
     
     # Attempt smart resolution
-    if get_next_valid_symbols is not None and candidate_instruments:
+    if get_next_valid_symbols is not None and contracts:
         try:
-            # get_next_valid_symbols expects a list of instrument dicts as `instrument_map` or `instruments`
-            # passing list as `instrument_map` usually works if the util handles list inputs, 
-            # otherwise we might need to check the signature. 
-            # Assuming standard usage: it filters a list of dicts.
-            
-            # Note: the previous error said "int object has no attribute get" because it was iterating
-            # a Dict[str, int]. Passing a List[Dict] should fix it.
             # Convert list of contract dicts to a map {token: contract}
-            # smart_symbol expects a dict-like interface (instrument_map.get)
+            # because smart_symbol often expects a map interface
             contract_map = {}
             for c in contracts:
                 t = c.get("instrument_token")
                 if t:
                     contract_map[int(t)] = c
-
+            
             results = get_next_valid_symbols(
                 [int(atm)], 
                 opt_types=('CE', 'PE'), 
                 instrument_map=contract_map 
             )
-            
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
                 if ts:
-                    # Ensure NFO prefix
                     if not ts.startswith("NFO:"):
                         final_symbols.append(f"NFO:{ts}")
                     else:
@@ -1843,7 +1818,6 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
         final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
 
     return final_symbols
-
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     cfg = getattr(config, "strategy_config", None)
     if isinstance(cfg, StrategyRunnerConfig):
