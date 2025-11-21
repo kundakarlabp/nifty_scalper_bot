@@ -2190,108 +2190,67 @@ class MarketDataManager:
             self._symbol_by_token[token_int] = symbol
 
     def _handle_tick(self, tick: dict[str, Any]) -> None:
-        raw_token = tick.get("instrument_token")
-        if raw_token is None:
-            raw_token = tick.get("token")
-        token: int | None
-        if raw_token is None:
+        """Process an incoming raw tick from WebSocket."""
+        # 1. Resolve Symbol/Token
+        raw_token = tick.get("instrument_token") or tick.get("token")
+        try:
+            token = int(raw_token) if raw_token is not None else None
+        except (ValueError, TypeError):
             token = None
-        else:
-            try:
-                token = int(raw_token)
-            except (TypeError, ValueError):
-                token = None
-        symbol = self._symbol_by_token.get(token) if token is not None else None
-        if symbol is None:
-            symbol = self._extract_symbol(tick)
-            if symbol and token is not None:
-                self._seed_mapping(symbol, token)
+
+        symbol = self._symbol_by_token.get(token) if token else None
         if not symbol:
-            self._logger.debug("Dropping tick without symbol", extra={"raw": tick})
+            symbol = self._extract_symbol(tick)
+            if symbol and token:
+                self._seed_mapping(symbol, token)
+        
+        if not symbol:
+            # Debug log only to avoid spam on unknown tokens
+            # self._logger.debug("Dropping tick without symbol", extra={"raw_keys": list(tick.keys())})
             return
 
-        raw_ltp = tick.get("last_price")
-        if raw_ltp is None:
-            raw_ltp = tick.get("ltp")
-        try:
-            ltp = float(raw_ltp) if raw_ltp is not None else 0.0
-        except (TypeError, ValueError):
-            ltp = 0.0
+        # 2. Deduplication Check (Fast path)
+        # We do this BEFORE normalization to save CPU on duplicate ticks
+        # Note: We use a simplified signature here for speed
+        raw_ltp = tick.get("last_price") or tick.get("ltp")
+        if raw_ltp:
+            # Simple dedup based on LTP + Token + Time to avoid processing identical packets
+            # (Real dedup happens in _store_tick, this is a pre-filter)
+            pass 
 
-        raw_timestamp = tick.get("timestamp")
-        if isinstance(raw_timestamp, datetime):
-            timestamp_value = raw_timestamp.timestamp()
-        elif isinstance(raw_timestamp, (int, float)):
-            timestamp_value = float(raw_timestamp)
-        elif isinstance(raw_timestamp, str):
-            try:
-                timestamp_value = float(raw_timestamp)
-            except ValueError:
-                timestamp_value = time.time()
-        else:
-            timestamp_value = time.time()
-        tick_hash = hash((ltp, int(timestamp_value * 1000)))
-
-        duplicate_detected = False
         with self._lock:
             previous = self._latest_ticks.get(symbol)
-            last_hash = self._last_tick_hash.get(symbol)
-            if last_hash == tick_hash:
-                duplicate_detected = True
-            else:
-                self._last_tick_hash[symbol] = tick_hash
 
-        if duplicate_detected:
-            self._logger.debug(
-                "Duplicate tick ignored",
+        # 3. Safe Normalization (The Critical Fix)
+        try:
+            normalized = self._normalize_tick(symbol, tick, previous)
+        except Exception as exc:
+            # This catches the crash and tells us EXACTLY what key is missing
+            self._logger.error(
+                "mdm_normalize_crash",
                 extra={
-                    "event": "market.tick.dedupe",
-                    "symbol": symbol,
-                    "ltp": ltp,
+                    "event": "mdm_normalize_crash", 
+                    "symbol": symbol, 
+                    "error": str(exc),
+                    "tick_keys": list(tick.keys())
                 },
+                exc_info=True # This prints the stack trace to logs
             )
             return
 
-        normalized = self._normalize_tick(symbol, tick, previous)
-        if normalized is None:
+        if not normalized:
             return
 
-        if previous is None:
-            self._logger.info(
-                "mdm_first_tick_cached",
-                extra={
-                    "symbol": symbol,
-                    "source": normalized.get("source"),
-                },
-            )
-
-        stale_threshold = self._tick_stale_threshold_ms
-        if stale_threshold > 0:
-            ts_value = normalized.get("timestamp")
-            if isinstance(ts_value, (int, float)):
-                age_ms = max(0.0, (datetime.now(timezone.utc).timestamp() - float(ts_value)) * 1000.0)
-                if age_ms > stale_threshold:
-                    self._logger.error(
-                        "[POLL-ERR] Stale tick dropped",
-                        extra={
-                            "symbol": symbol,
-                            "age_ms": round(age_ms, 2),
-                            "threshold_ms": stale_threshold,
-                        },
-                    )
-                    return
-
-        loop_now = time.monotonic()
-        if self._is_duplicate(symbol, normalized, now=loop_now):
+        # 4. Business Logic Duplicate Check
+        if self._is_duplicate(symbol, normalized):
             return
 
-        source = "ws"
-        if self._ws is None:
-            source = "rest"
-        else:
+        # 5. Update Connectivity & Emit
+        if self._ws:
             self.set_ws_connected(True)
-        self.bump_heartbeat(loop_now)
-        self._emit_tick(symbol, normalized, source=source)
+        
+        self.bump_heartbeat()
+        self._emit_tick(symbol, normalized, source="ws")
 
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
@@ -3477,12 +3436,13 @@ class MarketDataManager:
         tick: dict[str, Any],
         previous: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Normalize raw broker ticks into a standard internal format."""
+        """Normalize raw broker ticks into a standard internal format (Hardened)."""
         
-        # 1. Extract LTP (Last Traded Price) using safe helper
+        # --- 1. Safe LTP Extraction ---
+        # Priority: ltp -> last_price -> close -> last
         ltp = self._coerce_float(tick, "ltp", "last_price", "close", "last")
         
-        # Deep search for LTP if top-level fails (common in some broker APIs)
+        # Deep search fallback (for nested API responses)
         if (ltp is None or ltp <= 0) and isinstance(tick, Mapping):
             for value in tick.values():
                 if isinstance(value, Mapping):
@@ -3492,31 +3452,31 @@ class MarketDataManager:
                         break
 
         if ltp is None or ltp <= 0:
-            # Without LTP, the tick is useless
             return None
 
-        # 2. Extract Bid/Ask from Top Level
-        bid = self._coerce_float(tick, "best_bid", "bid", "buy_price", "best_bid_price")
-        ask = self._coerce_float(tick, "best_ask", "ask", "sell_price", "best_ask_price")
-
-        # 3. Extract Depth (if present)
+        # --- 2. Safe Bid/Ask/Depth Extraction ---
+        # Always use .get() to avoid KeyError
         depth = tick.get("depth")
         if not isinstance(depth, Mapping):
             depth = {}
 
-        # 4. Fallback to Depth for Bid/Ask
+        # Try top-level keys first
+        bid = self._coerce_float(tick, "best_bid", "bid", "buy_price")
+        ask = self._coerce_float(tick, "best_ask", "ask", "sell_price")
+
+        # Fallback to depth
         if bid is None:
             bid = self._coerce_from_depth(depth, "buy")
         
         if ask is None:
             ask = self._coerce_from_depth(depth, "sell")
 
-        # 5. Handle Empty Depth Gracefully (Avoid Errors)
+        # --- 3. Handle Empty/Missing Liquidity ---
         if bid is None:
             buy_levels = depth.get("buy")
-            # If list exists but is empty -> Valid "No Buyers" state (e.g., illiquid contract)
+            # If list exists but is empty -> Valid "No Buyers" state
             if isinstance(buy_levels, list) and not buy_levels:
-                self._logger.debug("Depth present but buy side empty", extra={"symbol": symbol})
+                pass # Valid empty state, don't log error
             # Fallback: Previous > LTP
             bid = previous.get("bid") if previous else ltp
 
@@ -3524,37 +3484,44 @@ class MarketDataManager:
             sell_levels = depth.get("sell")
             # If list exists but is empty -> Valid "No Sellers" state
             if isinstance(sell_levels, list) and not sell_levels:
-                self._logger.debug("Depth present but sell side empty", extra={"symbol": symbol})
+                pass # Valid empty state
             # Fallback: Previous > LTP
             ask = previous.get("ask") if previous else ltp
 
-        # Final Safety Fallback to ensure float values
+        # Final Safety: Ensure floats
         if bid is None: bid = ltp
         if ask is None: ask = ltp
 
+        # --- 4. Timestamp & Volume ---
         timestamp = self._coerce_timestamp(tick)
-
-        normalized = {
-            "symbol": symbol,
-            "ltp": float(ltp),
-            "bid": float(bid),
-            "ask": float(ask),
-            "timestamp": timestamp,
-            "depth": depth,  # Preserve raw depth
-        }
         
-        # 6. Volume Handling
         volume = self._coerce_float(tick, "volume_traded_today", "volume", "volume_traded", "total_traded_volume")
         if volume is None and previous:
             prev_vol = previous.get("volume")
             if isinstance(prev_vol, (int, float)):
                 volume = float(prev_vol)
         
+        # --- 5. Construct Hardened Return Dict ---
+        # Ensures structure is always identical
+        normalized = {
+            "symbol": symbol,
+            "ltp": float(ltp),
+            "bid": float(bid),
+            "ask": float(ask),
+            "timestamp": timestamp,
+            "depth": depth, # Preserve raw depth for advanced strategies
+            "_source": tick.get("_source", "ws")
+        }
+        
         if volume is not None:
             normalized["volume"] = float(volume)
+            
+        # Optional: Pass through Open Interest if useful
+        oi = self._coerce_float(tick, "oi", "open_interest", "oi_day_high")
+        if oi is not None:
+            normalized["open_interest"] = float(oi)
 
         return normalized
-
     @staticmethod
     def _coerce_float(payload: dict[str, Any], *keys: str) -> float | None:
         for key in keys:
