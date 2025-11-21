@@ -4125,6 +4125,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         state_tracker=ctx.state_tracker,
                         preflight_validator=ctx.preflight_validator,
                         version_info=version_info,
+                        allowed_chat_id=telegram_chat_id,
                     )
                     try:
                         register_telegram_commands(
