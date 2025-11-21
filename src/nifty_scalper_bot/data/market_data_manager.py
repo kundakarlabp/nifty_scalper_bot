@@ -2178,6 +2178,53 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Internal plumbing
+    
+    def _handle_tick(self, tick: dict[str, Any]) -> None:
+        """Process an incoming raw tick from WebSocket or Polling."""
+        
+        # 1. Resolve Symbol/Token
+        raw_token = tick.get("instrument_token") or tick.get("token")
+        try:
+            token = int(raw_token) if raw_token is not None else None
+        except (ValueError, TypeError):
+            token = None
+
+        symbol = self._symbol_by_token.get(token) if token else None
+        if not symbol:
+            symbol = self._extract_symbol(tick)
+            if symbol and token:
+                self._seed_mapping(symbol, token)
+        
+        if not symbol:
+            return
+
+        # 2. Normalize
+        with self._lock:
+            previous = self._latest_ticks.get(symbol)
+
+        try:
+            normalized = self._normalize_tick(symbol, tick, previous)
+        except Exception as exc:
+            self._logger.error(f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True)
+            return
+
+        if not normalized:
+            return
+
+        # 3. Deduplicate
+        if self._is_duplicate(symbol, normalized):
+            return
+
+        # 4. Update State
+        if self._ws:
+            self.set_ws_connected(True)
+        
+        self.bump_heartbeat()
+        
+        # 5. Emit
+        self._emit_tick(symbol, normalized, source=tick.get("source", "ws"))
+
+    
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
             return
