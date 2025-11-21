@@ -1788,15 +1788,15 @@ def _get_symbols(
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"Live NIFTY Spot: {ltp} -> Dynamic ATM Strike: {atm_price}")
             else:
-                LOGGER.warning(f"Could not fetch live price for {underlying}, using default 26000")
-                atm_price = 26000
+                LOGGER.warning(f"Could not fetch live price for {underlying}, using default 24000")
+                atm_price = 24000
                 
         except Exception as exc:
-            LOGGER.warning(f"Error fetching live spot price: {exc}. Using default 26000.")
-            atm_price = 26000
+            LOGGER.warning(f"Error fetching live spot price: {exc}. Using default 24000.")
+            atm_price = 24000
     else:
-        LOGGER.warning("No broker client provided to _get_symbols. Using default 26000.")
-        atm_price = 26000
+        LOGGER.warning("No broker client provided to _get_symbols. Using default 24000.")
+        atm_price = 24000
 
     # 3. Generate Range (ATM +/- 2 Strikes)
     strike_step = 50
@@ -4199,22 +4199,9 @@ def _validate_config(config: AppConfig) -> None:
 
 
 async def startup_sequence(ctx: BotContext) -> None:
-    """Run startup tasks in order."""
-    LOGGER.info("Loading instruments...")
-    ctx.instrument_resolver.load_instruments() 
-    
-    if hasattr(ctx.broker_client, "user_id"):
-        LOGGER.info(f"Connected to broker: {ctx.broker_client.user_id}")
-    ctx.market_data_manager.start()
-    validated_symbols = _get_symbols(
-        ctx.config, 
-        resolver=ctx.instrument_resolver,
-        broker=ctx.broker_client)
-    if not validated_symbols:
-        LOGGER.error("No symbols generated. Bot will not trade.")
-    else:
-        LOGGER.info(f"Tracking symbols: {validated_symbols}")
+    """Execute startup sequence."""
 
+    LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
 
     broker_ready = True
