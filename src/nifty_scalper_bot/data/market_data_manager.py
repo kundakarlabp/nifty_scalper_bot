@@ -156,21 +156,32 @@ class _OHLCBuilder:
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
-    def __init__(self, broker: Any = None, websocket: Any = None, settings: dict | None = None, *, cache_len: int = 1000, resolver: Any = None, **kwargs) -> None:
+    def __init__(
+        self, 
+        broker: Any = None, 
+        websocket: Any = None, 
+        settings: dict | None = None, 
+        *, 
+        cache_len: int = 1000, 
+        resolver: Any = None, 
+        **kwargs
+    ) -> None:
         """
         MarketDataManager constructor.
-
-        Accepts resolver as kwarg for backward compatibility:
-            MarketDataManager(broker, resolver=instrument_resolver, websocket=...)
         """
         self._broker = broker
         self._websocket = websocket
-        self._ws = websocket
+        # FIX: Explicitly assign self._ws for internal use
+        self._ws = websocket  
         self._settings = settings or {}
-        # attach resolver if provided (backwards-compatible)
         self._resolver = resolver
         self._logger = get_logger(__name__)
+
+        # FIX: Initialize cache_len before it is used
         self._cache_len = cache_len
+        
+        # FIX: Initialize duplicate window (Missing in your file, causing the crash)
+        self._duplicate_window = self._parse_float_env("MDM_DUPLICATE_WINDOW_SEC", default=1.0, minimum=0.0)
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._latest_ticks: dict[str, dict[str, Any]] = {}
@@ -259,45 +270,18 @@ class MarketDataManager:
         if self._rest_poll_enabled:
             self._tracked_symbols.add("NIFTY")
 
-        try:
-            settings = get_settings()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager.__init__: %s",
-                exc,
-                extra={"event": "mdm_settings_load_failed"},
-            )
-            settings = None
-        if settings is not None and self._resolver is None:
-            try:
-                self._resolver = getattr(settings, "resolver", None)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in MarketDataManager.__init__: %s",
-                    exc,
-                    extra={"event": "mdm_settings_resolver_invalid"},
-                )
+        # Load optional settings overrides
         if settings is not None:
             try:
                 jitter_pct = max(
                     0.0, float(getattr(settings, "poll_interval_ms_jitter_pct", 0.0))
                 )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in MarketDataManager.__init__: %s",
-                    exc,
-                    extra={"event": "mdm_settings_jitter_invalid"},
-                )
+            except Exception:  # noqa: BLE001
                 jitter_pct = 0.0
             self._poll_jitter_pct = jitter_pct
             try:
                 ceiling = int(getattr(settings, "poll_batch_size", 0))
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in MarketDataManager.__init__: %s",
-                    exc,
-                    extra={"event": "mdm_settings_batch_invalid"},
-                )
+            except Exception:  # noqa: BLE001
                 ceiling = 0
             if ceiling > 0:
                 self._poll_batch_ceiling = ceiling
