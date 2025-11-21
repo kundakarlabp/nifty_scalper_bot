@@ -156,7 +156,7 @@ class _OHLCBuilder:
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
-    def __init__(self, broker: Any = None, websocket: Any = None, settings: dict | None = None, *, resolver: Any = None, **kwargs) -> None:
+    def __init__(self, broker: Any = None, websocket: Any = None, settings: dict | None = None, *, cache_len: int = 1000, resolver: Any = None, **kwargs) -> None:
         """
         MarketDataManager constructor.
 
