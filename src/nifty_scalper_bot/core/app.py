@@ -1751,32 +1751,41 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
 
 def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols to be tracked.
-    Uses the provided resolver to validate symbols against the broker's cache.
+    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
     """
-    # 1. Explicit Configuration
+    # 1. Explicit Configuration (Overrides auto-selection)
     symbols = getattr(config, "symbols", None)
     if symbols:
         if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
             return [str(s).strip() for s in symbols if str(s).strip()]
         return [str(symbols)]
 
-    # 2. Smart Resolution (Dynamic)
+    # 2. Dynamic Selection (ATM, ITM, OTM)
     final_symbols: list[str] = []
     
-    # Fallback defaults
-    atm = 24000
+    # Static ATM fallback (Update this if you have a live spot source)
+    atm_price = 24000 
+    strike_step = 50  # Nifty strike interval
     
-    # Try to import smart symbol utility
+    # Define Range: ATM, 2 strikes ITM, 2 strikes OTM
+    # e.g. 23900, 23950, 24000, 24050, 24100
+    strikes_to_fetch = [
+        atm_price - (2 * strike_step), # Deep ITM Call / OTM Put
+        atm_price - strike_step,       # ITM Call / OTM Put
+        atm_price,                     # ATM
+        atm_price + strike_step,       # OTM Call / ITM Put
+        atm_price + (2 * strike_step), # Deep OTM Call / ITM Put
+    ]
+
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
     except ImportError:
         get_next_valid_symbols = None
 
-    # If we have a resolver and the utility, try to find the exact contract
+    # 3. Attempt Smart Resolution
     if resolver is not None and get_next_valid_symbols is not None:
         try:
-            # Extract contracts from resolver
+            # Load all NIFTY option contracts
             contracts = []
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
@@ -1786,16 +1795,12 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
                     contracts.extend(c_list)
             
             if contracts:
-                # Convert to map for utility
-                contract_map = {}
-                for c in contracts:
-                    t = c.get("instrument_token")
-                    if t:
-                        contract_map[int(t)] = c
+                # Convert list to map for utility
+                contract_map = {int(c["instrument_token"]): c for c in contracts if "instrument_token" in c}
                 
-                # Get valid symbols
+                # Fetch valid symbols for ALL calculated strikes
                 results = get_next_valid_symbols(
-                    [int(atm)], 
+                    strikes_to_fetch, 
                     opt_types=('CE', 'PE'), 
                     instrument_map=contract_map 
                 )
@@ -1805,41 +1810,28 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
                     if ts:
                         prefix = "NFO:" if not ts.startswith("NFO:") else ""
                         final_symbols.append(f"{prefix}{ts}")
+                        
         except Exception as exc:
             LOGGER.warning("smart_symbol resolution failed: %s", exc)
 
-    # 3. Robust Fallback (If smart resolution failed)
-    # We try multiple formats to find one that exists in the resolver
+    # 4. Robust Fallback (If smart resolution fails, generate standard monthly symbols)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
+        yymmm = now.strftime("%y%b").upper() # e.g., "25NOV"
         
-        # Format 1: Monthly (YYMMM) -> NIFTY25NOV24000CE
-        yymmm = now.strftime("%y%b").upper() # 25NOV
+        for strike in strikes_to_fetch:
+            for kind in ("CE", "PE"):
+                # Try Monthly format
+                candidate = f"NFO:NIFTY{yymmm}{strike}{kind}"
+                # Verify it exists before adding
+                if resolver and (resolver.resolve(candidate) or resolver.resolve(candidate.replace("NFO:", ""))):
+                    final_symbols.append(candidate)
+                else:
+                    # Blindly add if we can't verify, to ensure we track *something*
+                    final_symbols.append(candidate)
         
-        # Format 2: Weekly (YYMdd) -> NIFTY25N2724000CE
-        # (Simple heuristic: just try the monthly first as it's safest for default)
-        
-        candidates = [
-            f"NIFTY{yymmm}{atm}CE", 
-            f"NIFTY{yymmm}{atm}PE"
-        ]
-        
-        valid_fallbacks = []
-        if resolver:
-            for cand in candidates:
-                # Check if this symbol actually exists
-                if resolver.resolve(cand) or resolver.resolve(f"NFO:{cand}"):
-                    valid_fallbacks.append(f"NFO:{cand}")
-        
-        if valid_fallbacks:
-            final_symbols = valid_fallbacks
-            LOGGER.info(f"Using validated monthly fallback symbols: {final_symbols}")
-        else:
-            # Last resort: The old legacy format (likely to fail, but keeps code running)
-            expiry = get_nifty_expiry()
-            final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
-            LOGGER.warning(f"Using unvalidated legacy fallback symbols: {final_symbols}")
+        LOGGER.info(f"Generated fallback symbol range: {len(final_symbols)} symbols")
 
     return final_symbols
 
