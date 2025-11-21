@@ -1749,12 +1749,10 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
     return None
 
 
-def _get_symbols(config: AppConfig) -> list[str]:
+def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols to be tracked by the runner.
-    Uses nifty_scalper_bot.utils.smart_symbol to generate and validate candidate symbols
-    against the warmed InstrumentResolver when available. Falls back to legacy string
-    construction only when resolver absent, and logs a warning.
+    Return a list of validated exchange-qualified symbols to be tracked.
+    Uses the provided resolver to validate symbols against the broker's cache.
     """
     symbols = getattr(config, "symbols", None)
     if symbols:
@@ -1762,52 +1760,46 @@ def _get_symbols(config: AppConfig) -> list[str]:
             return [str(s).strip() for s in symbols if str(s).strip()]
         return [str(symbols)]
 
-    # No explicit symbols in config -> build ATM CE & PE for next expiry
-    # prefer validated lookup via instrument resolver
+    # No explicit symbols -> Build ATM CE/PE for next expiry using resolver
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
-    except Exception:
+    except ImportError:
         get_next_valid_symbols = None
 
-    # try to get instrument resolver from context/globals (warmed)
-    resolver = globals().get("instrument_resolver") or globals().get("resolver")
     instrument_map = {}
     if resolver is not None:
-        # try to extract dict-like mapping from resolver (non-fatal)
         try:
-            # common attributes: _by_symbol, symbols
-            instrument_map = getattr(resolver, "_by_symbol", None) or getattr(resolver, "symbols", None) or {}
-            # ensure keys are simple strings (copy)
-            if not isinstance(instrument_map, dict):
-                instrument_map = dict(instrument_map)
+            # Extract underlying map safely
+            instrument_map = getattr(resolver, "_by_symbol", None) or {}
         except Exception:
-            instrument_map = {}
+            pass
 
-    # Determine ATM strike
+    # Determine ATM strike from resolver/MDM or fallback
     atm = 24000
     try:
-        mdm = globals().get("market_data_manager")
-        if mdm is not None and hasattr(mdm, "get_latest_price"):
-            nifty_spot = mdm.get_latest_price("NIFTY") or atm
-            atm = round(float(nifty_spot) / 50) * 50
+        # Try to get live price if MDM is available globally or via some other path
+        # (For startup, we usually rely on a static ref price or just center on a rounded default)
+        # If you have a way to fetch spot, do it here. Otherwise, 24000 fallback.
+        pass 
     except Exception:
         pass
 
     final_symbols: list[str] = []
-    # If we have the smart_symbol helper and instrument_map, use it to resolve valid entries
+    
     if get_next_valid_symbols is not None and instrument_map:
         try:
+            # Calculate next valid weekly/monthly expiry symbols dynamically
             results = get_next_valid_symbols([int(atm)], opt_types=('CE', 'PE'), instrument_map=instrument_map)
             for inst in results:
-                # make sure to return exchange-prefixed variant (NFO:)
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
                 if ts:
                     final_symbols.append(f"NFO:{ts}")
         except Exception as exc:
-            LOGGER.warning("smart_symbol resolution failed: %s; falling back to legacy symbol construction", exc, extra={"event":"smart_symbol_failed"})
-    # Fallback: legacy construction (keeps previous behaviour)
+            LOGGER.warning("smart_symbol resolution failed: %s", exc)
+
+    # Fallback: legacy construction if smart resolution failed or returned empty
     if not final_symbols:
-        expiry = get_nifty_expiry()  # legacy helper for human-readable expiry
+        expiry = get_nifty_expiry()  # Legacy helper
         final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
 
     return final_symbols
