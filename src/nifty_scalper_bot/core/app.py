@@ -1645,6 +1645,7 @@ def _configure_rate_limiter(cfg: Any) -> RateLimiter:
 
 def get_nifty_expiry() -> str:
     """Return the current month's Nifty expiry code (e.g., 25NOV)."""
+    from datetime import datetime
     now = datetime.now()
     # Get 2-digit year and upper-case short month (e.g., 25NOV)
     return now.strftime("%y%b").upper()
