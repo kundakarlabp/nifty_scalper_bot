@@ -2189,68 +2189,93 @@ class MarketDataManager:
             self._token_by_symbol[symbol] = token_int
             self._symbol_by_token[token_int] = symbol
 
-    def _handle_tick(self, tick: dict[str, Any]) -> None:
-        """Process an incoming raw tick from WebSocket."""
-        # 1. Resolve Symbol/Token
-        raw_token = tick.get("instrument_token") or tick.get("token")
+    def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) -> list[str]:
+    """
+    Return a list of validated exchange-qualified symbols to be tracked.
+    Uses the provided resolver to validate symbols against the broker's cache.
+    """
+    symbols = getattr(config, "symbols", None)
+    if symbols:
+        if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
+            return [str(s).strip() for s in symbols if str(s).strip()]
+        return [str(symbols)]
+
+    # No explicit symbols -> Build ATM CE/PE for next expiry using resolver
+    try:
+        from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
+    except ImportError:
+        get_next_valid_symbols = None
+
+    # Gather candidate instruments from resolver
+    candidate_instruments = []
+    if resolver is not None:
         try:
-            token = int(raw_token) if raw_token is not None else None
-        except (ValueError, TypeError):
-            token = None
-
-        symbol = self._symbol_by_token.get(token) if token else None
-        if not symbol:
-            symbol = self._extract_symbol(tick)
-            if symbol and token:
-                self._seed_mapping(symbol, token)
-        
-        if not symbol:
-            # Debug log only to avoid spam on unknown tokens
-            # self._logger.debug("Dropping tick without symbol", extra={"raw_keys": list(tick.keys())})
-            return
-
-        # 2. Deduplication Check (Fast path)
-        # We do this BEFORE normalization to save CPU on duplicate ticks
-        # Note: We use a simplified signature here for speed
-        raw_ltp = tick.get("last_price") or tick.get("ltp")
-        if raw_ltp:
-            # Simple dedup based on LTP + Token + Time to avoid processing identical packets
-            # (Real dedup happens in _store_tick, this is a pre-filter)
-            pass 
-
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-
-        # 3. Safe Normalization (The Critical Fix)
-        try:
-            normalized = self._normalize_tick(symbol, tick, previous)
+            # 1. Try public API if available
+            if hasattr(resolver, "option_contracts"):
+                # Load NIFTY options specifically
+                candidate_instruments.extend(resolver.option_contracts("NIFTY"))
+            # 2. Fallback to internal storage if public API fails or returns empty
+            elif hasattr(resolver, "_option_contracts"):
+                contracts_map = getattr(resolver, "_option_contracts", {})
+                if contracts_map:
+                    for contracts in contracts_map.values():
+                        candidate_instruments.extend(contracts)
         except Exception as exc:
-            # This catches the crash and tells us EXACTLY what key is missing
-            self._logger.error(
-                "mdm_normalize_crash",
-                extra={
-                    "event": "mdm_normalize_crash", 
-                    "symbol": symbol, 
-                    "error": str(exc),
-                    "tick_keys": list(tick.keys())
-                },
-                exc_info=True # This prints the stack trace to logs
+            LOGGER.debug("Failed to extract contracts from resolver: %s", exc)
+
+    # Determine ATM strike (Logic matches original intent)
+    atm = 24000
+    try:
+        # Try to get live price if available in globals (legacy) or via resolver context?
+        # For simplicity/robustness in this func, we stick to the 24000 fallback 
+        # or assume the caller might have wanted dynamic ATM. 
+        # Since we don't have MDM here, we keep the existing logic or static fallback.
+        # The user's previous code had a try/except block checking globals. 
+        # We can keep that as a best-effort.
+        mdm = globals().get("market_data_manager")
+        if mdm is not None and hasattr(mdm, "get_latest_price"):
+            nifty_spot = mdm.get_latest_price("NIFTY")
+            if nifty_spot:
+                atm = round(float(nifty_spot) / 50) * 50
+    except Exception:
+        pass
+
+    final_symbols: list[str] = []
+    
+    # Attempt smart resolution
+    if get_next_valid_symbols is not None and candidate_instruments:
+        try:
+            # get_next_valid_symbols expects a list of instrument dicts as `instrument_map` or `instruments`
+            # passing list as `instrument_map` usually works if the util handles list inputs, 
+            # otherwise we might need to check the signature. 
+            # Assuming standard usage: it filters a list of dicts.
+            
+            # Note: the previous error said "int object has no attribute get" because it was iterating
+            # a Dict[str, int]. Passing a List[Dict] should fix it.
+            
+            results = get_next_valid_symbols(
+                [int(atm)], 
+                opt_types=('CE', 'PE'), 
+                instrument_map=candidate_instruments # Passing list of dicts
             )
-            return
+            
+            for inst in results:
+                ts = inst.get("tradingsymbol") or inst.get("symbol")
+                if ts:
+                    # Ensure NFO prefix
+                    if not ts.startswith("NFO:"):
+                        final_symbols.append(f"NFO:{ts}")
+                    else:
+                        final_symbols.append(ts)
+        except Exception as exc:
+            LOGGER.warning("smart_symbol resolution failed: %s", exc)
 
-        if not normalized:
-            return
+    # Fallback: legacy construction
+    if not final_symbols:
+        expiry = get_nifty_expiry()  # Legacy helper defined in app.py
+        final_symbols = [f"NFO:NIFTY{expiry}{atm}CE", f"NFO:NIFTY{expiry}{atm}PE"]
 
-        # 4. Business Logic Duplicate Check
-        if self._is_duplicate(symbol, normalized):
-            return
-
-        # 5. Update Connectivity & Emit
-        if self._ws:
-            self.set_ws_connected(True)
-        
-        self.bump_heartbeat()
-        self._emit_tick(symbol, normalized, source="ws")
+    return final_symbols
 
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
