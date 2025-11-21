@@ -1812,11 +1812,18 @@ def _get_symbols(config: AppConfig, resolver: InstrumentResolver | None = None) 
             
             # Note: the previous error said "int object has no attribute get" because it was iterating
             # a Dict[str, int]. Passing a List[Dict] should fix it.
-            
+            # Convert list of contract dicts to a map {token: contract}
+            # smart_symbol expects a dict-like interface (instrument_map.get)
+            contract_map = {}
+            for c in contracts:
+                t = c.get("instrument_token")
+                if t:
+                    contract_map[int(t)] = c
+
             results = get_next_valid_symbols(
                 [int(atm)], 
                 opt_types=('CE', 'PE'), 
-                instrument_map=candidate_instruments # Passing list of dicts
+                instrument_map=contract_map 
             )
             
             for inst in results:
