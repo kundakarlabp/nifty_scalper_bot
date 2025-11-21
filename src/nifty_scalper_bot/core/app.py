@@ -1758,52 +1758,57 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price (Robust Multi-Variant)
+    # 2. Fetch Live Spot Price
     if broker:
         try:
-            # Try standard Zerodha symbol first, then fallback variants
-            variants = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            # Try multiple common formats for Nifty 50 spot
+            candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            for underlying in variants:
+            # Method A: broker.ltp(list)
+            if hasattr(broker, "ltp"):
                 try:
-                    # Attempt both 'get_quote' and 'ltp' methods
-                    quote = getattr(broker, "get_quote", lambda x: None)(underlying) or \
-                            getattr(broker, "ltp", lambda x: None)(underlying)
-                    
+                    quote = broker.ltp(candidates)
                     if quote:
-                        # Handle diverse broker response structures
-                        # Case A: Flat dict {'last_price': 26000}
-                        # Case B: Nested dict {'NSE:NIFTY 50': {'last_price': 26000}}
-                        val = quote
-                        if isinstance(quote, dict) and underlying in quote:
-                             val = quote[underlying]
-                        
-                        if isinstance(val, dict):
-                            ltp_raw = val.get("last_price") or val.get("ltp") or val.get("close")
-                            ltp = float(ltp_raw) if ltp_raw else 0.0
-                        elif isinstance(val, (int, float)):
-                            ltp = float(val)
-                            
-                        if ltp > 0:
-                            LOGGER.info(f"✅ Fetched live price via '{underlying}': {ltp}")
-                            break # Success!
+                        for key in candidates:
+                            val = quote.get(key)
+                            if isinstance(val, dict):
+                                ltp = float(val.get("last_price") or 0)
+                            elif isinstance(val, (int, float)):
+                                ltp = float(val)
+                            if ltp > 0: break
                 except Exception:
-                    continue # Try next variant
+                    pass
+            
+            # Method B: broker.get_quote(str)
+            if ltp == 0 and hasattr(broker, "get_quote"):
+                try:
+                    for key in candidates:
+                        quote = broker.get_quote(key)
+                        if quote:
+                            val = quote.get(key) or quote
+                            if isinstance(val, dict):
+                                ltp = float(val.get("last_price") or val.get("ltp") or val.get("close") or 0)
+                            if ltp > 0: break
+                except Exception:
+                    pass
 
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"Live NIFTY Spot: {ltp} -> Dynamic ATM: {atm_price}")
+                LOGGER.info(f"Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
             else:
-                LOGGER.warning(f"⚠️ Could not fetch live price with any variant {variants}. Using default 24000.")
-                atm_price = 24000
+                LOGGER.warning("Live price fetch returned 0 or failed.")
+
         except Exception as exc:
             LOGGER.warning(f"Error fetching live price: {exc}")
-            atm_price = 24000
-    else:
-        atm_price = 24000
 
-    # 3. Generate Strikes (ATM +/- 2)
+    # 3. Fallback Logic (If Broker API fails)
+    if atm_price is None:
+        fallback_base = 26000 
+        LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
+        atm_price = fallback_base
+
+    # 4. Generate Strikes (ATM +/- 2)
     strike_step = 50
     strikes_to_fetch = [
         atm_price - (2 * strike_step), 
@@ -1813,9 +1818,10 @@ def _get_symbols(
         atm_price + (2 * strike_step), 
     ]
 
-    # 4. Attempt Smart Resolution
+    # 5. Resolve Symbols
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
+        
         contracts = []
         if resolver:
             if hasattr(resolver, "option_contracts"):
@@ -1825,8 +1831,15 @@ def _get_symbols(
                 for c_list in raw.values():
                     contracts.extend(c_list)
         
-        if contracts and get_next_valid_symbols:
-            # Pass list directly to fix 'list object has no attribute get' error
+        # FIX: Initialize contract_map here to avoid NameError
+        contract_map = {}
+        if contracts:
+            for c in contracts:
+                t = c.get("instrument_token")
+                if t: contract_map[int(t)] = c
+        
+        if contract_map and get_next_valid_symbols:
+            # Pass the MAP, not the list
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
@@ -1844,13 +1857,13 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 5. Robust Weekly Fallback
+    # 6. Manual Fallback (If Smart Resolution failed)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
         
-        # Target TUESDAY (Weekly Expiry)
-        target_weekday = 1 
+        # Calculate Next Valid Tuesday
+        target_weekday = 1 # Tuesday
         today_weekday = now.weekday() 
         days_ahead = 0
         
@@ -1888,8 +1901,7 @@ def _get_symbols(
                     if resolver.resolve(monthly_sym):
                          final_symbols.append(monthly_sym)
                     else:
-                         # Just add weekly if validation fails, better to try
-                         final_symbols.append(weekly_sym)
+                         LOGGER.debug(f"Skipping {strike}{kind}: Not found")
                 else:
                     final_symbols.append(weekly_sym)
         
