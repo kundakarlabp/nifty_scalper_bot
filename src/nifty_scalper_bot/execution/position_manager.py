@@ -166,9 +166,11 @@ class Position:
     def unrealized_pnl_pct(self) -> float:
         """Return the unrealised profit or loss as a percentage of entry notional."""
 
+        # FIX: Guard against division by zero
         notional = abs(self.entry_price * self.quantity)
         if notional == 0:
             return 0.0
+            
         return (self.unrealized_pnl / notional) * 100.0
 
     @property
