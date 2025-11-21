@@ -27,7 +27,8 @@ LOGGER = get_logger(__name__)
 
 try:
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-    from nifty_scalper_bot.data.resolver import InstrumentResolver
+    # FIX: Correct import path from 'resolver' to 'instruments'
+    from nifty_scalper_bot.data.instruments import InstrumentResolver
 except Exception:  # pragma: no cover - defensive import
     MarketDataManager = object  # type: ignore
     InstrumentResolver = object  # type: ignore
@@ -323,18 +324,7 @@ class StrikeSelector:
 
     @property
     def settings(self) -> "SelectorSettings":
-        """Return selector configuration.
-
-        Args:
-            None
-
-        Returns:
-            SelectorSettings: Active selector configuration in use.
-
-        Raises:
-            RuntimeError: Never raised; retained for interface consistency.
-        """
-
+        """Return selector configuration."""
         return self._selector_settings
 
     def _get_mdm_and_resolver(
@@ -370,9 +360,6 @@ class StrikeSelector:
         Returns:
             SelectedContract | None: The best contract or ``None`` when no
             candidate meets configured filters.
-
-        Raises:
-            ValueError: If ``underlying`` is empty.
         """
 
         LOGGER.debug(
@@ -581,21 +568,7 @@ class StrikeSelector:
         roll_minutes: int,
         special_dates: set[date],
     ) -> tuple[datetime | None, str]:
-        """Resolve preferred expiry using configured regime.
-
-        Args:
-            candidates: Sorted sequence of available expiries.
-            regime: Expiry regime such as ``"weekly"`` or ``"auto"``.
-            now: Current timestamp used for roll window calculations.
-            roll_minutes: Roll window duration in minutes.
-            special_dates: Set of dates treated as special expiries.
-
-        Returns:
-            Tuple containing the selected expiry (or ``None``) and the selection reason.
-
-        Raises:
-            None.
-        """
+        """Resolve preferred expiry using configured regime."""
 
         if not candidates:
             return None, "empty_pool"
@@ -728,17 +701,7 @@ def _delta_score(delta: float | None, target: float) -> float:
 
 
 def _normalize_option_type(option_type: str | None) -> str | None:
-    """Normalise and validate an option type token.
-
-    Args:
-        option_type: Raw option type token supplied by caller.
-
-    Returns:
-        str | None: ``"CE"`` or ``"PE"`` when valid; ``None`` when input is empty.
-
-    Raises:
-        ValueError: If the provided token is not recognised as a valid option type.
-    """
+    """Normalise and validate an option type token."""
 
     if option_type is None:
         return None
@@ -759,17 +722,7 @@ def _mid_price(bid: float | None, ask: float | None) -> float | None:
 
 
 def _normalize_exchange_symbol(symbol: str) -> str:
-    """Return an exchange-qualified trading symbol string.
-
-    Args:
-        symbol: Raw trading symbol possibly missing exchange prefix.
-
-    Returns:
-        str: Normalized symbol with uppercase text and inferred exchange prefix.
-
-    Raises:
-        None.
-    """
+    """Return an exchange-qualified trading symbol string."""
 
     normalized = (symbol or "").strip().upper()
     if not normalized:
