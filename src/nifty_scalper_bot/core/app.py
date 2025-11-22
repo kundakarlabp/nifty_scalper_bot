@@ -1797,6 +1797,10 @@ def _get_symbols(
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
+                global _LATEST_CTX
+                if _LATEST_CTX:
+                    _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
+            
             else:
                 LOGGER.warning("Live price fetch returned 0 or failed.")
 
