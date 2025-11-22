@@ -569,9 +569,10 @@ class TelegramBot:
             fetch_metric_summary=self._fetch_metric_summary,
             collect_recent_errors=self._collect_recent_errors,
             reconcile_status_line=self._reconcile_status_line,
-            reconcile_last_success_at=self._reconcile_last_success_at,
-            reconcile_last_failure_at=self._reconcile_last_failure_at,
-            reconcile_alert_failures=self._reconcile_alert_failures,
+            # CRITICAL FIX: Pass lambdas to fetch mutable state safely:
+            reconcile_last_success_at=lambda: self._reconcile_last_success_at,
+            reconcile_last_failure_at=lambda: self._reconcile_last_failure_at,
+            reconcile_alert_failures=lambda: self._reconcile_alert_failures,
             response_builder=self._response_builder,
             coerce_float_value=self._coerce_float_value,
             format_currency=self._format_currency,
