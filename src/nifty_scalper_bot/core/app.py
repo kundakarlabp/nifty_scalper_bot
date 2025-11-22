@@ -2144,6 +2144,96 @@ async def reconcile_positions_on_startup(
         raise
 
 
+def parse_nifty_option_symbol(symbol: str) -> dict | None:
+    """
+    Parse NIFTY option symbol to extract strike, expiry, and option type.
+    """
+    import re
+    from datetime import datetime, timedelta, timezone # Ensure timezone is imported
+    import calendar
+    
+    symbol = symbol.replace("NFO:", "").strip()
+    
+    # Monthly/Far Weekly Pattern: NIFTY25NOV25950CE
+    monthly_match = re.match(r'NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)', symbol)
+    if monthly_match:
+        year, month_str, strike, opt_type = monthly_match.groups()
+        month_names = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6, 'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+        month = month_names.get(month_str)
+        if month:
+            year_full = 2000 + int(year)
+            
+            # Find last Thursday of the month (Standard Monthly Expiry Logic)
+            last_day = calendar.monthrange(year_full, month)[1]
+            expiry = datetime(year_full, month, last_day)
+            while expiry.weekday() != 3: # Thursday is 3
+                expiry = expiry - timedelta(days=1)
+            
+            # Use total_seconds for float days_to_expiry
+            days_to_expiry = (expiry - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 86400.0
+            
+            return {
+                "strike": int(strike),
+                "expiry": expiry,
+                "days_to_expiry": max(days_to_expiry, 0.001),
+                "option_type": opt_type,
+                "symbol_type": "Monthly"
+            }
+    
+    # Simple pattern match for weekly/other (can be expanded)
+    weekly_match = re.match(r'NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)', symbol)
+    if weekly_match:
+        # Placeholder logic, needs proper date mapping for weeks
+        return {"strike": int(weekly_match.groups()[3]), "expiry": datetime.now(), "days_to_expiry": 3.0, "option_type": weekly_match.groups()[4], "symbol_type": "Weekly (Approx)"}
+
+    return None
+
+def calculate_greeks_simple(
+    spot: float,
+    strike: float,
+    days_to_expiry: float,
+    option_type: str,
+    volatility: float = 0.20, # 20% IV assumption
+) -> dict:
+    """
+    Simple Greeks approximation (using Black-Scholes principles).
+    """
+    import math
+    
+    if days_to_expiry <= 0.0:
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "days_to_expiry": 0.0, "moneyness": spot/strike}
+    
+    t = days_to_expiry / 365.25 # Time in years
+    moneyness = spot / strike
+    
+    # Simple delta approximation (ATMs are 0.5/-0.5)
+    delta = 0.5
+    if option_type.upper() in ["CE", "CALL"]:
+        delta = 0.5 + min(0.49, max(0, moneyness - 1.0)) 
+    else:  # PUT
+        delta = -0.5 - min(0.49, max(0, 1.0 - moneyness)) 
+    
+    # Gamma (peaks at ATM)
+    gamma = 0.01 / (abs(moneyness - 1) + 0.01) * math.sqrt(1 / max(t, 0.01))
+    gamma = min(gamma, 0.05)
+    
+    # Theta (time decay)
+    theta_base = spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
+    theta = -1.0 * theta_base
+    
+    # Vega (volatility sensitivity)
+    vega = spot * math.sqrt(max(t, 0.01)) * 0.01
+    
+    return {
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "theta": round(theta, 2),
+        "vega": round(vega, 2),
+        "days_to_expiry": round(days_to_expiry, 1),
+        "moneyness": round(moneyness, 3),
+    }
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
