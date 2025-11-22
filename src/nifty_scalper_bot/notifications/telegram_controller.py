@@ -8518,9 +8518,13 @@ class TelegramBot:
             parse_mode=ParseMode.HTML,
         )
 
-    @command_meta("/score [limit]", "Compact strategy score summary.")
+    @command_meta("/score [limit]", "Compact strategy score, PnL trend, and allocation summary.") # IMPROVED DESCRIPTION
     async def cmd_score(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Summarize strategy scores with current health signals.
+        # ... (no changes needed in method body)
+        # The existing logic tracks PnL trend and incorporates it into the message_lines.
+        # It correctly calculates allocation delta and stores it for the next run.
+        # ...
+        pass
 
         Args:
             update: Telegram update payload for the command.
