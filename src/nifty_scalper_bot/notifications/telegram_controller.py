@@ -3893,6 +3893,7 @@ class TelegramBot:
                     ("sell", self.cmd_sell, ("exit",)),
                     ("cancel", self.cmd_cancel, ("flat",)),
                     ("net", self.cmd_ping, ("ping",)),
+                    ("rejections", self.cmd_rejections, ()),
                 ),
             ),
             (
@@ -3912,12 +3913,15 @@ class TelegramBot:
                     ("trail", self.cmd_guard, ()),
                     ("size", self.cmd_plan, ()),
                     ("journal", self.cmd_issues, ()),
+                    ("reconcile", self.cmd_reconcile_status, ()),
                 ),
             ),
             (
                 "strategy_execution_management",
                 (
                     ("strategies", self.cmd_strategies, ("sig",)),
+                    ("signals", self.cmd_signals, ()),       
+                    ("strategy_pnl", self.cmd_strategy_pnl, ()),
                     (
                         "strategy_scores",
                         self.cmd_strategy_scores,
@@ -3959,6 +3963,7 @@ class TelegramBot:
                 "logging_error_reporting",
                 (
                     ("logs", self.cmd_tail, ("tail",)),
+                    ("latencies", self.cmd_latencies, ()),
                     ("dumpLogs", self.cmd_dump_logs, ()),
                     ("errors", self.cmd_errors, ()),
                     ("issues", self.cmd_issues, ()),
