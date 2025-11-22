@@ -3634,7 +3634,18 @@ class OrderManager:
             for order in pending:
                 try:
                     self._refresh_order(order.order_id)
-                except Exception as exc:  # noqa: BLE001
+                except RateLimitError:
+                    # Back off hard on rate limits
+                    time_module.sleep(self.POLL_INTERVAL_SEC * 10)
+                    break
+                except Exception as exc:
+                    # CRITICAL FIX: Check for fatal broker errors (401/403)
+                    error_str = str(exc)
+                    if "401" in error_str or "403" in error_str or "access denied" in error_str.lower():
+                        self._logger.critical("FATAL: Broker session expired during monitoring. Stopping monitor.")
+                        self._stop_event.set()
+                        return
+                    
                     self._logger.error(
                         "Order poll failed for %s: %s", order.order_id, exc
                     )
