@@ -12234,41 +12234,6 @@ class TelegramBot:
              await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
 
 
-    @command_meta("/rejections", "Lists recent order rejections by reason and count.")
-    async def cmd_rejections(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        try:
-            # We assume metric summary contains 'order_rejections_5m' or similar keys, collected via _collect_recent_errors
-            rejection_map = self._collect_recent_errors(limit=20)
-            
-            # Filter specifically for rejection-like reasons 
-            filtered_rejections = {
-                k: v for k, v in rejection_map.items() 
-                if 'reject' in k.lower() or 'block' in k.lower() or 'margin' in k.lower() or 'failure' in k.lower()
-            }
-            
-            if not filtered_rejections:
-                await self._reply(chat, ctx, "No recent order rejections or critical failures recorded in metrics (last 5m).")
-                return
-
-            rb = self._response_builder
-            lines: list[str] = [f"{rb.section('Recent Order Rejections')} {EMOJI['fail']}", ]
-            
-            for reason, count in sorted(filtered_rejections.items(), key=lambda item: item[1], reverse=True):
-                lines.append(f"❌ <b>{rb.esc(reason)}</b>: {count} times")
-            
-            lines.append(f"\n{EMOJI['hint']} **Hint**: Review detailed logs or broker status for fatal errors (e.g., Auth, Margin).")
-
-            await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
-            
-        except Exception as exc:  # noqa: BLE001
-            log.error("Failure in cmd_rejections: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, "Failed to retrieve rejection data.")
-
-
     @command_meta("/latencies", "Summary of order and tick processing latency.")
     async def cmd_latencies(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
