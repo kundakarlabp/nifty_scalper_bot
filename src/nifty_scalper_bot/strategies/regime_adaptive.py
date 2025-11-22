@@ -406,6 +406,7 @@ class RegimeAdaptiveStrategy(Strategy):
                         "regime": regime,
                         "reasons": reasons,
                         "stats": dict(self._filter_stats),
+                        "snapshot": dict(snapshot),
                     },
                 )
                 return False, reasons
