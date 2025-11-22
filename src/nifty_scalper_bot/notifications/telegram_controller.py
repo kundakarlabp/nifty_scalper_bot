@@ -106,10 +106,6 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 from nifty_scalper_bot.utils.response_builder import EMOJI, RB, ResponseBuilder
 from telegram import Bot, Chat, InputFile, Message, Update
-from .execution_diagnostics_controller import (
-    ExecutionDiagnosticsController,
-    ExecutionControllerDeps,
-)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
@@ -565,19 +561,6 @@ class TelegramBot:
         self._pending_confirmation: dict[str, t.Any] | None = None
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
-        exec_deps = ExecutionControllerDeps(
-            fetch_metric_summary=self._fetch_metric_summary,
-            collect_recent_errors=self._collect_recent_errors,
-            reconcile_status_line=self._reconcile_status_line,
-            # CRITICAL FIX: Pass lambdas to fetch mutable state safely:
-            reconcile_last_success_at=lambda: self._reconcile_last_success_at,
-            reconcile_last_failure_at=lambda: self._reconcile_last_failure_at,
-            reconcile_alert_failures=lambda: self._reconcile_alert_failures,
-            response_builder=self._response_builder,
-            coerce_float_value=self._coerce_float_value,
-            format_currency=self._format_currency,
-        )
-        self._exec_controller = ExecutionDiagnosticsController(exec_deps)
 
     def _command_registered(self, app: Application, command: str) -> bool:
         """Return ``True`` when *command* is already wired on *app*.
@@ -3910,7 +3893,6 @@ class TelegramBot:
                     ("sell", self.cmd_sell, ("exit",)),
                     ("cancel", self.cmd_cancel, ("flat",)),
                     ("net", self.cmd_ping, ("ping",)),
-                    ("rejections", self.cmd_rejections, ()),
                 ),
             ),
             (
@@ -3930,15 +3912,12 @@ class TelegramBot:
                     ("trail", self.cmd_guard, ()),
                     ("size", self.cmd_plan, ()),
                     ("journal", self.cmd_issues, ()),
-                    ("reconcile", self.cmd_reconcile_status, ()),
                 ),
             ),
             (
                 "strategy_execution_management",
                 (
                     ("strategies", self.cmd_strategies, ("sig",)),
-                    ("signals", self.cmd_signals, ()),       
-                    ("strategy_pnl", self.cmd_strategy_pnl, ()),
                     (
                         "strategy_scores",
                         self.cmd_strategy_scores,
@@ -3980,7 +3959,6 @@ class TelegramBot:
                 "logging_error_reporting",
                 (
                     ("logs", self.cmd_tail, ("tail",)),
-                    ("latencies", self.cmd_latencies, ()),
                     ("dumpLogs", self.cmd_dump_logs, ()),
                     ("errors", self.cmd_errors, ()),
                     ("issues", self.cmd_issues, ()),
@@ -8540,13 +8518,9 @@ class TelegramBot:
             parse_mode=ParseMode.HTML,
         )
 
-    @command_meta("/score [limit]", "Compact strategy score, PnL trend, and allocation summary.") # IMPROVED DESCRIPTION
+    @command_meta("/score [limit]", "Compact strategy score summary.")
     async def cmd_score(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        # ... (no changes needed in method body)
-        # The existing logic tracks PnL trend and incorporates it into the message_lines.
-        # It correctly calculates allocation delta and stores it for the next run.
-        # ...
-       
+        """Summarize strategy scores with current health signals.
 
         Args:
             update: Telegram update payload for the command.
@@ -9614,13 +9588,8 @@ class TelegramBot:
                 )
                 lines.append(f"  stats={stats_line}")
         return lines, snapshots[-1]
-      
-    @command_meta("/trades", "Recent filled orders (trades).")
+
     async def cmd_trades(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        # ... (no changes needed in method body)
-        # The existing logic already filters for fills using:
-        # fills = [order for order in history if str(getattr(order, "status", "")).upper().endswith("FILLED")]
-        # ...
         chat = await self._guard(update)
         if chat is None:
             return
@@ -11724,53 +11693,6 @@ class TelegramBot:
         )
         await self.cmd_qprobe(update, ctx)
 
-
-
-    @command_meta("/rejections", "Lists recent order rejections by reason and count.")
-    async def cmd_rejections(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles the /rejections command by delegating to the execution controller."""
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        # Delegation: The core logic is in the external ExecutionDiagnosticsController
-        try:
-            await self._exec_controller.cmd_rejections(update, ctx)
-        except Exception as exc:
-            # Fallback reply in case the controller fails unexpectedly
-            log.error("Failure delegating cmd_rejections: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, f"Rejections command failed: {self._short_reason(str(exc))}")
-
-
-    @command_meta("/latencies", "Summary of order and tick processing latency.")
-    async def cmd_latencies(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles the /latencies command by delegating to the execution controller."""
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        # Delegation: The core logic is in the external controller
-        try:
-            await self._exec_controller.cmd_latencies(update, ctx)
-        except Exception as exc:
-            log.error("Failure delegating cmd_latencies: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, f"Latencies command failed: {self._short_reason(str(exc))}")
-
-
-    @command_meta("/reconcile", "Health and history of position reconciliation.")
-    async def cmd_reconcile_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handles the /reconcile command by delegating to the execution controller."""
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        # Delegation: The core logic is in the external controller
-        try:
-            await self._exec_controller.cmd_reconcile_status(update, ctx)
-        except Exception as exc:
-            log.error("Failure delegating cmd_reconcile_status: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, f"Reconcile command failed: {self._short_reason(str(exc))}")
-
     @command_meta("/gate", "Inspect micro risk gate status.")
     async def cmd_gate(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
@@ -12179,211 +12101,6 @@ class TelegramBot:
                 "rm_source": rm_source,
             },
         )
-     
-
-
-    @command_meta("/signals [STRATEGY]", "Show the last few computed trading signals.")
-    async def cmd_signals(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        manager = getattr(self.deps, "strategy_manager", None)
-        if manager is None:
-            await self._reply(chat, ctx, "Strategy manager unavailable.")
-            return
-
-        target_strategy = (ctx.args[0].strip() if ctx.args else None)
-
-        try:
-            get_history = getattr(manager, "get_signal_history", None)
-            if not callable(get_history):
-                await self._reply(chat, ctx, "Signal history not supported in this manager.")
-                return
-
-            # Note: We assume the external manager handles filtering by strategy_name if provided
-            history = get_history(limit=10, strategy_name=target_strategy)
-        except Exception as exc:  # noqa: BLE001
-            log.error("Failure in cmd_signals fetch: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, "Failed to fetch signal history.")
-            return
-
-        if not history:
-            await self._reply(chat, ctx, f"No recent signals found for {target_strategy or 'all strategies'}.")
-            return
-
-        rb = self._response_builder
-        lines: list[str] = [f"{rb.section('Signal History')} {EMOJI['chart']}", ]
-        for entry in history:
-            ts_raw = entry.get("timestamp", time.time())
-            ts = datetime.fromtimestamp(ts_raw, timezone.utc).strftime("%H:%M:%S")
-            strategy = entry.get("strategy", "N/A")
-            signal = entry.get("signal", "NONE")
-            confidence = float(entry.get("confidence", 0.0))
-            reason = rb.esc(str(entry.get("reason", "")[:40]))
-            
-            emoji = "🟢" if "ENTRY" in signal else ("🔴" if "EXIT" in signal else "⚪")
-            
-            lines.append(
-                f"{emoji} <code>{ts}</code> <b>{rb.esc(strategy)}</b>: {rb.esc(signal)} ({confidence:.2f}) - {reason}"
-            )
-        
-        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
-
-
-    @command_meta("/strategy_pnl [STRATEGY]", "Detailed P&L breakdown by strategy.")
-    async def cmd_strategy_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        manager = getattr(self.deps, "strategy_manager", None)
-        if manager is None:
-            await self._reply(chat, ctx, "Strategy manager unavailable.")
-            return
-
-        target_strategy = (ctx.args[0].strip() if ctx.args else None)
-
-        try:
-            get_snapshot = getattr(manager, "get_performance_snapshot", None)
-            if not callable(get_snapshot):
-                await self._reply(chat, ctx, "Performance snapshot unavailable.")
-                return
-            snapshot = get_snapshot()
-        except Exception as exc:  # noqa: BLE001
-            log.error("Failure in cmd_strategy_pnl fetch: %s", exc, exc_info=exc)
-            await self._reply(chat, ctx, "Failed to fetch performance snapshot.")
-            return
-
-        if not snapshot.get("strategies"):
-            await self._reply(chat, ctx, "No performance data available.")
-            return
-
-        rb = self._response_builder
-        lines: list[str] = [f"{rb.section('Strategy P&L Snapshot')} {EMOJI['money']}", ]
-        
-        found_data = False
-        for name, data in snapshot["strategies"].items():
-            if target_strategy and name.lower() != target_strategy.lower():
-                continue
-                
-            agg = data.get("aggregate", {})
-            # Use coerce helper for safe number parsing
-            realized = self._format_currency(self._coerce_float_value(agg.get("realized"), field=f"{name}.realized"), signed=True)
-            unrealized = self._format_currency(self._coerce_float_value(agg.get("unrealized"), field=f"{name}.unrealized"), signed=True)
-            win_rate = self._format_percent(self._coerce_float_value(agg.get("win_rate"), field=f"{name}.win_rate"))
-            trades = int(agg.get("trades", 0))
-            
-            lines.append(
-                f"<b>{rb.esc(name)}</b>"
-                f" (Trades: {trades})"
-                f" | R: {rb.esc(realized)}"
-                f" | U: {rb.esc(unrealized)}"
-                f" | Win: {rb.esc(win_rate)}"
-            )
-            
-            if target_strategy:
-                # Provide a drill-down when targeting a single strategy
-                max_dd = self._format_currency(self._coerce_float_value(agg.get('max_drawdown'), field='max_dd'))
-                win_loss_ratio = self._coerce_float_value(agg.get('win_loss_ratio'), field='w/l')
-                details = [
-                    f"Max Drawdown: {max_dd}",
-                    f"Win/Loss Ratio: {win_loss_ratio:.2f}" if win_loss_ratio is not None else "Win/Loss Ratio: n/a"
-                ]
-                lines.append(rb.bullets(details))
-
-            found_data = True
-
-        if not found_data:
-             await self._reply(chat, ctx, f"No data found for strategy: {target_strategy}")
-        else:
-             await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
-
-
-    @command_meta("/latencies", "Summary of order and tick processing latency.")
-    async def cmd_latencies(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        rb = self._response_builder
-        summary_data = self._fetch_metric_summary()
-        
-        # Use explicit key lookup based on metric summary payload
-        tick_p95 = self._coerce_float_value(summary_data.get("tick_latency_p95"), field="tick_p95")
-        order_p95 = self._coerce_float_value(summary_data.get("order_latency_p95"), field="order_p95")
-        max_staleness = self._coerce_float_value(summary_data.get("max_tick_staleness"), field="max_staleness")
-        
-        lines: list[str] = [f"{rb.section('System Latencies')} {EMOJI['clock']}", ]
-
-        def _fmt_seconds(value: float | None) -> str:
-            if value is None: return "n/a"
-            return f"{value:.3f}s"
-        
-        lines.append(f"📈 **Tick Latency (p95)**: <code>{_fmt_seconds(tick_p95)}</code>")
-        lines.append(f"🧾 **Order Latency (p95)**: <code>{_fmt_seconds(order_p95)}</code>")
-        lines.append(f"⏱️ **Max Tick Staleness**: <code>{_fmt_seconds(max_staleness)}</code>")
-
-        if max_staleness and max_staleness > 5.0:
-            lines.append(f"{EMOJI['warn']} **Warning**: Max staleness exceeds 5s, check market data connection or processing lag.")
-        
-        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
-
-
-    @command_meta("/reconcile", "Health and history of position reconciliation.")
-    async def cmd_reconcile_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        
-        rb = self._response_builder
-        
-        # Get formatted line and hint from existing internal state
-        reconcile_line, reconcile_hint = self._reconcile_status_line()
-        
-        lines: list[str] = [f"{rb.section('Reconciliation Health')} {EMOJI['exchange']}", ]
-        
-        if reconcile_line:
-            lines.append(reconcile_line)
-        else:
-            lines.append("ℹ️ Reconciliation data not yet received or is unavailable.")
-        
-        # Display specific timestamps for context
-        # Note: We must display the timestamp in HTML, thus using the inner part of _reconcile_status_line's approach
-        
-        last_success_ts = self._reconcile_last_success_at
-        if last_success_ts:
-             # Ensure UTC is used for standard formatting
-            ts_utc = last_success_ts.astimezone(timezone.utc)
-            lines.append(f"✅ Last Success: <code>{ts_utc:%H:%M:%S}Z</code>")
-            
-        last_failure_ts = self._reconcile_last_failure_at
-        if last_failure_ts:
-            ts_utc = last_failure_ts.astimezone(timezone.utc)
-            # Use current failure streak count from internal state
-            failure_streak = self._reconcile_alert_failures
-            lines.append(f"❌ Last Failure: <code>{ts_utc:%H:%M:%S}Z</code> (Streak: {failure_streak})")
-
-        if reconcile_hint:
-            lines.append(f"\n{EMOJI['hint']} **Hint**: {reconcile_hint}")
-
-        # Add metric insight if available
-        metrics_summary = self._fetch_metric_summary()
-        reconcile_metrics = metrics_summary.get("position_reconcile", {})
-        if isinstance(reconcile_metrics, dict):
-            failures_5m = int(reconcile_metrics.get("failures_5m", 0) or 0)
-            successes_5m = int(reconcile_metrics.get("successes_5m", 0) or 0)
-            avg_latency = self._coerce_float_value(reconcile_metrics.get("latency_avg"), field="reco_latency")
-            
-            if failures_5m > 0 or successes_5m > 0:
-                lines.append(f"\n{rb.section('Recent Metrics')}")
-                lines.append(f"Successes (5m): {successes_5m}")
-                lines.append(f"Failures (5m): {failures_5m}")
-                if avg_latency is not None:
-                    lines.append(f"Avg Latency: {avg_latency:.3f}s")
-
-
-        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
-
-
 
     @command_meta("/balance", "Summarize broker balances by segment.")
     async def cmd_balance(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
