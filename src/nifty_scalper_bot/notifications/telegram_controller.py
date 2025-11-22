@@ -8529,7 +8529,7 @@ class TelegramBot:
         # The existing logic tracks PnL trend and incorporates it into the message_lines.
         # It correctly calculates allocation delta and stores it for the next run.
         # ...
-        pass
+       
 
         Args:
             update: Telegram update payload for the command.
@@ -9604,7 +9604,6 @@ class TelegramBot:
         # The existing logic already filters for fills using:
         # fills = [order for order in history if str(getattr(order, "status", "")).upper().endswith("FILLED")]
         # ...
-        pass
         chat = await self._guard(update)
         if chat is None:
             return
