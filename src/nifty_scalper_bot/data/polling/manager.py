@@ -29,274 +29,435 @@ TickHandler = Callable[[dict[str, object]], None]
 class PollingManager:
     """Run an asyncio loop that fetches ticks and emits observability metrics."""
 
-    # threshold for consecutive empty depth responses before emitting critical log
+    # Threshold for consecutive empty depth responses before emitting critical log
     _EMPTY_DEPTH_THRESHOLD = 3
+    
+    # Threshold for consecutive fetch failures before reconnect
+    _FAILURE_THRESHOLD = 5
 
-    def __init__(self, fetch_fn: TickFetcher, on_tick: TickHandler) -> None:
-        """Initialise the polling manager with fetch and dispatch callbacks.
+    def __init__(
+        self,
+        fetch_fn: TickFetcher,
+        on_tick: TickHandler,
+        interval_ms: int = 3000,
+        max_batch_size: int = 50,
+    ) -> None:
+        """
+        Initialize the polling manager.
 
         Args:
-            fetch_fn: Awaitable callable returning an iterable of tick dictionaries.
-            on_tick: Callback executed for every tick payload received.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If ``fetch_fn`` or ``on_tick`` is not callable.
+            fetch_fn: Async callable that returns an iterable of tick dicts
+            on_tick: Sync callable invoked per tick
+            interval_ms: Polling interval in milliseconds
+            max_batch_size: Maximum symbols to fetch per batch
         """
-
-        if not callable(fetch_fn):
-            raise ValueError('fetch_fn must be callable')
-        if not callable(on_tick):
-            raise ValueError('on_tick must be callable')
-        self._fetch_fn = fetch_fn
+        self._fetch = fetch_fn
         self._on_tick = on_tick
+        self._interval = interval_ms / 1000.0
+        self._max_batch = max_batch_size
+        self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._poll_task: Optional[asyncio.Task[None]] = None
-        self._last_success = time.monotonic()
-        self._reconnect_attempt = 0
-
-        # track consecutive empty-depth responses per symbol (tradingsymbol or token)
         self._empty_depth_counts: dict[str, int] = {}
+        self._consecutive_failures = 0
+        self._last_successful_fetch = time.time()
+        self._add_synthetic_depth = cfg.POLL_ADD_SYNTHETIC_DEPTH()
 
-    async def start(self) -> None:
-        """Start the polling loop if it is not already running.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            RuntimeError: If the polling task fails to start.
-        """
-
-        LOGGER.debug('Entered PollingManager.start', extra={'event': 'poll_start'})
+    def start(self) -> None:
+        """Start the polling loop in a background task."""
         if self._running:
-            LOGGER.info('PollingManager.start ignored; already running')
+            LOGGER.warning("PollingManager already running; ignoring start request.")
             return
-        try:
-            self._running = True
-            self._last_success = time.monotonic()
-            self._reconnect_attempt = 0
-            self._poll_task = asyncio.create_task(self._poll_loop(), name='poll.loop')
-            LOGGER.info('PollingManager started', extra={'event': 'poll_started'})
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error('Failure in PollingManager.start: %s', exc)
-            self._running = False
-            self._poll_task = None
-            raise RuntimeError('Failed to start polling manager') from exc
 
-    async def stop(self) -> None:
-        """Stop the polling loop and cancel the background task.
+        self._running = True
+        LOGGER.info(
+            "Starting PollingManager (interval=%.2fs, batch_size=%d, synthetic_depth=%s)",
+            self._interval,
+            self._max_batch,
+            self._add_synthetic_depth,
+            extra={
+                'event': 'polling_manager_start',
+                'interval_s': self._interval,
+                'batch_size': self._max_batch,
+                'synthetic_depth': self._add_synthetic_depth,
+            },
+        )
 
-        Args:
-            None.
+        loop = asyncio.get_event_loop()
+        self._task = loop.create_task(self._loop())
 
-        Returns:
-            None.
+    def stop(self) -> None:
+        """Stop the polling loop."""
+        if not self._running:
+            LOGGER.warning("PollingManager not running; ignoring stop request.")
+            return
 
-        Raises:
-            None.
-        """
-
-        LOGGER.debug('Entered PollingManager.stop', extra={'event': 'poll_stop'})
         self._running = False
-        task = self._poll_task
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._poll_task = None
-        LOGGER.info('PollingManager stopped', extra={'event': 'poll_stopped'})
+        LOGGER.info("Stopping PollingManager", extra={'event': 'polling_manager_stop'})
 
-    async def _poll_loop(self) -> None:
-        """Run the internal polling loop with adaptive intervals and backoff.
+        if self._task and not self._task.done():
+            self._task.cancel()
 
-        Args:
-            None.
+    async def _loop(self) -> None:
+        """Main polling loop with exponential backoff on failures."""
+        backoff_gen = exp_backoff(base_ms=500, max_ms=30000)
 
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        LOGGER.debug('Entered PollingManager._poll_loop', extra={'event': 'poll_loop'})
         while self._running:
-            market_open = is_market_open()
-            interval = (
-                cfg.POLL_INTERVAL_SECS_MARKET()
-                if market_open
-                else cfg.POLL_INTERVAL_SECS_OFFHOURS()
-            )
-            deadline = max(interval * 3.0, 5.0)
+            start = time.time()
+
             try:
                 await self._tick_once()
-                heartbeat_lag = time.monotonic() - self._last_success
-                if heartbeat_lag > deadline:
-                    phase = 'market' if market_open else 'offhours'
-                    LOGGER.warning(
-                        'Polling heartbeat missed: %.2fs>%0.2fs phase=%s',
-                        heartbeat_lag,
-                        deadline,
-                        phase,
-                        extra={
-                            'event': 'poll_heartbeat_miss',
-                            'lag': heartbeat_lag,
-                            'deadline': deadline,
-                            'phase': phase,
-                        },
+                
+                # Reset failure counter on success
+                self._consecutive_failures = 0
+                self._last_successful_fetch = time.time()
+                
+                # Sleep for interval
+                elapsed = time.time() - start
+                sleep_time = max(0, self._interval - elapsed)
+                
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                else:
+                    LOGGER.debug(
+                        "Polling cycle took longer than interval (%.2fs > %.2fs)",
+                        elapsed,
+                        self._interval,
+                        extra={'event': 'poll_cycle_slow', 'elapsed_s': elapsed}
                     )
-                    POLL_HEARTBEAT_SKIPS.labels(phase=phase).inc()
-                    raise RuntimeError('poll_heartbeat_miss')
-                await asyncio.sleep(max(interval, 0.0))
-            except asyncio.CancelledError:  # pragma: no cover - cooperative shutdown
-                raise
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error('Failure in PollingManager._poll_loop: %s', exc)
-                POLL_ERRORS.labels(reason=type(exc).__name__).inc()
-                POLL_RECONNECTS.labels(reason='error').inc()
-                delay = exp_backoff(
-                    self._reconnect_attempt,
-                    base=0.5,
-                    cap=float(cfg.POLL_RECONNECT_CAP_SECS()),
-                    jitter=0.2,
+
+            except asyncio.CancelledError:
+                LOGGER.info("PollingManager loop cancelled", extra={'event': 'poll_loop_cancelled'})
+                break
+
+            except Exception as exc:
+                self._consecutive_failures += 1
+                POLL_ERRORS.labels(reason='fetch_exception').inc()
+                
+                LOGGER.error(
+                    "Polling fetch failed (attempt %d/%d): %s",
+                    self._consecutive_failures,
+                    self._FAILURE_THRESHOLD,
+                    exc,
+                    extra={
+                        'event': 'poll_fetch_error',
+                        'consecutive_failures': self._consecutive_failures,
+                        'error': str(exc),
+                    },
+                    exc_info=True,
                 )
-                self._reconnect_attempt += 1
-                await asyncio.sleep(delay)
+
+                # Apply exponential backoff on repeated failures
+                if self._consecutive_failures >= self._FAILURE_THRESHOLD:
+                    backoff_ms = next(backoff_gen)
+                    LOGGER.warning(
+                        "Multiple consecutive failures (%d), backing off for %dms",
+                        self._consecutive_failures,
+                        backoff_ms,
+                        extra={'event': 'poll_backoff', 'backoff_ms': backoff_ms}
+                    )
+                    POLL_RECONNECTS.inc()
+                    await asyncio.sleep(backoff_ms / 1000.0)
+                else:
+                    # Short pause before retry
+                    await asyncio.sleep(1.0)
+
+        LOGGER.info("PollingManager loop exited", extra={'event': 'poll_loop_exit'})
 
     async def _tick_once(self) -> None:
-        """Fetch ticks once and dispatch them to the handler.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            RuntimeError: If the fetch callback fails.
-        """
-
-        LOGGER.debug('Entered PollingManager._tick_once', extra={'event': 'poll_tick'})
+        """Fetch and process a single batch of ticks."""
+        
+        # Fetch raw ticks from broker
         try:
-            ticks = await self._fetch_fn()
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error('Failure in PollingManager._tick_once fetch: %s', exc)
-            raise RuntimeError('poll_fetch_failed') from exc
-        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        POLL_LAST_TICK_TS.set(now_ms)
-        self._last_success = time.monotonic()
-        self._reconnect_attempt = 0
-        if not ticks:
+            raw_ticks = await self._fetch()
+        except Exception as fetch_exc:
+            LOGGER.error(
+                "Critical: fetch_fn raised exception: %s",
+                fetch_exc,
+                extra={'event': 'poll_fetch_fn_exception'},
+                exc_info=True,
+            )
+            raise
+
+        # Handle empty or None response
+        if not raw_ticks:
+            POLL_HEARTBEAT_SKIPS.inc()
+            LOGGER.debug(
+                "Fetch returned empty/None ticks",
+                extra={'event': 'poll_fetch_empty'}
+            )
             return
 
-        for tick in ticks:
-            exch_ts = tick.get('ts_ms') or tick.get('timestamp_ms')
-            if isinstance(exch_ts, (int, float)) and exch_ts > 0:
-                lag_ms = max(0, now_ms - int(exch_ts))
-                POLL_TICK_LAG_MS.set(lag_ms)
-
-            # --- NEW: detect empty market depth / malformed tick and ignore it ---
-            try:
-                # identify symbol key: prefer tradingsymbol if present else instrument_token
-                symbol_key = None
-                if 'tradingsymbol' in tick and tick.get('tradingsymbol'):
-                    symbol_key = str(tick.get('tradingsymbol'))
-                elif 'instrument_token' in tick and tick.get('instrument_token'):
-                    symbol_key = str(tick.get('instrument_token'))
-                else:
-                    # fallback to any symbol-like key if present
-                    if 'symbol' in tick and tick.get('symbol'):
-                        symbol_key = str(tick.get('symbol'))
-
-                # detect depth structure patterns that indicate "non-existent instrument" responses:
-                # - explicit depth object with empty 'buy' and 'sell' lists
-                # - missing any ltp/price fields AND depth fields present but empty
-                is_empty_depth = False
-                buy = tick.get('buy')
-                sell = tick.get('sell')
-                ltp = (
-                    _safe_float(tick.get('ltp'))
-                    or _safe_float(tick.get('last_price'))
-                    or _safe_float(tick.get('close'))
-                    or _safe_float(tick.get('price'))
+        # Process each tick
+        processed_count = 0
+        skipped_count = 0
+        
+        for tick in raw_ticks:
+            if not isinstance(tick, dict):
+                LOGGER.warning(
+                    "Non-dict tick received: %s",
+                    type(tick).__name__,
+                    extra={'event': 'poll_invalid_tick_type', 'type': type(tick).__name__}
                 )
-
-                if (isinstance(buy, (list, tuple)) and isinstance(sell, (list, tuple))
-                        and len(buy) == 0 and len(sell) == 0):
-                    is_empty_depth = True
-                elif ltp is None and ((buy is not None and sell is None) or (buy is None and sell is not None)):
-                    # partial depth and no price — treat defensively as empty
-                    is_empty_depth = True
-                # else, if ltp is None and both buy/sell are empty or missing — also treat as empty
-                elif ltp is None and ((buy is None and sell is None) or (isinstance(buy, (list, tuple)) and len(buy) == 0 and sell is None) or (isinstance(sell, (list, tuple)) and len(sell) == 0 and buy is None)):
-                    is_empty_depth = True
-
-                if is_empty_depth:
-                    # increment failure counter for this symbol; default key if missing
-                    key = symbol_key or "<unknown>"
-                    prev = self._empty_depth_counts.get(key, 0) + 1
-                    self._empty_depth_counts[key] = prev
-                    POLL_ERRORS.labels(reason='empty_depth').inc()
-                    LOGGER.warning(
-                        "Ignoring empty depth tick for %s (count=%d): %s",
-                        key,
-                        prev,
-                        _short_tick_repr(tick),
-                        extra={'event': 'poll_empty_depth', 'symbol': key, 'count': prev},
-                    )
-                    # After threshold reached — log critical (ops should investigate)
-                    if prev >= self._EMPTY_DEPTH_THRESHOLD:
-                        LOGGER.critical(
-                            "Repeated empty depth responses for %s (count=%d) — likely unresolved instrument or bad symbol formatting.",
-                            key,
-                            prev,
-                            extra={'event': 'poll_empty_depth_persistent', 'symbol': key, 'count': prev},
-                        )
-                    # Do not forward this tick to downstream handlers — prevents ghost polling effects.
-                    continue
-                else:
-                    # successful tick -> reset empty depth counter for symbol (if present)
-                    if symbol_key and self._empty_depth_counts.get(symbol_key):
-                        self._empty_depth_counts.pop(symbol_key, None)
-            except Exception as exc:  # defensive: malformed tick structure
-                LOGGER.debug("Failed to evaluate tick emptiness: %s; tick=%s", exc, _short_tick_repr(tick))
-
-            # dispatch to handler
-            try:
-                self._on_tick(tick)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error('Failure in PollingManager._tick_once on_tick: %s', exc)
-                # Continue processing remaining ticks even if one handler fails.
+                skipped_count += 1
                 continue
 
+            try:
+                # Validate and enrich tick
+                if not self._validate_tick(tick):
+                    skipped_count += 1
+                    continue
 
-# --- small helpers local to this module (non-exported) -----------------
-def _safe_float(value: object) -> float | None:
+                # Add synthetic depth if enabled and needed
+                if self._add_synthetic_depth:
+                    tick = self._enrich_tick_with_synthetic_depth(tick)
+
+                # Dispatch to handler
+                self._on_tick(tick)
+                processed_count += 1
+
+                # Update metrics
+                POLL_LAST_TICK_TS.set(time.time())
+                
+                # Track tick lag if timestamp available
+                tick_ts = tick.get('exchange_timestamp') or tick.get('timestamp')
+                if tick_ts:
+                    lag_ms = (time.time() - float(tick_ts)) * 1000
+                    POLL_TICK_LAG_MS.observe(lag_ms)
+
+            except Exception as exc:
+                LOGGER.error(
+                    "Failed to process tick: %s",
+                    exc,
+                    extra={
+                        'event': 'poll_tick_processing_error',
+                        'tick_sample': _short_tick_repr(tick),
+                    },
+                    exc_info=True,
+                )
+                skipped_count += 1
+                continue
+
+        # Log batch summary
+        if processed_count > 0 or skipped_count > 0:
+            LOGGER.debug(
+                "Batch processed: %d successful, %d skipped",
+                processed_count,
+                skipped_count,
+                extra={
+                    'event': 'poll_batch_complete',
+                    'processed': processed_count,
+                    'skipped': skipped_count,
+                }
+            )
+
+    def _validate_tick(self, tick: dict) -> bool:
+        """
+        Validate tick has minimum required data.
+        
+        Returns True if tick is valid, False if should be skipped.
+        """
+        
+        # Identify symbol key
+        symbol_key = (
+            tick.get('tradingsymbol')
+            or tick.get('instrument_token')
+            or tick.get('symbol')
+        )
+        
+        if not symbol_key:
+            LOGGER.debug(
+                "Tick missing symbol identifier: %s",
+                _short_tick_repr(tick),
+                extra={'event': 'poll_tick_no_symbol'}
+            )
+            return False
+
+        symbol_key = str(symbol_key)
+
+        # Extract price data
+        ltp = _safe_float(
+            tick.get('ltp')
+            or tick.get('last_price')
+            or tick.get('close')
+            or tick.get('price')
+        )
+
+        # Extract depth data
+        buy_depth = tick.get('buy') or tick.get('depth', {}).get('buy', [])
+        sell_depth = tick.get('sell') or tick.get('depth', {}).get('sell', [])
+
+        # Check if depth is empty
+        has_empty_depth = (
+            isinstance(buy_depth, (list, tuple)) and len(buy_depth) == 0 and
+            isinstance(sell_depth, (list, tuple)) and len(sell_depth) == 0
+        )
+
+        # ✅ CRITICAL LOGIC: Only reject if BOTH conditions are true:
+        # 1. No LTP/price data (ltp is None)
+        # 2. Empty depth arrays
+        if ltp is None and has_empty_depth:
+            # Completely empty tick - reject
+            self._empty_depth_counts[symbol_key] = self._empty_depth_counts.get(symbol_key, 0) + 1
+            count = self._empty_depth_counts[symbol_key]
+            
+            POLL_ERRORS.labels(reason='empty_depth').inc()
+            
+            if count >= self._EMPTY_DEPTH_THRESHOLD:
+                LOGGER.critical(
+                    "Persistent empty ticks for %s (count=%d) - likely invalid symbol",
+                    symbol_key,
+                    count,
+                    extra={
+                        'event': 'poll_empty_depth_persistent',
+                        'symbol': symbol_key,
+                        'count': count,
+                    }
+                )
+            else:
+                LOGGER.warning(
+                    "Empty tick for %s (count=%d): %s",
+                    symbol_key,
+                    count,
+                    _short_tick_repr(tick),
+                    extra={
+                        'event': 'poll_empty_depth',
+                        'symbol': symbol_key,
+                        'count': count,
+                    }
+                )
+            
+            return False
+
+        # ✅ CRITICAL: If we have LTP but no depth, it's VALID (off-market hours)
+        if ltp is not None and has_empty_depth:
+            LOGGER.debug(
+                "Accepting tick with LTP but no depth for %s (off-market hours)",
+                symbol_key,
+                extra={
+                    'event': 'poll_offhours_tick',
+                    'symbol': symbol_key,
+                    'ltp': ltp,
+                }
+            )
+            # Reset empty depth counter since we got valid data
+            self._empty_depth_counts.pop(symbol_key, None)
+
+        # Reset empty depth counter on valid tick
+        if symbol_key in self._empty_depth_counts:
+            self._empty_depth_counts.pop(symbol_key, None)
+
+        return True
+
+    def _enrich_tick_with_synthetic_depth(self, tick: dict) -> dict:
+        """
+        Add synthetic market depth if missing (for off-market testing).
+        
+        Only adds depth if:
+        1. Tick has LTP but no depth
+        2. LTP is positive
+        """
+        
+        # Check if depth already exists
+        buy_depth = tick.get('buy') or tick.get('depth', {}).get('buy', [])
+        sell_depth = tick.get('sell') or tick.get('depth', {}).get('sell', [])
+        
+        has_depth = (
+            isinstance(buy_depth, (list, tuple)) and len(buy_depth) > 0 and
+            isinstance(sell_depth, (list, tuple)) and len(sell_depth) > 0 and
+            buy_depth[0].get('price', 0) > 0
+        )
+        
+        if has_depth:
+            return tick  # Already has real depth
+
+        # Get LTP
+        ltp = _safe_float(
+            tick.get('ltp')
+            or tick.get('last_price')
+            or tick.get('close')
+            or tick.get('price')
+        )
+        
+        if ltp is None or ltp <= 0:
+            return tick  # Can't create synthetic depth
+
+        # Calculate realistic spread
+        # For NIFTY options: typically 0.3-0.8% spread
+        spread_pct = 0.005  # 0.5%
+        spread = max(ltp * spread_pct, 0.05)  # Min 0.05 (1 tick)
+        tick_size = 0.05  # NIFTY options tick size
+
+        # Build 5-level depth on each side
+        synthetic_buy = []
+        synthetic_sell = []
+        
+        for level in range(1, 6):
+            # Decreasing liquidity as you move away from LTP
+            quantity = 75 * (6 - level)  # 375, 300, 225, 150, 75
+            orders = level + 2  # 3, 4, 5, 6, 7
+            
+            # Calculate prices (rounded to tick size)
+            buy_price = round((ltp - (spread * level)) / tick_size) * tick_size
+            sell_price = round((ltp + (spread * level)) / tick_size) * tick_size
+            
+            synthetic_buy.append({
+                "quantity": quantity,
+                "price": max(buy_price, tick_size),  # Don't go below tick size
+                "orders": orders,
+            })
+            
+            synthetic_sell.append({
+                "quantity": quantity,
+                "price": sell_price,
+                "orders": orders,
+            })
+
+        # Update tick with synthetic depth
+        tick['buy'] = synthetic_buy
+        tick['sell'] = synthetic_sell
+        
+        # Add best bid/ask for convenience
+        tick['bid'] = synthetic_buy[0]['price']
+        tick['ask'] = synthetic_sell[0]['price']
+        
+        # Mark as synthetic for debugging
+        tick['_synthetic_depth'] = True
+        
+        symbol = tick.get('tradingsymbol') or tick.get('instrument_token')
+        LOGGER.debug(
+            "Added synthetic depth for %s (ltp=%.2f, bid=%.2f, ask=%.2f)",
+            symbol,
+            ltp,
+            tick['bid'],
+            tick['ask'],
+            extra={
+                'event': 'poll_synthetic_depth',
+                'symbol': symbol,
+                'ltp': ltp,
+                'spread_pct': spread_pct,
+            }
+        )
+        
+        return tick
+
+
+def _safe_float(value) -> Optional[float]:
+    """Safely convert value to float, returning None on failure."""
+    if value is None:
+        return None
     try:
-        if value is None:
-            return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
 def _short_tick_repr(tick: dict) -> str:
-    """Return a compact representation of tick for logging while avoiding huge payloads."""
-    try:
-        parts = []
-        for k in ("tradingsymbol", "instrument_token", "ltp", "last_price", "buy", "sell"):
-            if k in tick:
-                v = tick.get(k)
-                if isinstance(v, (list, tuple)):
-                    parts.append(f"{k}=[{len(v)}]")
-                else:
-                    parts.append(f"{k}={str(v)[:60]}")
-        return ",".join(parts)
-    except Exception:
-        return "<unserializable-tick>"
+    """Create a short string representation of tick for logging."""
+    if not isinstance(tick, dict):
+        return str(tick)
+    
+    # Show only key fields
+    symbol = tick.get('tradingsymbol') or tick.get('instrument_token') or tick.get('symbol')
+    ltp = tick.get('ltp') or tick.get('last_price')
+    
+    return f"{{symbol={symbol}, ltp={ltp}, keys={list(tick.keys())[:8]}}}"
