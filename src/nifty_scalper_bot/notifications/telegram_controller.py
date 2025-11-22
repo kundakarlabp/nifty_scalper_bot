@@ -9588,8 +9588,14 @@ class TelegramBot:
                 )
                 lines.append(f"  stats={stats_line}")
         return lines, snapshots[-1]
-
+      
+    @command_meta("/trades", "Recent filled orders (trades).")
     async def cmd_trades(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        # ... (no changes needed in method body)
+        # The existing logic already filters for fills using:
+        # fills = [order for order in history if str(getattr(order, "status", "")).upper().endswith("FILLED")]
+        # ...
+        pass
         chat = await self._guard(update)
         if chat is None:
             return
