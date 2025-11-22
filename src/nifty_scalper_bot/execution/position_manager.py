@@ -166,6 +166,9 @@ class Position:
     def unrealized_pnl_pct(self) -> float:
         """Return the unrealised profit or loss as a percentage of entry notional."""
 
+        # Direction logic is correct
+        direction = 1 if self.side == "LONG" else -1
+        
         # FIX: Guard against division by zero
         notional = abs(self.entry_price * self.quantity)
         if notional == 0:
