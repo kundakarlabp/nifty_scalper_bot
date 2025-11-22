@@ -736,7 +736,7 @@ class TradingSessionGuard:
         market_close: time = time(15, 30),
         session_max_age_hours: float = 22.0,
         timezone_name: str = "Asia/Kolkata",
-        allow_out_of_hours: bool = true,
+        allow_out_of_hours: bool = True,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._risk_manager = risk_manager
