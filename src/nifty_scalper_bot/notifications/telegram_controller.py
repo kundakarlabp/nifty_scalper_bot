@@ -12116,7 +12116,8 @@ class TelegramBot:
                 "rm_source": rm_source,
             },
         )
-      # New methods in TelegramBot class:
+     
+
 
     @command_meta("/signals [STRATEGY]", "Show the last few computed trading signals.")
     async def cmd_signals(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12136,6 +12137,7 @@ class TelegramBot:
                 await self._reply(chat, ctx, "Signal history not supported in this manager.")
                 return
 
+            # Note: We assume the external manager handles filtering by strategy_name if provided
             history = get_history(limit=10, strategy_name=target_strategy)
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in cmd_signals fetch: %s", exc, exc_info=exc)
@@ -12149,7 +12151,8 @@ class TelegramBot:
         rb = self._response_builder
         lines: list[str] = [f"{rb.section('Signal History')} {EMOJI['chart']}", ]
         for entry in history:
-            ts = datetime.fromtimestamp(entry.get("timestamp", time.time()), timezone.utc).strftime("%H:%M:%S")
+            ts_raw = entry.get("timestamp", time.time())
+            ts = datetime.fromtimestamp(ts_raw, timezone.utc).strftime("%H:%M:%S")
             strategy = entry.get("strategy", "N/A")
             signal = entry.get("signal", "NONE")
             confidence = float(entry.get("confidence", 0.0))
@@ -12177,7 +12180,11 @@ class TelegramBot:
         target_strategy = (ctx.args[0].strip() if ctx.args else None)
 
         try:
-            snapshot = manager.get_performance_snapshot()
+            get_snapshot = getattr(manager, "get_performance_snapshot", None)
+            if not callable(get_snapshot):
+                await self._reply(chat, ctx, "Performance snapshot unavailable.")
+                return
+            snapshot = get_snapshot()
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in cmd_strategy_pnl fetch: %s", exc, exc_info=exc)
             await self._reply(chat, ctx, "Failed to fetch performance snapshot.")
@@ -12190,11 +12197,13 @@ class TelegramBot:
         rb = self._response_builder
         lines: list[str] = [f"{rb.section('Strategy P&L Snapshot')} {EMOJI['money']}", ]
         
+        found_data = False
         for name, data in snapshot["strategies"].items():
             if target_strategy and name.lower() != target_strategy.lower():
                 continue
                 
             agg = data.get("aggregate", {})
+            # Use coerce helper for safe number parsing
             realized = self._format_currency(self._coerce_float_value(agg.get("realized"), field=f"{name}.realized"), signed=True)
             unrealized = self._format_currency(self._coerce_float_value(agg.get("unrealized"), field=f"{name}.unrealized"), signed=True)
             win_rate = self._format_percent(self._coerce_float_value(agg.get("win_rate"), field=f"{name}.win_rate"))
@@ -12209,23 +12218,22 @@ class TelegramBot:
             )
             
             if target_strategy:
-                # Provide a drill-down
+                # Provide a drill-down when targeting a single strategy
+                max_dd = self._format_currency(self._coerce_float_value(agg.get('max_drawdown'), field='max_dd'))
+                win_loss_ratio = self._coerce_float_value(agg.get('win_loss_ratio'), field='w/l')
                 details = [
-                    f"Max Drawdown: {self._format_currency(self._coerce_float_value(agg.get('max_drawdown'), field='max_dd'))}",
-                    f"Win/Loss Ratio: {self._coerce_float_value(agg.get('win_loss_ratio'), field='w/l'):.2f}"
+                    f"Max Drawdown: {max_dd}",
+                    f"Win/Loss Ratio: {win_loss_ratio:.2f}" if win_loss_ratio is not None else "Win/Loss Ratio: n/a"
                 ]
                 lines.append(rb.bullets(details))
 
-        if len(lines) == 1:
+            found_data = True
+
+        if not found_data:
              await self._reply(chat, ctx, f"No data found for strategy: {target_strategy}")
         else:
              await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
 
-
-#### B. Order Execution Debugging (`/rejections`, `/latencies`, `/reconcile`)
-
-```python
-# New methods in TelegramBot class:
 
     @command_meta("/rejections", "Lists recent order rejections by reason and count.")
     async def cmd_rejections(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12234,16 +12242,17 @@ class TelegramBot:
             return
         
         try:
-            # Rejections are tracked in the metrics collector, typically filtered by a recent window (e.g., 5m)
-            rejection_map = self._collect_recent_errors(limit=20) 
-            # Filter specifically for rejection-like reasons if possible, using broader log errors as fallback
+            # We assume metric summary contains 'order_rejections_5m' or similar keys, collected via _collect_recent_errors
+            rejection_map = self._collect_recent_errors(limit=20)
+            
+            # Filter specifically for rejection-like reasons 
             filtered_rejections = {
                 k: v for k, v in rejection_map.items() 
-                if 'reject' in k.lower() or 'block' in k.lower() or 'margin' in k.lower()
+                if 'reject' in k.lower() or 'block' in k.lower() or 'margin' in k.lower() or 'failure' in k.lower()
             }
             
             if not filtered_rejections:
-                await self._reply(chat, ctx, "No recent order rejections recorded in metrics (last 5m).")
+                await self._reply(chat, ctx, "No recent order rejections or critical failures recorded in metrics (last 5m).")
                 return
 
             rb = self._response_builder
@@ -12251,6 +12260,8 @@ class TelegramBot:
             
             for reason, count in sorted(filtered_rejections.items(), key=lambda item: item[1], reverse=True):
                 lines.append(f"❌ <b>{rb.esc(reason)}</b>: {count} times")
+            
+            lines.append(f"\n{EMOJI['hint']} **Hint**: Review detailed logs or broker status for fatal errors (e.g., Auth, Margin).")
 
             await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
             
@@ -12268,6 +12279,7 @@ class TelegramBot:
         rb = self._response_builder
         summary_data = self._fetch_metric_summary()
         
+        # Use explicit key lookup based on metric summary payload
         tick_p95 = self._coerce_float_value(summary_data.get("tick_latency_p95"), field="tick_p95")
         order_p95 = self._coerce_float_value(summary_data.get("order_latency_p95"), field="order_p95")
         max_staleness = self._coerce_float_value(summary_data.get("max_tick_staleness"), field="max_staleness")
@@ -12283,7 +12295,7 @@ class TelegramBot:
         lines.append(f"⏱️ **Max Tick Staleness**: <code>{_fmt_seconds(max_staleness)}</code>")
 
         if max_staleness and max_staleness > 5.0:
-            lines.append(f"{EMOJI['warn']} **Warning**: Max staleness exceeds 5s, check market data connection.")
+            lines.append(f"{EMOJI['warn']} **Warning**: Max staleness exceeds 5s, check market data connection or processing lag.")
         
         await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
 
@@ -12296,7 +12308,7 @@ class TelegramBot:
         
         rb = self._response_builder
         
-        # This function fetches reconciliation status from the in-memory state
+        # Get formatted line and hint from existing internal state
         reconcile_line, reconcile_hint = self._reconcile_status_line()
         
         lines: list[str] = [f"{rb.section('Reconciliation Health')} {EMOJI['exchange']}", ]
@@ -12306,14 +12318,40 @@ class TelegramBot:
         else:
             lines.append("ℹ️ Reconciliation data not yet received or is unavailable.")
         
-        if self._reconcile_last_success_at:
-            lines.append(f"✅ Last Success: <code>{self._reconcile_last_success_at.astimezone(timezone.utc):%H:%M:%S}Z</code>")
+        # Display specific timestamps for context
+        # Note: We must display the timestamp in HTML, thus using the inner part of _reconcile_status_line's approach
+        
+        last_success_ts = self._reconcile_last_success_at
+        if last_success_ts:
+             # Ensure UTC is used for standard formatting
+            ts_utc = last_success_ts.astimezone(timezone.utc)
+            lines.append(f"✅ Last Success: <code>{ts_utc:%H:%M:%S}Z</code>")
             
-        if self._reconcile_last_failure_at:
-            lines.append(f"❌ Last Failure: <code>{self._reconcile_last_failure_at.astimezone(timezone.utc):%H:%M:%S}Z</code>")
+        last_failure_ts = self._reconcile_last_failure_at
+        if last_failure_ts:
+            ts_utc = last_failure_ts.astimezone(timezone.utc)
+            # Use current failure streak count from internal state
+            failure_streak = self._reconcile_alert_failures
+            lines.append(f"❌ Last Failure: <code>{ts_utc:%H:%M:%S}Z</code> (Streak: {failure_streak})")
 
         if reconcile_hint:
             lines.append(f"\n{EMOJI['hint']} **Hint**: {reconcile_hint}")
+
+        # Add metric insight if available
+        metrics_summary = self._fetch_metric_summary()
+        reconcile_metrics = metrics_summary.get("position_reconcile", {})
+        if isinstance(reconcile_metrics, dict):
+            failures_5m = int(reconcile_metrics.get("failures_5m", 0) or 0)
+            successes_5m = int(reconcile_metrics.get("successes_5m", 0) or 0)
+            avg_latency = self._coerce_float_value(reconcile_metrics.get("latency_avg"), field="reco_latency")
+            
+            if failures_5m > 0 or successes_5m > 0:
+                lines.append(f"\n{rb.section('Recent Metrics')}")
+                lines.append(f"Successes (5m): {successes_5m}")
+                lines.append(f"Failures (5m): {failures_5m}")
+                if avg_latency is not None:
+                    lines.append(f"Avg Latency: {avg_latency:.3f}s")
+
 
         await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
 
