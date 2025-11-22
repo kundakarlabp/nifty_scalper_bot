@@ -12101,6 +12101,208 @@ class TelegramBot:
                 "rm_source": rm_source,
             },
         )
+      # New methods in TelegramBot class:
+
+    @command_meta("/signals [STRATEGY]", "Show the last few computed trading signals.")
+    async def cmd_signals(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        manager = getattr(self.deps, "strategy_manager", None)
+        if manager is None:
+            await self._reply(chat, ctx, "Strategy manager unavailable.")
+            return
+
+        target_strategy = (ctx.args[0].strip() if ctx.args else None)
+
+        try:
+            get_history = getattr(manager, "get_signal_history", None)
+            if not callable(get_history):
+                await self._reply(chat, ctx, "Signal history not supported in this manager.")
+                return
+
+            history = get_history(limit=10, strategy_name=target_strategy)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_signals fetch: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, "Failed to fetch signal history.")
+            return
+
+        if not history:
+            await self._reply(chat, ctx, f"No recent signals found for {target_strategy or 'all strategies'}.")
+            return
+
+        rb = self._response_builder
+        lines: list[str] = [f"{rb.section('Signal History')} {EMOJI['chart']}", ]
+        for entry in history:
+            ts = datetime.fromtimestamp(entry.get("timestamp", time.time()), timezone.utc).strftime("%H:%M:%S")
+            strategy = entry.get("strategy", "N/A")
+            signal = entry.get("signal", "NONE")
+            confidence = float(entry.get("confidence", 0.0))
+            reason = rb.esc(str(entry.get("reason", "")[:40]))
+            
+            emoji = "🟢" if "ENTRY" in signal else ("🔴" if "EXIT" in signal else "⚪")
+            
+            lines.append(
+                f"{emoji} <code>{ts}</code> <b>{rb.esc(strategy)}</b>: {rb.esc(signal)} ({confidence:.2f}) - {reason}"
+            )
+        
+        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
+
+
+    @command_meta("/strategy_pnl [STRATEGY]", "Detailed P&L breakdown by strategy.")
+    async def cmd_strategy_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        manager = getattr(self.deps, "strategy_manager", None)
+        if manager is None:
+            await self._reply(chat, ctx, "Strategy manager unavailable.")
+            return
+
+        target_strategy = (ctx.args[0].strip() if ctx.args else None)
+
+        try:
+            snapshot = manager.get_performance_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_strategy_pnl fetch: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, "Failed to fetch performance snapshot.")
+            return
+
+        if not snapshot.get("strategies"):
+            await self._reply(chat, ctx, "No performance data available.")
+            return
+
+        rb = self._response_builder
+        lines: list[str] = [f"{rb.section('Strategy P&L Snapshot')} {EMOJI['money']}", ]
+        
+        for name, data in snapshot["strategies"].items():
+            if target_strategy and name.lower() != target_strategy.lower():
+                continue
+                
+            agg = data.get("aggregate", {})
+            realized = self._format_currency(self._coerce_float_value(agg.get("realized"), field=f"{name}.realized"), signed=True)
+            unrealized = self._format_currency(self._coerce_float_value(agg.get("unrealized"), field=f"{name}.unrealized"), signed=True)
+            win_rate = self._format_percent(self._coerce_float_value(agg.get("win_rate"), field=f"{name}.win_rate"))
+            trades = int(agg.get("trades", 0))
+            
+            lines.append(
+                f"<b>{rb.esc(name)}</b>"
+                f" (Trades: {trades})"
+                f" | R: {rb.esc(realized)}"
+                f" | U: {rb.esc(unrealized)}"
+                f" | Win: {rb.esc(win_rate)}"
+            )
+            
+            if target_strategy:
+                # Provide a drill-down
+                details = [
+                    f"Max Drawdown: {self._format_currency(self._coerce_float_value(agg.get('max_drawdown'), field='max_dd'))}",
+                    f"Win/Loss Ratio: {self._coerce_float_value(agg.get('win_loss_ratio'), field='w/l'):.2f}"
+                ]
+                lines.append(rb.bullets(details))
+
+        if len(lines) == 1:
+             await self._reply(chat, ctx, f"No data found for strategy: {target_strategy}")
+        else:
+             await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
+
+
+#### B. Order Execution Debugging (`/rejections`, `/latencies`, `/reconcile`)
+
+```python
+# New methods in TelegramBot class:
+
+    @command_meta("/rejections", "Lists recent order rejections by reason and count.")
+    async def cmd_rejections(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        try:
+            # Rejections are tracked in the metrics collector, typically filtered by a recent window (e.g., 5m)
+            rejection_map = self._collect_recent_errors(limit=20) 
+            # Filter specifically for rejection-like reasons if possible, using broader log errors as fallback
+            filtered_rejections = {
+                k: v for k, v in rejection_map.items() 
+                if 'reject' in k.lower() or 'block' in k.lower() or 'margin' in k.lower()
+            }
+            
+            if not filtered_rejections:
+                await self._reply(chat, ctx, "No recent order rejections recorded in metrics (last 5m).")
+                return
+
+            rb = self._response_builder
+            lines: list[str] = [f"{rb.section('Recent Order Rejections')} {EMOJI['fail']}", ]
+            
+            for reason, count in sorted(filtered_rejections.items(), key=lambda item: item[1], reverse=True):
+                lines.append(f"❌ <b>{rb.esc(reason)}</b>: {count} times")
+
+            await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
+            
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_rejections: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, "Failed to retrieve rejection data.")
+
+
+    @command_meta("/latencies", "Summary of order and tick processing latency.")
+    async def cmd_latencies(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        rb = self._response_builder
+        summary_data = self._fetch_metric_summary()
+        
+        tick_p95 = self._coerce_float_value(summary_data.get("tick_latency_p95"), field="tick_p95")
+        order_p95 = self._coerce_float_value(summary_data.get("order_latency_p95"), field="order_p95")
+        max_staleness = self._coerce_float_value(summary_data.get("max_tick_staleness"), field="max_staleness")
+        
+        lines: list[str] = [f"{rb.section('System Latencies')} {EMOJI['clock']}", ]
+
+        def _fmt_seconds(value: float | None) -> str:
+            if value is None: return "n/a"
+            return f"{value:.3f}s"
+        
+        lines.append(f"📈 **Tick Latency (p95)**: <code>{_fmt_seconds(tick_p95)}</code>")
+        lines.append(f"🧾 **Order Latency (p95)**: <code>{_fmt_seconds(order_p95)}</code>")
+        lines.append(f"⏱️ **Max Tick Staleness**: <code>{_fmt_seconds(max_staleness)}</code>")
+
+        if max_staleness and max_staleness > 5.0:
+            lines.append(f"{EMOJI['warn']} **Warning**: Max staleness exceeds 5s, check market data connection.")
+        
+        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
+
+
+    @command_meta("/reconcile", "Health and history of position reconciliation.")
+    async def cmd_reconcile_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        rb = self._response_builder
+        
+        # This function fetches reconciliation status from the in-memory state
+        reconcile_line, reconcile_hint = self._reconcile_status_line()
+        
+        lines: list[str] = [f"{rb.section('Reconciliation Health')} {EMOJI['exchange']}", ]
+        
+        if reconcile_line:
+            lines.append(reconcile_line)
+        else:
+            lines.append("ℹ️ Reconciliation data not yet received or is unavailable.")
+        
+        if self._reconcile_last_success_at:
+            lines.append(f"✅ Last Success: <code>{self._reconcile_last_success_at.astimezone(timezone.utc):%H:%M:%S}Z</code>")
+            
+        if self._reconcile_last_failure_at:
+            lines.append(f"❌ Last Failure: <code>{self._reconcile_last_failure_at.astimezone(timezone.utc):%H:%M:%S}Z</code>")
+
+        if reconcile_hint:
+            lines.append(f"\n{EMOJI['hint']} **Hint**: {reconcile_hint}")
+
+        await self._reply(chat, ctx, rb.br().join(lines), parse_mode=ParseMode.HTML)
+
+
 
     @command_meta("/balance", "Summarize broker balances by segment.")
     async def cmd_balance(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
