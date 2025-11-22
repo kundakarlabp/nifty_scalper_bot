@@ -106,6 +106,10 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 from nifty_scalper_bot.utils.response_builder import EMOJI, RB, ResponseBuilder
 from telegram import Bot, Chat, InputFile, Message, Update
+from .execution_diagnostics_controller import (
+    ExecutionDiagnosticsController,
+    ExecutionControllerDeps,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
@@ -561,6 +565,18 @@ class TelegramBot:
         self._pending_confirmation: dict[str, t.Any] | None = None
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
+        exec_deps = ExecutionControllerDeps(
+            fetch_metric_summary=self._fetch_metric_summary,
+            collect_recent_errors=self._collect_recent_errors,
+            reconcile_status_line=self._reconcile_status_line,
+            reconcile_last_success_at=self._reconcile_last_success_at,
+            reconcile_last_failure_at=self._reconcile_last_failure_at,
+            reconcile_alert_failures=self._reconcile_alert_failures,
+            response_builder=self._response_builder,
+            coerce_float_value=self._coerce_float_value,
+            format_currency=self._format_currency,
+        )
+        self._exec_controller = ExecutionDiagnosticsController(exec_deps)
 
     def _command_registered(self, app: Application, command: str) -> bool:
         """Return ``True`` when *command* is already wired on *app*.
@@ -11706,6 +11722,53 @@ class TelegramBot:
             extra={"event": "telegram_cmd_quote_probe_enter"},
         )
         await self.cmd_qprobe(update, ctx)
+
+
+
+    @command_meta("/rejections", "Lists recent order rejections by reason and count.")
+    async def cmd_rejections(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles the /rejections command by delegating to the execution controller."""
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        # Delegation: The core logic is in the external ExecutionDiagnosticsController
+        try:
+            await self._exec_controller.cmd_rejections(update, ctx)
+        except Exception as exc:
+            # Fallback reply in case the controller fails unexpectedly
+            log.error("Failure delegating cmd_rejections: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, f"Rejections command failed: {self._short_reason(str(exc))}")
+
+
+    @command_meta("/latencies", "Summary of order and tick processing latency.")
+    async def cmd_latencies(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles the /latencies command by delegating to the execution controller."""
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        # Delegation: The core logic is in the external controller
+        try:
+            await self._exec_controller.cmd_latencies(update, ctx)
+        except Exception as exc:
+            log.error("Failure delegating cmd_latencies: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, f"Latencies command failed: {self._short_reason(str(exc))}")
+
+
+    @command_meta("/reconcile", "Health and history of position reconciliation.")
+    async def cmd_reconcile_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles the /reconcile command by delegating to the execution controller."""
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        
+        # Delegation: The core logic is in the external controller
+        try:
+            await self._exec_controller.cmd_reconcile_status(update, ctx)
+        except Exception as exc:
+            log.error("Failure delegating cmd_reconcile_status: %s", exc, exc_info=exc)
+            await self._reply(chat, ctx, f"Reconcile command failed: {self._short_reason(str(exc))}")
 
     @command_meta("/gate", "Inspect micro risk gate status.")
     async def cmd_gate(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
