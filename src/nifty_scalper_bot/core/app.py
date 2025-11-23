@@ -2224,33 +2224,37 @@ def calculate_greeks_simple(
     strike: float,
     days_to_expiry: float,
     option_type: str,
-    volatility: float = 0.20, # 20% IV assumption
+    volatility: float = 0.20,
 ) -> dict:
-    """
-    Simple Greeks approximation (using Black-Scholes principles).
-    """
+    """Simple Greeks approximation using Black-Scholes principles."""
     import math
     
     if days_to_expiry <= 0.0:
-        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "days_to_expiry": 0.0, "moneyness": spot/strike}
+        return {
+            "delta": 0.0,
+            "gamma": 0.0,
+            "theta": 0.0,
+            "vega": 0.0,
+            "days_to_expiry": 0.0,
+            "moneyness": spot / strike,
+            "error": "Expired"
+        }
     
-    t = days_to_expiry / 365.25 # Time in years
+    t = days_to_expiry / 365.25
     moneyness = spot / strike
     
-    # Simple delta approximation (ATMs are 0.5/-0.5)
-    delta = 0.5
+    # Delta approximation
     if option_type.upper() in ["CE", "CALL"]:
-        delta = 0.5 + min(0.49, max(0, moneyness - 1.0)) 
+        delta = 0.5 + min(0.49, max(-0.49, (moneyness - 1.0) * 2.0))
     else:  # PUT
-        delta = -0.5 - min(0.49, max(0, 1.0 - moneyness)) 
+        delta = -0.5 - min(0.49, max(-0.49, (1.0 - moneyness) * 2.0))
     
     # Gamma (peaks at ATM)
     gamma = 0.01 / (abs(moneyness - 1) + 0.01) * math.sqrt(1 / max(t, 0.01))
     gamma = min(gamma, 0.05)
     
     # Theta (time decay)
-    theta_base = spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
-    theta = -1.0 * theta_base
+    theta = -spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
     
     # Vega (volatility sensitivity)
     vega = spot * math.sqrt(max(t, 0.01)) * 0.01
@@ -2264,8 +2268,6 @@ def calculate_greeks_simple(
         "moneyness": round(moneyness, 3),
     }
 
-
-# ===== ADD AT LINE ~5800 (Before telegram command registration) =====
 
 def _get_nifty_spot_from_context(ctx: BotContext) -> float | None:
     """Get NIFTY spot price with multi-tier fallback."""
