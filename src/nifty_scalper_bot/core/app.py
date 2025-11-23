@@ -2159,32 +2159,32 @@ async def reconcile_positions_on_startup(
 
 
 def parse_nifty_option_symbol(symbol: str) -> dict | None:
-    """
-    Parse NIFTY option symbol to extract strike, expiry, and option type.
-    """
+    """Parse NIFTY option symbol to extract strike, expiry, and option type."""
     import re
-    from datetime import datetime, timedelta, timezone # Ensure timezone is imported
+    from datetime import datetime, timedelta, timezone
     import calendar
     
     symbol = symbol.replace("NFO:", "").strip()
     
-    # Monthly/Far Weekly Pattern: NIFTY25NOV25950CE
+    # Monthly Pattern: NIFTY25NOV25950CE
     monthly_match = re.match(r'NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)', symbol)
     if monthly_match:
         year, month_str, strike, opt_type = monthly_match.groups()
-        month_names = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6, 'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+        month_names = {
+            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+        }
         month = month_names.get(month_str)
         if month:
             year_full = 2000 + int(year)
-            
-            # Find last Thursday of the month (Standard Monthly Expiry Logic)
             last_day = calendar.monthrange(year_full, month)[1]
             expiry = datetime(year_full, month, last_day)
-            while expiry.weekday() != 3: # Thursday is 3
+            while expiry.weekday() != 3:  # Thursday
                 expiry = expiry - timedelta(days=1)
             
-            # Use total_seconds for float days_to_expiry
-            days_to_expiry = (expiry - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 86400.0
+            # Use timezone-aware datetime
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            days_to_expiry = (expiry - now).total_seconds() / 86400.0
             
             return {
                 "strike": int(strike),
@@ -2194,13 +2194,30 @@ def parse_nifty_option_symbol(symbol: str) -> dict | None:
                 "symbol_type": "Monthly"
             }
     
-    # Simple pattern match for weekly/other (can be expanded)
+    # Weekly Pattern: NIFTY25N2625950CE
     weekly_match = re.match(r'NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)', symbol)
     if weekly_match:
-        # Placeholder logic, needs proper date mapping for weeks
-        return {"strike": int(weekly_match.groups()[3]), "expiry": datetime.now(), "days_to_expiry": 3.0, "option_type": weekly_match.groups()[4], "symbol_type": "Weekly (Approx)"}
-
+        year, month_code, day, strike, opt_type = weekly_match.groups()
+        month_map = {
+            '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6,
+            '7': 7, '8': 8, '9': 9, 'O': 10, 'N': 11, 'D': 12
+        }
+        month = month_map.get(month_code)
+        if month:
+            expiry = datetime(2000 + int(year), month, int(day))
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            days_to_expiry = (expiry - now).total_seconds() / 86400.0
+            
+            return {
+                "strike": int(strike),
+                "expiry": expiry,
+                "days_to_expiry": max(days_to_expiry, 0.001),
+                "option_type": opt_type,
+                "symbol_type": "Weekly"
+            }
+    
     return None
+
 
 def calculate_greeks_simple(
     spot: float,
