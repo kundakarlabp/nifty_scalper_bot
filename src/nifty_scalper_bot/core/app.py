@@ -4394,6 +4394,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     access_denied = False
     denied_reason: str | None = None
     guard = ctx.session_guard
+    resolver_instance = ctx.instrument_resolver
 
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
