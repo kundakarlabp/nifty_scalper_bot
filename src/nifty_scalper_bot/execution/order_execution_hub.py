@@ -593,7 +593,7 @@ class OrderExecutionHub:
         self._stats["validated"] += 1
         return outcome
 
-   async def _dispatch_request(self, request: OrderRequest) -> None:
+    async def _dispatch_request(self, request: OrderRequest) -> None:
         """Route ``request`` through the execution router.
 
         Implements an aggressive check for stale market data before proceeding 
