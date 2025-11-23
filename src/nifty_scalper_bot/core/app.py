@@ -4466,6 +4466,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.error(
                 "Failed to execute ensure_core_index_tokens: %s", exc, 
                 extra={"event": "final_token_guarantee_failed"}
+            )
 
     if broker_ready:
         try:
