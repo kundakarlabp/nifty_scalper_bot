@@ -4389,6 +4389,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
+    resolver = ctx.instrument_resolver
 
     broker_ready = True
     access_denied = False
