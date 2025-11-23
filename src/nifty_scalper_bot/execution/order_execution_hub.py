@@ -594,39 +594,56 @@ class OrderExecutionHub:
         return outcome
 
     async def _dispatch_request(self, request: OrderRequest) -> None:
-        """Route ``request`` through the execution router.
+    """Route ``request`` through the execution router.
 
-        Args:
-            request: OrderRequest to dispatch via the router.
+    Includes an aggressive check for stale market data before proceeding with execution.
 
-        Returns:
-            None.
-
-        Raises:
-            None. Errors are logged when execution fails.
-        """
-
-        LOGGER.debug(
-            "Entered OrderExecutionHub._dispatch_request",
+    Args:
+        request: OrderRequest to dispatch via the router.
+    """
+    
+    # --- START CRITICAL FIX: AGGRESSIVE STALE QUOTE CHECK (Suggestion #3) ---
+    # Set a strict threshold (e.g., 500ms) for critical scalping orders.
+    STALE_THRESHOLD_MS = 500 
+    
+    # Check data freshness before wasting resources on risk checks or routing
+    if self.datahub and not self.datahub.is_quote_fresh(request.symbol, STALE_THRESHOLD_MS):
+        self.logger.warning(
+            "❌ STALE QUOTE REJECTED: Symbol quote age exceeds %dms.",
+            STALE_THRESHOLD_MS,
             extra={
-                "event": "order_execution_hub_dispatch",
+                "event": "stale_quote_reject_dispatch", 
                 "symbol": request.symbol,
-            },
+            }
         )
-        try:
-            self._enrich_request_metadata(request)
-            result = await asyncio.to_thread(self._execution_router.execute, request)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in OrderExecutionHub._dispatch_request: %s",
-                exc,
-                extra={"event": "order_execution_hub_dispatch_error"},
-                exc_info=exc,
-            )
-            self._stats["failed"] += 1
-            self._persist_order(request, status="failed")
-            return
-        self._handle_execution_result(request, result)
+        # Assuming self._stats is available in the hub
+        self._stats["stale_rejects"] += 1 
+        return # Exit the dispatch process immediately
+
+    # --- END CRITICAL FIX ---
+
+    LOGGER.debug(
+        "Entered OrderExecutionHub._dispatch_request",
+        extra={
+            "event": "order_execution_hub_dispatch",
+            "symbol": request.symbol,
+        },
+    )
+    try:
+        self._enrich_request_metadata(request)
+        # Use asyncio.to_thread for blocking execution to keep the main event loop responsive
+        result = await asyncio.to_thread(self._execution_router.execute, request) 
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in OrderExecutionHub._dispatch_request: %s",
+            exc,
+            extra={"event": "order_execution_hub_dispatch_error"},
+            exc_info=exc,
+        )
+        self._stats["failed"] += 1
+        self._persist_order(request, status="failed")
+        return
+    self._handle_execution_result(request, result)
 
     def _enrich_request_metadata(self, request: OrderRequest) -> None:
         """Populate resolver metadata on ``request`` when available.
