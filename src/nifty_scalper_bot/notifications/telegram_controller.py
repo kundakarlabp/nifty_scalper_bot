@@ -8184,12 +8184,17 @@ class TelegramBot:
 
         Usage: /greeks NFO:NIFTY25NOV25950CE
         """
-        # Ensure log and ParseMode are available (assuming they are globally imported)
-        # Note: You need to ensure 'from telegram.constants import ParseMode' is imported globally
-        from telegram.constants import ParseMode 
+        from telegram.constants import ParseMode
         from nifty_scalper_bot.utils.logging import get_logger
-        log = get_logger(__name__) 
-        
+        log = get_logger(__name__)
+
+        # --- START FIX: Define HTML formatting helpers inline to bypass broken ResponseBuilder ---
+        def h_strong(text): return f"<b>{text}</b>"
+        def h_section(text): return f"<u>{text}</u>"
+        def h_dim(text): return f"<i>{text}</i>"
+        def h_br(): return "\n" # Use newline for join, ParseMode.HTML handles formatting
+        # --- END FIX ---
+
         log.debug("Entered cmd_greeks", extra={"event": "telegram_cmd_greeks_enter"})
 
         chat = await self._guard(update)
@@ -8239,33 +8244,33 @@ class TelegramBot:
                 option_type=parsed["option_type"]
             )
 
-            # Build response
-            rb = self._response_builder
+            # Build response using safe, inline formatting helpers
             lines = [
-                f"{rb.section('Greeks')} {rb.esc(symbol)}",
+                f"{h_section('Greeks')} {symbol}", # Using h_section (underlined/bold)
                 "",
-                f"{rb.strong('Underlying:')} NIFTY @ ₹{spot:,.2f}",
-                f"{rb.strong('Strike:')} ₹{parsed['strike']:,}",
-                f"{rb.strong('Type:')} {parsed['option_type']} ({parsed['symbol_type']})",
-                f"{rb.strong('Expiry:')} {parsed['expiry'].strftime('%d %b %Y')} ({greeks['days_to_expiry']:.0f} days)",
+                f"{h_strong('Underlying:')} NIFTY @ ₹{spot:,.2f}",
+                f"{h_strong('Strike:')} ₹{parsed['strike']:,}",
+                f"{h_strong('Type:')} {parsed['option_type']} ({parsed['symbol_type']})",
+                f"{h_strong('Expiry:')} {parsed['expiry'].strftime('%d %b %Y')} ({greeks['days_to_expiry']:.0f} days)",
             ]
 
             if ltp:
-                lines.append(f"{rb.strong('LTP:')} ₹{ltp:.2f}")
+                lines.append(f"{h_strong('LTP:')} ₹{ltp:.2f}")
             else:
-                lines.append(f"{rb.strong('LTP:')} n/a")
+                lines.append(f"{h_strong('LTP:')} n/a")
 
-            lines.append(f"{rb.strong('Moneyness:')} {greeks['moneyness']:.3f}")
+            lines.append(f"{h_strong('Moneyness:')} {greeks['moneyness']:.3f}")
             lines.append("")
-            lines.append(rb.strong("Greeks:"))
-            lines.append(f"• {rb.strong('Delta:')} {greeks['delta']:+.4f}")
-            lines.append(f"• {rb.strong('Gamma:')} {greeks['gamma']:.6f}")
-            lines.append(f"• {rb.strong('Theta:')} ₹{greeks['theta']:.2f}/day")
-            lines.append(f"• {rb.strong('Vega:')} ₹{greeks['vega']:.2f}")
+            lines.append(h_strong("Greeks:"))
+            lines.append(f"• {h_strong('Delta:')} {greeks['delta']:+.4f}")
+            lines.append(f"• {h_strong('Gamma:')} {greeks['gamma']:.6f}")
+            lines.append(f"• {h_strong('Theta:')} ₹{greeks['theta']:.2f}/day")
+            lines.append(f"• {h_strong('Vega:')} ₹{greeks['vega']:.2f}")
             lines.append("")
-            lines.append(rb.dim("Calculated using 20% IV assumption (simple approximation)"))
+            lines.append(h_dim("Calculated using 20% IV assumption (simple approximation)")) # Using h_dim (italics)
 
-            message = rb.br().join(lines)
+            # Join lines using the newline helper
+            message = h_br().join(lines)
             await self._reply(chat, ctx, message, parse_mode=ParseMode.HTML)
 
             log.info(
@@ -8281,7 +8286,6 @@ class TelegramBot:
                 exc_info=exc,
             )
             await self._reply(chat, ctx, f"❌ Greeks calculation error: {exc}")
-
     async def cmd_quote(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
         if chat is None:
