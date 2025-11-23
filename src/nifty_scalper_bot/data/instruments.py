@@ -639,6 +639,35 @@ class InstrumentResolver:
         return exchange, tradingsymbol
 
     # ------------------------- New helper APIs -----------------------------
+
+    def ensure_core_index_tokens(self) -> None:
+        """
+        Guarantees that canonical index tokens (NIFTY, BANKNIFTY) are present
+        in the resolver cache, regardless of broker dump completeness.
+        """
+        for symbol, token in WELL_KNOWN.items():
+            try:
+                # Use the dedicated upsert method to ensure symbol, token, and exchange (NSE) are mapped
+                self.upsert(
+                    symbol=symbol,
+                    token=token,
+                    exchange=symbol.split(":", 1)[0] if ":" in symbol else "NSE",
+                )
+                LOGGER.debug(
+                    "Fixed missing core index token",
+                    extra={"event": "instrument_resolver_core_fix", "symbol": symbol}
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    "Failure to upsert well-known token %s: %s",
+                    symbol,
+                    exc,
+                    extra={"event": "instrument_resolver_core_fix_error"},
+                )
+        # Ensure the underlying symbol caches are primed for all well-known entries
+        self._seed_well_known()
+
+    
     def option_contracts(self, base: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Return lightweight option contract metadata for base (e.g., 'NIFTY' or 'BANKNIFTY').
