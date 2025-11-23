@@ -4458,6 +4458,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                 exc,
                 extra={"event": "instrument_load_failed"},
             )
+    if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
+        try:
+            resolver.ensure_core_index_tokens()
+            LOGGER.info("InstrumentResolver core tokens guaranteed.")
+        except Exception as exc:
+            LOGGER.error("Core token guarantee failed: %s", exc)
 
     if broker_ready:
         try:
