@@ -4463,7 +4463,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             resolver.ensure_core_index_tokens()
             LOGGER.info("InstrumentResolver core tokens guaranteed.")
         except Exception as exc:
-            LOGGER.error("Core token guarantee failed: %s", exc)
+            LOGGER.error(
+                "Failed to execute ensure_core_index_tokens: %s", exc, 
+                extra={"event": "final_token_guarantee_failed"}
 
     if broker_ready:
         try:
