@@ -776,28 +776,21 @@ class RiskManager:
     ) -> tuple[bool, str]:  # pragma: no cover
         """Return ``(allowed, reason)`` for the provided order signal."""
 
-        try:
-            force_refresh = self._should_force_balance_refresh()
-            if force_refresh:
-                age = max(time.time() - self._last_balance_refresh, 0.0)
-                self._logger.info(
-                    "Condition met: risk_balance_jit_refresh",
-                    extra={
-                        "event": "risk_balance_jit_refresh",
-                        "age": round(age, 2),
-                        "threshold": round(self._balance_force_refresh, 2),
-                    },
-                )
-            self.refresh_account_balance(force=force_refresh)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in RiskManager.check_order refresh: %s",
-                exc,
-                extra={"event": "risk_balance_refresh_check_order_error"},
-                exc_info=exc,
-            )
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
+
+        # Safety check: ensure we have a positive balance value before proceeding
+        if self.account_balance <= 0:
+            source_context = f"source: {self._balance_source}"
+            if self._balance_source == "DEFAULT_ENV_FALLBACK":
+                source_context = "CRITICAL: Balance is from static ENV fallback or 0."
+            
+            self._logger.critical(
+                f"❌ NO VALID BALANCE: Risk check failed! {source_context}",
+                extra={"event": "risk_check_no_balance", "balance": self.account_balance}
+            )
+            self._last_rejection = "NO_VALID_BALANCE"
+            return False, "NO_VALID_BALANCE"
 
         if self._breaker_tripped:
             self._last_rejection = canonical(self._breaker_reason or "BREAKER")
