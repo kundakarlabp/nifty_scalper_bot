@@ -131,7 +131,7 @@ class InstrumentResolver:
         self._lock = threading.RLock()
 
         # seed well-known tokens
-        self._seed_well_known()
+        # self._seed_well_known()
 
     # ------------------------- public API ---------------------------------
     def warm(self) -> None:
