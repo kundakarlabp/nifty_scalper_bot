@@ -2248,6 +2248,40 @@ def calculate_greeks_simple(
     }
 
 
+# ===== ADD AT LINE ~5800 (Before telegram command registration) =====
+
+def _get_nifty_spot_from_context(ctx: BotContext) -> float | None:
+    """Get NIFTY spot price with multi-tier fallback."""
+    
+    # Priority 1: Check underlying_spot_prices dict
+    spot = ctx.underlying_spot_prices.get("NIFTY")
+    if spot and spot > 0:
+        return float(spot)
+    
+    # Priority 2: Try market data manager
+    if ctx.market_data_manager:
+        for symbol in ["NIFTY", "NSE:NIFTY 50", "NSE:NIFTY50"]:
+            try:
+                tick = ctx.market_data_manager.get_latest_tick(symbol)
+                if tick:
+                    ltp = tick.get("ltp") or tick.get("last_price")
+                    if ltp and ltp > 0:
+                        return float(ltp)
+            except Exception:
+                continue
+    
+    # Priority 3: Try data hub
+    if ctx.data_hub:
+        try:
+            snapshot = ctx.data_hub.snapshot("NIFTY")
+            if snapshot and snapshot.get("ltp"):
+                return float(snapshot["ltp"])
+        except Exception:
+            pass
+    
+    return None
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
