@@ -8036,7 +8036,7 @@ class TelegramBot:
             )
             await self._reply(chat, ctx, "Unexpected IV lookup error.")
 
-   @command_meta(
+    @command_meta(
         "/greeks SYMBOL",
         "Return option Greeks with context-aware fallbacks.",
     )
