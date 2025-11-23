@@ -1166,6 +1166,144 @@ class TelegramBot:
             immediate=False,
         )
 
+
+    def _get_nifty_spot_price(self) -> float | None:
+        """Get NIFTY spot price with multi-tier fallback."""
+        
+        # Tier 1: Market data manager
+        mdm = getattr(self.deps, "market_data_manager", None)
+        if mdm:
+            for symbol in ["NIFTY", "NSE:NIFTY 50", "NSE:NIFTY50"]:
+                try:
+                    tick = mdm.get_latest_tick(symbol)
+                    if tick and isinstance(tick, dict):
+                        ltp = tick.get("ltp") or tick.get("last_price")
+                        if ltp and ltp > 0:
+                            return float(ltp)
+                except Exception:
+                    continue
+                    
+        # Tier 2: Data hub
+        hub = getattr(self.deps, "data_hub", None)
+        if hub:
+            try:
+                snapshot = hub.snapshot("NIFTY")
+                if snapshot and snapshot.get("ltp"):
+                    return float(snapshot["ltp"])
+            except Exception:
+                pass
+                
+        return None
+
+    def _parse_nifty_option_symbol(self, symbol: str) -> dict | None:
+        """Parse NIFTY option symbol to extract components."""
+        import re
+        import calendar
+        from datetime import datetime, timedelta
+        
+        symbol = symbol.replace("NFO:", "").strip()
+        
+        # Monthly Format: NIFTY25NOV25950CE
+        monthly = re.match(r'NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)', symbol)
+        if monthly:
+            year, month_str, strike, opt_type = monthly.groups()
+            months = {
+                'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+            }
+            month = months.get(month_str)
+            if month:
+                year_full = 2000 + int(year)
+                
+                # Find the last Thursday of the month for expiry
+                last_day = calendar.monthrange(year_full, month)[1]
+                expiry = datetime(year_full, month, last_day)
+                while expiry.weekday() != 3: # 3 is Thursday
+                    expiry = expiry - timedelta(days=1)
+                            
+                days = max((expiry - datetime.now()).days, 0)
+                return {
+                    "strike": int(strike),
+                    "expiry": expiry,
+                    "days_to_expiry": days,
+                    "option_type": opt_type,
+                    "symbol_type": "Monthly"
+                }
+                
+        # Weekly Format (Hypothetical): NIFTY25N2625950CE
+        weekly = re.match(r'NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)', symbol)
+        if weekly:
+            year, month_code, day, strike, opt_type = weekly.groups()
+            month_map = {
+                '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6,
+                '7': 7, '8': 8, '9': 9, 'O': 10, 'N': 11, 'D': 12
+            }
+            month = month_map.get(month_code)
+            if month:
+                expiry = datetime(2000 + int(year), month, int(day))
+                days = max((expiry - datetime.now()).days, 0)
+                return {
+                    "strike": int(strike),
+                    "expiry": expiry,
+                    "days_to_expiry": days,
+                    "option_type": opt_type,
+                    "symbol_type": "Weekly"
+                }
+                
+        return None
+
+    def _calculate_greeks_simple(
+        self,
+        spot: float,
+        strike: float,
+        days_to_expiry: float,
+        option_type: str,
+    ) -> dict:
+        """Simple Greeks approximation using Black-Scholes principles (20% IV assumption)."""
+        import math
+        
+        if days_to_expiry <= 0:
+            return {
+                "delta": 0.0,
+                "gamma": 0.0,
+                "theta": 0.0,
+                "vega": 0.0,
+                "days_to_expiry": 0,
+                "moneyness": spot / strike,
+                "error": "Expired"
+            }
+            
+        t = days_to_expiry / 365.25
+        moneyness = spot / strike
+        
+        # Delta Approximation
+        if option_type.upper() in ["CE", "CALL"]:
+            # Caps delta between 0.01 and 0.99
+            delta = 0.5 + min(0.49, max(-0.49, (moneyness - 1.0) * 2.0))
+        else:
+            # Caps delta between -0.99 and -0.01
+            delta = -0.5 - min(0.49, max(-0.49, (1.0 - moneyness) * 2.0))
+            
+        # Gamma Approximation (Higher Gamma near ATM, lower for short expiry)
+        gamma = 0.01 / (abs(moneyness - 1) + 0.01) * math.sqrt(1 / max(t, 0.01))
+        gamma = min(gamma, 0.05)
+        
+        # Theta Approximation (Uses fixed 20% IV)
+        # Formula: -Spot * IV / (2 * sqrt(t)) / 365.25
+        theta = -spot * 0.20 / (2 * math.sqrt(max(t, 0.01))) / 365.25
+        
+        # Vega Approximation (Uses fixed 20% IV)
+        vega = spot * math.sqrt(max(t, 0.01)) * 0.01
+        
+        return {
+            "delta": round(delta, 4),
+            "gamma": round(gamma, 6),
+            "theta": round(theta, 2),
+            "vega": round(vega, 2),
+            "days_to_expiry": round(days_to_expiry, 1),
+            "moneyness": round(moneyness, 3)
+        }
+  
     def _remove_log_alert_handler(self) -> None:
         """Detach the log alert handler when shutting down.
 
@@ -8041,84 +8179,100 @@ class TelegramBot:
         "Return option Greeks with context-aware fallbacks.",
     )
     async def cmd_greeks(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Fetch option Greeks for *SYMBOL* when supported by the data hub."""
+        """
+        Calculate and display option Greeks for a given NIFTY option symbol.
 
-        # ... (initial checks and setup)
+        Usage: /greeks NFO:NIFTY25NOV25950CE
+        """
+        # Ensure log and ParseMode are available (assuming they are globally imported)
+        # Note: You need to ensure 'from telegram.constants import ParseMode' is imported globally
+        from telegram.constants import ParseMode 
+        from nifty_scalper_bot.utils.logging import get_logger
+        log = get_logger(__name__) 
+        
+        log.debug("Entered cmd_greeks", extra={"event": "telegram_cmd_greeks_enter"})
+
         chat = await self._guard(update)
         if chat is None:
             return
+
         try:
-            args = ctx.args or []
+            args = list(ctx.args or [])
             if not args:
-                await self._reply(chat, ctx, "Usage: /greeks SYMBOL")
-                return
-            raw_symbol = args[0].strip()
-            symbol = DataHub.normalize(raw_symbol) or raw_symbol.upper()
-            hub = getattr(self.deps, "data_hub", None)
-            
-            if hub is None or not hasattr(hub, "get_greeks"):
-                message = (
-                    "📈 Greeks unavailable\n\n"
-                    "Reasons:\n"
-                    "• Data hub not configured for option analytics\n"
-                    "• Market closed (requires live option chain)"
-                )
-                await self._reply(chat, ctx, message)
-                return
-            
-            try:
-                greeks = hub.get_greeks(symbol)
-            except Exception as exc:  # noqa: BLE001
                 await self._reply(
-                    chat,
-                    ctx,
-                    f"Greek lookup failed: {self._short_reason(str(exc))}",
+                    chat, ctx,
+                    "Usage: /greeks SYMBOL\nExample: /greeks NFO:NIFTY25NOV25950CE"
                 )
                 return
-            
-            if not greeks:
-                # --- FIX: Check underlying price for better diagnostics ---
-                underlying_symbol = "NIFTY"
-                underlying_price = "n/a"
-                try:
-                    # Attempt to fetch the underlying NIFTY price
-                    price_candidate = hub.get_latest_price(underlying_symbol)
-                    underlying_price = self._format_currency(price_candidate)
-                except Exception:
-                    pass
-                    
-                message = (
-                    f"📈 No Greeks for {symbol}\n\n"
-                    f"Possible causes:\n"
-                    f"• Underlying Price ({underlying_symbol}): {underlying_price}\n"
-                    f"• Option lacks live inputs (IV, Bid/Ask) due to illiquidity.\n"
-                    f"• Strike is expired or too far Out-of-the-Money (OTM)."
-                )
-                await self._reply(chat, ctx, message)
-                log.info(
-                    "Condition met: telegram_cmd_greeks_missing_data_detail",
-                    extra={"event": "telegram_cmd_greeks_missing_data", "symbol": symbol},
+
+            symbol = str(args[0]).strip().upper()
+
+            # Parse the option symbol
+            parsed = self._parse_nifty_option_symbol(symbol)
+            if not parsed:
+                await self._reply(chat, ctx, f"❌ Could not parse symbol: {symbol}")
+                return
+
+            # Get NIFTY spot price
+            spot = self._get_nifty_spot_price()
+            if not spot:
+                await self._reply(
+                    chat, ctx,
+                    "❌ NIFTY spot price unavailable\n\n"
+                    "**Fix:** Run `/watch NIFTY` then retry in a few seconds"
                 )
                 return
-            # --- END FIX ---
-            
-            # Success path: Format and send the calculated Greeks
-            formatted: list[str] = [f"📈 Greeks for {self.rb.esc(symbol)}"]
-            for key in sorted(greeks):
-                value = greeks[key]
-                try:
-                    numeric = float(value)
-                    # Use signed formatting for key Greeks like Delta/Gamma/Theta/Vega
-                    format_str = "+.4f" if key.lower() in ("delta", "gamma", "theta", "vega") else ".4f"
-                    formatted.append(f"<b>{self.rb.esc(key.title())}</b>: {f'{numeric:{format_str}}'}")
-                except (TypeError, ValueError):
-                    formatted.append(f"<b>{self.rb.esc(key.title())}</b>: {self.rb.esc(str(value))}")
-            
-            await self._reply(chat, ctx, self.rb.br().join(formatted), parse_mode=ParseMode.HTML)
+
+            # Get option LTP
+            ltp = None
+            mdm = getattr(self.deps, "market_data_manager", None)
+            if mdm:
+                tick = mdm.get_latest_tick(symbol)
+                if tick and isinstance(tick, dict):
+                    ltp = tick.get("ltp") or tick.get("last_price")
+
+            # Calculate Greeks
+            greeks = self._calculate_greeks_simple(
+                spot=spot,
+                strike=parsed["strike"],
+                days_to_expiry=parsed["days_to_expiry"],
+                option_type=parsed["option_type"]
+            )
+
+            # Build response
+            rb = self._response_builder
+            lines = [
+                f"{rb.section('Greeks')} {rb.esc(symbol)}",
+                "",
+                f"{rb.strong('Underlying:')} NIFTY @ ₹{spot:,.2f}",
+                f"{rb.strong('Strike:')} ₹{parsed['strike']:,}",
+                f"{rb.strong('Type:')} {parsed['option_type']} ({parsed['symbol_type']})",
+                f"{rb.strong('Expiry:')} {parsed['expiry'].strftime('%d %b %Y')} ({greeks['days_to_expiry']:.0f} days)",
+            ]
+
+            if ltp:
+                lines.append(f"{rb.strong('LTP:')} ₹{ltp:.2f}")
+            else:
+                lines.append(f"{rb.strong('LTP:')} n/a")
+
+            lines.append(f"{rb.strong('Moneyness:')} {greeks['moneyness']:.3f}")
+            lines.append("")
+            lines.append(rb.strong("Greeks:"))
+            lines.append(f"• {rb.strong('Delta:')} {greeks['delta']:+.4f}")
+            lines.append(f"• {rb.strong('Gamma:')} {greeks['gamma']:.6f}")
+            lines.append(f"• {rb.strong('Theta:')} ₹{greeks['theta']:.2f}/day")
+            lines.append(f"• {rb.strong('Vega:')} ₹{greeks['vega']:.2f}")
+            lines.append("")
+            lines.append(rb.dim("Calculated using 20% IV assumption (simple approximation)"))
+
+            message = rb.br().join(lines)
+            await self._reply(chat, ctx, message, parse_mode=ParseMode.HTML)
+
             log.info(
                 "Condition met: telegram_cmd_greeks_success",
                 extra={"event": "telegram_cmd_greeks_success", "symbol": symbol},
             )
+
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in cmd_greeks outer: %s",
@@ -8126,7 +8280,7 @@ class TelegramBot:
                 extra={"event": "telegram_cmd_greeks_outer_error"},
                 exc_info=exc,
             )
-            await self._reply(chat, ctx, "Unexpected Greeks lookup error.")
+            await self._reply(chat, ctx, f"❌ Greeks calculation error: {exc}")
 
     async def cmd_quote(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
