@@ -4462,10 +4462,10 @@ async def startup_sequence(ctx: BotContext) -> None:
     if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
         try:
             resolver.ensure_core_index_tokens()
-            LOGGER.info("InstrumentResolver core tokens guaranteed.")
+            LOGGER.info("InstrumentResolver core tokens guaranteed (Fix).")
         except Exception as exc:
             LOGGER.error(
-                "Failed to execute ensure_core_index_tokens: %s", exc, 
+                "Final token guarantee failed: %s", exc, 
                 extra={"event": "final_token_guarantee_failed"}
             )
 
