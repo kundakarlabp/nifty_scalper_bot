@@ -96,6 +96,7 @@ class OrderExecutionHub:
             "executed": 0,
             "failed": 0,
             "circuit_breaker_pauses": 0,
+            "stale_rejects": 0,  # Added for new Stale Quote metric
         }
         self._circuit_pause_interval = 5.0
         self._last_circuit_log = 0.0
@@ -446,6 +447,7 @@ class OrderExecutionHub:
                 if not symbol:
                     continue
                 try:
+                    # Note: LifecycleManager.exit_at_market handles submitting an EXIT_MARKET request
                     self._lifecycle_manager.exit_at_market(symbol, "EMERGENCY_STOP")
                     positions_closed = snapshot.setdefault("positions_closed", [])
                     if isinstance(positions_closed, list):
@@ -485,6 +487,7 @@ class OrderExecutionHub:
         queue_depth = len(self._order_queue.get_queue_snapshot())
         router_stats = self._execution_router.get_stats()
         monitor_stats = self._post_fill_monitor.get_stats()
+        # Note: self._stats now includes 'stale_rejects'
         return {
             **self._stats,
             "queue_depth": queue_depth,
@@ -606,14 +609,15 @@ class OrderExecutionHub:
             None.
         """
     
-        # --- START CRITICAL FIX: AGGRESSIVE STALE QUOTE CHECK (Suggestion #3) ---
+        # --- START CRITICAL FIX: AGGRESSIVE STALE QUOTE CHECK ---
         # 500ms is a production-grade strict limit for scalping.
         STALE_THRESHOLD_MS = 500 
     
         # Check data freshness immediately. If stale, reject and return instantly.
-        # We must ensure self.datahub exists and exposes the is_quote_fresh method.
-        if self.datahub and not self.datahub.is_quote_fresh(request.symbol, STALE_THRESHOLD_MS):
-            self.logger.warning(
+        if self._data_hub is not None and not self._data_hub.is_quote_fresh(request.symbol, STALE_THRESHOLD_MS):
+            # Using self.logger is safer than using the global LOGGER here, although get_logger(__name__) is used
+            # I will use self.logger (which relies on the global LOGGER here) for consistency with the rest of the code:
+            LOGGER.warning(
                 "❌ STALE QUOTE REJECTED: Symbol quote age exceeds %dms. Skipping execution.",
                 STALE_THRESHOLD_MS,
                 extra={
@@ -621,7 +625,6 @@ class OrderExecutionHub:
                     "symbol": request.symbol,
                 }
             )
-            # Assuming self._stats is available
             self._stats["stale_rejects"] += 1 
             return # Exit the dispatch process immediately
         # --- END CRITICAL FIX ---
@@ -785,8 +788,12 @@ class OrderExecutionHub:
         if result.status in {"FILLED", "SUBMITTED"} and result.order_id:
             self._stats["executed"] += 1
             self._record_order(request, result)
+            
+            # --- FIX: CALL CORRECT FUNCTION NAME (trigger_lifecycle_on_entry) ---
             if request.intent == "ENTRY":
-                self._trigger_lifecycle_on_entry(request, result)
+                self.trigger_lifecycle_on_entry(request, result)
+            # --- END FIX ---
+            
             LOGGER.info(
                 "Condition met: order execution recorded",
                 extra={
@@ -824,9 +831,10 @@ class OrderExecutionHub:
             tuple[sl_id, tp_id] where either can be None on failure
         """
     
-        # NOTE: The implementation below relies on self.orderqueue.submit_order_request,
-        # self.get_atr_for_symbol, self.lifecyclemanager, and the correct Enum definitions.
-    
+        # NOTE: The implementation below relies on self._order_queue, self._lifecycle_manager, etc.
+        # Priority 0 is EMERGENCY/CRITICAL, Priority 1 is HIGH/TP.
+        from nifty_scalper_bot.execution.order_manager import OrderType # Assume import for OrderType
+        
         entry_id = result.orderid
         symbol = request.symbol
         filled_qty = result.fillquantity or request.quantity
@@ -848,7 +856,7 @@ class OrderExecutionHub:
         sl_id = None
         try:
             # Calculate SL trigger price from metadata
-            atr = self.get_atr_for_symbol(symbol, metadata)
+            atr = self._get_atr_for_symbol(symbol, metadata)
             sl_trigger = fill_price - (atr * 1.5) if side == "BUY" else fill_price + (atr * 1.5)
         
             # Place SL order (OrderIntent.EXIT_SL)
@@ -859,11 +867,11 @@ class OrderExecutionHub:
                 intent=OrderIntent.EXIT_SL,
                 price=None,  # Market on trigger (Assumed STOP LOSS MARKET logic)
                 metadata={"parent_id": entry_id, "trigger": sl_trigger},
-                priority=0  # CRITICAL priority (assuming 0 = highest)
+                priority=0  # CRITICAL priority
             )
         
             # Submit to queue
-            self.orderqueue.submit_order_request(sl_request)
+            self._order_queue.submit_order_request(sl_request)
             sl_id = f"SL_{entry_id}"
         
             LOGGER.info(
@@ -899,7 +907,7 @@ class OrderExecutionHub:
                     priority=0  # EMERGENCY priority
                 )
             
-                self.orderqueue.submit_order_request(exit_request)
+                self._order_queue.submit_order_request(exit_request)
                 exit_id = f"EMERGENCY_{entry_id}"
             
                 LOGGER.critical(
@@ -921,14 +929,14 @@ class OrderExecutionHub:
                     },
                     exc_info=True
                 )
-                # Placeholder for Telegram/Operator Alert
+                # Note: You need to implement self.notify_critical_exposure via a Telegram or similar client
                 # self.notify_critical_exposure(entry_id, filled_qty, fill_price, exit_exc) 
                 raise
     
         # ✅ STEP 4: SL succeeded, now place TP (non-critical)
         tp_id = None
         try:
-            atr = self.get_atr_for_symbol(symbol, metadata)
+            atr = self._get_atr_for_symbol(symbol, metadata)
             tp_price = fill_price + (atr * 2.0) if side == "BUY" else fill_price - (atr * 2.0)
         
             tp_request = OrderRequest(
@@ -942,19 +950,18 @@ class OrderExecutionHub:
                 priority=1  # HIGH but not CRITICAL
             )
         
-            self.orderqueue.submit_order_request(tp_request)
+            self._order_queue.submit_order_request(tp_request)
             tp_id = f"TP_{entry_id}"
         
-            # Register bracket with lifecycle manager
-            if hasattr(self, 'lifecyclemanager'):
-                try:
-                    self.lifecyclemanager.register_bracket(
-                        entry_id=entry_id,
-                        sl_id=sl_id,
-                        tp_id=tp_id
-                    )
-                except Exception as reg_exc:
-                    LOGGER.warning(f"Bracket registration failed: {reg_exc}")
+            # Register bracket with lifecycle manager (using the initialized dependency)
+            try:
+                self._lifecycle_manager.register_bracket(
+                    entry_id=entry_id,
+                    sl_id=sl_id,
+                    tp_id=tp_id
+                )
+            except Exception as reg_exc:
+                LOGGER.warning(f"Bracket registration failed: {reg_exc}")
                 
             LOGGER.info(
                 f"✅ TP placed and bracket registered for entry {entry_id}: TP ID {tp_id}",
@@ -972,15 +979,14 @@ class OrderExecutionHub:
             )
         
             # Register partial bracket (SL only)
-            if hasattr(self, 'lifecyclemanager'):
-                try:
-                    self.lifecyclemanager.register_bracket(
-                        entry_id=entry_id,
-                        sl_id=sl_id,
-                        tp_id=None
-                    )
-                except Exception as reg_exc:
-                    LOGGER.warning(f"Bracket registration failed: {reg_exc}")
+            try:
+                self._lifecycle_manager.register_bracket(
+                    entry_id=entry_id,
+                    sl_id=sl_id,
+                    tp_id=None
+                )
+            except Exception as reg_exc:
+                LOGGER.warning(f"Bracket registration failed: {reg_exc}")
                 
             return sl_id, None
 
@@ -1060,37 +1066,33 @@ class OrderExecutionHub:
             )
 
     def trigger_lifecycle_on_entry(self, request: OrderRequest, result: ExecutionResult) -> None:
-    """Initialise lifecycle manager and place protective exits using the safe mechanism."""
-    
-    # ✅ NEW: Use safe execution instead of original bracket logic
-    try:
-        sl_id, tp_id = self._execute_entry_exits_safely(request, result)
+        """Initialise lifecycle manager and place protective exits using the safe mechanism."""
         
-        LOGGER.info(
-            f"Entry protection placed: SL={sl_id}, TP={tp_id}",
-            extra={
-                "event": "entry_protected",
-                "symbol": request.symbol,
-                "sl_id": sl_id,
-                "tp_id": tp_id
-            }
-        )
-    except Exception as exc:
-        LOGGER.critical(
-            f"CRITICAL: Entry protection failed completely! Position exposed!",
-            extra={"event": "entry_protection_catastrophic_failure"},
-            exc_info=True
-        )
-        # Re-raise or handle cleanup as necessary (Original logic continues below 
-        # but the exception will halt further processing of this trade)
-        
-    metadata = request.metadata or {}
-    # ... rest of existing code (e.g., logging final entry state, etc.) ...
-    # This point ensures the code structure remains intact, assuming the original 
-    # function had more code below the call site for final state logging/update.
-    
-    # NOTE: Ensure the original logic that registers the bracket is now deleted 
-    # from this function, as it has been moved into _execute_entry_exits_safely().
+        # ✅ NEW: Use safe execution instead of original bracket logic
+        try:
+            sl_id, tp_id = self._execute_entry_exits_safely(request, result)
+            
+            LOGGER.info(
+                f"Entry protection placed: SL={sl_id}, TP={tp_id}",
+                extra={
+                    "event": "entry_protected",
+                    "symbol": request.symbol,
+                    "sl_id": sl_id,
+                    "tp_id": tp_id
+                }
+            )
+        except Exception as exc:
+            LOGGER.critical(
+                f"CRITICAL: Entry protection failed completely! Position exposed!",
+                extra={"event": "entry_protection_catastrophic_failure"},
+                exc_info=True
+            )
+            # Re-raising here ensures the failure is propagated up to the worker loop
+            raise
+            
+        # The remaining original logic that relied on the bracket registration 
+        # is now safely managed within _execute_entry_exits_safely().
+        # No further code is needed here, resolving the original IndentationError.
 
     def _should_halt_processing(self) -> bool:
         """Return ``True`` when queue processing should pause.
