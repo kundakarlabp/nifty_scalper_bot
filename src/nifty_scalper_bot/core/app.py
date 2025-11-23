@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio  # Required for startup reconciliation and background tasks
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from importlib import import_module
 import inspect
