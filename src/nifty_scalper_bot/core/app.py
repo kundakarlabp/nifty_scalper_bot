@@ -4459,16 +4459,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 exc,
                 extra={"event": "instrument_load_failed"},
             )
-    if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
-        try:
-            resolver.ensure_core_index_tokens()
-            LOGGER.info("InstrumentResolver core tokens guaranteed (Fix).")
-        except Exception as exc:
-            LOGGER.error(
-                "Final token guarantee failed: %s", exc, 
-                extra={"event": "final_token_guarantee_failed"}
-            )
-
+    
     if broker_ready:
         try:
             _reconcile_state(ctx)
@@ -4504,6 +4495,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={"event": "post_fill_monitor_initial_reconcile_failed"},
                         exc_info=True,
                     )
+
+    if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
+        try:
+            resolver.ensure_core_index_tokens()
+            LOGGER.info("InstrumentResolver core tokens guaranteed (Fix).")
+        except Exception as exc:
+            LOGGER.error(
+                "Final token guarantee failed: %s", exc, 
+                extra={"event": "final_token_guarantee_failed"}
+            )
 
     strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
     order_manager_component = _require_component(ctx.order_manager, "order_manager")
