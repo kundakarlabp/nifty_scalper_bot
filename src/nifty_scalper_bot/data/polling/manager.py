@@ -556,10 +556,13 @@ class PollingManager:
         if ltp is None or ltp <= 0:
             return tick
 
-        # Calculate realistic spread
-        spread = max(ltp * self._SYNTHETIC_SPREAD_PCT, self._SYNTHETIC_MIN_SPREAD)
+        # Calculate base values
+        spread_amount = max(ltp * self._SYNTHETIC_SPREAD_PCT, self._SYNTHETIC_MIN_SPREAD)
+        
+        # Determine the synthetic midpoint
+        # For a truly symmetrical synthetic depth, use LTP as the midpoint
+        midpoint = ltp
 
-        # Build 5-level depth on each side
         synthetic_buy = []
         synthetic_sell = []
         
@@ -568,9 +571,20 @@ class PollingManager:
             quantity = 75 * (6 - level)
             orders = level + 2  # 3 to 7 orders per level
             
-            # Calculate prices aligned to tick size
-            buy_price = round((ltp - (spread * level)) / self._TICK_SIZE) * self._TICK_SIZE
-            sell_price = round((ltp + (spread * level)) / self._TICK_SIZE) * self._TICK_SIZE
+            # Calculate price offset from midpoint, scaled by level
+            # Bid/Ask are offset from the midpoint
+            buy_price_raw = midpoint - (spread_amount * level)
+            sell_price_raw = midpoint + (spread_amount * level)
+            
+            # Align prices to tick size (₹0.05)
+            buy_price = round(buy_price_raw / self._TICK_SIZE) * self._TICK_SIZE
+            sell_price = round(sell_price_raw / self._TICK_SIZE) * self._TICK_SIZE
+            
+            # Ensure bid is always less than ask, and both are positive
+            if buy_price >= sell_price:
+                # Force a minimal spread of 1 tick (₹0.05) between best bid/ask
+                buy_price = round(midpoint / self._TICK_SIZE) * self._TICK_SIZE - self._TICK_SIZE
+                sell_price = buy_price + self._TICK_SIZE * 2 # Ensures at least 2 ticks spread (0.10) for first level
             
             synthetic_buy.append({
                 "quantity": quantity,
