@@ -2293,6 +2293,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "csv_path": csv_hint,
         },
     )
+    ensure_fn = getattr(instrument_resolver, "ensure_core_index_tokens", None)
+    if callable(ensure_fn):
+        ensure_fn()
 
     margin_segment_env = os.getenv("BROKER_MARGIN_SEGMENT", "equity") or "equity"
     margin_segment = margin_segment_env.strip().lower()
