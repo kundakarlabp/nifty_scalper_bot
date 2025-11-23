@@ -1814,6 +1814,10 @@ def _get_symbols(
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
+                ctx_ref_dict = globals().get('ctx_ref', {})
+                ctx_from_ref = ctx_ref_dict.get('ctx')
+                if ctx_from_ref and hasattr(ctx_from_ref, 'underlying_spot_prices'):
+                    ctx_from_ref.underlying_spot_prices['NIFTY'] = ltp
             
             else:
                 LOGGER.warning("Live price fetch returned 0 or failed.")
