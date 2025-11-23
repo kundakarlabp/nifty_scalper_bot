@@ -8036,28 +8036,14 @@ class TelegramBot:
             )
             await self._reply(chat, ctx, "Unexpected IV lookup error.")
 
-    @command_meta(
+   @command_meta(
         "/greeks SYMBOL",
         "Return option Greeks with context-aware fallbacks.",
     )
     async def cmd_greeks(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Fetch option Greeks for *SYMBOL* when supported by the data hub.
+        """Fetch option Greeks for *SYMBOL* when supported by the data hub."""
 
-        Args:
-            update: Telegram update triggering the command.
-            ctx: Handler context provided by python-telegram-bot.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        log.debug(
-            "Entered cmd_greeks",
-            extra={"event": "telegram_cmd_greeks_enter"},
-        )
+        # ... (initial checks and setup)
         chat = await self._guard(update)
         if chat is None:
             return
@@ -8065,70 +8051,70 @@ class TelegramBot:
             args = ctx.args or []
             if not args:
                 await self._reply(chat, ctx, "Usage: /greeks SYMBOL")
-                log.info(
-                    "Condition met: telegram_cmd_greeks_missing_symbol",
-                    extra={"event": "telegram_cmd_greeks_missing_symbol"},
-                )
                 return
             raw_symbol = args[0].strip()
             symbol = DataHub.normalize(raw_symbol) or raw_symbol.upper()
             hub = getattr(self.deps, "data_hub", None)
+            
             if hub is None or not hasattr(hub, "get_greeks"):
                 message = (
                     "📈 Greeks unavailable\n\n"
                     "Reasons:\n"
                     "• Data hub not configured for option analytics\n"
-                    "• Market closed (requires live option chain)\n"
-                    "• Symbol not recognised in the option universe\n\n"
-                    "💡 Retry during market hours with a valid option contract."
+                    "• Market closed (requires live option chain)"
                 )
                 await self._reply(chat, ctx, message)
-                log.info(
-                    "Condition met: telegram_cmd_greeks_unavailable",
-                    extra={"event": "telegram_cmd_greeks_unavailable"},
-                )
                 return
+            
             try:
                 greeks = hub.get_greeks(symbol)
             except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "Failure in cmd_greeks lookup: %s",
-                    exc,
-                    extra={"event": "telegram_cmd_greeks_error", "symbol": symbol},
-                    exc_info=exc,
-                )
                 await self._reply(
                     chat,
                     ctx,
                     f"Greek lookup failed: {self._short_reason(str(exc))}",
                 )
                 return
+            
             if not greeks:
+                # --- FIX: Check underlying price for better diagnostics ---
+                underlying_symbol = "NIFTY"
+                underlying_price = "n/a"
+                try:
+                    # Attempt to fetch the underlying NIFTY price
+                    price_candidate = hub.get_latest_price(underlying_symbol)
+                    underlying_price = self._format_currency(price_candidate)
+                except Exception:
+                    pass
+                    
                 message = (
                     f"📈 No Greeks for {symbol}\n\n"
-                    "Possible causes:\n"
-                    "• Option lacks theoretical price inputs\n"
-                    "• Strike expired or illiquid\n"
-                    "• Feed still caching the option chain"
+                    f"Possible causes:\n"
+                    f"• Underlying Price ({underlying_symbol}): {underlying_price}\n"
+                    f"• Option lacks live inputs (IV, Bid/Ask) due to illiquidity.\n"
+                    f"• Strike is expired or too far Out-of-the-Money (OTM)."
                 )
                 await self._reply(chat, ctx, message)
                 log.info(
-                    "Condition met: telegram_cmd_greeks_missing_data",
-                    extra={
-                        "event": "telegram_cmd_greeks_missing_data",
-                        "symbol": symbol,
-                    },
+                    "Condition met: telegram_cmd_greeks_missing_data_detail",
+                    extra={"event": "telegram_cmd_greeks_missing_data", "symbol": symbol},
                 )
                 return
-            formatted: list[str] = [f"📈 Greeks for {symbol}"]
+            # --- END FIX ---
+            
+            # Success path: Format and send the calculated Greeks
+            formatted: list[str] = [f"📈 Greeks for {self.rb.esc(symbol)}"]
             for key in sorted(greeks):
                 value = greeks[key]
                 try:
                     numeric = float(value)
-                    formatted.append(f"{key}: {numeric:+.4f}")
+                    # Use signed formatting for key Greeks like Delta/Gamma/Theta/Vega
+                    format_str = "+.4f" if key.lower() in ("delta", "gamma", "theta", "vega") else ".4f"
+                    formatted.append(f"<b>{self.rb.esc(key.title())}</b>: {f'{numeric:{format_str}}'}")
                 except (TypeError, ValueError):
-                    formatted.append(f"{key}: {value}")
-            await self._reply(chat, ctx, "\n".join(formatted))
+                    formatted.append(f"<b>{self.rb.esc(key.title())}</b>: {self.rb.esc(str(value))}")
+            
+            await self._reply(chat, ctx, self.rb.br().join(formatted), parse_mode=ParseMode.HTML)
             log.info(
                 "Condition met: telegram_cmd_greeks_success",
                 extra={"event": "telegram_cmd_greeks_success", "symbol": symbol},
