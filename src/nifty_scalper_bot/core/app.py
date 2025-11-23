@@ -4397,6 +4397,16 @@ async def startup_sequence(ctx: BotContext) -> None:
     guard = ctx.session_guard
     resolver_instance = ctx.instrument_resolver
 
+    if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
+        try:
+            resolver.ensure_core_index_tokens()
+            LOGGER.info("InstrumentResolver core tokens guaranteed (Fix).")
+        except Exception as exc:
+            LOGGER.error(
+                "Final token guarantee failed: %s", exc, 
+                extra={"event": "final_token_guarantee_failed"}
+            )
+
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
         if notifier is None:
@@ -4497,15 +4507,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         exc_info=True,
                     )
 
-    if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
-        try:
-            resolver.ensure_core_index_tokens()
-            LOGGER.info("InstrumentResolver core tokens guaranteed (Fix).")
-        except Exception as exc:
-            LOGGER.error(
-                "Final token guarantee failed: %s", exc, 
-                extra={"event": "final_token_guarantee_failed"}
-            )
+    
 
     strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
     order_manager_component = _require_component(ctx.order_manager, "order_manager")
