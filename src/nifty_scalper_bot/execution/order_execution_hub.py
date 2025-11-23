@@ -809,181 +809,180 @@ class OrderExecutionHub:
         )
         self._persist_order(request, status=final_status or "failed")
 
-
     def _execute_entry_exits_safely(self, request: OrderRequest, result: ExecutionResult) -> tuple[str | None, str | None]:
-    """
-    Handle successful entry fill and immediately place protecting exit orders (SL/TP).
+        """
+        Handle successful entry fill and immediately place protecting exit orders (SL/TP).
         
-    This function implements the critical safety guarantee: SL placement MUST succeed,
-    or an emergency market exit is attempted immediately.
+        This function implements the critical safety guarantee: SL placement MUST succeed,
+        or an emergency market exit is attempted immediately.
         
-    Args:
-        request: Original OrderRequest that was executed
-        result: ExecutionResult containing fill details
+        Args:
+            request: Original OrderRequest that was executed
+            result: ExecutionResult containing fill details
             
-    Returns:
-        tuple[sl_id, tp_id] where either can be None on failure
-    """
+        Returns:
+            tuple[sl_id, tp_id] where either can be None on failure
+        """
     
-    # NOTE: The implementation below relies on self.orderqueue.submit_order_request,
-    # self.get_atr_for_symbol, self.lifecyclemanager, and the correct Enum definitions.
+        # NOTE: The implementation below relies on self.orderqueue.submit_order_request,
+        # self.get_atr_for_symbol, self.lifecyclemanager, and the correct Enum definitions.
     
-    entry_id = result.orderid
-    symbol = request.symbol
-    filled_qty = result.fillquantity or request.quantity
-    fill_price = result.fillprice or request.price
-    side = request.side
-    metadata = request.metadata or {}
+        entry_id = result.orderid
+        symbol = request.symbol
+        filled_qty = result.fillquantity or request.quantity
+        fill_price = result.fillprice or request.price
+        side = request.side
+        metadata = request.metadata or {}
     
-    LOGGER.info(
-        f"Entry fill confirmed for {entry_id}, placing protective exits",
-        extra={
-            "event": "bracket_entry_fill",
-            "order_id": entry_id,
-            "filled_qty": filled_qty,
-            "fill_price": fill_price
-        }
-    )
-    
-    # ✅ STEP 1: Calculate and place SL immediately with CRITICAL priority
-    sl_id = None
-    try:
-        # Calculate SL trigger price from metadata
-        atr = self.get_atr_for_symbol(symbol, metadata)
-        sl_trigger = fill_price - (atr * 1.5) if side == "BUY" else fill_price + (atr * 1.5)
-        
-        # Place SL order (OrderIntent.EXIT_SL)
-        sl_request = OrderRequest(
-            symbol=symbol,
-            side="SELL" if side == "BUY" else "BUY",
-            quantity=filled_qty,
-            intent=OrderIntent.EXIT_SL,
-            price=None,  # Market on trigger (Assumed STOP LOSS MARKET logic)
-            metadata={"parent_id": entry_id, "trigger": sl_trigger},
-            priority=0  # CRITICAL priority (assuming 0 = highest)
-        )
-        
-        # Submit to queue
-        self.orderqueue.submit_order_request(sl_request)
-        sl_id = f"SL_{entry_id}"
-        
         LOGGER.info(
-            f"✅ SL placed for entry {entry_id} @ {sl_trigger:.2f}: ID {sl_id}",
+            f"Entry fill confirmed for {entry_id}, placing protective exits",
             extra={
-                "event": "bracket_sl_placed",
-                "sl_id": sl_id,
-                "entry_id": entry_id,
-                "trigger": sl_trigger
+                "event": "bracket_entry_fill",
+                "order_id": entry_id,
+                "filled_qty": filled_qty,
+                "fill_price": fill_price
             }
         )
-        
-    except Exception as sl_exc:
-        # ✅ STEP 2: CRITICAL FALLBACK - Emergency market exit
-        LOGGER.critical(
-            f"❌ SL placement failed for entry {entry_id}! Initiating emergency market exit!",
-            extra={
-                "event": "bracket_sl_failed_emergency_exit",
-                "entry_id": entry_id,
-                "error": str(sl_exc)
-            },
-            exc_info=True
-        )
-        
+    
+        # ✅ STEP 1: Calculate and place SL immediately with CRITICAL priority
+        sl_id = None
         try:
-            # Force immediate market exit
-            exit_request = OrderRequest(
+            # Calculate SL trigger price from metadata
+            atr = self.get_atr_for_symbol(symbol, metadata)
+            sl_trigger = fill_price - (atr * 1.5) if side == "BUY" else fill_price + (atr * 1.5)
+        
+            # Place SL order (OrderIntent.EXIT_SL)
+            sl_request = OrderRequest(
                 symbol=symbol,
                 side="SELL" if side == "BUY" else "BUY",
                 quantity=filled_qty,
-                intent=OrderIntent.EXIT_MARKET,
-                ordertype=OrderType.MARKET,
-                priority=0  # EMERGENCY priority
+                intent=OrderIntent.EXIT_SL,
+                price=None,  # Market on trigger (Assumed STOP LOSS MARKET logic)
+                metadata={"parent_id": entry_id, "trigger": sl_trigger},
+                priority=0  # CRITICAL priority (assuming 0 = highest)
             )
-            
-            self.orderqueue.submit_order_request(exit_request)
-            exit_id = f"EMERGENCY_{entry_id}"
-            
-            LOGGER.critical(
-                f"⚠️ Emergency market exit submitted: {exit_id}. Position will be flattened.",
-                extra={"event": "emergency_market_exit_success", "exit_id": exit_id}
-            )
-            
-            return None, exit_id 
-            
-        except Exception as exit_exc:
-            # ✅ STEP 3: UNRECOVERABLE - Alert operator
-            LOGGER.critical(
-                f"🚨 UNRECOVERABLE: Emergency exit FAILED for {entry_id}! Position is EXPOSED!",
+        
+            # Submit to queue
+            self.orderqueue.submit_order_request(sl_request)
+            sl_id = f"SL_{entry_id}"
+        
+            LOGGER.info(
+                f"✅ SL placed for entry {entry_id} @ {sl_trigger:.2f}: ID {sl_id}",
                 extra={
-                    "event": "emergency_exit_unrecoverable",
-                    "symbol": symbol,
-                    "quantity": filled_qty,
-                    "error": str(exit_exc)
+                    "event": "bracket_sl_placed",
+                    "sl_id": sl_id,
+                    "entry_id": entry_id,
+                    "trigger": sl_trigger
+                }
+            )
+        
+        except Exception as sl_exc:
+            # ✅ STEP 2: CRITICAL FALLBACK - Emergency market exit
+            LOGGER.critical(
+                f"❌ SL placement failed for entry {entry_id}! Initiating emergency market exit!",
+                extra={
+                    "event": "bracket_sl_failed_emergency_exit",
+                    "entry_id": entry_id,
+                    "error": str(sl_exc)
                 },
                 exc_info=True
             )
-            # Placeholder for Telegram/Operator Alert
-            # self.notify_critical_exposure(entry_id, filled_qty, fill_price, exit_exc) 
-            raise
+        
+            try:
+                # Force immediate market exit
+                exit_request = OrderRequest(
+                    symbol=symbol,
+                    side="SELL" if side == "BUY" else "BUY",
+                    quantity=filled_qty,
+                    intent=OrderIntent.EXIT_MARKET,
+                    ordertype=OrderType.MARKET,
+                    priority=0  # EMERGENCY priority
+                )
+            
+                self.orderqueue.submit_order_request(exit_request)
+                exit_id = f"EMERGENCY_{entry_id}"
+            
+                LOGGER.critical(
+                    f"⚠️ Emergency market exit submitted: {exit_id}. Position will be flattened.",
+                    extra={"event": "emergency_market_exit_success", "exit_id": exit_id}
+                )
+            
+                return None, exit_id 
+            
+            except Exception as exit_exc:
+                # ✅ STEP 3: UNRECOVERABLE - Alert operator
+                LOGGER.critical(
+                    f"🚨 UNRECOVERABLE: Emergency exit FAILED for {entry_id}! Position is EXPOSED!",
+                    extra={
+                        "event": "emergency_exit_unrecoverable",
+                        "symbol": symbol,
+                        "quantity": filled_qty,
+                        "error": str(exit_exc)
+                    },
+                    exc_info=True
+                )
+                # Placeholder for Telegram/Operator Alert
+                # self.notify_critical_exposure(entry_id, filled_qty, fill_price, exit_exc) 
+                raise
     
-    # ✅ STEP 4: SL succeeded, now place TP (non-critical)
-    tp_id = None
-    try:
-        atr = self.get_atr_for_symbol(symbol, metadata)
-        tp_price = fill_price + (atr * 2.0) if side == "BUY" else fill_price - (atr * 2.0)
+        # ✅ STEP 4: SL succeeded, now place TP (non-critical)
+        tp_id = None
+        try:
+            atr = self.get_atr_for_symbol(symbol, metadata)
+            tp_price = fill_price + (atr * 2.0) if side == "BUY" else fill_price - (atr * 2.0)
         
-        tp_request = OrderRequest(
-            symbol=symbol,
-            side="SELL" if side == "BUY" else "BUY",
-            quantity=filled_qty,
-            intent=OrderIntent.EXIT_TP1,
-            ordertype=OrderType.LIMIT,
-            price=tp_price,
-            metadata={"parent_id": entry_id},
-            priority=1  # HIGH but not CRITICAL
-        )
+            tp_request = OrderRequest(
+                symbol=symbol,
+                side="SELL" if side == "BUY" else "BUY",
+                quantity=filled_qty,
+                intent=OrderIntent.EXIT_TP1,
+                ordertype=OrderType.LIMIT,
+                price=tp_price,
+                metadata={"parent_id": entry_id},
+                priority=1  # HIGH but not CRITICAL
+            )
         
-        self.orderqueue.submit_order_request(tp_request)
-        tp_id = f"TP_{entry_id}"
+            self.orderqueue.submit_order_request(tp_request)
+            tp_id = f"TP_{entry_id}"
         
-        # Register bracket with lifecycle manager
-        if hasattr(self, 'lifecyclemanager'):
-            try:
-                self.lifecyclemanager.register_bracket(
-                    entry_id=entry_id,
-                    sl_id=sl_id,
-                    tp_id=tp_id
-                )
-            except Exception as reg_exc:
-                LOGGER.warning(f"Bracket registration failed: {reg_exc}")
+            # Register bracket with lifecycle manager
+            if hasattr(self, 'lifecyclemanager'):
+                try:
+                    self.lifecyclemanager.register_bracket(
+                        entry_id=entry_id,
+                        sl_id=sl_id,
+                        tp_id=tp_id
+                    )
+                except Exception as reg_exc:
+                    LOGGER.warning(f"Bracket registration failed: {reg_exc}")
                 
-        LOGGER.info(
-            f"✅ TP placed and bracket registered for entry {entry_id}: TP ID {tp_id}",
-            extra={"event": "bracket_tp_placed", "tp_id": tp_id, "sl_id": sl_id}
-        )
+            LOGGER.info(
+                f"✅ TP placed and bracket registered for entry {entry_id}: TP ID {tp_id}",
+                extra={"event": "bracket_tp_placed", "tp_id": tp_id, "sl_id": sl_id}
+            )
         
-        return sl_id, tp_id
+            return sl_id, tp_id
         
-    except Exception as tp_exc:
-        # ✅ STEP 5: TP failed but SL is active - Position is protected
-        LOGGER.warning(
-            f"⚠️ TP placement failed for entry {entry_id}. SL is active, position is protected.",
-            extra={"event": "bracket_tp_failed_protected", "error": str(tp_exc)},
-            exc_info=True
-        )
+        except Exception as tp_exc:
+            # ✅ STEP 5: TP failed but SL is active - Position is protected
+            LOGGER.warning(
+                f"⚠️ TP placement failed for entry {entry_id}. SL is active, position is protected.",
+                extra={"event": "bracket_tp_failed_protected", "error": str(tp_exc)},
+                exc_info=True
+            )
         
-        # Register partial bracket (SL only)
-        if hasattr(self, 'lifecyclemanager'):
-            try:
-                self.lifecyclemanager.register_bracket(
-                    entry_id=entry_id,
-                    sl_id=sl_id,
-                    tp_id=None
-                )
-            except Exception as reg_exc:
-                LOGGER.warning(f"Bracket registration failed: {reg_exc}")
+            # Register partial bracket (SL only)
+            if hasattr(self, 'lifecyclemanager'):
+                try:
+                    self.lifecyclemanager.register_bracket(
+                        entry_id=entry_id,
+                        sl_id=sl_id,
+                        tp_id=None
+                    )
+                except Exception as reg_exc:
+                    LOGGER.warning(f"Bracket registration failed: {reg_exc}")
                 
-        return sl_id, None
+            return sl_id, None
 
     def _record_order(self, request: OrderRequest, result: ExecutionResult) -> None:
         """Persist execution details to the state tracker.
