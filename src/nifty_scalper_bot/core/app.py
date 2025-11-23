@@ -1226,6 +1226,20 @@ def get_http_app() -> FastAPI:
             # Defensive outer guard — log and continue; do not prevent app startup.
             LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
 
+        ensure_fn = getattr(resolver, "ensure_core_index_tokens", None)
+        if callable(ensure_fn):
+            try:
+                ensure_fn()
+                LOGGER.info(
+                    "InstrumentResolver core tokens ensured (fix applied)",
+                    extra={"event": "resolver_warm.core_fix_applied"}
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    "Failed to execute ensure_core_index_tokens: %s",
+                    exc,
+                    extra={"event": "resolver_warm.core_fix_failed"}
+                )
     return app
 
 
