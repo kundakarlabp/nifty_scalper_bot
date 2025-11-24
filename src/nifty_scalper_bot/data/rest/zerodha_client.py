@@ -340,7 +340,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 ts_ms = int(datetime.fromisoformat(last_trade_time).timestamp() * 1000)
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
-
+        
+        # --- FIX 1: REMOVE TRAILING COMMAS TO ASSIGN FLOATS, NOT TUPLES ---
+        # The variables 'bid' and 'ask' MUST be floats/None, not tuples.
         return {
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
