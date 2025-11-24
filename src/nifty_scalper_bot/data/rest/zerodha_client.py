@@ -590,7 +590,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if require_depth:
             try:
                 # get_quote_bulk already honors rate limiting and symbol resolution.
-                quote_map = await self.get_quote_bulk(tokens)
+                quote_map = await self.get_quote_bulk(batch)
                 out: dict[int, float] = {}
                 for token, payload in quote_map.items():
                     if not isinstance(payload, Mapping):
