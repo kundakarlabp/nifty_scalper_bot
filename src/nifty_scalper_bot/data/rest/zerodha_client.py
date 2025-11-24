@@ -1880,9 +1880,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         raise BrokerError(f"Instrument token not found for {symbol}")
 
-    async def close(self) -> None:  # ✅ ASYNC
+    def close(self) -> None:
         """Close underlying HTTP session."""
-        await self._client.aclose()  # ✅ ASYNC CLOSE
+
+        self._client.close()
 
     def _tokens_to_symbols(
         self, tokens: Iterable[int]
