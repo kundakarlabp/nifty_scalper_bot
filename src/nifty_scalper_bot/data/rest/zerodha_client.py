@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,  # ✅ ADDED FOR ASYNC
     Callable,
     Iterable,
     Mapping,
@@ -318,9 +317,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return quotes or None
 
     # BaseBrokerClient protocol methods
-    async def get_quote(  # ✅ ASYNC
-
-    self, symbol: str) -> dict[str, Any]:
+    def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get quote for symbol."""
 
         self._acquire_bucket(self._QUOTE_BUCKET)
@@ -343,16 +340,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 ts_ms = int(datetime.fromisoformat(last_trade_time).timestamp() * 1000)
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
-        
-        # CORRECTED LOGIC: Removes the syntax error and adds safety checks.
-        bid_price = float(buy_depth[0]["price"]) if buy_depth and len(buy_depth) > 0 and "price" in buy_depth[0] else None
-        ask_price = float(sell_depth[0]["price"]) if sell_depth and len(sell_depth) > 0 and "price" in sell_depth[0] else None
+
         return {
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
             "ts_ms": ts_ms,
-            "bid": bid_price, 
-            "ask": ask_price,
+            "bid": float(buy_depth[0]["price"]) if buy_depth else None,
+            "ask": float(sell_depth[0]["price"]) if sell_depth else None,
             "volume": quote_data.get("volume"),
             "oi": quote_data.get("oi"),
         }
@@ -461,10 +455,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return params
 
-    async def place_order(  # ✅ ASYNC
-
-
-    self, payload: dict[str, Any]) -> dict[str, Any]:
+    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Place order."""
 
         params = self._build_kite_params(payload)
@@ -555,10 +546,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._resolver = resolver
 
-    async def get_ltp_bulk(  # ✅ ASYNC
-
-
-    self, tokens: list[int]) -> dict[int, float]:
+    def get_ltp_bulk(self, tokens: list[int]) -> dict[int, float]:
         """Return mapping of instrument tokens to last traded price."""
 
         if not tokens:
@@ -573,7 +561,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if require_depth:
             try:
                 # get_quote_bulk already honors rate limiting and symbol resolution.
-                quote_map = await self.get_quote_bulk(  # ✅ AWAITtokens)
+                quote_map = self.get_quote_bulk(tokens)
                 out: dict[int, float] = {}
                 for token, payload in quote_map.items():
                     if not isinstance(payload, Mapping):
@@ -637,10 +625,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return out
 
-    async def get_quote_by_token(  # ✅ ASYNC
-
-
-    self, token: int) -> dict[str, Any]:
+    def get_quote_by_token(self, token: int) -> dict[str, Any]:
         """Return a Zerodha quote payload for the given instrument token."""
 
         symbols, _symbol_map = self._tokens_to_symbols([int(token)])
@@ -658,10 +643,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             payload["last_price"] = 0.0
         return payload
 
-    async def get_quote_bulk(  # ✅ ASYNC
-
-
-    self, tokens: list[int]) -> dict[int, dict[str, Any]]:
+    def get_quote_bulk(self, tokens: list[int]) -> dict[int, dict[str, Any]]:
         """Return mapping of instrument tokens to Zerodha quote payloads."""
 
         if not tokens:
@@ -684,10 +666,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             out[token] = payload
         return out
 
-    async def get_ohlc(  # ✅ ASYNC
-
-
-    
+    def get_ohlc(
         self,
         symbol: str,
         interval: str,
@@ -708,10 +687,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         data = cast(dict[str, Any], response.get("data", {}))
         return cast(list[dict], data.get("candles", []))
 
-    async def get_order_status(  # ✅ ASYNC
-
-
-    self, order_id: str) -> dict:
+    def get_order_status(self, order_id: str) -> dict:
         """Get order status from broker."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
@@ -722,10 +698,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return order
         return {}
 
-    async def cancel_order(  # ✅ ASYNC
-
-
-    self, order_id: str, variety: str = "regular") -> dict:
+    def cancel_order(self, order_id: str, variety: str = "regular") -> dict:
         """Cancel order."""
 
         self._acquire_bucket(self._ORDER_BUCKET)
@@ -738,10 +711,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(dict[str, Any], response.get("data", {}))
 
-    async def modify_order(  # ✅ ASYNC
-
-
-    
+    def modify_order(
         self,
         order_id: str,
         quantity: int | None = None,
@@ -771,10 +741,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(dict[str, Any], response.get("data", {}))
 
-    async def get_orders(  # ✅ ASYNC
-
-
-    self) -> list[dict]:
+    def get_orders(self) -> list[dict]:
         """Get all Zerodha orders for the trading day.
 
         Args:
@@ -816,7 +783,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return orders
 
         try:
-            return await self._execute_with_retry(  # ✅ AWAIT
+            return self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -831,10 +798,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    async def get_positions(  # ✅ ASYNC
-
-
-    self) -> list[dict[str, Any]]:
+    def get_positions(self) -> list[dict[str, Any]]:
         """Return Zerodha positions as normalized dictionaries.
 
         Args:
@@ -913,7 +877,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return []
 
         try:
-            return await self._execute_with_retry(  # ✅ AWAIT
+            return self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -928,10 +892,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    async def get_holdings(  # ✅ ASYNC
-
-
-    self) -> list[dict]:
+    def get_holdings(self) -> list[dict]:
         """Get holdings."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
@@ -942,10 +903,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(list[dict], response.get("data", []))
 
-    async def get_account_margins(  # ✅ ASYNC
-
-
-    self, segment: str | None = None) -> dict[str, Any]:
+    def get_account_margins(self, segment: str | None = None) -> dict[str, Any]:
         """Return raw Zerodha account margin payload for *segment*.
 
         Args:
@@ -1002,7 +960,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return payload
 
         try:
-            return await self._execute_with_retry(  # ✅ AWAIT
+            return self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -1021,10 +979,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    async def get_margins(  # ✅ ASYNC
-
-
-    self, segment: str = "equity") -> dict[str, Any]:
+    def get_margins(self, segment: str = "equity") -> dict[str, Any]:
         """Fetch Zerodha margin information for *segment*.
 
         Args:
@@ -1071,7 +1026,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return payload
 
         try:
-            return await self._execute_with_retry(  # ✅ AWAIT
+            return self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -1089,10 +1044,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    async def get_margin_summary(  # ✅ ASYNC
-
-
-    self, segment: str = "equity") -> dict[str, float]:
+    def get_margin_summary(self, segment: str = "equity") -> dict[str, float]:
         """Return normalized margin snapshot for a Zerodha segment.
 
         Args:
@@ -1110,7 +1062,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             extra={"event": "zerodha_margin_summary_start", "segment": segment},
         )
         try:
-            payload = await self.get_margins(  # ✅ AWAITsegment=segment)
+            payload = self.get_margins(segment=segment)
         except Exception as exc:  # noqa: BLE001 - propagate after logging
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.get_margin_summary: %s",
@@ -1136,10 +1088,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return summary
 
-    async def get_available_balance(  # ✅ ASYNC
-
-
-    self, segment: str = "equity") -> float:
+    def get_available_balance(self, segment: str = "equity") -> float:
         """Return available margin balance for a Zerodha segment.
 
         Args:
@@ -1166,7 +1115,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         summary: dict[str, float] | None = None
         account_error: Exception | None = None
         try:
-            account_payload = await self.get_account_margins(  # ✅ AWAITsegment=normalized_segment)
+            account_payload = self.get_account_margins(segment=normalized_segment)
             if account_payload:
                 summary = self._normalize_margin_payload(
                     account_payload,
@@ -1613,7 +1562,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return content
 
         self._acquire_bucket(self._HISTORICAL_BUCKET)
-        raw_response = await self._make_request(  # ✅ AWAIT
+        raw_response = self._make_request(
             "GET",
             f"/instruments/{exchange}",
             raw_response=True,
@@ -1986,11 +1935,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return _should_retry, _on_retry
 
-    async def _execute_with_retry(  # ✅ NOW ASYNC
+    def _execute_with_retry(
         self,
         *,
         label: str,
-        operation: Callable[[], Awaitable[T]],  # ✅ AWAITABLE
+        operation: Callable[[], T],
         should_retry: Callable[[Exception], bool],
         error_message: str,
         on_retry: Callable[[int, Exception, float], None] | None,
@@ -2016,7 +1965,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             extra={"event": "zerodha_execute_with_retry_start", "label": label},
         )
         try:
-            return await retry_with_backoff(  # ✅ AWAIT
+            return retry_with_backoff(
                 operation=operation,
                 retries=self._max_retries + self._transient_retry_bonus,
                 base_delay=self._retry_base_delay,
@@ -2036,7 +1985,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise BrokerError(error_message) from (exc.context.error or exc)
 
-    async def _make_request(  # ✅ NOW ASYNC
+    def _make_request(
         self,
         method: str,
         endpoint: str,
@@ -2071,10 +2020,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
         label = operation_label or (url.lstrip("/") or "zerodha")
         should_retry, on_retry = self._build_retry_handlers(endpoint=url)
 
-        async def _operation() -> dict | httpx.Response:  # ✅ ASYNC
+        def _operation() -> dict | httpx.Response:
             self._breaker_sleep(url)
             try:
-                response = await self._client.request(  # ✅ AWAITmethod, url, params=params, data=data)
+                response = self._client.request(method, url, params=params, data=data)
             except httpx.RequestError as exc:
                 raise RetryableError(
                     f"Request error for {url}",
@@ -2130,9 +2079,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._raise_for_status(response, expect_order_response)
 
         if not with_retry:
-            return await _operation()  # ✅ AWAIT
+            return _operation()
 
-        return await self._execute_with_retry(  # ✅ AWAIT
+        return self._execute_with_retry(
             label=label,
             operation=_operation,
             should_retry=should_retry,
@@ -2264,21 +2213,23 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._transient_error_streak = 0
             self._breaker_open_until = 0.0
 
-
-    async def _update_http_client(self, base_url: str) -> None:  # ✅ ASYNC
-        try:
-            await self._client.aclose()  # ✅ ASYNC
-        except Exception:  # pragma: no cover - defensive
-            LOGGER.debug("zerodha_client_close_failed", exc_info=True)
-        self._base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(
-            base_url=self._base_url,
+    def _create_http_client(self, base_url: str) -> httpx.Client:
+        return httpx.Client(
+            base_url=base_url,
             timeout=self._timeout,
             headers={
                 "X-Kite-Version": "3",
                 "Authorization": f"token {self._api_key}:{self._access_token}",
             },
         )
+
+    def _update_http_client(self, base_url: str) -> None:
+        try:
+            self._client.close()
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.debug("zerodha_client_close_failed", exc_info=True)
+        self._base_url = base_url.rstrip("/")
+        self._client = self._create_http_client(self._base_url)
 
     def _rotate_base_url(self, *, reason: str | None, status: int | None) -> None:
         if len(self._base_urls) <= 1:
