@@ -196,7 +196,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             normalized_segment = "equity"
         self._default_margin_segment = normalized_segment
 
-    def quote_any(self, items: Sequence[object]) -> Mapping[str, Any] | None:
+    async def quote_any(self, items: Sequence[object]) -> Mapping[str, Any] | None:
         """Fetch Zerodha quote payloads for mixed identifiers.
 
         Args:
@@ -484,7 +484,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return params
 
-    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Place order."""
 
         params = self._build_kite_params(payload)
@@ -534,7 +534,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._acquire_bucket(self._ORDER_BUCKET)
         response = self._ensure_json(
-            self._make_request(
+            await self._make_request(
                 "POST",
                 f"/orders/{variety}",
                 data=params,
@@ -550,7 +550,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         }
 
     # Additional Kite-specific methods
-    def get_ltp(self, symbols: list[str]) -> dict[str, float]:
+    async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
         """Get last traded price for multiple symbols."""
 
         if not symbols:
@@ -558,7 +558,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._acquire_bucket(self._QUOTE_BUCKET)
         kite_symbols = [self._format_symbol(symbol) for symbol in symbols]
         response = self._ensure_json(
-            self._make_request("GET", "/quote/ltp", params={"i": kite_symbols})
+            await self._make_request("GET", "/quote/ltp", params={"i": kite_symbols})
         )
         data = cast(dict[str, Any], response.get("data", {}))
         results: dict[str, float] = {}
@@ -631,7 +631,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return {}
         self._acquire_bucket(self._QUOTE_BUCKET)
         response = self._ensure_json(
-            self._make_request("GET", "/quote/ltp", params={"i": symbols})
+            await self._make_request("GET", "/quote/ltp", params={"i": symbols})
         )
         data = cast(dict[str, Any], response.get("data", {}))
         out: dict[int, float] = {}
@@ -663,7 +663,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raise BrokerError(msg)
         self._acquire_bucket(self._QUOTE_BUCKET)
         response = self._ensure_json(
-            self._make_request("GET", "/quote", params={"i": symbols})
+            await self._make_request("GET", "/quote", params={"i": symbols})
         )
         data = cast(dict[str, Any], response.get("data", {}))
         payload = dict(data.get(symbols[0], {}))
@@ -731,7 +731,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._acquire_bucket(self._ORDER_BUCKET)
         response = self._ensure_json(
-            self._make_request(
+            await self._make_request(
                 "DELETE",
                 f"/orders/{variety}/{order_id}",
                 operation_label="orders.cancel",
@@ -760,7 +760,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._acquire_bucket(self._ORDER_BUCKET)
         response = self._ensure_json(
-            self._make_request(
+            await self._make_request(
                 "PUT",
                 f"/orders/{variety}/{order_id}",
                 data=payload,
@@ -792,7 +792,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         async def _operation() -> list[dict]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             payload = self._ensure_json(
-                self._make_request(
+                await self._make_request(
                     "GET",
                     "/orders",
                     operation_label=label,
@@ -850,7 +850,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         async def _operation() -> list[dict[str, Any]]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             response = self._ensure_json(
-                self._make_request(
+                await self._make_request(
                     "GET",
                     endpoint,
                     operation_label=label,
@@ -925,7 +925,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._acquire_bucket(self._GENERAL_BUCKET)
         response = self._ensure_json(
-            self._make_request(
+            await self._make_request(
                 "GET", "/portfolio/holdings", operation_label="holdings.fetch"
             )
         )
@@ -959,7 +959,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         endpoint = f"/user/margins/{normalized_segment}"
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
 
-        def _operation() -> dict[str, Any]:
+        async def _operation() -> dict[str, Any]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             raw_payload = self._ensure_json(
                 await self._make_request(
@@ -1028,7 +1028,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         endpoint = f"/margins/{segment}"
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
 
-        def _operation() -> dict[str, Any]:
+        async def _operation() -> dict[str, Any]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             raw_payload = self._ensure_json(
                 self._make_request(
@@ -1499,7 +1499,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return None
         return result
 
-    def get_profile(self) -> dict:
+    asdef get_profile(self) -> dict:
         """Get user profile."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
@@ -1590,7 +1590,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return content
 
         self._acquire_bucket(self._HISTORICAL_BUCKET)
-        raw_response = self._make_request(
+        raw_response = await self._make_request(
             "GET",
             f"/instruments/{exchange}",
             raw_response=True,
