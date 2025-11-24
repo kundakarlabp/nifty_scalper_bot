@@ -61,7 +61,9 @@ def _should_start_http_server() -> bool:
 
 
 async def _run() -> None:
+    app_core = NiftyScalperApp()
     app_core._ctx = await app_core._ctx_coroutine
+    await app_core.start()
     uv_server: uvicorn.Server | None = None
     http_task: asyncio.Task[None] | None = None
     http_enabled = _should_start_http_server()
