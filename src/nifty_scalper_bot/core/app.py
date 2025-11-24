@@ -2305,7 +2305,7 @@ def _get_nifty_spot_from_context(ctx: BotContext) -> float | None:
     return None
 
 
-def initialize_components(settings: Settings | None = None) -> BotContext:
+async def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
     ensure_multiproc_dir(clear_stale=True)
