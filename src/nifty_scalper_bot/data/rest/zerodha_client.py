@@ -706,7 +706,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._acquire_bucket(self._HISTORICAL_BUCKET)
         instrument_token = self.get_instrument_token(symbol)
         response = self._ensure_json(
-            self._make_request(
+            await self._make_request(
                 "GET",
                 f"/instruments/historical/{instrument_token}/{interval}",
                 params={"from": from_date, "to": to_date},
@@ -811,7 +811,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return orders
 
         try:
-            return self._execute_with_retry(
+            return await self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -905,7 +905,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return []
 
         try:
-            return self._execute_with_retry(
+            return await self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -962,7 +962,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         def _operation() -> dict[str, Any]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             raw_payload = self._ensure_json(
-                self._make_request(
+                await self._make_request(
                     "GET",
                     endpoint,
                     operation_label=label,
@@ -988,7 +988,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return payload
 
         try:
-            return self._execute_with_retry(
+            return await self._execute_with_retry(
                 label=label,
                 operation=_operation,
                 should_retry=should_retry,
@@ -1503,7 +1503,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """Get user profile."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
-        response = self._ensure_json(self._make_request("GET", "/user/profile"))
+        response = self._ensure_json(await self._make_request("GET", "/user/profile"))
         return cast(dict[str, Any], response.get("data", {}))
 
     async def _fetch_instrument_csv(self, exchange: str) -> str:
@@ -1963,11 +1963,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return _should_retry, _on_retry
 
-    def _execute_with_retry(
+    async def _execute_with_retry(
         self,
         *,
         label: str,
-        operation: Callable[[], T],
+        operation: Callable[[], Awaitable[T]],
         should_retry: Callable[[Exception], bool],
         error_message: str,
         on_retry: Callable[[int, Exception, float], None] | None,
@@ -1993,7 +1993,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             extra={"event": "zerodha_execute_with_retry_start", "label": label},
         )
         try:
-            return retry_with_backoff(
+            return await retry_with_backoff(
                 operation=operation,
                 retries=self._max_retries + self._transient_retry_bonus,
                 base_delay=self._retry_base_delay,
@@ -2013,7 +2013,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise BrokerError(error_message) from (exc.context.error or exc)
 
-    def _make_request(
+    async def _make_request(
         self,
         method: str,
         endpoint: str,
@@ -2048,7 +2048,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         label = operation_label or (url.lstrip("/") or "zerodha")
         should_retry, on_retry = self._build_retry_handlers(endpoint=url)
 
-        def _operation() -> dict | httpx.Response:
+        async def _operation() -> dict | httpx.Response:
             self._breaker_sleep(url)
             try:
                 response = await self._client.request(method, url, params=params, data=data)
@@ -2117,14 +2117,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
             on_retry=on_retry,
         )
 
-    def _ensure_json(self, payload: dict[str, Any] | httpx.Response) -> dict[str, Any]:
+    async def _ensure_json(self, payload: dict[str, Any] | httpx.Response) -> dict[str, Any]:
         """Ensure `_make_request` returned JSON data."""
 
         if isinstance(payload, httpx.Response):
             raise BrokerError("Unexpected raw HTTP response")
         return payload
 
-    def _raise_for_status(
+    async def _raise_for_status(
         self, response: httpx.Response, expect_order_response: bool
     ) -> NoReturn:
         """Convert HTTP response to typed error and raise."""
