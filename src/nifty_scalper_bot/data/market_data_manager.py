@@ -716,7 +716,7 @@ class MarketDataManager:
             if not snapshot:
                 margins_fetcher = getattr(self._broker, "get_margins", None)
                 if callable(margins_fetcher):
-                    response = margins_fetcher(segment=segment)
+                    response = await margins_fetcher(segment=segment)
                     normalizer = getattr(
                         self._broker, "_normalize_margin_payload", None
                     )
