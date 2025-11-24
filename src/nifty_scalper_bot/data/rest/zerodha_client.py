@@ -273,7 +273,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         try:
             self._acquire_bucket(self._QUOTE_BUCKET)
             response = self._ensure_json(
-                self._make_request("GET", "/quote", params={"i": ordered_items})
+                await self._make_request("GET", "/quote", params={"i": ordered_items})
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
@@ -1857,7 +1857,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         raise BrokerError(f"Instrument token not found for {symbol}")
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close underlying HTTP session."""
 
         await self._client.aclose()
