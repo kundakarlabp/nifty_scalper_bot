@@ -694,7 +694,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             out[token] = payload
         return out
 
-    def get_ohlc(
+    async def get_ohlc(
         self,
         symbol: str,
         interval: str,
@@ -715,7 +715,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         data = cast(dict[str, Any], response.get("data", {}))
         return cast(list[dict], data.get("candles", []))
 
-    def get_order_status(self, order_id: str) -> dict:
+    async def get_order_status(self, order_id: str) -> dict:
         """Get order status from broker."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
@@ -726,7 +726,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return order
         return {}
 
-    def cancel_order(self, order_id: str, variety: str = "regular") -> dict:
+    async def cancel_order(self, order_id: str, variety: str = "regular") -> dict:
         """Cancel order."""
 
         self._acquire_bucket(self._ORDER_BUCKET)
@@ -739,7 +739,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(dict[str, Any], response.get("data", {}))
 
-    def modify_order(
+    async def modify_order(
         self,
         order_id: str,
         quantity: int | None = None,
@@ -769,7 +769,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(dict[str, Any], response.get("data", {}))
 
-    def get_orders(self) -> list[dict]:
+    async def get_orders(self) -> list[dict]:
         """Get all Zerodha orders for the trading day.
 
         Args:
@@ -826,7 +826,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    def get_positions(self) -> list[dict[str, Any]]:
+    async def get_positions(self) -> list[dict[str, Any]]:
         """Return Zerodha positions as normalized dictionaries.
 
         Args:
@@ -920,7 +920,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    def get_holdings(self) -> list[dict]:
+    async def get_holdings(self) -> list[dict]:
         """Get holdings."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
@@ -931,7 +931,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(list[dict], response.get("data", []))
 
-    def get_account_margins(self, segment: str | None = None) -> dict[str, Any]:
+    async def get_account_margins(self, segment: str | None = None) -> dict[str, Any]:
         """Return raw Zerodha account margin payload for *segment*.
 
         Args:
@@ -1007,7 +1007,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    def get_margins(self, segment: str = "equity") -> dict[str, Any]:
+    async def get_margins(self, segment: str = "equity") -> dict[str, Any]:
         """Fetch Zerodha margin information for *segment*.
 
         Args:
@@ -1072,7 +1072,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise
 
-    def get_margin_summary(self, segment: str = "equity") -> dict[str, float]:
+    async def get_margin_summary(self, segment: str = "equity") -> dict[str, float]:
         """Return normalized margin snapshot for a Zerodha segment.
 
         Args:
@@ -1506,7 +1506,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         response = self._ensure_json(self._make_request("GET", "/user/profile"))
         return cast(dict[str, Any], response.get("data", {}))
 
-    def _fetch_instrument_csv(self, exchange: str) -> str:
+    async def _fetch_instrument_csv(self, exchange: str) -> str:
         """Fetch raw instrument CSV payload for *exchange*.
 
         Args:
