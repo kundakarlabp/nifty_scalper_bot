@@ -659,7 +659,7 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Broker account snapshot accessors
-    def get_account_snapshot(self, *, force: bool = False) -> dict[str, float]:
+    async def get_account_snapshot(self, *, force: bool = False) -> dict[str, float]:
         """Return cached broker margin snapshot sourced via the MDM.
 
         Args:
@@ -702,7 +702,7 @@ class MarketDataManager:
         try:
             summary_fetcher = getattr(self._broker, "get_margin_summary", None)
             if callable(summary_fetcher):
-                response = summary_fetcher(segment=segment)
+                response = await summary_fetcher(segment=segment)
                 snapshot = _coerce_margin_summary(response)
                 if snapshot:
                     self._logger.info(
@@ -729,7 +729,7 @@ class MarketDataManager:
             if not snapshot:
                 balance_fetcher = getattr(self._broker, "get_available_balance", None)
                 if callable(balance_fetcher):
-                    available = balance_fetcher(segment=segment)
+                    available = await balance_fetcher(segment=segment)
                     available_value = _coerce_positive_float(available)
                     if available_value is not None:
                         snapshot = {"available": float(available_value)}
