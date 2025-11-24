@@ -332,7 +332,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._acquire_bucket(self._QUOTE_BUCKET)
         kite_symbol = self._format_symbol(symbol)
         response = self._ensure_json(
-            self._make_request("GET", "/quote", params={"i": [kite_symbol]})
+            await self._make_request("GET", "/quote", params={"i": [kite_symbol]})
         )
         
         # --- FIX: ROBUST ERROR CHECKING BEFORE ACCESSING DATA ---
