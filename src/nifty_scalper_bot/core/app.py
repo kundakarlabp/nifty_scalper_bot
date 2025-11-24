@@ -5203,7 +5203,7 @@ class NiftyScalperApp:
                 },
             )
             raise ConfigurationError(f"Execution configuration invalid: {joined}")
-        self._ctx = initialize_components(self._settings)
+        self._ctx = asyncio.get_event_loop().run_until_complete(initialize_components(self._settings))
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._health_task: asyncio.Task[None] | None = None
