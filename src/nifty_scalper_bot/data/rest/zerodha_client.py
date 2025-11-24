@@ -341,14 +341,15 @@ class ZerodhaKiteClient(BaseBrokerClient):
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
         
-        # --- FIX 1: REMOVE TRAILING COMMAS TO ASSIGN FLOATS, NOT TUPLES ---
-        # The variables 'bid' and 'ask' MUST be floats/None, not tuples.
+        # CORRECTED LOGIC: Removes the syntax error and adds safety checks.
+        bid_price = float(buy_depth[0]["price"]) if buy_depth and len(buy_depth) > 0 and "price" in buy_depth[0] else None
+        ask_price = float(sell_depth[0]["price"]) if sell_depth and len(sell_depth) > 0 and "price" in sell_depth[0] else None
         return {
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
             "ts_ms": ts_ms,
-            "bid": float(buy_depth[0]["price"]) if buy_depth else None
-            "ask": float(sell_depth[0]["price"]) if sell_depth else None
+            "bid": bid_price, 
+            "ask": ask_price,
             "volume": quote_data.get("volume"),
             "oi": quote_data.get("oi"),
         }
