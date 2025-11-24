@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional, Any
 
 from nifty_scalper_bot.config import env as cfg
 from nifty_scalper_bot.infra.metrics import (
@@ -23,8 +24,30 @@ from nifty_scalper_bot.utils.market import is_market_open
 
 LOGGER = get_logger(__name__)
 
+# Type definitions: TickHandler is a synchronous function
 TickFetcher = Callable[[], Awaitable[Iterable[dict[str, object]] | None]]
 TickHandler = Callable[[dict[str, object]], None]
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Safely convert value to float, returning None on failure."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _short_tick_repr(tick: dict) -> str:
+    """Create a concise string representation of tick for logging."""
+    if not isinstance(tick, dict):
+        return str(tick)[:100]
+    
+    symbol = tick.get('tradingsymbol') or tick.get('instrument_token') or tick.get('symbol')
+    ltp = tick.get('ltp') or tick.get('last_price')
+    
+    return f"{{symbol={symbol}, ltp={ltp}, keys={list(tick.keys())[:8]}}}"
 
 
 class PollingManager:
@@ -58,6 +81,8 @@ class PollingManager:
         on_tick: TickHandler,
         interval_ms: int = 3000,
         max_batch_size: int = 50,
+        # World-class: Use a separate thread pool for blocking handlers
+        thread_executor: ThreadPoolExecutor | None = None,
     ) -> None:
         """
         Initialize the polling manager with production-grade defaults.
@@ -67,12 +92,14 @@ class PollingManager:
             on_tick: Sync handler for processed ticks
             interval_ms: Polling interval in milliseconds
             max_batch_size: Maximum symbols per batch
+            thread_executor: Optional executor for dispatching sync handlers.
         """
         # Core components
         self._fetch = fetch_fn
         self._on_tick = on_tick
         self._interval = interval_ms / 1000.0
         self._max_batch = max_batch_size
+        self._executor = thread_executor
         
         # Task management
         self._task: Optional[asyncio.Task] = None
@@ -113,11 +140,12 @@ class PollingManager:
         self._running = True
         
         LOGGER.info(
-            "Starting PollingManager (interval=%.2fs, batch=%d, synthetic=%s, dedup=%s)",
+            "Starting PollingManager (interval=%.2fs, batch=%d, synthetic=%s, dedup=%s, executor_used=%s)",
             self._interval,
             self._max_batch,
             self._add_synthetic_depth,
             self._enable_deduplication,
+            self._executor is not None,
             extra={
                 'event': 'polling_manager_start',
                 'config': {
@@ -287,6 +315,9 @@ class PollingManager:
         duplicate_count = 0
         synthetic_count = 0
         
+        # List of tasks to run the handler in parallel threads
+        handler_tasks: list[asyncio.Future] = []
+        
         for tick in raw_ticks:
             # Type validation
             if not isinstance(tick, dict):
@@ -314,16 +345,23 @@ class PollingManager:
                     continue
 
                 # Enrich with synthetic depth if needed
-                was_enriched = False
                 if self._add_synthetic_depth:
                     original_has_depth = self._has_real_depth(tick)
                     tick = self._enrich_tick_with_synthetic_depth(tick)
                     if not original_has_depth and self._has_real_depth(tick):
                         synthetic_count += 1
-                        was_enriched = True
 
-                # Dispatch to handler
-                self._on_tick(tick)
+                # --- WORLD-CLASS FIX: Dispatch synchronous handler to thread ---
+                # This ensures blocking I/O (e.g., writing to a slow cache) does not block the polling loop.
+                if self._executor:
+                    task = asyncio.get_event_loop().run_in_executor(
+                        self._executor, self._on_tick, tick
+                    )
+                    handler_tasks.append(task)
+                else:
+                    # Fallback to direct call (still non-blocking for CPU-bound, but dangerous for I/O)
+                    await asyncio.to_thread(self._on_tick, tick) 
+                
                 processed_count += 1
 
                 # Update tick history for deduplication
@@ -356,6 +394,10 @@ class PollingManager:
                 )
                 skipped_count += 1
                 continue
+        
+        # Await all handler dispatches to ensure batch is complete before proceeding
+        if handler_tasks:
+            await asyncio.gather(*handler_tasks, return_exceptions=True)
 
         # Update global metrics
         self._metrics['total_processed'] += processed_count
@@ -572,7 +614,6 @@ class PollingManager:
             orders = level + 2  # 3 to 7 orders per level
             
             # Calculate price offset from midpoint, scaled by level
-            # Bid/Ask are offset from the midpoint
             buy_price_raw = midpoint - (spread_amount * level)
             sell_price_raw = midpoint + (spread_amount * level)
             
@@ -583,9 +624,15 @@ class PollingManager:
             # Ensure bid is always less than ask, and both are positive
             if buy_price >= sell_price:
                 # Force a minimal spread of 1 tick (₹0.05) between best bid/ask
-                buy_price = round(midpoint / self._TICK_SIZE) * self._TICK_SIZE - self._TICK_SIZE
-                sell_price = buy_price + self._TICK_SIZE * 2 # Ensures at least 2 ticks spread (0.10) for first level
-            
+                # Re-calculate to keep midpoint close to LTP for level 1
+                if level == 1:
+                    buy_price = round(midpoint / self._TICK_SIZE) * self._TICK_SIZE - self._TICK_SIZE
+                    sell_price = buy_price + self._TICK_SIZE * 2 # Ensures at least 2 ticks spread (0.10) for first level
+                else:
+                    # For deeper levels, just ensure they are spaced correctly
+                    buy_price = synthetic_buy[-1]['price'] - self._TICK_SIZE
+                    sell_price = synthetic_sell[-1]['price'] + self._TICK_SIZE
+
             synthetic_buy.append({
                 "quantity": quantity,
                 "price": max(buy_price, self._TICK_SIZE),  # Floor at tick size
@@ -717,24 +764,3 @@ class PollingManager:
                 }
             }
         )
-
-
-def _safe_float(value) -> Optional[float]:
-    """Safely convert value to float, returning None on failure."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _short_tick_repr(tick: dict) -> str:
-    """Create a concise string representation of tick for logging."""
-    if not isinstance(tick, dict):
-        return str(tick)[:100]
-    
-    symbol = tick.get('tradingsymbol') or tick.get('instrument_token') or tick.get('symbol')
-    ltp = tick.get('ltp') or tick.get('last_price')
-    
-    return f"{{symbol={symbol}, ltp={ltp}, keys={list(tick.keys())[:8]}}}"
