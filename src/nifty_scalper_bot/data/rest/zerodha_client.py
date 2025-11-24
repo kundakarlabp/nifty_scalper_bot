@@ -347,8 +347,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
             "ts_ms": ts_ms,
-            "bid": float(buy_depth[0]["price"]) if buy_depth else None,
-            "ask": float(sell_depth[0]["price"]) if sell_depth else None,
+            "bid": float(buy_depth[0]["price"]) if buy_depth else None
+            "ask": float(sell_depth[0]["price"]) if sell_depth else None
             "volume": quote_data.get("volume"),
             "oi": quote_data.get("oi"),
         }
