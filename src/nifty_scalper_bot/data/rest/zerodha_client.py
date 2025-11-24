@@ -18,6 +18,7 @@ from typing import (
     Callable,
     Iterable,
     Mapping,
+    Awaitable,
     NoReturn,
     Optional,
     Sequence,
@@ -142,7 +143,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
             tuple(host_cycle) if host_cycle else (self._base_url,)
         )
         self._base_index = 0
-        self._client = self._create_http_client(self._base_urls[self._base_index])
+        self._client = httpx.AsyncClient(
+            base_url=self._base_urls[self._base_index],
+            timeout=self._timeout,
+            headers={
+                "X-Kite-Version": "3",
+                "Authorization": f"token {self._api_key}:{self._access_token}",
+            },
+        )
         self._transient_retry_bonus = 2 if len(self._base_urls) > 1 else 0
 
         self._limiter = limiter or RateLimiter()
