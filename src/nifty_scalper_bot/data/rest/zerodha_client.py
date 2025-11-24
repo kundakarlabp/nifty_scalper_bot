@@ -333,11 +333,22 @@ class ZerodhaKiteClient(BaseBrokerClient):
         response = self._ensure_json(
             self._make_request("GET", "/quote", params={"i": [kite_symbol]})
         )
-        try:
-            quote_data = response["data"][kite_symbol]
-        except KeyError as exc:  # pragma: no cover - API invariant
-            raise BrokerError(f"Quote data missing for {symbol}") from exc
-
+        
+        # --- FIX: ROBUST ERROR CHECKING BEFORE ACCESSING DATA ---
+        data = response.get("data", {})
+        if not isinstance(data, Mapping):
+            raise BrokerError(f"Invalid quote response format for {symbol}. Data missing.")
+        if kite_symbol not in data:
+            LOGGER.warning(
+                f"Zerodha skipped quote for {kite_symbol}. Response keys: {list(data.keys())}",
+                extra={"event": "broker_symbol_skipped", "symbol": symbol}
+            )
+            raise BrokerError(f"Quote data for {symbol} was skipped by broker.")
+        
+        quote_data = data[kite_symbol]
+        # End of Fix 
+        
+        # Original logic resumes here, but the Key Error is now prevented
         depth = quote_data.get("depth", {})
         buy_depth = depth.get("buy", [])
         sell_depth = depth.get("sell", [])
@@ -348,9 +359,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 ts_ms = int(datetime.fromisoformat(last_trade_time).timestamp() * 1000)
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
-        bid_price = float(buy_depth[0]["price"]) if buy_depth and buy_depth[0].get("price") else None
-        ask_price = float(sell_depth[0]["price"]) if sell_depth and sell_depth[0].get("price") else None
 
+        # Re-apply the surgical comma fix and robust price check
+        bid_price = None
+        if buy_depth and buy_depth[0].get("price"):
+            bid_price = float(buy_depth[0]["price"])
+
+        ask_price = None
+        if sell_depth and sell_depth[0].get("price"):
+            ask_price = float(sell_depth[0]["price"])
+        
         return {
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
