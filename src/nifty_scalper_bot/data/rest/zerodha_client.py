@@ -789,7 +789,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         label = "orders.fetch"
         should_retry, on_retry = self._build_retry_handlers(endpoint="/orders")
 
-        def _operation() -> list[dict]:
+        async def _operation() -> list[dict]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             payload = self._ensure_json(
                 self._make_request(
@@ -847,7 +847,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         endpoint = "/portfolio/positions"
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
 
-        def _operation() -> list[dict[str, Any]]:
+        async def _operation() -> list[dict[str, Any]]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             response = self._ensure_json(
                 self._make_request(
