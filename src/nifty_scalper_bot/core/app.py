@@ -2335,7 +2335,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
-    broker_client.preload_instruments()
+    await broker_client.preload_instruments()
 
     instrument_resolver = InstrumentResolver(broker_client)
     cache_settings = getattr(settings, "instruments", None)
@@ -2373,7 +2373,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if margin_segment not in {"equity", "commodity"}:
         margin_segment = "equity"
     try:
-        margin_summary = broker_client.get_margin_summary(segment=margin_segment)
+        margin_summary = await broker_client.get_margin_summary(segment=margin_segment)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "broker_margin_summary_failed",
@@ -5203,7 +5203,7 @@ class NiftyScalperApp:
                 },
             )
             raise ConfigurationError(f"Execution configuration invalid: {joined}")
-        self._ctx = initialize_components(self._settings)
+        self._ctx = await initialize_components(self._settings)
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._health_task: asyncio.Task[None] | None = None
