@@ -340,6 +340,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 ts_ms = int(datetime.fromisoformat(last_trade_time).timestamp() * 1000)
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
+        bid_price = float(buy_depth[0]["price"]) if buy_depth and buy_depth[0].get("price") else None
+        ask_price = float(sell_depth[0]["price"]) if sell_depth and sell_depth[0].get("price") else None
 
         return {
             "symbol": symbol,
