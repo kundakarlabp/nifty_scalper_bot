@@ -317,11 +317,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return quotes or None
 
     # BaseBrokerClient protocol methods
-    def get_quote(self, symbol: str) -> dict[str, Any]:
+   def get_quote(self, symbol: str) -> dict[str, Any]:
         """Get quote for symbol."""
 
         self._acquire_bucket(self._QUOTE_BUCKET)
         kite_symbol = self._format_symbol(symbol)
+        # NOTE: Sync method kept here for compatibility with potential sync callers.
+        # But this should be called inside asyncio.to_thread() if used by an async caller.
         response = self._ensure_json(
             self._make_request("GET", "/quote", params={"i": [kite_symbol]})
         )
@@ -341,18 +343,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
             except ValueError:
                 LOGGER.debug("Unable to parse last_trade_time for %s", symbol)
         
-        # CORRECTED LOGIC: Removes the syntax error and adds safety checks.
+        # --- CRITICAL FIX: REMOVED TRAILING COMMAS AND ADDED ROBUSTNESS ---
+        # Checks for array length and key presence before accessing index 0.
         bid_price = float(buy_depth[0]["price"]) if buy_depth and len(buy_depth) > 0 and "price" in buy_depth[0] else None
         ask_price = float(sell_depth[0]["price"]) if sell_depth and len(sell_depth) > 0 and "price" in sell_depth[0] else None
+
         return {
             "symbol": symbol,
             "ltp": float(quote_data.get("last_price", 0.0)),
             "ts_ms": ts_ms,
-            "bid": bid_price, 
-            "ask": ask_price,
+            "bid": bid_price, # Now a clean float/None
+            "ask": ask_price, # Now a clean float/None
             "volume": quote_data.get("volume"),
             "oi": quote_data.get("oi"),
-        }
+        } # NO TRAILING COMMA HERE
 
     def _build_kite_params(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Construct a sanitized Kite order payload."""
@@ -1938,7 +1942,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return _should_retry, _on_retry
 
-    def _execute_with_retry(
+    async def _execute_with_retry(
         self,
         *,
         label: str,
@@ -1968,7 +1972,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             extra={"event": "zerodha_execute_with_retry_start", "label": label},
         )
         try:
-            return retry_with_backoff(
+            return await retry_with_backoff(
                 operation=operation,
                 retries=self._max_retries + self._transient_retry_bonus,
                 base_delay=self._retry_base_delay,
@@ -1988,7 +1992,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             raise BrokerError(error_message) from (exc.context.error or exc)
 
-    def _make_request(
+    async def _make_request(
         self,
         method: str,
         endpoint: str,
