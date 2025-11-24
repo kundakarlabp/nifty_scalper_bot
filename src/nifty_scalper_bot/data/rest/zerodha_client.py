@@ -1499,7 +1499,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return None
         return result
 
-    asdef get_profile(self) -> dict:
+    async def get_profile(self) -> dict:
         """Get user profile."""
 
         self._acquire_bucket(self._GENERAL_BUCKET)
