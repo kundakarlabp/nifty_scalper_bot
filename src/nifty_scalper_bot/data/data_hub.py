@@ -167,6 +167,7 @@ class DataHub:
     # Accessors (Read Path)
     # ----------------------------------------------------------------
 
+    # FIX: Ensure 'async def' is used to allow 'await' inside.
     async def get_quote(self, symbol: str, allow_pull: bool = False) -> Tick | None:
         """Return the latest cached tick for a symbol.
         
@@ -180,10 +181,9 @@ class DataHub:
         if tick is not None:
             return tick
             
-        # FIX: Restore allow_pull logic to satisfy RuntimeSelfChecker
+        # FIX: The logic here is now correct due to the 'async def' definition
         if allow_pull and self._mdm and hasattr(self._mdm, "pull_quote"):
             try:
-                # Note: pull_quote usually returns the dict AND triggers ingestion via callback
                 # We return it directly here to satisfy the caller immediately
                 return await self._mdm.pull_quote(symbol)
             except Exception:
@@ -225,7 +225,13 @@ class DataHub:
 
     def is_fresh(self, symbol: str, threshold_ms: float = 2000.0) -> tuple[bool, Freshness]:
         """Check if the quote for a symbol is fresh."""
-        quote = self.get_quote(symbol)
+        # FIX: Call the synchronous version of get_quote here, or implement a synchronous cache lookup
+        # Since this method must be synchronous (it's often called synchronously), we rely on the cache.
+        
+        # We use the internal _quotes cache directly instead of calling the async get_quote
+        with self._lock:
+            quote = self._quotes.get(symbol)
+
         if not quote:
             return False, {"ok": False, "reason": "no_quote", "threshold_ms": threshold_ms}
 
@@ -386,11 +392,6 @@ class DataHub:
             return await self._mdm.get_account_snapshot(force=force)
         return {}
 
-    def normalize(self, symbol: str) -> str:
-        # Static method in original, but instance method here is fine.
-        # If callers use DataHub.normalize(), make it static.
-        return symbol.strip().upper()
-    
     # Make normalize static for compatibility with existing calls like DataHub.normalize()
     @staticmethod
     def normalize(symbol: str) -> str:
