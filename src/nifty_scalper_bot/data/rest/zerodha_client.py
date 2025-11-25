@@ -11,9 +11,6 @@ import threading
 import time
 from contextlib import suppress
 from nifty_scalper_bot.utils.async_helpers import run_sync
-    self._limiter = limiter or RateLimiter()
-    if limiter is None:
-        run_sync(self._configure_rate_limits())
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -127,7 +124,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 "Set ZERODHA_API_KEY (or KITE_API_KEY) and "
                 "ZERODHA_ACCESS_TOKEN (or KITE_ACCESS_TOKEN) environment variables."
             )
-
+        self._limiter = limiter or RateLimiter()
+        if limiter is None:
+            run_sync(self._configure_rate_limits())
         self._base_url = base_url.rstrip("/")
         self._timeout = httpx.Timeout(timeout, read=timeout)
         configured_retries = get_int("BROKER_RETRIES", default=max_retries)
