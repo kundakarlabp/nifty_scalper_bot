@@ -191,6 +191,20 @@ class RiskManager:
         """Return the account balance used for risk calculations."""
 
         try:
+            return self.refresh_account_balance()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.error(
+                "Failure in RiskManager.current_balance: %s",
+                exc,
+                extra={"event": "risk_balance_refresh_error"},
+                exc_info=exc,
+            )
+            return self.account_balance
+
+    def current_balance(self) -> float:
+        """Return the account balance used for risk calculations."""
+
+        try:
             return self._cached_balance
             self._logger.error(
                 "Failure in RiskManager.current_balance: %s",
