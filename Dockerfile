@@ -7,12 +7,14 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
+# FIX: Install security and build dependencies together
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    ca-certificates \
     build-essential \
     curl \
     git \
-    ca-certificates \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /install
