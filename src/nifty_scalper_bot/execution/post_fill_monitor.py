@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Awaitable, cast, Iterable
 
 from nifty_scalper_bot.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
 
 
 class PostFillMonitor:
@@ -31,7 +33,7 @@ class PostFillMonitor:
             None.
 
         Raises:
-            None.
+            None. Errors are logged when the loop cannot start.
         """
 
         self._logger = get_logger(__name__)
@@ -125,13 +127,20 @@ class PostFillMonitor:
             extra={"event": "post_fill_monitor_reconcile"},
         )
         try:
-            broker_positions = await asyncio.to_thread(self._fetch_broker_positions)
+            # FIX 1: Fetch broker positions directly (already async)
+            broker_positions = await self._fetch_broker_positions()
             broker_map = self._normalise_positions(broker_positions)
-            local_snapshot_data = self._state_tracker.get_open_positions()
-            local_snapshot = list(local_snapshot_data) if local_snapshot_data else []
-            local_positions = self._normalize_positions(local_snapshot)
+            
+            # FIX 2: Await local state tracker if it returns a coroutine
+            local_snapshot_raw = await self._state_tracker.get_open_positions()
+            
+            # FIX 3: Normalize the local snapshot (this is a synchronous operation)
+            local_snapshot = self._normalize_snapshot(local_snapshot_raw)
+            
+            local_positions = self._normalise_positions(local_snapshot)
             mismatches = self._diff_positions(broker_map, local_positions)
             self._mismatch_count = len(mismatches)
+            
             if mismatches and self._alert_on_mismatch:
                 self._logger.warning(
                     "post_fill_reconcile_mismatch",
@@ -150,9 +159,53 @@ class PostFillMonitor:
             self._logger.error(
                 "Failure in PostFillMonitor.reconcile: %s",
                 exc,
-                extra={"event": "post_fill_monitor_reconcile_error"},
+                extra={
+                    "event": "post_fill_monitor_reconcile_error",
+                    "error_type": type(exc).__name__,
+                },
                 exc_info=exc,
             )
+
+    def _normalize_snapshot(self, snapshot: Any) -> list[dict[str, Any]]:
+        """Normalize snapshot data handling various async/sync return types.
+
+        Args:
+            snapshot: Raw snapshot data from state tracker.
+
+        Returns:
+            list[dict[str, Any]]: Normalized list of positions.
+
+        Raises:
+            None. Returns empty list on error.
+        """
+        try:
+            # Handle None
+            if snapshot is None:
+                return []
+            
+            # Handle regular iterable
+            # NOTE: We assume all AWAITING is done in reconcile(), so snapshot is iterable here.
+            if isinstance(snapshot, Iterable) and not isinstance(snapshot, (str, bytes, Awaitable)):
+                return list(snapshot)
+            
+            # Handle single item - wrap in list
+            if isinstance(snapshot, dict):
+                 return [snapshot]
+                 
+            self._logger.warning(
+                "Snapshot normalization received unexpected non-iterable type",
+                extra={"event": "snapshot_normalization_type_error", "type": type(snapshot).__name__}
+            )
+            return []
+
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure normalizing snapshot: %s",
+                exc,
+                extra={"event": "snapshot_normalization_error"},
+                exc_info=exc,
+            )
+            return []
 
     async def _reconciliation_loop(self) -> None:
         """Run reconciliation periodically until stopped.
@@ -176,22 +229,31 @@ class PostFillMonitor:
                 await asyncio.sleep(float(self._interval))
                 try:
                     await self.reconcile()
-                except TypeError as te:
-                    if "'coroutine' object is not iterable" in str(te):
-                        self._logger.error(
-                            "Coroutine iteration error in reconcile - this is a bug that needs fixing",
-                            extra={"error": str(te)},
-                            exc_info=te
-                        )
-                    else:
-                        raise
+                except Exception as exc:  # noqa: BLE001
+                    # Log but continue loop - don't let single failure kill monitor
+                    self._logger.error(
+                        "Reconciliation cycle failed: %s",
+                        exc,
+                        extra={
+                            "event": "reconciliation_cycle_error",
+                            "error_type": type(exc).__name__,
+                        },
+                        exc_info=exc,
+                    )
         except asyncio.CancelledError:
+            self._logger.info(
+                "Reconciliation loop cancelled",
+                extra={"event": "post_fill_monitor_loop_cancelled"},
+            )
             raise
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in PostFillMonitor._reconciliation_loop: %s",
                 exc,
-                extra={"event": "post_fill_monitor_loop_error"},
+                extra={
+                    "event": "post_fill_monitor_loop_error",
+                    "error_type": type(exc).__name__,
+                },
                 exc_info=exc,
             )
 
@@ -214,7 +276,10 @@ class PostFillMonitor:
         }
 
     # ------------------------------------------------------------------
-    def _fetch_broker_positions(self) -> list[dict[str, Any]]:
+    # Private helper methods
+    # ------------------------------------------------------------------
+
+    async def _fetch_broker_positions(self) -> list[dict[str, Any]]:
         """Fetch positions from the broker client defensively.
 
         Args:
@@ -233,16 +298,25 @@ class PostFillMonitor:
         )
         try:
             if hasattr(self._broker, "get_positions"):
-                payload = self._broker.get_positions()
+                # CRITICAL FIX: Await the async broker method
+                payload = await self._broker.get_positions()
             elif hasattr(self._broker, "positions"):
+                # Handle property/sync method if available
                 payload = self._broker.positions()
             else:
+                self._logger.warning(
+                    "Broker client has no position fetch method",
+                    extra={"event": "broker_no_positions_method"},
+                )
                 payload = []
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in PostFillMonitor._fetch_broker_positions: %s",
                 exc,
-                extra={"event": "post_fill_monitor_fetch_error"},
+                extra={
+                    "event": "post_fill_monitor_fetch_error",
+                    "error_type": type(exc).__name__,
+                },
                 exc_info=exc,
             )
             return []
@@ -335,6 +409,8 @@ class PostFillMonitor:
                     broker_qty,
                     float(broker_pos["avg_price"]),
                 )
+            # NOTE: Average price mismatch could be added here if desired
+
         return mismatches
 
     def _safe_update(self, symbol: str, quantity: int, avg_price: float) -> None:
@@ -361,7 +437,11 @@ class PostFillMonitor:
             self._logger.error(
                 "Failure in PostFillMonitor._safe_update: %s",
                 exc,
-                extra={"event": "post_fill_monitor_update_error", "symbol": symbol},
+                extra={
+                    "event": "post_fill_monitor_update_error",
+                    "symbol": symbol,
+                    "error_type": type(exc).__name__,
+                },
                 exc_info=exc,
             )
 
