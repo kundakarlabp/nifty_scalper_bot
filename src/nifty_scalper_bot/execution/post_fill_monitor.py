@@ -127,8 +127,9 @@ class PostFillMonitor:
         try:
             broker_positions = await asyncio.to_thread(self._fetch_broker_positions)
             broker_map = self._normalise_positions(broker_positions)
-            local_snapshot = list(self._state_tracker.get_open_positions())
-            local_positions = self._normalise_positions(local_snapshot)
+            local_snapshot_data = self._state_tracker.get_open_positions()
+            local_snapshot = list(local_snapshot_data) if local_snapshot_data else []
+            local_positions = self._normalize_positions(local_snapshot)
             mismatches = self._diff_positions(broker_map, local_positions)
             self._mismatch_count = len(mismatches)
             if mismatches and self._alert_on_mismatch:
@@ -173,7 +174,17 @@ class PostFillMonitor:
         try:
             while not self._stop_event.is_set():
                 await asyncio.sleep(float(self._interval))
-                await self.reconcile()
+                try:
+                    await self.reconcile()
+                except TypeError as te:
+                    if "'coroutine' object is not iterable" in str(te):
+                        self._logger.error(
+                            "Coroutine iteration error in reconcile - this is a bug that needs fixing",
+                            extra={"error": str(te)},
+                            exc_info=te
+                        )
+                    else:
+                        raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
