@@ -367,7 +367,7 @@ class RiskManager:
                     exc_info=exc,
                 )
 
-    def refresh_account_balance(self, *, force: bool = False) -> float:
+    async def refresh_account_balance(self, *, force: bool = False) -> float:
         """Refresh account balance using the shared data hub cache.
 
         Args:
