@@ -583,9 +583,16 @@ class RiskManager:
                 "Entered RiskManager._start_balance_refresher loop",
                 extra={"event": "risk_balance_refresher_loop_enter"},
             )
+            
+            # FIX 1: Create and set the event loop ONCE for the thread (Best Practice)
+            # This resolves issues where async calls fail in a new thread.
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # FIX 2: Removed loop creation from inside the loop (Syntax/Runtime Fix)
             while True:
                 try:
-                    loop = asyncio.new_event_loop()
+                    # Run the async method using the thread's event loop
                     loop.run_until_complete(self.refresh_account_balance(force=True))
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
@@ -738,6 +745,7 @@ class RiskManager:
             current = current.get(key)
             if current is None:
                 return None
+            current = current
         numeric: float | None
         if isinstance(current, (int, float)):
             numeric = float(current)
