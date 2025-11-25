@@ -201,19 +201,6 @@ class RiskManager:
             )
             return self.account_balance
 
-    def current_balance(self) -> float:
-        """Return the account balance used for risk calculations."""
-
-        try:
-            return self._cached_balance
-            self._logger.error(
-                "Failure in RiskManager.current_balance: %s",
-                exc,
-                extra={"event": "risk_balance_refresh_error"},
-                exc_info=exc,
-            )
-            return self.account_balance
-
     def balance_source_label(self) -> str:
         """Return label describing the origin of the cached balance.
 
