@@ -127,7 +127,7 @@ class PostFillMonitor:
         try:
             broker_positions = await asyncio.to_thread(self._fetch_broker_positions)
             broker_map = self._normalise_positions(broker_positions)
-            local_snapshot = list(self._state_tracker.get_open_positions())
+            local_snapshot = list(await self._state_tracker.get_open_positions())
             local_positions = self._normalise_positions(local_snapshot)
             mismatches = self._diff_positions(broker_map, local_positions)
             self._mismatch_count = len(mismatches)
