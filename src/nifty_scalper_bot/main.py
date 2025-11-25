@@ -12,6 +12,10 @@ from typing import Any, Callable
 import sentry_sdk
 import uvicorn
 from sentry_sdk.integrations.logging import LoggingIntegration
+from nifty_scalper_bot.utils.logging import get_logger 
+
+# And then initialize it at the module level:
+LOGGER = get_logger(__name__)
 
 import nifty_scalper_bot.load_env_first  # noqa: F401
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
