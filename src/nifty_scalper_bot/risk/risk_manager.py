@@ -367,7 +367,7 @@ class RiskManager:
                     exc_info=exc,
                 )
 
-    async def refresh_account_balance(self, *, force: bool = False) -> float:
+    def refresh_account_balance(self, *, force: bool = False) -> float:
         """Refresh account balance using the shared data hub cache.
 
         Args:
@@ -443,9 +443,9 @@ class RiskManager:
         cached_balance_source: str | None = None
         cached_balance_value: float | None = None
         try:
-            balance = await hub.get_available_balance(force=force)
+            balance = hub.get_available_balance(force=force)
             if balance is None:
-                snapshot = await hub.get_account_snapshot(force=force)
+                snapshot = hub.get_account_snapshot(force=force)
                 balance = self._extract_balance_from_payload(snapshot)
             if balance is not None and balance > 0:
                 self.account_balance = float(balance)
@@ -583,17 +583,9 @@ class RiskManager:
                 "Entered RiskManager._start_balance_refresher loop",
                 extra={"event": "risk_balance_refresher_loop_enter"},
             )
-            
-            # FIX 1: Create and set the event loop ONCE for the thread (Best Practice)
-            # This resolves issues where async calls fail in a new thread.
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            # FIX 2: Removed loop creation from inside the loop (Syntax/Runtime Fix)
             while True:
                 try:
-                    # Run the async method using the thread's event loop
-                    loop.run_until_complete(self.refresh_account_balance(force=True))
+                    self.refresh_account_balance(force=True)
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in RiskManager balance refresher: %s",
@@ -745,7 +737,6 @@ class RiskManager:
             current = current.get(key)
             if current is None:
                 return None
-            current = current
         numeric: float | None
         if isinstance(current, (int, float)):
             numeric = float(current)
@@ -785,21 +776,28 @@ class RiskManager:
     ) -> tuple[bool, str]:  # pragma: no cover
         """Return ``(allowed, reason)`` for the provided order signal."""
 
+        try:
+            force_refresh = self._should_force_balance_refresh()
+            if force_refresh:
+                age = max(time.time() - self._last_balance_refresh, 0.0)
+                self._logger.info(
+                    "Condition met: risk_balance_jit_refresh",
+                    extra={
+                        "event": "risk_balance_jit_refresh",
+                        "age": round(age, 2),
+                        "threshold": round(self._balance_force_refresh, 2),
+                    },
+                )
+            self.refresh_account_balance(force=force_refresh)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in RiskManager.check_order refresh: %s",
+                exc,
+                extra={"event": "risk_balance_refresh_check_order_error"},
+                exc_info=exc,
+            )
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
-
-        # Safety check: ensure we have a positive balance value before proceeding
-        if self.account_balance <= 0:
-            source_context = f"source: {self._balance_source}"
-            if self._balance_source == "DEFAULT_ENV_FALLBACK":
-                source_context = "CRITICAL: Balance is from static ENV fallback or 0."
-            
-            self._logger.critical(
-                f"❌ NO VALID BALANCE: Risk check failed! {source_context}",
-                extra={"event": "risk_check_no_balance", "balance": self.account_balance}
-            )
-            self._last_rejection = "NO_VALID_BALANCE"
-            return False, "NO_VALID_BALANCE"
 
         if self._breaker_tripped:
             self._last_rejection = canonical(self._breaker_reason or "BREAKER")
