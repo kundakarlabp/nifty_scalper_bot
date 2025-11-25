@@ -11,6 +11,9 @@ import threading
 import time
 from contextlib import suppress
 from nifty_scalper_bot.utils.async_helpers import run_sync
+    self._limiter = limiter or RateLimiter()
+    if limiter is None:
+        run_sync(self._configure_rate_limits())
 from datetime import datetime
 from pathlib import Path
 from typing import (
