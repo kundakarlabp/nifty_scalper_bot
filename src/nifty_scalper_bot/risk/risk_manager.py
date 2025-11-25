@@ -585,8 +585,8 @@ class RiskManager:
             )
             while True:
                 try:
-                    &nbsp;&nbsp;loop = asyncio.new_event_loop()
-                    &nbsp;&nbsp;loop.run_until_complete(self.refresh_account_balance(force=True))
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(self.refresh_account_balance(force=True))
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in RiskManager balance refresher: %s",
