@@ -13,7 +13,6 @@ import asyncio  # Required for startup reconciliation and background tasks
 from contextlib import suppress
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, time, timedelta, timezone
-from nifty_scalper_bot.utils.async_helpers import run_sync
 from importlib import import_module
 import inspect
 import os
@@ -1815,10 +1814,6 @@ def _get_symbols(
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
-                ctx_ref_dict = globals().get('ctx_ref', {})
-                ctx_from_ref = ctx_ref_dict.get('ctx')
-                if ctx_from_ref and hasattr(ctx_from_ref, 'underlying_spot_prices'):
-                    ctx_from_ref.underlying_spot_prices['NIFTY'] = ltp
             
             else:
                 LOGGER.warning("Live price fetch returned 0 or failed.")
@@ -2164,32 +2159,32 @@ async def reconcile_positions_on_startup(
 
 
 def parse_nifty_option_symbol(symbol: str) -> dict | None:
-    """Parse NIFTY option symbol to extract strike, expiry, and option type."""
+    """
+    Parse NIFTY option symbol to extract strike, expiry, and option type.
+    """
     import re
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta, timezone # Ensure timezone is imported
     import calendar
     
     symbol = symbol.replace("NFO:", "").strip()
     
-    # Monthly Pattern: NIFTY25NOV25950CE
+    # Monthly/Far Weekly Pattern: NIFTY25NOV25950CE
     monthly_match = re.match(r'NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)', symbol)
     if monthly_match:
         year, month_str, strike, opt_type = monthly_match.groups()
-        month_names = {
-            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
-        }
+        month_names = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6, 'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
         month = month_names.get(month_str)
         if month:
             year_full = 2000 + int(year)
+            
+            # Find last Thursday of the month (Standard Monthly Expiry Logic)
             last_day = calendar.monthrange(year_full, month)[1]
             expiry = datetime(year_full, month, last_day)
-            while expiry.weekday() != 3:  # Thursday
+            while expiry.weekday() != 3: # Thursday is 3
                 expiry = expiry - timedelta(days=1)
             
-            # Use timezone-aware datetime
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            days_to_expiry = (expiry - now).total_seconds() / 86400.0
+            # Use total_seconds for float days_to_expiry
+            days_to_expiry = (expiry - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 86400.0
             
             return {
                 "strike": int(strike),
@@ -2199,67 +2194,46 @@ def parse_nifty_option_symbol(symbol: str) -> dict | None:
                 "symbol_type": "Monthly"
             }
     
-    # Weekly Pattern: NIFTY25N2625950CE
+    # Simple pattern match for weekly/other (can be expanded)
     weekly_match = re.match(r'NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)', symbol)
     if weekly_match:
-        year, month_code, day, strike, opt_type = weekly_match.groups()
-        month_map = {
-            '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6,
-            '7': 7, '8': 8, '9': 9, 'O': 10, 'N': 11, 'D': 12
-        }
-        month = month_map.get(month_code)
-        if month:
-            expiry = datetime(2000 + int(year), month, int(day))
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            days_to_expiry = (expiry - now).total_seconds() / 86400.0
-            
-            return {
-                "strike": int(strike),
-                "expiry": expiry,
-                "days_to_expiry": max(days_to_expiry, 0.001),
-                "option_type": opt_type,
-                "symbol_type": "Weekly"
-            }
-    
-    return None
+        # Placeholder logic, needs proper date mapping for weeks
+        return {"strike": int(weekly_match.groups()[3]), "expiry": datetime.now(), "days_to_expiry": 3.0, "option_type": weekly_match.groups()[4], "symbol_type": "Weekly (Approx)"}
 
+    return None
 
 def calculate_greeks_simple(
     spot: float,
     strike: float,
     days_to_expiry: float,
     option_type: str,
-    volatility: float = 0.20,
+    volatility: float = 0.20, # 20% IV assumption
 ) -> dict:
-    """Simple Greeks approximation using Black-Scholes principles."""
+    """
+    Simple Greeks approximation (using Black-Scholes principles).
+    """
     import math
     
     if days_to_expiry <= 0.0:
-        return {
-            "delta": 0.0,
-            "gamma": 0.0,
-            "theta": 0.0,
-            "vega": 0.0,
-            "days_to_expiry": 0.0,
-            "moneyness": spot / strike,
-            "error": "Expired"
-        }
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "days_to_expiry": 0.0, "moneyness": spot/strike}
     
-    t = days_to_expiry / 365.25
+    t = days_to_expiry / 365.25 # Time in years
     moneyness = spot / strike
     
-    # Delta approximation
+    # Simple delta approximation (ATMs are 0.5/-0.5)
+    delta = 0.5
     if option_type.upper() in ["CE", "CALL"]:
-        delta = 0.5 + min(0.49, max(-0.49, (moneyness - 1.0) * 2.0))
+        delta = 0.5 + min(0.49, max(0, moneyness - 1.0)) 
     else:  # PUT
-        delta = -0.5 - min(0.49, max(-0.49, (1.0 - moneyness) * 2.0))
+        delta = -0.5 - min(0.49, max(0, 1.0 - moneyness)) 
     
     # Gamma (peaks at ATM)
     gamma = 0.01 / (abs(moneyness - 1) + 0.01) * math.sqrt(1 / max(t, 0.01))
     gamma = min(gamma, 0.05)
     
     # Theta (time decay)
-    theta = -spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
+    theta_base = spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
+    theta = -1.0 * theta_base
     
     # Vega (volatility sensitivity)
     vega = spot * math.sqrt(max(t, 0.01)) * 0.01
@@ -2274,39 +2248,7 @@ def calculate_greeks_simple(
     }
 
 
-def _get_nifty_spot_from_context(ctx: BotContext) -> float | None:
-    """Get NIFTY spot price with multi-tier fallback."""
-    
-    # Priority 1: Check underlying_spot_prices dict
-    spot = ctx.underlying_spot_prices.get("NIFTY")
-    if spot and spot > 0:
-        return float(spot)
-    
-    # Priority 2: Try market data manager
-    if ctx.market_data_manager:
-        for symbol in ["NIFTY", "NSE:NIFTY 50", "NSE:NIFTY50"]:
-            try:
-                tick = ctx.market_data_manager.get_latest_tick(symbol)
-                if tick:
-                    ltp = tick.get("ltp") or tick.get("last_price")
-                    if ltp and ltp > 0:
-                        return float(ltp)
-            except Exception:
-                continue
-    
-    # Priority 3: Try data hub
-    if ctx.data_hub:
-        try:
-            snapshot = ctx.data_hub.snapshot("NIFTY")
-            if snapshot and snapshot.get("ltp"):
-                return float(snapshot["ltp"])
-        except Exception:
-            pass
-    
-    return None
-
-
-async def initialize_components(settings: Settings | None = None) -> BotContext:
+def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
     ensure_multiproc_dir(clear_stale=True)
@@ -2336,7 +2278,7 @@ async def initialize_components(settings: Settings | None = None) -> BotContext:
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
-    await broker_client.preload_instruments()
+    broker_client.preload_instruments()
 
     instrument_resolver = InstrumentResolver(broker_client)
     cache_settings = getattr(settings, "instruments", None)
@@ -2374,7 +2316,7 @@ async def initialize_components(settings: Settings | None = None) -> BotContext:
     if margin_segment not in {"equity", "commodity"}:
         margin_segment = "equity"
     try:
-        margin_summary = await broker_client.get_margin_summary(segment=margin_segment)
+        margin_summary = broker_client.get_margin_summary(segment=margin_segment)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "broker_margin_summary_failed",
@@ -5204,7 +5146,7 @@ class NiftyScalperApp:
                 },
             )
             raise ConfigurationError(f"Execution configuration invalid: {joined}")
-        self._ctx_coroutine = initialize_components(self._settings)
+        self._ctx = initialize_components(self._settings)
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._health_task: asyncio.Task[None] | None = None
