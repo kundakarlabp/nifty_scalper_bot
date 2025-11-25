@@ -378,7 +378,7 @@ class DataHub:
     
     async def get_available_balance(self, force: bool = False) -> float | None:
         if self._mdm:
-            return self._mdm.get_available_balance(force=force)
+            return await self._mdm.get_available_balance(force=force)
         return None
 
     async def get_account_snapshot(self, force: bool = False) -> dict[str, float]:
