@@ -383,7 +383,7 @@ class DataHub:
 
     def get_account_snapshot(self, force: bool = False) -> dict[str, float]:
         if self._mdm:
-            return self._mdm.get_account_snapshot(force=force)
+            return await self._mdm.get_account_snapshot(force=force)
         return {}
 
     def normalize(self, symbol: str) -> str:
