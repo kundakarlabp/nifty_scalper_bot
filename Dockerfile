@@ -1,52 +1,63 @@
-# === STAGE 1: BUILDER (Used for compiling and installing dependencies) ===
-FROM python:3.11-alpine AS builder
+# === Multi-Stage Build: Production-Grade for Trading Bots ===
+FROM python:3.11-slim-bookworm AS builder
 
+# Build environment variables
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install build tools and other necessary system deps
-RUN apk update && apk add --no-cache \
-    build-base \
-    tzdata \
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     curl \
-    python3-dev \
- && rm -rf /var/cache/apk/*
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /install
 
-# Copy requirements and install dependencies into a separate directory
-# '--target /install/deps' ensures packages are isolated for easy copying
+# Copy and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --target /install/deps
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt --target /install/deps
 
+# === STAGE 2: Runtime Image ===
+FROM python:3.11-slim-bookworm
 
-# === STAGE 2: FINAL (The minimal image for execution) ===
-# Use the same base image, but without the build tools
-FROM python:3.11-alpine
+# Runtime environment
+ENV APP_MODULE="nifty_scalper_bot.main" \
+    APP_CMD="python -m ${APP_MODULE}" \
+    INSTRUMENTS_CSV_PATH=/app/instruments.csv \
+    PYTHONPATH=/app:/usr/local/lib/python3.11/site-packages \
+    TZ=Asia/Kolkata
 
-# Set environment variables for runtime
-ENV APP_MODULE="nifty_scalper_bot.main"
-ENV APP_CMD="python -m ${APP_MODULE}"
-ENV INSTRUMENTS_CSV_PATH=/app/instruments.csv
-
-# Install runtime-only dependencies (like curl and tzdata)
-RUN apk update && apk add --no-cache \
-    tzdata \
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
- && rm -rf /var/cache/apk/*
+    ca-certificates \
+    tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy ONLY the installed Python packages from the builder stage
+# Copy installed packages from builder
 COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
 
-# Copy code and run build-time checks
+# Copy application code
 COPY . /app
-RUN python scripts/verify_runtime.py
 
-# Download Zerodha instruments master
-RUN curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments
+# Download instruments CSV (with retry logic)
+RUN for i in 1 2 3; do \
+        curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments && break || sleep 5; \
+    done
+
+# Health check (if your app exposes an endpoint on port 8000)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
 EXPOSE 8000
-CMD ["/bin/sh", "-lc", "$APP_CMD"]
+# Use exec form to ensure proper signal handling
+CMD ["sh", "-c", "python -m ${APP_MODULE}"]
