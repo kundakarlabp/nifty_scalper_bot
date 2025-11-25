@@ -1,16 +1,11 @@
-# 1. Use the stable Alpine base image
-FROM python:3.11-alpine
+# === STAGE 1: BUILDER (Used for compiling and installing dependencies) ===
+FROM python:3.11-alpine AS builder
 
-# Environment Variables (mostly preserved)
-# PIP_NO_CACHE_DIR, PYTHONDONTWRITEBYTECODE, PYTHONUNBUFFERED are good practice.
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# 2. Install necessary system dependencies for compiling Python packages and for curl
-# 'build-base' is the Alpine equivalent of 'build-essential'
-# 'tzdata' is needed for time zone operations (important for trading)
-# 'curl' is needed to download the instruments file
+# Install build tools and other necessary system deps
 RUN apk update && apk add --no-cache \
     build-base \
     tzdata \
@@ -18,31 +13,40 @@ RUN apk update && apk add --no-cache \
     python3-dev \
  && rm -rf /var/cache/apk/*
 
-WORKDIR /app
+WORKDIR /install
 
-# 3. Install deps first (layer caching)
-COPY requirements.txt requirements_full.txt /app/
-RUN python -m pip install --upgrade pip \
- && pip install -r /app/requirements.txt
+# Copy requirements and install dependencies into a separate directory
+# '--target /install/deps' ensures packages are isolated for easy copying
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt --target /install/deps
 
-# 4. Copy code
-COPY . /app
 
-# 5. Build-time import guard (fail fast if anything is missing)
-# Ensure the 'scripts/verify_runtime.py' file is present in your repo
-RUN python scripts/verify_runtime.py
+# === STAGE 2: FINAL (The minimal image for execution) ===
+# Use the same base image, but without the build tools
+FROM python:3.11-alpine
 
-# 6. Default app module and command
+# Set environment variables for runtime
 ENV APP_MODULE="nifty_scalper_bot.main"
-# Use 'python -m' which works better across environments
 ENV APP_CMD="python -m ${APP_MODULE}"
-
-# 7. Download Zerodha instruments master during build
-# Ref: https://api.kite.trade/instruments (public CSV)
-RUN curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments
 ENV INSTRUMENTS_CSV_PATH=/app/instruments.csv
 
-# 8. Expose port (if your app uses a web interface or API)
+# Install runtime-only dependencies (like curl and tzdata)
+RUN apk update && apk add --no-cache \
+    tzdata \
+    curl \
+ && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy ONLY the installed Python packages from the builder stage
+COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
+
+# Copy code and run build-time checks
+COPY . /app
+RUN python scripts/verify_runtime.py
+
+# Download Zerodha instruments master
+RUN curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments
+
 EXPOSE 8000
-# CMD starts the application (using shell to interpret the $APP_CMD variable)
 CMD ["/bin/sh", "-lc", "$APP_CMD"]
