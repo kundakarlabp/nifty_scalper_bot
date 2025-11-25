@@ -1,3 +1,44 @@
-# Use the full environment (old-zip equivalent)
--r requirements_full.txt
-pydantic-settings>=2.3
+# === Core Config ===
+pydantic==2.7.4
+pydantic-settings==2.0.3
+python-dotenv==1.0.1
+typing-extensions==4.12.0
+
+# === Web/API + metrics ===
+fastapi==0.111.0
+uvicorn==0.29.0
+prometheus-client==0.20.0
+starlette==0.37.2
+sentry-sdk==2.7.0
+
+# === Logging / utils ===
+structlog==24.3.0
+rich==13.7.1
+requests==2.31.0
+python-dateutil==2.9.0.post0
+
+# === Data & analytics (Pinned for compatibility with Bullseye & each other) ===
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+scikit-learn==1.5.0
+ta==0.11.0
+yfinance==0.2.40
+kiteconnect==5.0.1
+quantstats==0.0.62
+matplotlib==3.8.4
+seaborn==0.13.2
+plotly==5.22.0
+
+# === Scheduling & jobs ===
+schedule==1.2.1
+
+# === Timezones ===
+pytz==2024.1
+tzdata==2024.1
+
+# === CLI / misc ===
+python-slugify==8.0.4
+python-telegram-bot[rate-limiter]==21.3
+PyYAML==6.0.1
+ujson==5.10.0
