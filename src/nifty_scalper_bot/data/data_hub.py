@@ -376,7 +376,7 @@ class DataHub:
     # Proxy Methods (Delegation to MDM)
     # ----------------------------------------------------------------
     
-    def get_available_balance(self, force: bool = False) -> float | None:
+    async def get_available_balance(self, force: bool = False) -> float | None:
         if self._mdm:
             return self._mdm.get_available_balance(force=force)
         return None
