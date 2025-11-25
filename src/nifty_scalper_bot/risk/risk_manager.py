@@ -191,8 +191,7 @@ class RiskManager:
         """Return the account balance used for risk calculations."""
 
         try:
-            return self.refresh_account_balance()
-        except Exception as exc:  # pragma: no cover - defensive
+            return self._cached_balance
             self._logger.error(
                 "Failure in RiskManager.current_balance: %s",
                 exc,
@@ -443,9 +442,9 @@ class RiskManager:
         cached_balance_source: str | None = None
         cached_balance_value: float | None = None
         try:
-            balance = hub.get_available_balance(force=force)
+            balance = await hub.get_available_balance(force=force)
             if balance is None:
-                snapshot = hub.get_account_snapshot(force=force)
+                snapshot = await hub.get_account_snapshot(force=force)
                 balance = self._extract_balance_from_payload(snapshot)
             if balance is not None and balance > 0:
                 self.account_balance = float(balance)
