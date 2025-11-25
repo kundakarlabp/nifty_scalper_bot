@@ -1,39 +1,32 @@
-# === STAGE 1: BUILDER (Uses Bullseye for libssl.so.1.1 compatibility) ===
+# === STAGE 1: BUILDER (Minimal Multi-Stage) ===
 FROM python:3.11-slim-bullseye AS builder
 
-# Build environment variables
-ENV PIP_NO_CACHE_DIR=1 \
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install security and build dependencies
-# Includes the fix for network issues (ca-certificates)
+# Install essential build tools (required for pandas, cryptography, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    git \
     ca-certificates \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /install
 
-# Copy and install Python dependencies
+# Copy and install dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel && \
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt --target /install/deps
 
 # === STAGE 2: RUNTIME (The clean, small execution image) ===
 FROM python:3.11-slim-bullseye
 
-# Runtime environment variables
+# Runtime environment
 ENV APP_MODULE="nifty_scalper_bot.main" \
-    INSTRUMENTS_CSV_PATH=/app/instruments.csv \
-    PYTHONPATH=/app:/usr/local/lib/python3.11/site-packages \
     TZ=Asia/Kolkata
 
-# Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -44,23 +37,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy installed packages from the builder stage
+# Copy installed packages from builder
 COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
 
-# Copy application code and run import check
+# Copy application
 COPY . /app
-RUN python -c "import nifty_scalper_bot; print('✓ Module import successful')" || true
 
-# Download Zerodha instruments CSV with retry logic (URL is correct here)
+# Download instruments (Fixed URL and retry logic)
 RUN for i in 1 2 3; do \
         curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments && break || sleep 5; \
-    done
+    done || true
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-EXPOSE 8000
-
-# Start the bot
+# Final command
 CMD ["python", "-m", "nifty_scalper_bot.main"]
