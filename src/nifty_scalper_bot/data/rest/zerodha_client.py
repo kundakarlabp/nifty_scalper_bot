@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from contextlib import suppress
+from nifty_scalper_bot.utils.async_helpers import run_sync
 from datetime import datetime
 from pathlib import Path
 from typing import (
