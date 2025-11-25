@@ -155,7 +155,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         self._limiter = limiter or RateLimiter()
         if limiter is None:
-            self._configure_rate_limits()
+            run_sync(self._configure_rate_limits())
 
         # instrument cache: exchange -> mapping of many normalized keys -> row
         self._instrument_cache: dict[str, dict[str, dict[str, Any]]] = {}
