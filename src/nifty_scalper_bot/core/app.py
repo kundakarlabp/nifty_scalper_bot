@@ -13,6 +13,7 @@ import asyncio  # Required for startup reconciliation and background tasks
 from contextlib import suppress
 from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, time, timedelta, timezone
+from nifty_scalper_bot.utils.async_helpers import run_sync
 from importlib import import_module
 import inspect
 import os
