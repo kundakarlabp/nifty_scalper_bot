@@ -961,7 +961,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         async def _operation() -> dict[str, Any]:
             self._acquire_bucket(self._GENERAL_BUCKET)
-            raw_payload = self._ensure_json(
+            raw_payload = await self._ensure_json(
                 await self._make_request(
                     "GET",
                     endpoint,
@@ -1030,7 +1030,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         async def _operation() -> dict[str, Any]:
             self._acquire_bucket(self._GENERAL_BUCKET)
-            raw_payload = self._ensure_json(
+            raw_payload = await self._ensure_json(
                 self._make_request(
                     "GET",
                     endpoint,
