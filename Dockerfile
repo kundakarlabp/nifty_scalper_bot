@@ -1,4 +1,4 @@
-# === Multi-Stage Build: Production-Grade for Trading Bots ===
+# === STAGE 1: BUILDER (Used for compiling and installing dependencies) ===
 FROM python:3.11-slim-bookworm AS builder
 
 # Build environment variables
@@ -7,14 +7,10 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# FIX: Install security and build dependencies together
+# Install security and build dependencies
+# Note: All package names are on a single line, or one package per line with the continuation mark (\)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    apt-transport-https \
-    ca-certificates \
-    build-essential \
-    curl \
-    git \
-    tzdata \
+    apt-transport-https ca-certificates build-essential curl git tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /install
@@ -36,9 +32,7 @@ ENV APP_MODULE="nifty_scalper_bot.main" \
 
 # Install only runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    tzdata \
+    curl ca-certificates tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
