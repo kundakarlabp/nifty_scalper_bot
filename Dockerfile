@@ -1,52 +1,58 @@
-# === STAGE 1: BUILDER (Uses Bullseye, now with dependency fix flags) ===
-FROM python:3.11-slim-bullseye AS builder
+# ========================================================================
+# STAGE 1: BUILDER (Alpine for ultimate network stability & small size)
+# ========================================================================
+FROM python:3.11-alpine AS builder
 
+# Set crucial environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    DEBIAN_FRONTEND=noninteractive
+    PYTHONDONTWRITEBYTECODE=1
 
-# FIX: Force stable mirror (Google CDN)
-RUN echo "deb http://cdn-fastly.deb.debian.org/debian bullseye main" > /etc/apt/sources.list
-
-# FIX: Use --fix-missing and --allow-unauthenticated flags to resolve dependency conflicts.
-# Also run a small upgrade to ensure core libs are synced.
-RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
-    --fix-missing \
-    --allow-unauthenticated \
-    build-essential \
+# Install essential Alpine build tools (required for Numpy/Pandas/Scipy)
+# This uses apk, which is more reliable than apt-get on flaky networks.
+RUN apk update && apk add --no-cache \
+    build-base \
+    python3-dev \
+    libffi-dev \
+    openssl-dev \
+    musl-dev \
+    linux-headers \
     curl \
-    ca-certificates \
     tzdata \
-    libatlas-base-dev \
-    && rm -rf /var/lib/apt/lists/*
+    openblas-dev \
+    && rm -rf /var/cache/apk/*
 
 WORKDIR /install
+
+# Copy the pinned requirements file (CRUCIAL: ensure requirements.txt is pinned!)
 COPY requirements.txt .
+# Install dependencies, prioritizing minimal memory usage
 RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt --target /install/deps
 
-# === STAGE 2: RUNTIME (Same stable image) ===
-FROM python:3.11-slim-bullseye
+# ========================================================================
+# STAGE 2: RUNTIME (The minimal Alpine execution image)
+# ========================================================================
+FROM python:3.11-alpine
 
+# Runtime environment variables
 ENV APP_MODULE="nifty_scalper_bot.main" \
     PYTHONPATH=/app:/usr/local/lib/python3.11/site-packages \
     TZ=Asia/Kolkata
 
-# FIX: Force stable mirror for runtime packages
-RUN echo "deb http://cdn-fastly.deb.debian.org/debian bullseye main" > /etc/apt/sources.list
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime dependencies only
+RUN apk update && apk add --no-cache \
     curl \
-    ca-certificates \
     tzdata \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+    libstdc++ \
+    openblas \
+    && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 
+# Copy installed packages from the builder stage
 COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
+
+# Copy application code
 COPY . /app
 
 # Download Zerodha instruments CSV with retry logic
@@ -54,4 +60,5 @@ RUN for i in 1 2 3; do \
         curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments && break || sleep 5; \
     done || true
 
+# Final command
 CMD ["python", "-m", "nifty_scalper_bot.main"]
