@@ -12,10 +12,6 @@ from typing import Any, Callable
 import sentry_sdk
 import uvicorn
 from sentry_sdk.integrations.logging import LoggingIntegration
-from nifty_scalper_bot.utils.logging import get_logger 
-
-# And then initialize it at the module level:
-LOGGER = get_logger(__name__)
 
 import nifty_scalper_bot.load_env_first  # noqa: F401
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
@@ -63,25 +59,9 @@ def _should_start_http_server() -> bool:
 
     return _env_flag("ENABLE_EMBEDDED_HTTP_SERVER", default=True)
 
+
 async def _run() -> None:
-    """Main application runner, called by asyncio.run()."""
-    # 1. Instantiate the application object (Synchronous call)
-    app_core = NiftyScalperApp() 
-
-    # 2. Await component initialization and assign result to _ctx (Asynchronous step)
-    # The _ctx_coroutine attribute was stored in __init__
-    try:
-        app_core._ctx = await app_core._ctx_coroutine 
-    except AttributeError:
-        # Failsafe for missing attribute if __init__ was inconsistent
-        app_core._ctx = await app_core._ctx 
-    except Exception as exc:
-        LOGGER.critical("Fatal: Application component initialization failed.", exc_info=True)
-        raise SystemExit(1) from exc
-
-    # 3. Start the application services (Polling, Strategy runner, etc.)
-    await app_core.start()
-
+    app_core = NiftyScalperApp()
     uv_server: uvicorn.Server | None = None
     http_task: asyncio.Task[None] | None = None
     http_enabled = _should_start_http_server()
