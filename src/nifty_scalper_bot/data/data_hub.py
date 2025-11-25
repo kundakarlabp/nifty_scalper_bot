@@ -167,7 +167,7 @@ class DataHub:
     # Accessors (Read Path)
     # ----------------------------------------------------------------
 
-    def get_quote(self, symbol: str, allow_pull: bool = False) -> Tick | None:
+    async def get_quote(self, symbol: str, allow_pull: bool = False) -> Tick | None:
         """Return the latest cached tick for a symbol.
         
         Args:
@@ -185,7 +185,7 @@ class DataHub:
             try:
                 # Note: pull_quote usually returns the dict AND triggers ingestion via callback
                 # We return it directly here to satisfy the caller immediately
-                return self._mdm.pull_quote(symbol)
+                return await self._mdm.pull_quote(symbol)
             except Exception:
                 pass
                 
@@ -381,7 +381,7 @@ class DataHub:
             return self._mdm.get_available_balance(force=force)
         return None
 
-    def get_account_snapshot(self, force: bool = False) -> dict[str, float]:
+    async def get_account_snapshot(self, force: bool = False) -> dict[str, float]:
         if self._mdm:
             return await self._mdm.get_account_snapshot(force=force)
         return {}
