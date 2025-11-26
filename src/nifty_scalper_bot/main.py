@@ -13,15 +13,15 @@ import sentry_sdk
 import uvicorn
 from sentry_sdk.integrations.logging import LoggingIntegration
 
-import nifty_scalper_bot.load_env_first  # noqa: F401
+# 🚨 FIX: Removed invalid non-printable character U+00A0 after 'first'
+import nifty_scalper_bot.load_env_first # noqa: F401
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
 
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
-# 💡 FIX 1: Change Sentry log level to WARNING to prevent interference with routine INFO/DEBUG logs 
-# that might contain objects and trigger serialization crashes.
+# 💡 FIX 1: Change Sentry log level to WARNING for stability (prevents conflicts with object logging)
 sentry_logging = LoggingIntegration(
-    level=logging.WARNING, # Changed from logging.INFO
+    level=logging.WARNING,
     event_level=logging.ERROR,
 )
 
