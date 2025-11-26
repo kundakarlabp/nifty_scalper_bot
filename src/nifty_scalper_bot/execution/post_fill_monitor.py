@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, cast, Iterable
+# 💡 FIX 1: Import json for safe serialization of complex objects in logging
+import json
 
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -127,14 +129,14 @@ class PostFillMonitor:
             extra={"event": "post_fill_monitor_reconcile"},
         )
         try:
-            # FIX 1: Fetch broker positions directly (already async)
+            # FIX 2: Ensures proper await for the async broker method (already in _fetch_broker_positions)
             broker_positions = await self._fetch_broker_positions()
             broker_map = self._normalise_positions(broker_positions)
             
-            # FIX 2: Await local state tracker if it returns a coroutine
+            # FIX 3: Await local state tracker if it returns a coroutine (using `await` on the method result)
             local_snapshot_raw = await self._state_tracker.get_open_positions()
             
-            # FIX 3: Normalize the local snapshot (this is a synchronous operation)
+            # FIX 4: Normalize the local snapshot
             local_snapshot = self._normalize_snapshot(local_snapshot_raw)
             
             local_positions = self._normalise_positions(local_snapshot)
@@ -142,12 +144,15 @@ class PostFillMonitor:
             self._mismatch_count = len(mismatches)
             
             if mismatches and self._alert_on_mismatch:
+                # 💡 FIX 5: Convert the complex 'mismatches' list to a JSON string for safe logging
+                mismatches_str = json.dumps(mismatches, indent=2)
                 self._logger.warning(
-                    "post_fill_reconcile_mismatch",
+                    "post_fill_reconcile_mismatch: %s",
+                    mismatches_str,
                     extra={
                         "event": "post_fill_reconcile_mismatch",
                         "count": len(mismatches),
-                        "mismatches": mismatches,
+                        "mismatches": mismatches, # Keeping original object in extra dict
                     },
                 )
             elif not mismatches:
@@ -156,9 +161,10 @@ class PostFillMonitor:
                     extra={"event": "post_fill_reconcile_clean"},
                 )
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX 6: Use str(exc) to ensure the message is always a string
             self._logger.error(
                 "Failure in PostFillMonitor.reconcile: %s",
-                exc,
+                str(exc),
                 extra={
                     "event": "post_fill_monitor_reconcile_error",
                     "error_type": type(exc).__name__,
@@ -199,9 +205,10 @@ class PostFillMonitor:
             return []
 
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX 7: Use str(exc) for safe logging
             self._logger.error(
                 "Failure normalizing snapshot: %s",
-                exc,
+                str(exc),
                 extra={"event": "snapshot_normalization_error"},
                 exc_info=exc,
             )
@@ -231,9 +238,10 @@ class PostFillMonitor:
                     await self.reconcile()
                 except Exception as exc:  # noqa: BLE001
                     # Log but continue loop - don't let single failure kill monitor
+                    # 💡 FIX 8: Use str(exc) for safe logging
                     self._logger.error(
                         "Reconciliation cycle failed: %s",
-                        exc,
+                        str(exc),
                         extra={
                             "event": "reconciliation_cycle_error",
                             "error_type": type(exc).__name__,
@@ -247,9 +255,10 @@ class PostFillMonitor:
             )
             raise
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX 9: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor._reconciliation_loop: %s",
-                exc,
+                str(exc),
                 extra={
                     "event": "post_fill_monitor_loop_error",
                     "error_type": type(exc).__name__,
@@ -297,11 +306,14 @@ class PostFillMonitor:
             extra={"event": "post_fill_monitor_fetch"},
         )
         try:
+            payload: Any
             if hasattr(self._broker, "get_positions"):
-                # CRITICAL FIX: Await the async broker method
+                # 💡 FIX 10: Ensure we await the async broker method call
                 payload = await self._broker.get_positions()
             elif hasattr(self._broker, "positions"):
                 # Handle property/sync method if available
+                # 💡 FIX 11: If this is an async method, it needs await (assuming sync property/method here)
+                # If it's a synchronous method, ensure it doesn't block the event loop.
                 payload = self._broker.positions()
             else:
                 self._logger.warning(
@@ -309,10 +321,21 @@ class PostFillMonitor:
                     extra={"event": "broker_no_positions_method"},
                 )
                 payload = []
+                
+            # 💡 FIX 12: Safely log the fetched payload as a string to prevent the list-in-format error
+            if payload:
+                payload_str = json.dumps(payload, indent=2)
+                self._logger.debug(
+                    "Broker positions fetched: %s",
+                    payload_str,
+                    extra={"event": "broker_positions_fetched", "payload_sample": payload},
+                )
+            
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX 13: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor._fetch_broker_positions: %s",
-                exc,
+                str(exc),
                 extra={
                     "event": "post_fill_monitor_fetch_error",
                     "error_type": type(exc).__name__,
@@ -320,7 +343,10 @@ class PostFillMonitor:
                 exc_info=exc,
             )
             return []
+        
+        # FIX 14: Ensure payload is an iterable if a fetch method was called
         return list(payload or [])
+
 
     def _normalise_positions(
         self, positions: list[dict[str, Any]] | list[Any]
@@ -434,9 +460,10 @@ class PostFillMonitor:
                 {"quantity": quantity, "entry_price": avg_price},
             )
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX 15: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor._safe_update: %s",
-                exc,
+                str(exc),
                 extra={
                     "event": "post_fill_monitor_update_error",
                     "symbol": symbol,
