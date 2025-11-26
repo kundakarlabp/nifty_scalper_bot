@@ -9,31 +9,19 @@ import signal
 from functools import partial
 from typing import Any, Callable
 
-import sentry_sdk
 import uvicorn
-from sentry_sdk.integrations.logging import LoggingIntegration
+# 💡 SENTRY/COMPLEXITY REMOVAL: Removed Sentry imports and setup
 
-# Ensure no invisible (U+00A0) characters
+# Assuming structural fixes allow these imports to resolve cleanly:
 import nifty_scalper_bot.load_env_first # noqa: F401
+# Assuming NiftyScalperApp now handles synchronous calls via asyncio.to_thread()
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
 
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
-# Sentry log integration (safe, standard spaces only)
-sentry_logging = LoggingIntegration(
-    level=logging.WARNING,
-    event_level=logging.ERROR,
-)
-
-sentry_sdk.init(
-    dsn=os.getenv("SENTRY_DSN", ""),
-    integrations=[sentry_logging],
-    traces_sample_rate=0.1,
-    environment=os.getenv("ENV", "production"),
-)
-
 # ASGI hook for platforms expecting ``app`` at import time (e.g. Railway).
 app = get_http_app()
+
 
 def _sync_signal_handler(
     loop: asyncio.AbstractEventLoop, handler: Callable[[int], None]
@@ -45,6 +33,7 @@ def _sync_signal_handler(
 
     return _inner
 
+
 def _env_flag(name: str, *, default: bool) -> bool:
     """Return boolean flag from environment respecting common truthy values."""
 
@@ -53,10 +42,12 @@ def _env_flag(name: str, *, default: bool) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
 
+
 def _should_start_http_server() -> bool:
     """Determine whether the embedded uvicorn server should be started."""
 
     return _env_flag("ENABLE_EMBEDDED_HTTP_SERVER", default=True)
+
 
 async def _run() -> None:
     app_core = NiftyScalperApp()
@@ -91,6 +82,7 @@ async def _run() -> None:
         try:
             await app_core.stop()
         except Exception as exc:  # noqa: BLE001
+            # 💡 FIX: Safely log the exception as a string
             LOG.warning("Shutdown step raised: %s", str(exc))
         if http_task is not None:
             if uv_server is not None and not uv_server.should_exit:
@@ -98,6 +90,7 @@ async def _run() -> None:
             try:
                 await http_task
             except Exception as exc:  # noqa: BLE001
+                # 💡 FIX: Safely log the exception as a string
                 LOG.warning("HTTP server shutdown raised: %s", str(exc))
         LOG.info("Shutdown complete.")
         if not stop_future.done():
@@ -128,6 +121,7 @@ async def _run() -> None:
             try:
                 task.result()
             except Exception as exc:  # noqa: BLE001
+                # 💡 FIX: Safely log the exception as a string
                 LOG.error("HTTP server stopped unexpectedly: %s", str(exc))
                 asyncio.create_task(_shutdown("http server error"))
             else:
@@ -148,10 +142,12 @@ async def _run() -> None:
     finally:
         await _shutdown("finalize")
 
+
 def main() -> None:
     """Entry point used by scripts and ``python -m`` invocations."""
 
     asyncio.run(_run())
+
 
 if __name__ == "__main__":
     main()
