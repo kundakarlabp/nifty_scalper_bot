@@ -4,15 +4,15 @@ pydantic-settings==2.0.3
 python-dotenv==1.0.1
 typing-extensions==4.12.0
 
-# === Telegram Bot (DOWNGRADED for sync compatibility) ===
+# === Telegram Bot (FIXED - use v13.x for sync compatibility) ===
 python-telegram-bot==13.15
 
 # === Web/API + metrics ===
 fastapi==0.111.0
-uvicorn==0.29.0
-prometheus-client==0.20.0
+uvicorn[standard]==0.29.0
 starlette==0.37.2
 sentry-sdk==2.7.0
+prometheus-client==0.20.0
 
 # === Logging / utils ===
 structlog==24.3.0
@@ -27,14 +27,18 @@ scipy==1.13.0
 scikit-learn==1.5.0
 ta==0.11.0
 yfinance==0.2.40
-kiteconnect==5.0.1
 quantstats==0.0.62
 matplotlib==3.8.4
 seaborn==0.13.2
 plotly==5.22.0
 
+# === Broker API (Finvasia/Shoonya) ===
+NorenRestApiPy==0.0.22
+pyotp==2.9.0
+
 # === Scheduling & jobs ===
 schedule==1.2.1
+APScheduler==3.10.4
 
 # === Timezones ===
 pytz==2024.1
@@ -45,6 +49,5 @@ python-slugify==8.0.4
 PyYAML==6.0.1
 ujson==5.10.0
 
-# === Broker API ===
-NorenRestApiPy==0.0.22
-pyotp==2.9.0
+# === Additional for strategies ===
+websocket-client==1.6.4
