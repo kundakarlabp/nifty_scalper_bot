@@ -8,3 +8,10 @@ __pycache__/
 .venv*/
 .env
 sync.log
+env/
+*.pyc
+*.log
+.vscode/
+.idea/
+venv/
+*.db
