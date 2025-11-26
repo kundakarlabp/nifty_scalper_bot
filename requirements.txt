@@ -4,6 +4,9 @@ pydantic-settings==2.0.3
 python-dotenv==1.0.1
 typing-extensions==4.12.0
 
+# === Telegram Bot (DOWNGRADED for sync compatibility) ===
+python-telegram-bot==13.15
+
 # === Web/API + metrics ===
 fastapi==0.111.0
 uvicorn==0.29.0
@@ -17,7 +20,7 @@ rich==13.7.1
 requests==2.31.0
 python-dateutil==2.9.0.post0
 
-# === Data & analytics (Pinned for compatibility with Bullseye & each other) ===
+# === Data & analytics ===
 pandas==2.2.2
 numpy==1.26.4
 scipy==1.13.0
@@ -39,6 +42,9 @@ tzdata==2024.1
 
 # === CLI / misc ===
 python-slugify==8.0.4
-python-telegram-bot[rate-limiter]==21.3
 PyYAML==6.0.1
 ujson==5.10.0
+
+# === Broker API ===
+NorenRestApiPy==0.0.22
+pyotp==2.9.0
