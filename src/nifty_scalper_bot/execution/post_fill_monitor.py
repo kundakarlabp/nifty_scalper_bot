@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, cast, Iterable
+# 💡 FIX 1: Import json for safe serialization of complex objects in logging
 import json
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -73,6 +74,7 @@ class PostFillMonitor:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # noqa: BLE001
+            # 💡 FIX: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor.start: %s",
                 str(exc),
@@ -80,6 +82,7 @@ class PostFillMonitor:
                 exc_info=exc,
             )
             return
+        # BEST PRACTICE: Name the task for debugging
         self._task = loop.create_task(self._reconciliation_loop(), name="reconciliation-monitor")
 
     async def stop(self) -> None:
@@ -322,6 +325,7 @@ class PostFillMonitor:
             
         except Exception as exc:  # noqa: BLE001
             # 💡 STRONGEST LOGGING FIX: Log a simple string message and put details in 'extra'.
+            # This is done to bypass any custom framework logic that might fail on the exc object.
             error_details = {
                 "event": "post_fill_monitor_fetch_error",
                 "error_type": type(exc).__name__,
