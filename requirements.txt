@@ -1,6 +1,6 @@
 # === Core Config ===
 pydantic==2.7.4
-pydantic-settings==2.0.3
+pydantic-settings==2.2.1
 python-dotenv==1.0.1
 typing-extensions==4.12.0
 
@@ -39,10 +39,11 @@ tzdata==2024.1
 
 # === CLI / misc ===
 python-slugify==8.0.4
-python-telegram-bot[rate-limiter]==21.3
+python-telegram-bot[rate-limiter]==13.5
 PyYAML==6.0.1
 ujson==5.10.0
 
 # === Optional web servers / async utils ===
 # Removed uvloop and httptools version pins to let FastAPI/uvicorn pull compatible versions,
 # as pinning them manually is often the cause of conflicts.
+
