@@ -1,53 +1,161 @@
-#!/usr/bin/env python3
-"""
-Nifty Scalper Bot - Main Entry Point
-"""
+"""Async entry point that wires the core trading stack with Telegram notifications."""
 
-import os
-import sys
+from __future__ import annotations
+
+import asyncio
 import logging
-from pathlib import Path
+import os
+import signal
+from functools import partial
+from typing import Any, Callable
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+import sentry_sdk
+import uvicorn
+from sentry_sdk.integrations.logging import LoggingIntegration
 
-from dotenv import load_dotenv
+import nifty_scalper_bot.load_env_first  # noqa: F401
+from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
 
-# Load environment variables
-load_dotenv()
+LOG = logging.getLogger("nifty_scalper_bot.main")
 
-# Setup logging before importing app components
-logging.basicConfig(
+sentry_logging = LoggingIntegration(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('bot.log')
-    ]
+    event_level=logging.ERROR,
 )
 
-logger = logging.getLogger(__name__)
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN", ""),
+    integrations=[sentry_logging],
+    traces_sample_rate=0.1,
+    environment=os.getenv("ENV", "production"),
+)
 
-def main():
-    """Main entry point"""
+# ASGI hook for platforms expecting ``app`` at import time (e.g. Railway).
+app = get_http_app()
+
+
+def _sync_signal_handler(
+    loop: asyncio.AbstractEventLoop, handler: Callable[[int], None]
+) -> Callable[[int, Any], None]:
+    """Create a synchronous signal handler that schedules *handler*."""
+
+    def _inner(signum: int, _frame: Any) -> None:
+        loop.call_soon_threadsafe(handler, signum)
+
+    return _inner
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    """Return boolean flag from environment respecting common truthy values."""
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _should_start_http_server() -> bool:
+    """Determine whether the embedded uvicorn server should be started."""
+
+    return _env_flag("ENABLE_EMBEDDED_HTTP_SERVER", default=True)
+
+
+async def _run() -> None:
+    app_core = NiftyScalperApp()
+    uv_server: uvicorn.Server | None = None
+    http_task: asyncio.Task[None] | None = None
+    http_enabled = _should_start_http_server()
+
+    if http_enabled:
+        http_app = get_http_app()
+        port = int(os.environ.get("PORT", "8000"))
+        uv_config = uvicorn.Config(
+            http_app,
+            host="0.0.0.0",
+            port=port,
+            lifespan="on",
+            log_config=None,
+        )
+        uv_server = uvicorn.Server(uv_config)
+    else:
+        LOG.info("Embedded HTTP server disabled via ENABLE_EMBEDDED_HTTP_SERVER=false.")
+
+    loop = asyncio.get_running_loop()
+    stop_future: asyncio.Future[None] = loop.create_future()
+    shutting_down = asyncio.Event()
+
+    async def _shutdown(reason: str) -> None:
+        nonlocal http_task
+        if shutting_down.is_set():
+            return
+        shutting_down.set()
+        LOG.info("Shutting down (%s)...", reason)
+        try:
+            await app_core.stop()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Shutdown step raised: %s", exc)
+        if http_task is not None:
+            if uv_server is not None and not uv_server.should_exit:
+                uv_server.should_exit = True
+            try:
+                await http_task
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("HTTP server shutdown raised: %s", exc)
+        LOG.info("Shutdown complete.")
+        if not stop_future.done():
+            stop_future.set_result(None)
+
+    def _schedule_shutdown(signum: int) -> None:
+        try:
+            sig = signal.Signals(signum)
+            label = f"signal {sig.name}"
+        except ValueError:
+            label = f"signal {signum}"
+        if shutting_down.is_set():
+            return
+        LOG.info("Received %s", label)
+        asyncio.create_task(_shutdown(label))
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, partial(_schedule_shutdown, sig.value))
+        except (NotImplementedError, AttributeError):
+            signal.signal(sig, _sync_signal_handler(loop, _schedule_shutdown))
+
+    if http_enabled and uv_server is not None:
+
+        def _http_task_done(task: asyncio.Task[None]) -> None:
+            if shutting_down.is_set():
+                return
+            try:
+                task.result()
+            except Exception as exc:  # noqa: BLE001
+                LOG.error("HTTP server stopped unexpectedly: %s", exc)
+                asyncio.create_task(_shutdown("http server error"))
+            else:
+                LOG.info("HTTP server stopped unexpectedly.")
+                asyncio.create_task(_shutdown("http server stopped"))
+
+        http_task = asyncio.create_task(uv_server.serve(), name="uvicorn-server")
+        http_task.add_done_callback(_http_task_done)
+
     try:
-        logger.info("=" * 80)
-        logger.info("Starting Nifty Scalper Bot")
-        logger.info("=" * 80)
-        
-        # Import after logging setup to avoid issues
-        from nifty_scalper_bot.core.app import NiftyScalperApp
-        
-        # Create and run app
-        app = NiftyScalperApp()
-        app.run()
-        
-    except KeyboardInterrupt:
-        logger.info("
-👋 Bot stopped by user")
-    except Exception as e:
-        logger.critical(f"💥 Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+        await app_core.start()
+        LOG.info("Core ready, strategies active.")
+        await stop_future
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("Fatal error: %s", exc)
+        await _shutdown("fatal error")
+        raise SystemExit(1) from exc
+    finally:
+        await _shutdown("finalize")
 
-if __name__ == '__main__':
+
+def main() -> None:
+    """Entry point used by scripts and ``python -m`` invocations."""
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
     main()
