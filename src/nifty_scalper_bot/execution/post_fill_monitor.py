@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, cast, Iterable
-# 💡 FIX 1: Import json for safe serialization of complex objects in logging
 import json
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -74,7 +73,6 @@ class PostFillMonitor:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor.start: %s",
                 str(exc),
@@ -82,7 +80,6 @@ class PostFillMonitor:
                 exc_info=exc,
             )
             return
-        # 💡 BEST PRACTICE: Name the task for easier debugging
         self._task = loop.create_task(self._reconciliation_loop(), name="reconciliation-monitor")
 
     async def stop(self) -> None:
@@ -144,15 +141,15 @@ class PostFillMonitor:
             self._mismatch_count = len(mismatches)
             
             if mismatches and self._alert_on_mismatch:
-                # 💡 CRITICAL FIX: Use simple string format and pass count. 
-                # JSON dump the list for safe storage in the 'extra' dict.
+                # 💡 CRITICAL FIX: Only pass count (integer) as the substitution argument 
+                # to guarantee logging stability.
                 self._logger.warning(
                     "Post-fill reconciliation mismatch detected. Count: %d",
-                    len(mismatches),
+                    len(mismatches), 
                     extra={
                         "event": "post_fill_reconcile_mismatch",
                         "count": len(mismatches),
-                        "mismatches": json.dumps(mismatches), 
+                        "mismatches": json.dumps(mismatches), # Safely serialized in extra
                     },
                 )
             elif not mismatches:
@@ -161,7 +158,7 @@ class PostFillMonitor:
                     extra={"event": "post_fill_reconcile_clean"},
                 )
         except Exception as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging to prevent the 'Object list' error
+            # 💡 FIX: Safely log the failure using str(exc)
             self._logger.error(
                 "Failure in PostFillMonitor.reconcile: %s",
                 str(exc),
@@ -204,7 +201,6 @@ class PostFillMonitor:
             return []
 
         except Exception as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging
             self._logger.error(
                 "Failure normalizing snapshot: %s",
                 str(exc),
@@ -236,8 +232,6 @@ class PostFillMonitor:
                 try:
                     await self.reconcile()
                 except Exception as exc:  # noqa: BLE001
-                    # Log but continue loop - don't let single failure kill monitor
-                    # 💡 FIX: Use str(exc) for safe logging
                     self._logger.error(
                         "Reconciliation cycle failed: %s",
                         str(exc),
@@ -254,7 +248,6 @@ class PostFillMonitor:
             )
             raise
         except Exception as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor._reconciliation_loop: %s",
                 str(exc),
@@ -307,11 +300,9 @@ class PostFillMonitor:
         try:
             payload: Any
             if hasattr(self._broker, "get_positions"):
-                # Assuming 'get_positions' is natively async and should be awaited
                 payload = await self._broker.get_positions()
             elif hasattr(self._broker, "positions"):
-                # 💡 CRITICAL FIX: Wrap the synchronous/blocking method with asyncio.to_thread()
-                # This prevents the main event loop from blocking.
+                # 💡 CRITICAL CONCURRENCY FIX: Delegate blocking I/O to a separate thread
                 payload = await asyncio.to_thread(self._broker.positions)
             else:
                 self._logger.warning(
@@ -330,14 +321,15 @@ class PostFillMonitor:
                 )
             
         except Exception as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging. This directly fixes the "Object list can't be used in 'a'." error
+            # 💡 STRONGEST LOGGING FIX: Log a simple string message and put details in 'extra'.
+            error_details = {
+                "event": "post_fill_monitor_fetch_error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc), 
+            }
             self._logger.error(
-                "Failure in PostFillMonitor._fetch_broker_positions: %s",
-                str(exc),
-                extra={
-                    "event": "post_fill_monitor_fetch_error",
-                    "error_type": type(exc).__name__,
-                },
+                "Failure in broker positions fetch (see extra details).",
+                extra=error_details,
                 exc_info=exc,
             )
             return []
@@ -457,7 +449,6 @@ class PostFillMonitor:
                 {"quantity": quantity, "entry_price": avg_price},
             )
         except Exception as exc:  # noqa: BLE001
-            # 💡 FIX: Use str(exc) for safe logging
             self._logger.error(
                 "Failure in PostFillMonitor._safe_update: %s",
                 str(exc),
