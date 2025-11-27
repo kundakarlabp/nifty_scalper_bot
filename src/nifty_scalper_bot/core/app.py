@@ -2305,7 +2305,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         websocket_manager=websocket_manager,
         streamer=streamer,
         stream_supervisor=stream_supervisor,
-         
+    )
     
     broker_client.preload_instruments()
 
