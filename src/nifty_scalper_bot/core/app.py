@@ -49,6 +49,11 @@ from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.message_bus import (
+    MessageBus, 
+    Message, 
+    MessageType
+)
 from nifty_scalper_bot.core.unified_manager import UnifiedManager
 from nifty_scalper_bot.data import (
     InstrumentResolver,
@@ -1264,6 +1269,7 @@ class BotContext:
     websocket_manager: WebSocketManager | None
     streamer: Any
     stream_supervisor: StreamSupervisor | None
+    message_bus: MessageBus
     data_hub: DataHub | None = None
     market_data_manager: MarketDataManager | None = None
     market_regime: MarketRegimeDetector | None = None
@@ -2273,7 +2279,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ws_host = urlsplit(str(config.broker.websocket_url)).hostname or ""
 
     rate_limiter = _configure_rate_limiter(config.ratelimit)
-
+    message_bus = MessageBus()
 
     from nifty_scalper_bot.data.robust_provider import (
     RobustDataProvider,
@@ -3300,6 +3306,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         config=_get_strategy_config(config),
         data_hub=data_hub,
         strike_selector=strike_selector,
+        message_bus=message_bus,
     )
     strategy_runner.attach_persistent_state(persistent_state)
     strategy_runner.restore_trades(persistent_state.load_trades())
@@ -3663,7 +3670,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         settings=settings,
         config=config,
         rate_limiter=rate_limiter,
-        broker_client=broker_client,
+        broker_client=robust_provider,
+        message_bus=message_bus,
         websocket_client=websocket_client,
         websocket_manager=websocket_manager,
         streamer=streamer,
@@ -4526,7 +4534,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={"event": "post_fill_monitor_initial_reconcile_failed"},
                         exc_info=True,
                     )
-
+    message_bus_component = _require_component(ctx.message_bus, "message_bus")
+    message_bus_component.start()
     
 
     strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
@@ -4657,6 +4666,15 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     """Execute graceful shutdown."""
 
     LOGGER.info("Shutting down bot...")
+    hub = getattr(ctx, "order_execution_hub", None)
+    bus = getattr(ctx, "message_bus", None)
+    if bus is not None:
+        with suppress(Exception):
+            await bus.stop()
+
+    if hub is not None:
+        with suppress(Exception):
+            await hub.shutdown()
 
     refresh_task = getattr(ctx, "instrument_refresh_task", None)
     if refresh_task is not None:
