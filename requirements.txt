@@ -3,6 +3,7 @@ pydantic>=2.5,<3
 pydantic-settings>=2.2,<3
 python-dotenv>=1.0
 typing-extensions>=4.12
+tenacity
 
 # Web/API + metrics
 fastapi>=0.111
@@ -47,3 +48,4 @@ ujson>=5.8
 # Optional web servers / async utils (if used before)
 uvloop>=0.19
 httptools>=0.6
+
