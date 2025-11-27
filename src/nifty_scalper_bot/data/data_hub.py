@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Callable, Iterable, Mapping, Optional, TypedDict, cast
+from nifty_scalper_bot.core.message_bus import MessageBus, Message, MessageType
 
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
@@ -83,13 +84,15 @@ class DataHub:
         *,
         options_only: bool = True,
         store: HubStore | None = None,
+        message_bus: MessageBus
     ) -> None:
+        
         self._mdm = market_data_manager
         self._resolver = instrument_resolver
         self._options_only = options_only
         self._store = store
         self._lock = RLock()
-        message_bus: MessageBus,
+       
 
         # State Caches
         self._quotes: dict[str, Tick] = {}
@@ -114,6 +117,7 @@ class DataHub:
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
 
+    # data_hub.py, around line 89: Find ingest_tick
     def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
@@ -137,22 +141,49 @@ class DataHub:
                             "Tick subscriber failed for %s: %s", 
                             symbol, exc, exc_info=True
                         )
-
-    def ingest_order_update(self, order: dict[str, Any]) -> None:
-        """Process an order status update."""
-        order_id = order.get("order_id")
-        if not order_id:
+    
+    def ingest_tick(self, tick: Tick) -> None:
+        """Process an incoming market tick."""
+        symbol = tick.get("symbol")
+        if not symbol:
             return
 
         with self._lock:
-            self._orders[order_id] = order
-
-            # Notify subscribers
-            for callback in self._order_subscribers:
+            # Update quote cache
+            self._quotes[symbol] = tick
+            
+            # Update derived metrics (Throttled)
+            self._capture_option_metrics(symbol, tick)
+            
+            # ✅ FIX: PUBLISH TICK MESSAGE TO THE BUS FIRST
+            if self._message_bus:
                 try:
-                    callback(order)
+                    # Note: We use asyncio.create_task to run the async publish 
+                    # from this synchronous thread safely.
+                    asyncio.create_task(
+                        self._message_bus.publish(
+                            Message(
+                                type=MessageType.TICK,
+                                timestamp=datetime.now(timezone.utc), # Use UTC for consistency
+                                data=tick,
+                                source="data_hub"
+                            )
+                        )
+                    )
                 except Exception as exc:
-                    LOGGER.error("Order subscriber failed: %s", exc, exc_info=True)
+                    # Catch loop not running or task creation failures
+                    LOGGER.warning("Failed to publish tick to MessageBus: %s", exc)
+
+            # Notify old synchronous subscribers for compatibility
+            if symbol in self._tick_subscribers:
+                for callback in list(self._tick_subscribers[symbol]):
+                    try:
+                        callback(tick)
+                    except Exception as exc:
+                        LOGGER.error(
+                            "Tick subscriber failed for %s: %s", 
+                            symbol, exc, exc_info=True
+                        )
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
