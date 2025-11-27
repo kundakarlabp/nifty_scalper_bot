@@ -2273,11 +2273,33 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     rate_limiter = _configure_rate_limiter(config.ratelimit)
 
+
+    from nifty_scalper_bot.data.robust_provider import (
+    RobustDataProvider,
+    CircuitBreakerConfig
+    )
+
     broker_client = ZerodhaKiteClient(
         api_key=config.broker.api_key,
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
+    robust_provider = RobustDataProvider(
+        broker_client=broker_client,
+        circuit_config=CircuitBreakerConfig(
+            failure_threshold=5,
+            timeout_seconds=60.0
+        ),
+        notifier=lambda event, data: asyncio.create_task(
+            notifier.send_event(event, data) if notifier else asyncio.sleep(0)
+        )
+    )
+    ctx = BotContext(
+        broker_client=robust_provider,  # ✅ Protected
+    )
+
+    
+    
     broker_client.preload_instruments()
 
     instrument_resolver = InstrumentResolver(broker_client)
