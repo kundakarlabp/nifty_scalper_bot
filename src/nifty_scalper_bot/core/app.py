@@ -2294,11 +2294,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             notifier.send_event(event, data) if notifier else asyncio.sleep(0)
         )
     )
-    ctx = BotContext(
-        broker_client=robust_provider,  # ✅ Protected
-    )
-
     
+    ctx = BotContext(
+        settings=settings,
+        config=config,
+        rate_limiter=rate_limiter,
+        # ✅ FIX: Use the protected provider here
+        broker_client=robust_provider,  
+        websocket_client=websocket_client,
+        websocket_manager=websocket_manager,
+        streamer=streamer,
+        stream_supervisor=stream_supervisor,
+         
     
     broker_client.preload_instruments()
 
