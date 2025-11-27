@@ -2464,6 +2464,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             instrument_resolver,
             options_only=True,
             store=hub_store,
+            message_bus=message_bus,
         )
         # Explicitly mark WS disconnected in polling mode so health reflects polling
         market_data_manager.set_ws_connected(False)
@@ -2623,6 +2624,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             instrument_resolver,
             options_only=True,
             store=hub_store,
+            message_bus=message_bus,
         )
         streamer.register_handler(market_data_manager._handle_tick)  # type: ignore[attr-defined]
         streamer.register_handler(lambda tick: data_hub.ingest_tick(tick))
