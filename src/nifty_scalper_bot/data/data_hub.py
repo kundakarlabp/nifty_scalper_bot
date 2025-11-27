@@ -89,11 +89,13 @@ class DataHub:
         self._options_only = options_only
         self._store = store
         self._lock = RLock()
+        message_bus: MessageBus,
 
         # State Caches
         self._quotes: dict[str, Tick] = {}
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
+        self._message_bus = message_bus
         
         # Derived Metrics Caches
         self._iv_cache: dict[str, float] = {}
