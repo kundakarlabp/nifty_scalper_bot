@@ -17,6 +17,7 @@ from importlib import import_module
 import inspect
 import os
 from pathlib import Path
+from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 import random
 import pytz
@@ -2295,17 +2296,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
     )
     
-    ctx = BotContext(
-        settings=settings,
-        config=config,
-        rate_limiter=rate_limiter,
-        # ✅ FIX: Use the protected provider here
-        broker_client=robust_provider,  
-        websocket_client=websocket_client,
-        websocket_manager=websocket_manager,
-        streamer=streamer,
-        stream_supervisor=stream_supervisor,
-    )
+    
     
     broker_client.preload_instruments()
 
@@ -2894,7 +2885,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     paper_toggle_env = coalesce_bool("PAPER__ENABLED", default=not live_possible)
     shadow_mode_env = get_bool("SHADOW_MODE", default=not live_possible)
     paper_initial = bool((not live_possible) or paper_toggle_env or shadow_mode_env)
-    broker_backend = broker_client if not paper_initial else paper_engine
+    broker_backend = robust_provider if not paper_initial else paper_engine
 
     order_manager = OrderManager(
         broker_client=cast(Any, broker_backend),
@@ -3282,7 +3273,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         "RECONCILIATION_ALERT_ON_MISMATCH", default=True
     )
     post_fill_monitor = PostFillMonitor(
-        broker_client=broker_client,
+        broker_client=robust_provider,
         state_tracker=state_tracker,
         interval_sec=int(reconciliation_interval),
         alert_on_mismatch=bool(reconciliation_alert),
