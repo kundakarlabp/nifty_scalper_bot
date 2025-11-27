@@ -236,6 +236,7 @@ class StrategyRunner:
         strategy_manager: StrategyManager,
         risk_manager: RiskManager,
         order_manager: OrderRouter,
+        message_bus: MessageBus,
         position_manager: PositionManager,
         config: StrategyRunnerConfig | None = None,
         data_hub: "DataHub | None" = None,
