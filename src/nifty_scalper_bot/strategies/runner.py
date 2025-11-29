@@ -29,6 +29,8 @@ from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
+from nifty_scalper_bot.core.message_bus import MessageBus, Message, MessageType
+from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -246,7 +248,8 @@ class StrategyRunner:
         self._indicator_engine = indicator_engine
         self._strategy_manager = strategy_manager
         self._risk_manager = risk_manager
-        self._order_manager = order_manager
+        self._message_bus = message_bus
+        self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
         self._position_manager = position_manager
         self._config = config or StrategyRunnerConfig()
         self._logger = get_logger(__name__)
@@ -575,6 +578,61 @@ class StrategyRunner:
             orchestrator.notify_exit(underlying)
         except Exception as exc:
             self._logger.debug("orchestrator_notify_exit_failed: %s", exc)
+
+    # runner.py, inside class StrategyRunner: NEW METHOD
+
+    async def _handle_tick_message(self, message: Message) -> None:
+        """
+        Processes incoming TICK messages from the MessageBus.
+        This is the new asynchronous entry point for strategy evaluation.
+        """
+        tick: dict = message.data
+        
+        if not self._running or self._trading_paused:
+            return
+
+        # 1. Evaluate strategies, making this synchronous/CPU-bound part non-blocking
+        # by running it in a separate thread.
+        # This is CRITICAL for maintaining async performance.
+        try:
+            signals = await asyncio.to_thread(
+                self._evaluate_strategies_synchronously,
+                tick
+            )
+        except Exception as exc:
+            LOGGER.error("Strategy evaluation failed: %s", exc, exc_info=True)
+            return
+
+        # 2. Publish resulting signals to the MessageBus
+        for signal in signals:
+            if signal:
+                # Signal must contain symbol, side, and quantity at minimum
+                
+                # ✅ FIX: PUBLISH SIGNAL TO THE ORDER PROCESSOR
+                await self._message_bus.publish(
+                    Message(
+                        type=MessageType.SIGNAL,
+                        timestamp=datetime.now(),
+                        data=signal, # Signal usually contains symbol, side, qty, etc.
+                        source="strategy_runner"
+                    )
+                )
+
+    # Note: Your main evaluation logic needs to be factored into this new synchronous method:
+    def _evaluate_strategies_synchronously(self, tick: dict) -> list[dict]:
+        """
+        Wrapper to run the core, blocking strategy logic in a separate thread.
+        This function should contain the original synchronous loops/calls.
+        """
+        
+        all_signals = []
+        for symbol in self._active_symbols:
+            # This logic should be adapted from your original _handle_tick loop
+            signal = self._strategy_manager.evaluate_symbol(symbol, tick) 
+            if signal:
+                 all_signals.append(signal)
+                 
+        return all_signals
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
