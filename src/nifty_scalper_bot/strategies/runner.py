@@ -234,8 +234,8 @@ class StrategyRunner:
         market_data_manager: MarketDataManager,
         indicator_engine: IndicatorEngine,
         strategy_manager: StrategyManager,
+        
         risk_manager: RiskManager,
-        order_manager: OrderRouter,
         message_bus: MessageBus,
         position_manager: PositionManager,
         config: StrategyRunnerConfig | None = None,
