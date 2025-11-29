@@ -88,6 +88,7 @@ from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
 from nifty_scalper_bot.execution.preflight_validator import PreFlightValidator
 from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
 from nifty_scalper_bot.execution.state_tracker import StateTracker
+from nifty_scalper_bot.execution.order_processor import OrderProcessor
 from nifty_scalper_bot.infra.cron_refresh import schedule_instrument_refresh
 from nifty_scalper_bot.infra.health import HealthState, create_health_app
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -1270,6 +1271,7 @@ class BotContext:
     streamer: Any
     stream_supervisor: StreamSupervisor | None
     message_bus: MessageBus
+    order_processor: OrderProcessor | None = None
     data_hub: DataHub | None = None
     market_data_manager: MarketDataManager | None = None
     market_regime: MarketRegimeDetector | None = None
@@ -3297,13 +3299,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         regime_manager=market_regime_manager,
         risk_manager=risk_manager,
     )
+    order_processor = OrderProcessor(
+        message_bus=message_bus,
+        safe_order_manager=safe_order_manager,
+        risk_manager=risk_manager,
+    )
 
     strategy_runner = StrategyRunner(
         market_data_manager=market_data_manager,
         indicator_engine=indicator_engine,
         strategy_manager=strategy_manager,
         risk_manager=risk_manager,
-        order_manager=safe_order_manager,
         position_manager=position_manager,
         config=_get_strategy_config(config),
         data_hub=data_hub,
@@ -3699,6 +3705,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_manager=strategy_manager,
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
+        order_processor=order_processor,
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
@@ -4538,7 +4545,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
     message_bus_component = _require_component(ctx.message_bus, "message_bus")
     message_bus_component.start()
-    
+    proc = getattr(ctx, "order_processor", None)
+    if proc is not None:
+        try:
+            proc.start()
+            LOGGER.info("Order processor started.")
+        except Exception as exc:
+            LOGGER.warning("Order processor failed to start: %s", exc)
 
     strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
     order_manager_component = _require_component(ctx.order_manager, "order_manager")
@@ -4670,6 +4683,10 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     LOGGER.info("Shutting down bot...")
     hub = getattr(ctx, "order_execution_hub", None)
     bus = getattr(ctx, "message_bus", None)
+    proc = getattr(ctx, "order_processor", None)
+    if proc is not None:
+        with suppress(Exception):
+            await proc.stop()
     if bus is not None:
         with suppress(Exception):
             await bus.stop()
