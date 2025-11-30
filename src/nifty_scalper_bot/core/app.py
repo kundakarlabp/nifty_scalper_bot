@@ -2641,7 +2641,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         raise ConfigurationError("Data hub initialisation failed")
 
     try:
-        snapshot = data_hub.get_account_snapshot(force=True)
+        snapshot = asyncio.run(data_hub.get_account_snapshot(force=True))
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "init.account_snapshot_failed",
@@ -5602,7 +5602,7 @@ class NiftyScalperApp:
                 if now - last_heavy >= heavy_interval:
                     _health_check(self._ctx)
                     try:
-                        _reconcile_state(self._ctx)
+                        await _reconcile_state(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "Periodic state reconciliation failed: %s",
