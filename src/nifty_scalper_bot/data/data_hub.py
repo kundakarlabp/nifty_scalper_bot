@@ -155,24 +155,27 @@ class DataHub:
             
             # Update derived metrics (Throttled)
             self._capture_option_metrics(symbol, tick)
-            
-            # ✅ FIX: PUBLISH TICK MESSAGE TO THE BUS FIRST
+      
             if self._message_bus:
                 try:
-                    # Note: We use asyncio.create_task to run the async publish 
-                    # from this synchronous thread safely.
-                    asyncio.create_task(
+                    # Get the running loop. If none, skip (system is still booting)
+                    loop = asyncio.get_running_loop() 
+                    
+                    loop.create_task(
                         self._message_bus.publish(
                             Message(
                                 type=MessageType.TICK,
-                                timestamp=datetime.now(timezone.utc), # Use UTC for consistency
+                                timestamp=datetime.now(timezone.utc),
                                 data=tick,
                                 source="data_hub"
                             )
                         )
                     )
+                except RuntimeError:
+                    # This happens before the event loop starts. We swallow this harmlessly.
+                    pass 
                 except Exception as exc:
-                    # Catch loop not running or task creation failures
+                    # Log other critical failures (like QueueFull or bad data)
                     LOGGER.warning("Failed to publish tick to MessageBus: %s", exc)
 
             # Notify old synchronous subscribers for compatibility
