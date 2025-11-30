@@ -304,12 +304,9 @@ class PostFillMonitor:
             payload: Any
             if hasattr(self._broker, "get_positions"):
                 payload = await self._broker.get_positions()
-            elif hasattr(self._broker, "positions"):
-                # 💡 CRITICAL CONCURRENCY FIX: Delegate blocking I/O to a separate thread
-                payload = await asyncio.to_thread(self._broker.positions)
             else:
-                self._logger.warning(
-                    "Broker client has no position fetch method",
+                self._logger.error(
+                    "CRITICAL: Broker client has no 'get_positions' method. Check RobustDataProvider setup.",
                     extra={"event": "broker_no_positions_method"},
                 )
                 payload = []
