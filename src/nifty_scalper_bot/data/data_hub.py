@@ -119,29 +119,7 @@ class DataHub:
     # ----------------------------------------------------------------
 
     # data_hub.py, around line 89: Find ingest_tick
-    def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick."""
-        symbol = tick.get("symbol")
-        if not symbol:
-            return
 
-        with self._lock:
-            # Update quote cache
-            self._quotes[symbol] = tick
-            
-            # Update derived metrics (Throttled)
-            self._capture_option_metrics(symbol, tick)
-            
-            # Notify subscribers
-            if symbol in self._tick_subscribers:
-                for callback in list(self._tick_subscribers[symbol]):
-                    try:
-                        callback(tick)
-                    except Exception as exc:
-                        LOGGER.error(
-                            "Tick subscriber failed for %s: %s", 
-                            symbol, exc, exc_info=True
-                        )
     
     def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
