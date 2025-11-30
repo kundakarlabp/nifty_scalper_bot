@@ -136,19 +136,20 @@ class DataHub:
       
             if self._message_bus:
                 try:
-                    # Get the running loop. If none, skip (system is still booting)
-                    loop = asyncio.get_running_loop() 
+                    # ✅ FIX C: Get the main loop defensively for cross-thread scheduling.
+                    loop = asyncio.get_event_loop() 
                     
-                    loop.create_task(
-                        self._message_bus.publish(
-                            Message(
-                                type=MessageType.TICK,
-                                timestamp=datetime.now(timezone.utc),
-                                data=tick,
-                                source="data_hub"
+                    if loop.is_running():
+                        loop.create_task(
+                            self._message_bus.publish(
+                                Message(
+                                    type=MessageType.TICK,
+                                    timestamp=datetime.now(timezone.utc),
+                                    data=tick,
+                                    source="data_hub"
+                                )
                             )
                         )
-                    )
                 except RuntimeError:
                     # This happens before the event loop starts. We swallow this harmlessly.
                     pass 
