@@ -4774,11 +4774,12 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     LOGGER.info("Bot shutdown complete")
 
 
-def _reconcile_state(ctx: BotContext) -> None:
+async def _reconcile_state(ctx: BotContext) -> None:
     LOGGER.debug(
         "Entered state reconciliation",
         extra={"event": "state_reconcile_enter"},
     )
+    raw_broker_positions = await ctx.broker_client.get_positions()
     broker_positions: list[Mapping[str, Any]] = [
         pos for pos in ctx.broker_client.get_positions() if isinstance(pos, Mapping)
     ]
