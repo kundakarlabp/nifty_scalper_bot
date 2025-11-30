@@ -135,7 +135,9 @@ class PostFillMonitor:
             broker_map = self._normalise_positions(broker_positions)
             
             # Assuming get_open_positions is async
-            local_snapshot_raw = await self._state_tracker.get_open_positions()
+            local_snapshot_raw = self._state_tracker.get_open_positions()
+            if asyncio.iscoroutine(local_snapshot_raw):
+                 local_snapshot_raw = await local_snapshot_raw
             
             local_snapshot = self._normalize_snapshot(local_snapshot_raw)
             
@@ -284,17 +286,7 @@ class PostFillMonitor:
     # ------------------------------------------------------------------
 
     async def _fetch_broker_positions(self) -> list[dict[str, Any]]:
-        """Fetch positions from the broker client defensively.
 
-        Args:
-            None.
-
-        Returns:
-            list[dict[str, Any]]: Raw broker position payloads.
-
-        Raises:
-            None. Failures are logged and an empty list returned.
-        """
 
         self._logger.debug(
             "Entered PostFillMonitor._fetch_broker_positions",
@@ -306,7 +298,7 @@ class PostFillMonitor:
                 payload = await self._broker.get_positions()
             else:
                 self._logger.error(
-                    "CRITICAL: Broker client has no 'get_positions' method. Check RobustDataProvider setup.",
+                    "CRITICAL: Broker client missing 'get_positions'. Cannot reconcile.",
                     extra={"event": "broker_no_positions_method"},
                 )
                 payload = []
