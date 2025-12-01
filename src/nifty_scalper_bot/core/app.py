@@ -1788,34 +1788,25 @@ def _get_symbols(
             # Try multiple common formats for Nifty 50 spot
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
+            def get_live_price():
+                # Unpack wrapper if needed
+                inner = getattr(broker, "broker", getattr(broker, "_broker", broker))
             
-            # Method A: broker.ltp(list)
-            if hasattr(broker, "ltp"):
-                try:
-                    quote = broker.ltp(candidates)
-                    if quote:
-                        for key in candidates:
-                            val = quote.get(key)
-                            if isinstance(val, dict):
-                                ltp = float(val.get("last_price") or 0)
-                            elif isinstance(val, (int, float)):
-                                ltp = float(val)
-                            if ltp > 0: break
-                except Exception:
-                    pass
-            
-            # Method B: broker.get_quote(str)
-            if ltp == 0 and hasattr(broker, "get_quote"):
-                try:
-                    for key in candidates:
-                        quote = broker.get_quote(key)
-                        if quote:
-                            val = quote.get(key) or quote
-                            if isinstance(val, dict):
-                                ltp = float(val.get("last_price") or val.get("ltp") or val.get("close") or 0)
-                            if ltp > 0: break
-                except Exception:
-                    pass
+            # Try LTP API first
+                if hasattr(inner, "ltp"):
+                    q = inner.ltp(candidates)
+                    for k in candidates:
+                        if k in q: return q[k].get("last_price")
+                
+                # Try Quote API
+                if hasattr(inner, "quote"):
+                    q = inner.quote(candidates)
+                    for k in candidates:
+                        if k in q: return q[k].get("last_price")
+                return 0.0
+
+            # Execute safely
+            ltp = float(get_live_price() or 0.0)
 
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
@@ -4793,29 +4784,36 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
 
 async def _reconcile_state(ctx: BotContext) -> None:
     LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
+    broker_positions: list[Mapping[str, Any]] = []
     
     try:
-        # 1. Fetch raw data safely
+        # 1. Fetch raw data safely (Async await)
         raw_data = await ctx.broker_client.get_positions()
         
         # 2. Normalize: Ensure we have a list of dictionaries
-        broker_positions: list[Mapping[str, Any]] = []
-        
         if isinstance(raw_data, list):
             for item in raw_data:
                 if isinstance(item, Mapping):
                     broker_positions.append(item)
         elif isinstance(raw_data, Mapping):
-            # Handle case where API returns single dict or wrapper
+            # Handle case where API returns single dict or wrapper (e.g. {'net': [...]})
             if "net" in raw_data and isinstance(raw_data["net"], list):
-                 # Zerodha often returns {'net': [...], 'day': [...]}
                  broker_positions.extend([p for p in raw_data["net"] if isinstance(p, Mapping)])
             else:
                  broker_positions.append(raw_data)
 
-        # 3. Process valid positions only
-        position_manager = _require_component(ctx.position_manager, "position_manager")
-        local_positions = position_manager.get_all_positions()
+    except Exception as exc:
+        # ✅ FIX: Missing EXCEPT block added here to handle fetch failures gracefully
+        LOGGER.error(
+            "state_reconcile_fetch_failed",
+            extra={"event": "state_reconcile_fetch_failed", "error": str(exc)},
+            exc_info=True
+        )
+        return  # Stop reconciliation for this cycle if fetch fails
+
+    # 3. Process valid positions only
+    position_manager = _require_component(ctx.position_manager, "position_manager")
+    local_positions = position_manager.get_all_positions()
 
     broker_symbols = {
         str(pos.get("tradingsymbol") or pos.get("symbol"))
@@ -4844,7 +4842,6 @@ async def _reconcile_state(ctx: BotContext) -> None:
             "order_reconcile_failed",
             extra={"event": "order_reconcile_failed", "error": str(exc)},
         )
-
     def _extract_symbol(payload: Mapping[str, Any]) -> str:
         symbol_raw = payload.get("tradingsymbol") or payload.get("symbol") or ""
         symbol = str(symbol_raw).strip().upper()
