@@ -1788,21 +1788,29 @@ def _get_symbols(
             # Try multiple common formats for Nifty 50 spot
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
-            def get_live_price():
-                # Unpack wrapper if needed
-                inner = getattr(broker, "client", getattr(broker, "_broker", broker))
-            
-            # Try LTP API first
-                if hasattr(inner, "ltp"):
-                    q = inner.ltp(candidates)
-                    for k in candidates:
-                        if k in q: return q[k].get("last_price")
+            inner_broker = getattr(broker, "client", getattr(broker, "_broker", broker))
+
+            def fetch_price():
+                # Try LTP first (lighter API)
+                if hasattr(inner_broker, "ltp"):
+                    try:
+                        q = inner_broker.ltp(candidates)
+                        for k in candidates:
+                            if k in q: return q[k].get("last_price")
+                    except Exception:
+                        pass
                 
-                # Try Quote API
-                if hasattr(inner, "quote"):
-                    q = inner.quote(candidates)
-                    for k in candidates:
-                        if k in q: return q[k].get("last_price")
+                # Try Quote second (richer API)
+                if hasattr(inner_broker, "quote"):
+                    try:
+                        q = inner_broker.quote(candidates)
+                        for k in candidates:
+                            # Quote structure can vary (nested dict vs flat)
+                            data = q.get(k)
+                            if data:
+                                return data.get("last_price") or data.get("ltp")
+                    except Exception:
+                        pass
                 return 0.0
 
             # Execute safely
