@@ -1763,14 +1763,16 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
     return None
 
 
+# src/nifty_scalper_bot/core/app.py - Replace _get_symbols
+
 def _get_symbols(
     config: AppConfig, 
     resolver: InstrumentResolver | None = None, 
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Prioritizes Weekly options derived from Live Spot Price.
+    Return a list of validated exchange-qualified symbols.
+    Fetches live Spot price to determine ATM.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1785,55 +1787,58 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
+            # NIFTY 50 Token on NSE is usually 256265. We try strings first.
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # Helper to safely call broker methods (sync)
-            def get_live_price():
-                # Unpack wrapper recursively to get the real Zerodha client
-                inner = broker
-                while hasattr(inner, "client") or hasattr(inner, "_broker") or hasattr(inner, "broker"):
-                    inner = getattr(inner, "client", getattr(inner, "_broker", getattr(inner, "broker", inner)))
-                
-                # Try LTP API first
-                if hasattr(inner, "ltp"):
-                    try:
-                        q = inner.ltp(candidates)
-                        for k in candidates:
-                            if k in q: return float(q[k].get("last_price", 0))
-                    except Exception:
-                        pass
-                
-                # Try Quote API second
-                if hasattr(inner, "quote"):
-                    try:
-                        q = inner.quote(candidates)
-                        for k in candidates:
-                            if k in q:
-                                data = q[k]
-                                return float(data.get("last_price") or data.get("ltp") or 0)
-                    except Exception:
-                        pass
-                return 0.0
+            # Unwrap to get real client
+            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
+            
+            # Debug: Log what we are working with
+            LOGGER.debug(f"Fetching ATM using broker type: {type(inner).__name__}")
 
-            # Execute synchronous fetch using the helper
-            ltp = get_live_price()
+            # Strategy A: LTP API
+            if hasattr(inner, "ltp"):
+                try:
+                    # fetch both strings and the raw token for NIFTY 50
+                    q = inner.ltp(candidates + ["256265"]) 
+                    
+                    # Check responses
+                    for k, v in q.items():
+                        p = v.get("last_price", 0)
+                        if p > 0:
+                            ltp = float(p)
+                            LOGGER.info(f"Found price {ltp} using key '{k}'")
+                            break
+                except Exception as e:
+                    LOGGER.warning(f"LTP API failed: {e}")
 
+            # Strategy B: Quote API (Fallback)
+            if ltp == 0 and hasattr(inner, "quote"):
+                try:
+                    q = inner.quote(candidates)
+                    for k, v in q.items():
+                        p = v.get("last_price") or v.get("ltp")
+                        if p and p > 0:
+                            ltp = float(p)
+                            break
+                except Exception as e:
+                    LOGGER.warning(f"Quote API failed: {e}")
+
+            # Logic
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                # Store in context
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning("⚠️ Live price fetch returned 0. Using fallback.")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Candidates: {candidates}")
 
         except Exception as exc:
-            # ✅ THIS EXCEPT BLOCK WAS MISSING IN YOUR EDIT causing the SyntaxError
-            LOGGER.warning(f"Error fetching live price: {exc}")
+            LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic (If Broker API fails)
+    # 3. Fallback Logic
     if atm_price is None:
         fallback_base = 26000 
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
@@ -1850,6 +1855,7 @@ def _get_symbols(
     ]
 
     # 5. Resolve Symbols
+    # (Keep your existing resolution logic here)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
         
@@ -1886,53 +1892,18 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (If Smart Resolution failed)
+    # 6. Manual Fallback
     if not final_symbols:
+        # (Keep your existing manual fallback logic here)
         import datetime
         now = datetime.datetime.now()
+        month_suffix = now.strftime("%y%b").upper() # e.g. 25DEC
         
-        # Calculate Next Valid Tuesday
-        target_weekday = 1 # Tuesday
-        today_weekday = now.weekday() 
-        days_ahead = 0
-        
-        if today_weekday < target_weekday:
-             days_ahead = target_weekday - today_weekday
-        elif today_weekday == target_weekday:
-             if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                 days_ahead = 0 
-             else:
-                 days_ahead = 7
-        else:
-             days_ahead = 7 - (today_weekday - target_weekday)
-             
-        next_expiry = now + datetime.timedelta(days=days_ahead)
-        
-        year_short = next_expiry.strftime("%y")
-        day_str = next_expiry.strftime("%d")
-        month_map = {
-            1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6',
-            7: '7', 8: '8', 9: '9', 10: 'O', 11: 'N', 12: 'D'
-        }
-        month_code = month_map.get(next_expiry.month, str(next_expiry.month))
-        weekly_suffix = f"{year_short}{month_code}{day_str}"
-        monthly_suffix = now.strftime("%y%b").upper()
-
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                weekly_sym = f"NFO:NIFTY{weekly_suffix}{strike}{kind}"
-                if resolver and resolver.resolve(weekly_sym):
-                    final_symbols.append(weekly_sym)
-                    continue 
-                
-                monthly_sym = f"NFO:NIFTY{monthly_suffix}{strike}{kind}"
-                if resolver:
-                    if resolver.resolve(monthly_sym):
-                         final_symbols.append(monthly_sym)
-                    else:
-                         LOGGER.debug(f"Skipping {strike}{kind}: Not found")
-                else:
-                    final_symbols.append(weekly_sym)
+                # Try Monthly
+                sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
+                final_symbols.append(sym)
         
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
@@ -2641,25 +2612,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if data_hub is None:
         raise ConfigurationError("Data hub initialisation failed")
 
-    try:
-        snapshot = asyncio.run(data_hub.get_account_snapshot(force=True))
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error(
-            "init.account_snapshot_failed",
-            extra={"event": "init.account_snapshot_failed", "error": str(exc)},
-            exc_info=exc,
-        )
-    else:
-        LOGGER.info(
-            "init.account_snapshot_ready",
-            extra={
-                "event": "init.account_snapshot_ready",
-                "available": (
-                    snapshot.get("available") if isinstance(snapshot, dict) else None
-                ),
-                "net": (snapshot.get("net") if isinstance(snapshot, dict) else None),
-            },
-        )
+    LOGGER.info("DataHub initialized. Snapshot deferred to startup sequence.")
+
+    
 
     indicator_engine = IndicatorEngine()
     for env_key, env_default in (
