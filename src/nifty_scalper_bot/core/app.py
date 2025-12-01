@@ -4792,16 +4792,30 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
 
 
 async def _reconcile_state(ctx: BotContext) -> None:
-    LOGGER.debug(
-        "Entered state reconciliation",
-        extra={"event": "state_reconcile_enter"},
-    )
-    raw_broker_positions = await ctx.broker_client.get_positions()
-    broker_positions: list[Mapping[str, Any]] = [
-        pos for pos in ctx.broker_client.get_positions() if isinstance(pos, Mapping)
-    ]
-    position_manager = _require_component(ctx.position_manager, "position_manager")
-    local_positions = position_manager.get_all_positions()
+    LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
+    
+    try:
+        # 1. Fetch raw data safely
+        raw_data = await ctx.broker_client.get_positions()
+        
+        # 2. Normalize: Ensure we have a list of dictionaries
+        broker_positions: list[Mapping[str, Any]] = []
+        
+        if isinstance(raw_data, list):
+            for item in raw_data:
+                if isinstance(item, Mapping):
+                    broker_positions.append(item)
+        elif isinstance(raw_data, Mapping):
+            # Handle case where API returns single dict or wrapper
+            if "net" in raw_data and isinstance(raw_data["net"], list):
+                 # Zerodha often returns {'net': [...], 'day': [...]}
+                 broker_positions.extend([p for p in raw_data["net"] if isinstance(p, Mapping)])
+            else:
+                 broker_positions.append(raw_data)
+
+        # 3. Process valid positions only
+        position_manager = _require_component(ctx.position_manager, "position_manager")
+        local_positions = position_manager.get_all_positions()
 
     broker_symbols = {
         str(pos.get("tradingsymbol") or pos.get("symbol"))
