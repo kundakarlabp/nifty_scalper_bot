@@ -2404,7 +2404,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         poll_symbols = [s.strip().upper() for s in raw_syms if s.strip()]
     else:
         poll_symbols = ["NSE:NIFTY 50", "256265"]
-        )
 
     attach_resolver = getattr(broker_client, "attach_resolver", None)
     if callable(attach_resolver):
