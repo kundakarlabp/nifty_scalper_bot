@@ -193,7 +193,12 @@ class PostFillMonitor:
             
             # Handle regular iterable
             if isinstance(snapshot, Iterable) and not isinstance(snapshot, (str, bytes, Awaitable)):
-                return list(snapshot)
+                # Ensure every item in the iterable is a dictionary (Mapping)
+                return [
+                    cast(dict[str, Any], item) 
+                    for item in snapshot 
+                    if isinstance(item, Mapping)
+                ]
             
             # Handle single item - wrap in list
             if isinstance(snapshot, dict):
