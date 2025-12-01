@@ -1790,7 +1790,7 @@ def _get_symbols(
             ltp = 0.0
             def get_live_price():
                 # Unpack wrapper if needed
-                inner = getattr(broker, "broker", getattr(broker, "_broker", broker))
+                inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
             # Try LTP API first
                 if hasattr(inner, "ltp"):
