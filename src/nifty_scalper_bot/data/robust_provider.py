@@ -237,39 +237,46 @@ class RobustDataProvider:
             raise
             
     async def get_positions(self) -> list[dict[str, Any]]:
-        """Fetch positions with full validation and async retry."""
+        """Fetch positions with safety wrapper for sync/async compatibility."""
         
-        async def _fetch():
-            # ✅ FIX: Handle both sync and async underlying clients
-            # This prevents blocking the loop or crashing on await
-            if asyncio.iscoroutinefunction(self.client.get_positions):
-                return await self.client.get_positions()
-            else:
-                # Wrap synchronous Zerodha call in a thread
-                return await asyncio.to_thread(self.client.get_positions)
-
         try:
-            # Call the helper defined above
-            response = await _fetch()
-            
-            # Zerodha sometimes returns {'status': 'success', 'data': ...}
-            # or just the list. Handle both.
-            if isinstance(response, dict):
-                data = response.get("data", response)
-                if isinstance(data, dict) and "net" in data:
-                    data = data["net"] # Handle {'net': [], 'day': []} format
-            else:
-                data = response
-
-            if not isinstance(data, list):
-                # Return empty list instead of crashing if format is unexpected
+            # 1. Access the real client
+            real_client = getattr(self, "client", getattr(self, "_broker", None))
+            if not real_client:
                 return []
+
+            # 2. Define execution strategy
+            async def _execute_fetch():
+                # If the client's method is actually async (coroutine), await it
+                if asyncio.iscoroutinefunction(real_client.get_positions):
+                    return await real_client.get_positions()
                 
-            return data
+                # If it's a standard synchronous method (Zerodha), run in thread to avoid blocking
+                return await asyncio.to_thread(real_client.get_positions)
+
+            # 3. Execute
+            response = await _execute_fetch()
+
+            # 4. Normalize Data (Handle Zerodha's {'net': ...} structure)
+            data = []
+            if isinstance(response, list):
+                data = response
+            elif isinstance(response, dict):
+                # Check for 'net' positions (standard Zerodha response)
+                if "net" in response:
+                    data = response["net"]
+                elif "data" in response:
+                    data = response["data"]
+            
+            if isinstance(data, list):
+                return data
+            
+            return []
 
         except Exception as exc:
-            self._logger.error(f"Position fetch failed: {exc}")
-            return [] # Safe fallback
+            # Log failure but return empty list to prevent crashes
+            self._logger.error(f"Robust position fetch failed: {exc}")
+            return []
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch quotes with full validation."""
