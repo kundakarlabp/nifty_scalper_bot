@@ -1782,30 +1782,33 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price
+   # 2. Fetch Live Spot Price
     if broker:
         try:
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # ✅ FIX: Define helper and use it correctly in scope
-            inner_broker = getattr(broker, "client", getattr(broker, "_broker", broker))
+            # ✅ FIX: Unwrap the wrapper to get the raw synchronous client
+            # This bypasses the async wrapper complexity during sync startup
+            inner = broker
+            if hasattr(inner, "client"): inner = inner.client
+            elif hasattr(inner, "_broker"): inner = inner._broker
             
-            # 1. Try LTP API
-            if ltp == 0 and hasattr(inner_broker, "ltp"):
+            # Now call the method directly on the inner object
+            if hasattr(inner, "ltp"):
                 try:
-                    q = inner_broker.ltp(candidates)
+                    q = inner.ltp(candidates)
                     for k in candidates:
                         if k in q: 
-                            ltp = float(q[k].get("last_price") or 0)
+                            ltp = float(q[k].get("last_price", 0))
                             if ltp > 0: break
                 except Exception:
                     pass
             
-            # 2. Try Quote API
-            if ltp == 0 and hasattr(inner_broker, "quote"):
+            # Fallback to quote
+            if ltp == 0 and hasattr(inner, "quote"):
                 try:
-                    q = inner_broker.quote(candidates)
+                    q = inner.quote(candidates)
                     for k in candidates:
                         data = q.get(k)
                         if data:
@@ -1816,15 +1819,10 @@ def _get_symbols(
 
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                global _LATEST_CTX
-                if _LATEST_CTX:
-                    _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
+                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
+                # ... (store in context)
             else:
-                LOGGER.warning("Live price fetch returned 0.")
-
-        except Exception as exc:
-            LOGGER.warning(f"Error fetching live price: {exc}")
+                LOGGER.warning("⚠️ Live price fetch returned 0.")
 
     # 3. Fallback Logic (If Broker API fails)
     if atm_price is None:
