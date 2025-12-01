@@ -1782,47 +1782,56 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-   # 2. Fetch Live Spot Price
+    # 2. Fetch Live Spot Price
     if broker:
         try:
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # ✅ FIX: Unwrap the wrapper to get the raw synchronous client
-            # This bypasses the async wrapper complexity during sync startup
-            inner = broker
-            if hasattr(inner, "client"): inner = inner.client
-            elif hasattr(inner, "_broker"): inner = inner._broker
-            
-            # Now call the method directly on the inner object
-            if hasattr(inner, "ltp"):
-                try:
-                    q = inner.ltp(candidates)
-                    for k in candidates:
-                        if k in q: 
-                            ltp = float(q[k].get("last_price", 0))
-                            if ltp > 0: break
-                except Exception:
-                    pass
-            
-            # Fallback to quote
-            if ltp == 0 and hasattr(inner, "quote"):
-                try:
-                    q = inner.quote(candidates)
-                    for k in candidates:
-                        data = q.get(k)
-                        if data:
-                            ltp = float(data.get("last_price") or data.get("ltp") or 0)
-                            if ltp > 0: break
-                except Exception:
-                    pass
+            # Helper to safely call broker methods (sync)
+            def get_live_price():
+                # Unpack wrapper recursively to get the real Zerodha client
+                inner = broker
+                while hasattr(inner, "client") or hasattr(inner, "_broker") or hasattr(inner, "broker"):
+                    inner = getattr(inner, "client", getattr(inner, "_broker", getattr(inner, "broker", inner)))
+                
+                # Try LTP API first
+                if hasattr(inner, "ltp"):
+                    try:
+                        q = inner.ltp(candidates)
+                        for k in candidates:
+                            if k in q: return float(q[k].get("last_price", 0))
+                    except Exception:
+                        pass
+                
+                # Try Quote API second
+                if hasattr(inner, "quote"):
+                    try:
+                        q = inner.quote(candidates)
+                        for k in candidates:
+                            if k in q:
+                                data = q[k]
+                                return float(data.get("last_price") or data.get("ltp") or 0)
+                    except Exception:
+                        pass
+                return 0.0
+
+            # Execute synchronous fetch using the helper
+            ltp = get_live_price()
 
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                # ... (store in context)
+                # Store in context
+                global _LATEST_CTX
+                if _LATEST_CTX:
+                    _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning("⚠️ Live price fetch returned 0.")
+                LOGGER.warning("⚠️ Live price fetch returned 0. Using fallback.")
+
+        except Exception as exc:
+            # ✅ THIS EXCEPT BLOCK WAS MISSING IN YOUR EDIT causing the SyntaxError
+            LOGGER.warning(f"Error fetching live price: {exc}")
 
     # 3. Fallback Logic (If Broker API fails)
     if atm_price is None:
@@ -1853,7 +1862,6 @@ def _get_symbols(
                 for c_list in raw.values():
                     contracts.extend(c_list)
         
-        # FIX: Initialize contract_map here to avoid NameError
         contract_map = {}
         if contracts:
             for c in contracts:
@@ -1861,7 +1869,6 @@ def _get_symbols(
                 if t: contract_map[int(t)] = c
         
         if contract_map and get_next_valid_symbols:
-            # Pass the MAP, not the list
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
