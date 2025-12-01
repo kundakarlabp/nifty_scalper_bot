@@ -4501,7 +4501,12 @@ async def startup_sequence(ctx: BotContext) -> None:
     if broker_ready:
         LOGGER.info("Loading instruments...")
         try:
-            instruments = ctx.broker_client.load_instruments("NSE")
+            inner_broker = getattr(ctx.broker_client, "broker", 
+                           getattr(ctx.broker_client, "_broker", ctx.broker_client))
+            
+            # Run blocking I/O in a thread to keep startup snappy
+            instruments = await asyncio.to_thread(inner_broker.load_instruments, "NSE")
+            
             _must_ok(isinstance(instruments, list), "Failed to load instruments")
         except Exception as exc:  # noqa: BLE001
             broker_ready = False
