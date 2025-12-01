@@ -1785,36 +1785,34 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            # Try multiple common formats for Nifty 50 spot
             candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
+            
+            # ✅ FIX: Define helper and use it correctly in scope
             inner_broker = getattr(broker, "client", getattr(broker, "_broker", broker))
-
-            def fetch_price():
-                # Try LTP first (lighter API)
-                if hasattr(inner_broker, "ltp"):
-                    try:
-                        q = inner_broker.ltp(candidates)
-                        for k in candidates:
-                            if k in q: return q[k].get("last_price")
-                    except Exception:
-                        pass
-                
-                # Try Quote second (richer API)
-                if hasattr(inner_broker, "quote"):
-                    try:
-                        q = inner_broker.quote(candidates)
-                        for k in candidates:
-                            # Quote structure can vary (nested dict vs flat)
-                            data = q.get(k)
-                            if data:
-                                return data.get("last_price") or data.get("ltp")
-                    except Exception:
-                        pass
-                return 0.0
-
-            # Execute safely
-            ltp = float(get_live_price() or 0.0)
+            
+            # 1. Try LTP API
+            if ltp == 0 and hasattr(inner_broker, "ltp"):
+                try:
+                    q = inner_broker.ltp(candidates)
+                    for k in candidates:
+                        if k in q: 
+                            ltp = float(q[k].get("last_price") or 0)
+                            if ltp > 0: break
+                except Exception:
+                    pass
+            
+            # 2. Try Quote API
+            if ltp == 0 and hasattr(inner_broker, "quote"):
+                try:
+                    q = inner_broker.quote(candidates)
+                    for k in candidates:
+                        data = q.get(k)
+                        if data:
+                            ltp = float(data.get("last_price") or data.get("ltp") or 0)
+                            if ltp > 0: break
+                except Exception:
+                    pass
 
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
@@ -1822,9 +1820,8 @@ def _get_symbols(
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
-            
             else:
-                LOGGER.warning("Live price fetch returned 0 or failed.")
+                LOGGER.warning("Live price fetch returned 0.")
 
         except Exception as exc:
             LOGGER.warning(f"Error fetching live price: {exc}")
