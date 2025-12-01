@@ -4794,7 +4794,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
     broker_symbols = {
         str(pos.get("tradingsymbol") or pos.get("symbol"))
         for pos in broker_positions
-        if (pos.get("tradingsymbol") or pos.get("symbol"))
+        if isinstance(pos, Mapping) and (pos.get("tradingsymbol") or pos.get("symbol"))
     }
     local_symbols = {pos.symbol for pos in local_positions}
 
