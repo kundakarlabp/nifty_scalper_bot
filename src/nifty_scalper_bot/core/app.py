@@ -4622,8 +4622,13 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
     else:
         _start_order_monitoring()
-        with suppress(Exception):
-            strategy_runner.pause_trading()
+        if broker_ready:
+            with suppress(Exception):
+                # The runner starts paused if broker_ready=False. Resume if true.
+                if hasattr(strategy_runner, 'resume'):
+                    strategy_runner.resume()
+                elif hasattr(strategy_runner, 'start'):
+                     strategy_runner.start() # Redundant start call, but safe fallback
         session_guard = getattr(ctx, "session_guard", None)
         try:
             if session_guard is not None:
