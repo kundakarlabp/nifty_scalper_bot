@@ -4583,6 +4583,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra={"event": "order_monitor_start_failed"},
             )
 
+    if not broker_ready:
+        LOGGER.critical("Broker connection failed. Exiting to prevent zombie state.")
+        # Gracefully stop the app or raise a fatal error to restart the container
+        await shutdown_sequence(ctx, reason="broker_init_failed")
+        return # or sys.exit(1)
+
     if broker_ready:
         try:
             supervisor = getattr(ctx, "stream_supervisor", None)
