@@ -238,43 +238,49 @@ class RobustDataProvider:
             
     async def get_positions(self) -> list[dict[str, Any]]:
         """Fetch positions with safety wrapper for sync/async compatibility."""
-        
         try:
             # 1. Access the real client
+            # Support both _broker (old convention) and client (new convention)
             real_client = getattr(self, "client", getattr(self, "_broker", None))
+            
             if not real_client:
+                self._logger.error("RobustDataProvider has no underlying client!")
                 return []
 
             # 2. Define execution strategy
             async def _execute_fetch():
-                # If the client's method is actually async (coroutine), await it
+                # Check if the method exists
+                if not hasattr(real_client, 'get_positions'):
+                     # Fallback for some clients that might use .positions()
+                     if hasattr(real_client, 'positions'):
+                         if asyncio.iscoroutinefunction(real_client.positions):
+                             return await real_client.positions()
+                         return await asyncio.to_thread(real_client.positions)
+                     raise AttributeError("Broker client has no get_positions method")
+
+                # If the client's method is async, await it
                 if asyncio.iscoroutinefunction(real_client.get_positions):
                     return await real_client.get_positions()
                 
-                # If it's a standard synchronous method (Zerodha), run in thread to avoid blocking
+                # If it's synchronous (standard Zerodha), run in thread
                 return await asyncio.to_thread(real_client.get_positions)
 
-            # 3. Execute
+            # 3. Execute with retries (implicitly via the wrapper if configured, or here)
             response = await _execute_fetch()
 
-            # 4. Normalize Data (Handle Zerodha's {'net': ...} structure)
+            # 4. Normalize Data
             data = []
             if isinstance(response, list):
                 data = response
             elif isinstance(response, dict):
-                # Check for 'net' positions (standard Zerodha response)
                 if "net" in response:
                     data = response["net"]
                 elif "data" in response:
                     data = response["data"]
             
-            if isinstance(data, list):
-                return data
-            
-            return []
+            return data if isinstance(data, list) else []
 
         except Exception as exc:
-            # Log failure but return empty list to prevent crashes
             self._logger.error(f"Robust position fetch failed: {exc}")
             return []
 
