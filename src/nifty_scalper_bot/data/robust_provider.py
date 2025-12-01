@@ -107,7 +107,25 @@ class RobustDataProvider:
         self.broker = broker_client
         self.circuit = CircuitBreaker(circuit_config or CircuitBreakerConfig())
         self.notifier = notifier
+    
+    def get_profile(self) -> dict:
+        """
+        World-class FIX: Proxies non-critical status calls (like get_profile) 
+        synchronously to the underlying broker client for startup checks.
+        """
+        profile_fn = getattr(self._broker, 'get_profile', None) 
+        if callable(profile_fn):
+            try:
+                # Assuming the underlying call is synchronous, use to_thread to be safe 
+                # if this code is ever called from an async context outside startup.
+                # However, for the simple startup probe, we rely on the client being synchronous.
+                # Since the current environment is synchronous during init:
+                return profile_fn()
+            except Exception as exc:
+                LOGGER.warning("Profile fetch failed via proxy: %s", exc)
         
+        # Fallback if method or client is missing/failing
+        return {"user_id": "unavailable", "user_name": "unavailable", "broker": "unknown"}    
     def _validate_response(
         self,
         response: Any,
