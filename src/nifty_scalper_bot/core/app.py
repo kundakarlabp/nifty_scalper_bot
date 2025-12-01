@@ -2991,7 +2991,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_symbol = coalesce_str(
             "RISK_STATE_SYMBOL",
             "RISK_STATE__SYMBOL",
-            default=trade_symbol or "NIFTY",
+           default="NSE:NIFTY 50",
         )
         attach = getattr(risk_state, "attach_data_hub", None)
         if callable(attach):
