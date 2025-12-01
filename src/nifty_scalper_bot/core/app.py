@@ -4458,7 +4458,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             guard.reset_session_validation()
 
     try:
-        broker_proxy = getattr(ctx.broker_client, '_broker', ctx.broker_client) 
+        broker_proxy = getattr(ctx.broker_client, 'broker', ctx.broker_client) 
         get_profile_fn = getattr(broker_proxy, 'get_profile', None)
         if not callable(get_profile_fn):
             raise RuntimeError("Broker client missing 'get_profile' method.")
