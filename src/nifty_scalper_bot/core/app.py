@@ -4520,7 +4520,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     
     if broker_ready:
         try:
-            _reconcile_state(ctx)
+            await _reconcile_state(ctx)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
                 "State reconciliation failed: %s",
