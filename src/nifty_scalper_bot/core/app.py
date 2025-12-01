@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Prioritizes Weekly options derived from Live Spot Price.
+    Return a list of validated exchange-qualified symbols.
+    Fetches live Spot price (LTP) or Previous Close to determine ATM.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1773,70 +1773,65 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price (Universal Lookup)
+    # 2. Fetch Live Spot Price
     if broker:
         try:
-            # Try ALL standard Nifty 50 formats + Raw Token (256265 is Nifty 50 on NSE)
-            candidates = [
-                "NSE:NIFTY 50",  # Standard Zerodha
-                "NIFTY 50",      # Common alias
-                "NIFTY 50 INDEX",# Another alias
-                "256265"         # Raw Token (Bulletproof method)
-            ]
+            # NIFTY 50 Candidates
+            candidates = ["NSE:NIFTY 50", "NIFTY 50", "256265"]
             ltp = 0.0
             
-            # ✅ FIX: Unwrap the RobustDataProvider to get the real synchronous Zerodha client
-            # This handles 'client' (new wrapper), '_broker' (old wrapper), or raw object.
-            inner_broker = getattr(broker, "client", getattr(broker, "_broker", broker))
+            # Unwrap the wrapper to get the real client
+            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            # Strategy A: LTP API (Preferred/Fastest)
-            if hasattr(inner_broker, "ltp"):
-                try:
-                    # Fetch all candidates at once
-                    q = inner_broker.ltp(candidates)
-                    
-                    # Scan response for ANY valid price
-                    for key in candidates:
-                        if key in q and q[key].get("last_price"):
-                            ltp = float(q[key]["last_price"])
-                            LOGGER.info(f"Found NIFTY price {ltp} using symbol '{key}'")
-                            break
-                except Exception as e:
-                    LOGGER.debug(f"LTP API failed: {e}")
+            # Helper to extract price from a quote object
+            def extract_price(data: dict) -> float:
+                # Priority: 1. Last Price (Live) -> 2. Close Price (Offline/Night)
+                price = data.get("last_price") or data.get("ltp")
+                if not price or float(price) == 0:
+                    price = data.get("ohlc", {}).get("close")
+                return float(price or 0.0)
 
-            # Strategy B: Quote API (Fallback)
-            if ltp == 0 and hasattr(inner_broker, "quote"):
+            # Strategy: Quote API (Best for OHLC fallback)
+            if hasattr(inner, "quote"):
                 try:
-                    q = inner_broker.quote(candidates)
+                    # Quote returns rich data including OHLC
+                    q = inner.quote(candidates)
                     for key in candidates:
                         if key in q:
-                            data = q[key]
-                            # Zerodha quote structure varies
-                            price = data.get("last_price") or data.get("ltp") or data.get("ohlc", {}).get("close")
-                            if price:
-                                ltp = float(price)
-                                LOGGER.info(f"Found NIFTY price {ltp} using quote '{key}'")
+                            ltp = extract_price(q[key])
+                            if ltp > 0:
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} using Quote for '{key}'")
                                 break
                 except Exception as e:
                     LOGGER.debug(f"Quote API failed: {e}")
 
-            # Logic
+            # Strategy: LTP API (Backup)
+            if ltp == 0 and hasattr(inner, "ltp"):
+                try:
+                    q = inner.ltp(candidates)
+                    for key in candidates:
+                        if key in q:
+                            ltp = float(q[key].get("last_price", 0))
+                            if ltp > 0:
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} using LTP for '{key}'")
+                                break
+                except Exception as e:
+                    LOGGER.debug(f"LTP API failed: {e}")
+
+            # Result
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                
-                # Store in context for other components
+                # Save to context
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning(f"⚠️ Live price fetch returned 0. Checked candidates: {candidates}")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Market might be closed/reset.")
 
         except Exception as exc:
-            # ✅ FIX: Added missing except block to prevent SyntaxError
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic (If Broker API fails)
+    # 3. Fallback Logic
     if atm_price is None:
         fallback_base = 26000 
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
@@ -1852,27 +1847,25 @@ def _get_symbols(
         atm_price + (2 * strike_step), 
     ]
 
-    # 5. Resolve Symbols
+    # 5. Resolve Symbols (Standard Logic)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
+        contract_map = {}
         
-        contracts = []
         if resolver:
+            # Get option contracts map
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
             elif hasattr(resolver, "_option_contracts"):
                 raw = getattr(resolver, "_option_contracts", {})
                 for c_list in raw.values():
                     contracts.extend(c_list)
-        
-        contract_map = {}
-        if contracts:
+            
             for c in contracts:
                 t = c.get("instrument_token")
                 if t: contract_map[int(t)] = c
         
         if contract_map and get_next_valid_symbols:
-            # Pass the MAP, not the list
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
@@ -1883,54 +1876,19 @@ def _get_symbols(
                 if ts:
                     prefix = "NFO:" if not ts.startswith("NFO:") else ""
                     final_symbols.append(f"{prefix}{ts}")
-            
-            if final_symbols:
-                LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
 
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (If Smart Resolution failed)
+    # 6. Manual Fallback (If resolution failed)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
-        
-        # Calculate Next Valid Tuesday
-        target_weekday = 1 # Tuesday
-        today_weekday = now.weekday() 
-        days_ahead = 0
-        
-        if today_weekday < target_weekday:
-             days_ahead = target_weekday - today_weekday
-        elif today_weekday == target_weekday:
-             if now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                 days_ahead = 0 
-             else:
-                 days_ahead = 7
-        else:
-             days_ahead = 7 - (today_weekday - target_weekday)
-             
-        next_expiry = now + datetime.timedelta(days=days_ahead)
-        
-        year_short = next_expiry.strftime("%y")
-        # day_str = next_expiry.strftime("%d") # Unused in monthly logic below
-        
-        # Map month number to Zerodha future/option month codes (1-9, O, N, D) is for futures mostly,
-        # but standard options use JAN/FEB/etc. Let's stick to standard monthly for fallback.
         month_suffix = now.strftime("%y%b").upper()
-
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                # Try Monthly format: NIFTY25DEC26000CE
                 sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
-                
-                # Check if valid in resolver
-                if resolver and resolver.resolve(sym):
-                    final_symbols.append(sym)
-                else:
-                    # Append anyway as last resort
-                    final_symbols.append(sym)
-        
+                final_symbols.append(sym)
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
     return final_symbols
