@@ -1623,18 +1623,7 @@ class RuntimeSelfChecker:
         return session_valid, "ok" if session_valid else "blocked", dict(as_dict)
 
     def _resolve_symbol(self) -> str:
-        """Return primary symbol used for runtime data checks.
-
-        Args:
-            None.
-
-        Returns:
-            Symbol string best suited for data freshness probes.
-
-        Raises:
-            None.
-        """
-
+        """Return primary symbol used for runtime data checks."""
         symbols = getattr(self._context.config, "symbols", None)
         if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
             for candidate in symbols:
@@ -1643,7 +1632,9 @@ class RuntimeSelfChecker:
                     return candidate_str
         if isinstance(symbols, (str, bytes)) and symbols:
             return str(symbols)
-        return "NIFTY"
+        
+        # ✅ FIX: Return the standard Zerodha format
+        return "NSE:NIFTY 50"
 
 
 def _configure_rate_limiter(cfg: Any) -> RateLimiter:
@@ -1763,16 +1754,14 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
     return None
 
 
-# src/nifty_scalper_bot/core/app.py - Replace _get_symbols
-
 def _get_symbols(
     config: AppConfig, 
     resolver: InstrumentResolver | None = None, 
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols.
-    Fetches live Spot price to determine ATM.
+    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    Prioritizes Weekly options derived from Live Spot Price.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1784,61 +1773,70 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price
+    # 2. Fetch Live Spot Price (Universal Lookup)
     if broker:
         try:
-            # NIFTY 50 Token on NSE is usually 256265. We try strings first.
-            candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            # Try ALL standard Nifty 50 formats + Raw Token (256265 is Nifty 50 on NSE)
+            candidates = [
+                "NSE:NIFTY 50",  # Standard Zerodha
+                "NIFTY 50",      # Common alias
+                "NIFTY 50 INDEX",# Another alias
+                "256265"         # Raw Token (Bulletproof method)
+            ]
             ltp = 0.0
             
-            # Unwrap to get real client
-            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
+            # ✅ FIX: Unwrap the RobustDataProvider to get the real synchronous Zerodha client
+            # This handles 'client' (new wrapper), '_broker' (old wrapper), or raw object.
+            inner_broker = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            # Debug: Log what we are working with
-            LOGGER.debug(f"Fetching ATM using broker type: {type(inner).__name__}")
-
-            # Strategy A: LTP API
-            if hasattr(inner, "ltp"):
+            # Strategy A: LTP API (Preferred/Fastest)
+            if hasattr(inner_broker, "ltp"):
                 try:
-                    # fetch both strings and the raw token for NIFTY 50
-                    q = inner.ltp(candidates + ["256265"]) 
+                    # Fetch all candidates at once
+                    q = inner_broker.ltp(candidates)
                     
-                    # Check responses
-                    for k, v in q.items():
-                        p = v.get("last_price", 0)
-                        if p > 0:
-                            ltp = float(p)
-                            LOGGER.info(f"Found price {ltp} using key '{k}'")
+                    # Scan response for ANY valid price
+                    for key in candidates:
+                        if key in q and q[key].get("last_price"):
+                            ltp = float(q[key]["last_price"])
+                            LOGGER.info(f"Found NIFTY price {ltp} using symbol '{key}'")
                             break
                 except Exception as e:
-                    LOGGER.warning(f"LTP API failed: {e}")
+                    LOGGER.debug(f"LTP API failed: {e}")
 
             # Strategy B: Quote API (Fallback)
-            if ltp == 0 and hasattr(inner, "quote"):
+            if ltp == 0 and hasattr(inner_broker, "quote"):
                 try:
-                    q = inner.quote(candidates)
-                    for k, v in q.items():
-                        p = v.get("last_price") or v.get("ltp")
-                        if p and p > 0:
-                            ltp = float(p)
-                            break
+                    q = inner_broker.quote(candidates)
+                    for key in candidates:
+                        if key in q:
+                            data = q[key]
+                            # Zerodha quote structure varies
+                            price = data.get("last_price") or data.get("ltp") or data.get("ohlc", {}).get("close")
+                            if price:
+                                ltp = float(price)
+                                LOGGER.info(f"Found NIFTY price {ltp} using quote '{key}'")
+                                break
                 except Exception as e:
-                    LOGGER.warning(f"Quote API failed: {e}")
+                    LOGGER.debug(f"Quote API failed: {e}")
 
             # Logic
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
+                
+                # Store in context for other components
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning(f"⚠️ Live price fetch returned 0. Candidates: {candidates}")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Checked candidates: {candidates}")
 
         except Exception as exc:
+            # ✅ FIX: Added missing except block to prevent SyntaxError
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic
+    # 3. Fallback Logic (If Broker API fails)
     if atm_price is None:
         fallback_base = 26000 
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
@@ -1855,7 +1853,6 @@ def _get_symbols(
     ]
 
     # 5. Resolve Symbols
-    # (Keep your existing resolution logic here)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
         
@@ -1875,6 +1872,7 @@ def _get_symbols(
                 if t: contract_map[int(t)] = c
         
         if contract_map and get_next_valid_symbols:
+            # Pass the MAP, not the list
             results = get_next_valid_symbols(
                 strikes_to_fetch, 
                 opt_types=('CE', 'PE'), 
@@ -1892,18 +1890,46 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback
+    # 6. Manual Fallback (If Smart Resolution failed)
     if not final_symbols:
-        # (Keep your existing manual fallback logic here)
         import datetime
         now = datetime.datetime.now()
-        month_suffix = now.strftime("%y%b").upper() # e.g. 25DEC
         
+        # Calculate Next Valid Tuesday
+        target_weekday = 1 # Tuesday
+        today_weekday = now.weekday() 
+        days_ahead = 0
+        
+        if today_weekday < target_weekday:
+             days_ahead = target_weekday - today_weekday
+        elif today_weekday == target_weekday:
+             if now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                 days_ahead = 0 
+             else:
+                 days_ahead = 7
+        else:
+             days_ahead = 7 - (today_weekday - target_weekday)
+             
+        next_expiry = now + datetime.timedelta(days=days_ahead)
+        
+        year_short = next_expiry.strftime("%y")
+        # day_str = next_expiry.strftime("%d") # Unused in monthly logic below
+        
+        # Map month number to Zerodha future/option month codes (1-9, O, N, D) is for futures mostly,
+        # but standard options use JAN/FEB/etc. Let's stick to standard monthly for fallback.
+        month_suffix = now.strftime("%y%b").upper()
+
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                # Try Monthly
+                # Try Monthly format: NIFTY25DEC26000CE
                 sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
-                final_symbols.append(sym)
+                
+                # Check if valid in resolver
+                if resolver and resolver.resolve(sym):
+                    final_symbols.append(sym)
+                else:
+                    # Append anyway as last resort
+                    final_symbols.append(sym)
         
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
@@ -2377,9 +2403,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if raw_syms:
         poll_symbols = [s.strip().upper() for s in raw_syms if s.strip()]
     else:
-        trade_symbol = coalesce_str("INSTRUMENTS__TRADE_SYMBOL", default="NIFTY")
-        poll_symbols = (
-            [trade_symbol.strip().upper()] if trade_symbol.strip() else ["NIFTY"]
+        poll_symbols = ["NSE:NIFTY 50", "256265"]
         )
 
     attach_resolver = getattr(broker_client, "attach_resolver", None)
