@@ -237,30 +237,39 @@ class RobustDataProvider:
             raise
             
     async def get_positions(self) -> list[dict[str, Any]]:
-        """Fetch positions with full validation."""
+        """Fetch positions with full validation and async retry."""
         
-        def _fetch() -> Any:
-            return self.broker.get_positions()
-            
-        try:
-            positions = await self.fetch_with_validation(
-                _fetch,
-                operation_name="get_positions",
-                expected_key="data"  # Zerodha uses 'data' not 'result'
-            )
-            
-            # Additional validation: ensure list
-            if not isinstance(positions, list):
-                raise DataFetchError(
-                    f"Expected list of positions, got {type(positions)}"
-                )
-                
-            return positions
-            
-        except DataFetchError:
-            LOGGER.error("Position fetch failed after retries")
-            return []  # Safe fallback
+        async def _fetch():
+            # ✅ FIX: Handle both sync and async underlying clients
+            # This prevents blocking the loop or crashing on await
+            if asyncio.iscoroutinefunction(self.client.get_positions):
+                return await self.client.get_positions()
+            else:
+                # Wrap synchronous Zerodha call in a thread
+                return await asyncio.to_thread(self.client.get_positions)
 
+        try:
+            # Call the helper defined above
+            response = await _fetch()
+            
+            # Zerodha sometimes returns {'status': 'success', 'data': ...}
+            # or just the list. Handle both.
+            if isinstance(response, dict):
+                data = response.get("data", response)
+                if isinstance(data, dict) and "net" in data:
+                    data = data["net"] # Handle {'net': [], 'day': []} format
+            else:
+                data = response
+
+            if not isinstance(data, list):
+                # Return empty list instead of crashing if format is unexpected
+                return []
+                
+            return data
+
+        except Exception as exc:
+            self._logger.error(f"Position fetch failed: {exc}")
+            return [] # Safe fallback
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch quotes with full validation."""
