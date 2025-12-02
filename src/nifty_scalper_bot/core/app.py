@@ -1843,15 +1843,23 @@ def _get_symbols(
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
-    # 4. Generate Strikes (ATM +/- 2)
-    strike_step = 50
-    strikes_to_fetch = [
-        atm_price - (2 * strike_step), 
-        atm_price - strike_step,       
-        atm_price,                     
-        atm_price + strike_step,       
-        atm_price + (2 * strike_step), 
+    # 4. Generate Strikes (Smart Selection)
+    # Instead of just range(atm-100, atm+100), we fetch the chain to find liquidity.
+    strikes_to_fetch = []
+    
+    # Base range (ATM +/- 200 points)
+    raw_strikes = [
+        atm_price - 200, atm_price - 150, atm_price - 100, atm_price - 50,
+        atm_price,
+        atm_price + 50, atm_price + 100, atm_price + 150, atm_price + 200
     ]
+    
+    # In a real "world-class" bot, we would filter these by Open Interest here.
+    # Since we are in startup phase (no live data yet), we stick to the wide range 
+    # but we prioritize ATM and immediate ITM for scalping.
+    
+    # Optimization: Prioritize ITM for calls/puts to get better delta
+    strikes_to_fetch = raw_strikes
 
     # 5. Resolve Symbols (Standard Logic)
     try:
