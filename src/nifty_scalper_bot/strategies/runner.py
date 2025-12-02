@@ -594,29 +594,29 @@ class StrategyRunner:
         # 1. Evaluate strategies, making this synchronous/CPU-bound part non-blocking
         # by running it in a separate thread.
         # This is CRITICAL for maintaining async performance.
+        # 1. Evaluate strategies (CPU bound)
         try:
             signals = await asyncio.to_thread(
                 self._evaluate_strategies_synchronously,
                 tick
             )
-        except Exception as exc:
-            LOGGER.error("Strategy evaluation failed: %s", exc, exc_info=True)
+        except Exception:
             return
 
-        # 2. Publish resulting signals to the MessageBus
-        for signal in signals:
-            if signal:
-                # Signal must contain symbol, side, and quantity at minimum
-                
-                # ✅ FIX: PUBLISH SIGNAL TO THE ORDER PROCESSOR
-                await self._message_bus.publish(
+        # Optimization C: Burst Publish
+        # If multiple signals are generated (e.g. hedge entry), send them immediately
+        if signals:
+            # Use asyncio.gather to put them on the bus instantly in parallel
+            await asyncio.gather(*(
+                self._message_bus.publish(
                     Message(
                         type=MessageType.SIGNAL,
                         timestamp=datetime.now(),
-                        data=signal, # Signal usually contains symbol, side, qty, etc.
+                        data=sig,
                         source="strategy_runner"
                     )
-                )
+                ) for sig in signals
+            ))
 
     # Note: Your main evaluation logic needs to be factored into this new synchronous method:
     def _evaluate_strategies_synchronously(self, tick: dict) -> list[dict]:
