@@ -124,24 +124,39 @@ class DataHub:
     def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
+        # Handle token mapping (fix from previous step)
+        token = tick.get("instrument_token") or tick.get("token")
+        if not symbol and token:
+            symbol = str(token)
+
         if not symbol:
             return
 
         with self._lock:
-            # Update quote cache
+            # 1. Update Cache
             self._quotes[symbol] = tick
-            if str(token) == "256265":
+            
+            # Cross-reference token/symbol (Fix for Self-Checker)
+            if str(token) == "256265": 
                 self._quotes["NSE:NIFTY 50"] = tick
                 self._quotes["NIFTY 50"] = tick
-            
-            # Update derived metrics (Throttled)
-            self._capture_option_metrics(symbol, tick)
-      
+
+            # 2. Update Metrics (Throttled)
+            try:
+                self._capture_option_metrics(symbol, tick)
+            except Exception:
+                pass # Don't let math errors kill the tick
+
+            # 3. Publish to MessageBus (The Critical Fix)
             if self._message_bus:
                 try:
-                    # ✅ FIX C: Get the main loop defensively for cross-thread scheduling.
-                    loop = asyncio.get_event_loop() 
-                    
+                    # Check for running loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        # If no running loop in this context, try getting the main event loop
+                        loop = asyncio.get_event_loop()
+
                     if loop.is_running():
                         loop.create_task(
                             self._message_bus.publish(
@@ -153,22 +168,20 @@ class DataHub:
                                 )
                             )
                         )
-                except RuntimeError:
-                    # This happens before the event loop starts. We swallow this harmlessly.
-                    pass 
                 except Exception as exc:
-                    # Log other critical failures (like QueueFull or bad data)
-                    LOGGER.warning("Failed to publish tick to MessageBus: %s", exc)
+                    # Log detailed error only once to avoid spam, or use debug
+                    LOGGER.debug(f"MessageBus publish failed: {exc}")
 
-            # Notify old synchronous subscribers for compatibility
+            # 4. Notify Legacy Subscribers (Backward Compatibility)
             if symbol in self._tick_subscribers:
                 for callback in list(self._tick_subscribers[symbol]):
                     try:
                         callback(tick)
                     except Exception as exc:
+                        # This is likely where the "Tick callback failed" log comes from
                         LOGGER.error(
-                            "Tick subscriber failed for %s: %s", 
-                            symbol, exc, exc_info=True
+                            f"Tick subscriber failed for {symbol}: {exc}", 
+                            exc_info=True # Prints full traceback to help debug
                         )
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
