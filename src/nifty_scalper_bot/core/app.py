@@ -1785,25 +1785,31 @@ def _get_symbols(
             
             # Helper to extract price from a quote object
             def extract_price(data: dict) -> float:
-                # Priority: 1. Last Price (Live) -> 2. Close Price (Offline/Night)
-                price = data.get("last_price") or data.get("ltp")
-                if not price or float(price) == 0:
-                    price = data.get("ohlc", {}).get("close")
-                return float(price or 0.0)
+                # Priority 1: Last Traded Price (Live)
+                p = data.get("last_price") or data.get("ltp")
+                if p and float(p) > 0: return float(p)
+                
+                # Priority 2: Previous Close (Offline/Night)
+                p = data.get("ohlc", {}).get("close")
+                if p and float(p) > 0: return float(p)
+                
+                return 0.0
 
-            # Strategy: Quote API (Best for OHLC fallback)
+            # Strategy: Quote API (Richest Data)
             if hasattr(inner, "quote"):
                 try:
-                    # Quote returns rich data including OHLC
                     q = inner.quote(candidates)
                     for key in candidates:
-                        if key in q:
-                            ltp = extract_price(q[key])
+                        # Handle both string keys and integer token keys
+                        val = q.get(key) or q.get(str(key)) or q.get(int(key) if str(key).isdigit() else key)
+                        
+                        if val:
+                            ltp = extract_price(val)
                             if ltp > 0:
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} using Quote for '{key}'")
+                                LOGGER.info(f"✅ Found Price {ltp} using '{key}'")
                                 break
-                except Exception as e:
-                    LOGGER.debug(f"Quote API failed: {e}")
+                except Exception:
+                    pass
 
             # Strategy: LTP API (Backup)
             if ltp == 0 and hasattr(inner, "ltp"):
