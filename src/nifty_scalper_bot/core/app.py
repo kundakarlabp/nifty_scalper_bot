@@ -3080,17 +3080,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # Optimization B: Dynamic Sizing based on Regime
         # Trend = Aggressive (100% size), Chop = Conservative (50% size)
         bias_candidates = {
-            "trend": {
-                "momentum": 1.0,  # Full size
-                "opening": 1.0
-            },
-            "chop": {
-                "mean_reversion": 0.5, # Half size
-                "liquidity": 0.5
-            },
-            "volcrush": {
-                "income": 0.8
-            }
+            "trend": { ... },
+            "chop": { ... },
+            "volcrush": { ... }
         }
         for strategy in elite_strategies:
             tags = tag_lookup.get(strategy.name, ("elite",))
