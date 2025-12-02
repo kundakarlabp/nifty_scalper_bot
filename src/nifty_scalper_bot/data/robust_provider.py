@@ -241,33 +241,48 @@ class RobustDataProvider:
             raise
             
     async def get_positions(self) -> list[dict[str, Any]]:
-        """Fetch positions safely, handling sync/async and data normalization."""
+        """
+        Fetch positions with intelligent fallback (sync/async, list/dict, method names).
+        """
         try:
-            # Helper to run the fetch
-            async def _fetch():
-                if asyncio.iscoroutinefunction(self.client.get_positions):
-                    return await self.client.get_positions()
+            # 1. Access the real client
+            real_client = getattr(self, "client", getattr(self, "_broker", None))
+            if not real_client:
+                return []
+
+            # 2. Intelligent Fetcher
+            async def _execute_fetch():
+                # Try standard method name 'positions' (Zerodha) first
+                method = getattr(real_client, "positions", getattr(real_client, "get_positions", None))
+                
+                if not method:
+                    self._logger.warning("Broker client missing positions/get_positions method")
+                    return []
+
+                if asyncio.iscoroutinefunction(method):
+                    return await method()
                 else:
-                    # Run synchronous Zerodha call in a thread to stop blocking
-                    return await asyncio.to_thread(self.client.get_positions)
+                    return await asyncio.to_thread(method)
 
-            raw_response = await _fetch()
+            raw_response = await _execute_fetch()
 
-            # ✅ 3. Data Normalization: Fixes 'list indices' errors
-            # Handle Zerodha's {'net': [...]} vs direct list
-            data = raw_response
+            # 3. Robust Normalization (The "World-Class" Part)
+            # Zerodha returns {'net': [...], 'day': [...]}
+            # Some brokers return [...]
+            data = []
             if isinstance(raw_response, dict):
                 data = raw_response.get("net", raw_response.get("data", []))
-            
+            elif isinstance(raw_response, list):
+                data = raw_response
+
             if not isinstance(data, list):
-                self._logger.warning(f"Unexpected position data type: {type(data)}")
                 return []
                 
             return data
 
         except Exception as exc:
             self._logger.error(f"Robust position fetch failed: {exc}")
-            return []
+            return [] # Return empty list to prevent crash
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch quotes with full validation."""
