@@ -3079,10 +3079,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         tag_lookup = elite_strategy_tags(settings.elite, elite_strategies)
         # Optimization B: Dynamic Sizing based on Regime
         # Trend = Aggressive (100% size), Chop = Conservative (50% size)
-        bias_candidates = {
-            "trend": { ... },
-            "chop": { ... },
-            "volcrush": { ... }
+        bias_candidates: dict[str, dict[str, float]] = {
+            "trend": {},
+            "chop": {},
+            "volcrush": {},
+            "event": {}, 
         }
         for strategy in elite_strategies:
             tags = tag_lookup.get(strategy.name, ("elite",))
