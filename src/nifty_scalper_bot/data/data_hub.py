@@ -130,6 +130,9 @@ class DataHub:
         with self._lock:
             # Update quote cache
             self._quotes[symbol] = tick
+            if str(token) == "256265":
+                self._quotes["NSE:NIFTY 50"] = tick
+                self._quotes["NIFTY 50"] = tick
             
             # Update derived metrics (Throttled)
             self._capture_option_metrics(symbol, tick)
