@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return validated symbols. Fetches live Spot price to determine ATM.
-    Fix: Uses Capability-Based Discovery to find the correct broker object.
+    Return validated symbols. Fetches live Spot price (ATM).
+    Fix: Type-safe fetching to prevent 'invalid literal for int()' errors.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1776,107 +1776,83 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            # Defined separately to respect API type constraints
+            token_candidates = [256265]  # Nifty 50 Token (Integer)
+            str_candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX", "256265"]
+            
             ltp = 0.0
             
-            # --- SYSTEMATIC DISCOVERY START ---
-            # We look for the first object that can actually trade.
-            # Priority: Wrapper -> Inner Client -> Library Object
+            # Unwrap wrapper
+            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            potential_clients = [
-                broker,                                          # 1. The Robust Wrapper
-                getattr(broker, "client", None),                 # 2. The ZerodhaKiteClient
-                getattr(broker, "_broker", None),                # 3. Old wrapper style
-            ]
-            
-            # Try to dig one level deeper if possible (e.g. ZerodhaKiteClient.kite)
-            if len(potential_clients) > 1 and potential_clients[1]:
-                 potential_clients.append(getattr(potential_clients[1], "kite", None))
-                 potential_clients.append(getattr(potential_clients[1], "_kite", None))
-
-            valid_client = None
-            method_name = None
-
-            # Scan for a capable client
-            for obj in potential_clients:
-                if obj is None: continue
-                
-                # Check for YOUR custom methods first
-                if hasattr(obj, "get_ltp_bulk"):
-                    valid_client = obj
-                    method_name = "get_ltp_bulk"
-                    break
-                if hasattr(obj, "get_ltp"):
-                    valid_client = obj
-                    method_name = "get_ltp"
-                    break
-                
-                # Check for standard KiteConnect methods
-                if hasattr(obj, "ltp"):
-                    valid_client = obj
-                    method_name = "ltp"
-                    break
-                if hasattr(obj, "quote"):
-                    valid_client = obj
-                    method_name = "quote"
-                    break
-
-            if valid_client:
-                LOGGER.info(f"ATM Fetch: Selected object '{type(valid_client).__name__}' using method '{method_name}'")
-            else:
-                # Debug: Dump attributes of the top object to see what went wrong
-                attrs = [a for a in dir(broker) if not a.startswith("_")]
-                LOGGER.error(f"CRITICAL: No pricing methods found on broker. Public attrs: {attrs[:20]}")
-
-            # --- SYSTEMATIC DISCOVERY END ---
-
             # Helper to parse price
-            def parse_price(data):
+            def parse_price(data: Any) -> float:
                 if not data: return 0.0
                 if isinstance(data, (int, float)): return float(data)
                 if isinstance(data, dict):
                     return float(data.get("last_price") or data.get("ltp") or data.get("close") or 0.0)
                 return 0.0
 
-            # EXECUTE using the discovered method
-            if valid_client and method_name == "get_ltp_bulk":
+            # --- Strategy A: get_ltp_bulk (Strictly Integers) ---
+            if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 try:
-                    # Your custom bulk method likely takes a list
-                    q = valid_client.get_ltp_bulk(candidates)
-                    # Scan result keys
-                    for k in candidates:
-                         # handle int vs str keys
-                         p = parse_price(q.get(k)) or parse_price(q.get(str(k))) or parse_price(q.get(int(k) if str(k).isdigit() else k))
-                         if p > 0:
-                             ltp = p
-                             break
+                    # ✅ FIX: Only pass INTEGERS to get_ltp_bulk
+                    LOGGER.debug(f"Attempting get_ltp_bulk with tokens: {token_candidates}")
+                    response = inner.get_ltp_bulk(token_candidates)
+                    
+                    if response:
+                        # Check for token key (as int or str)
+                        for t in token_candidates:
+                            val = response.get(t) or response.get(str(t))
+                            price = parse_price(val)
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp_bulk({t})")
+                                break
                 except Exception as e:
                     LOGGER.warning(f"get_ltp_bulk failed: {e}")
 
-            if ltp == 0 and valid_client and method_name == "get_ltp":
-                 for k in candidates:
-                     try:
-                         p = valid_client.get_ltp(k)
-                         ltp = parse_price(p)
-                         if ltp > 0: break
-                     except Exception: pass
+            # --- Strategy B: get_ltp (Try Integers, then Strings) ---
+            if ltp == 0 and hasattr(inner, "get_ltp"):
+                # 1. Try Tokens first
+                for t in token_candidates:
+                    try:
+                        p = inner.get_ltp(t)
+                        price = parse_price(p)
+                        if price > 0:
+                            ltp = price
+                            LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp({t})")
+                            break
+                    except Exception: pass
+                
+                # 2. Try Strings if Tokens failed
+                if ltp == 0:
+                    for s in str_candidates:
+                        try:
+                            p = inner.get_ltp(s)
+                            price = parse_price(p)
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp('{s}')")
+                                break
+                        except Exception: pass
 
-            if ltp == 0 and valid_client and method_name in ["ltp", "quote"]:
+            # --- Strategy C: Standard Kite .ltp() (Strictly Strings) ---
+            if ltp == 0 and hasattr(inner, "ltp"):
                 try:
-                    # Standard Kite expects strings only
-                    str_candidates = [str(c) for c in candidates]
-                    method = getattr(valid_client, method_name)
-                    q = method(str_candidates)
+                    # Standard Kite API expects strings
+                    q = inner.ltp(str_candidates)
                     for k in str_candidates:
                         if k in q:
-                            p = parse_price(q[k])
-                            if p > 0:
-                                ltp = p
+                            price = parse_price(q[k])
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via standard .ltp('{k}')")
                                 break
                 except Exception as e:
-                    LOGGER.warning(f"{method_name} failed: {e}")
+                    LOGGER.debug(f"Standard .ltp() failed: {e}")
 
-            # --- DECISION ---
+            # --- Result ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1884,7 +1860,7 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning("⚠️ Live price fetch returned 0. Using fallback.")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Tried tokens: {token_candidates}")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
