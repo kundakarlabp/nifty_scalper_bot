@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return validated symbols. Fetches live Spot price to determine ATM.
-    Supports Standard KiteConnect (.ltp) and Custom Clients (.get_ltp).
+    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    Fetches live Spot price using a multi-strategy robust fetcher.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1773,84 +1773,82 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price
+    # 2. Fetch Live Spot Price (Deep Dive Logic)
     if broker:
         try:
-            # Candidates: Raw Token (Best) -> Specific Symbol -> Generic
-            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            # We define candidates as tuples: (Value, Description)
+            # Zerodha Nifty 50 Token is 256265.
+            candidates = [
+                (256265, "Raw Token Int"), 
+                ("256265", "Raw Token Str"),
+                ("NSE:NIFTY 50", "Exchange Symbol"), 
+                ("NIFTY 50", "Symbol Only"),
+                ("INDICES:NIFTY 50", "Indices Format")
+            ]
             ltp = 0.0
             
-            # Unwrap wrapper to find the "real" client logic
+            # Unwrap wrapper to get the real client
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            # Helper to extract price from various response formats
-            def extract_price(response, source_name):
-                if not response: return 0.0
-                
-                for k in candidates:
-                    # Match key as int or str
-                    val = response.get(k) or response.get(int(k) if k.isdigit() else k)
-                    if val:
-                        # CASE 1: Value is a Dictionary (Standard Kite response)
-                        if isinstance(val, dict):
-                            p = val.get("last_price") or val.get("ltp") or val.get("ohlc", {}).get("close")
-                            if p and float(p) > 0:
-                                LOGGER.info(f"✅ Found NIFTY price {p} using {source_name} key: {k}")
-                                return float(p)
-                        # CASE 2: Value is a Float/Int (Custom get_ltp response)
-                        elif isinstance(val, (int, float)) and val > 0:
-                            LOGGER.info(f"✅ Found NIFTY price {val} using {source_name} key: {k}")
-                            return float(val)
+            # --- Strategy: Helper to extract price from ANY response format ---
+            def parse_price(data: Any) -> float:
+                if not data: return 0.0
+                # If float/int
+                if isinstance(data, (int, float)): return float(data)
+                # If dict
+                if isinstance(data, dict):
+                    return float(data.get("last_price") or data.get("ltp") or data.get("close") or 0.0)
                 return 0.0
 
-            # --- Strategy A: Custom Client Methods (get_ltp_bulk / get_ltp) ---
-            # ✅ FIX: This block specifically targets your ZerodhaKiteClient methods
-            
+            # --- Strategy A: get_ltp_bulk (List Input) ---
             if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 try:
-                    # get_ltp_bulk likely returns a dict {symbol: price} or {symbol: {data}}
-                    q = inner.get_ltp_bulk(candidates)
-                    ltp = extract_price(q, "get_ltp_bulk")
+                    # Pass all candidate values (ints and strings)
+                    query_list = [c[0] for c in candidates]
+                    response = inner.get_ltp_bulk(query_list)
+                    
+                    if response:
+                        # Scan response for any matching key
+                        for val, desc in candidates:
+                            # Check exact key or stringified key
+                            price = parse_price(response.get(val)) or parse_price(response.get(str(val)))
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp_bulk using {desc}")
+                                break
                 except Exception as e:
                     LOGGER.debug(f"get_ltp_bulk failed: {e}")
 
+            # --- Strategy B: get_ltp (Single Input) ---
             if ltp == 0 and hasattr(inner, "get_ltp"):
-                try:
-                    # Try fetching individually
-                    for k in candidates:
-                        p = inner.get_ltp(k)
-                        # Handle if it returns a float directly or a dict
-                        if isinstance(p, (int, float)) and p > 0:
-                            ltp = float(p)
-                            LOGGER.info(f"✅ Found NIFTY price {ltp} using get_ltp('{k}')")
+                for val, desc in candidates:
+                    try:
+                        response = inner.get_ltp(val)
+                        price = parse_price(response)
+                        if price > 0:
+                            ltp = price
+                            LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp using {desc}")
                             break
-                        elif isinstance(p, dict):
-                            val = p.get("last_price") or p.get("ltp")
-                            if val and float(val) > 0:
-                                ltp = float(val)
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} using get_ltp('{k}') dict")
-                                break
-                except Exception as e:
-                    LOGGER.debug(f"get_ltp failed: {e}")
+                    except Exception:
+                        continue
 
-            # --- Strategy B: Standard KiteConnect Methods (ltp / quote) ---
-            # Fallback if the user passed a raw KiteConnect object
-            
+            # --- Strategy C: Standard Kite .ltp() ---
             if ltp == 0 and hasattr(inner, "ltp"):
                 try:
-                    q = inner.ltp(candidates)
-                    ltp = extract_price(q, "LTP")
-                except Exception as e:
-                    LOGGER.debug(f"Standard LTP API failed: {e}")
+                    # Only pass strings to standard Kite API
+                    str_candidates = [str(c[0]) for c in candidates]
+                    response = inner.ltp(str_candidates)
+                    for k in str_candidates:
+                        if k in response:
+                            price = parse_price(response[k])
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via standard .ltp()")
+                                break
+                except Exception:
+                    pass
 
-            if ltp == 0 and hasattr(inner, "quote"):
-                try:
-                    q = inner.quote(candidates)
-                    ltp = extract_price(q, "Quote")
-                except Exception as e:
-                    LOGGER.debug(f"Standard Quote API failed: {e}")
-
-            # --- RESULT ---
+            # --- Success Check ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1858,16 +1856,16 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                # Log available methods to help debug if it fails again
-                methods = [m for m in dir(inner) if not m.startswith("_")]
-                LOGGER.warning(f"⚠️ Live price fetch returned 0. Available methods: {methods[:10]}...")
+                # Log methods for debugging only if it fails
+                methods = [m for m in dir(inner) if not m.startswith("_") and "ltp" in m]
+                LOGGER.warning(f"⚠️ Live price 0. LTP methods found on broker: {methods}")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic
+    # 3. Fallback Logic (Updated to realistic 24000 range)
     if atm_price is None:
-        fallback_base = 24500 # Updated to realistic 2025 level
+        fallback_base = 24500 
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
