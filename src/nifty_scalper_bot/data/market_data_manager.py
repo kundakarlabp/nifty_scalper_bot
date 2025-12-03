@@ -244,7 +244,7 @@ class MarketDataManager:
             "MDM_POLL_INTERVAL_SECONDS", default=3.0, minimum=0.5
         )
         configured_poll_max = self._parse_int_env(
-            "MDM_POLL_MAX_SYMBOLS", default=5, minimum=1
+            "MDM_POLL_MAX_SYMBOLS", default=50, minimum=1
         )
         self._rest_poll_max_symbols = (
             configured_poll_max if self._rest_poll_enabled else 0
@@ -2361,7 +2361,7 @@ class MarketDataManager:
             ordered = sorted(symbol for symbol in candidates if symbol)
             limit = self._rest_poll_max_symbols
             if limit > 0 and len(ordered) > limit:
-                self._logger.info(
+                self._logger.debug(
                     "Condition met: mdm_symbols_for_poll_limited",
                     extra={
                         "event": "mdm_symbols_for_poll_limited",
