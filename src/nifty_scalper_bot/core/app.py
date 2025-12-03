@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return validated symbols. Fetches live Spot price to determine ATM.
-    Robustly unwraps broker to find the true KiteConnect API.
+    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    Prioritizes Weekly options derived from Live Spot Price.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1776,62 +1776,81 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            # Candidates for NIFTY Spot
-            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX", "INDICES:NIFTY 50"]
+            # Candidates: Raw Token (Best) -> Specific Symbol -> Generic
+            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # --- STEP 1: AGGRESSIVE UNWRAPPING ---
-            inner = broker
-            # Peel off the RobustDataProvider wrapper
-            while hasattr(inner, "client") or hasattr(inner, "_broker") or hasattr(inner, "broker"):
-                inner = getattr(inner, "client", getattr(inner, "_broker", getattr(inner, "broker", inner)))
+            # Unwrap wrapper to find the "real" client logic
+            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            # Peel off the ZerodhaKiteClient wrapper to get KiteConnect
-            # Check common attribute names for the underlying library
-            for attr in ["_client", "kite", "_kite", "k", "client"]:
-                if hasattr(inner, attr):
-                    candidate_obj = getattr(inner, attr)
-                    # Verify it looks like a Kite object (has ltp or quote)
-                    if hasattr(candidate_obj, "ltp") or hasattr(candidate_obj, "quote"):
-                        inner = candidate_obj
-                        break
-
-            LOGGER.info(f" ATM Fetch: Using broker object type: {type(inner).__name__}")
-
-            # --- STEP 2: FETCHING ---
-            
-            # Helper to extract price
+            # Helper to extract price from various response formats
             def extract_price(response, source_name):
                 if not response: return 0.0
-                LOGGER.debug(f"ATM Response keys ({source_name}): {list(response.keys())}")
+                # LOGGER.debug(f"ATM Probe ({source_name}): {str(response)[:100]}") # Debug if needed
                 
                 for k in candidates:
-                    # Handle int/str key mismatch
+                    # Match key as int or str
                     val = response.get(k) or response.get(int(k) if k.isdigit() else k)
                     if val:
-                        p = val.get("last_price") or val.get("ltp") or val.get("ohlc", {}).get("close")
-                        if p and float(p) > 0:
-                            LOGGER.info(f"✅ Found NIFTY price {p} using {source_name} key: {k}")
-                            return float(p)
+                        # CASE 1: Value is a Dictionary (Standard Kite response)
+                        if isinstance(val, dict):
+                            p = val.get("last_price") or val.get("ltp") or val.get("ohlc", {}).get("close")
+                            if p and float(p) > 0:
+                                LOGGER.info(f"✅ Found NIFTY price {p} using {source_name} key: {k}")
+                                return float(p)
+                        # CASE 2: Value is a Float/Int (Custom get_ltp response)
+                        elif isinstance(val, (int, float)) and val > 0:
+                            LOGGER.info(f"✅ Found NIFTY price {val} using {source_name} key: {k}")
+                            return float(val)
                 return 0.0
 
-            # Strategy A: LTP
+            # --- Strategy A: Custom Client Methods (get_ltp_bulk / get_ltp) ---
+            # This fixes the issue where .ltp() doesn't exist but get_ltp() does.
+            
+            if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
+                try:
+                    q = inner.get_ltp_bulk(candidates)
+                    ltp = extract_price(q, "get_ltp_bulk")
+                except Exception as e:
+                    LOGGER.debug(f"get_ltp_bulk failed: {e}")
+
+            if ltp == 0 and hasattr(inner, "get_ltp"):
+                try:
+                    # Try fetching individually
+                    for k in candidates:
+                        p = inner.get_ltp(k)
+                        # Handle if it returns a float directly or a dict
+                        if isinstance(p, (int, float)) and p > 0:
+                            ltp = float(p)
+                            LOGGER.info(f"✅ Found NIFTY price {ltp} using get_ltp('{k}')")
+                            break
+                        elif isinstance(p, dict):
+                            val = p.get("last_price") or p.get("ltp")
+                            if val and float(val) > 0:
+                                ltp = float(val)
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} using get_ltp('{k}') dict")
+                                break
+                except Exception as e:
+                    LOGGER.debug(f"get_ltp failed: {e}")
+
+            # --- Strategy B: Standard KiteConnect Methods (ltp / quote) ---
+            # Fallback if the user passed a raw KiteConnect object
+            
             if ltp == 0 and hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(candidates)
                     ltp = extract_price(q, "LTP")
                 except Exception as e:
-                    LOGGER.debug(f"LTP fetch error: {e}")
+                    LOGGER.debug(f"Standard LTP API failed: {e}")
 
-            # Strategy B: Quote (Rich Data)
             if ltp == 0 and hasattr(inner, "quote"):
                 try:
                     q = inner.quote(candidates)
                     ltp = extract_price(q, "Quote")
                 except Exception as e:
-                    LOGGER.debug(f"Quote fetch error: {e}")
+                    LOGGER.debug(f"Standard Quote API failed: {e}")
 
-            # --- STEP 3: DECISION ---
+            # --- RESULT ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1839,16 +1858,16 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                # Log available attributes to help debug if it fails again
-                attrs = [a for a in dir(inner) if not a.startswith("_")]
-                LOGGER.warning(f"⚠️ Live price 0. Broker object methods: {attrs[:10]}...")
+                # Log the methods to help debug if it fails again
+                methods = [m for m in dir(inner) if not m.startswith("_")]
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Available methods: {methods[:10]}...")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic (Update fallback to realistic 2024/25 levels)
+    # 3. Fallback Logic
     if atm_price is None:
-        fallback_base = 24500 # Updated to realistic Nifty level
+        fallback_base = 24500 # Updated to realistic 2025 level
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
@@ -1862,7 +1881,7 @@ def _get_symbols(
         atm_price + (2 * strike_step), 
     ]
 
-    # 5. Resolve Symbols (Standard Logic)
+    # 5. Resolve Symbols
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
         contract_map = {}
@@ -1890,7 +1909,7 @@ def _get_symbols(
                     final_symbols.append(f"{prefix}{ts}")
             if final_symbols:
                  LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
-                 
+
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
