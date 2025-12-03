@@ -15,12 +15,25 @@ class VWAPProStrategy(BaseStrategy):
     3. Trigger: Price crosses VWAP with momentum.
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        # Default config if none provided
+    def __init__(self, config: Any = None):
+        # ✅ FIX: Convert Configuration Object to Dictionary
+        # The input 'config' might be a Pydantic model (VWAPProStrategyConfig), which lacks .setdefault
+        if config is not None and not isinstance(config, dict):
+            if hasattr(config, "model_dump"):  # Pydantic v2
+                config = config.model_dump()
+            elif hasattr(config, "dict"):      # Pydantic v1
+                config = config.dict()
+            elif hasattr(config, "__dict__"):  # Standard class
+                config = config.__dict__
+            else:
+                config = {} # Fallback
+
+        # Default config logic (now safe to use dictionary methods)
         config = config or {}
         config.setdefault("allowed_regimes", ["TRENDING", "VOLATILE"])
         config.setdefault("timeframe", 5)  # 5-minute candles
         config.setdefault("ema_period", 50)
+        config.setdefault("base_quantity", 50)
         
         super().__init__("VWAP_PRO", config)
         self.ema_period = config["ema_period"]
@@ -34,7 +47,6 @@ class VWAPProStrategy(BaseStrategy):
             return None
             
         if not self.can_trade(regime):
-            # Log once per minute to avoid spam, or just return None silently
             return None
 
         # 2. Extract Market Data
@@ -62,14 +74,14 @@ class VWAPProStrategy(BaseStrategy):
                 
                 if prev_close < vwap and current_price > vwap:
                     # Confirm with Volume if available
-                    vol_spike = last_candle['volume'] > (self._get_avg_volume(candles) * 1.2)
+                    vol_spike = last_candle.get('volume', 0) > (self._get_avg_volume(candles) * 1.2)
                     
                     if vol_spike:
-                        LOGGER.info(f"📈 VWAP_PRO Buy Signal: {tick['symbol']} @ {current_price} (Regime: {regime.get('label')})")
+                        LOGGER.info(f"📈 VWAP_PRO Buy Signal: {tick.get('symbol')} @ {current_price} (Regime: {regime.get('label')})")
                         return {
                             "side": "BUY",
                             "price": current_price,
-                            "quantity": self.config.get("base_quantity", 50), # Default to 1 lot Nifty
+                            "quantity": self.config.get("base_quantity", 50),
                             "reason": f"VWAP Cross + EMA{self.ema_period} Trend + Vol"
                         }
 
@@ -80,10 +92,10 @@ class VWAPProStrategy(BaseStrategy):
                 
                 if prev_close > vwap and current_price < vwap:
                     # Confirm with Volume
-                    vol_spike = last_candle['volume'] > (self._get_avg_volume(candles) * 1.2)
+                    vol_spike = last_candle.get('volume', 0) > (self._get_avg_volume(candles) * 1.2)
                     
                     if vol_spike:
-                        LOGGER.info(f"📉 VWAP_PRO Sell Signal: {tick['symbol']} @ {current_price} (Regime: {regime.get('label')})")
+                        LOGGER.info(f"📉 VWAP_PRO Sell Signal: {tick.get('symbol')} @ {current_price} (Regime: {regime.get('label')})")
                         return {
                             "side": "SELL",
                             "price": current_price,
@@ -107,7 +119,7 @@ class VWAPProStrategy(BaseStrategy):
         for c in candles:
             # Typical Price = (H + L + C) / 3
             tp = (c['high'] + c['low'] + c['close']) / 3
-            vol = c['volume']
+            vol = c.get('volume', 0)
             cumulative_pv += (tp * vol)
             cumulative_vol += vol
             
@@ -124,9 +136,7 @@ class VWAPProStrategy(BaseStrategy):
             
         # Use numpy for speed if available, else manual
         try:
-            return float(np.mean(closes[-period:])) # Simple Moving Average approximation for fallback
-            # For true EMA, you'd implement the smoothing factor logic here
-            # alpha = 2 / (period + 1)
+            return float(np.mean(closes[-period:])) # Simple MA fallback
         except Exception:
             return closes[-1]
 
@@ -135,5 +145,7 @@ class VWAPProStrategy(BaseStrategy):
         if not candles:
             return 0.0
         slice_ = candles[-lookback:]
-        volumes = [c['volume'] for c in slice_]
+        volumes = [c.get('volume', 0) for c in slice_]
+        if not volumes:
+            return 0.0
         return sum(volumes) / len(volumes)
