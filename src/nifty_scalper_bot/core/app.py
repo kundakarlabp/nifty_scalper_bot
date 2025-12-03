@@ -1161,93 +1161,55 @@ def get_http_app() -> FastAPI:
     # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
     # work before handlers or external probes rely on the resolver.
     @app.on_event("startup")
+    @app.on_event("startup")
     async def _warm_instrument_resolver_on_startup() -> None:
+        """
+        Force fresh instrument sync on startup. 
+        CRITICAL for Polling Mode to prevent invalid token errors.
+        """
         try:
             ctx = get_latest_bot_context()
             if ctx is None:
                 LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
                 return
 
+            # --- FIX: Force Fresh Instrument Sync for Polling Mode ---
+            # This ensures we have the correct tokens for the day before we start polling.
+            if ctx.broker_client:
+                 LOGGER.info("🚀 Polling Mode: Forcing fresh Instrument Load...")
+                 try:
+                     # Force the broker client to download fresh instruments (NFO) from Zerodha
+                     # We run this in a thread because network calls are blocking
+                     await asyncio.to_thread(ctx.broker_client.load_instruments, ["NFO"])
+                     LOGGER.info("✅ Broker instruments refreshed successfully.")
+                 except Exception as exc:
+                     LOGGER.warning(f"⚠️ Manual instrument load skipped/failed: {exc}")
+
+            # ---------------------------------------------------------
+
             resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
             if resolver is None:
                 LOGGER.debug("Resolver warm skipped: no resolver available on context", extra={"event":"resolver_warm.no_resolver"})
                 return
 
-            # Prefer explicit warm_from_broker_dump when available.
-            warm_fn = getattr(resolver, "warm_from_broker_dump", None)
-            if callable(warm_fn):
-                try:
-                    # If warm_from_broker_dump expects rows, provide them from DB cache;
-                    # otherwise call no-arg. Use inspect.signature to detect parameters.
-                    import inspect
-                    sig = inspect.signature(warm_fn)
-                    if len(sig.parameters) == 0:
-                        warm_fn()
-                    else:
-                        # Attempt to load rows from configured sqlite cache (non-fatal)
-                        rows = []
-                        conn = None
-                        try:
-                            db_path = getattr(ctx, "instrument_db_path", None) or getattr(ctx, "instrument_csv_path", None)
-                            if db_path:
-                                conn = ensure_sqlite(str(db_path))
-                            if conn is not None:
-                                rows = load_rows_for_resolver(conn)
-                        except Exception as exc:  # defensive: do not crash startup
-                            LOGGER.debug("Failed to load resolver rows from DB cache: %s", exc, extra={"event":"resolver_warm.load_rows_failed"})
-                        finally:
-                            if conn is not None:
-                                with suppress(Exception):
-                                    conn.close()
+            # Now warm the resolver with the FRESH data we just loaded
+            LOGGER.info("Re-warming resolver with fresh broker data...")
+            resolver.warm()
+            
+            # Log the result
+            tokens = len(getattr(resolver, "_symbol_by_token", {}))
+            LOGGER.info(
+                f"✅ Instrument Resolver warmed. Active Tokens: {tokens}", 
+                extra={"event": "instrument_warm_complete", "tokens": tokens}
+            )
 
-                        if rows:
-                            warm_fn(rows)
-                        else:
-                            # Fallback to generic warm() if no rows available.
-                            generic_warm = getattr(resolver, "warm", None)
-                            if callable(generic_warm):
-                                generic_warm()
-                    LOGGER.info("InstrumentResolver warmed via warm_from_broker_dump on HTTP startup", extra={"event": "resolver_warm.startup_success"})
-                except Exception as exc:  # defensive — do not crash startup
-                    LOGGER.warning(
-                        "InstrumentResolver warm_from_broker_dump failed on startup: %s",
-                        exc,
-                        extra={"event": "resolver_warm.startup_failed"},
-                        exc_info=exc,
-                    )
-            else:
-                # If explicit hook missing, fall back to any generic warm() call.
-                generic_warm = getattr(resolver, "warm", None)
-                if callable(generic_warm):
-                    try:
-                        generic_warm()
-                        LOGGER.info("InstrumentResolver warmed via warm() fallback on HTTP startup", extra={"event": "resolver_warm.startup_success_fallback"})
-                    except Exception as exc:
-                        LOGGER.warning(
-                            "InstrumentResolver warm() failed on startup: %s",
-                            exc,
-                            extra={"event": "resolver_warm.startup_failed_fallback"},
-                            exc_info=exc,
-                        )
-        except Exception:
-            # Defensive outer guard — log and continue; do not prevent app startup.
-            LOGGER.exception("Unexpected error while attempting to warm InstrumentResolver on startup", extra={"event": "resolver_warm.unexpected_error"})
-
-        ensure_fn = getattr(resolver, "ensure_core_index_tokens", None)
-        if callable(ensure_fn):
-            try:
-                ensure_fn()
-                LOGGER.info(
-                    "InstrumentResolver core tokens ensured (fix applied)",
-                    extra={"event": "resolver_warm.core_fix_applied"}
-                )
-            except Exception as exc:
-                LOGGER.error(
-                    "Failed to execute ensure_core_index_tokens: %s",
-                    exc,
-                    extra={"event": "resolver_warm.core_fix_failed"}
-                )
-    return app
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "Instrument warm-up failed: %s",
+                exc,
+                extra={"event": "instrument_warm_failed"},
+                exc_info=exc,
+            )
 
 
 def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
