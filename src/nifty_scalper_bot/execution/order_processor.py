@@ -62,27 +62,31 @@ class OrderProcessor:
         self._last_signal_time[symbol] = now
 
         # --- 2. Smart Price Calculation (Slippage Protection) ---
-        # Convert MARKET orders to LIMIT orders with a buffer (e.g. 1% slippage allowance)
-        # This guarantees fill like a Market order, but protects capital if price spikes 50%.
-        
+        # Convert MARKET orders to LIMIT orders with a protection buffer
         order_type = signal.get("order_type", OrderType.MARKET)
         price = signal.get("price")
 
-        if order_type == OrderType.MARKET and self.data_hub:
+        # Force Limit protection for all Options orders
+        if self.data_hub:
             tick = self.data_hub.get_quote(symbol)
             if tick:
                 ltp = tick.get("ltp") or tick.get("last_price") or 0.0
+                
+                # If user asked for MARKET, or we are in LIVE mode, convert to SAFE LIMIT
                 if ltp > 0:
-                    # Convert to LIMIT order
                     order_type = OrderType.LIMIT
-                    if side == "BUY":
-                        # Buy up to 1% higher than LTP (Aggressive Limit)
-                        price = round(ltp * 1.01, 1) 
-                    else:
-                        # Sell down to 1% lower than LTP
-                        price = round(ltp * 0.99, 1)
                     
-                    LOGGER.info(f"🛡️ Converted MARKET to LIMIT for protection: {symbol} @ {price} (LTP: {ltp})")
+                    # 2% buffer is standard for Nifty scalping
+                    buffer_pct = 1.02 
+                    
+                    if side == "BUY":
+                        # Buy at LTP + 2% (Aggressive Limit)
+                        price = round(ltp * buffer_pct, 1)
+                    else:
+                        # Sell at LTP - 2%
+                        price = round(ltp * (2 - buffer_pct), 1)
+                        
+                    LOGGER.info(f"🛡️ Safety Limit Applied: {symbol} {side} | LTP: {ltp} | Limit Price: {price}")
 
         # --- 3. Execution ---
         LOGGER.info(f"Executing: {side} {qty} {symbol} @ {price or 'MKT'}")
