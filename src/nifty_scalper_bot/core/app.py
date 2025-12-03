@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Prioritizes Weekly options derived from Live Spot Price.
+    Return validated symbols. Fetches live Spot price to determine ATM.
+    Supports Standard KiteConnect (.ltp) and Custom Clients (.get_ltp).
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1786,7 +1786,6 @@ def _get_symbols(
             # Helper to extract price from various response formats
             def extract_price(response, source_name):
                 if not response: return 0.0
-                # LOGGER.debug(f"ATM Probe ({source_name}): {str(response)[:100]}") # Debug if needed
                 
                 for k in candidates:
                     # Match key as int or str
@@ -1805,10 +1804,11 @@ def _get_symbols(
                 return 0.0
 
             # --- Strategy A: Custom Client Methods (get_ltp_bulk / get_ltp) ---
-            # This fixes the issue where .ltp() doesn't exist but get_ltp() does.
+            # ✅ FIX: This block specifically targets your ZerodhaKiteClient methods
             
             if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 try:
+                    # get_ltp_bulk likely returns a dict {symbol: price} or {symbol: {data}}
                     q = inner.get_ltp_bulk(candidates)
                     ltp = extract_price(q, "get_ltp_bulk")
                 except Exception as e:
@@ -1858,7 +1858,7 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                # Log the methods to help debug if it fails again
+                # Log available methods to help debug if it fails again
                 methods = [m for m in dir(inner) if not m.startswith("_")]
                 LOGGER.warning(f"⚠️ Live price fetch returned 0. Available methods: {methods[:10]}...")
 
