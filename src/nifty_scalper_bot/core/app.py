@@ -1180,7 +1180,7 @@ def get_http_app() -> FastAPI:
                  try:
                      # Force the broker client to download fresh instruments (NFO) from Zerodha
                      # We run this in a thread because network calls are blocking
-                     await asyncio.to_thread(ctx.broker_client.load_instruments, ["NFO")
+                     await asyncio.to_thread(ctx.broker_client.load_instruments, "NFO")
                      LOGGER.info("✅ Broker instruments refreshed successfully.")
                  except Exception as exc:
                      LOGGER.warning(f"⚠️ Manual instrument load skipped/failed: {exc}")
