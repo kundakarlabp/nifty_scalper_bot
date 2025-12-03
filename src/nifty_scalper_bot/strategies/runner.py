@@ -621,18 +621,54 @@ class StrategyRunner:
     # Note: Your main evaluation logic needs to be factored into this new synchronous method:
     def _evaluate_strategies_synchronously(self, tick: dict) -> list[dict]:
         """
-        Wrapper to run the core, blocking strategy logic in a separate thread.
-        This function should contain the original synchronous loops/calls.
+        Evaluates all strategies and Aggregates signals to prevent conflicts.
         """
+        active_signals = []
         
-        all_signals = []
-        for symbol in self._active_symbols:
-            # This logic should be adapted from your original _handle_tick loop
-            signal = self._strategy_manager.evaluate_symbol(symbol, tick) 
+        # 1. Get Market Context
+        regime = self._market_regime_manager.get_current_regime()
+        candles = self._data_hub.get_candles(tick['symbol'], "5minute") # Assumption
+        
+        # 2. Gather Votes
+        buy_score = 0
+        sell_score = 0
+        
+        for strategy in self._strategies:
+            # Skip if strategy doesn't fit the market mood
+            if not strategy.can_trade(regime):
+                continue
+                
+            signal = strategy.calculate_signal(tick, candles, regime)
+            
             if signal:
-                 all_signals.append(signal)
-                 
-        return all_signals
+                weight = strategy.config.get("weight", 1.0)
+                if signal['side'] == 'BUY':
+                    buy_score += weight
+                elif signal['side'] == 'SELL':
+                    sell_score += weight
+
+        # 3. Consensus Logic (The "World-Class" Filter)
+        # Only trade if one side clearly dominates
+        consensus_threshold = 1.5  # e.g., needs 2 weak strategies or 1 strong one
+        
+        final_signal = None
+        
+        if buy_score > consensus_threshold and sell_score < 1.0:
+            final_signal = {
+                "symbol": tick['symbol'],
+                "side": "BUY",
+                "quantity": self._calculate_position_size(buy_score),
+                "type": "CONSENSUS_ENTRY"
+            }
+        elif sell_score > consensus_threshold and buy_score < 1.0:
+             final_signal = {
+                "symbol": tick['symbol'],
+                "side": "SELL",
+                "quantity": self._calculate_position_size(sell_score),
+                "type": "CONSENSUS_ENTRY"
+            }
+            
+        return [final_signal] if final_signal else []
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
