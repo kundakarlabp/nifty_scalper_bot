@@ -439,89 +439,47 @@ class MarketRegimeManager:
             return []
 
     async def refresh_from_indicators(self) -> None:
-        """Update regime snapshot based on configured indicator adapter."""
-
-        logger.debug(
-            "Entered MarketRegimeManager.refresh_from_indicators",
-            extra={"event": "regime_manager_refresh_indicators"},
-        )
+        """Update regime snapshot by pulling fresh indicators."""
         if self.indicators is None:
-            logger.info(
-                "Condition met: regime_manager_refresh_skipped",
-                extra={"event": "regime_manager_refresh_skipped"},
-            )
             return
-        getter = getattr(self.indicators, "get", None)
-        if not callable(getter):
-            logger.info(
-                "Condition met: regime_manager_refresh_skipped",
-                extra={"event": "regime_manager_refresh_skipped"},
-            )
-            return
-        now = time.time()
-        if (
-            self._indicator_update_interval > 0
-            and now - self._last_indicator_refresh < self._indicator_update_interval
-        ):
-            logger.debug(
-                "Condition met: regime_manager_refresh_throttled",
-                extra={"event": "regime_manager_refresh_throttled"},
-            )
-            return
-        async with self._indicator_lock:
-            try:
-                atr_trend = await asyncio.to_thread(getter, "atr_trend")
-                vol_score = await asyncio.to_thread(getter, "volatility_index")
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Failure in MarketRegimeManager.refresh_from_indicators fetch: %s",
-                    exc,
-                    extra={"event": "regime_manager_refresh_error"},
-                )
-                return
-            try:
-                atr_value = float(atr_trend) if atr_trend is not None else 0.0
-            except Exception:  # pragma: no cover - defensive cast
-                atr_value = 0.0
-            try:
-                vol_value = float(vol_score) if vol_score is not None else 0.0
-            except Exception:  # pragma: no cover - defensive cast
-                vol_value = 0.0
-            atr_threshold = float(
-                self._indicator_settings.get("atr_trend_threshold", 1.5)
-            )
-            vol_threshold = float(self._indicator_settings.get("vol_threshold", 25.0))
-            if atr_value > atr_threshold:
-                regime = "TREND"
-            elif vol_value > vol_threshold:
-                regime = "VOLATILE"
-            else:
-                regime = "RANGE"
-            confidence = ((atr_value / 3.0) + (vol_value / 50.0)) / 2.0
-            confidence = max(0.0, min(confidence, 1.0))
-            snapshot = RegimeSnapshot(
-                symbol=self._indicator_symbol,
-                regime=regime,
-                confidence=confidence,
-                reason="indicator_refresh",
-                updated_at=now,
-                adjustments={
-                    "atr_trend": atr_value,
-                    "volatility_index": vol_value,
-                },
-            )
-            self.ingest_snapshot(snapshot)
-            self._last_indicator_refresh = now
-            logger.info(
-                "Condition met: regime_manager_indicator_refresh",
-                extra={
-                    "event": "regime_manager_indicator_refresh",
-                    "regime": regime,
-                    "confidence": confidence,
-                },
-            )
 
-    # ------------------------------------------------------------------
+        # 1. Pull required metrics from IndicatorEngine
+        getter = getattr(self.indicators, "get_indicators", None)
+        if not callable(getter):
+            return
+
+        # We need these specific keys for the sophisticated Detector logic
+        required_keys = [
+            "ema_fast", "ema_slow", "adx", "atr", "volume_spike_ratio", 
+            "iv_rank", "price", "close"
+        ]
+        
+        try:
+            # Fetch all indicators in one go for the symbol
+            data = getter(self._indicator_symbol, required_keys)
+            if not data:
+                return
+
+            # 2. Map them to the expected schema for the Detector
+            # The detector expects 'trend_score' (usually ADX) and 'volume_ratio'
+            enrichment = {
+                "trend_score": data.get("adx"),
+                "volume_ratio": data.get("volume_spike_ratio"),
+                "price": data.get("close"),
+                # Pass through others
+                **{k: v for k, v in data.items() if v is not None}
+            }
+
+            # 3. Ask Detector to Evaluate
+            # This uses the full logic (Trend vs Range vs Event) defined in MarketRegimeDetector
+            snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
+            
+            # 4. Update State
+            self.ingest_snapshot(snapshot)
+            self._last_indicator_refresh = time.time()
+            
+        except Exception as exc:
+            logger.error(f"Regime refresh error: {exc}", exc_info=True)
     def can_trade(
         self,
         *,
