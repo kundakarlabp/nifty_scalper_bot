@@ -1761,7 +1761,7 @@ def _get_symbols(
 ) -> list[str]:
     """
     Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Prioritizes Weekly options derived from Live Spot Price.
+    Prioritizes Weekly options derived from Live Spot Price (LTP) or Previous Close.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1776,36 +1776,43 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            # ✅ FIX: Add Raw Token (256265) to candidates so it gets CHECKED in the loop
+            # ✅ FIX 1: Add Raw Token '256265' (Nifty 50). This works even if string symbols fail.
             candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # Unwrap to get real client (Robust -> ZerodhaKiteClient)
-            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
+            # ✅ FIX 2: Deep Unwrap to get the real synchronous Zerodha client
+            # This bypasses RobustDataProvider and any intermediate wrappers
+            inner = broker
+            while hasattr(inner, "client") or hasattr(inner, "_broker") or hasattr(inner, "broker"):
+                inner = getattr(inner, "client", getattr(inner, "_broker", getattr(inner, "broker", inner)))
             
-            # Deep Unwrap: Check if there's a hidden _client (KiteConnect) inside ZerodhaKiteClient
-            # This ensures we call the raw API even if ZerodhaKiteClient methods are missing
+            # Deepest unwrap: check for the actual KiteConnect object (_client)
             if hasattr(inner, "_client"):
                 inner = inner._client
 
-            # Helper to extract price from response
-            def get_price_from_response(response):
-                if not response: return 0.0
-                for k in candidates:
-                    if k in response:
-                        data = response[k]
-                        # Handle both LTP response (flat) and Quote response (nested)
-                        p = data.get("last_price") or data.get("ltp")
-                        if p and float(p) > 0:
-                            LOGGER.info(f"✅ Found NIFTY price {p} using symbol '{k}'")
-                            return float(p)
-                return 0.0
+            # Helper to extract price from response data
+            def extract_price_from_data(data):
+                if not data: return 0.0
+                # Priority: Last Price -> LTP -> OHLC Close (for night/pre-market)
+                p = data.get("last_price") or data.get("ltp")
+                if not p or float(p) == 0:
+                    p = data.get("ohlc", {}).get("close")
+                return float(p or 0.0)
 
             # Strategy A: LTP API (Preferred)
             if hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(candidates)
-                    ltp = get_price_from_response(q)
+                    # Check all candidates
+                    for k in candidates:
+                        # API might return key as int (256265) or str ("256265")
+                        val = q.get(k) or q.get(int(k) if k.isdigit() else k)
+                        if val:
+                            price = extract_price_from_data(val)
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} using symbol '{k}'")
+                                break
                 except Exception as e:
                     LOGGER.debug(f"LTP API failed: {e}")
 
@@ -1813,21 +1820,18 @@ def _get_symbols(
             if ltp == 0 and hasattr(inner, "quote"):
                 try:
                     q = inner.quote(candidates)
-                    ltp = get_price_from_response(q)
-                    
-                    # Fallback: OHLC Close if live price is 0 (e.g. pre-market glitch)
-                    if ltp == 0:
-                        for k in candidates:
-                            if k in q and "ohlc" in q[k]:
-                                close = q[k]["ohlc"].get("close")
-                                if close and float(close) > 0:
-                                    ltp = float(close)
-                                    LOGGER.warning(f"Using OHLC Close price {ltp} for '{k}'")
-                                    break
+                    for k in candidates:
+                        val = q.get(k) or q.get(int(k) if k.isdigit() else k)
+                        if val:
+                            price = extract_price_from_data(val)
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} using quote '{k}'")
+                                break
                 except Exception as e:
                     LOGGER.debug(f"Quote API failed: {e}")
 
-            # Logic
+            # Result Calculation
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1856,7 +1860,7 @@ def _get_symbols(
         atm_price + (2 * strike_step), 
     ]
 
-    # 5. Resolve Symbols
+    # 5. Resolve Symbols (Standard Logic)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
         
@@ -1893,15 +1897,19 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback
+    # 6. Manual Fallback (If Smart Resolution failed or returned empty)
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
+        
+        # Default to current month format e.g. NIFTY25DEC...
         month_suffix = now.strftime("%y%b").upper()
+
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
                 sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
                 final_symbols.append(sym)
+        
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
     return final_symbols
