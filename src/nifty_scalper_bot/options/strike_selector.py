@@ -322,7 +322,7 @@ class StrikeSelector:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._active: MutableMapping[str, SelectedContract] = {}
         self._contract_cache = {}  # {symbol: (timestamp, contract_details)}
-        self._cache_ttl_seconds = 300
+        self._cache_ttl_seconds = 15
 
     @property
     def settings(self) -> "SelectorSettings":
