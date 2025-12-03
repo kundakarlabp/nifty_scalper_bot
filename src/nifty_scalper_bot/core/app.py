@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Prioritizes Weekly options derived from Live Spot Price (LTP) or Previous Close.
+    Return validated symbols. Fetches live Spot price to determine ATM.
+    Robustly unwraps broker to find the true KiteConnect API.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1776,62 +1776,62 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            # ✅ FIX 1: Add Raw Token '256265' (Nifty 50). This works even if string symbols fail.
-            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
+            # Candidates for NIFTY Spot
+            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX", "INDICES:NIFTY 50"]
             ltp = 0.0
             
-            # ✅ FIX 2: Deep Unwrap to get the real synchronous Zerodha client
-            # This bypasses RobustDataProvider and any intermediate wrappers
+            # --- STEP 1: AGGRESSIVE UNWRAPPING ---
             inner = broker
+            # Peel off the RobustDataProvider wrapper
             while hasattr(inner, "client") or hasattr(inner, "_broker") or hasattr(inner, "broker"):
                 inner = getattr(inner, "client", getattr(inner, "_broker", getattr(inner, "broker", inner)))
             
-            # Deepest unwrap: check for the actual KiteConnect object (_client)
-            if hasattr(inner, "_client"):
-                inner = inner._client
+            # Peel off the ZerodhaKiteClient wrapper to get KiteConnect
+            # Check common attribute names for the underlying library
+            for attr in ["_client", "kite", "_kite", "k", "client"]:
+                if hasattr(inner, attr):
+                    candidate_obj = getattr(inner, attr)
+                    # Verify it looks like a Kite object (has ltp or quote)
+                    if hasattr(candidate_obj, "ltp") or hasattr(candidate_obj, "quote"):
+                        inner = candidate_obj
+                        break
 
-            # Helper to extract price from response data
-            def extract_price_from_data(data):
-                if not data: return 0.0
-                # Priority: Last Price -> LTP -> OHLC Close (for night/pre-market)
-                p = data.get("last_price") or data.get("ltp")
-                if not p or float(p) == 0:
-                    p = data.get("ohlc", {}).get("close")
-                return float(p or 0.0)
+            LOGGER.info(f" ATM Fetch: Using broker object type: {type(inner).__name__}")
 
-            # Strategy A: LTP API (Preferred)
-            if hasattr(inner, "ltp"):
+            # --- STEP 2: FETCHING ---
+            
+            # Helper to extract price
+            def extract_price(response, source_name):
+                if not response: return 0.0
+                LOGGER.debug(f"ATM Response keys ({source_name}): {list(response.keys())}")
+                
+                for k in candidates:
+                    # Handle int/str key mismatch
+                    val = response.get(k) or response.get(int(k) if k.isdigit() else k)
+                    if val:
+                        p = val.get("last_price") or val.get("ltp") or val.get("ohlc", {}).get("close")
+                        if p and float(p) > 0:
+                            LOGGER.info(f"✅ Found NIFTY price {p} using {source_name} key: {k}")
+                            return float(p)
+                return 0.0
+
+            # Strategy A: LTP
+            if ltp == 0 and hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(candidates)
-                    # Check all candidates
-                    for k in candidates:
-                        # API might return key as int (256265) or str ("256265")
-                        val = q.get(k) or q.get(int(k) if k.isdigit() else k)
-                        if val:
-                            price = extract_price_from_data(val)
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} using symbol '{k}'")
-                                break
+                    ltp = extract_price(q, "LTP")
                 except Exception as e:
-                    LOGGER.debug(f"LTP API failed: {e}")
+                    LOGGER.debug(f"LTP fetch error: {e}")
 
-            # Strategy B: Quote API (Fallback)
+            # Strategy B: Quote (Rich Data)
             if ltp == 0 and hasattr(inner, "quote"):
                 try:
                     q = inner.quote(candidates)
-                    for k in candidates:
-                        val = q.get(k) or q.get(int(k) if k.isdigit() else k)
-                        if val:
-                            price = extract_price_from_data(val)
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} using quote '{k}'")
-                                break
+                    ltp = extract_price(q, "Quote")
                 except Exception as e:
-                    LOGGER.debug(f"Quote API failed: {e}")
+                    LOGGER.debug(f"Quote fetch error: {e}")
 
-            # Result Calculation
+            # --- STEP 3: DECISION ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1839,18 +1839,20 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning(f"⚠️ Live price fetch returned 0. Checked: {candidates}")
+                # Log available attributes to help debug if it fails again
+                attrs = [a for a in dir(inner) if not a.startswith("_")]
+                LOGGER.warning(f"⚠️ Live price 0. Broker object methods: {attrs[:10]}...")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic
+    # 3. Fallback Logic (Update fallback to realistic 2024/25 levels)
     if atm_price is None:
-        fallback_base = 26000 
+        fallback_base = 24500 # Updated to realistic Nifty level
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
-    # 4. Generate Strikes (ATM +/- 2)
+    # 4. Generate Strikes
     strike_step = 50
     strikes_to_fetch = [
         atm_price - (2 * strike_step), 
@@ -1863,8 +1865,7 @@ def _get_symbols(
     # 5. Resolve Symbols (Standard Logic)
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
-        
-        contracts = []
+        contract_map = {}
         if resolver:
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
@@ -1872,9 +1873,6 @@ def _get_symbols(
                 raw = getattr(resolver, "_option_contracts", {})
                 for c_list in raw.values():
                     contracts.extend(c_list)
-        
-        contract_map = {}
-        if contracts:
             for c in contracts:
                 t = c.get("instrument_token")
                 if t: contract_map[int(t)] = c
@@ -1890,26 +1888,21 @@ def _get_symbols(
                 if ts:
                     prefix = "NFO:" if not ts.startswith("NFO:") else ""
                     final_symbols.append(f"{prefix}{ts}")
-            
             if final_symbols:
-                LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
-
+                 LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
+                 
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (If Smart Resolution failed or returned empty)
+    # 6. Manual Fallback
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
-        
-        # Default to current month format e.g. NIFTY25DEC...
         month_suffix = now.strftime("%y%b").upper()
-
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
                 sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
                 final_symbols.append(sym)
-        
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
 
     return final_symbols
