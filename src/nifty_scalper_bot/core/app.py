@@ -4510,6 +4510,25 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     order_monitor_started = False
 
+    # --- FIX: Start Regime Refresh Task ---
+    async def _regime_refresh_loop():
+        """Periodically refresh market regime from indicators."""
+        mgr = ctx.market_regime_manager
+        while True:
+            try:
+                if mgr:
+                    await mgr.refresh_from_indicators()
+            except Exception as e:
+                LOGGER.error(f"Regime refresh failed: {e}")
+            # Run every 60 seconds (aligns with candle closing)
+            await asyncio.sleep(60) 
+
+    if ctx.market_regime_manager:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_regime_refresh_loop())
+        LOGGER.info("✅ Regime Refresh Task Started")
+    # --------------------------------------
+
     def _start_order_monitoring() -> None:
         nonlocal order_monitor_started
         if order_monitor_started:
