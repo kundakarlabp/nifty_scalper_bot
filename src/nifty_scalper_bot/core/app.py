@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols.
-    Fetches live Spot price (LTP) or Previous Close to determine ATM.
+    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
+    Prioritizes Weekly options derived from Live Spot Price.
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1776,63 +1776,66 @@ def _get_symbols(
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            # NIFTY 50 Candidates
-            candidates = ["NSE:NIFTY 50", "NIFTY 50", "256265"]
+            # ✅ FIX: Add Raw Token (256265) to candidates so it gets CHECKED in the loop
+            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # Unwrap the wrapper to get the real client
+            # Unwrap to get real client (Robust -> ZerodhaKiteClient)
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
             
-            # Helper to extract price from a quote object
-            def extract_price(data: dict) -> float:
-                # Priority 1: Last Traded Price (Live)
-                p = data.get("last_price") or data.get("ltp")
-                if p and float(p) > 0: return float(p)
-                
-                # Priority 2: Previous Close (Offline/Night)
-                p = data.get("ohlc", {}).get("close")
-                if p and float(p) > 0: return float(p)
-                
+            # Deep Unwrap: Check if there's a hidden _client (KiteConnect) inside ZerodhaKiteClient
+            # This ensures we call the raw API even if ZerodhaKiteClient methods are missing
+            if hasattr(inner, "_client"):
+                inner = inner._client
+
+            # Helper to extract price from response
+            def get_price_from_response(response):
+                if not response: return 0.0
+                for k in candidates:
+                    if k in response:
+                        data = response[k]
+                        # Handle both LTP response (flat) and Quote response (nested)
+                        p = data.get("last_price") or data.get("ltp")
+                        if p and float(p) > 0:
+                            LOGGER.info(f"✅ Found NIFTY price {p} using symbol '{k}'")
+                            return float(p)
                 return 0.0
 
-            # Strategy: Quote API (Richest Data)
-            if hasattr(inner, "quote"):
-                try:
-                    q = inner.quote(candidates)
-                    for key in candidates:
-                        # Handle both string keys and integer token keys
-                        val = q.get(key) or q.get(str(key)) or q.get(int(key) if str(key).isdigit() else key)
-                        
-                        if val:
-                            ltp = extract_price(val)
-                            if ltp > 0:
-                                LOGGER.info(f"✅ Found Price {ltp} using '{key}'")
-                                break
-                except Exception:
-                    pass
-
-            # Strategy: LTP API (Backup)
-            if ltp == 0 and hasattr(inner, "ltp"):
+            # Strategy A: LTP API (Preferred)
+            if hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(candidates)
-                    for key in candidates:
-                        if key in q:
-                            ltp = float(q[key].get("last_price", 0))
-                            if ltp > 0:
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} using LTP for '{key}'")
-                                break
+                    ltp = get_price_from_response(q)
                 except Exception as e:
                     LOGGER.debug(f"LTP API failed: {e}")
 
-            # Result
+            # Strategy B: Quote API (Fallback)
+            if ltp == 0 and hasattr(inner, "quote"):
+                try:
+                    q = inner.quote(candidates)
+                    ltp = get_price_from_response(q)
+                    
+                    # Fallback: OHLC Close if live price is 0 (e.g. pre-market glitch)
+                    if ltp == 0:
+                        for k in candidates:
+                            if k in q and "ohlc" in q[k]:
+                                close = q[k]["ohlc"].get("close")
+                                if close and float(close) > 0:
+                                    ltp = float(close)
+                                    LOGGER.warning(f"Using OHLC Close price {ltp} for '{k}'")
+                                    break
+                except Exception as e:
+                    LOGGER.debug(f"Quote API failed: {e}")
+
+            # Logic
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                # Save to context
+                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
                 global _LATEST_CTX
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                LOGGER.warning(f"⚠️ Live price fetch returned 0. Market might be closed/reset.")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Checked: {candidates}")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
@@ -1843,38 +1846,31 @@ def _get_symbols(
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
-    # 4. Generate Strikes (Smart Selection)
-    # Instead of just range(atm-100, atm+100), we fetch the chain to find liquidity.
-    strikes_to_fetch = []
-    
-    # Base range (ATM +/- 200 points)
-    raw_strikes = [
-        atm_price - 200, atm_price - 150, atm_price - 100, atm_price - 50,
-        atm_price,
-        atm_price + 50, atm_price + 100, atm_price + 150, atm_price + 200
+    # 4. Generate Strikes (ATM +/- 2)
+    strike_step = 50
+    strikes_to_fetch = [
+        atm_price - (2 * strike_step), 
+        atm_price - strike_step,       
+        atm_price,                     
+        atm_price + strike_step,       
+        atm_price + (2 * strike_step), 
     ]
-    
-    # In a real "world-class" bot, we would filter these by Open Interest here.
-    # Since we are in startup phase (no live data yet), we stick to the wide range 
-    # but we prioritize ATM and immediate ITM for scalping.
-    
-    # Optimization: Prioritize ITM for calls/puts to get better delta
-    strikes_to_fetch = raw_strikes
 
-    # 5. Resolve Symbols (Standard Logic)
+    # 5. Resolve Symbols
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
-        contract_map = {}
         
+        contracts = []
         if resolver:
-            # Get option contracts map
             if hasattr(resolver, "option_contracts"):
                 contracts = resolver.option_contracts("NIFTY")
             elif hasattr(resolver, "_option_contracts"):
                 raw = getattr(resolver, "_option_contracts", {})
                 for c_list in raw.values():
                     contracts.extend(c_list)
-            
+        
+        contract_map = {}
+        if contracts:
             for c in contracts:
                 t = c.get("instrument_token")
                 if t: contract_map[int(t)] = c
@@ -1890,11 +1886,14 @@ def _get_symbols(
                 if ts:
                     prefix = "NFO:" if not ts.startswith("NFO:") else ""
                     final_symbols.append(f"{prefix}{ts}")
+            
+            if final_symbols:
+                LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
 
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (If resolution failed)
+    # 6. Manual Fallback
     if not final_symbols:
         import datetime
         now = datetime.datetime.now()
