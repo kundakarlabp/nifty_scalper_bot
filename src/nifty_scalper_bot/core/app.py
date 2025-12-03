@@ -1760,8 +1760,8 @@ def _get_symbols(
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return a list of validated exchange-qualified symbols (ATM + ITM + OTM).
-    Fetches live Spot price using a multi-strategy robust fetcher.
+    Return validated symbols. Fetches live Spot price.
+    Fix: Supports 'get_ltp' (Custom Client) AND 'ltp' (Standard Kite).
     """
     # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
@@ -1773,82 +1773,77 @@ def _get_symbols(
     final_symbols: list[str] = []
     atm_price: int | None = None
     
-    # 2. Fetch Live Spot Price (Deep Dive Logic)
+    # 2. Fetch Live Spot Price
     if broker:
         try:
-            # We define candidates as tuples: (Value, Description)
-            # Zerodha Nifty 50 Token is 256265.
-            candidates = [
-                (256265, "Raw Token Int"), 
-                ("256265", "Raw Token Str"),
-                ("NSE:NIFTY 50", "Exchange Symbol"), 
-                ("NIFTY 50", "Symbol Only"),
-                ("INDICES:NIFTY 50", "Indices Format")
-            ]
+            # Candidates: Raw Token (Best) -> Specific Symbol -> Generic
+            candidates = ["256265", "NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
             ltp = 0.0
             
-            # Unwrap wrapper to get the real client
+            # Unwrap wrapper
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
-            
-            # --- Strategy: Helper to extract price from ANY response format ---
-            def parse_price(data: Any) -> float:
-                if not data: return 0.0
-                # If float/int
-                if isinstance(data, (int, float)): return float(data)
-                # If dict
-                if isinstance(data, dict):
-                    return float(data.get("last_price") or data.get("ltp") or data.get("close") or 0.0)
+            if hasattr(inner, "_client"): inner = inner._client # Deep unwrap
+
+            # Helper to extract price
+            def extract_price(response, source_name):
+                if not response: return 0.0
+                for k in candidates:
+                    # Handle int/str key mismatch
+                    val = response.get(k) or response.get(int(k) if k.isdigit() else k)
+                    if val:
+                        if isinstance(val, dict):
+                            p = val.get("last_price") or val.get("ltp") or val.get("ohlc", {}).get("close")
+                            if p and float(p) > 0:
+                                LOGGER.info(f"✅ Found NIFTY price {p} using {source_name} key: {k}")
+                                return float(p)
+                        elif isinstance(val, (int, float)) and val > 0:
+                            LOGGER.info(f"✅ Found NIFTY price {val} using {source_name} key: {k}")
+                            return float(val)
                 return 0.0
 
-            # --- Strategy A: get_ltp_bulk (List Input) ---
+            # --- Strategy A: Custom Client Methods (The Fix for YOUR Code) ---
             if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 try:
-                    # Pass all candidate values (ints and strings)
-                    query_list = [c[0] for c in candidates]
-                    response = inner.get_ltp_bulk(query_list)
-                    
-                    if response:
-                        # Scan response for any matching key
-                        for val, desc in candidates:
-                            # Check exact key or stringified key
-                            price = parse_price(response.get(val)) or parse_price(response.get(str(val)))
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp_bulk using {desc}")
-                                break
+                    q = inner.get_ltp_bulk(candidates)
+                    ltp = extract_price(q, "get_ltp_bulk")
                 except Exception as e:
                     LOGGER.debug(f"get_ltp_bulk failed: {e}")
 
-            # --- Strategy B: get_ltp (Single Input) ---
             if ltp == 0 and hasattr(inner, "get_ltp"):
-                for val, desc in candidates:
-                    try:
-                        response = inner.get_ltp(val)
-                        price = parse_price(response)
-                        if price > 0:
-                            ltp = price
-                            LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp using {desc}")
+                try:
+                    # Try fetching individually
+                    for k in candidates:
+                        p = inner.get_ltp(k)
+                        if isinstance(p, (int, float)) and p > 0:
+                            ltp = float(p)
+                            LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp('{k}')")
                             break
-                    except Exception:
-                        continue
+                        elif isinstance(p, dict):
+                            # Handle dict response from single fetch
+                            price = p.get("last_price") or p.get("ltp")
+                            if price:
+                                ltp = float(price)
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp('{k}') dict")
+                                break
+                except Exception as e:
+                    LOGGER.debug(f"get_ltp failed: {e}")
 
-            # --- Strategy C: Standard Kite .ltp() ---
+            # --- Strategy B: Standard KiteConnect Methods (Fallback) ---
             if ltp == 0 and hasattr(inner, "ltp"):
                 try:
-                    # Only pass strings to standard Kite API
-                    str_candidates = [str(c[0]) for c in candidates]
-                    response = inner.ltp(str_candidates)
-                    for k in str_candidates:
-                        if k in response:
-                            price = parse_price(response[k])
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ Found NIFTY price {ltp} via standard .ltp()")
-                                break
-                except Exception:
-                    pass
+                    q = inner.ltp(candidates)
+                    ltp = extract_price(q, "LTP")
+                except Exception as e:
+                    LOGGER.debug(f"Standard LTP API failed: {e}")
 
-            # --- Success Check ---
+            if ltp == 0 and hasattr(inner, "quote"):
+                try:
+                    q = inner.quote(candidates)
+                    ltp = extract_price(q, "Quote")
+                except Exception as e:
+                    LOGGER.debug(f"Standard Quote API failed: {e}")
+
+            # --- RESULT ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
                 LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
@@ -1856,16 +1851,16 @@ def _get_symbols(
                 if _LATEST_CTX:
                     _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
             else:
-                # Log methods for debugging only if it fails
-                methods = [m for m in dir(inner) if not m.startswith("_") and "ltp" in m]
-                LOGGER.warning(f"⚠️ Live price 0. LTP methods found on broker: {methods}")
+                # Log available methods to prove the issue if it persists
+                methods = [m for m in dir(inner) if not m.startswith("_")]
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Available methods: {methods[:10]}...")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback Logic (Updated to realistic 24000 range)
+    # 3. Fallback Logic
     if atm_price is None:
-        fallback_base = 24500 
+        fallback_base = 24500 # Updated to realistic level
         LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
