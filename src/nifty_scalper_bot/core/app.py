@@ -4599,6 +4599,45 @@ async def startup_sequence(ctx: BotContext) -> None:
     if broker_ready:
         await _warm_indicators_with_history()
     # -----------------------------------------------------
+# --- FIX: Adaptive Fast Sync (Speeds up when active) ---
+    async def _fast_sync_loop():
+        LOGGER.info("🚀 Fast State Sync Loop Started")
+        
+        # Default slow interval (safe for rate limits)
+        base_interval = 3.0 
+        # Fast interval when we have positions (to catch fills/stops instantly)
+        fast_interval = 1.0
+        
+        while True:
+            start_time = asyncio.get_running_loop().time()
+            has_exposure = False
+            
+            try:
+                # 1. Run Reconcile (Now safe & non-blocking)
+                await _reconcile_state(ctx)
+                
+                # 2. Check for Active Positions to decide speed
+                if ctx.position_manager:
+                    positions = ctx.position_manager.get_all_positions()
+                    # If we have any open quantity, we need speed!
+                    has_exposure = any(p.quantity != 0 for p in positions)
+
+            except Exception as e:
+                LOGGER.debug(f"Fast sync tick failed: {e}")
+            
+            # 3. Smart Sleep Calculation
+            # If we have money at risk, sleep less (1s). If flat, sleep more (3s).
+            interval = fast_interval if has_exposure else base_interval
+            
+            elapsed = asyncio.get_running_loop().time() - start_time
+            sleep_time = max(0.1, interval - elapsed)
+            
+            await asyncio.sleep(sleep_time)
+
+    # Start the background task
+    loop = asyncio.get_running_loop()
+    loop.create_task(_fast_sync_loop())
+    # -----------------------------------------------------
     # -----------------------------------------------------
 
     def _start_order_monitoring() -> None:
@@ -4816,22 +4855,22 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
 
     LOGGER.info("Bot shutdown complete")
 
-
 async def _reconcile_state(ctx: BotContext) -> None:
-    """Syncs local state with Broker (Orders & Positions). Non-Blocking."""
+    """Syncs local state with Broker (Orders & Positions). Non-Blocking Optimization."""
     # LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
     broker_positions: list[Mapping[str, Any]] = []
     
     try:
-        # 1. Fetch raw data (Already Async)
+        # 1. Fetch raw data (Already Async in your client)
         raw_data = await ctx.broker_client.get_positions()
         
-        # 2. Normalize
+        # 2. Normalize Data
         if isinstance(raw_data, list):
             for item in raw_data:
                 if isinstance(item, Mapping):
                     broker_positions.append(item)
         elif isinstance(raw_data, Mapping):
+            # Handle 'net'/'day' wrapper structure
             if "net" in raw_data and isinstance(raw_data["net"], list):
                  broker_positions.extend([p for p in raw_data["net"] if isinstance(p, Mapping)])
             else:
@@ -4841,18 +4880,22 @@ async def _reconcile_state(ctx: BotContext) -> None:
         LOGGER.error(f"state_reconcile_fetch_failed: {exc}", exc_info=True)
         return
 
-    # 3. Process Positions (Fast)
+    # 3. Process Positions (Fast in-memory update)
     if ctx.position_manager:
-        # (Add logic here if your PositionManager needs manual updates, otherwise assume it polls)
+        # PositionManager typically updates via its own logic or polling, 
+        # but if explicit sync is needed, add it here. 
+        # For now, we skip blocking logic.
         pass
 
     # 4. Sync Orders (CRITICAL FIX: Run in Thread)
-    # This prevents the bot from "freezing" while waiting for Zerodha
+    # This prevents the bot from "freezing" while waiting for Zerodha order book
     if ctx.order_manager:
         try:
             await asyncio.to_thread(ctx.order_manager.reconcile_open_orders_with_broker)
         except Exception as exc:
             LOGGER.debug(f"Order Reconcile Warning: {exc}")
+
+
     def _extract_symbol(payload: Mapping[str, Any]) -> str:
         symbol_raw = payload.get("tradingsymbol") or payload.get("symbol") or ""
         symbol = str(symbol_raw).strip().upper()
