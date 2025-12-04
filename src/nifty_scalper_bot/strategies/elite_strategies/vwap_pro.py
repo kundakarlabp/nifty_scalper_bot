@@ -1,172 +1,196 @@
-import logging
-import numpy as np
-from typing import Optional, List, Dict, Any
-from ..base_strategy import BaseStrategy
+"""VWAP Pro institutional-grade mean reversion strategy."""
 
-LOGGER = logging.getLogger(__name__)
+from __future__ import annotations
 
-class VWAPProStrategy(BaseStrategy):
+from typing import Any, Mapping
+
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    VWAPProStrategyConfig,
+)
+
+
+class VWAPProStrategy(EliteStrategy):
     """
     VWAP Pro: An institutional-grade intraday strategy.
     
     Logic:
-    1. Regime Filter: Only trades in 'TRENDING' or 'VOLATILE' markets.
-    2. Trend Filter: Longs only above EMA-50. Shorts only below EMA-50.
-    3. Trigger: Price crosses VWAP with momentum.
+    1. Regime Filter: Only trades in 'TRENDING' or 'VOLATILE' markets (handled by manager).
+    2. Trend Filter: Longs only above EMA. Shorts only below EMA.
+    3. Trigger: Price crosses/reverts to VWAP with volume confirmation.
     """
 
-    def __init__(self, config: Any = None):
-        # 1. Robust Config Conversion (Handle Pydantic/Dict/None)
-        if config is not None and not isinstance(config, dict):
-            if hasattr(config, "model_dump"):  # Pydantic v2
-                config = config.model_dump()
-            elif hasattr(config, "dict"):      # Pydantic v1
-                config = config.dict()
-            elif hasattr(config, "__dict__"):  # Standard class
-                config = config.__dict__
-            else:
-                config = {} # Fallback
+    def __init__(self, config: VWAPProStrategyConfig) -> None:
+        """Initialise strategy with configuration.
 
-        # 2. Set Defaults (Safe Dictionary Operations)
-        config = config or {}
-        config.setdefault("allowed_regimes", ["TRENDING", "VOLATILE"])
-        config.setdefault("timeframe", 5)  # 5-minute candles
-        config.setdefault("ema_period", 50)
-        config.setdefault("base_quantity", 50)
+        Args:
+            config: Strategy configuration dataclass.
+
+        Returns:
+            None.
+        """
+        super().__init__(name="VWAP Pro", config=config)
+        self._vwap_config = config
+        self._last_state: dict[str, str] = {}  # Track state for crossover detection
+
+    def get_required_indicators(self) -> list[str]:
+        """Return indicator keys required for VWAP evaluation.
         
-        # 3. Initialize Base
-        super().__init__("VWAP_PRO", config)
-        self.ema_period = config["ema_period"]
+        We request 'ema' (standard 20-period) as a trend proxy.
+        """
+        return [
+            "vwap",
+            "ema",
+            "volume",
+            "avg_volume",
+            "atr",
+            "rsi",
+        ]
 
-    # --- CRITICAL FIX: Missing Method Added ---
-    def get_required_indicators(self) -> List[str]:
-        """
-        Return list of indicators required by this strategy.
-        Used by the Strategy Runner for validation and pre-loading.
-        """
-        return ["vwap", "ema", "volume"]
+    def _evaluate_signal(
+        self,
+        symbol: str,
+        indicators: Mapping[str, Any],
+        current_price: float,
+        position: Any | None,
+    ) -> EliteSignal | None:
+        """Generate signal when price interacts with VWAP in direction of trend.
 
-    def calculate_signal(self, tick: Dict[str, Any], candles: List[Dict[str, Any]], regime: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Core logic to generate signals based on Tick, Candle history, and Regime.
-        """
-        # 1. Data Validation (Fail Fast)
-        if not candles or len(candles) < self.ema_period:
-            return None
-            
-        if not self.can_trade(regime):
-            return None
+        Args:
+            symbol: Trading symbol evaluated.
+            indicators: Indicator snapshot for symbol.
+            current_price: Latest traded price.
+            position: Existing open position when present.
 
-        # 2. Extract Market Data
+        Returns:
+            EliteSignal | None: Signal when setup detected else ``None``.
+        """
+
+        self._logger.debug(
+            "Entered VWAPProStrategy._evaluate_signal",
+            extra={"event": "vwap_pro_evaluate", "symbol": symbol},
+        )
         try:
-            last_candle = candles[-1]
-            current_price = tick.get('ltp') or tick.get('last_price')
-            
-            if not current_price:
+            vwap = float(indicators.get("vwap") or 0.0)
+            ema = float(indicators.get("ema") or 0.0)
+            atr = float(indicators.get("atr") or 0.0)
+            volume = float(indicators.get("volume") or 0.0)
+            avg_volume = float(indicators.get("avg_volume") or 0.0)
+            rsi = float(indicators.get("rsi") or 50.0)
+
+            # Data validation
+            if vwap <= 0 or ema <= 0 or atr <= 0:
                 return None
 
-            # 3. Get or Calculate Indicators
-            vwap = last_candle.get('vwap')
-            if vwap is None:
-                vwap = self._calculate_intraday_vwap(candles)
+            # 1. Volume Filter
+            # We need volume to be somewhat relevant (e.g., > 80% of avg) to avoid ghost moves
+            if avg_volume > 0 and volume < (avg_volume * 0.8):
+                return None
+
+            # 2. Determine Trend Bias using EMA
+            # Price > EMA => Bullish Bias
+            # Price < EMA => Bearish Bias
+            trend_bias = "BULLISH" if current_price > ema else "BEARISH"
+
+            # 3. Detect VWAP Interaction
+            # We look for price being close to VWAP (Mean Reversion Entry)
+            dist_to_vwap = current_price - vwap
+            dist_ratio = abs(dist_to_vwap) / atr
+
+            # Threshold: Price must be within 0.5 ATR of VWAP to consider it a "test" or "cross"
+            # If it's too far, we missed the move.
+            is_near_vwap = dist_ratio < 0.5
+
+            side = ""
+            if trend_bias == "BULLISH" and is_near_vwap:
+                # Long Condition: Uptrend + Pullback to VWAP or Crossing Up
+                # RSI check to ensure momentum isn't dead but not overbought
+                if 40 <= rsi <= 65:
+                    side = "BUY"
             
-            ema = self._calculate_ema(candles, self.ema_period)
+            elif trend_bias == "BEARISH" and is_near_vwap:
+                # Short Condition: Downtrend + Rally to VWAP or Crossing Down
+                if 35 <= rsi <= 60:
+                    side = "SELL"
 
-            # 4. Trading Logic
+            if not side:
+                return None
+
+            # 4. Filter out if we already have a position in this direction
+            if position and getattr(position, "side", "").upper() == (
+                "LONG" if side == "BUY" else "SHORT"
+            ):
+                return None
+
+            # 5. Calculate Confidence & Targets
+            # Higher volume spike = Higher confidence
+            vol_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
             
-            # --- LONG Logic ---
-            # Conditions: Price > EMA (Trend is Up) AND Price crossed above VWAP recently
-            if current_price > ema:
-                # Check for crossover: Previous candle closed below VWAP, Current price is above
-                prev_close = candles[-2]['close'] if len(candles) > 1 else last_candle['open']
+            confidence = self._vwap_config.min_confidence
+            confidence += min(15.0, (vol_ratio - 1.0) * 10.0) # Bonus for volume
+            
+            # Risk Management
+            # Stop Loss: On the other side of VWAP + buffer
+            # Target: Trend continuation
+            stop_buffer = atr * 0.5 
+            
+            if side == "BUY":
+                stop_loss = vwap - stop_buffer
+                # If price is already below VWAP (failed break), enter cautiously or use tighter stop
+                if current_price < vwap:
+                     stop_loss = current_price - stop_buffer
                 
-                if prev_close < vwap and current_price > vwap:
-                    # Confirm with Volume if available
-                    avg_vol = self._get_avg_volume(candles)
-                    current_vol = last_candle.get('volume', 0)
-                    vol_spike = current_vol > (avg_vol * 1.2)
-                    
-                    if vol_spike:
-                        LOGGER.info(f"📈 VWAP_PRO Buy Signal: {tick.get('symbol')} @ {current_price} (Regime: {regime.get('label')})")
-                        return {
-                            "side": "BUY",
-                            "price": current_price,
-                            "quantity": self.config.get("base_quantity", 50),
-                            "reason": f"VWAP Cross + EMA{self.ema_period} Trend + Vol"
-                        }
+                risk = current_price - stop_loss
+                tp1 = current_price + (risk * 2.0)
+                tp2 = current_price + (risk * 3.0)
+            else:
+                stop_loss = vwap + stop_buffer
+                if current_price > vwap:
+                    stop_loss = current_price + stop_buffer
 
-            # --- SHORT Logic ---
-            # Conditions: Price < EMA (Trend is Down) AND Price crossed below VWAP
-            elif current_price < ema:
-                prev_close = candles[-2]['close'] if len(candles) > 1 else last_candle['open']
-                
-                if prev_close > vwap and current_price < vwap:
-                    # Confirm with Volume
-                    avg_vol = self._get_avg_volume(candles)
-                    current_vol = last_candle.get('volume', 0)
-                    vol_spike = current_vol > (avg_vol * 1.2)
-                    
-                    if vol_spike:
-                        LOGGER.info(f"📉 VWAP_PRO Sell Signal: {tick.get('symbol')} @ {current_price} (Regime: {regime.get('label')})")
-                        return {
-                            "side": "SELL",
-                            "price": current_price,
-                            "quantity": self.config.get("base_quantity", 50),
-                            "reason": f"VWAP Cross - EMA{self.ema_period} Trend + Vol"
-                        }
+                risk = stop_loss - current_price
+                tp1 = current_price - (risk * 2.0)
+                tp2 = current_price - (risk * 3.0)
 
-        except Exception as e:
-            LOGGER.error(f"Error in VWAP Pro strategy calculation: {e}", exc_info=True)
+            self._logger.info(
+                "Condition met: vwap_pro_signal",
+                extra={
+                    "event": "vwap_pro_signal",
+                    "symbol": symbol,
+                    "side": side,
+                    "confidence": confidence,
+                    "dist_to_vwap": dist_to_vwap,
+                    "trend": trend_bias
+                },
+            )
+
+            return EliteSignal(
+                symbol=symbol,
+                side=side,
+                confidence=min(confidence, 100.0),
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                quantity=1,
+                strategy_name=self.name,
+                metadata={
+                    "vwap": vwap,
+                    "ema": ema,
+                    "atr": atr,
+                    "volume_ratio": vol_ratio,
+                    "trend_bias": trend_bias
+                },
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in VWAPProStrategy._evaluate_signal: %s",
+                exc,
+                exc_info=exc,
+                extra={"event": "vwap_pro_evaluate_error", "symbol": symbol},
+            )
             return None
-
-        return None
-
-    # --- Helper Methods for Robustness ---
-
-    def _calculate_intraday_vwap(self, candles: List[Dict[str, Any]]) -> float:
-        """Fallback VWAP calculation if data feed doesn't provide it."""
-        cumulative_pv = 0.0
-        cumulative_vol = 0.0
-        
-        for c in candles:
-            # Typical Price = (H + L + C) / 3
-            tp = (c['high'] + c['low'] + c['close']) / 3
-            vol = c.get('volume', 0)
-            cumulative_pv += (tp * vol)
-            cumulative_vol += vol
-            
-        if cumulative_vol == 0:
-            return candles[-1]['close']
-            
-        return cumulative_pv / cumulative_vol
-
-    def _calculate_ema(self, candles: List[Dict[str, Any]], period: int) -> float:
-        """True Exponential Moving Average (EMA) calculation."""
-        closes = [c['close'] for c in candles]
-        if len(closes) < period:
-            return closes[-1]
-            
-        # Optimization: Use pandas if available, else robust python loop
-        try:
-            import pandas as pd
-            return float(pd.Series(closes).ewm(span=period, adjust=False).mean().iloc[-1])
-        except ImportError:
-            # Pure Python EMA Implementation
-            # 1. Seed with SMA of the first 'period' elements
-            alpha = 2 / (period + 1)
-            ema = sum(closes[:period]) / period
-            
-            # 2. Calculate EMA for the rest
-            for price in closes[period:]:
-                ema = (price * alpha) + (ema * (1 - alpha))
-            return ema
-
-    def _get_avg_volume(self, candles: List[Dict[str, Any]], lookback: int = 20) -> float:
-        """Get average volume of last N candles."""
-        if not candles:
-            return 0.0
-        slice_ = candles[-lookback:]
-        volumes = [c.get('volume', 0) for c in slice_]
-        if not volumes:
-            return 0.0
-        return sum(volumes) / len(volumes)
