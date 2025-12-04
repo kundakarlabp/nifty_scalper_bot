@@ -455,70 +455,68 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return params
 
-    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Place order."""
+    # --- INSERT THIS METHOD (Missing in your code) ---
+    def get_orders(self) -> list[dict[str, Any]]:
+        """Fetch the complete order book for the day."""
+        self._acquire_bucket(self._ORDER_BUCKET)
+        response = self._ensure_json(self._make_request("GET", "/orders"))
+        data = response.get("data", [])
+        return cast(list[dict[str, Any]], data)
 
+    # --- REPLACE THE EXISTING place_order WITH THIS ---
+    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Place order with Tagging for Idempotency (Ghost Order Protection)."""
         params = self._build_kite_params(payload)
         variety = payload.get("variety", "regular")
-        raw_order_type = (
-            str(payload.get("order_type") or params.get("order_type", ""))
-            .replace("_", " ")
-            .upper()
-        )
-        price = payload.get("price")
-        trigger_price = payload.get("trigger_price")
-
-        if raw_order_type in {"STOP LOSS MARKET", "STOP_LOSS_MARKET", "SLM", "SL-M"}:
-            trigger = trigger_price if trigger_price is not None else price
-            if trigger is None:
-                raise OrderPlacementError("SL-M orders require a trigger price")
-            if not isinstance(trigger, (int, float, str)):
-                raise OrderPlacementError("Invalid trigger price")
-            params["order_type"] = "SL-M"
-            params["trigger_price"] = float(trigger)
-            params.pop("price", None)
-        elif raw_order_type in {"STOP LOSS", "SL"}:
-            if price is None and trigger_price is None:
-                raise OrderPlacementError("SL orders require a price")
-            price_source = price if price is not None else trigger_price
-            if not isinstance(price_source, (int, float, str)):
-                raise OrderPlacementError("Invalid stop-loss price")
-            limit_price = float(price_source)
-            trigger_source = trigger_price if trigger_price is not None else limit_price
-            if not isinstance(trigger_source, (int, float, str)):
-                raise OrderPlacementError("Invalid stop-loss trigger")
-            trigger = float(trigger_source)
-            params["order_type"] = "SL"
-            params["price"] = limit_price
-            params["trigger_price"] = trigger
-        elif raw_order_type in {"LIMIT", "L"}:
-            if price is None:
-                raise OrderPlacementError("Limit orders require a price")
-            params["order_type"] = "LIMIT"
-            if not isinstance(price, (int, float, str)):
-                raise OrderPlacementError("Invalid limit price")
-            params["price"] = float(price)
-        else:
-            params["order_type"] = "MARKET"
-            params.pop("price", None)
-            params.pop("trigger_price", None)
+        
+        # 1. Ensure every order has a unique tag for tracking
+        if "tag" not in params:
+            import uuid
+            # Generate short unique tag (max 20 chars for Zerodha)
+            params["tag"] = f"bot_{uuid.uuid4().hex[:8]}"
 
         self._acquire_bucket(self._ORDER_BUCKET)
-        response = self._ensure_json(
-            self._make_request(
-                "POST",
-                f"/orders/{variety}",
-                data=params,
-                expect_order_response=True,
-                operation_label="orders.place",
+        
+        try:
+            # 2. Attempt Placement
+            response = self._ensure_json(
+                self._make_request(
+                    "POST",
+                    f"/orders/{variety}",
+                    data=params,
+                    expect_order_response=True,
+                    operation_label="orders.place",
+                )
             )
-        )
-        data = response.get("data", {})
-        return {
-            "order_id": data.get("order_id"),
-            "status": response.get("status"),
-            "message": response.get("message"),
-        }
+            data = response.get("data", {})
+            return {
+                "order_id": data.get("order_id"),
+                "status": response.get("status"),
+                "message": response.get("message"),
+                "tag": params["tag"]
+            }
+            
+        except (TimeoutError, httpx.TimeoutException, httpx.ReadTimeout):
+            # 3. Handle Timeout (Ghost Order Check)
+            LOGGER.warning(f"⚠️ Order placement timed out. Checking for ghost order: {params['tag']}")
+            
+            # Scan order book for this specific tag
+            try:
+                all_orders = self.get_orders()
+                for order in all_orders:
+                    if order.get("tag") == params["tag"]:
+                        LOGGER.info(f"✅ Found ghost order {order['order_id']} after timeout.")
+                        return {
+                            "order_id": order["order_id"],
+                            "status": order["status"],
+                            "message": "Recovered from timeout",
+                            "tag": params["tag"]
+                        }
+            except Exception as e:
+                LOGGER.error(f"Failed to scan for ghost order: {e}")
+            
+            # If we really can't find it, re-raise exception (it truly failed)
+            raise OrderPlacementError("Order timed out and status is unknown.")
 
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
