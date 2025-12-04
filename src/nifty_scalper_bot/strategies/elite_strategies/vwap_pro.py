@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+# ✅ FIX: Inherit from EliteStrategy to ensure 'generate_signal' exists
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -27,6 +28,7 @@ class VWAPProStrategy(EliteStrategy):
 
     def __init__(self, config: VWAPProStrategyConfig) -> None:
         """Initialise strategy with configuration."""
+        # Pass config to parent EliteStrategy to handle basic setup
         super().__init__(name="VWAP Pro", config=config)
         self._vwap_config = config
 
@@ -71,12 +73,11 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             # 3. Determine Trend Bias (EMA Filter)
-            # Price > EMA => Bullish Bias | Price < EMA => Bearish Bias
             trend_bias = "BULLISH" if current_price > ema else "BEARISH"
 
             # 4. Detect VWAP Interaction (Mean Reversion / Pullback)
-            # Price must be within 0.5 ATR of VWAP to be considered a valid interaction
             dist_to_vwap = current_price - vwap
+            # Price must be within 0.5 ATR of VWAP to be considered a valid interaction
             is_near_vwap = abs(dist_to_vwap) < (atr * 0.5)
 
             side = ""
@@ -93,34 +94,28 @@ class VWAPProStrategy(EliteStrategy):
             if not side:
                 return None
 
-            # 5. Position Filter: Don't signal if already in that position
+            # 5. Position Filter
             if position and getattr(position, "side", "").upper() == (
                 "LONG" if side == "BUY" else "SHORT"
             ):
                 return None
 
             # 6. Signal Construction
-            # Calculate Confidence based on Volume Spike
             vol_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
             confidence = self._vwap_config.min_confidence
             confidence += min(15.0, (vol_ratio - 1.0) * 10.0)
             
-            # Smart Stops & Targets
             stop_buffer = atr * 0.5 
             
             if side == "BUY":
-                # Stop below VWAP or current price (whichever is safer/lower)
                 anchor = min(vwap, current_price)
                 stop_loss = anchor - stop_buffer
-                
                 risk = current_price - stop_loss
                 tp1 = current_price + (risk * 2.0)
                 tp2 = current_price + (risk * 3.0)
             else:
-                # Stop above VWAP or current price
                 anchor = max(vwap, current_price)
                 stop_loss = anchor + stop_buffer
-
                 risk = stop_loss - current_price
                 tp1 = current_price - (risk * 2.0)
                 tp2 = current_price - (risk * 3.0)
