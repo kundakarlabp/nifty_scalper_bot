@@ -4528,14 +4528,14 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - FINAL PRODUCTION VERSION ---
+    # --- FIX: History Backfill (Hydration) - ULTRA ROBUST VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
             # 1. Identify Tokens (Nifty 50)
             nifty_token = 256265 # Default Nifty 50 Index Token
             
-            # Dynamic Token Resolution
+            # Try to resolve dynamically
             if ctx.instrument_resolver:
                  resolve_fn = getattr(ctx.instrument_resolver, "resolve_token", getattr(ctx.instrument_resolver, "get_token", None))
                  if callable(resolve_fn):
@@ -4544,25 +4544,33 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Deep Unwrap to find KiteConnect (Traverse wrappers like RobustDataProvider)
-            broker_obj = ctx.broker_client
+            # 2. Deep Unwrap to find KiteConnect (Breadth-First Search)
+            # We search recursively through common attribute names to find the object with 'historical_data'
+            queue = [ctx.broker_client]
+            seen = {id(ctx.broker_client)}
             kite = None
             
-            # Search layers for the raw 'kite' object
-            candidates = [broker_obj]
-            seen = set()
-            while candidates:
-                curr = candidates.pop(0)
-                if id(curr) in seen: continue
-                seen.add(id(curr))
+            while queue:
+                curr = queue.pop(0)
                 
+                # Check if this is the Kite object we need
                 if hasattr(curr, "historical_data"):
                     kite = curr
                     break
                 
-                for attr in ["broker", "_broker", "client", "_client", "kite", "_kite"]:
-                    child = getattr(curr, attr, None)
-                    if child: candidates.append(child)
+                # Add children to search queue (covers RobustDataProvider, ZerodhaKiteClient, etc.)
+                # 'broker_client' is the specific key used by RobustDataProvider
+                for attr_name in [
+                    "broker_client", "_broker_client", 
+                    "broker", "_broker", 
+                    "client", "_client", 
+                    "kite", "_kite", 
+                    "wrapped", "_wrapped"
+                ]:
+                    child = getattr(curr, attr_name, None)
+                    if child is not None and id(child) not in seen:
+                        seen.add(id(child))
+                        queue.append(child)
 
             if kite:
                 from datetime import datetime, timedelta
@@ -4572,7 +4580,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 
                 LOGGER.info(f"🌊 Fetching history for Token {nifty_token}...")
                 
-                # Fetch NIFTY minute candles
+                # Fetch NIFTY minute candles (Runs in thread to not block bot)
                 records = await asyncio.to_thread(
                     kite.historical_data, nifty_token, start_dt, end_dt, "minute"
                 )
@@ -4595,8 +4603,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ts = candle.get("date")
                         vol = candle.get("volume", 0)
                         
-                        # ✅ CRITICAL FIX: Use 'update_price' (The actual method in indicators.py)
-                        # We pass the whole candle dict as 'price' because IndicatorEngine handles dicts
+                        # ✅ CORRECTED: Use 'update_price' (Confirmed method in your indicators.py)
+                        # We pass the whole candle dict as 'price' because IndicatorEngine handles OHLC mapping
                         engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
                         count += 1
                     
