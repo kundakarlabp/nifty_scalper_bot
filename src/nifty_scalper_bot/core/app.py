@@ -4856,15 +4856,16 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     LOGGER.info("Bot shutdown complete")
 
 async def _reconcile_state(ctx: BotContext) -> None:
-    """Syncs local state with Broker (Orders & Positions). Non-Blocking Optimization."""
+    """Syncs local state with Broker (Orders & Positions). Optimized & Non-Blocking."""
     # LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
-    broker_positions: list[Mapping[str, Any]] = []
     
+    # 1. FETCH POSITIONS (Async)
+    broker_positions: list[Mapping[str, Any]] = []
     try:
-        # 1. Fetch raw data (Already Async in your client)
+        # Fetch raw data
         raw_data = await ctx.broker_client.get_positions()
         
-        # 2. Normalize Data
+        # Normalize
         if isinstance(raw_data, list):
             for item in raw_data:
                 if isinstance(item, Mapping):
@@ -4875,27 +4876,43 @@ async def _reconcile_state(ctx: BotContext) -> None:
                  broker_positions.extend([p for p in raw_data["net"] if isinstance(p, Mapping)])
             else:
                  broker_positions.append(raw_data)
-
     except Exception as exc:
         LOGGER.error(f"state_reconcile_fetch_failed: {exc}", exc_info=True)
         return
 
-    # 3. Process Positions (Fast in-memory update)
-    if ctx.position_manager:
-        # PositionManager typically updates via its own logic or polling, 
-        # but if explicit sync is needed, add it here. 
-        # For now, we skip blocking logic.
-        pass
-
-    # 4. Sync Orders (CRITICAL FIX: Run in Thread)
-    # This prevents the bot from "freezing" while waiting for Zerodha order book
-    if ctx.order_manager:
+    # 2. SYNC ORDERS (Non-Blocking Thread)
+    # Define order_manager here to be used throughout the function [FIX for NameError]
+    order_manager = ctx.order_manager
+    if order_manager:
         try:
-            await asyncio.to_thread(ctx.order_manager.reconcile_open_orders_with_broker)
+            # Run the heavy reconciliation in a thread to avoid blocking the event loop
+            await asyncio.to_thread(order_manager.reconcile_open_orders_with_broker)
         except Exception as exc:
             LOGGER.debug(f"Order Reconcile Warning: {exc}")
 
+    # 3. SYNC POSITIONS (Restored Logic)
+    position_manager = ctx.position_manager
+    if not position_manager:
+        return
 
+    local_positions = position_manager.get_all_positions()
+
+    # Identify Mismatches
+    broker_symbols = {
+        str(pos.get("tradingsymbol") or pos.get("symbol") or "")
+        for pos in broker_positions
+    }
+    local_symbols = {pos.symbol for pos in local_positions}
+
+    missing_locally = broker_symbols - local_symbols
+    if missing_locally:
+        LOGGER.warning(f"Positions missing locally: {', '.join(sorted(missing_locally))}")
+
+    extra_locally = local_symbols - broker_symbols
+    if extra_locally:
+        LOGGER.warning(f"Positions missing at broker: {', '.join(sorted(extra_locally))}")
+
+    # Helper functions for parsing (Embedded to ensure self-containment)
     def _extract_symbol(payload: Mapping[str, Any]) -> str:
         symbol_raw = payload.get("tradingsymbol") or payload.get("symbol") or ""
         symbol = str(symbol_raw).strip().upper()
@@ -4906,34 +4923,27 @@ async def _reconcile_state(ctx: BotContext) -> None:
     def _extract_int(payload: Mapping[str, Any], *keys: str) -> int:
         for key in keys:
             value = payload.get(key)
-            if value is None:
-                continue
-            try:
-                return int(float(value))
-            except (TypeError, ValueError):
-                continue
+            if value is not None:
+                try: return int(float(value))
+                except: continue
         return 0
 
     def _extract_float(payload: Mapping[str, Any], *keys: str) -> float:
         for key in keys:
             value = payload.get(key)
-            if value is None:
-                continue
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                continue
+            if value is not None:
+                try: return float(value)
+                except: continue
         return 0.0
 
     def _derive_underlying(symbol: str) -> str:
         token = symbol.split(":", maxsplit=1)[-1]
         prefix = []
         for char in token:
-            if char.isdigit():
-                break
+            if char.isdigit(): break
             prefix.append(char)
         return "".join(prefix).strip().upper()
-
+    
     def _option_kind(symbol: str, payload: Mapping[str, Any]) -> str:
         suffix = symbol[-2:].upper()
         if suffix in {"CE", "PE"}:
@@ -4950,12 +4960,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
         if isinstance(raw, str):
             text = raw.strip()
             if text:
-                for fmt in (
-                    "%Y-%m-%d",
-                    "%Y-%m-%dT%H:%M:%S",
-                    "%d-%b-%Y",
-                    "%d-%m-%Y",
-                ):
+                for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d-%b-%Y", "%d-%m-%Y"):
                     try:
                         parsed = datetime.strptime(text, fmt)
                         return parsed.replace(tzinfo=timezone.utc)
@@ -4963,107 +4968,44 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         continue
                 try:
                     parsed = datetime.fromisoformat(text)
-                    return (
-                        parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-                    )
+                    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
                 except ValueError:
-                    LOGGER.debug(
-                        "expiry_parse_failed",
-                        extra={"event": "state_reconcile_parse_failed", "value": text},
-                    )
+                    pass
         return datetime.now(timezone.utc)
 
-    order_manager = order_manager_component
-    position_manager = position_manager
+    # Process Each Broker Position
     for entry in broker_positions:
         symbol = _extract_symbol(entry)
-        if not symbol:
-            continue
+        if not symbol: continue
+        
         net_qty = _extract_int(entry, "quantity", "net_quantity", "net", "net_qty")
+        
+        # Handle Closed/Flat Positions
         if net_qty == 0:
             try:
                 underlying = _derive_underlying(symbol)
-                existing_contract = (
-                    position_manager.get_active_contract(underlying)
-                    if underlying
-                    else None
-                )
-            except Exception as exc:  # noqa: BLE001 - defensive
-                LOGGER.error(
-                    "state_reconcile_contract_lookup_failed",
-                    extra={
-                        "event": "state_reconcile_contract_lookup_failed",
-                        "symbol": symbol,
-                        "err": str(exc),
-                    },
-                )
-                existing_contract = None
-            if existing_contract is not None:
-                try:
-                    if existing_contract.symbol == symbol or position_manager.is_flat(
-                        existing_contract.symbol
-                    ):
-                        position_manager.clear_active_contract_by_symbol(
-                            existing_contract.symbol
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "state_reconcile_contract_clear_failed",
-                        extra={
-                            "event": "state_reconcile_contract_clear_failed",
-                            "symbol": symbol,
-                            "err": str(exc),
-                        },
-                    )
-            if order_manager is not None:
-                try:
+                existing_contract = position_manager.get_active_contract(underlying) if underlying else None
+                if existing_contract and (existing_contract.symbol == symbol or position_manager.is_flat(existing_contract.symbol)):
+                     position_manager.clear_active_contract_by_symbol(existing_contract.symbol)
+                
+                if order_manager:
                     order_manager.clear_guard_pair(symbol)
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "state_reconcile_guard_clear_failed",
-                        extra={
-                            "event": "state_reconcile_guard_clear_failed",
-                            "symbol": symbol,
-                            "err": str(exc),
-                        },
-                    )
+            except Exception: pass
             continue
-        product_code = str(entry.get("product") or entry.get("product_type") or "MIS")
-        avg_price = _extract_float(
-            entry, "average_price", "avg_price", "buy_price", "sell_price"
-        )
-        last_price = _extract_float(entry, "last_price", "ltp", "close", "price")
-        strike = _extract_float(entry, "strike", "strike_price", "strikePrice")
+
+        # Handle Open Positions
+        product_code = str(entry.get("product") or "MIS")
+        avg_price = _extract_float(entry, "average_price", "avg_price", "buy_price")
+        last_price = _extract_float(entry, "last_price", "ltp", "close")
+        strike = _extract_float(entry, "strike", "strike_price")
         expiry_dt = _parse_expiry(entry)
         underlying = _derive_underlying(symbol)
         option_type = _option_kind(symbol, entry)
+        
+        existing_position = position_manager.get_position(symbol)
         should_guard = symbol in missing_locally
-        cached_contract: ActiveContract | None = None
-        if underlying:
-            try:
-                cached_contract = position_manager.get_active_contract(underlying)
-            except Exception as exc:  # noqa: BLE001 - defensive
-                LOGGER.error(
-                    "state_reconcile_contract_lookup_failed",
-                    extra={
-                        "event": "state_reconcile_contract_lookup_failed",
-                        "symbol": symbol,
-                        "err": str(exc),
-                    },
-                )
-                cached_contract = None
-        try:
-            existing_position = position_manager.get_position(symbol)
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            LOGGER.error(
-                "state_reconcile_lookup_failed",
-                extra={
-                    "event": "state_reconcile_lookup_failed",
-                    "symbol": symbol,
-                    "err": str(exc),
-                },
-            )
-            continue
+
+        # A. Restore missing position
         if existing_position is None and should_guard:
             entry_price = avg_price or last_price or 0.0
             try:
@@ -5073,55 +5015,35 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     quantity=abs(net_qty),
                     entry_price=entry_price,
                 )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    "Failed to hydrate broker position %s: %s",
-                    symbol,
-                    exc,
-                    extra={"event": "state_reconcile_open_failed"},
-                )
+                LOGGER.info(f"Recovered broker position: {symbol} Qty: {net_qty}")
+            except Exception as e:
+                LOGGER.error(f"Failed to hydrate position {symbol}: {e}")
                 continue
-            LOGGER.info(
-                "Recovered broker position for %s qty=%s",
-                symbol,
-                abs(net_qty),
-                extra={
-                    "event": "state_reconcile_recovered",
-                    "symbol": symbol,
-                    "quantity": abs(net_qty),
-                },
-            )
+
+        # B. Update prices
         elif existing_position is not None and last_price > 0:
             with suppress(Exception):
                 position_manager.update_position_price(symbol, last_price)
+        
+        # C. Update Active Contract (if needed)
         if underlying:
-            needs_update = True
-            if cached_contract is not None and cached_contract.symbol == symbol:
-                needs_update = False
-            if needs_update:
-                try:
-                    position_manager.set_active_contract(
-                        underlying,
-                        ActiveContract(
-                            underlying=underlying,
-                            symbol=symbol,
-                            option_type=(
-                                option_type or ("CE" if net_qty > 0 else "PE")
-                            ),
-                            strike=strike if strike > 0 else 0.0,
-                            expiry=expiry_dt,
-                        ),
+            try:
+                cached = position_manager.get_active_contract(underlying)
+                if not cached or cached.symbol != symbol:
+                    # Reconstruct contract details
+                    from nifty_scalper_bot.execution.position_manager import ActiveContract
+                    contract = ActiveContract(
+                        underlying=underlying,
+                        symbol=symbol,
+                        option_type=option_type or ("CE" if net_qty > 0 else "PE"),
+                        strike=strike if strike > 0 else 0.0,
+                        expiry=expiry_dt
                     )
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "state_reconcile_contract_failed",
-                        extra={
-                            "event": "state_reconcile_contract_failed",
-                            "symbol": symbol,
-                            "err": str(exc),
-                        },
-                    )
-        if should_guard and order_manager is not None:
+                    position_manager.set_active_contract(underlying, contract)
+            except Exception: pass
+
+        # D. Restore Guards (StopLoss/Target)
+        if should_guard and order_manager:
             try:
                 if not order_manager.has_guard_pair(symbol):
                     order_manager.guard_existing_position(
@@ -5132,16 +5054,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         last_price=last_price if last_price > 0 else None,
                         product=product_code,
                     )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    "state_reconcile_guard_failed",
-                    extra={
-                        "event": "state_reconcile_guard_failed",
-                        "symbol": symbol,
-                        "err": str(exc),
-                    },
-                )
-
+            except Exception as e:
+                LOGGER.error(f"Guard restore failed for {symbol}: {e}")
 
 def _close_all_positions(ctx: BotContext, *, reason: str) -> None:
     position_manager = _require_component(ctx.position_manager, "position_manager")
