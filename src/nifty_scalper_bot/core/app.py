@@ -4528,16 +4528,14 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) ---
-    # This solves 'atr_trend_missing_history' by fetching data from Zerodha
-    # so the bot is ready to trade IMMEDIATELY, not 15 mins later.
+    # --- FIX: History Backfill (Hydration) - DEEP UNWRAP VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
             # 1. Identify Tokens (Nifty 50)
             nifty_token = 256265 # Default Nifty 50 Index Token
             
-            # Try to resolve dynamically if resolver has method
+            # Try to resolve dynamically
             if ctx.instrument_resolver:
                  resolve_fn = getattr(ctx.instrument_resolver, "resolve_token", getattr(ctx.instrument_resolver, "get_token", None))
                  if callable(resolve_fn):
@@ -4546,15 +4544,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Prepare for Fetch
-            from datetime import datetime, timedelta
-            # Access the raw KiteConnect object to make API calls
+            # 2. Deep Unwrap to find KiteConnect
+            # Layer 1: RobustDataProvider -> ZerodhaKiteClient
             broker = ctx.broker_client
-            # Robust way to find the 'kite' object inside wrappers
-            kite = getattr(broker, "kite", getattr(broker, "_kite", None))
+            inner_broker = getattr(broker, "broker", getattr(broker, "_broker", broker))
+            
+            # Layer 2: ZerodhaKiteClient -> KiteConnect (The object we need)
+            # Try all common attribute names
+            kite = getattr(inner_broker, "kite", getattr(inner_broker, "_kite", getattr(inner_broker, "client", None)))
             
             if kite:
-                # Fetch last 60 minutes (Enough for ATR-14 and ADX-14)
+                from datetime import datetime, timedelta
+                # Fetch last 60 minutes
                 start_dt = datetime.now() - timedelta(minutes=60)
                 end_dt = datetime.now()
                 
@@ -4565,17 +4566,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                     kite.historical_data, nifty_token, start_dt, end_dt, "minute"
                 )
                 
+                if not records:
+                    LOGGER.warning("⚠️ History fetch returned 0 records.")
+                    return
+
                 # 3. Feed into Indicator Engine
-                # This simulates the bot having watched the market for the last hour
                 mgr = ctx.market_regime_manager
                 if mgr and mgr.indicators:
                     engine = mgr.indicators
-                    # Get the symbol name the engine expects (usually "NIFTY" or "NSE:NIFTY 50")
                     symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
                     
                     count = 0
                     for candle in records:
-                        # Feed the candle. Supports 'update_candle' or 'update' methods.
                         if hasattr(engine, "update_candle"):
                              engine.update_candle(symbol_key, candle)
                              count += 1
@@ -4588,14 +4590,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                     # Force a regime refresh NOW
                     await mgr.refresh_from_indicators()
             else:
-                LOGGER.warning("⚠️ Could not access Kite Object for Backfill.")
+                LOGGER.warning("⚠️ Could not access Kite Object. Unwrapping failed.")
 
         except Exception as e:
-            LOGGER.error(f"⚠️ History Backfill Failed: {e}")
-            
-    # Execute the backfill BEFORE strategies start
-    if broker_ready:
-        await _warm_indicators_with_history()
+            LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
     # -----------------------------------------------------
 
     def _start_order_monitoring() -> None:
