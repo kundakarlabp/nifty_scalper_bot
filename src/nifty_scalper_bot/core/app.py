@@ -4528,7 +4528,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - TARGETED LOOKUP VERSION ---
+   # --- FIX: History Backfill (Hydration) - DEEP SCAN VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
@@ -4544,35 +4544,44 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Targeted Unwrap to find KiteConnect
-            # We explicitly check the known structural paths of your bot framework
-            # Path: RobustDataProvider -> ZerodhaKiteClient -> KiteConnect
-            broker = ctx.broker_client
+            # 2. Nuclear Object Scanner (Find KiteConnect anywhere)
+            # This scans the broker object's memory graph to find the API client
+            # regardless of what variable name it is stored under.
             kite = None
+            queue = [ctx.broker_client]
+            seen_ids = {id(ctx.broker_client)}
             
-            # List of possible paths to the raw KiteConnect object
-            # We check these in order of likelihood
-            potential_paths = [
-                lambda: broker.kite,                   # Direct access
-                lambda: broker._kite,                  # Protected access
-                lambda: broker.client.kite,            # Wrapped in RobustProvider
-                lambda: broker.client._kite,           # Wrapped + Protected
-                lambda: broker._broker.kite,           # Alt Wrapper
-                lambda: broker._broker._kite,          # Alt Wrapper + Protected
-                lambda: broker.broker.kite,            # Legacy Wrapper
-                lambda: broker.broker._kite            # Legacy Wrapper + Protected
-            ]
-
-            for path in potential_paths:
-                try:
-                    candidate = path()
-                    # Verify it's the real deal by checking for the historical_data method
-                    if hasattr(candidate, "historical_data"):
-                        kite = candidate
-                        LOGGER.info(f"✅ Found KiteConnect object via path lookup.")
-                        break
-                except Exception:
-                    continue
+            LOGGER.info("🔍 Scanning broker object graph for KiteConnect...")
+            
+            while queue:
+                curr = queue.pop(0)
+                
+                # Check if this object IS the Kite client (Duck Typing)
+                # KiteConnect must have 'historical_data' and 'place_order' methods
+                if hasattr(curr, "historical_data") and hasattr(curr, "place_order"):
+                    kite = curr
+                    LOGGER.info(f"✅ Found KiteConnect object: {type(curr).__name__}")
+                    break
+                
+                # If not, add its attributes to the search queue
+                # We look for standard wrapper names first, then everything else
+                priority_attrs = ["kite", "_kite", "client", "_client", "broker", "_broker", "api", "_api", "wrapped", "_wrapped"]
+                
+                # 1. Check priority attributes first
+                for attr in priority_attrs:
+                    try:
+                        val = getattr(curr, attr, None)
+                        if val and id(val) not in seen_ids:
+                            seen_ids.add(id(val))
+                            queue.append(val)
+                    except Exception: pass
+                
+                # 2. If we are at the root level, check __dict__ for hidden attributes
+                if curr == ctx.broker_client and hasattr(curr, "__dict__"):
+                    for key, val in vars(curr).items():
+                        if val and id(val) not in seen_ids and not key.startswith("__"):
+                            seen_ids.add(id(val))
+                            queue.append(val)
 
             if kite:
                 from datetime import datetime, timedelta
@@ -4583,9 +4592,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info(f"🌊 Fetching history for Token {nifty_token}...")
                 
                 # Fetch NIFTY minute candles (Runs in thread to not block bot)
-                records = await asyncio.to_thread(
-                    kite.historical_data, nifty_token, start_dt, end_dt, "minute"
-                )
+                # We wrap this in a try/except block specific to the API call
+                try:
+                    records = await asyncio.to_thread(
+                        kite.historical_data, nifty_token, start_dt, end_dt, "minute"
+                    )
+                except Exception as api_err:
+                    LOGGER.error(f"⚠️ API Error during fetch: {api_err}")
+                    records = []
                 
                 if not records:
                     LOGGER.warning("⚠️ History fetch returned 0 records.")
@@ -4595,7 +4609,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 mgr = ctx.market_regime_manager
                 if mgr and mgr.indicators:
                     engine = mgr.indicators
-                    # Ensure we use the EXACT symbol the manager is tracking (usually "NIFTY")
+                    # Ensure we use the EXACT symbol the manager is tracking
                     symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
                     if not symbol_key: symbol_key = "NIFTY"
                     
@@ -4605,17 +4619,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ts = candle.get("date")
                         vol = candle.get("volume", 0)
                         
-                        # ✅ CRITICAL FIX: Use 'update_price'
-                        # We pass the whole candle dict as 'price' because IndicatorEngine handles OHLC mapping
+                        # Use 'update_price' (Correct method for IndicatorEngine)
                         engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
                         count += 1
                     
                     LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
                     
-                    # Force a regime refresh NOW to clear 'Missing History' warnings immediately
+                    # Force a regime refresh NOW
                     await mgr.refresh_from_indicators()
             else:
-                LOGGER.warning("⚠️ Could not access Kite Object. Manual Unwrap failed.")
+                LOGGER.warning("⚠️ Could not access Kite Object. Deep scan failed.")
 
         except Exception as e:
             LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
