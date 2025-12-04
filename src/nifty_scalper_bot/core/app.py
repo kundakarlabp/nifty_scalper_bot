@@ -4528,7 +4528,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - ROBUST PRODUCTION VERSION ---
+    # --- FIX: History Backfill (Hydration) - FINAL PRODUCTION VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
@@ -4544,12 +4544,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Deep Unwrap to find KiteConnect (Traverse wrappers)
-            # We look through layers of 'broker', '_broker', or 'client' to find the raw Kite object
+            # 2. Deep Unwrap to find KiteConnect (Traverse wrappers like RobustDataProvider)
             broker_obj = ctx.broker_client
             kite = None
             
-            # Search depth-first for the 'historical_data' method
+            # Search layers for the raw 'kite' object
             candidates = [broker_obj]
             seen = set()
             while candidates:
@@ -4557,19 +4556,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if id(curr) in seen: continue
                 seen.add(id(curr))
                 
-                # Check if this object is the Kite client
                 if hasattr(curr, "historical_data"):
                     kite = curr
                     break
                 
-                # Add children to search
                 for attr in ["broker", "_broker", "client", "_client", "kite", "_kite"]:
                     child = getattr(curr, attr, None)
                     if child: candidates.append(child)
 
             if kite:
                 from datetime import datetime, timedelta
-                # Fetch last 120 minutes (Safe buffer for Volatility Index/ATR)
+                # Fetch last 120 minutes (Safe buffer for Volatility/ATR calculations)
                 start_dt = datetime.now() - timedelta(minutes=120)
                 end_dt = datetime.now()
                 
@@ -4588,29 +4585,34 @@ async def startup_sequence(ctx: BotContext) -> None:
                 mgr = ctx.market_regime_manager
                 if mgr and mgr.indicators:
                     engine = mgr.indicators
-                    # Ensure we use the EXACT symbol the manager is tracking
+                    # Ensure we use the EXACT symbol the manager is tracking (usually "NIFTY")
                     symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
+                    if not symbol_key: symbol_key = "NIFTY"
                     
                     count = 0
                     for candle in records:
-                        # Kite format: {'date': dt, 'open': 100, 'high': 110... 'volume': 500}
+                        # Kite Candle Format: {'date': dt, 'open': 100, 'high': 110, ... 'volume': 500}
                         ts = candle.get("date")
                         vol = candle.get("volume", 0)
                         
-                        # ✅ CRITICAL FIX: Use 'update_price' (correct method name)
-                        # We pass the whole candle dict as 'price'; IndicatorEngine handles OHLC mapping automatically
+                        # ✅ CRITICAL FIX: Use 'update_price' (The actual method in indicators.py)
+                        # We pass the whole candle dict as 'price' because IndicatorEngine handles dicts
                         engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
                         count += 1
                     
                     LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
                     
-                    # Force a regime refresh NOW to clear 'Missing History' warnings
+                    # Force a regime refresh NOW to clear 'Missing History' warnings immediately
                     await mgr.refresh_from_indicators()
             else:
                 LOGGER.warning("⚠️ Could not access Kite Object. Unwrapping failed.")
 
         except Exception as e:
             LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
+    
+    # Execute the backfill BEFORE strategies start
+    if broker_ready:
+        await _warm_indicators_with_history()
     # -----------------------------------------------------
 
     def _start_order_monitoring() -> None:
