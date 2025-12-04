@@ -4528,14 +4528,14 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - CORRECTED METHOD NAME ---
+    # --- FIX: History Backfill (Hydration) - ROBUST PRODUCTION VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
             # 1. Identify Tokens (Nifty 50)
             nifty_token = 256265 # Default Nifty 50 Index Token
             
-            # Try to resolve dynamically
+            # Dynamic Token Resolution
             if ctx.instrument_resolver:
                  resolve_fn = getattr(ctx.instrument_resolver, "resolve_token", getattr(ctx.instrument_resolver, "get_token", None))
                  if callable(resolve_fn):
@@ -4544,14 +4544,32 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Deep Unwrap to find KiteConnect
-            broker = ctx.broker_client
-            inner_broker = getattr(broker, "broker", getattr(broker, "_broker", broker))
-            kite = getattr(inner_broker, "kite", getattr(inner_broker, "_kite", getattr(inner_broker, "client", None)))
+            # 2. Deep Unwrap to find KiteConnect (Traverse wrappers)
+            # We look through layers of 'broker', '_broker', or 'client' to find the raw Kite object
+            broker_obj = ctx.broker_client
+            kite = None
             
+            # Search depth-first for the 'historical_data' method
+            candidates = [broker_obj]
+            seen = set()
+            while candidates:
+                curr = candidates.pop(0)
+                if id(curr) in seen: continue
+                seen.add(id(curr))
+                
+                # Check if this object is the Kite client
+                if hasattr(curr, "historical_data"):
+                    kite = curr
+                    break
+                
+                # Add children to search
+                for attr in ["broker", "_broker", "client", "_client", "kite", "_kite"]:
+                    child = getattr(curr, attr, None)
+                    if child: candidates.append(child)
+
             if kite:
                 from datetime import datetime, timedelta
-                # Fetch last 120 minutes (Safe buffer for Volatility Index)
+                # Fetch last 120 minutes (Safe buffer for Volatility Index/ATR)
                 start_dt = datetime.now() - timedelta(minutes=120)
                 end_dt = datetime.now()
                 
@@ -4579,14 +4597,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ts = candle.get("date")
                         vol = candle.get("volume", 0)
                         
-                        # ✅ FIX: Use 'update_price' (not update_candle)
-                        # We pass the whole candle dict as 'price' because IndicatorEngine handles OHLC dicts
+                        # ✅ CRITICAL FIX: Use 'update_price' (correct method name)
+                        # We pass the whole candle dict as 'price'; IndicatorEngine handles OHLC mapping automatically
                         engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
                         count += 1
                     
                     LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
                     
-                    # Force a regime refresh NOW
+                    # Force a regime refresh NOW to clear 'Missing History' warnings
                     await mgr.refresh_from_indicators()
             else:
                 LOGGER.warning("⚠️ Could not access Kite Object. Unwrapping failed.")
