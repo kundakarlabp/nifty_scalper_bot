@@ -4528,7 +4528,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - DEEP UNWRAP VERSION ---
+    # --- FIX: History Backfill (Hydration) - CORRECTED METHOD NAME ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
@@ -4545,23 +4545,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                      except: pass
 
             # 2. Deep Unwrap to find KiteConnect
-            # Layer 1: RobustDataProvider -> ZerodhaKiteClient
             broker = ctx.broker_client
             inner_broker = getattr(broker, "broker", getattr(broker, "_broker", broker))
-            
-            # Layer 2: ZerodhaKiteClient -> KiteConnect (The object we need)
-            # Try all common attribute names
             kite = getattr(inner_broker, "kite", getattr(inner_broker, "_kite", getattr(inner_broker, "client", None)))
             
             if kite:
                 from datetime import datetime, timedelta
-                # Fetch last 60 minutes
-                start_dt = datetime.now() - timedelta(minutes=60)
+                # Fetch last 120 minutes (Safe buffer for Volatility Index)
+                start_dt = datetime.now() - timedelta(minutes=120)
                 end_dt = datetime.now()
                 
                 LOGGER.info(f"🌊 Fetching history for Token {nifty_token}...")
                 
-                # Fetch NIFTY minute candles (Runs in thread to not block bot)
+                # Fetch NIFTY minute candles
                 records = await asyncio.to_thread(
                     kite.historical_data, nifty_token, start_dt, end_dt, "minute"
                 )
@@ -4574,16 +4570,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                 mgr = ctx.market_regime_manager
                 if mgr and mgr.indicators:
                     engine = mgr.indicators
+                    # Ensure we use the EXACT symbol the manager is tracking
                     symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
                     
                     count = 0
                     for candle in records:
-                        if hasattr(engine, "update_candle"):
-                             engine.update_candle(symbol_key, candle)
-                             count += 1
-                        elif hasattr(engine, "update"):
-                             engine.update(symbol_key, candle)
-                             count += 1
+                        # Kite format: {'date': dt, 'open': 100, 'high': 110... 'volume': 500}
+                        ts = candle.get("date")
+                        vol = candle.get("volume", 0)
+                        
+                        # ✅ FIX: Use 'update_price' (not update_candle)
+                        # We pass the whole candle dict as 'price' because IndicatorEngine handles OHLC dicts
+                        engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
+                        count += 1
                     
                     LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
                     
