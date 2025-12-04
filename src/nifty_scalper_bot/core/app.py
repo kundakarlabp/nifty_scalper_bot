@@ -4528,7 +4528,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-    # --- FIX: History Backfill (Hydration) - DYNAMIC DISCOVERY VERSION ---
+    # --- FIX: History Backfill (Hydration) - TARGETED LOOKUP VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
@@ -4544,47 +4544,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                          if t: nifty_token = t
                      except: pass
 
-            # 2. Robust Unwrap to find KiteConnect
-            # We scan the broker object to find the actual API client that has 'historical_data'
+            # 2. Targeted Unwrap to find KiteConnect
+            # We explicitly check the known structural paths of your bot framework
+            # Path: RobustDataProvider -> ZerodhaKiteClient -> KiteConnect
+            broker = ctx.broker_client
             kite = None
             
-            # Start with the top-level broker client
-            candidates = [ctx.broker_client]
-            
-            # Attempt to unwrap RobustDataProvider first (it stores client in .client or ._broker)
-            if hasattr(ctx.broker_client, "client"):
-                candidates.append(ctx.broker_client.client)
-            if hasattr(ctx.broker_client, "_broker"):
-                candidates.append(ctx.broker_client._broker)
+            # List of possible paths to the raw KiteConnect object
+            # We check these in order of likelihood
+            potential_paths = [
+                lambda: broker.kite,                   # Direct access
+                lambda: broker._kite,                  # Protected access
+                lambda: broker.client.kite,            # Wrapped in RobustProvider
+                lambda: broker.client._kite,           # Wrapped + Protected
+                lambda: broker._broker.kite,           # Alt Wrapper
+                lambda: broker._broker._kite,          # Alt Wrapper + Protected
+                lambda: broker.broker.kite,            # Legacy Wrapper
+                lambda: broker.broker._kite            # Legacy Wrapper + Protected
+            ]
 
-            # Scan candidates and their attributes
-            seen = set()
-            for obj in candidates:
-                if id(obj) in seen: continue
-                seen.add(id(obj))
-                
-                # Is this object the Kite client?
-                if hasattr(obj, "historical_data") and callable(getattr(obj, "historical_data")):
-                    kite = obj
-                    break
-                
-                # If not, scan its attributes (e.g. obj.kite, obj._kite)
-                for attr_name in dir(obj):
-                    if attr_name.startswith("__"): continue
-                    try:
-                        val = getattr(obj, attr_name)
-                        # Check if this attribute is the Kite client
-                        if hasattr(val, "historical_data") and callable(getattr(val, "historical_data")):
-                            kite = val
-                            LOGGER.info(f"✅ Found KiteConnect object in attribute: '{attr_name}'")
-                            break
-                    except Exception:
-                        pass
-                if kite: break
+            for path in potential_paths:
+                try:
+                    candidate = path()
+                    # Verify it's the real deal by checking for the historical_data method
+                    if hasattr(candidate, "historical_data"):
+                        kite = candidate
+                        LOGGER.info(f"✅ Found KiteConnect object via path lookup.")
+                        break
+                except Exception:
+                    continue
 
             if kite:
                 from datetime import datetime, timedelta
-                # Fetch last 120 minutes (Safe buffer for Volatility/ATR)
+                # Fetch last 120 minutes (Safe buffer for Volatility/ATR calculations)
                 start_dt = datetime.now() - timedelta(minutes=120)
                 end_dt = datetime.now()
                 
@@ -4613,17 +4605,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ts = candle.get("date")
                         vol = candle.get("volume", 0)
                         
-                        # ✅ FIX: Use 'update_price' (matches indicators.py)
-                        # We pass the whole candle dict as 'price'; IndicatorEngine handles OHLC dicts
+                        # ✅ CRITICAL FIX: Use 'update_price'
+                        # We pass the whole candle dict as 'price' because IndicatorEngine handles OHLC mapping
                         engine.update_price(symbol_key, candle, volume=vol, timestamp=ts)
                         count += 1
                     
                     LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
                     
-                    # Force a regime refresh NOW to clear 'Missing History' warnings
+                    # Force a regime refresh NOW to clear 'Missing History' warnings immediately
                     await mgr.refresh_from_indicators()
             else:
-                LOGGER.warning("⚠️ Could not find Kite Object via dynamic scan. Backfill skipped.")
+                LOGGER.warning("⚠️ Could not access Kite Object. Manual Unwrap failed.")
 
         except Exception as e:
             LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
@@ -4631,6 +4623,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     # Execute the backfill BEFORE strategies start
     if broker_ready:
         await _warm_indicators_with_history()
+    # -----------------------------------------------------
     # -----------------------------------------------------
 
     def _start_order_monitoring() -> None:
