@@ -11,36 +11,27 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
+from nifty_scalper_bot.utils.logging import get_logger
 
+LOGGER = get_logger(__name__)
 
 class VWAPProStrategy(EliteStrategy):
     """
     VWAP Pro: An institutional-grade intraday strategy.
     
     Logic:
-    1. Regime Filter: Only trades in 'TRENDING' or 'VOLATILE' markets (handled by manager).
+    1. Regime Filter: Trades in 'TRENDING' or 'VOLATILE' markets.
     2. Trend Filter: Longs only above EMA. Shorts only below EMA.
     3. Trigger: Price crosses/reverts to VWAP with volume confirmation.
     """
 
     def __init__(self, config: VWAPProStrategyConfig) -> None:
-        """Initialise strategy with configuration.
-
-        Args:
-            config: Strategy configuration dataclass.
-
-        Returns:
-            None.
-        """
+        """Initialise strategy with configuration."""
         super().__init__(name="VWAP Pro", config=config)
         self._vwap_config = config
-        self._last_state: dict[str, str] = {}  # Track state for crossover detection
 
     def get_required_indicators(self) -> list[str]:
-        """Return indicator keys required for VWAP evaluation.
-        
-        We request 'ema' (standard 20-period) as a trend proxy.
-        """
+        """Return indicator keys required for VWAP evaluation."""
         return [
             "vwap",
             "ema",
@@ -57,23 +48,14 @@ class VWAPProStrategy(EliteStrategy):
         current_price: float,
         position: Any | None,
     ) -> EliteSignal | None:
-        """Generate signal when price interacts with VWAP in direction of trend.
-
-        Args:
-            symbol: Trading symbol evaluated.
-            indicators: Indicator snapshot for symbol.
-            current_price: Latest traded price.
-            position: Existing open position when present.
-
-        Returns:
-            EliteSignal | None: Signal when setup detected else ``None``.
-        """
+        """Generate signal when price interacts with VWAP in direction of trend."""
 
         self._logger.debug(
             "Entered VWAPProStrategy._evaluate_signal",
             extra={"event": "vwap_pro_evaluate", "symbol": symbol},
         )
         try:
+            # 1. Extract & Validate Indicators
             vwap = float(indicators.get("vwap") or 0.0)
             ema = float(indicators.get("ema") or 0.0)
             atr = float(indicators.get("atr") or 0.0)
@@ -81,75 +63,63 @@ class VWAPProStrategy(EliteStrategy):
             avg_volume = float(indicators.get("avg_volume") or 0.0)
             rsi = float(indicators.get("rsi") or 50.0)
 
-            # Data validation
             if vwap <= 0 or ema <= 0 or atr <= 0:
                 return None
 
-            # 1. Volume Filter
-            # We need volume to be somewhat relevant (e.g., > 80% of avg) to avoid ghost moves
-            if avg_volume > 0 and volume < (avg_volume * 0.8):
+            # 2. Volume Filter: Ignore moves with very low volume
+            if avg_volume > 0 and volume < (avg_volume * 0.6):
                 return None
 
-            # 2. Determine Trend Bias using EMA
-            # Price > EMA => Bullish Bias
-            # Price < EMA => Bearish Bias
+            # 3. Determine Trend Bias (EMA Filter)
+            # Price > EMA => Bullish Bias | Price < EMA => Bearish Bias
             trend_bias = "BULLISH" if current_price > ema else "BEARISH"
 
-            # 3. Detect VWAP Interaction
-            # We look for price being close to VWAP (Mean Reversion Entry)
+            # 4. Detect VWAP Interaction (Mean Reversion / Pullback)
+            # Price must be within 0.5 ATR of VWAP to be considered a valid interaction
             dist_to_vwap = current_price - vwap
-            dist_ratio = abs(dist_to_vwap) / atr
-
-            # Threshold: Price must be within 0.5 ATR of VWAP to consider it a "test" or "cross"
-            # If it's too far, we missed the move.
-            is_near_vwap = dist_ratio < 0.5
+            is_near_vwap = abs(dist_to_vwap) < (atr * 0.5)
 
             side = ""
             if trend_bias == "BULLISH" and is_near_vwap:
-                # Long Condition: Uptrend + Pullback to VWAP or Crossing Up
-                # RSI check to ensure momentum isn't dead but not overbought
+                # Buy Condition: Uptrend + Pullback to VWAP + RSI not overbought
                 if 40 <= rsi <= 65:
                     side = "BUY"
             
             elif trend_bias == "BEARISH" and is_near_vwap:
-                # Short Condition: Downtrend + Rally to VWAP or Crossing Down
+                # Sell Condition: Downtrend + Rally to VWAP + RSI not oversold
                 if 35 <= rsi <= 60:
                     side = "SELL"
 
             if not side:
                 return None
 
-            # 4. Filter out if we already have a position in this direction
+            # 5. Position Filter: Don't signal if already in that position
             if position and getattr(position, "side", "").upper() == (
                 "LONG" if side == "BUY" else "SHORT"
             ):
                 return None
 
-            # 5. Calculate Confidence & Targets
-            # Higher volume spike = Higher confidence
+            # 6. Signal Construction
+            # Calculate Confidence based on Volume Spike
             vol_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
-            
             confidence = self._vwap_config.min_confidence
-            confidence += min(15.0, (vol_ratio - 1.0) * 10.0) # Bonus for volume
+            confidence += min(15.0, (vol_ratio - 1.0) * 10.0)
             
-            # Risk Management
-            # Stop Loss: On the other side of VWAP + buffer
-            # Target: Trend continuation
+            # Smart Stops & Targets
             stop_buffer = atr * 0.5 
             
             if side == "BUY":
-                stop_loss = vwap - stop_buffer
-                # If price is already below VWAP (failed break), enter cautiously or use tighter stop
-                if current_price < vwap:
-                     stop_loss = current_price - stop_buffer
+                # Stop below VWAP or current price (whichever is safer/lower)
+                anchor = min(vwap, current_price)
+                stop_loss = anchor - stop_buffer
                 
                 risk = current_price - stop_loss
                 tp1 = current_price + (risk * 2.0)
                 tp2 = current_price + (risk * 3.0)
             else:
-                stop_loss = vwap + stop_buffer
-                if current_price > vwap:
-                    stop_loss = current_price + stop_buffer
+                # Stop above VWAP or current price
+                anchor = max(vwap, current_price)
+                stop_loss = anchor + stop_buffer
 
                 risk = stop_loss - current_price
                 tp1 = current_price - (risk * 2.0)
@@ -162,7 +132,6 @@ class VWAPProStrategy(EliteStrategy):
                     "symbol": symbol,
                     "side": side,
                     "confidence": confidence,
-                    "dist_to_vwap": dist_to_vwap,
                     "trend": trend_bias
                 },
             )
@@ -186,7 +155,7 @@ class VWAPProStrategy(EliteStrategy):
                 },
             )
 
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._logger.error(
                 "Failure in VWAPProStrategy._evaluate_signal: %s",
                 exc,
