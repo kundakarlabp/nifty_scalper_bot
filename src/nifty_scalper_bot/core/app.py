@@ -4528,94 +4528,74 @@ async def startup_sequence(ctx: BotContext) -> None:
         loop.create_task(_regime_refresh_loop())
         LOGGER.info("✅ Regime Refresh Task Started")
     # --------------------------------------
-   # --- FIX: History Backfill (Hydration) - PROXY DELEGATION VERSION ---
+   # --- FIX: History Backfill (Hydration) - FINAL PRODUCTION VERSION ---
     async def _warm_indicators_with_history():
         LOGGER.info("⏳ Starting History Backfill (Hydration)...")
         try:
-            # 1. Identify Symbol
-            # The custom client requires the full exchange symbol to resolve the token internally
+            # 1. Setup
             nifty_symbol = "NSE:NIFTY 50"
-            
-            # 2. Use the Broker Client Directly
-            # RobustDataProvider automatically delegates 'get_ohlc' to ZerodhaKiteClient
             broker = ctx.broker_client
             
-            # 3. Prepare Dates (ZerodhaKiteClient expects strings)
+            # 2. Validation: Ensure the client supports get_ohlc
+            if not hasattr(broker, "get_ohlc"):
+                LOGGER.warning("⚠️ Broker client missing 'get_ohlc'. Backfill skipped.")
+                return
+
+            # 3. Fetch Data (2 Hours History)
             from datetime import datetime, timedelta
             end_dt = datetime.now()
-            start_dt = end_dt - timedelta(minutes=120) # 2 hours of history
+            start_dt = end_dt - timedelta(minutes=120)
             
+            # Date strings for ZerodhaKiteClient
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             
             LOGGER.info(f"🌊 Fetching history for {nifty_symbol}...")
-
-            # 4. Fetch Data (Safe Execution)
-            # We check if the method exists to avoid crashing if the client interface changes
-            fetch_method = getattr(broker, "get_ohlc", None)
             
-            if not callable(fetch_method):
-                LOGGER.warning("⚠️ Broker client missing 'get_ohlc'. Backfill skipped.")
-                return
-
-            # Run blocking I/O in a thread
+            # 4. Execute Call (Delegated to ZerodhaKiteClient)
             records = await asyncio.to_thread(
-                fetch_method, nifty_symbol, "minute", from_str, to_str
+                broker.get_ohlc, nifty_symbol, "minute", from_str, to_str
             )
             
             if not records:
                 LOGGER.warning("⚠️ History fetch returned 0 records.")
                 return
 
-            # 5. Feed into Indicator Engine
+            # 5. Inject into Engine
             mgr = ctx.market_regime_manager
             if mgr and mgr.indicators:
                 engine = mgr.indicators
-                # Ensure we use the EXACT symbol key the manager is tracking
                 symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
                 if not symbol_key: symbol_key = "NIFTY"
                 
                 count = 0
                 for candle in records:
-                    # Handle potential differences in candle format (dict vs list)
-                    # ZerodhaKiteClient.get_ohlc typically returns a list of dicts
-                    ts = None
-                    vol = 0
-                    ohlc = {}
-                    
+                    # Handle List format (common in Kite) or Dict format
                     if isinstance(candle, dict):
-                        ts = candle.get("date")
-                        ohlc = candle # Dict has 'open', 'high', 'low', 'close'
+                        ohlc = candle
                         vol = candle.get("volume", 0)
+                        ts = candle.get("date")
                     elif isinstance(candle, list) and len(candle) >= 6:
-                        ts = candle[0]
-                        ohlc = {
-                            "open": candle[1], "high": candle[2], 
-                            "low": candle[3], "close": candle[4]
-                        }
-                        vol = candle[5]
+                        ts, o, h, l, c, vol = candle[:6]
+                        ohlc = {"open": o, "high": h, "low": l, "close": c}
                     else:
                         continue
-
-                    # Parse timestamp if it's a string
+                        
+                    # Parse String Timestamp
                     if isinstance(ts, str):
-                        try:
-                             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         except: pass
 
-                    # Feed to engine using the correct method 'update_price'
                     engine.update_price(symbol_key, ohlc, volume=vol, timestamp=ts)
                     count += 1
                 
                 LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
-                
-                # Force a regime refresh NOW to clear 'Missing History' warnings
                 await mgr.refresh_from_indicators()
 
         except Exception as e:
             LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
-            
-    # Execute the backfill BEFORE strategies start
+
+    # Run Backfill BEFORE starting strategies
     if broker_ready:
         await _warm_indicators_with_history()
     # -----------------------------------------------------
