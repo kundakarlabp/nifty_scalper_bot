@@ -4638,6 +4638,50 @@ async def startup_sequence(ctx: BotContext) -> None:
     loop = asyncio.get_running_loop()
     loop.create_task(_fast_sync_loop())
     # -----------------------------------------------------
+    # --- FIX: Futures Data Subscription (For Volume Calculation Only) ---
+    # We subscribe to Nifty Futures so the Orchestrator can calculate volume ratios.
+    # Actual trading of Futures is blocked by the Broker Client (Safe).
+    try:
+        from datetime import datetime
+        now = datetime.now()
+        # 1. Construct current month futures symbol (e.g., NFO:NIFTY25DECFUT)
+        y_str = now.strftime("%y")
+        m_str = now.strftime("%b").upper()
+        future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
+        
+        # 2. Resolve Token
+        token = None
+        if ctx.instrument_resolver:
+            token = ctx.instrument_resolver.resolve(future_symbol)
+        
+        if token:
+            LOGGER.info(f"✅ Futures Data Source: {future_symbol} (Token: {token})")
+            
+            # 3. Add to Runner (Builds Bars/Volume History)
+            if ctx.strategy_runner:
+                ctx.strategy_runner.add_symbol(future_symbol)
+                LOGGER.info(f"📡 Subscribed to {future_symbol} for calculation.")
+
+            # 4. Link to Orchestrator (Enables Volume Checks)
+            # The Orchestrator needs to know WHICH symbol is the 'Future' to read volume from.
+            # We update the StrategyManager's reference first (if it exists)
+            if ctx.strategy_manager:
+                # Some versions might store it here, good to update if present
+                if hasattr(ctx.strategy_manager, "_futures_symbol"):
+                    ctx.strategy_manager._futures_symbol = future_symbol
+
+            # Update the Orchestrator directly
+            orchestrator = getattr(ctx.strategy_manager, "orchestrator", None)
+            if orchestrator:
+                orchestrator._futures_symbol = future_symbol
+                LOGGER.info(f"🔗 Orchestrator linked to {future_symbol}")
+                
+        else:
+            LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}. Volume checks may fail.")
+
+    except Exception as e:
+        LOGGER.error(f"⚠️ Futures Setup Failed: {e}")
+    # --------------------------------------------------------------------
     # -----------------------------------------------------
 
     def _start_order_monitoring() -> None:
