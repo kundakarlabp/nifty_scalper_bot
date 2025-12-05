@@ -4937,7 +4937,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
         return
 
     # 2. SYNC ORDERS (Non-Blocking Thread)
-    # Define order_manager here to be used throughout the function [FIX for NameError]
+    # Fix: Define 'order_manager' here so it is available for the rest of the function
     order_manager = ctx.order_manager
     if order_manager:
         try:
