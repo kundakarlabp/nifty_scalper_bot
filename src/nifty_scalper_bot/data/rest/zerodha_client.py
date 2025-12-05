@@ -464,16 +464,25 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return cast(list[dict[str, Any]], data)
 
     # --- REPLACE THE EXISTING place_order WITH THIS ---
+    # --- REPLACEMENT FOR place_order ---
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Place order with Tagging for Idempotency (Ghost Order Protection)."""
+        """
+        Place order with Robust Idempotency (Ghost Order Protection).
+        Handles Zerodha's 20-char tag limit automatically.
+        """
         params = self._build_kite_params(payload)
         variety = payload.get("variety", "regular")
         
-        # 1. Ensure every order has a unique tag for tracking
-        if "tag" not in params:
-            import uuid
-            # Generate short unique tag (max 20 chars for Zerodha)
-            params["tag"] = f"bot_{uuid.uuid4().hex[:8]}"
+        # 1. Generate Safe Unique Tag
+        # Zerodha Limit: 20 chars. We need 8 chars for UUID.
+        # Allowed for prefix: 11 chars + 1 underscore.
+        import uuid
+        unique_id = uuid.uuid4().hex[:8]
+        
+        raw_tag = str(params.get("tag") or "bot").strip()
+        # Truncate existing tag to 11 chars to make room for unique ID
+        safe_prefix = raw_tag[:11] 
+        params["tag"] = f"{safe_prefix}_{unique_id}"
 
         self._acquire_bucket(self._ORDER_BUCKET)
         
@@ -498,25 +507,27 @@ class ZerodhaKiteClient(BaseBrokerClient):
             
         except (TimeoutError, httpx.TimeoutException, httpx.ReadTimeout):
             # 3. Handle Timeout (Ghost Order Check)
-            LOGGER.warning(f"⚠️ Order placement timed out. Checking for ghost order: {params['tag']}")
+            LOGGER.warning(f"⚠️ Order placement timed out. Scanning for tag: {params['tag']}")
             
-            # Scan order book for this specific tag
+            # Scan order book for this specific unique tag
             try:
-                all_orders = self.get_orders()
-                for order in all_orders:
-                    if order.get("tag") == params["tag"]:
-                        LOGGER.info(f"✅ Found ghost order {order['order_id']} after timeout.")
-                        return {
-                            "order_id": order["order_id"],
-                            "status": order["status"],
-                            "message": "Recovered from timeout",
-                            "tag": params["tag"]
-                        }
+                # Ensure get_orders exists (added in previous steps)
+                if hasattr(self, "get_orders"):
+                    all_orders = self.get_orders()
+                    for order in all_orders:
+                        if order.get("tag") == params["tag"]:
+                            LOGGER.info(f"✅ Found ghost order {order['order_id']} after timeout.")
+                            return {
+                                "order_id": order["order_id"],
+                                "status": order["status"],
+                                "message": "Recovered from timeout",
+                                "tag": params["tag"]
+                            }
             except Exception as e:
                 LOGGER.error(f"Failed to scan for ghost order: {e}")
             
-            # If we really can't find it, re-raise exception (it truly failed)
-            raise OrderPlacementError("Order timed out and status is unknown.")
+            # If not found, re-raise (It really failed)
+            raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {params['tag']}")
 
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
