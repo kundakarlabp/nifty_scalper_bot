@@ -2269,7 +2269,16 @@ class MarketDataManager:
             pass
         for callback in callbacks:
             try:
-                callback(dict(tick))
+                # FIX: Handle async callbacks (DataHub) and sync callbacks (Legacy)
+                if asyncio.iscoroutinefunction(callback):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(callback(dict(tick)))
+                    except RuntimeError:
+                        # Fallback if no loop is running in this thread
+                        asyncio.run(callback(dict(tick)))
+                else:
+                    callback(dict(tick))
             except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "Tick callback failed",
