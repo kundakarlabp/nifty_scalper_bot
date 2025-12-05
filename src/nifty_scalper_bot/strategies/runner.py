@@ -590,9 +590,9 @@ class StrategyRunner:
         
         if not self._running or self._trading_paused:
             return
-
+        signals = []
         try:
-            await asyncio.to_thread(self._evaluate_strategies_synchronously, tick)
+            signals = await asyncio.to_thread(self._evaluate_strategies_synchronously, tick)
         except Exception as exc:
             LOGGER.error(f"Error in strategy evaluation thread: {exc}", exc_info=True)
 
