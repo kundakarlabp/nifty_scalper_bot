@@ -4512,21 +4512,33 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     # --- FIX: Start Regime Refresh Task ---
     async def _regime_refresh_loop():
-        """Periodically refresh market regime from indicators."""
+        """Periodically refresh market regime from indicators (Smart Mode)."""
         mgr = ctx.market_regime_manager
         while True:
             try:
                 if mgr:
+                    # 1. Standard Refresh
                     await mgr.refresh_from_indicators()
+                    
+                    # 2. Liveness Check
+                    # If the regime is "unknown" or "stale", try to force a recalculation
+                    current = mgr.get_current_regime()
+                    if current in ("UNKNOWN", "STALE"):
+                        LOGGER.info("⚠️ Regime is STALE/UNKNOWN. Forcing deep refresh...")
+                        # Force pull latest candle from DataHub to update indicators
+                        symbol = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
+                        if ctx.data_hub:
+                            tick = ctx.data_hub.get_latest_tick(symbol)
+                            if tick:
+                                # Re-inject tick to wake up the engine
+                                mgr.indicators.update_price(symbol, tick.get("ltp"), timestamp=datetime.now())
+                                await mgr.refresh_from_indicators()
+
             except Exception as e:
                 LOGGER.error(f"Regime refresh failed: {e}")
-            # Run every 60 seconds (aligns with candle closing)
-            await asyncio.sleep(60) 
-
-    if ctx.market_regime_manager:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_regime_refresh_loop())
-        LOGGER.info("✅ Regime Refresh Task Started")
+            
+            # Run every 15 seconds (Faster than 60s to catch regime shifts quickly)
+            await asyncio.sleep(15)
     # --------------------------------------
    # --- FIX: History Backfill (Hydration) - FINAL PRODUCTION VERSION ---
     async def _warm_indicators_with_history():
