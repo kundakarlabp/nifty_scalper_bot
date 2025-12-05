@@ -100,6 +100,13 @@ class VWAPProStrategy(EliteStrategy):
             ):
                 return None
 
+            # --- FIX START: DERIVE OPTION TYPE ---
+            # The Selector requires explicit "CE" or "PE" instruction.
+            # "BUY" (Long Underlying) -> "CE" (Call Option)
+            # "SELL" (Short Underlying) -> "PE" (Put Option)
+            derived_option_type = "CE" if side == "BUY" else "PE"
+            # --- FIX END ---
+
             # 6. Signal Construction
             vol_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
             confidence = self._vwap_config.min_confidence
@@ -126,6 +133,7 @@ class VWAPProStrategy(EliteStrategy):
                     "event": "vwap_pro_signal",
                     "symbol": symbol,
                     "side": side,
+                    "option_type": derived_option_type, # Log this for debugging
                     "confidence": confidence,
                     "trend": trend_bias
                 },
@@ -142,6 +150,8 @@ class VWAPProStrategy(EliteStrategy):
                 quantity=1,
                 strategy_name=self.name,
                 metadata={
+                    # ✅ CRITICAL FIX: Pass option_type to the selector
+                    "option_type": derived_option_type,
                     "vwap": vwap,
                     "ema": ema,
                     "atr": atr,
