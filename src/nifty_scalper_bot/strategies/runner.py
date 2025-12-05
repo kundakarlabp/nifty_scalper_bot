@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 import os
 import threading
+import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -584,24 +585,16 @@ class StrategyRunner:
     async def _handle_tick_message(self, message: Message) -> None:
         """
         Processes incoming TICK messages from the MessageBus.
-        This is the new asynchronous entry point for strategy evaluation.
         """
         tick: dict = message.data
         
         if not self._running or self._trading_paused:
             return
 
-        # 1. Evaluate strategies, making this synchronous/CPU-bound part non-blocking
-        # by running it in a separate thread.
-        # This is CRITICAL for maintaining async performance.
-        # 1. Evaluate strategies (CPU bound)
         try:
-            signals = await asyncio.to_thread(
-                self._evaluate_strategies_synchronously,
-                tick
-            )
-        except Exception:
-            return
+            await asyncio.to_thread(self._evaluate_strategies_synchronously, tick)
+        except Exception as exc:
+            LOGGER.error(f"Error in strategy evaluation thread: {exc}", exc_info=True)
 
         # Optimization C: Burst Publish
         # If multiple signals are generated (e.g. hedge entry), send them immediately
