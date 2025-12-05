@@ -160,7 +160,7 @@ class DataHub:
                         )
                     )
                 except Exception as exc:
-                    LOGGER.debug(f"MessageBus publish failed: {exc}"))
+                    LOGGER.debug(f"MessageBus publish failed: {exc}")
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
             if symbol in self._tick_subscribers:
