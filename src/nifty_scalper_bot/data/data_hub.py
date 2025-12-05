@@ -121,7 +121,7 @@ class DataHub:
     # data_hub.py, around line 89: Find ingest_tick
 
     
-    def ingest_tick(self, tick: Tick) -> None:
+    async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
         # Handle token mapping (fix from previous step)
@@ -150,27 +150,17 @@ class DataHub:
             # 3. Publish to MessageBus (The Critical Fix)
             if self._message_bus:
                 try:
-                    # Check for running loop
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        # If no running loop in this context, try getting the main event loop
-                        loop = asyncio.get_event_loop()
-
-                    if loop.is_running():
-                        loop.create_task(
-                            self._message_bus.publish(
-                                Message(
-                                    type=MessageType.TICK,
-                                    timestamp=datetime.now(timezone.utc),
-                                    data=tick,
-                                    source="data_hub"
-                                )
-                            )
+                    # FIX: Direct await for immediate data flow
+                    await self._message_bus.publish(
+                        Message(
+                            type=MessageType.TICK,
+                            timestamp=datetime.now(timezone.utc),
+                            data=tick,
+                            source="data_hub"
                         )
+                    )
                 except Exception as exc:
-                    # Log detailed error only once to avoid spam, or use debug
-                    LOGGER.debug(f"MessageBus publish failed: {exc}")
+                    LOGGER.debug(f"MessageBus publish failed: {exc}"))
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
             if symbol in self._tick_subscribers:
