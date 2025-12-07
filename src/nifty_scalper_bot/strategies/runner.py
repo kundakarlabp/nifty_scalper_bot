@@ -722,7 +722,7 @@ class StrategyRunner:
 
         except Exception as exc:
             # Catch-all to prevent thread death
-            self._logger.error("Critical error in _on_tick for %s: %s", symbol, exc, exc_info=True))
+            self._logger.error("Critical error in _on_tick for %s: %s", symbol, exc, exc_info=True)
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         self._logger.debug("Entered _handle_signal: %s %s", signal.action, signal.symbol)
