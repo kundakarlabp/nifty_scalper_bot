@@ -2268,22 +2268,22 @@ class MarketDataManager:
         except Exception:  # pragma: no cover - optional metrics
             pass
         for callback in callbacks:
+    try:
+        # [FIX] Handle Async Callbacks (DataHub) vs Sync (Legacy)
+        if asyncio.iscoroutinefunction(callback):
             try:
-                # FIX: Handle async callbacks (DataHub) and sync callbacks (Legacy)
-                if asyncio.iscoroutinefunction(callback):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(callback(dict(tick)))
-                    except RuntimeError:
-                        # Fallback if no loop is running in this thread
-                        asyncio.run(callback(dict(tick)))
-                else:
-                    callback(dict(tick))
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Tick callback failed",
-                    extra={"symbol": symbol, "error": str(exc)},
-                )
+                loop = asyncio.get_running_loop()
+                loop.create_task(callback(dict(tick)))
+            except RuntimeError:
+                asyncio.run(callback(dict(tick)))
+        else:
+            callback(dict(tick))
+    except Exception as exc:
+        self._logger.error(
+            "Tick callback failed", 
+            extra={"symbol": symbol, "error": str(exc)}
+        )
+
 
     def _start_rest_poll(self) -> None:
         if self._rest_poll_thread is not None and self._rest_poll_thread.is_alive():
