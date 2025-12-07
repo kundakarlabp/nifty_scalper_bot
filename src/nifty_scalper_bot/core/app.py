@@ -2577,7 +2577,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             message_bus=message_bus,
         )
         streamer.register_handler(market_data_manager._handle_tick)  # type: ignore[attr-defined]
-        streamer.register_handler(lambda tick: data_hub.ingest_tick(tick))
+        streamer.register_handler(lambda tick: asyncio.create_task(data_hub.ingest_tick(tick)))
         websocket_manager.on_tick = streamer._handle_tick  # type: ignore[attr-defined]
     else:
         raise ConfigurationError(
