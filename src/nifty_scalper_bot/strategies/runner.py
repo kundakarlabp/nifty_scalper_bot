@@ -237,7 +237,7 @@ class StrategyRunner:
         market_data_manager: MarketDataManager,
         indicator_engine: IndicatorEngine,
         strategy_manager: StrategyManager,
-        
+        order_manager: Any,
         risk_manager: RiskManager,
         message_bus: MessageBus,
         position_manager: PositionManager,
