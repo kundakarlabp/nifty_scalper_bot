@@ -585,7 +585,7 @@ class OrderManager:
         broker_client: BaseBrokerClient,
         position_manager: PositionManager,
         rate_limiter: RateLimiter,
-        instrument_resolver: Any,
+        instrument_resolver: Any | None = None,
         history_path: str | Path | None = None,
     ):
         """Initialize with broker client and position manager."""
@@ -792,6 +792,7 @@ class OrderManager:
         """Store resolver used for lot-size lookups."""
 
         self._instrument_resolver = resolver
+        self._resolver = resolver
         self._configure_options_policy()
         self._maybe_init_execution_policy()
         self._refresh_margin_engine()
