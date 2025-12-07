@@ -693,7 +693,7 @@ class StrategyRunner:
                     reason="Manual Fire Drill"
                     stop_loss=0.0,
                     take_profit=0.0
-                )
+                 )
                 
                 # Manually trigger the handler
                 # If _order_manager is missing, THIS WILL CRASH HERE.
