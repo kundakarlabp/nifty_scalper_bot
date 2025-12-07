@@ -610,8 +610,8 @@ class OrderManager:
         self._monitor_thread: Thread | None = None
         self._market_data: MarketDataManager | None = None
         self._data_hub: DataHub | None = None
-        self._resolver = instrument_resolver
         self._instrument_resolver = instrument_resolver
+        self._resolver = instrument_resolver
         self._trailing: dict[
             str, tuple[TrailingStopController, Callable[[dict[str, Any]], None]]
         ] = {}
