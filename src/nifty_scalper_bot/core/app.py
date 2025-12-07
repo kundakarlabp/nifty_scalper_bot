@@ -2467,7 +2467,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     t["ltp"] = t["close"]
 
             if data_hub is not None:
-                data_hub.ingest_tick(t)
+                await data_hub.ingest_tick(t)
             try:
                 market_data_manager._handle_tick(t)
             except Exception as exc:
