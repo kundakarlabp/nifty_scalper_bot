@@ -713,6 +713,12 @@ class StrategyRunner:
 
             # 5. Generate Signal
             signal = self._strategy_manager.generate_signal(symbol, price)
+            self._logger.info(
+                "Strategy signal: action=%s, symbol=%s, price=%.2f",
+                signal.action if signal else "None",
+                symbol,
+                price
+            )
             if signal is None or signal.action == "HOLD":
                 return
 
