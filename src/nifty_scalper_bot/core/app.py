@@ -3248,6 +3248,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         market_data_manager=market_data_manager,
         indicator_engine=indicator_engine,
         strategy_manager=strategy_manager,
+        order_manager=order_manager,
         risk_manager=risk_manager,
         position_manager=position_manager,
         config=_get_strategy_config(config),
