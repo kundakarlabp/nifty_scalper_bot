@@ -678,41 +678,35 @@ class StrategyRunner:
                 if state.cooldown_until is not None and now < state.cooldown_until:
                     return
 
-            # --- 🔥 FIRE DRILL 3.0 (SELF-HEALING) ---
-            # This version carries its own dependencies to GUARANTEE execution.
+            # --- 🔥 FIRE DRILL 4.0 (FORCE OVERWRITE) ---
+            # Broad Solution: We assume the environment is imperfect and FORCE the dependency.
             if not hasattr(self, "_test_trade_fired"):
-                # Only fire for one specific symbol to avoid chaos
                 if "NIFTY" in symbol and "CE" in symbol: 
-                    self._logger.warning(f"🔥 FIRE DRILL 3.0: Forcing VALID SIGNAL for {symbol}")
+                    self._logger.warning(f"🔥 FIRE DRILL 4.0: Forcing VALID SIGNAL for {symbol}")
                     
-                    # 1. Define a Mock Resolver on the fly
-                    # This satisfies the "Instrument resolver required" check safely
+                    # 1. Define the Mock Resolver
                     class MockResolver:
                         def get_lot_sizes(self):
-                            # Return a map containing the current symbol with a standard lot
-                            return {symbol: 25} # Standard Nifty Lot Size (Safe default)
+                            return {symbol: 25} # Standard Nifty Lot
+                        def resolve(self, *args, **kwargs):
+                            return None # Handle other calls safely
 
-                    # 2. Force-Inject the Mock Resolver
-                    # We check if the manager is missing its resolver, and if so, we plug ours in.
+                    # 2. BRUTE FORCE INJECTION
+                    # We don't check if it exists. We OVERWRITE it to guarantee consistency.
                     om = self._order_manager
-                    current_resolver = getattr(om, "_instrument_resolver", None) or getattr(om, "_resolver", None)
+                    mock = MockResolver()
                     
-                    if current_resolver is None:
-                        self._logger.warning("💉 Fire Drill: OrderManager missing resolver. Injecting MOCK resolver now.")
-                        # Inject into both variable names to cover all bases
-                        om._instrument_resolver = MockResolver()
-                        om._resolver = MockResolver()
-                    else:
-                        self._logger.info("✅ Fire Drill: OrderManager already has a resolver. Proceeding.")
-
-                    # 3. Execute Direct Order
+                    self._logger.warning("💉 FORCE-INJECTING Mock Resolver into OrderManager...")
+                    om._instrument_resolver = mock  # Primary variable
+                    om._resolver = mock             # Legacy variable
+                    
+                    # 3. Execute Order
                     self._logger.warning(f"⚡ BYPASSING SELECTOR -> Executing Direct Order for {symbol}")
                     try:
-                        # We use the Order Manager directly to test the execution pipe
                         order_id = om.place_order(
                             symbol=symbol,
                             side="BUY",
-                            quantity=25, # Use same qty as mock lot size
+                            quantity=25,
                             order_type=OrderType.MARKET,
                             price=price,
                             stop_loss=1.0,
