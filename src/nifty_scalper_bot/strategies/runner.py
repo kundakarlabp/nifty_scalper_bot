@@ -690,7 +690,7 @@ class StrategyRunner:
                     action="BUY",
                     confidence=1.0,
                     quantity=1,
-                    reason="Manual Fire Drill"
+                    reason="Manual Fire Drill",
                     stop_loss=0.0,
                     take_profit=0.0
                  )
