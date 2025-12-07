@@ -245,7 +245,7 @@ class DataHub:
         with self._lock:
             return self._greeks_cache.get(symbol)
 
-    def is_fresh(self, symbol: str, threshold_ms: float = 2000.0) -> tuple[bool, Freshness]:
+    def is_fresh(self, symbol: str, threshold_ms: float = 5000.0) -> tuple[bool, Freshness]:
         """Check if the quote for a symbol is fresh."""
         quote = self.get_quote(symbol)
         if not quote:
