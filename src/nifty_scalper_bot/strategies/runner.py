@@ -712,15 +712,38 @@ class StrategyRunner:
                     return
 
             # 5. Generate Signal
-            signal = self._strategy_manager.generate_signal(symbol, price)
-            self._logger.info(
-                "Strategy signal: action=%s, symbol=%s, price=%.2f",
-                signal.action if signal else "None",
+            self._logger.debug(
+                "🔍 Signal Check: %s @ %.2f | Symbols tracked: %d | Strategies enabled: %d",
                 symbol,
-                price
+                price,
+                len(self._symbols),
+                len([s for s in self._strategy_manager._strategies if s.name not in self._strategy_manager._disabled_strategies])
             )
-            if signal is None or signal.action == "HOLD":
+            signal = self._strategy_manager.generate_signal(symbol, price)
+            if signal is None:
+                # INFO level: Document that we checked but got nothing
+                self._logger.info(
+                    "⚪ NO SIGNAL: %s @ %.2f | All strategies voted NEUTRAL",
+                    symbol,
+                    price
+                )
                 return
+            if signal.action == "HOLD":
+                # DEBUG level: Explicit hold is rare but trackable
+                self._logger.debug(
+                    "⏸️ HOLD SIGNAL: %s (Strategies explicitly voted HOLD)",
+                    symbol
+                )
+                return
+            # SUCCESS: We have a live trading signal
+            self._logger.info(
+                "🚀 SIGNAL READY: %s | Action: %s | Quantity: %d | Confidence: %.2f | Reason: %s",
+                signal.symbol,
+                signal.action,
+                signal.quantity,
+                signal.confidence,
+                signal.reason if hasattr(signal, 'reason') else "N/A"
+            )
 
             # 6. Throttle Signal
             with self._lock:
