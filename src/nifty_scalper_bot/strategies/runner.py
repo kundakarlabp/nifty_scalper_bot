@@ -252,6 +252,7 @@ class StrategyRunner:
         self._message_bus = message_bus
         self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
         self._position_manager = position_manager
+        self._order_manager = order_manager
         self._config = config or StrategyRunnerConfig()
         self._logger = get_logger(__name__)
         self._data_hub = data_hub
