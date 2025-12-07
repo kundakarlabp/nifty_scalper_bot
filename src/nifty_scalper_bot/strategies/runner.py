@@ -614,54 +614,25 @@ class StrategyRunner:
     # Note: Your main evaluation logic needs to be factored into this new synchronous method:
     def _evaluate_strategies_synchronously(self, tick: dict) -> list[dict]:
         """
-        Evaluates all strategies and Aggregates signals to prevent conflicts.
+        Executes the existing _on_tick logic within a thread to prevent blocking.
+        This serves as the 'Bridge' between the Async Runner and the Sync Logic.
         """
-        active_signals = []
-        
-        # 1. Get Market Context
-        regime = self._market_regime_manager.get_current_regime()
-        candles = self._data_hub.get_candles(tick['symbol'], "5minute") # Assumption
-        
-        # 2. Gather Votes
-        buy_score = 0
-        sell_score = 0
-        
-        for strategy in self._strategies:
-            # Skip if strategy doesn't fit the market mood
-            if not strategy.can_trade(regime):
-                continue
-                
-            signal = strategy.calculate_signal(tick, candles, regime)
-            
-            if signal:
-                weight = strategy.config.get("weight", 1.0)
-                if signal['side'] == 'BUY':
-                    buy_score += weight
-                elif signal['side'] == 'SELL':
-                    sell_score += weight
+        symbol = tick.get('symbol')
+        if not symbol:
+            return []
 
-        # 3. Consensus Logic (The "World-Class" Filter)
-        # Only trade if one side clearly dominates
-        consensus_threshold = 1.5  # e.g., needs 2 weak strategies or 1 strong one
-        
-        final_signal = None
-        
-        if buy_score > consensus_threshold and sell_score < 1.0:
-            final_signal = {
-                "symbol": tick['symbol'],
-                "side": "BUY",
-                "quantity": self._calculate_position_size(buy_score),
-                "type": "CONSENSUS_ENTRY"
-            }
-        elif sell_score > consensus_threshold and buy_score < 1.0:
-             final_signal = {
-                "symbol": tick['symbol'],
-                "side": "SELL",
-                "quantity": self._calculate_position_size(sell_score),
-                "type": "CONSENSUS_ENTRY"
-            }
-            
-        return [final_signal] if final_signal else []
+        # DEBUG: Prove this method is running
+        self._logger.debug(f"📢 _evaluate_strategies_synchronously CALLED for {symbol}")
+
+        try:
+            # CRITICAL FIX: Explicitly call the actual logic handler
+            # This connects the Async Runner to your existing Logic
+            self._on_tick(symbol, tick)
+        except Exception as exc:
+            self._logger.error(f"❌ Error in _on_tick for {symbol}: {exc}", exc_info=True)
+
+        # Return empty list because _on_tick handles execution internally
+        return []
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
@@ -694,6 +665,10 @@ class StrategyRunner:
 
             # 3. Check Run State
             with self._lock:
+                # FIX: Use _active_symbols instead of _symbols to prevent crash
+                if symbol not in self._active_symbols:
+                    return
+                
                 state = self._symbol_state.get(symbol)
                 if state is None: return
                 state.last_tick = dict(tick)
@@ -711,39 +686,18 @@ class StrategyRunner:
                 except Exception:
                     return
 
-            # 5. Generate Signal
-            self._logger.debug(
-                "🔍 Signal Check: %s @ %.2f | Symbols tracked: %d | Strategies enabled: %d",
-                symbol,
-                price,
-                len(self._symbols),
-                len([s for s in self._strategy_manager._strategies if s.name not in self._strategy_manager._disabled_strategies])
-            )
+            # 5. Generate Signal with Deep Logging (X-Ray)
+            self._logger.debug(f"🔍 Checking signals for {symbol} @ {price}")
+            
             signal = self._strategy_manager.generate_signal(symbol, price)
+            
             if signal is None:
-                # INFO level: Document that we checked but got nothing
-                self._logger.info(
-                    "⚪ NO SIGNAL: %s @ %.2f | All strategies voted NEUTRAL",
-                    symbol,
-                    price
-                )
+                self._logger.debug(f"⚪ No Signal: {symbol} (Strategies returned None or Neutral)")
                 return
+            
             if signal.action == "HOLD":
-                # DEBUG level: Explicit hold is rare but trackable
-                self._logger.debug(
-                    "⏸️ HOLD SIGNAL: %s (Strategies explicitly voted HOLD)",
-                    symbol
-                )
+                self._logger.debug(f"⏸️ Hold Signal: {symbol} (Strategies explicitly said HOLD)")
                 return
-            # SUCCESS: We have a live trading signal
-            self._logger.info(
-                "🚀 SIGNAL READY: %s | Action: %s | Quantity: %d | Confidence: %.2f | Reason: %s",
-                signal.symbol,
-                signal.action,
-                signal.quantity,
-                signal.confidence,
-                signal.reason if hasattr(signal, 'reason') else "N/A"
-            )
 
             # 6. Throttle Signal
             with self._lock:
@@ -752,6 +706,7 @@ class StrategyRunner:
                 if state.last_signal_at is not None:
                     elapsed = (now - state.last_signal_at).total_seconds()
                     if elapsed < self._config.signal_cooldown_seconds:
+                        self._logger.info(f"⏳ Signal Cooldown active for {symbol}")
                         return
                 state.last_signal_at = now
                 state.strategy_data["last_signal"] = {
@@ -761,12 +716,13 @@ class StrategyRunner:
                     "generated_at": now.isoformat(),
                 }
 
-            # 7. Handle Signal
+            # 7. Handle Signal (Execute Trade)
+            self._logger.info(f"🚀 SIGNAL DETECTED: {symbol} | Action: {signal.action} | Conf: {signal.confidence}")
             self._handle_signal(signal, price, now)
 
         except Exception as exc:
             # Catch-all to prevent thread death
-            self._logger.error("Critical error in _on_tick for %s: %s", symbol, exc, exc_info=True)
+            self._logger.error("Critical error in _on_tick for %s: %s", symbol, exc, exc_info=True))
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         self._logger.debug("Entered _handle_signal: %s %s", signal.action, signal.symbol)
