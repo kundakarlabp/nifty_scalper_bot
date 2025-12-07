@@ -677,31 +677,36 @@ class StrategyRunner:
                 if state.cooldown_until is not None and now < state.cooldown_until:
                     return
 
-            # --- 🔥 FIRE DRILL: FORCE EXECUTION TEST (Top of Function) ---
-            # This bypasses ALL checks (Warmup, Cooldown, etc.)
-            # ONLY RUN THIS ONCE, THEN DELETE IT.
+            # --- 🔥 FIRE DRILL 2.0: MANUAL VALID SIGNAL TEST ---
+            # This simulates a "Perfect" Strategy Signal
             if not hasattr(self, "_test_trade_fired"):
-                self._logger.warning(f"🔥 FORCING TEST SIGNAL NOW for {symbol}")
-                from nifty_scalper_bot.strategies.signal_generator import Signal
-                
-                # Create a Fake BUY Signal
-                test_signal = Signal(
-                    symbol=symbol,
-                    action="BUY",
-                    confidence=1.0,
-                    quantity=1,
-                    reason="Manual Fire Drill",
-                    stop_loss=0.0,
-                    take_profit=0.0
-                 )
-                
-                # Manually trigger the handler
-                # If _order_manager is missing, THIS WILL CRASH HERE.
-                # If it works, you will see 'Submitted' in logs.
-                self._handle_signal(test_signal, 100.0, datetime.now(timezone.utc))
-                
-                self._test_trade_fired = True
-                return # Stop processing this tick after test
+                # Only fire for one specific symbol to avoid chaos
+                if "NIFTY" in symbol and "CE" in symbol: 
+                    self._logger.warning(f"🔥 FIRE DRILL 2.0: Forcing VALID SIGNAL for {symbol}")
+                    
+                    from nifty_scalper_bot.strategies.signal_generator import Signal
+                    
+                    # Create a Complete Signal (Fixing previous missing fields)
+                    test_signal = Signal(
+                        symbol=symbol,
+                        action="BUY",
+                        confidence=1.0,
+                        quantity=50,  # 1 Lot (Adjust as needed)
+                        reason="Manual Fire Drill 2.0",
+                        stop_loss=1.0,    # Dummy SL
+                        take_profit=10.0, # Dummy TP
+                        metadata={
+                            "option_type": "CE", # Fixes 'selector_missing_option_type'
+                            "expiry": "2025-12-25", # Dummy expiry if needed
+                            "strike": 26000         # Dummy strike
+                        }
+                    )
+                    
+                    # Inject the signal into the pipeline
+                    self._handle_signal(test_signal, 100.0, datetime.now(timezone.utc))
+                    
+                    self._test_trade_fired = True
+                    return
             # -------------------------------------------------------------
 
             # 4. Check Indicators Ready
