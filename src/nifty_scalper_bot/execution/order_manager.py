@@ -585,6 +585,7 @@ class OrderManager:
         broker_client: BaseBrokerClient,
         position_manager: PositionManager,
         rate_limiter: RateLimiter,
+        instrument_resolver: Any,
         history_path: str | Path | None = None,
     ):
         """Initialize with broker client and position manager."""
