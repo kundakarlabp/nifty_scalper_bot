@@ -2467,7 +2467,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     t["ltp"] = t["close"]
 
             if data_hub is not None:
-                asyncio.create_task(data_hub.ingest_tick(t))
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(data_hub.ingest_tick(t))
+                except RuntimeError:
+                    asyncio.run(data_hub.ingest_tick(t))
             try:
                 market_data_manager._handle_tick(t)
             except Exception as exc:
