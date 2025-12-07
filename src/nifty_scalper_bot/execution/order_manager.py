@@ -789,7 +789,6 @@ class OrderManager:
     def set_instrument_resolver(self, resolver: Any | None) -> None:
         """Store resolver used for lot-size lookups."""
 
-        self._resolver = resolver
         self._instrument_resolver = resolver
         self._configure_options_policy()
         self._maybe_init_execution_policy()
