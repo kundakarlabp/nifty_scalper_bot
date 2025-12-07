@@ -7815,7 +7815,8 @@ class OrderManager:
                     qty_val = int(float(row.get("quantity", 0) or 0))
                     side_val = str(row.get("side", "")).upper()
                     if side_val == "LONG" and qty_val > 0:
-                        return Falseresolver = self._resolver
+                        return False
+                        resolver = self._resolver
             except Exception as exc:  # noqa: BLE001 - defensive
                 self._logger.error(
                     "Failure in _is_reduce_only_violation: %s",
