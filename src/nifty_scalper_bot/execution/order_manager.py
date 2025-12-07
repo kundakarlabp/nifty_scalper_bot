@@ -610,8 +610,8 @@ class OrderManager:
         self._monitor_thread: Thread | None = None
         self._market_data: MarketDataManager | None = None
         self._data_hub: DataHub | None = None
-        self._instrument_resolver = instrument_resolver
         self._resolver = instrument_resolver
+        self._instrument_resolver = instrument_resolver
         self._trailing: dict[
             str, tuple[TrailingStopController, Callable[[dict[str, Any]], None]]
         ] = {}
@@ -7815,7 +7815,7 @@ class OrderManager:
                     qty_val = int(float(row.get("quantity", 0) or 0))
                     side_val = str(row.get("side", "")).upper()
                     if side_val == "LONG" and qty_val > 0:
-                        return False
+                        return Falseresolver = self._resolver
             except Exception as exc:  # noqa: BLE001 - defensive
                 self._logger.error(
                     "Failure in _is_reduce_only_violation: %s",
@@ -7842,6 +7842,7 @@ class OrderManager:
 
     def _lot_lookup(self) -> Callable[[str], int] | None:
         resolver = self._resolver
+        if not resolver: return {}
         if resolver is None:
             market_data = self._market_data
             resolver = getattr(market_data, "resolver", None) if market_data else None
