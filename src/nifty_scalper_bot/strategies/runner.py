@@ -677,6 +677,31 @@ class StrategyRunner:
                 if state.cooldown_until is not None and now < state.cooldown_until:
                     return
 
+            # --- 🔥 FIRE DRILL: FORCE EXECUTION TEST (Top of Function) ---
+            # This bypasses ALL checks (Warmup, Cooldown, etc.)
+            # ONLY RUN THIS ONCE, THEN DELETE IT.
+            if not hasattr(self, "_test_trade_fired"):
+                self._logger.warning(f"🔥 FORCING TEST SIGNAL NOW for {symbol}")
+                from nifty_scalper_bot.strategies.signal_generator import Signal
+                
+                # Create a Fake BUY Signal
+                test_signal = Signal(
+                    symbol=symbol,
+                    action="BUY",
+                    confidence=1.0,
+                    quantity=1,
+                    reason="Manual Fire Drill"
+                )
+                
+                # Manually trigger the handler
+                # If _order_manager is missing, THIS WILL CRASH HERE.
+                # If it works, you will see 'Submitted' in logs.
+                self._handle_signal(test_signal, 100.0, datetime.now(timezone.utc))
+                
+                self._test_trade_fired = True
+                return # Stop processing this tick after test
+            # -------------------------------------------------------------
+
             # 4. Check Indicators Ready
             if self._config.min_indicator_bars:
                 try:
@@ -694,26 +719,6 @@ class StrategyRunner:
             # ... existing code ...
             if signal is None:
                 self._logger.debug(f"⚪ No Signal: {symbol}...")
-                
-                # --- TEMP: FORCE TRIGGER TEST (DELETE AFTER 1 RUN) ---
-                # Only force if we haven't traded yet to avoid spam
-                if not hasattr(self, "_test_trade_fired"): 
-                    self._logger.warning(f"🔥 FORCING TEST SIGNAL for {symbol}")
-                    from nifty_scalper_bot.strategies.signal_generator import Signal
-                    
-                    # Create a Fake BUY Signal
-                    test_signal = Signal(
-                        symbol=symbol,
-                        action="BUY",
-                        confidence=1.0,
-                        quantity=1,  # Minimum safe quantity
-                        reason="Manual Fire Drill"
-                    )
-                    
-                    self._handle_signal(test_signal, price, now)
-                    self._test_trade_fired = True
-                # -----------------------------------------------------
-                
                 return
             
             if signal.action == "HOLD":
