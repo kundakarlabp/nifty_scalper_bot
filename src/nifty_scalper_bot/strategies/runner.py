@@ -279,7 +279,7 @@ class StrategyRunner:
         self._lock = threading.RLock()
         self._running = False
         self._trading_paused = False
-
+        self._risk_manager = risk_manager
         self._active_symbols: set[str] = set()
         self._symbol_state: Dict[str, SymbolState] = {}
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
@@ -691,8 +691,29 @@ class StrategyRunner:
             
             signal = self._strategy_manager.generate_signal(symbol, price)
             
+            # ... existing code ...
             if signal is None:
-                self._logger.debug(f"⚪ No Signal: {symbol} (Strategies returned None or Neutral)")
+                self._logger.debug(f"⚪ No Signal: {symbol}...")
+                
+                # --- TEMP: FORCE TRIGGER TEST (DELETE AFTER 1 RUN) ---
+                # Only force if we haven't traded yet to avoid spam
+                if not hasattr(self, "_test_trade_fired"): 
+                    self._logger.warning(f"🔥 FORCING TEST SIGNAL for {symbol}")
+                    from nifty_scalper_bot.strategies.signal_generator import Signal
+                    
+                    # Create a Fake BUY Signal
+                    test_signal = Signal(
+                        symbol=symbol,
+                        action="BUY",
+                        confidence=1.0,
+                        quantity=1,  # Minimum safe quantity
+                        reason="Manual Fire Drill"
+                    )
+                    
+                    self._handle_signal(test_signal, price, now)
+                    self._test_trade_fired = True
+                # -----------------------------------------------------
+                
                 return
             
             if signal.action == "HOLD":
