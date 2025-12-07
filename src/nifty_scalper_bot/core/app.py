@@ -2837,7 +2837,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         broker_client=cast(Any, broker_backend),
         position_manager=position_manager,
         rate_limiter=rate_limiter,
-        instrument_resolver=instrument_resolver,
     )
     order_manager.set_market_data_manager(market_data_manager)
     order_manager.attach_data_hub(data_hub)
