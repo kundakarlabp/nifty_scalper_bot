@@ -422,24 +422,35 @@ class DataHub:
     # CRITICAL FIX: Option Chain Proxy for Strike Selector
     # ----------------------------------------------------------------
     
-    def get_option_chain(self, symbol: str) -> Any:
-        """
-        Retrieves the option chain for the given symbol.
-        Delegates to the underlying Market Data Manager or Provider.
-        """
-        # 1. Try Market Data Manager (standard path)
-        mdm = getattr(self, "_market_data", None) or getattr(self, "_mdm", None)
-        if mdm and hasattr(mdm, "get_option_chain"):
-            return mdm.get_option_chain(symbol)
-            
-        # 2. Try Internal Provider (direct path)
-        provider = getattr(self, "_provider", None)
-        if provider and hasattr(provider, "get_option_chain"):
-            return provider.get_option_chain(symbol)
-            
-        # 3. Fail Safe
+    def get_option_chain(self, symbol: str, option_type: str | None = None) -> list[dict]:
+        """Retrieves option chain with Traceability Logs."""
+        
+        # LOG 1: Entry
         if hasattr(self, "_logger"):
-            self._logger.error(f"❌ DataHub: No source found for 'get_option_chain' for {symbol}")
-        return []
+            self._logger.info(f"🔍 DataHub: Fetching chain for {symbol}...")
+
+        mdm = getattr(self, "_market_data", None) or getattr(self, "_mdm", None) or getattr(self, "_market_data_manager", None)
+        
+        result = []
+        source = "None"
+
+        if mdm and hasattr(mdm, "get_option_chain"):
+            result = mdm.get_option_chain(symbol)
+            source = "MDM"
+        elif getattr(self, "_provider", None):
+            provider = getattr(self, "_provider", None)
+            if hasattr(provider, "get_option_chain"):
+                result = provider.get_option_chain(symbol)
+                source = "Provider"
+
+        # LOG 2: Result
+        count = len(result) if result else 0
+        if hasattr(self, "_logger"):
+            if count > 0:
+                self._logger.info(f"✅ DataHub: Found {count} strikes via {source}.")
+            else:
+                self._logger.warning(f"⚠️ DataHub: Chain is EMPTY! Source: {source}. (Symbol: {symbol})")
+        
+        return result
 
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
