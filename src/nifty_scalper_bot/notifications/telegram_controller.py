@@ -9824,7 +9824,11 @@ class TelegramBot:
                     kwargs["order_type"] = order_type_cls.LIMIT
             elif order_type_cls is not None:
                 kwargs["order_type"] = order_type_cls.MARKET
-            order_id = getattr(om, "place_order")(**kwargs)
+            loop = asyncio.get_running_loop()
+            order_id = await loop.run_in_executor(
+              None, 
+              lambda: getattr(om, "place_order")(**kwargs)
+            )
         except Exception as exc:  # pragma: no cover - defensive
             await self._reply(chat, ctx, f"Order failed: {exc}")
             return
