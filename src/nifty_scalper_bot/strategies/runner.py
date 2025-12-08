@@ -1346,51 +1346,63 @@ class StrategyRunner:
             except Exception:
                 pass
 
-        # 4. Check state & Generate VWAP Signals
-        generated_signal = None
+        # 4. Check state & Auto-Register Symbol (CRITICAL FIX)
         with self._lock:
+            # If we are receiving data (via /watch), force runner to track it
             if symbol not in self._active_symbols:
-                return
+                self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
+                self._active_symbols.add(symbol)
+                self._symbol_state[symbol] = SymbolState(
+                    symbol=symbol, 
+                    history_limit=self._config.max_trade_history
+                )
 
             state = self._symbol_state.get(symbol)
             if state is None:
                 return
 
-            # [START] VWAP CROSSOVER TRIGGER
-            # 1. Get previous price and current VWAP
+            # [START] VWAP STRATEGY ENGINE
+            # 1. Extract VWAP from Zerodha Polling Data
+            vwap = _extract_float(tick, "average_price", "vwap")
+            if vwap and vwap > 0:
+                state.vwap = vwap
+
+            # 2. VWAP Crossover Trigger (The "Entry")
+            generated_signal = None
             prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
-            curr_vwap = getattr(state, "vwap", None) # Ensure vwap exists on state
+            curr_vwap = state.vwap
             
-            # 2. Check for Bullish Crossover (Price crosses VWAP from below)
+            # Check for Bullish Crossover (Price crosses VWAP from below)
             if prev_ltp and curr_vwap and price > 0:
                 if prev_ltp < curr_vwap and price > curr_vwap:
-                    self._logger.info(f"⚡ VWAP CROSSOVER DETECTED: {symbol} ({prev_ltp} -> {price} over {curr_vwap})")
+                    self._logger.info(f"⚡ VWAP CROSSOVER: {symbol} ({prev_ltp:.2f} -> {price:.2f} over {curr_vwap:.2f})")
+                    
+                    # Create the BUY Signal
                     generated_signal = Signal(
                         action="BUY",
                         symbol=symbol,
-                        quantity=1, # Placeholder (Risk Manager will resize this)
+                        quantity=1, # Order Manager will resize this based on Risk
                         confidence=1.0,
                         reason="vwap_crossover_polling",
-                        metadata={"vwap": curr_vwap, "prev_ltp": prev_ltp}
+                        stop_loss=None, # Will be calc by risk manager
+                        take_profit=None,
+                        metadata={
+                            "vwap": curr_vwap, 
+                            "prev_ltp": prev_ltp,
+                            "premium_stop_pct": 0.10, # Default 10% SL
+                            "premium_target_rr": 2.0  # Default 1:2 Risk/Reward
+                        }
                     )
-            # [END] VWAP CROSSOVER TRIGGER
-
-            state.last_tick = dict(tick)
             
-            # Update VWAP in state (from the 'vwap' variable we extracted earlier)
-            # Ensure 'vwap' variable is defined in _on_tick scope (see previous step)
-            if 'vwap' in locals() and vwap is not None and vwap > 0: 
-                state.vwap = vwap
+            # 3. Update State
+            state.last_tick = dict(tick)
 
-            if (
-                not self._running
-                or not state.active
-                or self._trading_paused
-            ):
+            if not self._running or not state.active or self._trading_paused:
                 return
 
             if state.cooldown_until is not None and now < state.cooldown_until:
                 return
+            # [END] VWAP STRATEGY ENGINE
 
         # 5. Check indicators ready
         if self._config.min_indicator_bars:
@@ -1491,6 +1503,17 @@ class StrategyRunner:
         """Handle entry (BUY/SELL) signals."""
         action = signal.action
 
+        # [VWAP TREND FILTER]
+        # Only BUY Call/Put if Price is ABOVE its own VWAP
+        current_vwap = None
+        with self._lock:
+            if state := self._symbol_state.get(base_symbol):
+                current_vwap = state.vwap
+        
+        if current_vwap and current_vwap > 0 and action == "BUY":
+            if trade_price < current_vwap:
+                self._logger.warning(f"🛑 VWAP FILTER: Price {trade_price} < VWAP {current_vwap}. Blocking BUY.")
+                return
         current_vwap = None
         with self._lock:
             if state := self._symbol_state.get(base_symbol):
