@@ -727,149 +727,179 @@ class StrategyRunner:
             self._logger.error("Critical error in _on_tick for %s: %s", symbol, exc, exc_info=True)
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
-        """
-        Production Logic with Breadcrumb Logging.
-        """
+        """Handle a trading signal."""
         # --- BREADCRUMB 1: ENTRY ---
-        self._logger.info(f"🔴 1. SIGNAL HANDLER ENTERED: {signal.symbol} {signal.action}")
+        self._logger.info(f"🔴 1. RUNNER ENTRY: {signal.symbol} {signal.action} @ {price}")
+
+        # Original Debug Log (Kept)
+        self._logger.debug("Entered _handle_signal: %s %s", signal.action, signal.symbol)
         
-        try:
-            action = signal.action
-            base_symbol = self._normalize_symbol(signal.symbol)
-            trade_symbol = base_symbol
-            trade_price = price
-            selection: SelectedContract | None = None
-            selector = self._strike_selector
-            
-            # Resolve Direction
-            direction = "BULLISH" if action == "BUY" else "BEARISH"
-            metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-            
-            # Resolve Option Type
-            option_type = metadata.get("option_type")
-            if not option_type and self._legacy_side_to_type:
-                option_type = "CE" if direction == "BULLISH" else "PE"
-            
-            # Resolve Side
-            sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
-            entry_side: OrderSide = "SELL" if sell_premium else "BUY"
-            
-            # --- BREADCRUMB 2: POSITION MANAGEMENT ---
-            if self._position_manager:
-                active = self._position_manager.get_active_contract(base_symbol)
-                if active:
-                    self._logger.info(f"🟡 Found active contract: {active.symbol}")
-                    if self._position_manager.is_flat(active.symbol):
-                        self._position_manager.clear_active_contract(base_symbol)
-                    else:
-                        reuse = True
-                        if active.option_type != option_type and not self._allow_hedge_entries:
-                            reuse = False
-                        
-                        if reuse:
-                            pos = self._position_manager.get_position(active.symbol)
-                            if pos:
-                                trade_price = getattr(pos, "current_price", trade_price) or trade_price
-                            
-                            selection = SelectedContract(
-                                symbol=active.symbol,
-                                option_type=active.option_type,
-                                strike=active.strike,
-                                expiry=active.expiry,
-                                ltp=trade_price,
-                                delta=None,
-                                metadata={"source": "position_manager"}
-                            )
-                            trade_symbol = selection.symbol
-                            self._logger.info(f"🟡 Reusing active contract: {trade_symbol}")
-
-            # --- BREADCRUMB 3: STRIKE SELECTION ---
-            if selector and not selection:
-                self._logger.info(f"🟡 3. SELECTING STRIKE for {base_symbol}...")
-                
-                safe_opt_type: Literal['CE', 'PE'] | None = None
-                if option_type in ('CE', 'PE'):
-                    safe_opt_type = cast(Literal['CE', 'PE'], option_type)
-
-                selector_side: Literal["BUY", "SELL"] = "BUY" if direction == "BULLISH" else "SELL"
-                
-                # CRITICAL: This is where it was crashing before. 
-                # If DataHub is missing get_option_chain, it dies here.
-                try:
-                    selection = selector.select_contract(
-                        underlying=base_symbol,
-                        side=selector_side,
-                        underlying_price=price,
-                        option_type=safe_opt_type,
-                    )
-                except Exception as e:
-                    self._logger.error(f"❌ Strike Selection Failed: {e}")
-                    # Don't return, allow logic to try fallback or exit gracefully
-                    selection = None
-
-                if selection:
-                    self._logger.info(f"🟢 STRIKE SELECTED: {selection.symbol}")
-                    # (Smart Symbol Validation Logic kept here...)
-                    # ... [Your existing smart validation code] ...
+        action = signal.action
+        base_symbol = self._normalize_symbol(signal.symbol)
+        trade_symbol = base_symbol
+        trade_price = price
+        selection: SelectedContract | None = None
+        selector = self._strike_selector
+        
+        # Resolve Direction
+        direction = "BULLISH" if action == "BUY" else "BEARISH"
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+        
+        # Resolve Option Type (Legacy/Metadata)
+        option_type = metadata.get("option_type")
+        if not option_type and self._legacy_side_to_type:
+            option_type = "CE" if direction == "BULLISH" else "PE"
+        
+        # Determine Entry Side (Long vs Short premium)
+        sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
+        entry_side: OrderSide = "SELL" if sell_premium else "BUY"
+        
+        # Position Manager - Active Contract Check
+        if self._position_manager:
+            active = self._position_manager.get_active_contract(base_symbol)
+            if active:
+                self._logger.info(f"🟡 Found Active Contract: {active.symbol}")
+                if self._position_manager.is_flat(active.symbol):
+                    self._position_manager.clear_active_contract(base_symbol)
                 else:
-                    self._logger.warning("⚠️ No strike selected.")
+                    # Reuse active contract if logic permits
+                    reuse = True
+                    if active.option_type != option_type and not self._allow_hedge_entries:
+                        reuse = False
+                    
+                    if reuse:
+                        # Update price from active pos if available
+                        pos = self._position_manager.get_position(active.symbol)
+                        if pos:
+                            trade_price = getattr(pos, "current_price", trade_price) or trade_price
+                        
+                        selection = SelectedContract(
+                            symbol=active.symbol,
+                            option_type=active.option_type,
+                            strike=active.strike,
+                            expiry=active.expiry,
+                            ltp=trade_price,
+                            delta=None,
+                            metadata={"source": "position_manager"}
+                        )
+                        trade_symbol = selection.symbol
+                        self._logger.info(f"🟡 Reusing Active Contract: {trade_symbol}")
 
-            if not selection:
-                self._logger.warning("🔴 Execution Stopped: No Contract Selected")
-                self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, price, "skipped", "no_contract"))
-                return
+        # Strike Selection (if no active contract)
+        if selector and not selection:
+            self._logger.info(f"🟡 2. SELECTING STRIKE for {base_symbol}...")
+            
+            # Safe coercion for option type literal
+            safe_opt_type: Literal['CE', 'PE'] | None = None
+            if option_type in ('CE', 'PE'):
+                safe_opt_type = cast(Literal['CE', 'PE'], option_type)
 
-            trade_symbol = selection.symbol
-            trade_price = selection.ltp or price
+            selector_side: Literal["BUY", "SELL"] = "BUY" if direction == "BULLISH" else "SELL"
             
-            # --- BREADCRUMB 4: RISK SIZING ---
-            self._logger.info(f"🟡 4. CALCULATING RISK for {trade_symbol}...")
-            
-            # (Monthly Lockout Logic)
-            lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
-            if lockout:
-                self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "skipped", "monthly_lockout"))
-                return
+            try:
+                selection = selector.select_contract(
+                    underlying=base_symbol,
+                    side=selector_side,
+                    underlying_price=price,
+                    option_type=safe_opt_type,
+                )
+            except Exception as e:
+                self._logger.error(f"❌ Strike Selection Exception: {e}", exc_info=True)
+                selection = None
 
-            # (Apply Premium Targets)
-            signal = self._apply_premium_targets(signal, trade_price, entry_side)
-            
-            # 1. Suggest Size
-            atr_val = _extract_float(metadata, "atr")
-            sized_qty = self._risk_manager.suggest_position_size(
-                side=entry_side,
-                price=trade_price,
-                stop_loss=signal.stop_loss,
-                atr=atr_val,
-                requested_quantity=signal.quantity,
-                confidence=signal.confidence,
-                symbol=trade_symbol
-            )
-            
-            if sized_qty <= 0:
-                 self._logger.warning(f"🔴 Risk Manager returned 0 qty")
-                 self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "blocked", "risk_sizing_zero"))
-                 return
+            # SMART SYMBOL VALIDATION
+            if selection:
+                self._logger.info(f"🟢 3. STRIKE SELECTED: {selection.symbol}")
+                try:
+                    resolver = getattr(self._data_hub, "instrument_resolver", None) or getattr(self._data_hub, "resolver", None)
+                    if resolver:
+                        # Check if symbol is known
+                        meta = resolver.lookup(selection.symbol)
+                        if not meta:
+                            # Try finding valid candidate
+                            candidates = []
+                            if selection.expiry and selection.strike:
+                                candidates = generate_candidate_symbols_for_expiry(
+                                    selection.expiry.date(), 
+                                    int(selection.strike), 
+                                    selection.option_type or "CE"
+                                )
+                            
+                            found_sym = None
+                            for cand in candidates:
+                                # Try NFO: format first
+                                if resolver.lookup(f"NFO:{cand}"):
+                                    found_sym = f"NFO:{cand}"
+                                    break
+                                if resolver.lookup(cand):
+                                    found_sym = cand
+                                    break
+                            
+                            if found_sym:
+                                selection.symbol = found_sym
+                                self._logger.info(f"✅ Symbol Normalized: {found_sym}")
+                            else:
+                                self._logger.warning("⚠️ Strike selector symbol %s unknown to resolver", selection.symbol)
+                                selection = None
+                except Exception as exc:
+                    self._logger.debug("Smart symbol validation failed: %s", exc)
+            else:
+                self._logger.warning(f"⚠️ 3. SELECTION FAILED (No Contract Returned)")
 
-            # 2. Validate New Position
-            allowed, reason = self._risk_manager.validate_new_position(
-                symbol=trade_symbol,
-                side="LONG" if entry_side == "BUY" else "SHORT",
-                quantity=int(sized_qty),
-                entry_price=trade_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit
-            )
-            
-            if not allowed:
-                self._logger.warning(f"🔴 Position validation failed: {reason}")
-                self._record_trade(base_symbol, TradeRecord(timestamp, action, int(sized_qty), trade_price, "blocked", str(reason)))
-                self._set_signal_cooldown(base_symbol, timestamp)
-                return
+        if not selection:
+            self._logger.error(f"🔴 Execution Stopped: No Contract Selected")
+            self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, price, "skipped", "no_contract"))
+            return
 
-            # --- BREADCRUMB 5: EXECUTION ---
-            self._logger.info(f"🟡 5. SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty}")
-            
+        trade_symbol = selection.symbol
+        trade_price = selection.ltp or price
+        
+        # Monthly Lockout Check
+        lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
+        if lockout:
+            self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "skipped", "monthly_lockout"))
+            return
+
+        # Risk Sizing & Validation
+        self._logger.info(f"🟡 4. CALCULATING RISK for {trade_symbol}...")
+        signal = self._apply_premium_targets(signal, trade_price, entry_side)
+        
+        # 1. Suggest Size
+        atr_val = _extract_float(metadata, "atr")
+        sized_qty = self._risk_manager.suggest_position_size(
+            side=entry_side,
+            price=trade_price,
+            stop_loss=signal.stop_loss,
+            atr=atr_val,
+            requested_quantity=signal.quantity,
+            confidence=signal.confidence,
+            symbol=trade_symbol
+        )
+        
+        if sized_qty <= 0:
+             self._logger.error(f"🔴 Risk Manager returned 0 qty")
+             self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "blocked", "risk_sizing_zero"))
+             return
+
+        # 2. Validate New Position
+        allowed, reason = self._risk_manager.validate_new_position(
+            symbol=trade_symbol,
+            side="LONG" if entry_side == "BUY" else "SHORT",
+            quantity=int(sized_qty),
+            entry_price=trade_price,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit
+        )
+        
+        if not allowed:
+            self._logger.warning(f"🔴 Position validation failed: {reason}")
+            self._record_trade(base_symbol, TradeRecord(timestamp, action, int(sized_qty), trade_price, "blocked", str(reason)))
+            self._set_signal_cooldown(base_symbol, timestamp)
+            return
+
+        # Execute Order
+        self._logger.info(f"🟡 5. SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty}")
+        try:
             order_id = self._order_manager.place_order(
                 symbol=trade_symbol,
                 side=entry_side,
@@ -882,11 +912,12 @@ class StrategyRunner:
             
             if order_id:
                 self._logger.info(f"🟢 6. ORDER SUBMITTED! ID: {order_id}")
-                # (Post-Trade Logic: Notify Orchestrator, Set Active Contract, Record Trade)
+                
                 self._notify_orchestrator_submission(signal, base_symbol)
                 
                 if self._position_manager and selection:
-                      if self._allow_hedge_entries or not self._position_manager.get_active_contract(base_symbol):
+                     # Update active contract tracking
+                     if self._allow_hedge_entries or not self._position_manager.get_active_contract(base_symbol):
                         self._position_manager.set_active_contract(base_symbol, selection)
 
                 if selector:
@@ -896,13 +927,14 @@ class StrategyRunner:
                     timestamp, action, int(sized_qty), trade_price, "submitted", signal.reason, order_id
                 ))
                 self._set_trade_cooldown(base_symbol, timestamp)
+                
             else:
                 self._logger.error("🔴 Order ID is None (OrderManager failed silently)")
-
+                
         except Exception as exc:
-            # --- BREADCRUMB 6: CRASH HANDLER ---
-            self._logger.error(f"🔴 HANDLER CRASHED: {exc}", exc_info=True)
-            self._record_trade(base_symbol, TradeRecord(timestamp, action, 0, price, "error", str(exc)))
+            self._logger.error(f"🔴 HANDLER CRASHED during Order Placement: {exc}", exc_info=True)
+            self._record_trade(base_symbol, TradeRecord(timestamp, action, int(sized_qty), trade_price, "error", str(exc)))
+                    
 
     def _set_trade_cooldown(self, symbol: str, timestamp: datetime) -> None:
         cooldown = self._config.trade_cooldown_seconds
