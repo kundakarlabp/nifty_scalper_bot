@@ -806,6 +806,15 @@ class OrderManager:
             if callable(setter):
                 setter(self._lot_lookup(), symbol=None)
 
+    def panic_button(self):
+        """Cancel ALL orders first, then exit positions."""
+        # 1. Fast Cancel (prevents new fills while we exit)
+        self._broker.cancel_all_orders() 
+    
+        # 2. Dump Positions (Market Orders)
+        for pos in self._positions.get_open_positions():
+            self.place_order(pos.symbol, "SELL" if pos.quantity > 0 else "BUY", abs(pos.quantity), "MARKET")
+
     def set_bracket_manager(self, bracket_manager: BracketManager | None) -> None:
         """Attach bracket manager responsible for OCO coordination."""
 
