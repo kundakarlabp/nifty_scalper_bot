@@ -185,6 +185,7 @@ class SymbolState:
     last_trade_at: datetime | None = None
     cooldown_until: datetime | None = None
     strategy_data: dict[str, Any] = field(default_factory=dict)
+    vwap: float | None = None  # <--- [INSERT THIS LINE] Add VWAP storage
     trade_history: Deque[TradeRecord] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1312,6 +1313,7 @@ class StrategyRunner:
 
         # 1. Extract price
         price = _extract_float(tick, "ltp", "last_price", "close", "price")
+        vwap = _extract_float(tick, "average_price", "vwap")
         if price is None or price <= 0:
             self._logger.debug("Ignoring tick without price for %s: %s", symbol, tick)
             return
@@ -1354,6 +1356,8 @@ class StrategyRunner:
                 return
 
             state.last_tick = dict(tick)
+            if vwap is not None and vwap > 0:
+                state.vwap = vwap
 
             if (
                 not self._running
@@ -1462,6 +1466,21 @@ class StrategyRunner:
     ) -> None:
         """Handle entry (BUY/SELL) signals."""
         action = signal.action
+
+        current_vwap = None
+        with self._lock:
+            if state := self._symbol_state.get(base_symbol):
+                current_vwap = state.vwap
+        
+        if current_vwap and current_vwap > 0:
+            vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
+            self._logger.info(f"📊 VWAP Check: Price={trade_price} VWAP={current_vwap} Dist={vwap_dist:.2f}%")
+            
+            # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
+            if action == "BUY" and trade_price < current_vwap:
+                self._logger.warning(f"🛑 VWAP BLOCK: Price {trade_price} is below VWAP {current_vwap}. Skipping BUY.")
+                self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "skipped", "vwap_filter"))
+                return
         selection: SelectedContract | None = None
         selector = self._strike_selector
 
