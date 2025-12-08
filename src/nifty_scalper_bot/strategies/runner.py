@@ -678,48 +678,6 @@ class StrategyRunner:
                 if state.cooldown_until is not None and now < state.cooldown_until:
                     return
 
-            # --- 🔥 FIRE DRILL 4.0 (FORCE OVERWRITE) ---
-            # Broad Solution: We assume the environment is imperfect and FORCE the dependency.
-            if not hasattr(self, "_test_trade_fired"):
-                if "NIFTY" in symbol and "CE" in symbol: 
-                    self._logger.warning(f"🔥 FIRE DRILL 4.0: Forcing VALID SIGNAL for {symbol}")
-                    
-                    # 1. Define the Mock Resolver
-                    class MockResolver:
-                        def get_lot_sizes(self):
-                            return {symbol: 25} # Standard Nifty Lot
-                        def resolve(self, *args, **kwargs):
-                            return None # Handle other calls safely
-
-                    # 2. BRUTE FORCE INJECTION
-                    # We don't check if it exists. We OVERWRITE it to guarantee consistency.
-                    om = self._order_manager
-                    mock = MockResolver()
-                    
-                    self._logger.warning("💉 FORCE-INJECTING Mock Resolver into OrderManager...")
-                    om._instrument_resolver = mock  # Primary variable
-                    om._resolver = mock             # Legacy variable
-                    
-                    # 3. Execute Order
-                    self._logger.warning(f"⚡ BYPASSING SELECTOR -> Executing Direct Order for {symbol}")
-                    try:
-                        order_id = om.place_order(
-                            symbol=symbol,
-                            side="BUY",
-                            quantity=25,
-                            order_type=OrderType.MARKET,
-                            price=price,
-                            stop_loss=1.0,
-                            take_profit=10.0
-                        )
-                        self._logger.info(f"✅ FIRE DRILL SUCCESS! Order ID: {order_id}")
-                    except Exception as e:
-                        self._logger.error(f"❌ FIRE DRILL FAILED: {e}", exc_info=True)
-                    
-                    self._test_trade_fired = True
-                    return
-            # -------------------------------------------------------------
-
             # 4. Check Indicators Ready
             if self._config.min_indicator_bars:
                 try:
