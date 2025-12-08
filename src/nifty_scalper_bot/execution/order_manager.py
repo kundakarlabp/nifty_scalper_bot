@@ -809,11 +809,19 @@ class OrderManager:
     def panic_button(self):
         """Cancel ALL orders first, then exit positions."""
         # 1. Fast Cancel (prevents new fills while we exit)
-        self._broker.cancel_all_orders() 
+        # self._broker.cancel_all_orders()  <-- INCORRECT, likely crashes
+        self.cancel_pending_orders()      # <-- CORRECT, uses local logic
     
         # 2. Dump Positions (Market Orders)
         for pos in self._positions.get_open_positions():
-            self.place_order(pos.symbol, "SELL" if pos.quantity > 0 else "BUY", abs(pos.quantity), "MARKET")
+            # Use 'exit' logic to ensure side is correct
+            self._place_exit_order(
+                symbol=pos.symbol,
+                side="SELL" if pos.quantity > 0 else "BUY",
+                quantity=abs(pos.quantity),
+                product=None,
+                tag="PANIC_BUTTON"
+            )
 
     def set_bracket_manager(self, bracket_manager: BracketManager | None) -> None:
         """Attach bracket manager responsible for OCO coordination."""
@@ -2181,16 +2189,6 @@ class OrderManager:
                 tp_secondary_qty = 0
         else:
             fraction = 0.0
-        tp_primary_qty = filled_quantity
-        tp_secondary_qty = 0
-        if 0 < fraction < 1:
-            tentative = int(filled_quantity * fraction)
-            tp_primary_qty = max(tentative, 1)
-            if tp_primary_qty >= filled_quantity:
-                tp_primary_qty = filled_quantity
-            tp_secondary_qty = filled_quantity - tp_primary_qty
-        else:
-            fraction = 0.0
 
         tp_details: OrderDetails | None = None
         if tp_primary_qty > 0:
@@ -2934,26 +2932,6 @@ class OrderManager:
             and replacement.price > 0
         ):
             state.stop_price = replacement.price
-        if state.trailing_spec is not None:
-            self.stop_trailing(state.entry_id)
-            try:
-                self.attach_trailing_stop(
-                    entry_order_id=state.entry_id,
-                    sl_order_id=replacement.order_id,
-                    symbol=state.symbol,
-                    side=state.side,
-                    entry_price=state.entry_price,
-                    spec=state.trailing_spec,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _resize_stop_order trailing: %s",
-                    exc,
-                    extra={
-                        "event": "resize_stop_trailing_failed",
-                        "entry_id": state.entry_id,
-                    },
-                )
                 
         if state.trailing_spec is not None:
             self.stop_trailing(state.entry_id)
@@ -2967,7 +2945,7 @@ class OrderManager:
                 self._logger.error(
                     "Failure in _resize_stop_order trailing: %s. Stop is now STATIC.",
                     exc,
-                    extra={...}
+                    extra={"event": "resize_stop_trailing_failed", "entry_id": state.entry_id}
                 )
 
     def _resize_target_order(
