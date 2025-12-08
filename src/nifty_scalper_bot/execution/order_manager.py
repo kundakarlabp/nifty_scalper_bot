@@ -657,21 +657,18 @@ class OrderManager:
         self._persistent_state: PersistentStateManager | None = None
         timeout_override = os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC")
         # 4. Add Missing Initialization Safety (The Fix)
+        # Clean Initialization
         if override := os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC"):
             with suppress(ValueError):
-                 # Safely parse float, ensure min 0.5s, ignore if invalid
-                 self.BRACKET_ENTRY_TIMEOUT_SEC = max(float(override), 0.5)
-        if timeout_override:
-            try:
-                configured_timeout = float(timeout_override)
-            except ValueError:
-                # pragma: no cover - guard for invalid overrides
-                self._logger.warning(
-                    "Invalid bracket entry timeout override",
+                 # Safely parse float, ensure min 0.5s
+                 sanitized = max(float(override), 0.5)
+                 self.BRACKET_ENTRY_TIMEOUT_SEC = sanitized
+                 self._logger.info(
+                    "Condition met: override bracket entry timeout",
                     extra={
-                        "event": "order_config_invalid",
+                        "event": "order_config_override",
                         "field": "bracket_entry_timeout_sec",
-                        "value": timeout_override,
+                        "value": sanitized,
                     },
                 )
             else:
@@ -2163,7 +2160,6 @@ class OrderManager:
         # [FIX] Lot-Aware Sizing
         lot_size = self._lot_size_for_symbol(symbol)
         
-        fraction = float(partial_profit_fraction or 0.0)
         tp_primary_qty = filled_quantity
         tp_secondary_qty = 0
         
@@ -3690,7 +3686,7 @@ class OrderManager:
                     self._refresh_order(order.order_id)
                 except RateLimitError:
                     # Back off hard on rate limits
-                    time_module.sleep(self.POLL_INTERVAL_SEC * 10)
+                    time.sleep(self.POLL_INTERVAL_SEC * 10)
                     break
                 except Exception as exc:
                     # CRITICAL FIX: Check for fatal broker errors (401/403)
@@ -7895,7 +7891,8 @@ class OrderManager:
 
     def _lot_lookup(self) -> Callable[[str], int] | None:
         resolver = self._resolver
-        if not resolver: return {}
+        if not resolver: 
+            return None
         if resolver is None:
             market_data = self._market_data
             resolver = getattr(market_data, "resolver", None) if market_data else None
