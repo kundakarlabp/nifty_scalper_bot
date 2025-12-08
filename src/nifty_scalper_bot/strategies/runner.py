@@ -1346,7 +1346,8 @@ class StrategyRunner:
             except Exception:
                 pass
 
-        # 4. Check state
+        # 4. Check state & Generate VWAP Signals
+        generated_signal = None
         with self._lock:
             if symbol not in self._active_symbols:
                 return
@@ -1355,8 +1356,30 @@ class StrategyRunner:
             if state is None:
                 return
 
+            # [START] VWAP CROSSOVER TRIGGER
+            # 1. Get previous price and current VWAP
+            prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
+            curr_vwap = getattr(state, "vwap", None) # Ensure vwap exists on state
+            
+            # 2. Check for Bullish Crossover (Price crosses VWAP from below)
+            if prev_ltp and curr_vwap and price > 0:
+                if prev_ltp < curr_vwap and price > curr_vwap:
+                    self._logger.info(f"⚡ VWAP CROSSOVER DETECTED: {symbol} ({prev_ltp} -> {price} over {curr_vwap})")
+                    generated_signal = Signal(
+                        action="BUY",
+                        symbol=symbol,
+                        quantity=1, # Placeholder (Risk Manager will resize this)
+                        confidence=1.0,
+                        reason="vwap_crossover_polling",
+                        metadata={"vwap": curr_vwap, "prev_ltp": prev_ltp}
+                    )
+            # [END] VWAP CROSSOVER TRIGGER
+
             state.last_tick = dict(tick)
-            if vwap is not None and vwap > 0:
+            
+            # Update VWAP in state (from the 'vwap' variable we extracted earlier)
+            # Ensure 'vwap' variable is defined in _on_tick scope (see previous step)
+            if 'vwap' in locals() and vwap is not None and vwap > 0: 
                 state.vwap = vwap
 
             if (
@@ -1382,8 +1405,9 @@ class StrategyRunner:
 
         # 6. Generate signal
         self._logger.debug(f"🔍 Checking signals for {symbol} @ {price}")
-        signal = self._strategy_manager.generate_signal(symbol, price)
-
+        signal = generated_signal
+        if signal is None:
+            signal = self._strategy_manager.generate_signal(symbol, price)
         if signal is None:
             self._logger.debug(f"⚪ No Signal: {symbol}...")
             return
