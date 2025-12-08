@@ -418,4 +418,28 @@ class DataHub:
     def normalize(symbol: str) -> str:
         return symbol.strip().upper()
 
+    # ----------------------------------------------------------------
+    # CRITICAL FIX: Option Chain Proxy for Strike Selector
+    # ----------------------------------------------------------------
+    
+    def get_option_chain(self, symbol: str) -> Any:
+        """
+        Retrieves the option chain for the given symbol.
+        Delegates to the underlying Market Data Manager or Provider.
+        """
+        # 1. Try Market Data Manager (standard path)
+        mdm = getattr(self, "_market_data", None) or getattr(self, "_mdm", None)
+        if mdm and hasattr(mdm, "get_option_chain"):
+            return mdm.get_option_chain(symbol)
+            
+        # 2. Try Internal Provider (direct path)
+        provider = getattr(self, "_provider", None)
+        if provider and hasattr(provider, "get_option_chain"):
+            return provider.get_option_chain(symbol)
+            
+        # 3. Fail Safe
+        if hasattr(self, "_logger"):
+            self._logger.error(f"❌ DataHub: No source found for 'get_option_chain' for {symbol}")
+        return []
+
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
