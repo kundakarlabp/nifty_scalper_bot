@@ -354,11 +354,11 @@ class StrikeSelector:
         """Select an option contract, utilizing in-memory caching for speed."""
 
         # Note: Assumes _contract_cache and _cache_ttl_seconds are defined in __init__
-    
+        
         # --- START CRITICAL FIX: CACHE CHECK (Latency Optimization) ---
         cache_key = f"{underlying}_{option_type}_{self._selector_settings.expiry}"
         current_time = self._clock().timestamp()
-    
+        
         if cache_key in self._contract_cache:
             timestamp, details = self._contract_cache[cache_key]
             if (current_time - timestamp) < self._cache_ttl_seconds:
@@ -373,19 +373,15 @@ class StrikeSelector:
             LOGGER.debug("Cache expired for %s. Recalculating.", cache_key)
         # --- END CRITICAL FIX: CACHE CHECK ---
 
-        LOGGER.debug(
-            "Entered StrikeSelector.select_contract",
-            extra={
-                "underlying": underlying,
-                "side": side,
-                "option_type": option_type,
-            },
+        LOGGER.info(
+            f"🕵️ SELECTOR ENTRY: Looking for {side} {option_type} on {underlying} @ {underlying_price}"
         )
+        
         normalized = underlying.strip().upper()
         if not normalized:
             raise ValueError("underlying must be provided")
         if underlying_price <= 0:
-            LOGGER.debug(
+            LOGGER.warning(
                 "Invalid underlying price for %s: %s", normalized, underlying_price
             )
             return None
@@ -395,65 +391,74 @@ class StrikeSelector:
         except ValueError as exc:
             LOGGER.error("Failure in select_contract_option_type: %s", exc)
             return None
+            
         if requested_option_type is None:
-            LOGGER.info(
-                "Condition met: selector_missing_option_type",
-                extra={"underlying": normalized, "side": side},
-            )
+            LOGGER.info("Condition met: selector_missing_option_type")
             return None
-        LOGGER.info(
-            "Condition met: selector_explicit_option_type",
-            extra={
-                "underlying": normalized,
-                "side": side,
-                "option_type": requested_option_type,
-            },
-        )
 
+        # --- TRACE 1: FETCH CHAIN ---
+        LOGGER.info(f"🟡 Fetching option chain for {normalized}...")
         chain = self._data_hub.get_option_chain(self._selector_settings.expiry)
+        
         if not chain:
-            LOGGER.warning("No option chain available for %s", normalized)
+            LOGGER.warning(f"❌ CHAIN ERROR: No option chain returned for {normalized}")
             return None
+        
+        LOGGER.info(f"✅ CHAIN SUCCESS: Received {len(chain)} raw items.")
 
+        # --- TRACE 2: PARSE & FILTER TYPE ---
         option_contracts = [
             _OptionContract.from_mapping(entry)
             for entry in chain
             if isinstance(entry, Mapping)
         ]
+        
         candidates = [
             contract
             for contract in option_contracts
             if contract is not None and contract.option_type == requested_option_type
         ]
+        
         if not candidates:
-            LOGGER.info(
-                "No %s contracts available for %s",
-                requested_option_type,
-                normalized,
+            LOGGER.warning(
+                f"❌ FILTER ERROR: No {requested_option_type} contracts found out of {len(option_contracts)} items."
             )
             return None
 
+        LOGGER.info(f"✅ TYPE MATCH: Found {len(candidates)} {requested_option_type} candidates.")
+
+        # --- TRACE 3: SELECT EXPIRY ---
         now = self._clock()
         target_expiry = self._select_expiry(candidates, now)
         if target_expiry is None:
             LOGGER.info("Unable to determine expiry for %s", normalized)
             return None
+            
         filtered_by_expiry = [
             contract
             for contract in candidates
             if contract.expiry.date() == target_expiry.date()
         ]
+        
         if not filtered_by_expiry:
-            LOGGER.info("No contracts for expiry %s (%s)", target_expiry, normalized)
+            LOGGER.info(f"❌ EXPIRY ERROR: No contracts for target expiry {target_expiry}")
             return None
 
+        LOGGER.info(f"✅ EXPIRY MATCH: {len(filtered_by_expiry)} contracts for {target_expiry}")
+
+        # --- TRACE 4: RANKING & DELTA ---
         ranked = self._rank_contracts(filtered_by_expiry, underlying_price)
+        LOGGER.info(f"ℹ️ Ranked {len(ranked)} contracts by proximity.")
+        
         selection: SelectedContract | None = None
-    
+        
         for contract in ranked:
+            # Trace Rejection Reasons
             if not self._within_delta(contract):
+                # LOGGER.debug(f"Skipping {contract.symbol}: Delta mismatch")
                 continue
             if not self._passes_liquidity(contract):
+                LOGGER.debug(f"Skipping {contract.symbol}: Failed liquidity check")
                 continue
 
             # --- quote-availability gate (one refresh) ---
@@ -465,9 +470,7 @@ class StrikeSelector:
 
             if resolver is not None:
                 try:
-                    meta = resolver.lookup(lookup_symbol) or resolver.lookup(
-                        contract.symbol
-                    )
+                    meta = resolver.lookup(lookup_symbol) or resolver.lookup(contract.symbol)
                     if isinstance(meta, Mapping):
                         ts2 = str(meta.get("tradingsymbol") or "").strip().upper()
                         ex = str(meta.get("exchange") or "NFO").strip().upper()
@@ -476,14 +479,7 @@ class StrikeSelector:
                             final_symbol = _normalize_exchange_symbol(f"{ex}:{ts2}")
                             lookup_symbol = final_symbol
                 except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug(
-                        "Failure in select_contract_resolver_lookup: %s",
-                        exc,
-                        extra={
-                            "symbol": lookup_symbol or contract.symbol,
-                            "event": "select_contract_resolver_lookup_failed",
-                        },
-                    )
+                    LOGGER.debug(f"Resolver lookup failed for {contract.symbol}: {exc}")
 
             query_symbols: list[str] = []
             seen_symbols: set[str] = set()
@@ -498,6 +494,7 @@ class StrikeSelector:
                 query_symbols.append(normalized_candidate)
                 seen_symbols.add(normalized_candidate)
 
+            # --- TRACE 5: QUOTE CHECK ---
             if mdm is not None:
                 try:
                     quote_available = False
@@ -505,40 +502,22 @@ class StrikeSelector:
                     for query_symbol in query_symbols or [final_symbol]:
                         has_quote = bool(mdm.get_quote(query_symbol))
                         if not has_quote and not attempted_refresh:
+                            # LOGGER.info(f"🔄 Refreshing quote for {query_symbol}...")
                             mdm.refresh_quote_now(query_symbol)
                             attempted_refresh = True
                             has_quote = bool(mdm.get_quote(query_symbol))
                         if has_quote:
                             quote_available = True
                             break
+                    
                     if not quote_available:
-                        LOGGER.info(
-                            "selector_reject_unquotable",
-                            extra={
-                                "symbol": (
-                                    query_symbols[0] if query_symbols else final_symbol
-                                ),
-                                "orig": contract.symbol,
-                                "reason": "no_quote_data",
-                                "candidates": query_symbols,
-                            },
-                        )
-                        # IMPORTANT: keep scanning for the next viable candidate.
+                        LOGGER.warning(f"⚠️ Rejecting {final_symbol}: No Quote Data Available")
                         continue
                 except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "Failure in select_contract_quote_gate: %s",
-                        exc,
-                        extra={
-                            "symbol": (
-                                query_symbols[0] if query_symbols else final_symbol
-                            ),
-                            "event": "select_contract_quote_gate_failed",
-                        },
-                    )
-                    # Can't validate quotes; try the next candidate.
+                    LOGGER.error(f"Quote gate exception: {exc}")
                     continue
 
+            # Calculate LTP
             ltp = (
                 contract.ltp
                 if contract.ltp > 0
@@ -558,6 +537,7 @@ class StrikeSelector:
             # --- START CRITICAL FIX: CACHE WRITE ---
             if selection:
                 self._contract_cache[cache_key] = (current_time, selection)
+                LOGGER.info(f"✅ STRIKE LOCKED: {selection.symbol} (Strike: {selection.strike}, LTP: {selection.ltp})")
             # --- END CRITICAL FIX: CACHE WRITE ---
         
             LOGGER.debug(
@@ -567,8 +547,8 @@ class StrikeSelector:
                 self._selector_settings.mode,
             )
             return selection
-    
-        LOGGER.info("No contracts satisfied selection filters for %s", normalized)
+        
+        LOGGER.warning(f"❌ EXHAUSTION: Checked all {len(ranked)} ranked contracts but none passed filters.")
         return None
 
     def register_open(self, underlying: str, contract: SelectedContract) -> None:
