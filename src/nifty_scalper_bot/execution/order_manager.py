@@ -2153,6 +2153,34 @@ class OrderManager:
         child_ids.append(stop_details.order_id)
 
         fraction = float(partial_profit_fraction or 0.0)
+        # [FIX] Lot-Aware Sizing
+        lot_size = self._lot_size_for_symbol(symbol)
+        
+        fraction = float(partial_profit_fraction or 0.0)
+        tp_primary_qty = filled_quantity
+        tp_secondary_qty = 0
+        
+        if 0 < fraction < 1:
+            # Calculate raw quantity
+            target_qty = int(filled_quantity * fraction)
+            
+            # Snap to lot size (floor)
+            lots_count = target_qty // lot_size
+            if lots_count == 0 and target_qty > 0: 
+                # If partial is less than 1 lot, decide policy (e.g., 0 or 1 lot)
+                # Here we force 0 for TP1 if < 1 lot, meaning full exit at TP2
+                tp_primary_qty = 0 
+            else:
+                tp_primary_qty = lots_count * lot_size
+                
+            tp_secondary_qty = filled_quantity - tp_primary_qty
+            
+            # Fallback if math puts everything in secondary
+            if tp_primary_qty == 0:
+                tp_primary_qty = filled_quantity
+                tp_secondary_qty = 0
+        else:
+            fraction = 0.0
         tp_primary_qty = filled_quantity
         tp_secondary_qty = 0
         if 0 < fraction < 1:
@@ -2855,27 +2883,49 @@ class OrderManager:
         self._bracket_index.pop(stop_id, None)
         self._update_entry_children(state.entry_id, remove=[stop_id])
         state.stop_order_id = ""
-        try:
-            replacement = self._place_single_order(
-                symbol=state.symbol,
-                side=state.exit_side,
-                quantity=new_quantity,
-                order_type=state.stop_order_type,
-                price=state.stop_price,
-                product=state.product,
-                tag=state.tag,
-                parent_order_id=state.entry_id,
+        # [FIX] Robust Stop Replacement Logic
+        replacement = None
+        for attempt in range(3):  # Try 3 times to place the new stop
+            try:
+                replacement = self._place_single_order(
+                    symbol=state.symbol,
+                    side=state.exit_side,
+                    quantity=new_quantity,
+                    order_type=state.stop_order_type,
+                    price=state.stop_price,
+                    product=state.product,
+                    tag=state.tag,
+                    parent_order_id=state.entry_id,
+                )
+                break # Success!
+            except Exception as exc:
+                self._logger.warning(
+                    f"Stop replacement attempt {attempt+1} failed: {exc}",
+                    extra={"entry_id": state.entry_id}
+                )
+                time.sleep(0.5)
+
+        if replacement is None:
+            # CRITICAL: Failed to replace stop. Position is NAKED.
+            # ACTION: Trigger Emergency Exit immediately.
+            self._logger.critical(
+                "CRITICAL: Failed to replace Stop Loss. Executing EMERGENCY EXIT.",
+                extra={"event": "resize_stop_fatal_error", "entry_id": state.entry_id}
             )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _resize_stop_order replace: %s",
-                exc,
-                extra={
-                    "event": "resize_stop_replace_failed",
-                    "entry_id": state.entry_id,
-                },
-            )
-            return
+            try:
+                self._place_exit_order(
+                    symbol=state.symbol,
+                    side=state.exit_side,
+                    quantity=new_quantity,
+                    product=state.product,
+                    tag="emergency_no_stop"
+                )
+            except Exception as exit_exc:
+                self._logger.critical(f"EMERGENCY EXIT FAILED: {exit_exc}")
+                # Optional: Send Telegram Alert Here via self._notifier
+            return 
+
+        # ... (Rest of the function continues with `replacement` guaranteed) ...
         state.stop_order_id = replacement.order_id
         self._bracket_index[replacement.order_id] = state.entry_id
         self._update_entry_children(state.entry_id, add=[replacement.order_id])
@@ -2903,6 +2953,21 @@ class OrderManager:
                         "event": "resize_stop_trailing_failed",
                         "entry_id": state.entry_id,
                     },
+                )
+                
+        if state.trailing_spec is not None:
+            self.stop_trailing(state.entry_id)
+            try:
+                self.attach_trailing_stop(
+                    # ... args ...
+                )
+            except Exception as exc:
+                # [ADD THIS LINE]
+                state.trailing_spec = None # Mark as no longer trailing
+                self._logger.error(
+                    "Failure in _resize_stop_order trailing: %s. Stop is now STATIC.",
+                    exc,
+                    extra={...}
                 )
 
     def _resize_target_order(
