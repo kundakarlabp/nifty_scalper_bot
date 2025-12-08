@@ -27,6 +27,7 @@ from typing import (
 
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+# Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.constants import OPTION_ALIAS_SUFFIX
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
@@ -321,6 +322,7 @@ class StrategyRunner:
         self._data_hub = data_hub
         self._strike_selector = strike_selector
         self._symbol_source: MarketDataManager | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
         # Subscribe to MessageBus if available
         if self._message_bus is not None:
@@ -410,6 +412,12 @@ class StrategyRunner:
             self._running = True
             self._trading_paused = False
             symbols = list(self._active_symbols)
+
+        # Capture the loop if called from async context (optional safety)
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
         self._market_data.start()
 
@@ -1271,8 +1279,13 @@ class StrategyRunner:
         if not self._running or self._trading_paused:
             return
 
+        # FIX #1: Capture the running loop for thread callbacks
+        if self._main_loop is None:
+            self._main_loop = asyncio.get_running_loop()
+
         tick: dict = message.data
         try:
+            # Offload heavy synchronous processing (and blocking broker calls) to a thread
             await asyncio.to_thread(self._on_tick_safe, tick)
         except Exception as exc:
             LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
@@ -1612,6 +1625,8 @@ class StrategyRunner:
 
             # Execute order
             self._logger.info(f"🟡 5. SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty}")
+            
+            # BLOCKING CALL - Safe here because we are in a worker thread (via to_thread)
             order_id = self._order_manager.place_order(
                 symbol=trade_symbol,
                 side=entry_side,
@@ -1626,9 +1641,15 @@ class StrategyRunner:
                 self._logger.info(f"🟢 6. ORDER SUBMITTED! ID: {order_id}")
 
                 # ========================================
-                # FIX #2: ASYNC ORDER VERIFICATION
+                # FIX #2: SAFE ASYNC SCHEDULING
                 # ========================================
-                asyncio.create_task(self._verify_order_status(order_id, trade_symbol, 3.0))
+                if self._main_loop and self._main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._verify_order_status(order_id, trade_symbol, 3.0),
+                        self._main_loop
+                    )
+                else:
+                    self._logger.warning("Main loop not available for order verification")
 
                 self._notify_orchestrator_submission(signal, base_symbol)
 
@@ -1666,7 +1687,7 @@ class StrategyRunner:
 
 
     # ========================================
-    # FIX #2: ORDER VERIFICATION METHOD
+    # FIX #2: NON-BLOCKING VERIFICATION
     # ========================================
     async def _verify_order_status(
         self, order_id: str, symbol: str, delay_seconds: float
@@ -1675,9 +1696,10 @@ class StrategyRunner:
         await asyncio.sleep(delay_seconds)
 
         try:
-            # Check order status
+            # Check order status in a thread to avoid blocking the loop
             if hasattr(self._order_manager, "get_order"):
-                order = self._order_manager.get_order(order_id)
+                order = await asyncio.to_thread(self._order_manager.get_order, order_id)
+                
                 if not order:
                     self._logger.warning(f"❓ Order {order_id} not found in manager after {delay_seconds}s")
                     return
@@ -1781,6 +1803,7 @@ class StrategyRunner:
             )
 
             # Place reduce-only exit
+            # Blocking call - safe in thread
             exit_order_id = self._order_manager.place_reduce_only_exit(exit_intent)
 
             if exit_order_id:
