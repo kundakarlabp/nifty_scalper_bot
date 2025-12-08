@@ -2869,7 +2869,8 @@ class TelegramBot:
             broker_err: str | None = None
             try:
                 if broker is not None and hasattr(broker, "get_quote"):
-                    quote = broker.get_quote(symbol)  # type: ignore[assignment]
+                    # [FIX] Run blocking network call in thread
+                    quote = await asyncio.to_thread(broker.get_quote, symbol)
 
                     def _pick(candidate: t.Any, *keys: str) -> t.Any:
                         for key in keys:
@@ -11596,7 +11597,7 @@ class TelegramBot:
                 broker_block = ["Broker (REST)", "❌ broker unavailable"]
             else:
                 try:
-                    quotes = broker.get_quote(candidate_keys)  # type: ignore[call-arg]
+                    quotes = await asyncio.to_thread(broker.get_quote, candidate_keys)
                 except Exception as exc:  # noqa: BLE001
                     log.error(
                         "Failure fetching broker quote in cmd_ingestprobe: %s",
@@ -12013,12 +12014,13 @@ class TelegramBot:
         br_available: float | None = None
         br_err: str | None = None
         try:
+            # [FIX] Run blocking calls in thread
             if broker is not None and hasattr(broker, "get_margin_summary"):
-                summary = broker.get_margin_summary(segment="equity")
+                summary = await asyncio.to_thread(broker.get_margin_summary, segment="equity")
                 if isinstance(summary, dict):
                     br_summary = summary
             if broker is not None and hasattr(broker, "get_available_balance"):
-                raw_available = broker.get_available_balance(segment="equity")
+                raw_available = await asyncio.to_thread(broker.get_available_balance, segment="equity"))
                 br_available = self._coerce_float_value(
                     raw_available,
                     field="broker.available",
@@ -12274,7 +12276,7 @@ class TelegramBot:
             return
 
         rb = self._response_builder
-        entries, snapshot = self._load_mdm_margin_entries(force=True)
+        entries, snapshot = await asyncio.to_thread(self._load_mdm_margin_entries, force=True)
         if not entries:
             log.info(
                 "Condition met: telegram_cmd_balance_no_entries",
@@ -12559,7 +12561,7 @@ class TelegramBot:
             return
 
         rb = self._response_builder
-        entries, snapshot = self._load_mdm_margin_entries(force=True)
+        entries, snapshot = await asyncio.to_thread(self._load_mdm_margin_entries, force=True)
         if not entries:
             log.info(
                 "Condition met: telegram_cmd_margins_no_entries",
