@@ -809,8 +809,7 @@ class OrderManager:
     def panic_button(self):
         """Cancel ALL orders first, then exit positions."""
         # 1. Fast Cancel (prevents new fills while we exit)
-        # self._broker.cancel_all_orders()  <-- INCORRECT, likely crashes
-        self.cancel_pending_orders()      # <-- CORRECT, uses local logic
+        self.cancel_pending_orders()  # <--- FIXED
     
         # 2. Dump Positions (Market Orders)
         for pos in self._positions.get_open_positions():
