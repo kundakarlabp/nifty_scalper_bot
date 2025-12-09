@@ -4468,6 +4468,43 @@ async def startup_sequence(ctx: BotContext) -> None:
                 exc,
                 extra={"event": "state_reconcile_failed"},
             )
+
+    # ------------------------------------------------------------------
+    # [STAGE 3 FIX] KILL SWITCH: Cancel all open orders on boot
+    # ------------------------------------------------------------------
+    if broker_ready:
+        LOGGER.info("💀 KILL SWITCH: Scanning for Zombie Orders...")
+        try:
+            # Run in thread to prevent blocking the async event loop
+            def _cancel_zombies():
+                # Fetch all orders from Zerodha
+                orders = ctx.broker_client.get_orders()
+                cancelled_count = 0
+                for o in orders:
+                    if o.get('status') == 'OPEN':
+                        oid = o.get('order_id')
+                        sym = o.get('tradingsymbol')
+                        LOGGER.warning(f"⚠️ Cancelling Zombie Order: {oid} ({sym})")
+                        try:
+                            # Cancel using the broker client
+                            ctx.broker_client.cancel_order(order_id=oid)
+                            cancelled_count += 1
+                        except Exception as e:
+                            LOGGER.error(f"Failed to cancel {oid}: {e}")
+                return cancelled_count
+
+            # Await the threaded execution
+            count = await asyncio.to_thread(_cancel_zombies)
+            
+            if count > 0:
+                LOGGER.info(f"✅ KILL SWITCH: Cancelled {count} zombie orders.")
+            else:
+                LOGGER.info("✅ KILL SWITCH: Clean start. No open orders found.")
+
+        except Exception as e:
+            LOGGER.error(f"❌ KILL SWITCH FAILED: {str(e)}")
+            # We do not stop the bot here; trading can still proceed manually
+    # ------------------------------------------------------------------
     else:
         LOGGER.info("Continuing startup in degraded mode (broker unavailable)")
 
