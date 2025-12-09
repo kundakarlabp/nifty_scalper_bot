@@ -81,7 +81,8 @@ class OrderProcessor:
                     
                     if side == "BUY":
                         # Buy at LTP + 2% (Aggressive Limit)
-                        price = round(ltp * buffer_pct, 1)
+                        raw_price = ltp * buffer_pct
+                        price = round(raw_price / 0.05) * 0.05
                     else:
                         # Sell at LTP - 2%
                         price = round(ltp * (2 - buffer_pct), 1)
