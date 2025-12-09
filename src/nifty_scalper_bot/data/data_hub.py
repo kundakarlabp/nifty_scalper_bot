@@ -157,8 +157,14 @@ class DataHub:
     # ----------------------------------------------------------------
 
     # ----------------------------------------------------------------
-    # [ADDED] Helpers for Sanitization & Freshness (Restored from Old)
+    # [ADDED] Helpers for Sanitization, Freshness & Warmup
     # ----------------------------------------------------------------
+    def _reset_warmup(self) -> None:
+        """Reset the warmup deadline based on current monotonic time."""
+        # Ensure grace period is at least 5.0s if not set
+        grace = getattr(self, "_warmup_grace_s", 5.0)
+        self._warmup_deadline = time.monotonic() + grace
+
     def _sanitize_tick(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Ensure numeric fields are floats/ints, preventing downstream crashes."""
         numeric_fields = (
@@ -199,7 +205,6 @@ class DataHub:
         ts = payload.get("timestamp") or payload.get("_server_ts")
         if not ts: return 0.0
         return max(0.0, time.time() - float(ts))
-
     
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick (Async + Sanitized + Persistent)."""
@@ -622,8 +627,5 @@ class DataHub:
                         self._positions = payload
         except Exception:
             LOGGER.exception("Failed to restore DataHub state")
-    def _reset_warmup(self) -> None:
-        """Reset the warmup deadline based on current monotonic time."""
-        self._warmup_deadline = time.monotonic() + self._warmup_grace_s
-
+    
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
