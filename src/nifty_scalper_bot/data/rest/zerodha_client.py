@@ -873,6 +873,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
             if isinstance(payload, list):
                 normalized = cast(list[dict[str, Any]], payload)
+                if normalized:
                 LOGGER.info(
                     "zerodha_positions_fetch_success count=%d",
                     len(normalized),
@@ -881,6 +882,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         "count": len(normalized),
                     },
                 )
+            else:
+                LOGGER.debug("zerodha_positions_fetch_success count=0")
                 return normalized
 
             LOGGER.info(
