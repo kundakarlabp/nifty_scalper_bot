@@ -5518,6 +5518,7 @@ class NiftyScalperApp:
                         extra={"event": "telegram_application_started"},
                     )
         elif self._ctx.telegram_bot is not None:
+            LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
             self._telegram_task = asyncio.create_task(
                 self._ctx.telegram_bot.run(),
                 name="telegram-console",
