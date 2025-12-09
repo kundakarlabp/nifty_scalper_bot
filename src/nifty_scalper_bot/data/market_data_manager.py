@@ -2338,7 +2338,7 @@ class MarketDataManager:
                     batch = symbols[i : i + batch_size]
                     try:
                         # Fetch all quotes in ONE HTTP call
-                        quotes = self._broker.quote(batch)
+                        quotes = self._broker.quote_any(batch) or {}
                         arrival_time = time.time()
 
                         # Ingest immediately
