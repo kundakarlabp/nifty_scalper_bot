@@ -622,5 +622,8 @@ class DataHub:
                         self._positions = payload
         except Exception:
             LOGGER.exception("Failed to restore DataHub state")
+    def _reset_warmup(self) -> None:
+        """Reset the warmup deadline based on current monotonic time."""
+        self._warmup_deadline = time.monotonic() + self._warmup_grace_s
 
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
