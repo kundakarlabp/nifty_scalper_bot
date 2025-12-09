@@ -1161,48 +1161,36 @@ def get_http_app() -> FastAPI:
     # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
     # work before handlers or external probes rely on the resolver.
     @app.on_event("startup")
-    @app.on_event("startup")
     async def _warm_instrument_resolver_on_startup() -> None:
         """
-        Force fresh instrument sync on startup. 
-        CRITICAL for Polling Mode to prevent invalid token errors.
+        Force fresh instrument sync on startup efficiently.
+        Uses smart caching to avoid Rate Limits.
         """
         try:
             ctx = get_latest_bot_context()
             if ctx is None:
-                LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
+                LOGGER.debug("Resolver warm skipped: no bot context")
                 return
 
-            # [FIX] Do not force download here (relies on Smart Cache in resolver.warm)
+            # [FIX] Initialize variable safely
+            resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
+            
+            if resolver is None:
+                LOGGER.debug("Resolver warm skipped: no resolver found")
+                return
+
             LOGGER.info("Verifying Instrument Cache...")
-            # Run warm in a thread to prevent blocking
+            # [FIX] Run warm in a thread to prevent blocking the event loop
             await asyncio.to_thread(resolver.warm)
 
-            # ---------------------------------------------------------
-
-            resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
-            if resolver is None:
-                LOGGER.debug("Resolver warm skipped: no resolver available on context", extra={"event":"resolver_warm.no_resolver"})
-                return
-
-            # Now warm the resolver with the FRESH data we just loaded
-            LOGGER.info("Re-warming resolver with fresh broker data...")
-            resolver.warm()
-            
-            # Log the result
             tokens = len(getattr(resolver, "_symbol_by_token", {}))
             LOGGER.info(
-                f"✅ Instrument Resolver warmed. Active Tokens: {tokens}", 
+                f"✅ Instrument Resolver Ready. Active Tokens: {tokens}", 
                 extra={"event": "instrument_warm_complete", "tokens": tokens}
             )
 
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Instrument warm-up failed: %s",
-                exc,
-                extra={"event": "instrument_warm_failed"},
-                exc_info=exc,
-            )
+        except Exception as exc:
+            LOGGER.error(f"Instrument warm-up failed: {exc}", exc_info=True)
 
 
 def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
@@ -4987,7 +4975,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
     broker_positions: list[Mapping[str, Any]] = []
     try:
         # Fetch raw data
-        raw_data = await asyncio.to_thread(ctx.broker_client.get_positions)
+        raw_data = await ctx.broker_client.get_positions()
         
         # Normalize
         if isinstance(raw_data, list):
