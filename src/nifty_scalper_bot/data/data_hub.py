@@ -78,6 +78,28 @@ _ORDER_STATE_MACHINE: dict[str, set[str]] = {
 class DataHub:
     """Central in-memory state cache for the trading bot."""
 
+    # --- [ADD THIS SECTION] Helper methods for parsing ---
+    @staticmethod
+    def _float(value: Any) -> float | None:
+        if value in (None, ""): return None
+        try: return float(value)
+        except Exception: return None
+
+    @staticmethod
+    def _int(value: Any) -> int:
+        if value in (None, ""): return 0
+        try: return int(float(value))
+        except Exception: return 0
+
+    @staticmethod
+    def _ts(value: Any) -> float:
+        if value in (None, ""): return time.time()
+        try:
+            ts = float(value)
+            return ts / 1000.0 if ts > 1_000_000_000_000 else ts
+        except Exception: return time.time()
+    # -----------------------------------------------------
+
     def __init__(
         self,
         market_data_manager: Any,
@@ -122,57 +144,58 @@ class DataHub:
 
     
     async def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick."""
+        """Process an incoming market tick (Async + Persistent)."""
         symbol = tick.get("symbol")
-        # Handle token mapping (fix from previous step)
         token = tick.get("instrument_token") or tick.get("token")
+        
+        # Nifty Hardcode (Requested by user)
+        if str(token) == "256265": 
+            tick["symbol"] = "NSE:NIFTY 50"
+            symbol = "NSE:NIFTY 50"
+
         if not symbol and token:
             symbol = str(token)
 
-        if not symbol:
-            return
+        if not symbol: return
+
+        # [TODO] You can add the sophisticated drift logic here if desired, 
+        # but for now we stick to your requested structure.
 
         with self._lock:
             # 1. Update Cache
             self._quotes[symbol] = tick
             
-            # Cross-reference token/symbol (Fix for Self-Checker)
-            if str(token) == "256265": 
-                self._quotes["NSE:NIFTY 50"] = tick
+            # 2. Hardcode Mirror (Requested)
+            if symbol == "NSE:NIFTY 50":
                 self._quotes["NIFTY 50"] = tick
 
-            # 2. Update Metrics (Throttled)
+            # 3. Update Metrics
+            try: self._capture_option_metrics(symbol, tick)
+            except Exception: pass
+
+        # 4. Persistence (Added)
+        self._persist_wal("quote", symbol, tick)
+        self._maybe_checkpoint()
+
+        # 5. MessageBus (Async)
+        if self._message_bus:
             try:
-                self._capture_option_metrics(symbol, tick)
-            except Exception:
-                pass # Don't let math errors kill the tick
-
-            # 3. Publish to MessageBus (The Critical Fix)
-            if self._message_bus:
-                try:
-                    # FIX: Direct await for immediate data flow
-                    await self._message_bus.publish(
-                        Message(
-                            type=MessageType.TICK,
-                            timestamp=datetime.now(timezone.utc),
-                            data=tick,
-                            source="data_hub"
-                        )
+                await self._message_bus.publish(
+                    Message(
+                        type=MessageType.TICK,
+                        timestamp=datetime.now(timezone.utc),
+                        data=tick,
+                        source="data_hub"
                     )
-                except Exception as exc:
-                    LOGGER.debug(f"MessageBus publish failed: {exc}")
+                )
+            except Exception as exc:
+                LOGGER.debug(f"MessageBus publish failed: {exc}")
 
-            # 4. Notify Legacy Subscribers (Backward Compatibility)
-            if symbol in self._tick_subscribers:
-                for callback in list(self._tick_subscribers[symbol]):
-                    try:
-                        callback(tick)
-                    except Exception as exc:
-                        # This is likely where the "Tick callback failed" log comes from
-                        LOGGER.error(
-                            f"Tick subscriber failed for {symbol}: {exc}", 
-                            exc_info=True # Prints full traceback to help debug
-                        )
+        # 6. Legacy Subscribers
+        if symbol in self._tick_subscribers:
+            for callback in list(self._tick_subscribers[symbol]):
+                try: callback(tick)
+                except Exception: pass
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
@@ -231,6 +254,37 @@ class DataHub:
     def upsert_order(self, order: dict[str, Any]) -> None:
         """Update or insert an order record (alias for ingest_order_update)."""
         self.ingest_order_update(order)
+
+    def ingest_order_update(self, payload: dict[str, Any]) -> None:
+        """Insert or update cached order state from payload."""
+        symbol = self.normalize(payload.get("symbol"))
+        order_id = str(payload.get("order_id") or payload.get("id") or "").strip()
+        if not order_id: return
+
+        # Normalize fields
+        row = dict(payload)
+        row["symbol"] = symbol
+        row["quantity"] = self._int(payload.get("quantity"))
+        row["filled_quantity"] = self._int(payload.get("filled_quantity") or payload.get("filled"))
+        row["price"] = self._float(payload.get("price"))
+        row["trigger_price"] = self._float(payload.get("trigger_price"))
+        
+        status = str(payload.get("status") or "").lower()
+        
+        # State tracking logic
+        with self._lock:
+            self._orders[order_id] = row
+            self._order_status[order_id] = status
+            listeners = list(self._order_subscribers)
+
+        # Persist
+        self._persist_wal("order", order_id, row)
+        self._maybe_checkpoint()
+
+        # Notify
+        for listener in listeners:
+            try: listener(dict(row))
+            except Exception: pass
 
     def get_iv(self, symbol: str, allow_fallback: bool = False) -> float | None:
         """Return cached Implied Volatility (IV)."""
@@ -452,5 +506,69 @@ class DataHub:
                 self._logger.warning(f"⚠️ DataHub: Chain is EMPTY! Source: {source}. (Symbol: {symbol})")
         
         return result
+
+# ----------------------------------------------------------------
+    # Persistence (Restored for Production Safety)
+    # ----------------------------------------------------------------
+    def _persist_wal(self, kind: str, key: str, payload: Any) -> None:
+        if self._store:
+            try:
+                self._store.append_wal(kind, key, dict(payload))
+            except Exception:
+                pass
+
+    def _maybe_checkpoint(self) -> None:
+        if not self._store: return
+        now = time.time()
+        if now - self._last_snapshot_ts > self._checkpoint_interval:
+            try:
+                with self._lock:
+                    q = self._quotes.copy()
+                    p = self._positions.copy()
+                    o = self._orders.copy()
+                    seq = self._order_sequences.copy()
+                    stat = self._order_status.copy()
+                
+                self._store.save_snapshot("quotes", q)
+                self._store.save_snapshot("positions", p)
+                self._store.save_snapshot("orders", o)
+                self._store.save_snapshot("order_sequences", seq)
+                self._store.save_snapshot("order_status", stat)
+                self._store.purge_wal()
+                self._last_snapshot_ts = now
+            except Exception:
+                LOGGER.exception("Checkpoint failed")
+
+    def _restore_from_store(self) -> None:
+        """Load state from disk on startup."""
+        if not self._store: return
+        try:
+            q = self._store.load_snapshot("quotes") or {}
+            p = self._store.load_snapshot("positions") or {}
+            o = self._store.load_snapshot("orders") or {}
+            seq = self._store.load_snapshot("order_sequences") or {}
+            stat = self._store.load_snapshot("order_status") or {}
+            wal = self._store.load_wal()
+            
+            with self._lock:
+                self._quotes.update(q)
+                self._positions.update(p)
+                self._orders.update(o)
+                self._order_sequences.update({k: int(v) for k, v in seq.items()})
+                self._order_status.update(stat)
+                
+                # Replay WAL
+                for entry in wal:
+                    if not isinstance(entry, dict): continue
+                    kind = entry.get("kind")
+                    payload = entry.get("payload")
+                    key = str(entry.get("key"))
+                    
+                    if kind == "order" and isinstance(payload, dict):
+                        self._orders[key] = payload
+                    elif kind == "positions" and isinstance(payload, dict):
+                        self._positions = payload
+        except Exception:
+            LOGGER.exception("Failed to restore DataHub state")
 
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
