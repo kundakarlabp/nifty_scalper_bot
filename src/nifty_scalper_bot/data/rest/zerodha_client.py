@@ -88,7 +88,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         base_url: str = _DEFAULT_BASE_URL,
         limiter: RateLimiter | None = None,
         default_exchange: str = _DEFAULT_EXCHANGE,
-        timeout: float = 10.0,
+        timeout: float = 5.0,
         max_retries: int = 3,
     ) -> None:
         """Initialize Kite client with credentials."""
@@ -124,7 +124,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
 
         self._base_url = base_url.rstrip("/")
-        self._timeout = httpx.Timeout(timeout, read=timeout)
+        self._timeout = httpx.Timeout(timeout, read=timeout, connect=2.0)
         configured_retries = get_int("BROKER_RETRIES", default=max_retries)
         self._max_retries = max(1, configured_retries)
         self._default_exchange = default_exchange
