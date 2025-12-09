@@ -8475,6 +8475,47 @@ class TelegramBot:
         "/strategy_scores [limit]",
         "Show weighted strategy scores and allocations.",
     )
+
+
+
+
+    async def cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """🚨 EMERGENCY: Cancel all orders and close all positions immediately."""
+        if not await self._guard_admin(update): return
+
+        await self._reply(update.effective_chat, context, "🚨 <b>PANIC SEQUENCE INITIATED...</b>")
+        
+        results = []
+        try:
+            # 1. Kill the Runner (Stop new trades)
+            self._deps.strategy_runner.pause_trading()
+            results.append("⛔ Strategy Paused")
+
+            # 2. Cancel Orders (The Stage 3 logic)
+            # Accessing the unified manager through dependencies
+            um = self._deps.strategy_runner._strategy_manager.orchestrator._order_manager
+            cancelled = um.cancel_all_open_orders() # Ensure this method exists in OrderManager
+            results.append(f"🗑️ Cancelled {len(cancelled)} Orders")
+
+            # 3. Flatten Positions (Market Exit)
+            positions = um.position_manager.get_all_positions()
+            for pos in positions:
+                if pos.quantity != 0:
+                    um.place_order(
+                        symbol=pos.symbol,
+                        side="SELL" if pos.quantity > 0 else "BUY",
+                        quantity=abs(pos.quantity),
+                        order_type="MARKET",
+                        tag="PANIC_EXIT"
+                    )
+            results.append(f"📉 Closing {len(positions)} Positions")
+
+        except Exception as e:
+            results.append(f"❌ ERROR: {str(e)}")
+
+        await self._reply(update.effective_chat, context, "\n".join(results))
+
+  
     async def cmd_strategy_scores(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
     ) -> None:
