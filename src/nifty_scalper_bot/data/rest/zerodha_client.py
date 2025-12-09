@@ -675,6 +675,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
             out[token] = payload
         return out
 
+    def quote(self, instruments: list[str] | str) -> dict[str, Any]:
+        """Standard KiteConnect compliant alias for quote fetching."""
+        # Handle single string input which KiteConnect supports
+        if isinstance(instruments, str):
+            instruments = [instruments]
+        return self.get_quote_bulk(instruments)
+
     def get_ohlc(
         self,
         symbol: str,
