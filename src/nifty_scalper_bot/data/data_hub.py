@@ -107,7 +107,9 @@ class DataHub:
         *,
         options_only: bool = True,
         store: HubStore | None = None,
-        message_bus: MessageBus
+        message_bus: MessageBus,
+        checkpoint_interval: float = 5.0,      
+        clock: Callable[[], float] | None = None,
     ) -> None:
         
         self._mdm = market_data_manager
@@ -127,6 +129,7 @@ class DataHub:
         self._order_status: dict[str, str] = {}      # <--- MISSING LINE RESTORED
         self._order_sequences: dict[str, int] = {}   # <--- Required for WAL replay
         self._checkpoint_interval = max(0.1, float(checkpoint_interval))
+        self._clock = clock or time.time
         self._last_snapshot_ts = 0.0
         
         # [ADDED] Freshness Config
