@@ -12061,7 +12061,7 @@ class TelegramBot:
                 if isinstance(summary, dict):
                     br_summary = summary
             if broker is not None and hasattr(broker, "get_available_balance"):
-                raw_available = await asyncio.to_thread(broker.get_available_balance, segment="equity"))
+                raw_available = await asyncio.to_thread(broker.get_available_balance, segment="equity")
                 br_available = self._coerce_float_value(
                     raw_available,
                     field="broker.available",
