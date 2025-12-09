@@ -122,6 +122,19 @@ class DataHub:
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
         self._message_bus = message_bus
+
+        # [ADDED] Persistence & State Tracking
+        self._order_status: dict[str, str] = {}      # <--- MISSING LINE RESTORED
+        self._order_sequences: dict[str, int] = {}   # <--- Required for WAL replay
+        self._checkpoint_interval = max(0.1, float(checkpoint_interval))
+        self._last_snapshot_ts = 0.0
+        
+        # [ADDED] Freshness Config
+        self._stale_tick_max_age_ms = 5000.0
+        self._warmup_grace_s = 5.0
+        self._warmup_deadline: float | None = None
+        self._start_mono = time.monotonic()
+        self._reset_warmup()
         
         # Derived Metrics Caches
         self._iv_cache: dict[str, float] = {}
@@ -144,13 +157,14 @@ class DataHub:
 
     
     async def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick (Async + Persistent)."""
-        symbol = tick.get("symbol")
-        token = tick.get("instrument_token") or tick.get("token")
+        """Process an incoming market tick (Async + Persistent + Nifty Hack)."""
+        payload = dict(tick)
+        symbol = payload.get("symbol")
+        token = payload.get("instrument_token") or payload.get("token")
         
-        # Nifty Hardcode (Requested by user)
+        # [HACK] Nifty 50 Token Hardcode
         if str(token) == "256265": 
-            tick["symbol"] = "NSE:NIFTY 50"
+            payload["symbol"] = "NSE:NIFTY 50"
             symbol = "NSE:NIFTY 50"
 
         if not symbol and token:
@@ -158,23 +172,20 @@ class DataHub:
 
         if not symbol: return
 
-        # [TODO] You can add the sophisticated drift logic here if desired, 
-        # but for now we stick to your requested structure.
-
         with self._lock:
             # 1. Update Cache
-            self._quotes[symbol] = tick
+            self._quotes[symbol] = payload
             
             # 2. Hardcode Mirror (Requested)
             if symbol == "NSE:NIFTY 50":
-                self._quotes["NIFTY 50"] = tick
+                self._quotes["NIFTY 50"] = payload
 
-            # 3. Update Metrics
-            try: self._capture_option_metrics(symbol, tick)
+            # 3. Update Metrics (Throttled)
+            try: self._capture_option_metrics(symbol, payload)
             except Exception: pass
 
         # 4. Persistence (Added)
-        self._persist_wal("quote", symbol, tick)
+        self._persist_wal("quote", symbol, payload)
         self._maybe_checkpoint()
 
         # 5. MessageBus (Async)
@@ -184,7 +195,7 @@ class DataHub:
                     Message(
                         type=MessageType.TICK,
                         timestamp=datetime.now(timezone.utc),
-                        data=tick,
+                        data=payload,
                         source="data_hub"
                     )
                 )
@@ -194,7 +205,7 @@ class DataHub:
         # 6. Legacy Subscribers
         if symbol in self._tick_subscribers:
             for callback in list(self._tick_subscribers[symbol]):
-                try: callback(tick)
+                try: callback(payload)
                 except Exception: pass
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
@@ -255,7 +266,7 @@ class DataHub:
         """Update or insert an order record (alias for ingest_order_update)."""
         self.ingest_order_update(order)
 
-    def ingest_order_update(self, payload: dict[str, Any]) -> None:
+    def ingest_order_update(self, payload: Mapping[str, Any]) -> None:
         """Insert or update cached order state from payload."""
         symbol = self.normalize(payload.get("symbol"))
         order_id = str(payload.get("order_id") or payload.get("id") or "").strip()
@@ -271,7 +282,6 @@ class DataHub:
         
         status = str(payload.get("status") or "").lower()
         
-        # State tracking logic
         with self._lock:
             self._orders[order_id] = row
             self._order_status[order_id] = status
@@ -281,7 +291,7 @@ class DataHub:
         self._persist_wal("order", order_id, row)
         self._maybe_checkpoint()
 
-        # Notify
+        # Notify listeners
         for listener in listeners:
             try: listener(dict(row))
             except Exception: pass
