@@ -4691,40 +4691,35 @@ async def startup_sequence(ctx: BotContext) -> None:
     if broker_ready:
         await _warm_indicators_with_history()
     # -----------------------------------------------------
-# --- FIX: Adaptive Fast Sync (Speeds up when active) ---
+    # [FIX] Robust Async Sync Loop-
     async def _fast_sync_loop():
-        LOGGER.info("🚀 Fast State Sync Loop Started")
-        
-        # Default slow interval (safe for rate limits)
-        base_interval = 3.0 
-        # Fast interval when we have positions (to catch fills/stops instantly)
-        fast_interval = 1.0
-        
+        LOGGER.info("🚀 Background Account Sync Loop Started")
+        # Sync every 15s normally, speed up to 5s only if we have active positions
+        normal_interval = 15.0
+        active_interval = 5.0
+    
         while True:
             start_time = asyncio.get_running_loop().time()
-            has_exposure = False
-            
+        
             try:
-                # 1. Run Reconcile (Now safe & non-blocking)
-                await _reconcile_state(ctx)
-                
-                # 2. Check for Active Positions to decide speed
+                # [CRITICAL] Run blocking sync in a thread to prevent freezing the bot
+                await asyncio.to_thread(_reconcile_state, ctx)
+            
+                # Determine pace based on activity
+                has_positions = False
                 if ctx.position_manager:
                     positions = ctx.position_manager.get_all_positions()
-                    # If we have any open quantity, we need speed!
-                    has_exposure = any(p.quantity != 0 for p in positions)
-
+                    has_positions = len(positions) > 0
+            
+                sleep_time = active_interval if has_positions else normal_interval
+            
             except Exception as e:
-                LOGGER.debug(f"Fast sync tick failed: {e}")
-            
-            # 3. Smart Sleep Calculation
-            # If we have money at risk, sleep less (1s). If flat, sleep more (3s).
-            interval = fast_interval if has_exposure else base_interval
-            
+                LOGGER.error(f"Sync loop error: {e}", exc_info=True)
+                sleep_time = normal_interval # Fallback to slow mode on error
+
+            # Calculate remaining time to maintain stable cadence
             elapsed = asyncio.get_running_loop().time() - start_time
-            sleep_time = max(0.1, interval - elapsed)
-            
-            await asyncio.sleep(sleep_time)
+            await asyncio.sleep(max(0.1, sleep_time - elapsed))
 
     # Start the background task
     loop = asyncio.get_running_loop()
