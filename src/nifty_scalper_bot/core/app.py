@@ -4633,10 +4633,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.warning("⚠️ Broker client missing 'get_ohlc'. Backfill skipped.")
                 return
 
-            # 3. Fetch Data (2 Hours History)
+            # 3. Fetch Data (5 days History)
             from datetime import datetime, timedelta
             end_dt = datetime.now()
-            start_dt = end_dt - timedelta(minutes=120)
+            start_dt = end_dt - timedelta(days=5)
             
             # Date strings for ZerodhaKiteClient
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
