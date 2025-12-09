@@ -153,16 +153,60 @@ class DataHub:
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
 
-    # data_hub.py, around line 89: Find ingest_tick
+    # ----------------------------------------------------------------
+    # [ADDED] Helpers for Sanitization & Freshness (Restored from Old)
+    # ----------------------------------------------------------------
+    def _sanitize_tick(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ensure numeric fields are floats/ints, preventing downstream crashes."""
+        numeric_fields = (
+            "ltp", "last_price", "close", "open", "high", "low",
+            "bid", "ask", "volume", "oi", "open_interest"
+        )
+        for key in numeric_fields:
+            if key in payload:
+                coerced = self._float(payload.get(key))
+                if coerced is not None:
+                    payload[key] = coerced
+        
+        # Normalize timestamp to seconds
+        ts = self._extract_tick_timestamp(payload)
+        if ts:
+            payload["timestamp"] = ts
+            
+        return payload
+
+    def _extract_tick_timestamp(self, payload: dict) -> float | None:
+        """Robust timestamp extraction handling ms/ns/iso formats."""
+        keys = ["exchange_timestamp", "last_trade_time", "timestamp", "ts", "ts_ms"]
+        for k in keys:
+            val = payload.get(k)
+            if val:
+                try:
+                    if isinstance(val, datetime):
+                        return val.timestamp()
+                    ts = float(val)
+                    if ts > 1e11: ts /= 1000.0  # Convert ms to s
+                    return ts
+                except Exception:
+                    continue
+        return None
+
+    def _compute_age(self, payload: dict) -> float:
+        """Calculate data age in seconds."""
+        ts = payload.get("timestamp") or payload.get("_server_ts")
+        if not ts: return 0.0
+        return max(0.0, time.time() - float(ts))
 
     
     async def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick (Async + Persistent + Nifty Hack)."""
-        payload = dict(tick)
+        """Process an incoming market tick (Async + Sanitized + Persistent)."""
+        # 1. Sanitize FIRST to prevent subscriber crashes
+        payload = self._sanitize_tick(dict(tick))
+        
         symbol = payload.get("symbol")
         token = payload.get("instrument_token") or payload.get("token")
         
-        # [HACK] Nifty 50 Token Hardcode
+        # [HACK] Nifty 50 Token Hardcode (Requested)
         if str(token) == "256265": 
             payload["symbol"] = "NSE:NIFTY 50"
             symbol = "NSE:NIFTY 50"
@@ -171,43 +215,43 @@ class DataHub:
             symbol = str(token)
 
         if not symbol: return
+        
+        # Calculate age for subscribers
+        payload["_age"] = self._compute_age(payload)
 
         with self._lock:
-            # 1. Update Cache
+            # 2. Update Cache
             self._quotes[symbol] = payload
             
-            # 2. Hardcode Mirror (Requested)
+            # 3. Hardcode Mirror
             if symbol == "NSE:NIFTY 50":
                 self._quotes["NIFTY 50"] = payload
 
-            # 3. Update Metrics (Throttled)
+            # 4. Update Metrics (Throttled)
             try: self._capture_option_metrics(symbol, payload)
             except Exception: pass
 
-        # 4. Persistence (Added)
+        # 5. Persistence
         self._persist_wal("quote", symbol, payload)
         self._maybe_checkpoint()
 
-        # 5. MessageBus (Async)
+        # 6. MessageBus (Async - Non-blocking)
         if self._message_bus:
             try:
-                await self._message_bus.publish(
-                    Message(
-                        type=MessageType.TICK,
-                        timestamp=datetime.now(timezone.utc),
-                        data=payload,
-                        source="data_hub"
-                    )
-                )
-            except Exception as exc:
-                LOGGER.debug(f"MessageBus publish failed: {exc}")
+                # Use create_task to fire-and-forget, avoiding await lag in polling loop
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._publish_tick_async(payload))
+            except RuntimeError:
+                pass # No loop available
 
-        # 6. Legacy Subscribers
+        # 7. Legacy Subscribers (Wrapped safely)
         if symbol in self._tick_subscribers:
             for callback in list(self._tick_subscribers[symbol]):
-                try: callback(payload)
-                except Exception: pass
-
+                try:
+                    callback(payload)
+                except Exception as exc:
+                    # Log warning but don't crash the ingestion loop
+                    LOGGER.warning(f"Tick callback failed for {symbol}: {exc}")
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
         new_map = {}
@@ -310,29 +354,24 @@ class DataHub:
             return self._greeks_cache.get(symbol)
 
     def is_fresh(self, symbol: str, threshold_ms: float = 5000.0) -> tuple[bool, Freshness]:
-        """Check if the quote for a symbol is fresh."""
-        quote = self.get_quote(symbol)
+        """Check freshness using robust timestamp analysis."""
+        quote = self.get_quote(symbol, allow_pull=False)
         if not quote:
-            return False, {"ok": False, "reason": "no_quote", "threshold_ms": threshold_ms}
-
-        now = self._clock() * 1000.0
-        ts = quote.get("timestamp")
+            return False, {"ok": False, "reason": "no_tick", "threshold_ms": threshold_ms}
         
-        if isinstance(ts, datetime):
-            ts_ms = ts.timestamp() * 1000.0
-        elif isinstance(ts, (int, float)):
-            ts_ms = float(ts) * (1000.0 if ts < 1e11 else 1.0)
-        else:
-            return False, {"ok": False, "reason": "invalid_ts", "threshold_ms": threshold_ms}
-
-        age = max(0.0, now - ts_ms)
-        is_fresh = age <= threshold_ms
+        # Use calculated age if available, else re-calculate
+        age_s = quote.get("_age")
+        if age_s is None:
+            age_s = self._compute_age(quote)
+            
+        age_ms = age_s * 1000.0
+        is_fresh = age_ms <= threshold_ms
         
         return is_fresh, {
             "ok": is_fresh,
-            "effective_ms": age,
+            "effective_ms": age_ms,
             "threshold_ms": threshold_ms,
-            "reason": None if is_fresh else "stale"
+            "reason": None if is_fresh else f"stale_{int(age_ms)}ms"
         }
 
     # ----------------------------------------------------------------
