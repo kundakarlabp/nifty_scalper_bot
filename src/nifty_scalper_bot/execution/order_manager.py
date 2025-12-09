@@ -671,17 +671,6 @@ class OrderManager:
                         "value": sanitized,
                     },
                 )
-            else:
-                sanitized_timeout = max(configured_timeout, 0.5)
-                self.BRACKET_ENTRY_TIMEOUT_SEC = sanitized_timeout
-                self._logger.info(
-                    "Condition met: override bracket entry timeout",
-                    extra={
-                        "event": "order_config_override",
-                        "field": "bracket_entry_timeout_sec",
-                        "value": sanitized_timeout,
-                    },
-                )
         self._margin_engine = MarginEngine(
             broker=self._broker,
             data_hub=self._data_hub,
@@ -2932,7 +2921,12 @@ class OrderManager:
             self.stop_trailing(state.entry_id)
             try:
                 self.attach_trailing_stop(
-                    # ... args ...
+                    entry_order_id=state.entry_id,
+                    sl_order_id=replacement.order_id,
+                    symbol=state.symbol,
+                    side=state.side,
+                    entry_price=state.entry_price,
+                    spec=state.trailing_spec,
                 )
             except Exception as exc:
                 # [ADD THIS LINE]
@@ -7864,7 +7858,6 @@ class OrderManager:
                     side_val = str(row.get("side", "")).upper()
                     if side_val == "LONG" and qty_val > 0:
                         return False
-                        resolver = self._resolver
             except Exception as exc:  # noqa: BLE001 - defensive
                 self._logger.error(
                     "Failure in _is_reduce_only_violation: %s",
