@@ -1173,17 +1173,10 @@ def get_http_app() -> FastAPI:
                 LOGGER.debug("Resolver warm skipped: no bot context available", extra={"event":"resolver_warm.no_context"})
                 return
 
-            # --- FIX: Force Fresh Instrument Sync for Polling Mode ---
-            # This ensures we have the correct tokens for the day before we start polling.
-            if ctx.broker_client:
-                 LOGGER.info("🚀 Polling Mode: Forcing fresh Instrument Load...")
-                 try:
-                     # Force the broker client to download fresh instruments (NFO) from Zerodha
-                     # We run this in a thread because network calls are blocking
-                     await asyncio.to_thread(ctx.broker_client.load_instruments, "NFO")
-                     LOGGER.info("✅ Broker instruments refreshed successfully.")
-                 except Exception as exc:
-                     LOGGER.warning(f"⚠️ Manual instrument load skipped/failed: {exc}")
+            # [FIX] Do not force download here (relies on Smart Cache in resolver.warm)
+            LOGGER.info("Verifying Instrument Cache...")
+            # Run warm in a thread to prevent blocking
+            await asyncio.to_thread(resolver.warm)
 
             # ---------------------------------------------------------
 
@@ -4703,7 +4696,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         
             try:
                 # [CRITICAL] Run blocking sync in a thread to prevent freezing the bot
-                await asyncio.to_thread(_reconcile_state, ctx)
+                await _reconcile_state(ctx)
             
                 # Determine pace based on activity
                 has_positions = False
@@ -4994,7 +4987,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
     broker_positions: list[Mapping[str, Any]] = []
     try:
         # Fetch raw data
-        raw_data = await ctx.broker_client.get_positions()
+        raw_data = await asyncio.to_thread(ctx.broker_client.get_positions)
         
         # Normalize
         if isinstance(raw_data, list):
