@@ -22,7 +22,7 @@ class OptionsExecutionPolicy:
 
     tick_size: float = 0.05
     max_spread: float = 3.0
-    max_tick_age_ms: int = 400
+    max_tick_age_ms: int = 2500
     max_order_value: float = 2_000_000
     lot_size_lookup: Callable[[str], int | None] | None = field(
         default=None, repr=False
@@ -72,7 +72,9 @@ class OptionsExecutionPolicy:
         Returns:
             Price aligned to the configured tick size.
         """
-
+        if price <= 0:
+            return 0.0
+            
         rounded = round(price / self.tick_size) * self.tick_size
         return round(rounded + 1e-12, 2)
 
