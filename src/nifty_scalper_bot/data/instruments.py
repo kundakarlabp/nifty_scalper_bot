@@ -134,38 +134,105 @@ class InstrumentResolver:
         # self._seed_well_known()
 
     # ------------------------- public API ---------------------------------
-    def warm(self) -> None:
+    # ------------------------- public API ---------------------------------
+    def warm(self, cache_path: str = "instruments.csv", force: bool = False) -> None:
         """
-        Warm the resolver from the broker if available; non-explosive on failure.
+        Smart Warmup:
+        1. Checks if local 'instruments.csv' is fresh (< 24h). If yes, loads it.
+        2. If stale/missing, fetches from broker and saves to 'instruments.csv'.
+        3. If broker fails (Rate Limit), falls back to stale cache to prevent crash.
         """
         LOGGER.debug("InstrumentResolver.warm() entered", extra={"event": "instrument_resolver_warm_enter"})
+        
+        path_obj = Path(cache_path)
+        is_fresh = False
+
+        # 1. Check Cache Freshness
+        if path_obj.exists() and not force:
+            try:
+                mtime = path_obj.stat().st_mtime
+                age_hours = (time.time() - mtime) / 3600.0
+                if age_hours < 24:
+                    is_fresh = True
+                    LOGGER.info("✅ Cache is fresh (Age: %.1fh). Loading local data...", age_hours)
+                    if self._try_load_csv(path_obj):
+                        self._seed_well_known()
+                        return
+            except Exception as e:
+                LOGGER.warning("Cache check failed: %s", e)
+
+        # 2. Fetch from Broker (if cache is stale or missing)
+        LOGGER.info("⬇️ Fetching fresh instruments from broker...")
         items: Optional[Iterable[Mapping[str, Any]]] = None
+        fetch_success = False
 
-        for name in ("list_instruments", "get_instruments", "instruments", "load_instruments", "fetch_instruments"):
-            fn = getattr(self._broker, name, None)
-            if callable(fn):
-                try:
+        try:
+            # Try all known broker methods
+            for name in ("list_instruments", "get_instruments", "instruments", "load_instruments", "fetch_instruments"):
+                fn = getattr(self._broker, name, None)
+                if callable(fn):
                     items = fn()
-                except Exception as exc:
-                    LOGGER.warning("InstrumentResolver: broker.%s() failed: %s", name, exc)
-                break
+                    if items:
+                        break
+            
+            if items:
+                fetch_success = True
+                count = 0
+                # Process and Save to Cache
+                to_save = []
+                with self._lock:
+                    for row in items:
+                        if not isinstance(row, Mapping): continue
+                        self._ingest_instrument_row(row)
+                        to_save.append(row)
+                        count += 1
+                
+                LOGGER.info("InstrumentResolver: warmed from broker with %d rows", count, extra={"event": "instrument_resolver_warm_broker"})
+                self._save_csv(path_obj, to_save)
+            else:
+                LOGGER.warning("Broker returned no instruments.")
 
-        if items:
-            count = 0
-            for row in items:
-                if not isinstance(row, Mapping):
-                    continue
-                try:
-                    self._ingest_instrument_row(row)
-                    count += 1
-                except Exception:
-                    LOGGER.exception("ingest_instrument_row failed for row")
-            LOGGER.info("InstrumentResolver: warmed from broker with %d rows", count, extra={"event": "instrument_resolver_warm_broker"})
-        else:
-            LOGGER.info("InstrumentResolver: no broker instrument dump available; using well-known fallbacks", extra={"event": "instrument_resolver_warm_no_broker"})
+        except Exception as exc:
+            # 3. CRITICAL FALLBACK: If broker fails (Rate Limit), use stale cache
+            LOGGER.error("❌ Broker fetch failed (Rate Limit?): %s", exc)
+            if path_obj.exists():
+                LOGGER.warning("⚠️ ACTIVATING FALLBACK: Using stale cache to keep bot alive.")
+                if self._try_load_csv(path_obj):
+                    LOGGER.info("✅ Fallback successful.")
+                    self._seed_well_known()
+                    return
 
+        # Finalize
         self._seed_well_known()
         LOGGER.info("InstrumentResolver ready with %d symbols", len(self._by_symbol), extra={"event": "instrument_resolver_ready"})
+
+    # --- Helper Methods (Add these to the class) ---
+    
+    def _try_load_csv(self, path_obj: Path) -> bool:
+        """Helper to load rows from CSV file safely."""
+        try:
+            with open(path_obj, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                self.warm_from_broker_dump(rows)
+            return True
+        except Exception as e:
+            LOGGER.error("Failed to load CSV cache: %s", e)
+            return False
+
+    def _save_csv(self, path_obj: Path, rows: List[Any]) -> None:
+        """Helper to save broker rows to CSV."""
+        if not rows: return
+        try:
+            # Get fieldnames from first valid row
+            fieldnames = list(rows[0].keys())
+            with open(path_obj, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            LOGGER.info("Saved instruments to %s", path_obj)
+        except Exception as e:
+            LOGGER.error("Failed to save CSV cache: %s", e)
 
     def warm_from_broker_dump(self, rows: Iterable[Mapping[str, Any]]) -> None:
         """
