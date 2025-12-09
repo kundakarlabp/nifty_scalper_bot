@@ -2295,52 +2295,79 @@ class MarketDataManager:
         self._rest_poll_thread.start()
 
     def _rest_poll_loop(self) -> None:
-        """Poll the broker REST API with jittered cadence.
+        """High-frequency batched polling loop (Production-Grade).
 
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
+        Optimized for <500ms latency. Batches requests and uses smart sleep.
         """
-
-        self._logger.debug(
-            "Entered _rest_poll_loop",
-            extra={
-                "event": "mdm_rest_poll_loop_enter",
-                "interval": self._rest_poll_interval,
-            },
+        # SCOUT CONFIGURATION: 0.5s target interval
+        target_interval = 0.5
+        self._logger.info(
+            f"🚀 Scout Polling Started. Target Interval: {target_interval}s",
+            extra={"event": "scout_poll_started"}
         )
-        base_interval = max(self._rest_poll_interval, 0.1)
+
+        # Move margin checks to a slower cadence (60s) to prevent blocking ticks
+        last_margin_refresh = 0.0
+        margin_interval = 60.0
+
         while not self._rest_poll_stop.is_set():
-            sleep_for = self._jittered_interval(base_interval)
-            if self._rest_poll_stop.wait(sleep_for):
-                break
+            loop_start = time.time()
+
             try:
-                self.refresh_margin_snapshot()
-            except Exception as exc:  # noqa: BLE001
+                # 1. Throttled Margin Refresh (Non-Blocking Priority)
+                if (loop_start - last_margin_refresh) > margin_interval:
+                    try:
+                        self.refresh_margin_snapshot()
+                        last_margin_refresh = loop_start
+                    except Exception as exc:
+                        self._logger.error(f"Margin refresh failed: {exc}")
+
+                # 2. Identify Symbols
+                symbols = self._symbols_for_poll()
+                if not symbols:
+                    # Idle wait if nothing to track
+                    if self._rest_poll_stop.wait(1.0): break
+                    continue
+
+                # 3. Batch Fetch (Critical Optimization)
+                # Zerodha accepts up to 500 symbols per call. using 200 for safety.
+                batch_size = 200
+                for i in range(0, len(symbols), batch_size):
+                    if self._rest_poll_stop.is_set(): break
+                    
+                    batch = symbols[i : i + batch_size]
+                    try:
+                        # Fetch all quotes in ONE HTTP call
+                        quotes = self._broker.quote(batch)
+                        arrival_time = time.time()
+
+                        # Ingest immediately
+                        for symbol, data in quotes.items():
+                            # CRITICAL: Inject local timestamp for Stale Data logic
+                            data['_local_timestamp'] = arrival_time
+                            self.ingest_rest_quote(symbol, data)
+                            
+                    except Exception as exc:
+                        self._logger.warning(
+                            f"Batch poll failed for {len(batch)} symbols: {exc}",
+                            extra={"event": "scout_batch_fail"}
+                        )
+
+            except Exception as exc:
                 self._logger.error(
-                    "Failure in MarketDataManager._rest_poll_loop margin refresh: %s",
-                    exc,
-                    extra={"event": "mdm_rest_poll_margin_error"},
-                    exc_info=exc,
+                    f"Scout Loop Critical Error: {exc}", 
+                    exc_info=True,
+                    extra={"event": "scout_critical_error"}
                 )
-            symbols = self._symbols_for_poll()
-            if not symbols:
-                continue
-            for symbol in symbols:
-                if self._rest_poll_stop.is_set():
-                    return
-                try:
-                    self._poll_symbol(symbol)
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.debug(
-                        "REST poll failed",
-                        extra={"symbol": symbol, "error": str(exc)},
-                    )
+                time.sleep(1.0) # Safety backoff on crash
+
+            # 4. Smart Sleep (Maintain Rhythm)
+            # Subtract processing time from interval to maintain steady heartbeat
+            elapsed = time.time() - loop_start
+            sleep_time = max(0.0, target_interval - elapsed)
+            
+            if self._rest_poll_stop.wait(sleep_time):
+                break
 
     def _symbols_for_poll(self) -> list[str]:
         """Derive poll candidates across subscribers, cache, and tracking.
