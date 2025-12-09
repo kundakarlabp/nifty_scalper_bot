@@ -2207,7 +2207,44 @@ def calculate_greeks_simple(
         "moneyness": round(moneyness, 3),
     }
 
+def _setup_telegram(ctx: BotContext) -> None:
+    """Wire the Telegram controller with full access to bot components."""
+    settings = ctx.settings.telegram
+    if not settings.bot_token or not settings.chat_id:
+        LOGGER.info("Telegram disabled: credentials missing.")
+        return
 
+    try:
+        # Local import to avoid circular dependency issues
+        from nifty_scalper_bot.notifications.telegram_controller import (
+            TelegramBot,
+            TelegramDeps,
+        )
+
+        # 1. Bundle all managers into dependencies
+        deps = TelegramDeps(
+            token=settings.bot_token,
+            chat_id=settings.chat_id,
+            app_version="1.0.0",
+            risk_manager=ctx.risk_manager,
+            order_manager=ctx.order_manager,
+            position_manager=ctx.position_manager,
+            strategy_runner=ctx.strategy_runner,
+            market_data_manager=ctx.market_data_manager,
+            unified_manager=ctx.unified_manager,
+            stream_supervisor=getattr(ctx, "stream_supervisor", None),
+            data_hub=ctx.data_hub,
+            instrument_resolver=getattr(ctx, "instrument_resolver", None),
+            enable_polling_fallback=True,  # Critical for Railway
+        )
+
+        # 2. Initialize the Bot
+        ctx.telegram_bot = TelegramBot(deps)
+        LOGGER.info("✅ Telegram Controller wired successfully.")
+
+    except Exception as e:
+        LOGGER.error(f"❌ Telegram setup failed: {e}", exc_info=True)
+        
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
