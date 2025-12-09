@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import logging
+import uuid
 import os
 import threading
 import time
@@ -455,16 +456,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return params
 
-    # --- INSERT THIS METHOD (Missing in your code) ---
-    def get_orders(self) -> list[dict[str, Any]]:
-        """Fetch the complete order book for the day."""
-        self._acquire_bucket(self._ORDER_BUCKET)
-        response = self._ensure_json(self._make_request("GET", "/orders"))
-        data = response.get("data", [])
-        return cast(list[dict[str, Any]], data)
-
-    # --- REPLACE THE EXISTING place_order WITH THIS ---
-    # --- REPLACEMENT FOR place_order ---
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """
         Place order with Robust Idempotency (Ghost Order Protection).
@@ -476,7 +467,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         # 1. Generate Safe Unique Tag
         # Zerodha Limit: 20 chars. We need 8 chars for UUID.
         # Allowed for prefix: 11 chars + 1 underscore.
-        import uuid
         unique_id = uuid.uuid4().hex[:8]
         
         raw_tag = str(params.get("tag") or "bot").strip()
@@ -758,44 +748,27 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return cast(dict[str, Any], response.get("data", {}))
 
     def get_orders(self) -> list[dict]:
-        """Get all Zerodha orders for the trading day.
-
-        Args:
-            None.
-
-        Returns:
-            list[dict]: Order payloads returned by the Zerodha API.
-
-        Raises:
-            BrokerError: If the broker call ultimately fails.
-        """
-
-        LOGGER.debug(
-            "Entered ZerodhaKiteClient.get_orders",
-            extra={"event": "zerodha_get_orders_start"},
-        )
+        """Get all Zerodha orders for the trading day (Log-Silent if empty)."""
+        LOGGER.debug("Entered ZerodhaKiteClient.get_orders", extra={"event": "zerodha_get_orders_start"})
         label = "orders.fetch"
         should_retry, on_retry = self._build_retry_handlers(endpoint="/orders")
 
         def _operation() -> list[dict]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             payload = self._ensure_json(
-                self._make_request(
-                    "GET",
-                    "/orders",
-                    operation_label=label,
-                    with_retry=False,
-                )
+                self._make_request("GET", "/orders", operation_label=label, with_retry=False)
             )
             orders = cast(list[dict], payload.get("data", []))
-            LOGGER.info(
-                "zerodha_orders_fetch_success count=%d",
-                len(orders),
-                extra={
-                    "event": "zerodha_orders_fetch_success",
-                    "count": len(orders),
-                },
-            )
+            
+            # [FIX] Only log INFO if we actually have orders, otherwise DEBUG
+            if orders:
+                LOGGER.info(
+                    "zerodha_orders_fetch_success count=%d",
+                    len(orders),
+                    extra={"event": "zerodha_orders_fetch_success", "count": len(orders)},
+                )
+            else:
+                LOGGER.debug("zerodha_orders_fetch_success count=0")
             return orders
 
         try:
@@ -806,31 +779,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 error_message="Failed to fetch Zerodha orders",
                 on_retry=on_retry,
             )
-        except Exception as exc:  # noqa: BLE001 - propagate after logging
-            LOGGER.error(
-                "Failure in ZerodhaKiteClient.get_orders: %s",
-                exc,
-                extra={"event": "zerodha_get_orders_error"},
-            )
+        except Exception as exc:
+            LOGGER.error("Failure in ZerodhaKiteClient.get_orders: %s", exc, extra={"event": "zerodha_get_orders_error"})
             raise
 
     def get_positions(self) -> list[dict[str, Any]]:
-        """Return Zerodha positions as normalized dictionaries.
-
-        Args:
-            None.
-
-        Returns:
-            list[dict[str, Any]]: Current Zerodha positions.
-
-        Raises:
-            BrokerError: If the broker call ultimately fails.
-        """
-
-        LOGGER.debug(
-            "Entered ZerodhaKiteClient.get_positions",
-            extra={"event": "zerodha_get_positions_start"},
-        )
+        """Return Zerodha positions (Log-Silent if empty)."""
+        LOGGER.debug("Entered ZerodhaKiteClient.get_positions", extra={"event": "zerodha_get_positions_start"})
         label = "positions.fetch"
         endpoint = "/portfolio/positions"
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
@@ -838,62 +793,35 @@ class ZerodhaKiteClient(BaseBrokerClient):
         def _operation() -> list[dict[str, Any]]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             response = self._ensure_json(
-                self._make_request(
-                    "GET",
-                    endpoint,
-                    operation_label=label,
-                    with_retry=False,
-                )
+                self._make_request("GET", endpoint, operation_label=label, with_retry=False)
             )
             payload = response.get("data")
+            normalized: list[dict[str, Any]] = []
 
+            # Case A: Payload is a Dict (net/day keys)
             if isinstance(payload, dict):
-                # Zerodha returns positions grouped under keys such as "net" or "day".
                 for key in ("net", "day"):
                     positions = payload.get(key)
                     if isinstance(positions, list):
                         normalized = cast(list[dict[str, Any]], positions)
-                        LOGGER.info(
-                            "zerodha_positions_fetch_success count=%d",
-                            len(normalized),
-                            extra={
-                                "event": "zerodha_positions_fetch_success",
-                                "count": len(normalized),
-                            },
-                        )
-                        return normalized
-                LOGGER.info(
-                    "zerodha_positions_fetch_success count=0",
-                    extra={
-                        "event": "zerodha_positions_fetch_success",
-                        "count": 0,
-                    },
-                )
-                return []
-
-            if isinstance(payload, list):
+                        if normalized: # If found valid list, stop looking
+                            break
+            
+            # Case B: Payload is a List (direct)
+            elif isinstance(payload, list):
                 normalized = cast(list[dict[str, Any]], payload)
-                if normalized:
-                    LOGGER.info(
-                        "zerodha_positions_fetch_success count=%d",
-                        len(normalized),
-                        extra={
-                            "event": "zerodha_positions_fetch_success",
-                            "count": len(normalized),
-                        },
-                    )
-                else:
-                    LOGGER.debug("zerodha_positions_fetch_success count=0")
-                return normalized
 
-            LOGGER.info(
-                "zerodha_positions_fetch_success count=0",
-                extra={
-                    "event": "zerodha_positions_fetch_success",
-                    "count": 0,
-                },
-            )
-            return []
+            # [FIX] Consolidated Logging for all cases
+            if normalized:
+                LOGGER.info(
+                    "zerodha_positions_fetch_success count=%d",
+                    len(normalized),
+                    extra={"event": "zerodha_positions_fetch_success", "count": len(normalized)},
+                )
+            else:
+                LOGGER.debug("zerodha_positions_fetch_success count=0")
+
+            return normalized
 
         try:
             return self._execute_with_retry(
@@ -903,12 +831,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 error_message="Failed to fetch Zerodha positions",
                 on_retry=on_retry,
             )
-        except Exception as exc:  # noqa: BLE001 - propagate after logging
-            LOGGER.error(
-                "Failure in ZerodhaKiteClient.get_positions: %s",
-                exc,
-                extra={"event": "zerodha_get_positions_error"},
-            )
+        except Exception as exc:
+            LOGGER.error("Failure in ZerodhaKiteClient.get_positions: %s", exc, extra={"event": "zerodha_get_positions_error"})
             raise
 
     def get_holdings(self) -> list[dict]:
