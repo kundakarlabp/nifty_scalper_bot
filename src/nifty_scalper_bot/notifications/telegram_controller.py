@@ -8470,15 +8470,7 @@ class TelegramBot:
                     ctx,
                     "Unable to fetch strategies. Inspect logs for details.",
                 )
-
-    @command_meta(
-        "/strategy_scores [limit]",
-        "Show weighted strategy scores and allocations.",
-    )
-
-
-
-
+    @command_meta("/panic", "🚨 EMERGENCY: Cancel all orders and flatten positions.")
     async def cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """🚨 EMERGENCY: Cancel all orders and close all positions immediately."""
         if not await self._guard_admin(update): return
@@ -8515,6 +8507,10 @@ class TelegramBot:
 
         await self._reply(update.effective_chat, context, "\n".join(results))
 
+    @command_meta(
+        "/strategy_scores [limit]",
+        "Show weighted strategy scores and allocations.",
+    )
   
     async def cmd_strategy_scores(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
