@@ -1311,44 +1311,40 @@ class StrategyRunner:
         """Handle incoming tick safely, updating state and triggering strategies."""
         now = datetime.now(timezone.utc)
 
-        # 1. Extract price
+        # 1. Extract Critical Market Data
+        # We prioritize 'average_price' (Broker VWAP) as it is authoritative for the trading day.
         price = _extract_float(tick, "ltp", "last_price", "close", "price")
-        vwap = _extract_float(tick, "average_price", "vwap")
+        broker_vwap = _extract_float(tick, "average_price", "vwap")
+        volume = _extract_int(tick, "volume", "volume_traded")
+        
         if price is None or price <= 0:
-            self._logger.debug("Ignoring tick without price for %s: %s", symbol, tick)
             return
 
-        volume = _extract_int(tick, "volume", "volume_traded")
         timestamp = _extract_timestamp(tick, now)
 
-        # 2. Bar building
+        # 2. Update Bar Builder (Maintains history for other indicators)
+        # We use setdefault to ensure a builder exists without a lock first (optimization)
         builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
         try:
             completed_bar = builder.update(float(price), volume, timestamp)
+            if completed_bar is not None:
+                self._ingest_bar(symbol, completed_bar)
         except ValueError as exc:
-            self._logger.error(
-                "Failure in one minute bar update for %s: %s",
-                symbol,
-                exc,
-                extra={"event": "one_minute_bar_invalid"},
-            )
-            return
+            # Log once per symbol/minute to avoid spamming if data is bad
+            if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
+                self._logger.warning(f"Bar update issue for {symbol}: {exc}")
+                builder._last_error_ts = now.timestamp()
 
-        if completed_bar is not None:
-            self._ingest_bar(symbol, completed_bar)
-
-        # 3. Update position tracker
-        if hasattr(
-            self._position_manager, "has_position"
-        ) and self._position_manager.has_position(symbol):
+        # 3. Update Position Manager (Live MTM updates)
+        if hasattr(self._position_manager, "update_position_price"):
             try:
                 self._position_manager.update_position_price(symbol, price)
             except Exception:
                 pass
 
-        # 4. Check state & Auto-Register Symbol (CRITICAL FIX)
+        # 4. Strategy Execution Core
         with self._lock:
-            # If we are receiving data (via /watch), force runner to track it
+            # A. Auto-Track New Symbols
             if symbol not in self._active_symbols:
                 self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
                 self._active_symbols.add(symbol)
@@ -1358,101 +1354,103 @@ class StrategyRunner:
                 )
 
             state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            # [START] VWAP STRATEGY ENGINE
-            # 1. Extract VWAP from Zerodha Polling Data
-            vwap = _extract_float(tick, "average_price", "vwap")
-            if vwap and vwap > 0:
-                state.vwap = vwap
-
-            # 2. VWAP Crossover Trigger (The "Entry")
-            generated_signal = None
-            prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
-            curr_vwap = state.vwap
-            
-            # Check for Bullish Crossover (Price crosses VWAP from below)
-            if prev_ltp and curr_vwap and price > 0:
-                if prev_ltp < curr_vwap and price > curr_vwap:
-                    self._logger.info(f"⚡ VWAP CROSSOVER: {symbol} ({prev_ltp:.2f} -> {price:.2f} over {curr_vwap:.2f})")
-                    
-                    # Create the BUY Signal
-                    generated_signal = Signal(
-                        action="BUY",
-                        symbol=symbol,
-                        quantity=1, # Order Manager will resize this based on Risk
-                        confidence=1.0,
-                        reason="vwap_crossover_polling",
-                        stop_loss=None, # Will be calc by risk manager
-                        take_profit=None,
-                        metadata={
-                            "vwap": curr_vwap, 
-                            "prev_ltp": prev_ltp,
-                            "premium_stop_pct": 0.10, # Default 10% SL
-                            "premium_target_rr": 2.0  # Default 1:2 Risk/Reward
-                        }
-                    )
-            
-            # 3. Update State
-            state.last_tick = dict(tick)
-
-            if not self._running or not state.active or self._trading_paused:
-                return
-
-            if state.cooldown_until is not None and now < state.cooldown_until:
-                return
-            # [END] VWAP STRATEGY ENGINE
-
-        # 5. Check indicators ready
-        if self._config.min_indicator_bars:
-            try:
-                if hasattr(self._indicator_engine, "is_ready"):
-                    if not self._indicator_engine.is_ready(
-                        symbol, self._config.min_indicator_bars
-                    ):
-                        return
-            except Exception:
-                return
-
-        # 6. Generate signal
-        self._logger.debug(f"🔍 Checking signals for {symbol} @ {price}")
-        signal = generated_signal
-        if signal is None:
-            signal = self._strategy_manager.generate_signal(symbol, price)
-        if signal is None:
-            self._logger.debug(f"⚪ No Signal: {symbol}...")
-            return
-
-        if signal.action == "HOLD":
-            self._logger.debug(f"⏸️ Hold Signal: {symbol}")
-            return
-
-        # 7. Throttle signal
-        with self._lock:
-            state = self._symbol_state.get(symbol)
             if state is None or not state.active:
                 return
 
-            if state.last_signal_at is not None:
-                elapsed = (now - state.last_signal_at).total_seconds()
-                if elapsed < self._config.signal_cooldown_seconds:
-                    self._logger.info(f"⏳ Signal Cooldown active for {symbol}")
-                    return
+            # B. Update State Variables
+            if broker_vwap and broker_vwap > 0:
+                state.vwap = broker_vwap
+            
+            # C. PRODUCTION DEBUG LOGGING (The "Why isn't it trading?" Fix)
+            # We log this for Futures/Options to verify volume/vwap are flowing
+            if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
+                 # Use DEBUG level so it doesn't flood logs unless enabled, 
+                 # but ensures we can verify data when needed.
+                 self._logger.debug(
+                    f"🔎 TICK: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f} | Vol={volume}",
+                    extra={
+                        "event": "tick_audit",
+                        "symbol": symbol,
+                        "ltp": price,
+                        "vwap": state.vwap,
+                        "vol": volume
+                    }
+                )
 
-            state.last_signal_at = now
-            state.strategy_data["last_signal"] = {
-                "action": signal.action,
-                "confidence": signal.confidence,
-                "reason": signal.reason,
-                "generated_at": now.isoformat(),
-            }
+            # D. VWAP Crossover Strategy Logic
+            generated_signal = None
+            prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
+            curr_vwap = state.vwap
 
-        # 8. Handle signal
-        self._logger.info(
-            f"🚀 SIGNAL DETECTED: {symbol} | Action: {signal.action} | Conf: {signal.confidence}"
-        )
-        self._handle_signal(signal, price, now)
+            if prev_ltp and curr_vwap and price > 0:
+                # Proximity Check (Debug info)
+                diff_pct = abs(price - curr_vwap) / curr_vwap * 100
+                if diff_pct < 0.15: # Within 0.15% of VWAP
+                     self._logger.debug(f"⚠️ PROXIMITY ALERT: {symbol} is {diff_pct:.3f}% from VWAP")
+
+                # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
+                if prev_ltp < curr_vwap and price > curr_vwap:
+                    self._logger.info(
+                        f"⚡ VWAP CROSSOVER DETECTED: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
+                        extra={"event": "vwap_crossover", "symbol": symbol}
+                    )
+                    
+                    generated_signal = Signal(
+                        action="BUY",
+                        symbol=symbol,
+                        quantity=1, # Quantity is sized by Risk Manager later
+                        confidence=1.0,
+                        reason="vwap_crossover",
+                        metadata={
+                            "strategy": "vwap_scalp",
+                            "vwap": curr_vwap,
+                            "cross_price": price,
+                            "premium_stop_pct": 0.10, # Dynamic SL support
+                            "premium_target_rr": 2.0
+                        }
+                    )
+
+            # E. Save Tick for Next Iteration
+            state.last_tick = dict(tick)
+
+            # F. Global Trading Guard (Pause/Stop checks)
+            if not self._running or self._trading_paused:
+                return
+
+            if state.cooldown_until and now < state.cooldown_until:
+                return
+
+        # 5. Signal Selection & Throttling
+        # Prioritize the locally generated signal, fallback to StrategyManager
+        signal = generated_signal
+        
+        # Fallback: If no local signal, check Strategy Manager (RSI/Supertrend/etc)
+        if signal is None and self._config.min_indicator_bars:
+            # Check readiness before asking strategy manager to avoid noise
+            if self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars):
+                signal = self._strategy_manager.generate_signal(symbol, price)
+
+        # 6. Execute Signal
+        if signal and signal.action != "HOLD":
+            # Final Throttling Check
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if state:
+                    if state.last_signal_at:
+                        elapsed = (now - state.last_signal_at).total_seconds()
+                        if elapsed < self._config.signal_cooldown_seconds:
+                            self._logger.info(f"⏳ Signal Cooldown active for {symbol} ({elapsed:.1f}s < {self._config.signal_cooldown_seconds}s)")
+                            return
+                    
+                    state.last_signal_at = now
+                    state.strategy_data["last_signal"] = {
+                        "action": signal.action,
+                        "reason": signal.reason,
+                        "timestamp": now.isoformat()
+                    }
+
+            self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} [{signal.action}] Reason: {signal.reason}")
+            self._handle_signal(signal, price, now)
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         """Handle signal execution with comprehensive error handling."""
