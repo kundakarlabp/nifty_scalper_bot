@@ -218,10 +218,9 @@ class PollingStreamer:
 
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
         timestamp_ms = int(time.time() * 1000)
-        if not self._require_depth:
-            ticks = self._try_ltp_bulk(batch, timestamp_ms)
-            if ticks:
-                return ticks
+        ticks = self._try_ltp_bulk(batch, timestamp_ms)
+        if ticks:
+            return ticks
 
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
