@@ -325,6 +325,8 @@ class PollingStreamer:
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
+                "volume": quote.get("volume", 0), 
+                "average_price": quote.get("average_price", 0.0),
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
