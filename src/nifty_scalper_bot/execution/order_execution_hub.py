@@ -611,7 +611,7 @@ class OrderExecutionHub:
     
         # --- START CRITICAL FIX: AGGRESSIVE STALE QUOTE CHECK ---
         # 500ms is a production-grade strict limit for scalping.
-        STALE_THRESHOLD_MS = 500 
+        STALE_THRESHOLD_MS = 3000 
     
         # Check data freshness immediately. If stale, reject and return instantly.
         if self._data_hub is not None and not self._data_hub.is_quote_fresh(request.symbol, STALE_THRESHOLD_MS):
