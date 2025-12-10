@@ -715,6 +715,18 @@ def _resolve_int(name: str, default: int) -> int:
         )
         return int(default)
 
+def silence_third_party_loggers():
+    for logger_name in ['httpcore', 'httpx', 'urllib3', 'asyncio', 'concurrent.futures', 'selector']:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+def enable_business_logic_logging():
+    for logger_name in ['nifty_scalper_bot.strategies', 'nifty_scalper_bot.execution', 'nifty_scalper_bot.risk', 'nifty_scalper_bot.core', 'nifty_scalper_bot.lifecycle']:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
+
+silence_third_party_loggers()
+enable_business_logic_logging()
+
+
 
 __all__ = [
     'get_logger',
