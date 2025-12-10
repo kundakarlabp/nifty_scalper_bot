@@ -1,14 +1,12 @@
-.env.local
+
 .venv/
 reports/
-data/journal.sqlite
-data/cache/
 data/order_submissions.jsonl
 __pycache__/
 .venv*/
-.env
+
 sync.log
-env/
+
 *.pyc
 *.log
 .vscode/
