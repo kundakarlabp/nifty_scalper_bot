@@ -181,8 +181,8 @@ class PollingStreamer:
                         ticks = self._fetch_ticks(batch)
                         # Alert if persistent empty polling batch
                         if not ticks:
-                            LOGGER.debug("[POLL-DEBUG] Empty ticks for batch %s. Check API availability.", batch)
-                            # We don't increment error metric here to avoid alerting on market-closed empty returns
+                            # Log at DEBUG to avoid spamming when market is closed
+                            LOGGER.debug("[POLL-DEBUG] Empty ticks for batch %s", batch)
                         
                         for tick in ticks:
                             # Validate tick shape
@@ -220,7 +220,7 @@ class PollingStreamer:
         """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
         timestamp_ms = int(time.time() * 1000)
         
-        # --- OPTIMIZED FETCH LOGIC ---
+        # --- CRITICAL FIX APPLIED: FORCE FULL QUOTE ---
         # Always try 'quote' first. Strategies like VWAP require Volume,
         # which 'ltp' (Last Traded Price) endpoints do not provide.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
