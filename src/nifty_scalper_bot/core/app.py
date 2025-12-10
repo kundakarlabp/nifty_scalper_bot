@@ -1817,11 +1817,11 @@ def _get_symbols(
     # 4. Generate Strikes
     strike_step = 50
     strikes_to_fetch = [
-        atm_price - (2 * strike_step), 
+        # atm_price - (2 * strike_step), 
         atm_price - strike_step,       
         atm_price,                     
         atm_price + strike_step,       
-        atm_price + (2 * strike_step), 
+        # atm_price + (2 * strike_step), 
     ]
 
     # 5. Resolve Symbols
