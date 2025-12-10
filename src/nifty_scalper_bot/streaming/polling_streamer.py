@@ -218,21 +218,20 @@ class PollingStreamer:
 
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
         timestamp_ms = int(time.time() * 1000)
-        ticks = self._try_ltp_bulk(batch, timestamp_ms)
-        if ticks:
-            return ticks
-
+        
+        # --- FIX: FORCE FULL QUOTE FETCH ---
+        # We try this FIRST to ensure we get Volume data for VWAP strategy.
+        # We ignore self._require_depth because strategies need volume regardless.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        if self._require_depth:
-            # Depth is required but the bulk endpoint failed. Fall back to LTP
-            # to at least provide price updates while surfacing logs.
-            ticks = self._try_ltp_bulk(batch, timestamp_ms)
-            if ticks:
-                return ticks
+        # Fallback to LTP if Quote fails (keeps price alive, but volume will be missing)
+        ticks = self._try_ltp_bulk(batch, timestamp_ms)
+        if ticks:
+            return ticks
 
+        # Fallback for single quote lookup
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -245,10 +244,15 @@ class PollingStreamer:
                 lp = float(quote.get("last_price", 0.0) or 0.0)
                 if lp <= 0:
                     continue
+                
+                # Extract volume if available
+                vol = quote.get("volume", 0) 
+                
                 tick: dict[str, Any] = {
                     "instrument_token": int(token),
                     "last_price": lp,
                     "timestamp": timestamp_ms,
+                    "volume": vol, # Added volume here too for consistency
                 }
                 depth = quote.get("depth")
                 if isinstance(depth, dict):
@@ -320,12 +324,15 @@ class PollingStreamer:
                 lp = 0.0
             if lp <= 0:
                 continue
+            
             tick: dict[str, Any] = {
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
-                "volume": quote.get("volume", 0), 
+                # --- FIX: ADDED VOLUME AND AVERAGE PRICE ---
+                "volume": quote.get("volume", 0),
                 "average_price": quote.get("average_price", 0.0),
+                # -------------------------------------------
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
