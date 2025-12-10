@@ -22,16 +22,10 @@ from nifty_scalper_bot.utils.logging import get_logger
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from nifty_scalper_bot.config.settings import LiquiditySettings, SelectorSettings
     from nifty_scalper_bot.data.data_hub import DataHub
+    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+    from nifty_scalper_bot.data.instruments import InstrumentResolver
 
 LOGGER = get_logger(__name__)
-
-try:
-    from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-    # FIX: Correct import path from 'resolver' to 'instruments'
-    from nifty_scalper_bot.data.instruments import InstrumentResolver
-except Exception:  # pragma: no cover - defensive import
-    MarketDataManager = object  # type: ignore
-    InstrumentResolver = object  # type: ignore
 
 
 def _parse_strike_from_symbol(ts: str) -> float | None:
