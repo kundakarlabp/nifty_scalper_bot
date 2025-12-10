@@ -720,8 +720,15 @@ def silence_third_party_loggers():
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 def enable_business_logic_logging():
-    for logger_name in ['nifty_scalper_bot.strategies', 'nifty_scalper_bot.execution', 'nifty_scalper_bot.risk', 'nifty_scalper_bot.core', 'nifty_scalper_bot.lifecycle']:
-        logging.getLogger(logger_name).setLevel(logging.DEBUG)
+    """Enable logs for Decisions, but silence the Loops."""
+    # 1. High Visibility (See Signals & Strategy)
+    logging.getLogger('nifty_scalper_bot.strategies').setLevel(logging.DEBUG)
+    logging.getLogger('nifty_scalper_bot.core').setLevel(logging.DEBUG)
+
+    # 2. Low Visibility (Silence 'Entered OrderQueue', 'Circuit Breaker' loops)
+    logging.getLogger('nifty_scalper_bot.execution').setLevel(logging.INFO)
+    logging.getLogger('nifty_scalper_bot.risk').setLevel(logging.INFO)
+    logging.getLogger('nifty_scalper_bot.lifecycle').setLevel(logging.INFO)
 
 silence_third_party_loggers()
 enable_business_logic_logging()
