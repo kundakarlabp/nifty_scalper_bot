@@ -153,8 +153,8 @@ class TradeRecord:
 class StrategyRunnerConfig:
     """Configuration controlling runner level behaviour."""
 
-    signal_cooldown_seconds: float = 30.0
-    trade_cooldown_seconds: float = 60.0
+    signal_cooldown_seconds: float = 3.0
+    trade_cooldown_seconds: float = 10.0
     min_indicator_bars: int = 50
     max_trade_history: int = 100
 
