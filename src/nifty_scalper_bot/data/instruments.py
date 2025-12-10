@@ -514,6 +514,9 @@ class InstrumentResolver:
         """
         try:
             tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").strip()
+            ts_upper = tradingsymbol.upper()
+            if not (ts_upper.startswith("NIFTY") or ts_upper.startswith("BANKNIFTY")):
+                return
             if not tradingsymbol:
                 return
             exchange = (row.get("exchange") or "").strip().upper() or None
