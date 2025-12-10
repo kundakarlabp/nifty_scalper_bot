@@ -1509,8 +1509,8 @@ class StrategyRunner:
                 current_vwap = state.vwap
         
         if current_vwap and current_vwap > 0 and action == "BUY":
-            if trade_price < current_vwap:
-                self._logger.warning(f"🛑 VWAP FILTER: Price {trade_price} < VWAP {current_vwap}. Blocking BUY.")
+            vwap_threshold = current_vwap * 0.995
+            if trade_price < vwap_threshold:
                 return
         current_vwap = None
         with self._lock:
