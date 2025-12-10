@@ -4679,13 +4679,20 @@ async def startup_sequence(ctx: BotContext) -> None:
         # Sync every 15s normally, speed up to 5s only if we have active positions
         normal_interval = 15.0
         active_interval = 5.0
+        timeout_seconds = 30.0
+        timeout_min = 10.0
+        timeout_max = 60.0
+        consecutive_timeouts = 0
+    
     
         while True:
             start_time = asyncio.get_running_loop().time()
         
             try:
-                # [CRITICAL] Run blocking sync in a thread to prevent freezing the bot
-                await _reconcile_state(ctx)
+                await asyncio.wait_for(
+                _reconcile_state(ctx),
+                timeout=timeout_seconds
+            )
             
                 # Determine pace based on activity
                 has_positions = False
@@ -4694,6 +4701,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                     has_positions = len(positions) > 0
             
                 sleep_time = active_interval if has_positions else normal_interval
+
+            except asyncio.TimeoutError:  # 🆕 Handle timeout separately
+                LOGGER.error(
+                    f"⚠️ Sync timeout after {timeout_seconds}s - broker API slow/down. Skipping cycle.",
+                    extra={"event": "sync_loop_timeout", "timeout": timeout_seconds}
+                )
+                sleep_time = normal_interval  # Slow down to avoid hammering
+
             
             except Exception as e:
                 LOGGER.error(f"Sync loop error: {e}", exc_info=True)
