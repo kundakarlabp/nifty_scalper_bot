@@ -336,7 +336,7 @@ class MarketDataManager:
             }
             with self._lock:
                 self._latest_ticks[normalized_symbol] = payload
-            self._logger.info(
+            self._logger.debug(
                 "mdm_ingest_rest_quote",
                 extra={
                     "event": "mdm_ingest_rest_quote",
