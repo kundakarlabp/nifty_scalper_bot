@@ -13,6 +13,9 @@ import sentry_sdk
 import uvicorn
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+# ✅ FIX #2: Set timezone BEFORE any other imports
+os.environ.setdefault("TZ", "Asia/Kolkata")
+
 import nifty_scalper_bot.load_env_first  # noqa: F401
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
 
@@ -62,6 +65,16 @@ def _should_start_http_server() -> bool:
 
 async def _run() -> None:
     app_core = NiftyScalperApp()
+
+    # ✅ FIX #3: Call the logging functions AFTER app initialization
+    from nifty_scalper_bot.utils.logging import (
+        silence_third_party_loggers,
+        enable_business_logic_logging,
+    )
+    silence_third_party_loggers()
+    enable_business_logic_logging()
+    # ✅ END FIX #3
+
     uv_server: uvicorn.Server | None = None
     http_task: asyncio.Task[None] | None = None
     http_enabled = _should_start_http_server()
