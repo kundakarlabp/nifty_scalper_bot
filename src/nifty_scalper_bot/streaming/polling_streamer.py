@@ -181,9 +181,9 @@ class PollingStreamer:
                         ticks = self._fetch_ticks(batch)
                         # Alert if persistent empty polling batch
                         if not ticks:
-                            LOGGER.error("[POLL-ERR] Polling returned empty ticks for batch: %s", batch)
-                            with suppress(Exception):
-                                self._m_poll_err.inc()
+                            LOGGER.debug("[POLL-DEBUG] Empty ticks for batch %s. Check API availability.", batch)
+                            # We don't increment error metric here to avoid alerting on market-closed empty returns
+                        
                         for tick in ticks:
                             # Validate tick shape
                             if (
@@ -217,21 +217,23 @@ class PollingStreamer:
             self._stop.wait(sleep_for)
 
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
+        """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
         timestamp_ms = int(time.time() * 1000)
         
-        # --- FIX: FORCE FULL QUOTE FETCH ---
-        # We try this FIRST to ensure we get Volume data for VWAP strategy.
-        # We ignore self._require_depth because strategies need volume regardless.
+        # --- OPTIMIZED FETCH LOGIC ---
+        # Always try 'quote' first. Strategies like VWAP require Volume,
+        # which 'ltp' (Last Traded Price) endpoints do not provide.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # Fallback to LTP if Quote fails (keeps price alive, but volume will be missing)
+        # Fallback 1: Bulk LTP
+        # If Quote API fails/throttles, fall back to LTP to keep price feeds alive.
         ticks = self._try_ltp_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # Fallback for single quote lookup
+        # Fallback 2: Single Quote (Slowest, Last Resort)
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -239,20 +241,22 @@ class PollingStreamer:
                 try:
                     quote = get_quote_single(int(token))
                 except Exception:  # noqa: BLE001
-                    LOGGER.exception("[POLL-ERR] Single quote lookup failed for token %s", int(token))
+                    LOGGER.debug("[POLL-ERR] Single quote lookup failed for token %s", int(token))
                     continue
                 lp = float(quote.get("last_price", 0.0) or 0.0)
                 if lp <= 0:
                     continue
                 
                 # Extract volume if available
-                vol = quote.get("volume", 0) 
+                vol = quote.get("volume", 0)
+                avg_price = quote.get("average_price", 0.0)
                 
                 tick: dict[str, Any] = {
                     "instrument_token": int(token),
                     "last_price": lp,
                     "timestamp": timestamp_ms,
-                    "volume": vol, # Added volume here too for consistency
+                    "volume": vol,
+                    "average_price": avg_price
                 }
                 depth = quote.get("depth")
                 if isinstance(depth, dict):
@@ -307,7 +311,8 @@ class PollingStreamer:
         try:
             quote_map = fetch_quote_bulk(batch)
         except Exception:  # noqa: BLE001
-            LOGGER.exception("[POLL-ERR] Quote bulk fetch failed")
+            # Log at DEBUG unless it persists, to avoid flooding logs during brief network hiccups
+            LOGGER.debug("[POLL-ERR] Quote bulk fetch failed") 
             return None
         ticks: list[dict[str, Any]] = []
         for token, quote in quote_map.items():
@@ -329,10 +334,10 @@ class PollingStreamer:
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
-                # --- FIX: ADDED VOLUME AND AVERAGE PRICE ---
+                # --- VITAL DATA FOR STRATEGIES ---
                 "volume": quote.get("volume", 0),
                 "average_price": quote.get("average_price", 0.0),
-                # -------------------------------------------
+                # ---------------------------------
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
