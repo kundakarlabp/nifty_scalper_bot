@@ -4477,16 +4477,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra={"event": "instrument_load_failed"},
             )
     
-    if broker_ready:
-        try:
-            await _reconcile_state(ctx)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning(
-                "State reconciliation failed: %s",
-                exc,
-                extra={"event": "state_reconcile_failed"},
-            )
-
+    
     # ------------------------------------------------------------------
     # [STAGE 3 FIX] KILL SWITCH: Cancel all open orders on boot
     # ------------------------------------------------------------------
@@ -4523,6 +4514,16 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.error(f"❌ KILL SWITCH FAILED: {str(e)}")
             # We do not stop the bot here; trading can still proceed manually
     # ------------------------------------------------------------------
+    if broker_ready:
+        try:
+            await _reconcile_state(ctx)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "State reconciliation failed: %s",
+                exc,
+                extra={"event": "state_reconcile_failed"},
+            )
+    
     else:
         LOGGER.info("Continuing startup in degraded mode (broker unavailable)")
 
