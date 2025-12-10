@@ -1875,10 +1875,10 @@ def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
         return cfg
     return StrategyRunnerConfig(
         signal_cooldown_seconds=float(
-            getattr(cfg, "signal_cooldown_seconds", 30.0) or 30.0
+            getattr(cfg, "signal_cooldown_seconds", 3.0) or 3.0
         ),
         trade_cooldown_seconds=float(
-            getattr(cfg, "trade_cooldown_seconds", 60.0) or 60.0
+            getattr(cfg, "trade_cooldown_seconds", 10.0) or 10.0
         ),
         min_indicator_bars=int(getattr(cfg, "min_indicator_bars", 50) or 50),
         max_trade_history=int(getattr(cfg, "max_trade_history", 100) or 100),
