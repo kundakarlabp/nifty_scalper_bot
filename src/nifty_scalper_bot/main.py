@@ -20,7 +20,7 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 # ✅ FIX #2: Set timezone BEFORE any other imports
 os.environ.setdefault("TZ", "Asia/Kolkata")
 
-import nifty_scalper_bot.load_env_first  # noqa: F401
+
 from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
 
 LOG = logging.getLogger("nifty_scalper_bot.main")
