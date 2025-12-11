@@ -163,10 +163,7 @@ class PollingStreamer:
                         # --- MODIFIED: Add logging to catch empty returns ---
                         ticks = self._fetch_ticks(batch)
                         
-                        # Only log empty ticks if we actually expected data (tokens list not empty)
-                        if not ticks and tokens:
-                            LOGGER.debug("[POLL-TRACE] Empty ticks returned for batch %s", batch)
-                        
+                                                
                         for tick in ticks:
                             if (
                                 "instrument_token" not in tick
