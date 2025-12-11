@@ -923,7 +923,7 @@ class TradingSessionGuard:
 
         return self._market_open, self._market_close
 
-        @staticmethod
+    @staticmethod
     def _parse_hhmm(value: str, fallback: time) -> time:
         try:
             clean = (value or "").strip()
