@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dotenv import load_dotenv
+# Force load the .env file from the current directory
+# override=True ensures this file overwrites anything else
+load_dotenv(override=True)
 import signal
 from functools import partial
 from typing import Any, Callable
