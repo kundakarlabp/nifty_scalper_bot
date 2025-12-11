@@ -4539,7 +4539,6 @@ async def startup_sequence(ctx: BotContext) -> None:
     access_denied = False
     denied_reason: str | None = None
     guard = ctx.session_guard
-    resolver_instance = ctx.instrument_resolver
 
     if resolver is not None and hasattr(resolver, "ensure_core_index_tokens"):
         try:
@@ -4579,18 +4578,8 @@ async def startup_sequence(ctx: BotContext) -> None:
         LOGGER.info(
             "Connected to broker: %s", profile.get("user_name") or user_id or "n/a"
         )
-        
-        # [FIX] Force validation and verify immediately
         if guard is not None:
             guard.mark_session_valid()
-            
-            # Double check status immediately
-            status = guard.evaluate()
-            if not status.session_valid:
-                LOGGER.warning("⚠️ Session guard did not validate immediately. Retrying mark...")
-                guard.mark_session_valid()
-                
-            LOGGER.info("✅ Broker session validated with Guard.")
     except ConfigurationError as exc:
         broker_ready = False
         access_denied = True
@@ -4634,8 +4623,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 exc,
                 extra={"event": "instrument_load_failed"},
             )
-    
-    
+
     # ------------------------------------------------------------------
     # [STAGE 3 FIX] KILL SWITCH: Cancel all open orders on boot
     # ------------------------------------------------------------------
@@ -4670,8 +4658,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
         except Exception as e:
             LOGGER.error(f"❌ KILL SWITCH FAILED: {str(e)}")
-            # We do not stop the bot here; trading can still proceed manually
-    # ------------------------------------------------------------------
+    
     if broker_ready:
         try:
             await _reconcile_state(ctx)
@@ -4681,7 +4668,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                 exc,
                 extra={"event": "state_reconcile_failed"},
             )
-    
     else:
         LOGGER.info("Continuing startup in degraded mode (broker unavailable)")
 
@@ -4708,8 +4694,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={"event": "post_fill_monitor_initial_reconcile_failed"},
                         exc_info=True,
                     )
+    
     message_bus_component = _require_component(ctx.message_bus, "message_bus")
     message_bus_component.start()
+    
     proc = getattr(ctx, "order_processor", None)
     if proc is not None:
         try:
@@ -4724,12 +4712,11 @@ async def startup_sequence(ctx: BotContext) -> None:
         ctx.market_data_manager,
         "market_data_manager",
     )
+
+    # --- FIX: Calculate Symbols FIRST ---
+    # We must calculate symbols now so we know what to hydrate in the backfill step
     validated_symbols = _get_symbols(ctx.config, resolver=ctx.instrument_resolver, broker=ctx.broker_client)
-    for symbol in validated_symbols:
-        strategy_runner.add_symbol(symbol)
-
-    order_monitor_started = False
-
+    
     # --- FIX: Start Regime Refresh Task ---
     async def _regime_refresh_loop():
         """Periodically refresh market regime from indicators (Smart Mode)."""
@@ -4737,195 +4724,165 @@ async def startup_sequence(ctx: BotContext) -> None:
         while True:
             try:
                 if mgr:
-                    # 1. Standard Refresh
                     await mgr.refresh_from_indicators()
-                    
-                    # 2. Liveness Check
-                    # If the regime is "unknown" or "stale", try to force a recalculation
                     current = mgr.get_current_regime()
                     if current in ("UNKNOWN", "STALE"):
-                        LOGGER.info("⚠️ Regime is STALE/UNKNOWN. Forcing deep refresh...")
-                        # Force pull latest candle from DataHub to update indicators
                         symbol = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
                         if ctx.data_hub:
                             tick = ctx.data_hub.get_latest_tick(symbol)
                             if tick:
-                                # Re-inject tick to wake up the engine
                                 mgr.indicators.update_price(symbol, tick.get("ltp"), timestamp=datetime.now())
                                 await mgr.refresh_from_indicators()
-
             except Exception as e:
                 LOGGER.error(f"Regime refresh failed: {e}")
-            
-            # Run every 15 seconds (Faster than 60s to catch regime shifts quickly)
             await asyncio.sleep(15)
-    # --------------------------------------
-   # --- FIX: History Backfill (Hydration) - FINAL PRODUCTION VERSION ---
-    async def _warm_indicators_with_history():
-        LOGGER.info("⏳ Starting History Backfill (Hydration)...")
+
+    # --- FIX: History Backfill (Hydration) for Index AND Options ---
+    async def _warm_indicators_with_history(target_symbols: list[str]) -> None:
+        LOGGER.info(f"⏳ Starting History Backfill (Hydration) for {len(target_symbols)} symbols...")
         try:
-            # 1. Setup
-            nifty_symbol = "NSE:NIFTY 50"
             broker = ctx.broker_client
-            
-            # 2. Validation: Ensure the client supports get_ohlc
             if not hasattr(broker, "get_ohlc"):
                 LOGGER.warning("⚠️ Broker client missing 'get_ohlc'. Backfill skipped.")
                 return
 
-            # 3. Fetch Data (5 days History)
             from datetime import datetime, timedelta
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=5)
-            
-            # Date strings for ZerodhaKiteClient
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             
-            LOGGER.info(f"🌊 Fetching history for {nifty_symbol}...")
-            
-            # 4. Execute Call (Delegated to ZerodhaKiteClient)
-            records = await asyncio.to_thread(
-                broker.get_ohlc, nifty_symbol, "minute", from_str, to_str
-            )
-            
-            if not records:
-                LOGGER.warning("⚠️ History fetch returned 0 records.")
-                return
-
-            # 5. Inject into Engine
             mgr = ctx.market_regime_manager
-            if mgr and mgr.indicators:
-                engine = mgr.indicators
-                symbol_key = getattr(mgr, "_indicator_symbol", "NSE:NIFTY 50")
-                if not symbol_key: symbol_key = "NIFTY"
-                
-                count = 0
-                for candle in records:
-                    # Handle List format (common in Kite) or Dict format
-                    if isinstance(candle, dict):
-                        ohlc = candle
-                        vol = candle.get("volume", 0)
-                        ts = candle.get("date")
-                    elif isinstance(candle, list) and len(candle) >= 6:
-                        ts, o, h, l, c, vol = candle[:6]
-                        ohlc = {"open": o, "high": h, "low": l, "close": c}
-                    else:
-                        continue
-                        
-                    # Parse String Timestamp
-                    if isinstance(ts, str):
-                        try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        except: pass
+            if not (mgr and mgr.indicators):
+                return
+            
+            engine = mgr.indicators
 
-                    engine.update_price(symbol_key, ohlc, volume=vol, timestamp=ts)
-                    count += 1
+            for symbol in target_symbols:
+                LOGGER.info(f"🌊 Fetching history for {symbol}...")
+                try:
+                    records = await asyncio.to_thread(
+                        broker.get_ohlc, symbol, "minute", from_str, to_str
+                    )
+                    
+                    if not records:
+                        LOGGER.warning(f"⚠️ History fetch returned 0 records for {symbol}.")
+                        continue
+
+                    count = 0
+                    for candle in records:
+                        if isinstance(candle, dict):
+                            ohlc = candle
+                            vol = candle.get("volume", 0)
+                            ts = candle.get("date")
+                        elif isinstance(candle, list) and len(candle) >= 6:
+                            ts, o, h, l, c, vol = candle[:6]
+                            ohlc = {"open": o, "high": h, "low": l, "close": c}
+                        else:
+                            continue
+                            
+                        if isinstance(ts, str):
+                            try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            except: pass
+
+                        engine.update_price(symbol, ohlc, volume=vol, timestamp=ts)
+                        count += 1
+                    
+                    LOGGER.info(f"✅ Hydrated {count} candles for {symbol}.")
                 
-                LOGGER.info(f"✅ Hydrated {count} candles. ATR/Regime is LIVE instantly.")
-                await mgr.refresh_from_indicators()
+                except Exception as e:
+                    LOGGER.error(f"Failed to hydrate {symbol}: {e}")
+
+            await mgr.refresh_from_indicators()
+            LOGGER.info("✅ Indicator Engine Warm-up Complete.")
 
         except Exception as e:
             LOGGER.error(f"⚠️ History Backfill Failed: {e}", exc_info=True)
 
     # Run Backfill BEFORE starting strategies
     if broker_ready:
-        await _warm_indicators_with_history()
-    # -----------------------------------------------------
-    # [FIX] Robust Async Sync Loop-
+        # Include Index + all calculated Option contracts
+        hydration_targets = ["NSE:NIFTY 50"] + validated_symbols
+        # Dedup
+        hydration_targets = list(dict.fromkeys(hydration_targets))
+        
+        await _warm_indicators_with_history(hydration_targets)
+
+    # [FIX] Robust Async Sync Loop
     async def _fast_sync_loop():
         LOGGER.info("🚀 Background Account Sync Loop Started")
-        # Sync every 15s normally, speed up to 5s only if we have active positions
         normal_interval = 15.0
         active_interval = 5.0
         timeout_seconds = 30.0
-        timeout_min = 10.0
-        timeout_max = 60.0
-        consecutive_timeouts = 0
-    
     
         while True:
             start_time = asyncio.get_running_loop().time()
-        
             try:
                 await asyncio.wait_for(
-                _reconcile_state(ctx),
-                timeout=timeout_seconds
-            )
-            
-                # Determine pace based on activity
+                    _reconcile_state(ctx),
+                    timeout=timeout_seconds
+                )
                 has_positions = False
                 if ctx.position_manager:
                     positions = ctx.position_manager.get_all_positions()
                     has_positions = len(positions) > 0
-            
                 sleep_time = active_interval if has_positions else normal_interval
 
-            except asyncio.TimeoutError:  # 🆕 Handle timeout separately
+            except asyncio.TimeoutError:
                 LOGGER.error(
-                    f"⚠️ Sync timeout after {timeout_seconds}s - broker API slow/down. Skipping cycle.",
-                    extra={"event": "sync_loop_timeout", "timeout": timeout_seconds}
+                    f"⚠️ Sync timeout after {timeout_seconds}s - broker API slow. Skipping.",
+                    extra={"event": "sync_loop_timeout"}
                 )
-                sleep_time = normal_interval  # Slow down to avoid hammering
-
-            
+                sleep_time = normal_interval
             except Exception as e:
                 LOGGER.error(f"Sync loop error: {e}", exc_info=True)
-                sleep_time = normal_interval # Fallback to slow mode on error
+                sleep_time = normal_interval
 
-            # Calculate remaining time to maintain stable cadence
             elapsed = asyncio.get_running_loop().time() - start_time
             await asyncio.sleep(max(0.1, sleep_time - elapsed))
 
-    # Start the background task
+    # Start loops
     loop = asyncio.get_running_loop()
     loop.create_task(_fast_sync_loop())
-    # -----------------------------------------------------
-    # --- FIX: Futures Data Subscription (For Volume Calculation Only) ---
-    # We subscribe to Nifty Futures so the Orchestrator can calculate volume ratios.
-    # Actual trading of Futures is blocked by the Broker Client (Safe).
+    loop.create_task(_regime_refresh_loop())
+
+    # --- FIX: Futures Data Subscription ---
     try:
         from datetime import datetime
         now = datetime.now()
-        # 1. Construct current month futures symbol (e.g., NFO:NIFTY25DECFUT)
         y_str = now.strftime("%y")
         m_str = now.strftime("%b").upper()
         future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
         
-        # 2. Resolve Token
         token = None
         if ctx.instrument_resolver:
             token = ctx.instrument_resolver.resolve(future_symbol)
         
         if token:
             LOGGER.info(f"✅ Futures Data Source: {future_symbol} (Token: {token})")
-            
-            # 3. Add to Runner (Builds Bars/Volume History)
             if ctx.strategy_runner:
                 ctx.strategy_runner.add_symbol(future_symbol)
                 LOGGER.info(f"📡 Subscribed to {future_symbol} for calculation.")
 
-            # 4. Link to Orchestrator (Enables Volume Checks)
-            # The Orchestrator needs to know WHICH symbol is the 'Future' to read volume from.
-            # We update the StrategyManager's reference first (if it exists)
             if ctx.strategy_manager:
-                # Some versions might store it here, good to update if present
                 if hasattr(ctx.strategy_manager, "_futures_symbol"):
                     ctx.strategy_manager._futures_symbol = future_symbol
 
-            # Update the Orchestrator directly
             orchestrator = getattr(ctx.strategy_manager, "orchestrator", None)
             if orchestrator:
                 orchestrator._futures_symbol = future_symbol
                 LOGGER.info(f"🔗 Orchestrator linked to {future_symbol}")
-                
         else:
             LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}. Volume checks may fail.")
 
     except Exception as e:
         LOGGER.error(f"⚠️ Futures Setup Failed: {e}")
-    # --------------------------------------------------------------------
-    # -----------------------------------------------------
 
+    # Register symbols with Strategy Runner (NOW they are hydrated)
+    for symbol in validated_symbols:
+        strategy_runner.add_symbol(symbol)
+
+    order_monitor_started = False
     def _start_order_monitoring() -> None:
         nonlocal order_monitor_started
         if order_monitor_started:
@@ -4942,9 +4899,8 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     if not broker_ready:
         LOGGER.critical("Broker connection failed. Exiting to prevent zombie state.")
-        # Gracefully stop the app or raise a fatal error to restart the container
         await shutdown_sequence(ctx, reason="broker_init_failed")
-        return # or sys.exit(1)
+        return
 
     if broker_ready:
         try:
@@ -4987,11 +4943,10 @@ async def startup_sequence(ctx: BotContext) -> None:
         _start_order_monitoring()
         if broker_ready:
             with suppress(Exception):
-                # The runner starts paused if broker_ready=False. Resume if true.
                 if hasattr(strategy_runner, 'resume'):
                     strategy_runner.resume()
                 elif hasattr(strategy_runner, 'start'):
-                     strategy_runner.start() # Redundant start call, but safe fallback
+                     strategy_runner.start()
         session_guard = getattr(ctx, "session_guard", None)
         try:
             if session_guard is not None:
