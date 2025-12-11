@@ -179,10 +179,9 @@ class PollingStreamer:
                 if tokens:
                     for batch in self._chunks(tokens, self._batch_size):
                         ticks = self._fetch_ticks(batch)
-                        # Alert if persistent empty polling batch
+                        # Alert if persistent empty polling batch (only if we expected data)
                         if not ticks:
-                            # Log at DEBUG to avoid spamming when market is closed
-                            LOGGER.debug("[POLL-DEBUG] Empty ticks for batch %s", batch)
+                            LOGGER.debug("[POLL-TRACE] Empty ticks for batch %s", batch)
                         
                         for tick in ticks:
                             # Validate tick shape
@@ -220,20 +219,23 @@ class PollingStreamer:
         """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
         timestamp_ms = int(time.time() * 1000)
         
-        # --- CRITICAL FIX APPLIED: FORCE FULL QUOTE ---
-        # Always try 'quote' first. Strategies like VWAP require Volume,
-        # which 'ltp' (Last Traded Price) endpoints do not provide.
+        # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
+        # We ignore self._require_depth because strategies often need volume data
+        # which is only available in the Quote endpoint, not the LTP endpoint.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
+            # Success! Returning full Quote data
             return ticks
 
-        # Fallback 1: Bulk LTP
-        # If Quote API fails/throttles, fall back to LTP to keep price feeds alive.
+        # --- FALLBACK: TRY LTP BULK (Price Only) ---
+        # If Quote fetch failed (e.g. rate limit, 503), fall back to LTP.
+        # This keeps the bot alive with Price updates, though VWAP strategies will pause.
+        LOGGER.warning("[POLL-WARN] Quote fetch failed. Falling back to LTP (No Volume data!)")
         ticks = self._try_ltp_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # Fallback 2: Single Quote (Slowest, Last Resort)
+        # --- LAST RESORT: SINGLE QUOTE ---
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -298,6 +300,7 @@ class PollingStreamer:
                     "instrument_token": int(token),
                     "last_price": ltp,
                     "timestamp": timestamp_ms,
+                    # Note: No volume in LTP
                 }
             )
         return ticks or None
@@ -312,7 +315,7 @@ class PollingStreamer:
             quote_map = fetch_quote_bulk(batch)
         except Exception:  # noqa: BLE001
             # Log at DEBUG unless it persists, to avoid flooding logs during brief network hiccups
-            LOGGER.debug("[POLL-ERR] Quote bulk fetch failed") 
+            LOGGER.debug("[POLL-ERR] Quote bulk fetch failed, will try fallback") 
             return None
         ticks: list[dict[str, Any]] = []
         for token, quote in quote_map.items():
@@ -334,10 +337,10 @@ class PollingStreamer:
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
-                # --- VITAL DATA FOR STRATEGIES ---
+                # --- CRITICAL: Extract Volume & VWAP ---
                 "volume": quote.get("volume", 0),
                 "average_price": quote.get("average_price", 0.0),
-                # ---------------------------------
+                # ---------------------------------------
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
