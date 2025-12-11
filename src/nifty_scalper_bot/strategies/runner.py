@@ -1287,7 +1287,12 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
-        self._logger.info(f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}")
+        log_throttled(
+            self._logger,
+            "msg_bus_tick",
+            f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}",
+            interval_sec=60.0
+        )
         if not self._running or self._trading_paused:
             return
 
@@ -1321,7 +1326,12 @@ class StrategyRunner:
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
         # DEBUG: Confirm tick received
-        self._logger.debug(f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}")
+        log_throttled(
+            self._logger,
+            "tick_received",
+            f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}",
+            interval_sec=60.0
+        )
         now = datetime.now(timezone.utc)
 
         # 1. Extract Critical Market Data
