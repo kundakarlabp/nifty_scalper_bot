@@ -1287,7 +1287,7 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
-        self._logger.debug(f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}")
+        self._logger.info(f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}")
         if not self._running or self._trading_paused:
             return
 
