@@ -783,8 +783,24 @@ class TradingSessionGuard:
             broker_session_valid = (
                 now - self._session_validated_at < self._session_max_age
             )
+            
+            # [FIX] Auto-refresh stale session
             if not broker_session_valid:
-                reasons.append("Broker session stale")
+                LOGGER.warning(f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh...")
+                try:
+                    # Attempt to fetch profile to validate connectivity
+                    ctx = get_latest_bot_context()
+                    if ctx and ctx.broker_client:
+                        # Use internal broker reference if wrapped
+                        client = getattr(ctx.broker_client, "client", ctx.broker_client)
+                        if hasattr(client, "get_profile"):
+                            client.get_profile() # Will raise if failed
+                            self.mark_session_valid()
+                            broker_session_valid = True
+                            LOGGER.info("✅ Session auto-refreshed successfully.")
+                except Exception as e:
+                    LOGGER.error(f"❌ Session auto-refresh failed: {e}")
+                    reasons.append("Broker session stale")
 
         budgets_ok = True
         snapshot = self._rate_limiter.snapshot()
@@ -808,7 +824,16 @@ class TradingSessionGuard:
         risk_fail_reason: str | None = None
         try:
             risk_ok = self._risk_manager.is_green()
-        except Exception:  # pragma: no cover - defensive
+            # [FIX] Detailed logging for risk blocks
+            if not risk_ok:
+                snap = self._risk_manager.snapshot()
+                if snap:
+                    LOGGER.warning(
+                        f"⛔ RISK BLOCK: Breaker={snap.breaker_tripped} | "
+                        f"Loss={snap.day_loss:.2f}/{snap.max_day_loss:.2f} | "
+                        f"Cooldown={snap.cooldown_remaining:.1f}s"
+                    )
+        except Exception:
             risk_ok = False
             reasons.append("Risk manager unavailable")
         if not risk_ok and "Risk manager unavailable" not in reasons:
@@ -4468,7 +4493,40 @@ def _validate_config(config: AppConfig) -> None:
     if config.ratelimit.orders.capacity <= 0:
         raise ValueError("Order rate limit capacity must be positive")
     LOGGER.debug("Configuration validated successfully")
+def force_enable_trading_override() -> str:
+    """
+    Emergency override to force enable trading by resetting all guards.
+    Usage: Call from Telegram or REPL.
+    """
+    ctx = get_latest_bot_context()
+    if not ctx:
+        return "❌ No Bot Context found."
 
+    logs = []
+    
+    # 1. Force Session Valid
+    if ctx.session_guard:
+        ctx.session_guard.mark_session_valid()
+        ctx.session_guard.set_allow_out_of_hours(True)
+        ctx.out_of_hours_override = True
+        logs.append("✅ Session Guard Force-Validated (Out-of-hours allowed)")
+
+    # 2. Reset Risk Breaker
+    if ctx.risk_manager:
+        ctx.risk_manager.reset_on_start(override=True)
+        # Manually clear flags if needed
+        if hasattr(ctx.risk_manager, "_breaker_tripped"):
+            ctx.risk_manager._breaker_tripped = False
+        logs.append("✅ Risk Manager Reset")
+
+    # 3. Enable Live Orders
+    if ctx.safe_order_manager:
+        ctx.safe_order_manager.set_live_enabled(True)
+        ctx.shadow_mode_enabled = False
+        logs.append("✅ Live Trading Enabled (Shadow Mode OFF)")
+
+    LOGGER.critical(f"🚨 MANUAL OVERRIDE ACTIVATED: {', '.join(logs)}")
+    return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence."""
@@ -4521,8 +4579,18 @@ async def startup_sequence(ctx: BotContext) -> None:
         LOGGER.info(
             "Connected to broker: %s", profile.get("user_name") or user_id or "n/a"
         )
+        
+        # [FIX] Force validation and verify immediately
         if guard is not None:
             guard.mark_session_valid()
+            
+            # Double check status immediately
+            status = guard.evaluate()
+            if not status.session_valid:
+                LOGGER.warning("⚠️ Session guard did not validate immediately. Retrying mark...")
+                guard.mark_session_valid()
+                
+            LOGGER.info("✅ Broker session validated with Guard.")
     except ConfigurationError as exc:
         broker_ready = False
         access_denied = True
