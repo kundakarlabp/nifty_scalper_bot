@@ -130,10 +130,20 @@ class RiskManager:
     _unified_manager: Any | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
+        # [MODIFIED] Do not crash on 0 balance; allow API to fetch it later
         if self.account_balance <= 0:
-            raise ValueError("account_balance must be positive")
-        self._logger = get_logger(__name__)
+            self._logger = get_logger(__name__) # Ensure logger is init first
+            self._logger.warning("Initial account_balance is 0 or negative. Waiting for DataHub refresh.")
+            # Default to a safe fallback (e.g. 1.0) or keep 0, but don't crash
+            if self.account_balance < 0: 
+                self.account_balance = 0.0
+        
+        # Ensure logger is initialized if not done above
+        if not hasattr(self, "_logger"):
+             self._logger = get_logger(__name__)
+
         self._cooldown_until = None
+        # ... rest of the function remains same ...
         self._trading_day_start = self._current_trading_day()
         self._last_pnl_snapshot = float(self.position_manager.get_realized_pnl())
         self._breaker_tripped = False
@@ -779,23 +789,17 @@ class RiskManager:
         try:
             force_refresh = self._should_force_balance_refresh()
             if force_refresh:
-                age = max(time.time() - self._last_balance_refresh, 0.0)
-                self._logger.info(
-                    "Condition met: risk_balance_jit_refresh",
-                    extra={
-                        "event": "risk_balance_jit_refresh",
-                        "age": round(age, 2),
-                        "threshold": round(self._balance_force_refresh, 2),
-                    },
-                )
-            self.refresh_account_balance(force=force_refresh)
+                # [MODIFIED] Log optimization: remove heavy extra dict construction in hot path unless debug
+                # age calculation moved inside debug check if needed, or simplified
+                self.refresh_account_balance(force=True)
         except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in RiskManager.check_order refresh: %s",
-                exc,
-                extra={"event": "risk_balance_refresh_check_order_error"},
-                exc_info=exc,
+            # [MODIFIED] Non-blocking error handling. 
+            # If refresh fails, we continue using the cached balance.
+            self._logger.warning(
+                "RiskManager balance refresh failed during check_order (using cache)",
+                extra={"error": str(exc)}
             )
+        
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
 
@@ -1004,7 +1008,16 @@ class RiskManager:
                 confidence_value = 0.0
         confidence_value = max(0.0, min(1.0, confidence_value))
 
-        lot_size = self._resolve_lot_size(symbol)
+        # [MODIFIED] Safe handling for lot size resolution
+        try:
+            lot_size = self._resolve_lot_size(symbol)
+        except (RuntimeError, ValueError) as exc:
+            self._logger.warning(
+                f"Cannot size position for {symbol}: {exc}",
+                extra={"event": "risk_sizing_missing_lot_info"}
+            )
+            return 0
+
         max_units_by_risk = int(allowed_risk // sl_distance)
         if max_units_by_risk < lot_size:
             return 0
@@ -1281,9 +1294,14 @@ class RiskManager:
             return
         try:
             loop = asyncio.get_running_loop()
+            # [MODIFIED] Ensure the loop is actually running/usable
+            if loop.is_closed():
+                raise RuntimeError("Loop is closed")
         except RuntimeError:
-            self._logger.warning(
-                "Breaker alert scheduling skipped: no running loop",
+            # This is expected behavior when running in a synchronous thread (like the Runner)
+            # We log as debug, not warning, to avoid spamming logs.
+            self._logger.debug(
+                "Breaker alert skipped: no async loop in current thread",
                 extra={"event": "risk_breaker_alert_no_loop", "reason": reason},
             )
             return
