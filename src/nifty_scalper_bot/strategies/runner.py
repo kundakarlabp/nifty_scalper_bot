@@ -1416,10 +1416,13 @@ class StrategyRunner:
             curr_vwap = state.vwap
 
             if prev_ltp and curr_vwap and price > 0:
-                # Proximity Check (Debug info)
-                diff_pct = abs(price - curr_vwap) / curr_vwap * 100
-                if diff_pct < 0.15: # Within 0.15% of VWAP
-                     self._logger.info(f"⚠️ PROXIMITY ALERT: {symbol} is {diff_pct:.3f}% from VWAP")
+                # [DIAGNOSTIC] Log Logic State
+                # Only log every 60 seconds OR if close to crossover (0.05%) to reduce spam
+                dist_pct = abs(price - curr_vwap) / curr_vwap * 100
+                if dist_pct < 0.05:
+                    self._logger.info(
+                        f"👀 VWAP WATCH: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | Cross? {prev_ltp < curr_vwap and price > curr_vwap}"
+                    )
 
                 # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
                 if prev_ltp < curr_vwap and price > curr_vwap:
@@ -1459,9 +1462,17 @@ class StrategyRunner:
         
         # Fallback: If no local signal, check Strategy Manager (RSI/Supertrend/etc)
         if signal is None and self._config.min_indicator_bars:
-            # Check readiness before asking strategy manager to avoid noise
-            if self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars):
+            is_ready = self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars)
+            
+            if is_ready:
                 signal = self._strategy_manager.generate_signal(symbol, price)
+                # [DIAGNOSTIC] Log if strategy checked but returned nothing
+                if signal is None:
+                    # Log mostly at debug, but force INFO occasionally to prove it's running
+                    log_throttled(self._logger, f"strat_check_{symbol}", f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL", interval_sec=300.0)
+            else:
+                # [DIAGNOSTIC] Log why we didn't even ask
+                log_throttled(self._logger, f"not_ready_{symbol}", f"⏳ Indicators NOT READY for {symbol} (Need {self._config.min_indicator_bars} bars)", interval_sec=60.0)
 
         # 6. Execute Signal
         if signal and signal.action != "HOLD":
@@ -1639,7 +1650,11 @@ class StrategyRunner:
                     trade_price = selection.ltp or trade_price
 
             if not selection:
-                self._logger.warning("🔴 Execution Stopped: No Contract Selected")
+                # [DIAGNOSTIC] More detail on failure
+                self._logger.warning(
+                    f"🔴 Execution Stopped: No Contract Selected for {base_symbol}. "
+                    f"Check: 1. Liquidity filters in settings. 2. Market hours. 3. Option chain data availability."
+                )
                 self._record_trade(
                     base_symbol,
                     TradeRecord(
@@ -1711,7 +1726,11 @@ class StrategyRunner:
             )
 
             if not allowed:
-                self._logger.warning(f"🔴 Position validation failed: {reason}")
+                # [DIAGNOSTIC] Full breakdown of blockage
+                self._logger.warning(
+                    f"🔴 RISK BLOCK: {reason} | Symbol: {trade_symbol} | "
+                    f"Qty: {sized_qty} | Balance: {self._risk_manager.account_balance}"
+                )
                 self._record_trade(
                     base_symbol,
                     TradeRecord(
