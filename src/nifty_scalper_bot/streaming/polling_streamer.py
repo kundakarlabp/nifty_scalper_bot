@@ -47,6 +47,7 @@ class PollingStreamer:
         self._m_poll_err = Counter("poll_err_total", "Polling rounds with error")
         self._m_tokens = Gauge("poll_tokens", "Tracked tokens for polling")
         self._m_interval = Gauge("poll_interval_seconds", "Polling interval (seconds)")
+        # Readiness/freshness gauges
         self._m_last_tick = Gauge("poll_last_tick_ts", "Epoch ms of last tick")
         self._m_last_success = Gauge("poll_last_success_ts", "Epoch ms of last successful poll")
 
@@ -161,8 +162,10 @@ class PollingStreamer:
                     for batch in self._chunks(tokens, self._batch_size):
                         # --- MODIFIED: Add logging to catch empty returns ---
                         ticks = self._fetch_ticks(batch)
-                        if not ticks:
-                            LOGGER.debug("[POLL-TRACE] Empty ticks for batch %s", batch)
+                        
+                        # Only log empty ticks if we actually expected data (tokens list not empty)
+                        if not ticks and tokens:
+                            LOGGER.debug("[POLL-TRACE] Empty ticks returned for batch %s", batch)
                         
                         for tick in ticks:
                             if (
@@ -195,23 +198,27 @@ class PollingStreamer:
         """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
         timestamp_ms = int(time.time() * 1000)
         
-        # --- FIX APPLIED: Force Quote Fetch (Logic Fix) ---
-        # We REMOVED the 'if not self._require_depth' check.
-        # This guarantees we try to get Volume data first.
+        # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
+        # We ignore self._require_depth because strategies often need volume data.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
+            # Success! Returning full Quote data
+            # Log success occasionally or on first run to confirm volume flow
+            # (Keeping it clean here, success is implied by absence of warning)
             return ticks
 
-        # --- FALLBACK: LTP (Safety Net) ---
-        # If Quote failed, we log it and fallback to LTP.
-        # Added explicit WARNING log so you know if this happens (Logging Fix).
+        # --- FALLBACK: TRY LTP BULK (Price Only) ---
+        # If Quote fetch failed (e.g. rate limit, 503), fall back to LTP.
+        # This keeps the bot alive with Price updates, though VWAP strategies will pause.
+        
+        # LOGGING FIX: Scream if we are falling back, so we know Volume is missing.
         LOGGER.warning("[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)")
         
         ticks = self._try_ltp_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # Fallback 2: Single Quote (Slowest)
+        # Fallback 2: Single Quote (Slowest, Last Resort)
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -225,6 +232,7 @@ class PollingStreamer:
                 if lp <= 0:
                     continue
                 
+                # Extract volume if available
                 vol = quote.get("volume", 0)
                 avg_price = quote.get("average_price", 0.0)
                 
@@ -241,6 +249,7 @@ class PollingStreamer:
                 ticks.append(tick)
             return ticks
 
+        # Final failure
         LOGGER.error("[POLL-ERR] Polling fallback hit without quote helpers; skipping batch")
         return []
 
@@ -282,18 +291,17 @@ class PollingStreamer:
     ) -> list[dict[str, Any]] | None:
         fetch_quote_bulk = getattr(self._broker, "get_quote_bulk", None)
         if not callable(fetch_quote_bulk):
-            LOGGER.error("[POLL-ERR] Broker does not have get_quote_bulk method!")
             return None
         try:
             quote_map = fetch_quote_bulk(batch)
         except Exception as exc:  # noqa: BLE001
-            # --- LOGGING FIX: Changed to WARNING to make it visible ---
+            # LOGGING FIX: Changed to WARNING to make it visible
             LOGGER.warning("[POLL-WARN] Quote bulk fetch raised exception: %s", exc)
             return None
             
         if not quote_map:
-             # Log empty return
-             LOGGER.debug("[POLL-TRACE] Quote API returned empty map")
+             # Log empty return at INFO so you know if API returns nothing
+             LOGGER.info("[POLL-INFO] Quote API returned empty map")
              return None
 
         ticks: list[dict[str, Any]] = []
@@ -309,13 +317,10 @@ class PollingStreamer:
             if lp <= 0:
                 continue
             
-            # --- LOGGING FIX: Verify Volume ---
+            # --- EXTRACT VOLUME & VWAP ---
             vol = quote.get("volume", 0)
             avg_p = quote.get("average_price", 0.0)
             
-            # Uncomment this if you want to see raw volume flow in logs (High Noise)
-            # LOGGER.info(f"DATA CHECK: {normalized_token} Vol={vol} VWAP={avg_p}")
-
             tick: dict[str, Any] = {
                 "instrument_token": normalized_token,
                 "last_price": lp,
@@ -327,4 +332,9 @@ class PollingStreamer:
             if isinstance(depth, dict):
                 tick["depth"] = depth
             ticks.append(tick)
+            
+        # LOGGING FIX: High Visibility Success Log
+        if ticks:
+            LOGGER.info(f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data")
+            
         return ticks or None
