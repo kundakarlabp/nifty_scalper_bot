@@ -624,17 +624,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
             if last_price > 0:
                 out[token] = last_price
+        
+        # [CORRECTED] Aligned with the 'for' loop
+        if out:
             now = time.time()
-    if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
-        LOGGER.info(
-            "zerodha_get_ltp_bulk_ltp_fallback",
-            extra={
-                "event": "zerodha_get_ltp_bulk_ltp_fallback",
-                "count": len(out),
-            },
-        )
-        self._last_log_ltp_bulk = now
-    return out
+            if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
+                LOGGER.info(
+                    "zerodha_get_ltp_bulk_ltp_fallback",
+                    extra={
+                        "event": "zerodha_get_ltp_bulk_ltp_fallback",
+                        "count": len(out),
+                    },
+                )
+                self._last_log_ltp_bulk = now
+        return out
 
 
     def get_quote_by_token(self, token: int) -> dict[str, Any]:
@@ -970,7 +973,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 cast(Mapping[str, Any] | None, raw_payload),
                 segment=segment,
             )
-                        now = time.time()
+            
+            # [CORRECTED] Aligned correctly
+            now = time.time()
             if now - self._last_log_margins >= self._log_throttle_interval:
                 LOGGER.info(
                     "zerodha_margins_fetch_success segment=%s",
@@ -1036,20 +1041,22 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raise
 
         summary = self._normalize_margin_payload(payload, segment=segment)
-            now = time.time()
-    if now - self._last_log_margins >= self._log_throttle_interval:
-        LOGGER.info(
-            "zerodha_margin_summary_success",
-            extra={
-                "event": "zerodha_margin_summary_success",
-                "segment": segment,
-                "available": summary.get("available"),
-                "used": summary.get("used"),
-                "net": summary.get("net"),
-            },
-        )
-        self._last_log_margins = now
-    return summary
+        
+        # [CORRECTED] Aligned correctly
+        now = time.time()
+        if now - self._last_log_margins >= self._log_throttle_interval:
+            LOGGER.info(
+                "zerodha_margin_summary_success",
+                extra={
+                    "event": "zerodha_margin_summary_success",
+                    "segment": segment,
+                    "available": summary.get("available"),
+                    "used": summary.get("used"),
+                    "net": summary.get("net"),
+                },
+            )
+            self._last_log_margins = now
+        return summary
 
 
     def get_available_balance(self, segment: str = "equity") -> float:
@@ -1166,18 +1173,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 },
             )
             return fallback_balance
-            now = time.time()
-    if now - self._last_log_balance >= self._log_throttle_interval:
-        LOGGER.info(
-            "zerodha_available_balance_success",
-            extra={
-                "event": "zerodha_available_balance_success",
-                "segment": normalized_segment,
-                "available": available,
-            },
-        )
-        self._last_log_balance = now
-    return available
+
+        # [CORRECTED] Aligned correctly and placed before return
+        now = time.time()
+        if now - self._last_log_balance >= self._log_throttle_interval:
+            LOGGER.info(
+                "zerodha_available_balance_success",
+                extra={
+                    "event": "zerodha_available_balance_success",
+                    "segment": normalized_segment,
+                    "available": available,
+                },
+            )
+            self._last_log_balance = now
+        return available
 
 
     def _resolve_balance_fallback(self) -> float:
@@ -1603,18 +1612,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
             cache[base] = row
 
         self._instrument_cache[normalized_exchange] = cache
-            now = time.time()
-    if now - self._last_log_instrument_load >= self._log_throttle_interval:
-        LOGGER.info(
-            "Condition met: zerodha.load_instruments.success",
-            extra={
-                "event": "zerodha.load_instruments.success",
-                "exchange": normalized_exchange,
-                "count": len(cache),
-            },
-        )
-        self._last_log_instrument_load = now
-    return instruments
+        
+        # [CORRECTED] Aligned correctly
+        now = time.time()
+        if now - self._last_log_instrument_load >= self._log_throttle_interval:
+            LOGGER.info(
+                "Condition met: zerodha.load_instruments.success",
+                extra={
+                    "event": "zerodha.load_instruments.success",
+                    "exchange": normalized_exchange,
+                    "count": len(cache),
+                },
+            )
+            self._last_log_instrument_load = now
+        return instruments
 
 
     def list_instruments(self) -> list[dict[str, Any]]:
