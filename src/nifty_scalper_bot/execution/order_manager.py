@@ -795,16 +795,19 @@ class OrderManager:
     def panic_button(self):
         """Cancel ALL orders first, then exit positions."""
         # 1. Fast Cancel (prevents new fills while we exit)
-        self.cancel_pending_orders()  # <--- FIXED
+        self.cancel_pending_orders()
     
         # 2. Dump Positions (Market Orders)
         for pos in self._positions.get_open_positions():
+            # Detect product from position to ensure NRML/MIS compatibility
+            product_code = getattr(pos, "product", "MIS")
+            
             # Use 'exit' logic to ensure side is correct
             self._place_exit_order(
                 symbol=pos.symbol,
                 side="SELL" if pos.quantity > 0 else "BUY",
                 quantity=abs(pos.quantity),
-                product=None,
+                product=product_code,
                 tag="PANIC_BUTTON"
             )
 
@@ -2155,9 +2158,12 @@ class OrderManager:
         if 0 < fraction < 1:
             # [FIX] Lot-aware sizing to prevent broker rejection
             raw_target = int(filled_quantity * fraction)
-            # Ensure we have a valid lot size (default to 1 if missing)
-            lot_size = getattr(order, 'lot_size', 1) or 1
-                        
+            # Ensure we have a valid lot size using the proper resolver
+            try:
+                lot_size = self._lot_size_for_symbol(symbol)
+            except Exception:
+                lot_size = 1
+            
             # Snap calculation to floor lot chunks (e.g. 37 -> 25 if lot is 25)
             lots_count = raw_target // lot_size
                         
@@ -3593,13 +3599,16 @@ class OrderManager:
         """Wait for order to fill. Returns True if filled within timeout."""
 
         deadline = time.time() + float(timeout_sec)
+        # Use a tighter poll interval for execution workflows (max 0.2s)
+        poll_interval = min(0.2, self.POLL_INTERVAL_SEC)
+        
         while time.time() < deadline:
             status = self.get_order_status(order_id)
             if status == OrderStatus.FILLED:
                 return True
             if status in self.FINAL_STATUSES:
                 return False
-            time.sleep(self.POLL_INTERVAL_SEC)
+            time.sleep(poll_interval)
         return False
 
     def get_fill_price(self, order_id: str) -> float | None:
