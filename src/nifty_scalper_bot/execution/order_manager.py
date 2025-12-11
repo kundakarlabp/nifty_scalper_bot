@@ -2889,7 +2889,7 @@ class OrderManager:
                     extra={"entry_id": state.entry_id}
                 )
                 time.sleep(0.5)
-         if not replacement:
+        if not replacement:
             # CRITICAL: Failed to replace stop. Position is NAKED.
             # ACTION: Trigger Emergency Exit immediately.
             self._logger.critical(
