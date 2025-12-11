@@ -2163,16 +2163,16 @@ class OrderManager:
                         
             if lots_count == 0:
             # If fraction results in < 1 lot, force full exit at TP2
-            tp_primary_qty = 0
+                tp_primary_qty = 0
             else:
-            tp_primary_qty = lots_count * lot_size
+                tp_primary_qty = lots_count * lot_size
                             
             tp_secondary_qty = filled_quantity - tp_primary_qty
                       
             # Failsafe: if primary became 0, move everything to secondary
             if tp_primary_qty == 0:
-            tp_primary_qty = filled_quantity
-            tp_secondary_qty = 0
+                tp_primary_qty = filled_quantity
+                tp_secondary_qty = 0
         else:
             fraction = 0.0
 
