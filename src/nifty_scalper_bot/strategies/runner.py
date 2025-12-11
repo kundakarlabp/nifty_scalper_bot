@@ -6,6 +6,7 @@ import calendar
 import os
 import threading
 import asyncio
+import time
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -52,7 +53,21 @@ if TYPE_CHECKING:
     )
 
 LOGGER = get_logger(__name__)
+_THROTTLE_CACHE: Dict[str, float] = {}
+_THROTTLE_LOCK = threading.Lock()
 
+def log_throttled(logger: Any, key: str, msg: str, interval_sec: float = 60.0, level: str = "info") -> None:
+    """Log a message only if 'interval_sec' has passed since the last log for 'key'."""
+    with _THROTTLE_LOCK:
+        now = time.time()
+        last_time = _THROTTLE_CACHE.get(key, 0.0)
+        if now - last_time < interval_sec:
+            return
+        _THROTTLE_CACHE[key] = now
+
+    log_method = getattr(logger, level.lower(), logger.info)
+    log_method(msg)
+    
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -406,13 +421,7 @@ class StrategyRunner:
     # ==================== LIFECYCLE MANAGEMENT ====================
 
     def start(self) -> None:
-        """Start processing market data events."""
-
-        # ==================== DEBUG VERIFICATION ====================
-        self._logger.debug("🔍 DEBUG TEST: This should appear if LOG_LEVEL=debug works!")
-        self._logger.info("✅ INFO TEST: StrategyRunner.start() called")
-        self._logger.warning("⚠️ WARNING TEST: Logger initialized correctly")
-        # ============================================================
+        """Start processing market data events."""    
         with self._lock:
             if self._running:
                 return
@@ -1287,10 +1296,11 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
+        # [MODIFIED] Using defined helper correctly
         log_throttled(
             self._logger,
             "msg_bus_tick",
-            f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}",
+            f"🔔 MESSAGE BUS TICK: type={message.type}",
             interval_sec=60.0
         )
         if not self._running or self._trading_paused:
@@ -1531,24 +1541,30 @@ class StrategyRunner:
             if state := self._symbol_state.get(base_symbol):
                 current_vwap = state.vwap
         
-        if current_vwap and current_vwap > 0 and action == "BUY":
-            vwap_threshold = current_vwap * 0.995
-            if trade_price < vwap_threshold:
-                return
-        current_vwap = None
-        with self._lock:
-            if state := self._symbol_state.get(base_symbol):
-                current_vwap = state.vwap
-        
         if current_vwap and current_vwap > 0:
             vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
-            self._logger.info(f"📊 VWAP Check: Price={trade_price} VWAP={current_vwap} Dist={vwap_dist:.2f}%")
             
             # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
+            # We allow a very small tolerance (e.g. 0.05%) to avoid noise at the exact line,
+            # or strictly enforce it. Below strictly enforces it as per user's "SCALP RULE" comment.
             if action == "BUY" and trade_price < current_vwap:
-                self._logger.warning(f"🛑 VWAP BLOCK: Price {trade_price} is below VWAP {current_vwap}. Skipping BUY.")
-                self._record_trade(base_symbol, TradeRecord(timestamp, action, signal.quantity, trade_price, "skipped", "vwap_filter"))
+                self._logger.warning(
+                    f"🛑 VWAP BLOCK: Price {trade_price:.2f} < VWAP {current_vwap:.2f} (Dist: {vwap_dist:.2f}%). Skipping BUY."
+                )
+                self._record_trade(
+                    base_symbol, 
+                    TradeRecord(
+                        timestamp, 
+                        action, 
+                        signal.quantity, 
+                        trade_price, 
+                        "skipped", 
+                        "vwap_filter"
+                    )
+                )
                 return
+            
+            self._logger.info(f"📊 VWAP PASS: Price={trade_price:.2f} > VWAP={current_vwap:.2f} Dist={vwap_dist:.2f}%")
         selection: SelectedContract | None = None
         selector = self._strike_selector
 
