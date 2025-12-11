@@ -19,8 +19,10 @@ import os
 from pathlib import Path
 from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
+from collections import OrderedDict
 import random
 import pytz
+import threading
 import sqlite3
 import time as time_module
 from typing import (
@@ -343,16 +345,24 @@ def _try_warm_instruments(
                 "db_path": db_hint,
             },
         )
-    except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
         logger.error(
             "Instrument warm-up failed: %s",
             exc,
             extra={"event": "instrument_warm_failed"},
             exc_info=exc,
         )
-        with suppress(Exception):
+        try:
             resolver.warm()
-        fallback_tokens = len(getattr(resolver, "_symbol_by_token", {}))
+            fallback_tokens = len(getattr(resolver, "_symbol_by_token", {}))
+        except Exception as fallback_exc:
+            logger.warning(
+                "Fallback resolver warm failed: %s",
+                fallback_exc,
+                extra={"event": "instrument_fallback_warm_failed"}
+            )
+            fallback_tokens = 0
+
         status.record_refresh(
             tokens=fallback_tokens,
             options=fallback_tokens,
@@ -623,12 +633,14 @@ def _fetch_positions_with_retry(
         )
         raise ValueError("broker_client.get_positions is unavailable")
 
-    attempt = 0
+        attempt = 0
     delay = max(backoff_min, 0.0)
     last_error: Exception | None = None
-
-    while attempt < max_attempts:
+    deadline = time_module.monotonic() + total_timeout_sec  # ✅ ADD THIS LINE
+    
+    while attempt < max_attempts and time_module.monotonic() < deadline:  # ✅ MODIFY THIS LINE
         attempt += 1
+
         try:
             snapshot = get_positions()
             positions = _normalize_broker_positions(snapshot)
@@ -911,19 +923,38 @@ class TradingSessionGuard:
 
         return self._market_open, self._market_close
 
-    @staticmethod
+        @staticmethod
     def _parse_hhmm(value: str, fallback: time) -> time:
         try:
             clean = (value or "").strip()
             if not clean:
                 return fallback
+            
+            if ":" not in clean:
+                raise ValueError(f"Invalid time format (missing colon): {clean}")
+            
             hour_str, minute_str = clean.split(":", 1)
-            hour = max(0, min(23, int(hour_str)))
-            minute = max(0, min(59, int(minute_str)))
+            hour = int(hour_str)
+            minute = int(minute_str)
+            
+            if not (0 <= hour <= 23):
+                raise ValueError(f"Hour must be 0-23, got {hour}")
+            if not (0 <= minute <= 59):
+                raise ValueError(f"Minute must be 0-59, got {minute}")
+            
             return time(hour, minute)
-        except Exception:
+        except ValueError as exc:
+            LOGGER.error(
+                f"Invalid time format '{value}': {exc}",
+                extra={"event": "parse_hhmm_invalid", "value": value}
+            )
+            raise ConfigurationError(f"Invalid time format '{value}': {exc}")
+        except Exception as exc:
+            LOGGER.warning(
+                f"Unexpected error parsing time '{value}': {exc}",
+                extra={"event": "parse_hhmm_error", "value": value}
+            )
             return fallback
-
 
 def _resolve_session_reason(
     status: TradingSessionStatus, snapshot: RiskSnapshot | None
@@ -960,16 +991,23 @@ def _resolve_session_reason(
     )
     return reason if reason else "OK", soft_override
 
+_http_app_lock = threading.Lock()  # Add this at top with other globals around line 370
 
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
-
     global _HTTP_APP, _HTTP_NOTIFIER, _HTTP_CONTROLLER
-
+    
+    # Thread-safe singleton pattern
     if _HTTP_APP is not None:
         return _HTTP_APP
+    
+    with _http_app_lock:
+        # Double-check after acquiring lock
+        if _HTTP_APP is not None:
+            return _HTTP_APP
+        
+        settings = get_settings()
 
-    settings = get_settings()
     telemetry_logger = get_logger("telegram.bootstrap")
 
     raw_webhook_env = os.getenv("TELEGRAM__WEBHOOK_ENABLED")
@@ -1038,27 +1076,48 @@ def get_http_app() -> FastAPI:
             media_type = "text/plain; charset=utf-8"
         return PlainTextResponse(payload, media_type=media_type)
 
-    @app.get("/health", response_class=JSONResponse)
+        @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
-        """Serve a lightweight health snapshot for infrastructure probes.
-
-        Args:
-            None.
-
-        Returns:
-            JSONResponse: Health payload with status metadata.
-
-        Raises:
-            None.
-        """
-
+        """Serve a lightweight health snapshot for infrastructure probes."""
         telemetry_logger.debug(
             "Entered http_health",
             extra={"event": "http_health_enter"},
         )
+        
         ctx = get_latest_bot_context()
-        if ctx is None or ctx.health_app is None:
+        if ctx is None:
+            return JSONResponse({"status": "initializing", "reason": "no_context"}, status_code=503)
+        
+        # ✅ ADD COMPONENT HEALTH CHECKS
+        checks = {
+            "broker": ctx.broker_client is not None,
+            "position_manager": ctx.position_manager is not None,
+            "risk_manager": ctx.risk_manager is not None,
+            "streamer": ctx.streamer is not None,
+            "data_hub": ctx.data_hub is not None,
+        }
+        
+        # Check risk breaker status
+        if ctx.risk_manager:
+            try:
+                snapshot = ctx.risk_manager.snapshot()
+                checks["risk_breaker_ok"] = not snapshot.breaker_tripped
+            except Exception:
+                checks["risk_breaker_ok"] = False
+        
+        all_healthy = all(checks.values())
+        status_code = 200 if all_healthy else 503
+        
+        return JSONResponse({
+            "status": "healthy" if all_healthy else "degraded",
+            "checks": checks,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status_code=status_code)
+        
+        # Keep original health_app delegation as fallback
+        if ctx.health_app is None:
             return JSONResponse({"status": "initialising"}, status_code=503)
+
         try:
             for route in getattr(ctx.health_app.router, "routes", []):
                 if getattr(route, "path", None) == "/health":
@@ -1250,8 +1309,16 @@ class BotContext:
     health_app: FastAPI | None = None
     session_guard: TradingSessionGuard | None = None
     selfchecker: "RuntimeSelfChecker | None" = None
-    underlying_spot_prices: dict[str, float] = field(default_factory=dict)
-
+    underlying_spot_prices: OrderedDict[str, float] = field(
+        default_factory=lambda: OrderedDict()
+    )
+    
+    def update_spot_price(self, underlying: str, price: float, max_size: int = 100) -> None:
+        """Update spot price with LRU eviction."""
+        self.underlying_spot_prices[underlying] = price
+        # Evict oldest entry if exceeds limit
+        while len(self.underlying_spot_prices) > max_size:
+            self.underlying_spot_prices.popitem(last=False)
 
 class PersistentHeartbeatFlusher:
     """Flush :class:`PersistentStateManager` data on heartbeat cadence.
@@ -1796,12 +1863,13 @@ def _get_symbols(
                     LOGGER.debug(f"Standard .ltp() failed: {e}")
 
             # --- Result ---
-            if ltp > 0:
-                atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                global _LATEST_CTX
-                if _LATEST_CTX:
-                    _LATEST_CTX.underlying_spot_prices['NIFTY'] = ltp
+                            if ltp > 0:
+                    atm_price = round(ltp / 50) * 50
+                    LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
+                    global _LATEST_CTX
+                    if _LATEST_CTX:
+                        _LATEST_CTX.update_spot_price('NIFTY', ltp)  # ✅ USE NEW METHOD
+
             else:
                 LOGGER.warning(f"⚠️ Live price fetch returned 0. Tried tokens: {token_candidates}")
 
@@ -1887,23 +1955,39 @@ def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
 
 def _bind_ws_mdm(ctx: BotContext) -> None:
     """Wire WebSocket connectivity events into the market data manager."""
-
     ws = getattr(ctx, "websocket_manager", None)
     mdm = getattr(ctx, "market_data_manager", None)
     if ws is None or mdm is None:
         return
-
+    
     def _on_connect() -> None:
-        with suppress(Exception):
+        try:
             mdm.set_ws_connected(True)
             mdm.bump_heartbeat()
-
+        except Exception as exc:
+            LOGGER.warning(
+                f"Failed to set WS connected state: {exc}",
+                extra={"event": "ws_mdm_connect_failed"}
+            )
+    
     def _on_disconnect() -> None:
-        with suppress(Exception):
+        try:
             mdm.set_ws_connected(False)
-
-    with suppress(Exception):
+        except Exception as exc:
+            LOGGER.warning(
+                f"Failed to set WS disconnected state: {exc}",
+                extra={"event": "ws_mdm_disconnect_failed"}
+            )
+    
+    try:
         ws.set_callbacks(on_connect=_on_connect, on_disconnect=_on_disconnect)
+    except Exception as exc:
+        LOGGER.error(
+            f"Failed to bind WS callbacks: {exc}",
+            extra={"event": "ws_mdm_bind_failed"},
+            exc_info=True
+        )
+
 
 
 async def reconcile_positions_on_startup(
@@ -2749,7 +2833,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ),
     )
 
-    try:
+        try:
         broker_positions = _fetch_positions_with_retry(
             broker_client,
             max_attempts=broker_sync_attempts,
@@ -2757,8 +2841,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             backoff_max=broker_sync_backoff_max,
             backoff_multiplier=broker_sync_backoff_multiplier,
             jitter_fraction=broker_sync_jitter,
+            total_timeout_sec=60.0,  # ✅ ADD THIS LINE
         )
     except Exception as exc:  # noqa: BLE001
+
         LOGGER.error(
             "broker_position_sync_failed",
             extra={"event": "broker_position_sync_failed", "error": str(exc)},
@@ -3328,18 +3414,35 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         },
     )
     # Reconcile positions on startup: schedule if loop running, otherwise run synchronously.
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We are inside an event loop (e.g. FastAPI startup). Schedule as background task.
-            loop.create_task(
+        async def _reconcile_with_timeout():
+        """Wrapper to add timeout protection"""
+        try:
+            await asyncio.wait_for(
                 reconcile_positions_on_startup(
                     broker_client=broker_client,
                     position_manager=position_manager,
                     order_manager=order_manager,
                     logger=LOGGER,
-                )
+                ),
+                timeout=30.0  # 30 second timeout
             )
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                "Position reconciliation timed out after 30s",
+                extra={"event": "reconcile_timeout"}
+            )
+        except Exception as exc:
+            LOGGER.error(
+                f"Position reconciliation failed: {exc}",
+                extra={"event": "reconcile_failed"},
+                exc_info=True
+            )
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_reconcile_with_timeout())  # ✅ USE WRAPPED VERSION
+
             LOGGER.info(
                 "Scheduled reconcile_positions_on_startup as background task",
                 extra={"event": "reconcile_positions_scheduled"},
