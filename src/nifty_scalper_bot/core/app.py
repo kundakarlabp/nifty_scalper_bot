@@ -345,7 +345,7 @@ def _try_warm_instruments(
                 "db_path": db_hint,
             },
         )
-        except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.error(
             "Instrument warm-up failed: %s",
             exc,
@@ -633,7 +633,7 @@ def _fetch_positions_with_retry(
         )
         raise ValueError("broker_client.get_positions is unavailable")
 
-        attempt = 0
+    attempt = 0
     delay = max(backoff_min, 0.0)
     last_error: Exception | None = None
     deadline = time_module.monotonic() + total_timeout_sec  # ✅ ADD THIS LINE
@@ -1077,12 +1077,13 @@ def get_http_app() -> FastAPI:
         return PlainTextResponse(payload, media_type=media_type)
 
         @app.get("/health", response_class=JSONResponse)
-    async def http_health() -> JSONResponse:
-        """Serve a lightweight health snapshot for infrastructure probes."""
-        telemetry_logger.debug(
-            "Entered http_health",
-            extra={"event": "http_health_enter"},
-        )
+        async def http_health() -> JSONResponse:  # [FIX] Aligned with decorator
+            """Serve a lightweight health snapshot for infrastructure probes."""
+            telemetry_logger.debug(
+                "Entered http_health",
+                extra={"event": "http_health_enter"},
+            )
+            # ... rest of function
         
         ctx = get_latest_bot_context()
         if ctx is None:
@@ -2833,7 +2834,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ),
     )
 
-        try:
+    try:
+        # [FIX] Indented correctly inside try
         broker_positions = _fetch_positions_with_retry(
             broker_client,
             max_attempts=broker_sync_attempts,
@@ -2841,10 +2843,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             backoff_max=broker_sync_backoff_max,
             backoff_multiplier=broker_sync_backoff_multiplier,
             jitter_fraction=broker_sync_jitter,
-            total_timeout_sec=60.0,  # ✅ ADD THIS LINE
+            total_timeout_sec=60.0,
         )
     except Exception as exc:  # noqa: BLE001
-
         LOGGER.error(
             "broker_position_sync_failed",
             extra={"event": "broker_position_sync_failed", "error": str(exc)},
