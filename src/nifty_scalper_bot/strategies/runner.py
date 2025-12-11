@@ -818,9 +818,13 @@ class StrategyRunner:
             self._callbacks[symbol] = callback
 
         if self._data_hub is not None:
+            self._logger.info(f"🔔 SUBSCRIBING via DataHub: {symbol}")
             self._data_hub.subscribe_ticks(symbol, callback)
+            self._logger.info(f"✅ SUBSCRIBED via DataHub: {symbol}")
         else:
+            self._logger.info(f"🔔 SUBSCRIBING via MarketData: {symbol}")
             self._market_data.subscribe(symbol, callback)
+            self._logger.info(f"✅ SUBSCRIBED via MarketData: {symbol}")
 
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar) -> None:
         """Persist the completed minute bar in the indicator engine cache."""
@@ -1283,6 +1287,7 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
+        self._logger.info(f"🔔 MESSAGE BUS TICK: type={message.type} data={message.data}")
         if not self._running or self._trading_paused:
             return
 
@@ -1315,6 +1320,8 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
+        # DEBUG: Confirm tick received
+        self._logger.info(f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}")
         now = datetime.now(timezone.utc)
 
         # 1. Extract Critical Market Data
