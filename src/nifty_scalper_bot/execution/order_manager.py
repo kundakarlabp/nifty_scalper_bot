@@ -2153,24 +2153,26 @@ class OrderManager:
         tp_secondary_qty = 0
         
         if 0 < fraction < 1:
-            # Calculate raw quantity
-            target_qty = int(filled_quantity * fraction)
-            
-            # Snap to lot size (floor)
-            lots_count = target_qty // lot_size
-            if lots_count == 0 and target_qty > 0: 
-                # If partial is less than 1 lot, decide policy (e.g., 0 or 1 lot)
-                # Here we force 0 for TP1 if < 1 lot, meaning full exit at TP2
-                tp_primary_qty = 0 
+            # [FIX] Lot-aware sizing to prevent broker rejection
+            raw_target = int(filled_quantity * fraction)
+            # Ensure we have a valid lot size (default to 1 if missing)
+            lot_size = getattr(order, 'lot_size', 1) or 1
+                        
+            # Snap calculation to floor lot chunks (e.g. 37 -> 25 if lot is 25)
+            lots_count = raw_target // lot_size
+                        
+            if lots_count == 0:
+            # If fraction results in < 1 lot, force full exit at TP2
+            tp_primary_qty = 0
             else:
-                tp_primary_qty = lots_count * lot_size
-                
+            tp_primary_qty = lots_count * lot_size
+                            
             tp_secondary_qty = filled_quantity - tp_primary_qty
-            
-            # Fallback if math puts everything in secondary
+                      
+            # Failsafe: if primary became 0, move everything to secondary
             if tp_primary_qty == 0:
-                tp_primary_qty = filled_quantity
-                tp_secondary_qty = 0
+            tp_primary_qty = filled_quantity
+            tp_secondary_qty = 0
         else:
             fraction = 0.0
 
@@ -2879,15 +2881,15 @@ class OrderManager:
                     tag=state.tag,
                     parent_order_id=state.entry_id,
                 )
-                break # Success!
+                if replacement:
+                    break
             except Exception as exc:
                 self._logger.warning(
                     f"Stop replacement attempt {attempt+1} failed: {exc}",
                     extra={"entry_id": state.entry_id}
                 )
                 time.sleep(0.5)
-
-        if replacement is None:
+         if not replacement:
             # CRITICAL: Failed to replace stop. Position is NAKED.
             # ACTION: Trigger Emergency Exit immediately.
             self._logger.critical(
@@ -2904,9 +2906,8 @@ class OrderManager:
                 )
             except Exception as exit_exc:
                 self._logger.critical(f"EMERGENCY EXIT FAILED: {exit_exc}")
-                # Optional: Send Telegram Alert Here via self._notifier
-            return 
-
+            return          
+                
         # ... (Rest of the function continues with `replacement` guaranteed) ...
         state.stop_order_id = replacement.order_id
         self._bracket_index[replacement.order_id] = state.entry_id
@@ -3684,15 +3685,14 @@ class OrderManager:
                     break
                 except Exception as exc:
                     # CRITICAL FIX: Check for fatal broker errors (401/403)
-                    error_str = str(exc)
-                    if "401" in error_str or "403" in error_str or "access denied" in error_str.lower():
+                    error_str = str(exc).lower()
+                    if "401" in error_str or "403" in error_str or "access denied" in error_str:
                         self._logger.critical("FATAL: Broker session expired during monitoring. Stopping monitor.")
                         self._stop_event.set()
                         return
                     
-                    self._logger.error(
-                        "Order poll failed for %s: %s", order.order_id, exc
-                    )
+                    self._logger.error("Order poll failed for %s: %s", order.order_id, exc)
+                    time.sleep(1.0)
 
     def _handle_order_filled(self, order: OrderDetails) -> None:
         """Callback when order is filled."""
