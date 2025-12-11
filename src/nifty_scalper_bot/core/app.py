@@ -598,25 +598,8 @@ def _fetch_positions_with_retry(
     backoff_max: float,
     backoff_multiplier: float,
     jitter_fraction: float,
+    total_timeout_sec: float = 60.0,
 ) -> list[Mapping[str, object]]:
-    """Fetch broker positions with bounded retry and jittered backoff.
-
-    Args:
-        broker_client: Broker integration exposing a ``get_positions`` callable.
-        max_attempts: Maximum attempts before failing.
-        backoff_min: Minimum delay applied between attempts.
-        backoff_max: Upper bound for retry delay.
-        backoff_multiplier: Multiplicative factor for exponential backoff.
-        jitter_fraction: Symmetric jitter ratio applied to the delay.
-
-    Returns:
-        Normalized broker positions obtained from the integration.
-
-    Raises:
-        ValueError: If the broker client does not provide ``get_positions``.
-        Exception: Re-raises the final broker error after exhausting retries.
-    """
-
     LOGGER.debug("Entered _fetch_positions_with_retry")
     if broker_client is None:
         LOGGER.error(
@@ -633,18 +616,27 @@ def _fetch_positions_with_retry(
         )
         raise ValueError("broker_client.get_positions is unavailable")
 
+    # [FIX] Variables defined at correct indentation level
     attempt = 0
     delay = max(backoff_min, 0.0)
     last_error: Exception | None = None
-    deadline = time_module.monotonic() + total_timeout_sec  # ✅ ADD THIS LINE
+    start_time = time_module.monotonic()
     
-    while attempt < max_attempts and time_module.monotonic() < deadline:  # ✅ MODIFY THIS LINE
+    while attempt < max_attempts and (time_module.monotonic() - start_time) < total_timeout_sec:
         attempt += 1
-
         try:
             snapshot = get_positions()
             positions = _normalize_broker_positions(snapshot)
-        except Exception as exc:  # noqa: BLE001
+            LOGGER.info(
+                "Condition met: broker_position_sync_success",
+                extra={
+                    "event": "broker_position_sync_success",
+                    "attempt": attempt,
+                    "positions": len(positions),
+                },
+            )
+            return positions
+        except Exception as exc:
             last_error = exc
             LOGGER.error(
                 "Failure in _fetch_positions_with_retry: %s",
@@ -655,13 +647,17 @@ def _fetch_positions_with_retry(
                     "attempt": attempt,
                 },
             )
-            if attempt >= max_attempts:
+            
+            if (time_module.monotonic() - start_time) + delay > total_timeout_sec:
+                LOGGER.error("Broker position sync timed out")
                 break
+
             sleep_window = min(backoff_max, max(delay, backoff_min))
             jitter_amplitude = max(0.0, jitter_fraction) * sleep_window
             if jitter_amplitude > 0.0:
                 sleep_window += random.uniform(-jitter_amplitude, jitter_amplitude)
                 sleep_window = max(backoff_min, sleep_window)
+            
             LOGGER.info(
                 "Condition met: broker_position_sync_retry_scheduled",
                 extra={
@@ -673,15 +669,6 @@ def _fetch_positions_with_retry(
             time_module.sleep(sleep_window)
             delay = min(backoff_max, max(backoff_min, delay * backoff_multiplier))
             continue
-        LOGGER.info(
-            "Condition met: broker_position_sync_success",
-            extra={
-                "event": "broker_position_sync_success",
-                "attempt": attempt,
-                "positions": len(positions),
-            },
-        )
-        return positions
 
     if last_error is not None:
         raise last_error
