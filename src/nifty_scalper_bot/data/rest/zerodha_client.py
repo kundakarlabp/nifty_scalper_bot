@@ -575,19 +575,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     except (TypeError, ValueError):
                         continue
                     if last_price > 0:
-                        out[token] = last_price
-                            if out:
-                now = time.time()
-                if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
-                    LOGGER.info(
-                        "zerodha_get_ltp_bulk_using_depth",
-                        extra={
-                            "event": "zerodha_get_ltp_bulk_depth_used",
-                            "count": len(out),
-                        },
-                    )
-                    self._last_log_ltp_bulk = now
-                return out
+                out[token] = last_price
+        
+        # [CORRECTED] Aligned with the 'for' loop
+        if out:
+            now = time.time()
+            if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
+                LOGGER.info(
+                    "zerodha_get_ltp_bulk_ltp_fallback",
+                    extra={
+                        "event": "zerodha_get_ltp_bulk_ltp_fallback",
+                        "count": len(out),
+                    },
+                )
+                self._last_log_ltp_bulk = now
+        return out
 
                 # depth fetch returned but no usable last_price values
                 LOGGER.warning(
