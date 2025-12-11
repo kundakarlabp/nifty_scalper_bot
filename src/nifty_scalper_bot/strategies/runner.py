@@ -407,6 +407,12 @@ class StrategyRunner:
 
     def start(self) -> None:
         """Start processing market data events."""
+
+        # ==================== DEBUG VERIFICATION ====================
+        self._logger.debug("🔍 DEBUG TEST: This should appear if LOG_LEVEL=debug works!")
+        self._logger.info("✅ INFO TEST: StrategyRunner.start() called")
+        self._logger.warning("⚠️ WARNING TEST: Logger initialized correctly")
+        # ============================================================
         with self._lock:
             if self._running:
                 return
@@ -1366,7 +1372,7 @@ class StrategyRunner:
             if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
                  # Use DEBUG level so it doesn't flood logs unless enabled, 
                  # but ensures we can verify data when needed.
-                 self._logger.debug(
+                 self._logger.info(
                     f"🔎 TICK: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f} | Vol={volume}",
                     extra={
                         "event": "tick_audit",
@@ -1386,7 +1392,7 @@ class StrategyRunner:
                 # Proximity Check (Debug info)
                 diff_pct = abs(price - curr_vwap) / curr_vwap * 100
                 if diff_pct < 0.15: # Within 0.15% of VWAP
-                     self._logger.debug(f"⚠️ PROXIMITY ALERT: {symbol} is {diff_pct:.3f}% from VWAP")
+                     self._logger.info(f"⚠️ PROXIMITY ALERT: {symbol} is {diff_pct:.3f}% from VWAP")
 
                 # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
                 if prev_ltp < curr_vwap and price > curr_vwap:
