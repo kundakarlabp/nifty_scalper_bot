@@ -1864,13 +1864,12 @@ def _get_symbols(
                     LOGGER.debug(f"Standard .ltp() failed: {e}")
 
             # --- Result ---
-                            if ltp > 0:
-                    atm_price = round(ltp / 50) * 50
-                    LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
-                    global _LATEST_CTX
-                    if _LATEST_CTX:
-                        _LATEST_CTX.update_spot_price('NIFTY', ltp)  # ✅ USE NEW METHOD
-
+            if ltp > 0:
+                atm_price = round(ltp / 50) * 50
+                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
+                global _LATEST_CTX
+                if _LATEST_CTX:
+                    _LATEST_CTX.update_spot_price('NIFTY', ltp)
             else:
                 LOGGER.warning(f"⚠️ Live price fetch returned 0. Tried tokens: {token_candidates}")
 
