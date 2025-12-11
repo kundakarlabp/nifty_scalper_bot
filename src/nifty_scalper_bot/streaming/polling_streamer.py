@@ -9,7 +9,8 @@ import time
 from contextlib import suppress
 from typing import Any, Callable, Iterable, Sequence
 
-from nifty_scalper_bot.utils.logging import get_logger
+# [FIX] Use centralized logging utilities
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 
 LOGGER = get_logger(__name__)
@@ -47,7 +48,6 @@ class PollingStreamer:
         self._m_poll_err = Counter("poll_err_total", "Polling rounds with error")
         self._m_tokens = Gauge("poll_tokens", "Tracked tokens for polling")
         self._m_interval = Gauge("poll_interval_seconds", "Polling interval (seconds)")
-        # Readiness/freshness gauges
         self._m_last_tick = Gauge("poll_last_tick_ts", "Epoch ms of last tick")
         self._m_last_success = Gauge("poll_last_success_ts", "Epoch ms of last successful poll")
 
@@ -136,11 +136,16 @@ class PollingStreamer:
         if token_count > safe_capacity:
             with suppress(Exception):
                 self._m_poll_err.inc()
-            LOGGER.error(
-                "[POLL-RATE] Token count %d may exceed REST rate limits (safe_capacity=%.2f)",
-                token_count,
-                safe_capacity,
+            
+            # Use throttled logging for rate limit warnings to avoid spamming error logs
+            log_throttled(
+                LOGGER,
+                "poll_rate_limit_warn",
+                f"[POLL-RATE] Token count {token_count} exceeds safe capacity ({safe_capacity:.2f})",
+                level=30, # WARNING
+                interval_sec=60.0
             )
+
             if not self._rate_limit_warned:
                 self._rate_limit_warned = True
         elif self._rate_limit_warned:
@@ -156,15 +161,25 @@ class PollingStreamer:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
+                # Copy token list under lock to avoid holding lock during network calls
                 with self._lock:
                     tokens = list(self._tokens)
                 if tokens:
                     for batch in self._chunks(tokens, self._batch_size):
-                        # --- MODIFIED: Add logging to catch empty returns ---
                         ticks = self._fetch_ticks(batch)
                         
-                                                
+                        # Alert if persistent empty polling batch (only if we expected data)
+                        if not ticks:
+                             log_throttled(
+                                LOGGER,
+                                "poll_empty_batch",
+                                f"[POLL-TRACE] Empty ticks returned for batch {batch[:5]}...",
+                                level=10, # DEBUG
+                                interval_sec=60.0
+                            )
+                        
                         for tick in ticks:
+                            # Validate tick shape
                             if (
                                 "instrument_token" not in tick
                                 or "last_price" not in tick
@@ -180,11 +195,14 @@ class PollingStreamer:
                     self._m_poll_ok.inc()
                 with suppress(Exception):
                     self._m_last_success.set(int(time.time() * 1000))
+                # reset backoff to normal when successful
                 backoff = self._interval_s
             except Exception:  # noqa: BLE001
+                # full stacktrace for observability
                 LOGGER.exception("[POLL-ERR] Polling round failed")
                 with suppress(Exception):
                     self._m_poll_err.inc()
+                # exponential backoff with jitter, bounded
                 jitter = random.uniform(-0.2, 0.2) * backoff
                 backoff = min(max(backoff * 2.0 + jitter, self._interval_s), 8.0)
             elapsed = max(0.0, time.monotonic() - started)
@@ -196,26 +214,35 @@ class PollingStreamer:
         timestamp_ms = int(time.time() * 1000)
         
         # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
-        # We ignore self._require_depth because strategies often need volume data.
+        # We ignore self._require_depth check to prioritize Strategy Data Quality.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
-            # Success! Returning full Quote data
-            # Log success occasionally or on first run to confirm volume flow
-            # (Keeping it clean here, success is implied by absence of warning)
+            # [FIX] Throttled logging: Show success heartbeat only once every 60 seconds
+            log_throttled(
+                LOGGER, 
+                "quote_fetch_success", 
+                f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
+                interval_sec=60.0
+            )
             return ticks
 
         # --- FALLBACK: TRY LTP BULK (Price Only) ---
         # If Quote fetch failed (e.g. rate limit, 503), fall back to LTP.
-        # This keeps the bot alive with Price updates, though VWAP strategies will pause.
-        
-        # LOGGING FIX: Scream if we are falling back, so we know Volume is missing.
-        LOGGER.warning("[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)")
+        # Log this as a warning so operators know data quality is degraded.
+        log_throttled(
+            LOGGER,
+            "poll_fallback_ltp",
+            "[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)",
+            level=30, # WARNING
+            interval_sec=10.0
+        )
         
         ticks = self._try_ltp_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # Fallback 2: Single Quote (Slowest, Last Resort)
+        # --- LAST RESORT: SINGLE QUOTE ---
+        # Very slow, used only if bulk endpoints are down.
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -229,7 +256,6 @@ class PollingStreamer:
                 if lp <= 0:
                     continue
                 
-                # Extract volume if available
                 vol = quote.get("volume", 0)
                 avg_price = quote.get("average_price", 0.0)
                 
@@ -246,8 +272,13 @@ class PollingStreamer:
                 ticks.append(tick)
             return ticks
 
-        # Final failure
-        LOGGER.error("[POLL-ERR] Polling fallback hit without quote helpers; skipping batch")
+        log_throttled(
+            LOGGER,
+            "poll_all_failed",
+            "[POLL-ERR] All polling methods failed for batch",
+            level=40, # ERROR
+            interval_sec=5.0
+        )
         return []
 
     def _try_ltp_bulk(
@@ -259,10 +290,12 @@ class PollingStreamer:
         try:
             data = fetch_ltp(batch)
         except Exception:  # noqa: BLE001
-            LOGGER.exception("[POLL-ERR] LTP bulk fetch failed")
+            # Don't log exception here to avoid spamming tracebacks on every retry
             return None
+
         ticks: list[dict[str, Any]] = []
         for token in batch:
+            # Normalize token lookups: try both int and str keys
             key_candidates = (int(token), str(int(token)))
             ltp = 0.0
             for k in key_candidates:
@@ -279,6 +312,9 @@ class PollingStreamer:
                     "instrument_token": int(token),
                     "last_price": ltp,
                     "timestamp": timestamp_ms,
+                    # Fallback values to prevent KeyError in strategies
+                    "volume": 0,
+                    "average_price": 0.0
                 }
             )
         return ticks or None
@@ -292,13 +328,17 @@ class PollingStreamer:
         try:
             quote_map = fetch_quote_bulk(batch)
         except Exception as exc:  # noqa: BLE001
-            # LOGGING FIX: Changed to WARNING to make it visible
-            LOGGER.warning("[POLL-WARN] Quote bulk fetch raised exception: %s", exc)
+            # Throttled debug log for connection issues
+            log_throttled(
+                LOGGER,
+                "poll_quote_exception",
+                f"[POLL-WARN] Quote bulk fetch exception: {exc}",
+                level=10, # DEBUG
+                interval_sec=30.0
+            )
             return None
             
         if not quote_map:
-             # Log empty return at INFO so you know if API returns nothing
-             LOGGER.info("[POLL-INFO] Quote API returned empty map")
              return None
 
         ticks: list[dict[str, Any]] = []
@@ -306,6 +346,7 @@ class PollingStreamer:
             try:
                 normalized_token = int(token)
             except Exception:
+                # skip if token key cannot be normalized
                 continue
             try:
                 lp = float(quote.get("last_price", 0.0) or 0.0)
@@ -314,29 +355,17 @@ class PollingStreamer:
             if lp <= 0:
                 continue
             
-            # --- EXTRACT VOLUME & VWAP ---
-            vol = quote.get("volume", 0)
-            avg_p = quote.get("average_price", 0.0)
-            
             tick: dict[str, Any] = {
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
-                "volume": vol,
-                "average_price": avg_p,
+                # --- VITAL DATA FOR STRATEGIES ---
+                "volume": quote.get("volume", 0),
+                "average_price": quote.get("average_price", 0.0),
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
                 tick["depth"] = depth
             ticks.append(tick)
-            
-        # LOGGING FIX: High Visibility Success Log
-        if ticks:
-            log_throttled(
-                LOGGER, 
-                "quote_fetch_success", 
-                f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
-                interval_sec=60.0
-            )
             
         return ticks or None
