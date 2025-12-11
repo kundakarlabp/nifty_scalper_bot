@@ -574,7 +574,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         last_price = float(payload.get("last_price", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         continue
-                    if last_price > 0:
+            if last_price > 0:
                 out[token] = last_price
         
         # [CORRECTED] Aligned with the 'for' loop
