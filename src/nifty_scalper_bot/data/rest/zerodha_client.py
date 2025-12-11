@@ -574,22 +574,24 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         last_price = float(payload.get("last_price", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         continue
-            if last_price > 0:
-                out[token] = last_price
-        
-        # [CORRECTED] Aligned with the 'for' loop
-        if out:
-            now = time.time()
-            if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
-                LOGGER.info(
-                    "zerodha_get_ltp_bulk_ltp_fallback",
-                    extra={
-                        "event": "zerodha_get_ltp_bulk_ltp_fallback",
-                        "count": len(out),
-                    },
-                )
-                self._last_log_ltp_bulk = now
-        return out
+                    
+                    # [CORRECTED] Indentation fixed to be inside the for loop
+                    if last_price > 0:
+                        out[token] = last_price
+                
+                # [CORRECTED] Logic for returning data if found (inside try)
+                if out:
+                    now = time.time()
+                    if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
+                        LOGGER.info(
+                            "zerodha_get_ltp_bulk_using_depth",
+                            extra={
+                                "event": "zerodha_get_ltp_bulk_depth_used",
+                                "count": len(out),
+                            },
+                        )
+                        self._last_log_ltp_bulk = now
+                    return out
 
                 # depth fetch returned but no usable last_price values
                 LOGGER.warning(
@@ -627,18 +629,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
             if last_price > 0:
                 out[token] = last_price
         
-        # [CORRECTED] Aligned with the 'for' loop
-        if out:
-            now = time.time()
-            if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
-                LOGGER.info(
-                    "zerodha_get_ltp_bulk_ltp_fallback",
-                    extra={
-                        "event": "zerodha_get_ltp_bulk_ltp_fallback",
-                        "count": len(out),
-                    },
-                )
-                self._last_log_ltp_bulk = now
+        now = time.time()
+        if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
+            LOGGER.info(
+                "zerodha_get_ltp_bulk_ltp_fallback",
+                extra={
+                    "event": "zerodha_get_ltp_bulk_ltp_fallback",
+                    "count": len(out),
+                },
+            )
+            self._last_log_ltp_bulk = now
         return out
 
 
