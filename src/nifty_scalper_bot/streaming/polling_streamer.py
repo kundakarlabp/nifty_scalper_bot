@@ -47,7 +47,6 @@ class PollingStreamer:
         self._m_poll_err = Counter("poll_err_total", "Polling rounds with error")
         self._m_tokens = Gauge("poll_tokens", "Tracked tokens for polling")
         self._m_interval = Gauge("poll_interval_seconds", "Polling interval (seconds)")
-        # Readiness/freshness gauges
         self._m_last_tick = Gauge("poll_last_tick_ts", "Epoch ms of last tick")
         self._m_last_success = Gauge("poll_last_success_ts", "Epoch ms of last successful poll")
 
@@ -134,7 +133,6 @@ class PollingStreamer:
         estimated_reqs_per_sec = batches_per_poll * polls_per_second
         safe_capacity = self._batch_size * polls_per_second
         if token_count > safe_capacity:
-            # escalate metric and log with a searchable tag
             with suppress(Exception):
                 self._m_poll_err.inc()
             LOGGER.error(
@@ -142,26 +140,10 @@ class PollingStreamer:
                 token_count,
                 safe_capacity,
             )
-            LOGGER.debug(
-                "Polling pressure details",
-                extra={
-                    "tokens": token_count,
-                    "batch_size": self._batch_size,
-                    "interval_s": self._interval_s,
-                    "estimated_reqs_per_sec": estimated_reqs_per_sec,
-                },
-            )
             if not self._rate_limit_warned:
                 self._rate_limit_warned = True
         elif self._rate_limit_warned:
-            LOGGER.info(
-                "[POLL-RATE] Token count back within estimated rate limits",
-                extra={
-                    "tokens": token_count,
-                    "batch_size": self._batch_size,
-                    "interval_s": self._interval_s,
-                },
-            )
+            LOGGER.info("[POLL-RATE] Token count back within estimated rate limits")
             self._rate_limit_warned = False
 
     def _chunks(self, payload: list[int], size: int) -> Iterable[list[int]]:
@@ -173,18 +155,16 @@ class PollingStreamer:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                # Copy token list under lock to avoid holding lock during network calls
                 with self._lock:
                     tokens = list(self._tokens)
                 if tokens:
                     for batch in self._chunks(tokens, self._batch_size):
+                        # --- MODIFIED: Add logging to catch empty returns ---
                         ticks = self._fetch_ticks(batch)
-                        # Alert if persistent empty polling batch (only if we expected data)
                         if not ticks:
                             LOGGER.debug("[POLL-TRACE] Empty ticks for batch %s", batch)
                         
                         for tick in ticks:
-                            # Validate tick shape
                             if (
                                 "instrument_token" not in tick
                                 or "last_price" not in tick
@@ -193,7 +173,6 @@ class PollingStreamer:
                                 LOGGER.error("[POLL-ERR] Invalid tick payload structure: %s", tick)
                                 continue
                             with suppress(Exception):
-                                # update last tick time for readiness/metrics
                                 self._m_last_tick.set(int(time.time() * 1000))
                             with suppress(Exception):
                                 self._on_tick(tick)
@@ -201,14 +180,11 @@ class PollingStreamer:
                     self._m_poll_ok.inc()
                 with suppress(Exception):
                     self._m_last_success.set(int(time.time() * 1000))
-                # reset backoff to normal when successful
                 backoff = self._interval_s
             except Exception:  # noqa: BLE001
-                # full stacktrace for observability
                 LOGGER.exception("[POLL-ERR] Polling round failed")
                 with suppress(Exception):
                     self._m_poll_err.inc()
-                # exponential backoff with jitter, bounded
                 jitter = random.uniform(-0.2, 0.2) * backoff
                 backoff = min(max(backoff * 2.0 + jitter, self._interval_s), 8.0)
             elapsed = max(0.0, time.monotonic() - started)
@@ -219,23 +195,23 @@ class PollingStreamer:
         """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
         timestamp_ms = int(time.time() * 1000)
         
-        # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
-        # We ignore self._require_depth because strategies often need volume data
-        # which is only available in the Quote endpoint, not the LTP endpoint.
+        # --- FIX APPLIED: Force Quote Fetch (Logic Fix) ---
+        # We REMOVED the 'if not self._require_depth' check.
+        # This guarantees we try to get Volume data first.
         ticks = self._try_quote_bulk(batch, timestamp_ms)
         if ticks:
-            # Success! Returning full Quote data
             return ticks
 
-        # --- FALLBACK: TRY LTP BULK (Price Only) ---
-        # If Quote fetch failed (e.g. rate limit, 503), fall back to LTP.
-        # This keeps the bot alive with Price updates, though VWAP strategies will pause.
-        LOGGER.warning("[POLL-WARN] Quote fetch failed. Falling back to LTP (No Volume data!)")
+        # --- FALLBACK: LTP (Safety Net) ---
+        # If Quote failed, we log it and fallback to LTP.
+        # Added explicit WARNING log so you know if this happens (Logging Fix).
+        LOGGER.warning("[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)")
+        
         ticks = self._try_ltp_bulk(batch, timestamp_ms)
         if ticks:
             return ticks
 
-        # --- LAST RESORT: SINGLE QUOTE ---
+        # Fallback 2: Single Quote (Slowest)
         get_quote_single = getattr(self._broker, "get_quote_by_token", None)
         ticks = []
         if callable(get_quote_single):
@@ -249,7 +225,6 @@ class PollingStreamer:
                 if lp <= 0:
                     continue
                 
-                # Extract volume if available
                 vol = quote.get("volume", 0)
                 avg_price = quote.get("average_price", 0.0)
                 
@@ -282,7 +257,6 @@ class PollingStreamer:
             return None
         ticks: list[dict[str, Any]] = []
         for token in batch:
-            # Normalize token lookups: try both int and str keys
             key_candidates = (int(token), str(int(token)))
             ltp = 0.0
             for k in key_candidates:
@@ -290,7 +264,6 @@ class PollingStreamer:
                     try:
                         ltp = float(data.get(k) or 0.0)
                     except Exception:
-                        # defensive: skip malformed values
                         ltp = 0.0
                     break
             if ltp <= 0:
@@ -300,7 +273,6 @@ class PollingStreamer:
                     "instrument_token": int(token),
                     "last_price": ltp,
                     "timestamp": timestamp_ms,
-                    # Note: No volume in LTP
                 }
             )
         return ticks or None
@@ -310,21 +282,25 @@ class PollingStreamer:
     ) -> list[dict[str, Any]] | None:
         fetch_quote_bulk = getattr(self._broker, "get_quote_bulk", None)
         if not callable(fetch_quote_bulk):
+            LOGGER.error("[POLL-ERR] Broker does not have get_quote_bulk method!")
             return None
         try:
             quote_map = fetch_quote_bulk(batch)
-        except Exception:  # noqa: BLE001
-            # Log at DEBUG unless it persists, to avoid flooding logs during brief network hiccups
-            LOGGER.debug("[POLL-ERR] Quote bulk fetch failed, will try fallback") 
+        except Exception as exc:  # noqa: BLE001
+            # --- LOGGING FIX: Changed to WARNING to make it visible ---
+            LOGGER.warning("[POLL-WARN] Quote bulk fetch raised exception: %s", exc)
             return None
+            
+        if not quote_map:
+             # Log empty return
+             LOGGER.debug("[POLL-TRACE] Quote API returned empty map")
+             return None
+
         ticks: list[dict[str, Any]] = []
         for token, quote in quote_map.items():
-            # Ensure token key is normalized to int
             try:
                 normalized_token = int(token)
             except Exception:
-                # skip if token key cannot be normalized
-                LOGGER.debug("[POLL-ERR] Received non-normalizable token key: %s", repr(token))
                 continue
             try:
                 lp = float(quote.get("last_price", 0.0) or 0.0)
@@ -333,14 +309,19 @@ class PollingStreamer:
             if lp <= 0:
                 continue
             
+            # --- LOGGING FIX: Verify Volume ---
+            vol = quote.get("volume", 0)
+            avg_p = quote.get("average_price", 0.0)
+            
+            # Uncomment this if you want to see raw volume flow in logs (High Noise)
+            # LOGGER.info(f"DATA CHECK: {normalized_token} Vol={vol} VWAP={avg_p}")
+
             tick: dict[str, Any] = {
                 "instrument_token": normalized_token,
                 "last_price": lp,
                 "timestamp": timestamp_ms,
-                # --- CRITICAL: Extract Volume & VWAP ---
-                "volume": quote.get("volume", 0),
-                "average_price": quote.get("average_price", 0.0),
-                # ---------------------------------------
+                "volume": vol,
+                "average_price": avg_p,
             }
             depth = quote.get("depth")
             if isinstance(depth, dict):
