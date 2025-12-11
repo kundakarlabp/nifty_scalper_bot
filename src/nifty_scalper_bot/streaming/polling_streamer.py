@@ -332,6 +332,11 @@ class PollingStreamer:
             
         # LOGGING FIX: High Visibility Success Log
         if ticks:
-            LOGGER.info(f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data")
+            log_throttled(
+                LOGGER, 
+                "quote_fetch_success", 
+                f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
+                interval_sec=60.0
+            )
             
         return ticks or None
