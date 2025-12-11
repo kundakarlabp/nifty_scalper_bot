@@ -3414,7 +3414,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         },
     )
     # Reconcile positions on startup: schedule if loop running, otherwise run synchronously.
-        async def _reconcile_with_timeout():
+    async def _reconcile_with_timeout():
         """Wrapper to add timeout protection"""
         try:
             await asyncio.wait_for(
