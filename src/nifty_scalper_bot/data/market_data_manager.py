@@ -294,7 +294,7 @@ class MarketDataManager:
                 self._ws_connected = bool(self._ws.is_connected())
 
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
-        self._m_subs = Counter("mdm_subscribe_total", "Symbol subscriptions")
+        self._last_balance_log_time = 0.0
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
         """Commit REST quote payload for ``symbol`` into cache.
@@ -809,15 +809,18 @@ class MarketDataManager:
                         )
                         if numeric_live is not None:
                             resolved_balance = float(numeric_live)
-                            self._logger.info(
-                                "mdm_available_balance_resolved",
-                                extra={
-                                    "event": "mdm_available_balance_resolved",
-                                    "key": "available",
-                                    "balance": round(resolved_balance, 2),
-                                    "source": "broker_available",
-                                },
-                            )
+                            # [FIX] Throttled INFO log
+                            if time.time() - self._last_balance_log_time >= 60.0:
+                                self._logger.info(
+                                    "mdm_available_balance_resolved",
+                                    extra={
+                                        "event": "mdm_available_balance_resolved",
+                                        "key": "available",
+                                        "balance": round(resolved_balance, 2),
+                                        "source": "broker_available",
+                                    },
+                                )
+                                self._last_balance_log_time = time.time()
                             return resolved_balance
                     except Exception as exc:  # noqa: BLE001
                         self._logger.error(
@@ -834,15 +837,17 @@ class MarketDataManager:
                         for key in ("available", "available_cash", "cash", "net"):
                             value = _coerce_positive_float(flattened.get(key))
                             if value is not None:
-                                self._logger.info(
-                                    "mdm_available_balance_resolved",
-                                    extra={
-                                        "event": "mdm_available_balance_resolved",
-                                        "key": key,
-                                        "balance": round(value, 2),
-                                        "source": "broker_margin",
-                                    },
-                                )
+                                if time.time() - self._last_balance_log_time >= 60.0:
+                                    self._logger.info(
+                                        "mdm_available_balance_resolved",
+                                        extra={
+                                            "event": "mdm_available_balance_resolved",
+                                            "key": key,
+                                            "balance": round(value, 2),
+                                            "source": "broker_margin",
+                                        },
+                                    )
+                                    self._last_balance_log_time = time.time()
                                 return float(value)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
