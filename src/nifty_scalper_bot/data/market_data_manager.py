@@ -2305,7 +2305,7 @@ class MarketDataManager:
         Optimized for <500ms latency. Batches requests and uses smart sleep.
         """
         # SCOUT CONFIGURATION: 0.5s target interval
-        target_interval = 1.0
+        target_interval = 1.5
         self._logger.info(
             f"🚀 Scout Polling Started. Target Interval: {target_interval}s",
             extra={"event": "scout_poll_started"}
@@ -2359,12 +2359,21 @@ class MarketDataManager:
                         )
 
             except Exception as exc:
-                self._logger.error(
-                    f"Scout Loop Critical Error: {exc}", 
-                    exc_info=True,
-                    extra={"event": "scout_critical_error"}
-                )
-                time.sleep(1.0) # Safety backoff on crash
+                # [FIX] Handle Rate Limits Gracefully
+                if "rate limit" in str(exc).lower() or "429" in str(exc):
+                    self._logger.warning(
+                        "⚠️ Rate Limit Hit! Cooling down Scout Poller...",
+                        extra={"event": "scout_rate_limit"}
+                    )
+                    time.sleep(5.0) # Hard wait for 5 seconds
+                    target_interval = min(5.0, target_interval + 0.5) # Permanently slow down
+                else:
+                    self._logger.error(
+                        f"Scout Loop Critical Error: {exc}", 
+                        exc_info=True,
+                        extra={"event": "scout_critical_error"}
+                    )
+                    time.sleep(1.0) # Safety backoff on crash
 
             # 4. Smart Sleep (Maintain Rhythm)
             # Subtract processing time from interval to maintain steady heartbeat
