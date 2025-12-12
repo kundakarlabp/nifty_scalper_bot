@@ -2887,6 +2887,29 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     try:
         risk_manager.set_broker_client(broker_client)
+        # [FIX] Connect Lot Size Provider to Risk Manager
+    # This allows the risk manager to convert "Risk Amount" into "Number of Lots"
+    if instrument_resolver:
+        def _lot_size_lookup(symbol: str) -> int:
+            try:
+                # 1. Try resolving metadata
+                meta = instrument_resolver.lookup(symbol)
+                if meta and "lot_size" in meta:
+                    return int(meta["lot_size"])
+                
+                # 2. Fallback for NIFTY/BANKNIFTY if meta missing
+                sym_upper = symbol.upper()
+                if "NIFTY" in sym_upper:
+                    return 25
+                if "BANKNIFTY" in sym_upper:
+                    return 15
+                
+                return 1 # Fallback for equity
+            except Exception:
+                return 25 # Safe default for NIFTY options
+        
+        risk_manager.set_lot_size_provider(_lot_size_lookup)
+        LOGGER.info("✅ Wired Lot Size Provider to Risk Manager")
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "risk_manager_attach_broker_failed",
