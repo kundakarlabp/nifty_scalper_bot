@@ -183,7 +183,7 @@ class RiskManager:
             0.0,
             float(get_float("RISK__BALANCE_JIT_REFRESH", default=1.0)),
         )
-        self._balance_refresher = None
+        self._last_log_time = 0.0
 
     @property
     def risk_config(self) -> RiskSettings:
@@ -314,13 +314,16 @@ class RiskManager:
                 self._cached_balance = self.account_balance
                 self._last_balance_refresh = now
                 self._balance_source = "live"
-                self._logger.info(
-                    "Condition met: balance_updated_from_data_hub",
-                    extra={
-                        "event": "balance_updated",
-                        "balance": round(self.account_balance, 2),
-                    },
-                )
+                # [FIX] Log only once every 60s
+                if now - self._last_log_time >= 60.0:
+                    self._logger.info(
+                        "Condition met: balance_updated_from_data_hub",
+                        extra={
+                            "event": "balance_updated",
+                            "balance": round(self.account_balance, 2),
+                        },
+                    )
+                    self._last_log_time = now
                 self._notify_unified_manager(self.account_balance, source="live")
                 return self.account_balance
 
