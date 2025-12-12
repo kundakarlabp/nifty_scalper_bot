@@ -2499,11 +2499,118 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         return None
 
     use_polling = (not websocket_enabled) or streaming_mode in {"polling", "poll", ""}
+    
+    # [FIX 1/2] Container to hold strategy runner reference for direct tick injection
+    strategy_runner_ref: dict[str, Any] = {} 
+
     if not poll_enabled and not websocket_enabled:
         raise ConfigurationError(
             "Polling disabled while websocket transport is disabled; "
             "no streamer available"
         )
+    if not poll_enabled and use_polling:
+        use_polling = False  # explicit disable beats default
+    market_data_mode = "polling" if use_polling else "websocket"
+    LOGGER.info(
+        "Market data streamer starting in %s mode",
+        market_data_mode,
+        extra={
+            "event": "market_data_mode",
+            "mode": market_data_mode,
+            "websocket_disabled_env": websocket_disabled_env,
+            "streaming_mode": streaming_mode,
+        },
+    )
+    if use_polling:
+        market_data_manager = MarketDataManager(
+            broker_client,
+            None,
+            resolver=instrument_resolver,
+        )
+        data_hub = DataHub(
+            market_data_manager,
+            instrument_resolver,
+            options_only=True,
+            store=hub_store,
+            message_bus=message_bus,
+        )
+        # Explicitly mark WS disconnected in polling mode so health reflects polling
+        market_data_manager.set_ws_connected(False)
+
+        # Fan-out: every polled tick updates MDM and the supervisor heartbeat
+        def _on_poll_tick(tick: dict[str, Any]) -> None:
+            t: dict[str, Any]
+            if isinstance(tick, dict):
+                t = dict(tick)
+            else:  # pragma: no cover - defensive
+                t = {"raw": tick}
+
+            if "instrument_token" not in t and "token" in t:
+                # ... (existing token normalization code remains here) ...
+                raw_token = t["token"]
+                token_candidate: int | None = None
+                if isinstance(raw_token, bool):
+                    token_candidate = None
+                elif isinstance(raw_token, (int, float)):
+                    token_candidate = int(raw_token)
+                elif isinstance(raw_token, str):
+                    with suppress(Exception):
+                        token_candidate = int(float(raw_token))
+
+                if token_candidate is not None:
+                    t["instrument_token"] = token_candidate
+                else:
+                    LOGGER.warning("invalid_token_value", extra={"event": "invalid_token_value", "token": raw_token})
+
+            t.setdefault("source", "polling")
+
+            token_value = t.get("instrument_token")
+            if token_value is not None:
+                with suppress(Exception):
+                    mapped_symbol = market_data_manager._symbol_by_token.get(
+                        int(token_value)
+                    )
+                    if mapped_symbol:
+                        t.setdefault("symbol", mapped_symbol)
+
+            if "ltp" not in t:
+                if "last_price" in t:
+                    t["ltp"] = t["last_price"]
+                elif "close" in t:
+                    t["ltp"] = t["close"]
+
+            # [FIX] CRITICAL: Direct Feed to StrategyRunner
+            # This ensures ticks reach strategies even if DataHub callbacks fail
+            runner_instance = strategy_runner_ref.get("instance")
+            if runner_instance:
+                try:
+                    sym = t.get("symbol")
+                    if sym:
+                        # Attempt to call _on_tick_safe (thread-safe) or _on_tick
+                        handler = getattr(runner_instance, "_on_tick_safe", getattr(runner_instance, "_on_tick", None))
+                        if callable(handler):
+                            # Handle different signatures
+                            if handler.__name__ == "_on_tick":
+                                handler(sym, t)
+                            else:
+                                handler(t)
+                except Exception:
+                    pass # Keep polling alive even if runner errors
+
+            if data_hub is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(data_hub.ingest_tick(t))
+                except RuntimeError:
+                    asyncio.run(data_hub.ingest_tick(t))
+            try:
+                market_data_manager._handle_tick(t)
+            except Exception as exc:
+                # ... (existing error handling) ...
+                LOGGER.error(f"CRITICAL: mdm_handle_tick_failed -> {type(exc).__name__}: {exc}", extra={"event": "mdm_handle_tick_failed", "err": str(exc)}, exc_info=True)
+            finally:
+                if stream_supervisor is not None:
+                    stream_supervisor.on_tick(t)
     if not poll_enabled and use_polling:
         use_polling = False  # explicit disable beats default
     market_data_mode = "polling" if use_polling else "websocket"
@@ -3375,6 +3482,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     strategy_runner.attach_persistent_state(persistent_state)
     strategy_runner.restore_trades(persistent_state.load_trades())
+    # [FIX 2/2] Populate the reference for Polling Mode to enable the hot-wire
+    strategy_runner_ref["instance"] = strategy_runner
+    LOGGER.info("✅ Polling Streamer -> StrategyRunner direct wiring established.")
 
     settings.enable_live = bool(live_toggle_env)
     mandatory_paper = not live_possible
