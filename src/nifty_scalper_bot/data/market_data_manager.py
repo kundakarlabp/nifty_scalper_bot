@@ -297,61 +297,47 @@ class MarketDataManager:
         self._last_balance_log_time = 0.0
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
-        """Commit REST quote payload for ``symbol`` into cache.
-
-        Args:
-            symbol: Instrument identifier corresponding to the quote.
-            quote: Mapping containing LTP/bid/ask/timestamp fields.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarketDataManager.ingest_rest_quote",
-            extra={"event": "mdm_ingest_rest_quote_enter", "symbol": symbol},
-        )
+        """Commit REST quote payload for ``symbol`` into cache AND emit to subscribers."""
         if not symbol or not isinstance(quote, Mapping):
             return
+        
         try:
             normalized_symbol = symbol.strip().upper()
             if not normalized_symbol:
                 return
+            
+            # Normalize fields
             ltp = _coerce_float(quote.get("ltp") or quote.get("last_price"))
             bid = _coerce_float(quote.get("bid"))
             ask = _coerce_float(quote.get("ask"))
-            timestamp = _coerce_float(
-                quote.get("timestamp") or quote.get("server_ts_s")
-            )
+            timestamp = _coerce_float(quote.get("timestamp") or quote.get("server_ts_s"))
+            volume = _coerce_float(quote.get("volume") or quote.get("volume_traded"))
+            
             payload = {
                 "symbol": normalized_symbol,
                 "ltp": ltp,
                 "bid": bid,
                 "ask": ask,
+                "volume": volume,
                 "timestamp": timestamp or time.time(),
                 "_source": "rest",
+                "depth": quote.get("depth")
             }
+            
             with self._lock:
+                previous = self._latest_ticks.get(normalized_symbol)
                 self._latest_ticks[normalized_symbol] = payload
-            self._logger.debug(
-                "mdm_ingest_rest_quote",
-                extra={
-                    "event": "mdm_ingest_rest_quote",
-                    "symbol": normalized_symbol,
-                    "ltp": ltp,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
+            
+            # [FIX] CRITICAL: Emit to Strategy Runner!
+            normalized_tick = self._normalize_tick(normalized_symbol, payload, previous)
+            if normalized_tick:
+                 self._emit_tick(normalized_symbol, normalized_tick, source="rest")
+
+        except Exception as exc:
             self._logger.error(
                 "Failure in MarketDataManager.ingest_rest_quote: %s",
                 exc,
-                extra={
-                    "event": "mdm_ingest_rest_quote_error",
-                    "symbol": symbol,
-                },
+                extra={"event": "mdm_ingest_rest_quote_error", "symbol": symbol},
                 exc_info=exc,
             )
 
