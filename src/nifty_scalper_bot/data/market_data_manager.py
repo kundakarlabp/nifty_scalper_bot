@@ -2305,7 +2305,7 @@ class MarketDataManager:
         Optimized for <500ms latency. Batches requests and uses smart sleep.
         """
         # SCOUT CONFIGURATION: 0.5s target interval
-        target_interval = 0.5
+        target_interval = 1.0
         self._logger.info(
             f"🚀 Scout Polling Started. Target Interval: {target_interval}s",
             extra={"event": "scout_poll_started"}
