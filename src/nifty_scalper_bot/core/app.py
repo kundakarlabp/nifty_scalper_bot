@@ -2614,8 +2614,27 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 if stream_supervisor is not None:
                     stream_supervisor.on_tick(t)
 
-    elif websocket_enabled:
+        # [INSERTED CODE STARTS HERE]
+        streamer = PollingStreamer(
+            broker_client=broker_client,
+            on_tick=_on_poll_tick,
+            instrument_resolver=instrument_resolver,
+            poll_interval_ms=poll_interval_ms,
+            batch_size=poll_batch_size,
+            require_depth=poll_require_depth,
+            warn_on_rate_limit=poll_warn_rate_limit,
+        )
+        stream_supervisor = StreamSupervisor(
+            streamer=streamer,
+            resolver=instrument_resolver,
+            default_symbols=list(poll_symbols or ["NIFTY"]),
+            autostart=True,
+        )
+        stream_supervisor.bootstrap()
+        stream_supervisor.ensure_started()
+        # [INSERTED CODE ENDS HERE]
 
+    elif websocket_enabled:
         def _sanitize_ws_token(value: str | None) -> str:
             token = (value or "").strip()
             if ":" in token:
