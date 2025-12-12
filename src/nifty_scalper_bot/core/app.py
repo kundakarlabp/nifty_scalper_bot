@@ -4543,14 +4543,14 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
-    """Execute startup sequence with Smart Hydration."""
+    """Execute startup sequence with Smart Hydration and Force Tracking."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
 
-    # [FIX] Define _notify helper LOCALLY so startup_sequence can use it
+    # [FIX 1] Define _notify helper locally so startup_sequence can use it
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
         if notifier is None:
@@ -4624,12 +4624,21 @@ async def startup_sequence(ctx: BotContext) -> None:
             # Force Regime Refresh
             await ctx.market_regime_manager.refresh_from_indicators()
             
-            # Register with Runner
+            # [FIX 2] CRITICAL: Force MDM to track these symbols for Polling
+            # This ensures the Scout Poller actually fetches these symbols
+            mdm = ctx.market_data_manager
             for sym in targets:
+                # 1. Register with Strategy Runner (Logic)
                 ctx.strategy_runner.add_symbol(sym)
                 
+                # 2. Force Track in Data Manager (Data)
+                if mdm:
+                    mdm.ensure_tracking(sym)
+            
+            LOGGER.info(f"✅ Forced tracking for {len(targets)} symbols in MDM.")
+                
         except Exception as e:
-            LOGGER.error(f"Hydration failed: {e}", exc_info=True)
+            LOGGER.error(f"Hydration/Tracking failed: {e}", exc_info=True)
 
     # 4. Start Subsystems
     if broker_ready:
@@ -4671,6 +4680,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
 
+    # Correctly uses the local _notify defined at the top
     await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
 
 
