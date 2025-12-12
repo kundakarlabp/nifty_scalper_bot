@@ -4543,12 +4543,23 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
+async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
+
+    # [FIX] Define _notify helper LOCALLY so startup_sequence can use it
+    async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
+        notifier = ctx.telegram_notifier
+        if notifier is None:
+            return
+        try:
+            await notifier.send_event(event, payload)
+        except Exception:
+            LOGGER.debug("Startup notifier failed", exc_info=True)
 
     # 1. Validate Broker & Session
     try:
