@@ -4543,14 +4543,14 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
-    """Execute startup sequence with Smart Hydration and Forced Subscription."""
+    """Execute startup sequence with Smart Hydration and Option-Only Trading."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
 
-    # [FIX 1] Define _notify helper locally (Prevents NameError crash)
+    # [FIX 1] Define _notify helper locally
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
         if notifier is None:
@@ -4581,13 +4581,38 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}")
 
-    # 3. Calculate Targets & Hydrate
+    # 3. Calculate Targets (Options + Index + FUTURES)
     if broker_ready:
         try:
-            # Calculate ATM Options
+            # A. Get ATM Options & Index
             targets = _get_symbols(ctx.config, ctx.instrument_resolver, ctx.broker_client)
-            targets = ["NSE:NIFTY 50"] + targets
-            targets = list(dict.fromkeys(targets)) # Unique
+            
+            # B. Calculate Current Month Futures (Vital for Orchestrator Data)
+            from datetime import datetime
+            now = datetime.now()
+            y_str = now.strftime("%y")
+            m_str = now.strftime("%b").upper()
+            future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
+            
+            # Resolve Future Token
+            fut_token = None
+            if ctx.instrument_resolver:
+                fut_token = ctx.instrument_resolver.resolve(future_symbol)
+                
+            if fut_token:
+                LOGGER.info(f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}")
+                targets.append(future_symbol)
+                # Ensure Orchestrator knows this is the reference symbol
+                if ctx.strategy_manager and hasattr(ctx.strategy_manager, "orchestrator"):
+                    ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
+            else:
+                LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
+
+            # Ensure NIFTY 50 is present (Data Only)
+            targets.append("NSE:NIFTY 50")
+            
+            # Deduplicate
+            targets = list(dict.fromkeys(targets))
             
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
             
@@ -4624,30 +4649,35 @@ async def startup_sequence(ctx: BotContext) -> None:
             # Force Regime Refresh
             await ctx.market_regime_manager.refresh_from_indicators()
             
-            # [FIX 2] Explicitly WIRE symbols to Subsystems
+            # [FIX 2] Explicitly WIRE symbols (Data vs Execution Separation)
             mdm = ctx.market_data_manager
-            streamer = ctx.streamer # The PollingStreamer
+            streamer = ctx.streamer
             tokens_to_poll = []
 
             for sym in targets:
-                # A. Register with Strategy Runner (Logic)
-                ctx.strategy_runner.add_symbol(sym)
-                
-                # B. Force Track in MDM (Scout Poller)
+                # A. Force Track in MDM (Scout Poller) - EVERYONE gets Data
                 if mdm: mdm.ensure_tracking(sym)
                 
-                # C. Resolve Token for Streamer (Main Poller)
+                # B. Collect tokens for Main Streamer - EVERYONE gets Data
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
                     if tok: tokens_to_poll.append(tok)
 
-            # [FIX 3] Bulk Subscribe to PollingStreamer
-            # This calls ensure_running() internally AND adds symbols to the fetch list
+                # C. [CRITICAL CHANGE] Register with Runner (EXECUTION) - ONLY OPTIONS
+                # We filter for symbols ending in CE or PE to prevent Futures Trading
+                if sym.endswith("CE") or sym.endswith("PE"):
+                    ctx.strategy_runner.add_symbol(sym)
+                else:
+                    LOGGER.info(f"🔭 Monitoring (No Trade): {sym}")
+
+            # Bulk Subscribe to PollingStreamer (Data Feed)
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
                 streamer.subscribe(tokens_to_poll)
-                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer (High-Freq)")
-            else:
-                LOGGER.warning("⚠️ Streamer missing or no tokens resolved!")
+                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+            
+            # Manually trigger one poll immediately to prime the cache
+            if mdm:
+                asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
                 
         except Exception as e:
             LOGGER.error(f"Hydration/Tracking failed: {e}", exc_info=True)
@@ -4655,11 +4685,8 @@ async def startup_sequence(ctx: BotContext) -> None:
     # 4. Start Subsystems
     if broker_ready:
         try:
-            # Start Order Monitor
             if ctx.order_manager: ctx.order_manager.start_monitoring()
-            # Start Strategy Runner
             if ctx.strategy_runner: ctx.strategy_runner.start()
-            # Start Streamer
             if ctx.stream_supervisor: ctx.stream_supervisor.start()
             elif hasattr(ctx.streamer, "start"): 
                 res = ctx.streamer.start()
@@ -4672,14 +4699,12 @@ async def startup_sequence(ctx: BotContext) -> None:
     # 5. Start Kill Switch & Sync Loop
     if broker_ready:
         try:
-            # Kill Zombies
             orders = await asyncio.to_thread(ctx.broker_client.get_orders)
             for o in orders:
                 if o.get("status") == "OPEN":
                     await asyncio.to_thread(ctx.broker_client.cancel_order, o.get("order_id"))
             LOGGER.info("✅ Zombie orders cleared.")
             
-            # Start Sync Loop
             async def _sync_loop():
                 while True:
                     try:
