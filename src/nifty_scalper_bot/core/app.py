@@ -3690,7 +3690,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             snapshot["orders"] = {"error": str(exc)}
 
         return snapshot
-
+    def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
+        if notifier is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - initialization phase
+            LOGGER.debug(
+                "No running loop to dispatch telegram notification",
+                extra={"event": event},
+            )
+            return
+        loop.create_task(notifier.send_event(event, payload))
     def _emit_health_snapshot(trigger: str, detail: str | None = None) -> None:
         """Dispatch a health snapshot notification for high-impact events.
 
@@ -3720,19 +3731,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         }
         _notify("HEALTH_SNAPSHOT", payload)
 
-    def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
-        if notifier is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - initialization phase
-            LOGGER.debug(
-                "No running loop to dispatch telegram notification",
-                extra={"event": event},
-            )
-            return
-        loop.create_task(notifier.send_event(event, payload))
-
+    
     shadow_trader: ShadowPaperTrader | None = None
     if settings.shadow.drift_threshold_pct > 0:
 
