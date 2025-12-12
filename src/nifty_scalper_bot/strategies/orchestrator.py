@@ -40,20 +40,7 @@ class StrategyOrchestrator:
         data_hub: Any | None = None,
         futures_symbol: str | None = None,
     ) -> None:
-        """Initialise orchestrator with runtime dependencies.
-
-        Args:
-            risk_manager: Risk manager exposing balance information.
-            order_manager: Order manager for communicating skip reasons.
-            data_hub: Optional data hub for futures data lookups.
-            futures_symbol: Symbol used when requesting futures context.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Initialise orchestrator with runtime dependencies."""
 
         self._risk_manager = risk_manager
         self._order_manager = order_manager
@@ -67,19 +54,7 @@ class StrategyOrchestrator:
     def register_strategy(
         self, name: str, *, capital_fraction: float, correlation_tags: Iterable[str]
     ) -> None:
-        """Register strategy metadata used for orchestration decisions.
-
-        Args:
-            name: Strategy identifier.
-            capital_fraction: Fraction of capital the strategy may utilise.
-            correlation_tags: Iterable of tags representing correlation clusters.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If ``capital_fraction`` is not positive.
-        """
+        """Register strategy metadata used for orchestration decisions."""
 
         self._logger.debug(
             "Entered StrategyOrchestrator.register_strategy",
@@ -100,37 +75,38 @@ class StrategyOrchestrator:
         indicators: Mapping[str, Any],
         position_manager: Any,
     ) -> Any | None:
-        """Return signal when allowed else ``None`` if blocked.
+        """Return signal when allowed else ``None`` if blocked."""
 
-        Args:
-            signal: Candidate signal provided by strategy manager.
-            indicators: Indicator snapshot for contextual checks.
-            position_manager: Position manager for exposure inspection.
-
-        Returns:
-            Signal when permitted else ``None``.
-
-        Raises:
-            None.
-        """
-
+        symbol = getattr(signal, "symbol", "")
         self._logger.debug(
             "Entered StrategyOrchestrator.filter_signal",
             extra={
                 "event": "orchestrator_filter",
-                "symbol": getattr(signal, "symbol", ""),
+                "symbol": symbol,
             },
         )
+        
+        # [FIX 1] CRITICAL: Block Futures Trading Explicitly
+        if self._is_futures(symbol):
+            self._logger.info(
+                "Orchestrator blocked Futures trade (Options Only Mode)",
+                extra={"event": "orchestrator_futures_blocked", "symbol": symbol}
+            )
+            return None
+
         strategy_name = self._resolve_strategy_name(signal)
         if not strategy_name:
             return signal
+            
         allocation = self._allocations.get(strategy_name)
         if allocation is None:
             return signal
+            
         action = getattr(signal, "action", "")
         if action not in {"BUY", "SELL"}:
             return signal
-        underlying = self._normalize_underlying(getattr(signal, "symbol", ""))
+            
+        underlying = self._normalize_underlying(symbol)
         if not underlying:
             return signal
 
@@ -144,6 +120,7 @@ class StrategyOrchestrator:
             )
             self._set_skip_reason("orchestrator_capital")
             return None
+            
         if self._is_correlated(underlying, position_manager):
             self._logger.info(
                 "Condition met: orchestrator_correlation_block",
@@ -154,31 +131,20 @@ class StrategyOrchestrator:
             )
             self._set_skip_reason("orchestrator_correlation")
             return None
+            
+        # [FIX 2] Removed the blocking check for _futures_context_ready.
+        # Previously, if futures volume wasn't ready, it killed Option trades.
+        # Now we just log a warning but ALLOW the trade.
         if not self._futures_context_ready(indicators):
-            self._logger.info(
-                "Condition met: orchestrator_futures_block",
-                extra={
-                    "event": "orchestrator_futures_block",
-                    "strategy": strategy_name,
-                },
+            self._logger.debug(
+                "Futures context missing, but allowing Option trade.",
+                extra={"event": "orchestrator_futures_context_missing", "symbol": symbol}
             )
-            self._set_skip_reason("orchestrator_futures")
-            return None
+
         return signal
 
     def notify_submission(self, signal: Any, underlying: str) -> None:
-        """Register that *signal* secured control over *underlying*.
-
-        Args:
-            signal: Signal associated with the submission.
-            underlying: Underlying symbol controlled by the strategy.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Register that *signal* secured control over *underlying*."""
 
         strategy_name = self._resolve_strategy_name(signal)
         if not strategy_name:
@@ -205,17 +171,7 @@ class StrategyOrchestrator:
         )
 
     def notify_exit(self, underlying: str) -> None:
-        """Release orchestration control for *underlying*.
-
-        Args:
-            underlying: Underlying symbol whose control is released.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Release orchestration control for *underlying*."""
 
         normalized = self._normalize_underlying(underlying)
         if not normalized:
@@ -228,19 +184,19 @@ class StrategyOrchestrator:
         )
 
     # ------------------------------------------------------------------
+    def _is_futures(self, symbol: str) -> bool:
+        """Check if symbol is a futures contract (Safe Version)."""
+        normalized = symbol.strip().upper()
+        
+        # Options (CE/PE) are NOT futures
+        if normalized.endswith("CE") or normalized.endswith("PE"):
+            return False
+            
+        # Only true Futures contain "FUT"
+        return "FUT" in normalized
+
     def _resolve_strategy_name(self, signal: Any) -> str:
-        """Return strategy name from *signal* metadata if available.
-
-        Args:
-            signal: Signal to introspect.
-
-        Returns:
-            Extracted strategy name or empty string.
-
-        Raises:
-            None.
-        """
-
+        """Return strategy name from *signal* metadata if available."""
         metadata = getattr(signal, "metadata", None)
         if isinstance(metadata, Mapping):
             value = metadata.get("strategy")
@@ -251,19 +207,7 @@ class StrategyOrchestrator:
     def _has_capital_headroom(
         self, allocation: StrategyAllocation, position_manager: Any
     ) -> bool:
-        """Return True if strategy has remaining capital headroom.
-
-        Args:
-            allocation: Strategy allocation configuration.
-            position_manager: Position manager providing exposure data.
-
-        Returns:
-            bool: ``True`` when headroom exists else ``False``.
-
-        Raises:
-            None.
-        """
-
+        """Return True if strategy has remaining capital headroom."""
         balance = float(getattr(self._risk_manager, "current_balance", 0.0) or 0.0)
         if balance <= 0:
             return True
@@ -284,19 +228,7 @@ class StrategyOrchestrator:
         return exposure < max_allocation
 
     def _is_correlated(self, underlying: str, position_manager: Any) -> bool:
-        """Return True when *underlying* conflicts with active allocations.
-
-        Args:
-            underlying: Normalised underlying symbol.
-            position_manager: Position manager exposing current positions.
-
-        Returns:
-            bool: ``True`` when correlation prohibits new trades.
-
-        Raises:
-            None.
-        """
-
+        """Return True when *underlying* conflicts with active allocations."""
         with self._lock:
             active = self._active.get(underlying)
             if active is not None:
@@ -319,36 +251,14 @@ class StrategyOrchestrator:
         return False
 
     def _futures_context_ready(self, indicators: Mapping[str, Any]) -> bool:
-        """Return whether futures volume context is available.
-
-        Args:
-            indicators: Indicator snapshot containing futures ratio.
-
-        Returns:
-            bool: ``True`` when context exists or not required.
-
-        Raises:
-            None.
-        """
-
+        """Return whether futures volume context is available."""
         if self._data_hub is None:
             return True
         ratio = indicators.get("futures_volume_ratio")
         return isinstance(ratio, (int, float)) and float(ratio) > 0
 
     def _normalize_underlying(self, symbol: str) -> str:
-        """Normalise option/futures symbol into underlying token.
-
-        Args:
-            symbol: Instrument identifier from the signal.
-
-        Returns:
-            str: Upper-case underlying token.
-
-        Raises:
-            None.
-        """
-
+        """Normalise option/futures symbol into underlying token."""
         token = (symbol or "").strip().upper()
         if token.endswith("CE") or token.endswith("PE"):
             token = token[:-2]
@@ -357,18 +267,7 @@ class StrategyOrchestrator:
         return token
 
     def _set_skip_reason(self, reason: str) -> None:
-        """Set skip reason on the order manager when available.
-
-        Args:
-            reason: Canonical skip reason string.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Set skip reason on the order manager when available."""
         if self._order_manager is None:
             return
         setter = getattr(self._order_manager, "set_last_skip_reason", None)
