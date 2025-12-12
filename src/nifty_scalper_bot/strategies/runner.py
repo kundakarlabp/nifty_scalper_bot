@@ -1631,6 +1631,21 @@ class StrategyRunner:
                             trade_symbol = selection.symbol
                             self._logger.info(f"🟡 Reusing active contract: {trade_symbol}")
 
+            # [FIX] Strategy-Specified Contract Bypass
+            # If the strategy runs on a specific Option symbol, use it directly.
+            if not selection and (base_symbol.endswith("CE") or base_symbol.endswith("PE")):
+                self._logger.info(f"🎯 Strategy provided explicit contract: {base_symbol}. Bypassing selector.")
+                selection = SelectedContract(
+                    symbol=base_symbol,
+                    option_type="CE" if base_symbol.endswith("CE") else "PE",
+                    strike=0.0,
+                    expiry=timestamp,
+                    ltp=trade_price,
+                    delta=None,
+                    metadata={"source": "strategy_explicit"}
+                )
+                trade_symbol = base_symbol
+
             # Strike selection
             if selector and not selection:
                 self._logger.info(f"🟡 3. SELECTING STRIKE for {base_symbol}...")
