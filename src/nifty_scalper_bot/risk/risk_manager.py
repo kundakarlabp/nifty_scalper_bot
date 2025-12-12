@@ -128,6 +128,8 @@ class RiskManager:
         init=False, repr=False, default=None
     )
     _unified_manager: Any | None = field(init=False, repr=False, default=None)
+    # [FIX] Declare the field so __post_init__ can use it
+    _last_log_time: float = field(init=False, repr=False, default=0.0)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
