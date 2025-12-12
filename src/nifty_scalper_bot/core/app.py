@@ -2880,39 +2880,71 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     initial_balance = float(
         getattr(config, "initial_balance", 1_000_000.0) or 1_000_000.0
     )
+    
+    # 1. Initialize Risk Manager
     risk_manager = RiskManager(
         settings=settings.risk,
         position_manager=position_manager,
         account_balance=initial_balance,
     )
+
+    # 2. Attach Broker (Safe Try/Except)
     try:
         risk_manager.set_broker_client(broker_client)
-    # [FIX] Connect Lot Size Provider to Risk Manager
-    # This allows the risk manager to convert "Risk Amount" into "Number of Lots"
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_broker_failed",
+            extra={"event": "risk_manager_attach_broker_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+    # 3. Attach Market Data (Safe Try/Except)
+    try:
+        risk_manager.set_market_data_manager(market_data_manager)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_mdm_failed",
+            extra={"event": "risk_manager_attach_mdm_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+    # 4. Attach Data Hub (Safe Try/Except)
+    try:
+        risk_manager.attach_data_hub(data_hub)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_data_hub_failed",
+            extra={"event": "risk_manager_attach_data_hub_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+    # 5. [FIX] Wire Lot Size Provider (NIFTY = 75)
+    # This must be OUTSIDE any try/except blocks to avoid SyntaxError
     if instrument_resolver:
         def _lot_size_lookup(symbol: str) -> int:
             try:
-                # 1. Try resolving metadata from the loaded instrument db
+                # A. Try metadata from resolver
                 meta = instrument_resolver.lookup(symbol)
                 if meta and "lot_size" in meta:
                     return int(meta["lot_size"])
                 
-                # 2. Fallback if metadata is missing (Hardcoded Defaults)
+                # B. Fallback Defaults
                 sym_upper = symbol.upper()
                 if "NIFTY" in sym_upper:
-                    return 75  # [USER OVERRIDE] Set NIFTY Lot Size to 75
+                    return 75  # Force 75 for NIFTY
                 if "BANKNIFTY" in sym_upper:
-                    return 15  # Default for BankNifty
-                
-                return 1 # Fallback for equity/others
+                    return 15
+                return 1
             except Exception:
-                # Safe default for NIFTY options if all else fails
+                # C. Safety Net
                 if "NIFTY" in symbol.upper():
                     return 75
                 return 1
         
         risk_manager.set_lot_size_provider(_lot_size_lookup)
         LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
+
+    # ... Next line in your file should be: risk_state: RiskState | None = None
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "risk_manager_attach_broker_failed",
