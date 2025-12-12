@@ -1350,7 +1350,16 @@ class StrategyRunner:
         broker_vwap = _extract_float(tick, "average_price", "vwap")
         volume = _extract_int(tick, "volume", "volume_traded")
         
+        # [FIX] Data Integrity Guard
         if price is None or price <= 0:
+            return
+            
+        # [FIX] Reject Low-Quality Data (Rate Limit Artifacts)
+        # Zerodha sends Volume=0 when rate-limited/cached. Strategies hate this.
+        if volume is None or volume <= 0:
+            # We skip processing but don't crash.
+            # Optional: Log if you want to see how often this happens
+            # self._logger.debug(f"Skipping tick for {symbol} (Vol=0)")
             return
 
         timestamp = _extract_timestamp(tick, now)
