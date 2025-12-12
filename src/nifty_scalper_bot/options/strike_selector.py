@@ -325,16 +325,15 @@ class StrikeSelector:
 
     def _get_mdm_and_resolver(
         self,
-    ) -> tuple[MarketDataManager | None, InstrumentResolver | None]:
+    ) -> tuple[Any | None, Any | None]:
         mdm = getattr(self._data_hub, "market_data_manager", None) or getattr(
             self._data_hub, "_mdm", None
         )
         resolver = getattr(self._data_hub, "resolver", None) or getattr(
             self._data_hub, "_resolver", None
         )
-        return cast(MarketDataManager | None, mdm), cast(
-            InstrumentResolver | None, resolver
-        )
+        # [FIX] Removed runtime cast using undefined types
+        return mdm, resolver
 
     def select_contract(
         self,
