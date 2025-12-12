@@ -2918,30 +2918,32 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             exc_info=exc,
         )
 
-    # 5. [FIX] Wire Lot Size Provider (NIFTY = 75)
-    if instrument_resolver:
-        def _lot_size_lookup(symbol: str) -> int:
-            try:
-                # A. Try metadata from resolver
+    # 5. [FIX] Wire Lot Size Provider (Unconditional)
+    # We define this regardless of resolver state to ensure NIFTY always returns 75/25.
+    def _lot_size_lookup(symbol: str) -> int:
+        try:
+            # A. Try metadata from resolver if available
+            if instrument_resolver:
                 meta = instrument_resolver.lookup(symbol)
                 if meta and "lot_size" in meta:
                     return int(meta["lot_size"])
-                
-                # B. Fallback Defaults
-                sym_upper = symbol.upper()
-                if "NIFTY" in sym_upper:
-                    return 75  # Force 75 for NIFTY
-                if "BANKNIFTY" in sym_upper:
-                    return 15
-                return 1
-            except Exception:
-                # C. Safety Net
-                if "NIFTY" in symbol.upper():
-                    return 75
-                return 1
-        
-        risk_manager.set_lot_size_provider(_lot_size_lookup)
-        LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
+            
+            # B. Fallback Defaults
+            sym_upper = symbol.upper()
+            if "NIFTY" in sym_upper:
+                return 75  # Force 75 for NIFTY
+            if "BANKNIFTY" in sym_upper:
+                return 35
+            return 1
+        except Exception:
+            # C. Safety Net
+            if "NIFTY" in symbol.upper():
+                return 75
+            return 1
+    
+    # Always set the provider
+    risk_manager.set_lot_size_provider(_lot_size_lookup)
+    LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
 
     risk_state: RiskState | None = None
     try:
