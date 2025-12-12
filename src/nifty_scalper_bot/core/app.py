@@ -4543,14 +4543,14 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
-    """Execute startup sequence with Smart Hydration and Force Tracking."""
+    """Execute startup sequence with Smart Hydration and Forced Subscription."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
 
-    # [FIX 1] Define _notify helper locally so startup_sequence can use it
+    # [FIX 1] Define _notify helper locally (Prevents NameError crash)
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
         if notifier is None:
@@ -4591,7 +4591,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
             
-            # Fetch 5 days history
+            # Fetch 5 days history (Hydration)
             from datetime import datetime, timedelta
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=5)
@@ -4624,18 +4624,30 @@ async def startup_sequence(ctx: BotContext) -> None:
             # Force Regime Refresh
             await ctx.market_regime_manager.refresh_from_indicators()
             
-            # [FIX 2] CRITICAL: Force MDM to track these symbols for Polling
-            # This ensures the Scout Poller actually fetches these symbols
+            # [FIX 2] Explicitly WIRE symbols to Subsystems
             mdm = ctx.market_data_manager
+            streamer = ctx.streamer # The PollingStreamer
+            tokens_to_poll = []
+
             for sym in targets:
-                # 1. Register with Strategy Runner (Logic)
+                # A. Register with Strategy Runner (Logic)
                 ctx.strategy_runner.add_symbol(sym)
                 
-                # 2. Force Track in Data Manager (Data)
-                if mdm:
-                    mdm.ensure_tracking(sym)
-            
-            LOGGER.info(f"✅ Forced tracking for {len(targets)} symbols in MDM.")
+                # B. Force Track in MDM (Scout Poller)
+                if mdm: mdm.ensure_tracking(sym)
+                
+                # C. Resolve Token for Streamer (Main Poller)
+                if ctx.instrument_resolver:
+                    tok = ctx.instrument_resolver.resolve(sym)
+                    if tok: tokens_to_poll.append(tok)
+
+            # [FIX 3] Bulk Subscribe to PollingStreamer
+            # This calls ensure_running() internally AND adds symbols to the fetch list
+            if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
+                streamer.subscribe(tokens_to_poll)
+                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer (High-Freq)")
+            else:
+                LOGGER.warning("⚠️ Streamer missing or no tokens resolved!")
                 
         except Exception as e:
             LOGGER.error(f"Hydration/Tracking failed: {e}", exc_info=True)
@@ -4680,7 +4692,6 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
 
-    # Correctly uses the local _notify defined at the top
     await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
 
 
