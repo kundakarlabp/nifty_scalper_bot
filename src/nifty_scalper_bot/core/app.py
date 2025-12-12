@@ -4543,7 +4543,6 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 async def startup_sequence(ctx: BotContext) -> None:
-async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
