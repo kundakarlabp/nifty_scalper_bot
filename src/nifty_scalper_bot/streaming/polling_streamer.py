@@ -288,9 +288,12 @@ class PollingStreamer:
         if not callable(fetch_ltp):
             return None
         try:
+            # Zerodha returns: {'256265': {'instrument_token': 256265, 'last_price': 17000.0}}
             data = fetch_ltp(batch)
         except Exception:  # noqa: BLE001
-            # Don't log exception here to avoid spamming tracebacks on every retry
+            return None
+
+        if not data:
             return None
 
         ticks: list[dict[str, Any]] = []
@@ -298,15 +301,30 @@ class PollingStreamer:
             # Normalize token lookups: try both int and str keys
             key_candidates = (int(token), str(int(token)))
             ltp = 0.0
+            
+            # [FIX] Correctly parse Nested Dictionary from Zerodha
             for k in key_candidates:
                 if k in data:
-                    try:
-                        ltp = float(data.get(k) or 0.0)
-                    except Exception:
-                        ltp = 0.0
-                    break
+                    val = data[k]
+                    if isinstance(val, dict):
+                        # Extract from dict: {'last_price': 123.45}
+                        try:
+                            ltp = float(val.get("last_price") or val.get("ltp") or 0.0)
+                        except Exception:
+                            ltp = 0.0
+                    else:
+                        # Direct value (unlikely but safe fallback)
+                        try:
+                            ltp = float(val or 0.0)
+                        except Exception:
+                            ltp = 0.0
+                    
+                    if ltp > 0:
+                        break
+            
             if ltp <= 0:
                 continue
+
             ticks.append(
                 {
                     "instrument_token": int(token),
@@ -318,7 +336,6 @@ class PollingStreamer:
                 }
             )
         return ticks or None
-
     def _try_quote_bulk(
         self, batch: list[int], timestamp_ms: int
     ) -> list[dict[str, Any]] | None:
