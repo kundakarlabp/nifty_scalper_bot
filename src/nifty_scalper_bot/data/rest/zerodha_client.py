@@ -1179,15 +1179,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
         # [CORRECTED] Aligned correctly and placed before return
         now = time.time()
         if now - self._last_log_balance >= self._log_throttle_interval:
-            LOGGER.info(
-                "zerodha_available_balance_success",
-                extra={
-                    "event": "zerodha_available_balance_success",
-                    "segment": normalized_segment,
-                    "available": available,
-                },
-            )
-            self._last_log_balance = now
+                # [FIX] Keep as INFO, throttled by _log_throttle_interval (default 60s)
+                LOGGER.info(
+                    "zerodha_available_balance_success",
+                    extra={
+                        "event": "zerodha_available_balance_success",
+                        "segment": normalized_segment,
+                        "available": available,
+                    },
+                )
+                self._last_log_balance = now
         return available
 
 
