@@ -2891,6 +2891,33 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # 2. Attach Broker
     try:
         risk_manager.set_broker_client(broker_client)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_broker_failed",
+            extra={"event": "risk_manager_attach_broker_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+    # 3. Attach Market Data (was missing in your file)
+    try:
+        risk_manager.set_market_data_manager(market_data_manager)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_mdm_failed",
+            extra={"event": "risk_manager_attach_mdm_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+    # 4. Attach Data Hub (was missing in your file)
+    try:
+        risk_manager.attach_data_hub(data_hub)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "risk_manager_attach_data_hub_failed",
+            extra={"event": "risk_manager_attach_data_hub_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
     # 5. [FIX] Wire Lot Size Provider (NIFTY = 75)
     if instrument_resolver:
         def _lot_size_lookup(symbol: str) -> int:
