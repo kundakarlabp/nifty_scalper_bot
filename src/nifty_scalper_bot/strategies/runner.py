@@ -1354,13 +1354,10 @@ class StrategyRunner:
         if price is None or price <= 0:
             return
             
-        # [FIX] Reject Low-Quality Data (Rate Limit Artifacts)
-        # Zerodha sends Volume=0 when rate-limited/cached. Strategies hate this.
+        # [FIX] Log Warning but ALLOW processing (so strategies can at least try)
         if volume is None or volume <= 0:
-            # We skip processing but don't crash.
-            # Optional: Log if you want to see how often this happens
-            # self._logger.debug(f"Skipping tick for {symbol} (Vol=0)")
-            return
+             self._logger.debug(f"⚠️ Low-quality tick for {symbol} (Vol=0). Proceeding cautiously.")
+             # return  <-- COMMENT THIS OUT. Let the strategy decide if it needs volume.
 
         timestamp = _extract_timestamp(tick, now)
 
