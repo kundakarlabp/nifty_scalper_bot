@@ -2907,23 +2907,29 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
 
     # 5. [FIX] Wire Lot Size Provider (Unconditional)
-    # This prevents the "Risk Manager returned 0 qty" error
+    # We define this logic regardless of resolver state to ensure sizing always works.
     def _lot_size_lookup(symbol: str) -> int:
         try:
-            # Try metadata first
+            # A. Try metadata from resolver if available
             if instrument_resolver:
                 meta = instrument_resolver.lookup(symbol)
                 if meta and "lot_size" in meta:
                     return int(meta["lot_size"])
             
-            # Fallbacks
+            # B. Fallback Defaults
             sym_upper = symbol.upper()
-            if "NIFTY" in sym_upper: return 75  # Force 75 for NIFTY
-            if "BANKNIFTY" in sym_upper: return 15
+            if "NIFTY" in sym_upper:
+                return 75  # Force 75 for NIFTY
+            if "BANKNIFTY" in sym_upper:
+                return 15
             return 1
         except Exception:
-            return 75 if "NIFTY" in symbol.upper() else 1
+            # C. Safety Net
+            if "NIFTY" in symbol.upper():
+                return 75
+            return 1
     
+    # Always attach the provider
     risk_manager.set_lot_size_provider(_lot_size_lookup)
     LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
 
