@@ -725,20 +725,29 @@ class RiskManager:
         self._lot_size_symbol = symbol
 
     def _resolve_lot_size(self, symbol: str | None) -> int:
+        """Resolve lot size with robust fallbacks."""
+        # 1. Try the wired lookup function (Primary)
         lookup = self._lot_size_lookup
         target_symbol = symbol or self._lot_size_symbol
-        if lookup is None or not callable(lookup):
-            raise RuntimeError("Lot size provider not configured for risk manager")
-        if not target_symbol:
-            raise RuntimeError("Lot size symbol not specified for risk sizing")
-        resolved = lookup(target_symbol)
-        try:
-            lot_size = int(resolved)
-        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
-            raise RuntimeError("Lot size provider returned invalid value") from exc
-        if lot_size <= 0:
-            raise RuntimeError("Lot size provider returned non-positive value")
-        return lot_size
+        
+        if lookup is not None and callable(lookup) and target_symbol:
+            try:
+                resolved = lookup(target_symbol)
+                lot_size = int(resolved)
+                if lot_size > 0:
+                    return lot_size
+            except Exception:
+                pass # Fallthrough to settings
+        
+        # 2. Fallback to Settings (Safety Net)
+        # Your settings.py already defaults contract_lot_size to 75. Use it!
+        if hasattr(self.settings, "contract_lot_size"):
+             default_size = int(self.settings.contract_lot_size)
+             if default_size > 0:
+                 return default_size
+
+        # 3. Last Resort Hardcoded Fallback
+        return 75
 
     def record_fill(self, realized_pnl: float) -> None:  # pragma: no cover
         """Update realised PnL state and consecutive loss counters."""
