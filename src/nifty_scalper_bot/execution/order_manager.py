@@ -1374,428 +1374,130 @@ class OrderManager:
         quantity: int,
         order_type: OrderType = OrderType.MARKET,
         price: float | None = None,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
-        *,
-        product: str | None = None,
+        trigger_price: float | None = None,
         tag: str | None = None,
-        trailing_spec: TrailingSpec | None = None,
-        max_slippage_per_lot: float | None = None,
-        await_confirmation: bool = False,
-        confirmation_timeout: float = 5.0,
-    ) -> str:
-        """Place an order and optionally create bracket exits.
-
-        Args:
-            symbol: Instrument identifier for the order.
-            side: Trade direction (``BUY`` or ``SELL``).
-            quantity: Requested quantity for the entry leg.
-            order_type: Desired order type (market or limit).
-            price: Optional limit price for non-market orders.
-            stop_loss: Optional stop-loss trigger for bracket orders.
-            take_profit: Optional take-profit price for bracket orders.
-            product: Optional broker product code.
-            tag: Optional broker tag string.
-            trailing_spec: Optional trailing stop specification.
-            max_slippage_per_lot: Optional adverse slippage guard expressed in INR.
-            await_confirmation: When ``True`` wait for broker acknowledgement.
-            confirmation_timeout: Maximum seconds to wait for confirmation.
+        product: str = "MIS",
+        variety: str = "regular",
+        check_risk: bool = True,
+    ) -> str | None:
+        """Place an order with smart retry logic and risk checks.
 
         Returns:
-            Broker order identifier for the entry leg.
-
-        Raises:
-            ValueError: If only one of stop-loss or take-profit is provided.
-            OrderPlacementError: If the order is rejected during confirmation.
+            Order ID if successful, None otherwise.
         """
+        start_time = time.monotonic()
+        normalized_symbol = symbol.strip().upper()
+        
+        # 1. Trading Switch Guard
+        if not trading_switch.can_trade_new():
+            self._logger.warning(
+                "Order blocked: Trading switch is OFF",
+                extra={"symbol": normalized_symbol}
+            )
+            return None
 
-        self._logger.debug(
-            "Entered place_order",
-            extra={
-                "event": "place_order_enter",
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "order_type": order_type.value,
-            },
-        )
-        self._last_skip_reason = None
-        side_token = side.upper()
-        side_literal: Literal["BUY", "SELL"] = "BUY" if side_token == "BUY" else "SELL"
-        try:
-            adjusted_quantity = self._truncate_quantity_to_lot(
-                symbol=symbol, quantity=quantity
-            )
-        except OrderPlacementError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in place_order: %s",
-                exc,
-                extra={"event": "place_order_truncate_failed", "symbol": symbol},
-            )
-            raise
-        if adjusted_quantity <= 0:
-            emit_diag(
-                self._logger,
-                "place_order_skip_zero_qty",
-                reason="lot_rounding_zero",
-                severity="info",
-                symbol=symbol,
+        # 2. Risk Checks
+        if check_risk and self._risk_manager:
+            # [FIX] OrderSignal is now correctly imported
+            signal = OrderSignal(
+                symbol=normalized_symbol,
                 side=side,
-                requested_qty=quantity,
-            )
-            self.set_last_skip_reason("lot_rounding_zero")
-            return ""
-        if adjusted_quantity != quantity:
-            self._logger.info(
-                "Condition met: place_order_quantity_truncated",
-                extra={
-                    "event": "place_order_quantity_truncated",
-                    "symbol": symbol,
-                    "side": side,
-                    "requested_qty": quantity,
-                    "adjusted_qty": adjusted_quantity,
-                },
-            )
-        quantity = adjusted_quantity
-        if (
-            side_token == "SELL"
-            and not app_settings.ORDER_ALLOW_NAKED_SHORTS
-            and self._is_reduce_only_violation(
-                symbol=symbol, quantity=quantity, product=product
-            )
-        ):
-            emit_diag(
-                self._logger,
-                "place_order_reduce_only_block",
-                reason="reduce_only_violation",
-                severity="warning",
-                alert=True,
-                symbol=symbol,
-                product=product,
                 quantity=quantity,
+                price=price or 0.0,
+                stop_loss=None,
+                take_profit=None
             )
-            self.set_last_skip_reason("reduce_only_violation")
-            return ""
-        if stop_loss is not None or take_profit is not None:
-            if stop_loss is None or take_profit is None:
-                raise ValueError(
-                    "Both stop_loss and take_profit required for bracket orders"
+            # Check live/shadow status dynamically
+            live = self._is_live_enabled() and not self._is_shadow_mode()
+            allowed, reason = self._risk_manager.check_order(signal, live_enabled=live)
+            
+            if not allowed:
+                self._logger.warning(
+                    f"Risk Manager Blocked Order: {reason}",
+                    extra={"symbol": normalized_symbol, "reason": reason}
                 )
-            self._validate_quantity(symbol, quantity)
-            if not self._ensure_trading_allowed(
-                symbol=symbol, side=side, quantity=quantity
-            ):
-                return ""
-            use_market = order_type == OrderType.MARKET
-            entry_px = 0.0 if use_market else (price if price is not None else 0.0)
-            entry_id, _sl_id, _tp_id = self.place_bracket_order(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                entry_price=entry_px,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                product=product,
-                tag=tag,
-                trailing_spec=trailing_spec,
-            )
-            return entry_id
+                if self.on_order_rejected:
+                    self.on_order_rejected(normalized_symbol, reason)
+                return None
 
-        self._validate_quantity(symbol, quantity)
-        if not self._ensure_trading_allowed(
-            symbol=symbol, side=side, quantity=quantity
-        ):
-            return ""
-        exit_candidate = False
-        try:
-            exit_candidate = self._is_force_exit(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in place_order: %s",
-                exc,
-                extra={"event": "place_order_exit_detect_failed"},
-            )
-        if order_type == OrderType.MARKET and exit_candidate:
-            exit_side = side_token
-            if exit_side == "SELL":
-                exchange = symbol.split(":", maxsplit=1)[0] if ":" in symbol else "NFO"
-                tradingsymbol = symbol.split(":", maxsplit=1)[-1]
-                reduce_only_id = self.place_reduce_only_exit(
-                    ExitIntent(
-                        symbol=tradingsymbol,
-                        qty=quantity,
-                        product=(product or "MIS"),
-                        exchange=exchange,
-                        order_type="MARKET",
-                        tag=tag,
+        # 3. Execution with Retry Logic
+        exchange = self._resolve_exchange(normalized_symbol)
+        tradingsymbol = self._resolve_tradingsymbol(normalized_symbol)
+        
+        params = {
+            "variety": variety,
+            "exchange": exchange,
+            "tradingsymbol": tradingsymbol,
+            "transaction_type": side,
+            "quantity": quantity,
+            "product": product,
+            "order_type": order_type.value,
+            "validity": "DAY"
+        }
+        if price and price > 0:
+            params["price"] = price
+        if trigger_price and trigger_price > 0:
+            params["trigger_price"] = trigger_price
+        if tag:
+            params["tag"] = tag
+
+        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol} @ {price or 'MKT'}")
+        
+        # [OPTIMIZATION] Retry loop for transient network errors
+        attempts = 3
+        last_exception = None
+        
+        for attempt in range(1, attempts + 1):
+            try:
+                # Blocking call to broker
+                order_id = self._broker.place_order(**params)
+                
+                if order_id:
+                    # 4. Register Order Locally
+                    details = OrderDetails(
+                        order_id=order_id,
+                        symbol=normalized_symbol,
+                        quantity=quantity,
+                        order_type=order_type,
+                        status=OrderStatus.PENDING,
+                        price=price,
+                        trigger_price=trigger_price,
+                        tag=tag
                     )
-                )
-                if reduce_only_id:
-                    return reduce_only_id
-                return ""
-            try:
-                details = self._place_exit_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=quantity,
-                    product=product,
-                    tag=tag,
-                )
-            except OrderPlacementError as exc:
-                self._logger.error(
-                    "Failure in place_order: %s",
-                    exc,
-                    extra={"event": "place_order_exit_router_failed"},
-                )
-            else:
-                return details.order_id
-        depth_snapshot = self.get_best_bid_ask_depth(symbol)
-        preferred_price: float | None
-        preferred_price = (
-            float(depth_snapshot.get("ask") or 0.0)
-            if side_token == "BUY"
-            else float(depth_snapshot.get("bid") or 0.0)
+                    self._register_order(details)
+                    
+                    # Metrics
+                    duration = time.monotonic() - start_time
+                    self._m_order_latency.observe(duration)
+                    self._m_orders_placed.labels(side=side, type=order_type.value, status="submitted").inc()
+                    
+                    self._logger.info(
+                        f"✅ Order Placed: {order_id} (Latency: {duration*1000:.2f}ms)",
+                        extra={"order_id": order_id}
+                    )
+                    return order_id
+                    
+            except Exception as e:
+                last_exception = e
+                # Only retry network-like errors (timeouts, 503s), not logic errors
+                error_str = str(e).lower()
+                if "network" in error_str or "timeout" in error_str or "503" in error_str:
+                    self._logger.warning(
+                        f"Order retry {attempt}/{attempts}: {e}",
+                        extra={"symbol": normalized_symbol}
+                    )
+                    time.sleep(0.1 * attempt) # Exponential backoff
+                    continue
+                else:
+                    # Logic error (e.g. Insufficient Funds) - Break immediately
+                    break
+
+        self._logger.error(
+            f"Broker execution failed after retries: {last_exception}", 
+            exc_info=True,
+            extra={"symbol": normalized_symbol}
         )
-        if preferred_price <= 0:
-            preferred_price = None
-        if (
-            order_type == OrderType.LIMIT
-            and (price is None or price <= 0)
-            and preferred_price is not None
-        ):
-            price = preferred_price
-        queue_price: float | None = None
-        if price is not None and price > 0:
-            queue_price = float(price)
-        elif preferred_price is not None and preferred_price > 0:
-            queue_price = preferred_price
-        queue_position = 0
-        if queue_price is not None and queue_price > 0:
-            queue_position = self.calculate_queue_position(
-                symbol, side_literal, float(queue_price)
-            )
-        queue_threshold = self._queue_threshold(symbol, quantity)
-        self._logger.info(
-            "Condition met: queue_position_for_order",
-            extra={
-                "event": "queue_position_for_order",
-                "symbol": symbol,
-                "side": side_token,
-                "queue_position": queue_position,
-                "queue_threshold": queue_threshold,
-            },
-        )
-        try:
-            self._m_queue_position.labels(symbol).set(float(queue_position))
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in place_order: %s",
-                exc,
-                extra={
-                    "event": "queue_position_metric_error",
-                    "symbol": symbol,
-                },
-            )
-        try:
-            METRICS.record_queue_depth(symbol=symbol, depth=float(queue_position))
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in place_order queue depth metric: %s",
-                exc,
-                extra={
-                    "event": "queue_depth_metric_error",
-                    "symbol": symbol,
-                },
-            )
-        if queue_threshold > 0 and queue_position > queue_threshold:
-            self._logger.info(
-                "Condition met: queue_position_block",
-                extra={
-                    "event": "queue_position_block",
-                    "symbol": symbol,
-                    "side": side_token,
-                    "queue_position": queue_position,
-                    "queue_threshold": queue_threshold,
-                },
-            )
-            self.set_last_skip_reason("queue_depth")
-            return ""
-        avg_fill, slippage_unit, historical_slippage = self._estimate_order_slippage(
-            symbol, side_literal, quantity
-        )
-        slippage_per_lot: float | None = None
-        if slippage_unit is not None:
-            lot_size_for_slippage: int | None = None
-            try:
-                lot_size_for_slippage = self._lot_size_for_symbol(symbol)
-            except OrderPlacementError:
-                lot_size_for_slippage = None
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug(
-                    "slippage_lot_lookup_failed",
-                    extra={
-                        "event": "slippage_lot_lookup_failed",
-                        "symbol": symbol,
-                        "error": str(exc),
-                    },
-                )
-                lot_size_for_slippage = None
-            if lot_size_for_slippage and lot_size_for_slippage > 0:
-                slippage_per_lot = abs(float(slippage_unit)) * lot_size_for_slippage
-            else:
-                slippage_per_lot = abs(float(slippage_unit)) * quantity
-            self._logger.info(
-                "Condition met: order_slippage_estimate",
-                extra={
-                    "event": "order_slippage_estimate",
-                    "symbol": symbol,
-                    "side": side_token,
-                    "avg_fill_price": avg_fill,
-                    "slippage_per_unit": slippage_unit,
-                    "slippage_per_lot": slippage_per_lot,
-                    "historical_slippage": historical_slippage,
-                },
-            )
-            try:
-                self._m_order_slippage.labels(symbol).set(float(slippage_per_lot))
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in place_order: %s",
-                    exc,
-                    extra={
-                        "event": "order_slippage_metric_error",
-                        "symbol": symbol,
-                    },
-                )
-        if (
-            max_slippage_per_lot is not None
-            and slippage_per_lot is not None
-            and slippage_per_lot > max_slippage_per_lot
-        ):
-            self._logger.info(
-                "Condition met: order_slippage_guard",
-                extra={
-                    "event": "order_slippage_guard",
-                    "symbol": symbol,
-                    "side": side_token,
-                    "slippage_per_lot": slippage_per_lot,
-                    "max_slippage_per_lot": max_slippage_per_lot,
-                },
-            )
-            self.set_last_skip_reason("slippage_guard")
-            return ""
-        if order_type == OrderType.MARKET:
-            details = self._execute_market_order(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                product=product,
-                tag=tag,
-            )
-        else:
-            details = self._place_single_order(
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                order_type=order_type,
-                price=price,
-                product=product,
-                tag=tag,
-            )
-        order_id = details.order_id
-        self._logger.info(
-            "Condition met: order_place_success",
-            extra={
-                "event": "order_place_success",
-                "order_id": order_id,
-                "symbol": symbol,
-                "side": side_token,
-                "quantity": quantity,
-                "order_type": order_type.value,
-            },
-        )
-
-        if not await_confirmation:
-            return order_id
-
-        start_time = time.time()
-        poll_interval = 0.2
-        while time.time() - start_time < confirmation_timeout:
-            try:
-                refreshed = self._refresh_order(order_id)
-            except KeyError:
-                self._logger.debug(
-                    "order_confirmation_pending_local_missing",
-                    extra={
-                        "event": "order_confirm_pending_missing",
-                        "order_id": order_id,
-                    },
-                )
-                time.sleep(poll_interval)
-                continue
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in place_order confirmation poll: %s",
-                    exc,
-                    extra={
-                        "event": "order_confirm_poll_error",
-                        "order_id": order_id,
-                    },
-                )
-                raise
-
-            status = refreshed.status
-            if status in (
-                OrderStatus.PENDING,
-                OrderStatus.SUBMITTED,
-                OrderStatus.PARTIALLY_FILLED,
-                OrderStatus.FILLED,
-            ):
-                self._logger.info(
-                    "Condition met: order_confirmation_success",
-                    extra={
-                        "event": "order_confirm_success",
-                        "order_id": order_id,
-                        "status": status.value,
-                        "latency_ms": (time.time() - start_time) * 1000.0,
-                    },
-                )
-                return order_id
-
-            if status in (
-                OrderStatus.REJECTED,
-                OrderStatus.CANCELLED,
-                OrderStatus.EXPIRED,
-            ):
-                message = refreshed.rejection_reason or "Order rejected"
-                self._logger.error(
-                    "Failure in place_order confirmation: %s",
-                    message,
-                    extra={
-                        "event": "order_confirm_rejected",
-                        "order_id": order_id,
-                        "status": status.value,
-                    },
-                )
-                raise OrderPlacementError(f"Order {order_id} rejected: {message}")
-
-            time.sleep(poll_interval)
-
-        self._logger.warning(
-            "Order confirmation timeout",
-            extra={
-                "event": "order_confirm_timeout",
-                "order_id": order_id,
-                "timeout_seconds": confirmation_timeout,
-            },
-        )
-        return order_id
+        return None
 
     def guard_existing_position(
         self,
