@@ -2885,16 +2885,21 @@ class OrderManager:
             None.
         """
 
-        # [FIX] Lazy Initialization: Check if this order needs a bracket but doesn't have one yet
+        # -------------------------------------------------------------------------
+        # 1. [FIX] LAZY INITIALIZATION (Auto-Bracket for Simple Orders)
+        # -------------------------------------------------------------------------
         entry_id = self._bracket_index.get(order.order_id)
-        if not entry_id and order.order_id in self._brackets:
-            # This happens if we registered the bracket but didn't index the entry ID yet
-            entry_id = order.order_id
         
-        # [FIX] Auto-Bracket Trigger for simple orders
-        # If this is a filled entry order that has SL/TP intent but no active bracket orders
-        if not entry_id and (order.stop_loss or order.take_profit) and order.status == OrderStatus.FILLED:
-            self._logger.info(f"🛡️ Auto-initializing bracket for simple order {order.order_id}")
+        # If not indexed, check if this IS the entry order for a known bracket
+        if not entry_id and order.order_id in self._brackets:
+            entry_id = order.order_id
+
+        # If still unknown, check if this is a filled "simple" entry that needs a bracket
+        if not entry_id and order.status == OrderStatus.FILLED and (order.stop_loss or order.take_profit):
+            self._logger.info(
+                f"🛡️ Auto-initializing bracket for simple order {order.order_id}",
+                extra={"event": "auto_bracket_init", "order_id": order.order_id}
+            )
             
             exit_side: Literal["BUY", "SELL"] = "SELL" if order.side == "BUY" else "BUY"
             
@@ -2909,9 +2914,9 @@ class OrderManager:
                 product="MIS", # Default to MIS for safety if unknown
                 tag=order.tag,
                 stop_order_id="",
-                stop_price=order.stop_loss or 0.0,
+                stop_price=float(order.stop_loss) if order.stop_loss else 0.0,
                 stop_order_type=OrderType.STOP_LOSS_MARKET,
-                tp_primary_price=order.take_profit,
+                tp_primary_price=float(order.take_profit) if order.take_profit else None,
                 tp_primary_qty=order.filled_quantity if order.take_profit else 0
             )
             
@@ -2919,7 +2924,7 @@ class OrderManager:
             self._register_bracket_state(state)
             entry_id = order.order_id
             
-            # Place the bracket orders immediately
+            # Place Stop Loss
             if state.stop_price > 0:
                 try:
                     stop = self._place_single_order(
@@ -2938,6 +2943,7 @@ class OrderManager:
                 except Exception as e:
                     self._logger.error(f"Failed to place auto-stop: {e}")
 
+            # Place Take Profit
             if state.tp_primary_price and state.tp_primary_price > 0:
                 try:
                     tp = self._place_single_order(
@@ -2959,7 +2965,9 @@ class OrderManager:
             self._persist_bracket_state(state)
             return
 
-        # --- Normal Flow starts here ---
+        # -------------------------------------------------------------------------
+        # 2. STANDARD UPDATE LOGIC (Existing Code)
+        # -------------------------------------------------------------------------
         if not entry_id:
             return
         state = self._brackets.get(entry_id)
@@ -2977,7 +2985,7 @@ class OrderManager:
             },
         )
         
-        # Delegate to external manager if exists
+        # Delegate to external bracket manager if attached
         if self._bracket_manager is not None:
             try:
                 self._bracket_manager.handle_bracket_update(
@@ -2997,7 +3005,7 @@ class OrderManager:
                     exc_info=exc,
                 )
         
-        # State Machine Logic
+        # Internal State Machine Logic
         try:
             if order.order_id == state.stop_order_id:
                 state.stop_filled = order.filled_quantity
@@ -3093,7 +3101,7 @@ class OrderManager:
                 "Failure in _handle_bracket_update: %s",
                 exc,
                 extra={"event": "handle_bracket_update_failed", "entry_id": entry_id},
-            )
+            )    
 
     def place_atomic_entry(
         self,
@@ -7289,48 +7297,107 @@ class OrderManager:
 
     def reconcile_open_orders_with_broker(self) -> None:
         """Sync local order state with broker and trigger brackets on fill."""
+        
+        # 1. Identify local orders that need checking
+        with self._lock:
+            pending_ids = {
+                oid for oid, order in self._orders.items() 
+                if order.status not in self.FINAL_STATUSES
+            }
+        
+        # Optimization: Don't spam API if we have nothing to track
+        if not pending_ids:
+            return
+
         try:
-            # 1. Fetch all open orders from Broker
-            broker_orders = self._broker.orders()
-            if not broker_orders:
+            # 2. RESOLVE FETCHER (Fixes the 'no attribute orders' crash)
+            # Dynamically find the correct method (get_orders, list_orders, etc.)
+            fetcher = self._resolve_open_orders_fetcher()
+            
+            # Fallback: some clients might expose 'orders' property/method directly
+            if not fetcher:
+                candidate = getattr(self._broker, "orders", None)
+                if callable(candidate):
+                    fetcher = candidate
+
+            if not fetcher:
+                # Log once per minute to avoid flooding logs if broker is incompatible
+                if time.time() % 60 < 2: 
+                    self._logger.error("No order fetch method found on broker client")
                 return
 
-            broker_map = {str(o['order_id']): o for o in broker_orders}
-            
+            # 3. Fetch Orders safely via Circuit Breaker
+            response = self._call_broker(fetcher)
+            if not response:
+                return
+
+            # Normalize response to list of dicts
+            broker_orders = []
+            if isinstance(response, Mapping):
+                broker_orders = [response]
+            elif isinstance(response, Iterable) and not isinstance(response, (str, bytes)):
+                broker_orders = list(response)
+
+            # Map broker order_id -> payload for O(1) lookup
+            broker_map = {}
+            for item in broker_orders:
+                if isinstance(item, Mapping):
+                    oid = str(item.get('order_id') or item.get('id') or '')
+                    if oid:
+                        broker_map[oid] = item
+
+            # 4. Reconciliation Loop
             with self._lock:
-                # 2. Check our pending local orders
-                for order_id, local_order in list(self._orders.items()):
-                    # Skip if already finalized locally
-                    if local_order.status in self.FINAL_STATUSES:
+                for order_id in pending_ids:
+                    local_order = self._orders.get(order_id)
+                    if not local_order:
                         continue
                         
                     remote = broker_map.get(order_id)
+                    # If remote missing, order might be closed/archived. 
+                    # We can't assume anything yet.
                     if not remote:
                         continue
 
-                    # 3. Update Status
+                    # Capture old status to detect transitions
                     old_status = local_order.status
-                    new_status_str = remote.get('status', '').upper()
                     
-                    # Map broker status string to Enum if needed
-                    try:
-                        new_status = OrderStatus(new_status_str)
-                    except ValueError:
-                        new_status = OrderStatus.UNKNOWN
+                    # Update Local State
+                    raw_status = str(remote.get('status', '')).upper()
+                    local_order.status = self._parse_status(raw_status)
+                    
+                    filled = self._coerce_int(remote.get('filled_quantity'))
+                    if filled is not None:
+                        local_order.filled_quantity = filled
+                        
+                    avg_price = self._coerce_float(remote.get('average_price'))
+                    if avg_price is not None:
+                        local_order.average_price = avg_price
+                        
+                    msg = remote.get('status_message')
+                    if msg:
+                        local_order.message = str(msg)
 
-                    local_order.status = new_status
-                    local_order.filled_quantity = int(remote.get('filled_quantity', 0))
-                    local_order.average_price = float(remote.get('average_price', 0.0))
-                    local_order.message = str(remote.get('status_message', ''))
+                    # 5. TRIGGER LOGIC
+                    # If order JUST finished, trigger the Bracket Handler
+                    if local_order.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+                        # If it wasn't filled before, log it
+                        if old_status != OrderStatus.FILLED:
+                            self._logger.info(
+                                f"✅ Order {order_id} update: {local_order.status.name} "
+                                f"({local_order.filled_quantity} qty @ {local_order.average_price})"
+                            )
+                        
+                        # CRITICAL: This call triggers the auto-SL/TP placement
+                        # We pass the 'remote' payload so the handler has full context
+                        self._handle_bracket_update(local_order, old_status, remote)
 
-                    # 4. DETECT FILL & TRIGGER BRACKET
-                    # If order just completed, and we haven't bracketed it yet
-                    if new_status == OrderStatus.COMPLETE and old_status != OrderStatus.COMPLETE:
-                        self._logger.info(f"✅ Order {order_id} FILLED @ {local_order.average_price}")
-                        self._trigger_bracket_order(local_order)
+                    # If Rejected, handle it
+                    if local_order.status == OrderStatus.REJECTED and old_status != OrderStatus.REJECTED:
+                        self._handle_order_rejected(local_order)
 
         except Exception as e:
-            self._logger.error(f"Reconcile failed: {e}")
+            self._logger.error(f"Reconcile failed: {e}", exc_info=True)
 
     def _trigger_bracket_order(self, order: OrderDetails) -> None:
         """Place Stop Loss and Target orders after entry fill."""
