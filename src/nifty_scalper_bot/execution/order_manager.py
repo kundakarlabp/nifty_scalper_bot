@@ -147,11 +147,11 @@ class OrderDetails:
     symbol: str
     side: str
     order_type: OrderType
+    status: OrderStatus
     quantity: int
     price: float
     stop_loss: Optional[float] = None   
     take_profit: Optional[float] = None
-    status: OrderStatus
     timestamp: datetime
     filled_quantity: int = 0
     fill_price: float | None = None
