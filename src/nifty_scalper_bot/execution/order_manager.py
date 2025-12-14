@@ -149,6 +149,8 @@ class OrderDetails:
     order_type: OrderType
     quantity: int
     price: float
+    stop_loss: Optional[float] = None   
+    take_profit: Optional[float] = None
     status: OrderStatus
     timestamp: datetime
     filled_quantity: int = 0
@@ -1461,6 +1463,8 @@ class OrderManager:
                         order_type=order_type,
                         status=OrderStatus.PENDING,
                         price=price,
+                        stop_loss=signal.stop_loss if signal else None, 
+                        take_profit=signal.take_profit if signal else None,
                         trigger_price=trigger_price,
                         tag=tag
                     )
@@ -7247,100 +7251,74 @@ class OrderManager:
             )
 
     def reconcile_open_orders_with_broker(self) -> None:
-        """Reconcile persisted open orders with broker live state.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered reconcile_open_orders_with_broker",
-            extra={"event": "order_manager_reconcile_orders"},
-        )
-        fetcher = self._resolve_open_orders_fetcher()
-        if fetcher is None:
-            self._logger.info(
-                "Condition met: reconcile_open_orders_fetcher_missing",
-                extra={"event": "order_manager_reconcile_skip"},
-            )
-            return
+        """Sync local order state with broker and trigger brackets on fill."""
         try:
-            response = self._call_broker(fetcher)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in reconcile_open_orders_with_broker: %s", exc)
+            # 1. Fetch all open orders from Broker
+            broker_orders = self._broker.orders()
+            if not broker_orders:
+                return
+
+            broker_map = {str(o['order_id']): o for o in broker_orders}
+            
+            with self._lock:
+                # 2. Check our pending local orders
+                for order_id, local_order in list(self._orders.items()):
+                    # Skip if already finalized locally
+                    if local_order.status in self.FINAL_STATUSES:
+                        continue
+                        
+                    remote = broker_map.get(order_id)
+                    if not remote:
+                        continue
+
+                    # 3. Update Status
+                    old_status = local_order.status
+                    new_status_str = remote.get('status', '').upper()
+                    
+                    # Map broker status string to Enum if needed
+                    try:
+                        new_status = OrderStatus(new_status_str)
+                    except ValueError:
+                        new_status = OrderStatus.UNKNOWN
+
+                    local_order.status = new_status
+                    local_order.filled_quantity = int(remote.get('filled_quantity', 0))
+                    local_order.average_price = float(remote.get('average_price', 0.0))
+                    local_order.message = str(remote.get('status_message', ''))
+
+                    # 4. DETECT FILL & TRIGGER BRACKET
+                    # If order just completed, and we haven't bracketed it yet
+                    if new_status == OrderStatus.COMPLETE and old_status != OrderStatus.COMPLETE:
+                        self._logger.info(f"✅ Order {order_id} FILLED @ {local_order.average_price}")
+                        self._trigger_bracket_order(local_order)
+
+        except Exception as e:
+            self._logger.error(f"Reconcile failed: {e}")
+
+    def _trigger_bracket_order(self, order: OrderDetails) -> None:
+        """Place Stop Loss and Target orders after entry fill."""
+        if not self._bracket_manager:
+            self._logger.warning("No BracketManager attached; TP/SL not placed.")
             return
-        payloads: list[Mapping[str, Any]] = []
-        if isinstance(response, Mapping):
-            payloads.append(response)
-        elif isinstance(response, Iterable) and not isinstance(response, (str, bytes)):
-            payloads.extend(
-                cast(Mapping[str, Any], item)
-                for item in response
-                if isinstance(item, Mapping)
+
+        if not order.stop_loss and not order.take_profit:
+            return
+
+        self._logger.info(f"🛡️ Placing Bracket for {order.symbol} (Qty: {order.filled_quantity})")
+        
+        try:
+            # Delegate to Bracket Manager
+            self._bracket_manager.place_bracket(
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.filled_quantity,
+                entry_price=order.average_price,
+                stop_loss_price=order.stop_loss,
+                take_profit_price=order.take_profit,
+                parent_order_id=order.order_id
             )
-        broker_orders: dict[str, OrderDetails] = {}
-        for item in payloads:
-            detail = self._coerce_broker_open_order(item)
-            if detail is None:
-                continue
-            broker_orders[detail.order_id] = detail
-        open_ids = set(broker_orders.keys())
-        changed: dict[str, OrderDetails] = {}
-        with self._lock:
-            for order_id, detail in broker_orders.items():
-                existing = self._orders.get(order_id)
-                if existing is None:
-                    self._orders[order_id] = detail
-                    self._append_history(detail)
-                    if detail.client_order_id:
-                        self._client_order_index[str(detail.client_order_id)] = order_id
-                    changed[order_id] = detail
-                else:
-                    if existing.status != detail.status or (
-                        detail.filled_quantity
-                        and existing.filled_quantity != detail.filled_quantity
-                    ):
-                        existing.status = detail.status
-                        existing.filled_quantity = detail.filled_quantity
-                        existing.fill_price = detail.fill_price
-                        self._history_persisted_ids.discard(order_id)
-                        changed[order_id] = existing
-            for order_id, existing in list(self._orders.items()):
-                if existing.status in self.FINAL_STATUSES:
-                    continue
-                if order_id in open_ids:
-                    continue
-                existing.status = OrderStatus.FILLED
-                if existing.filled_quantity <= 0:
-                    existing.filled_quantity = existing.quantity
-                changed[order_id] = existing
-            stale_brackets = [
-                entry_id
-                for entry_id in list(self._brackets.keys())
-                if entry_id not in open_ids
-            ]
-            if changed:
-                self._persist_history()
-        for order in changed.values():
-            self._publish_order_to_hub(order)
-            self._persist_order_snapshot(order)
-        for entry_id in stale_brackets:
-            self._cleanup_bracket_state(entry_id)
-        if changed or stale_brackets:
-            self._logger.info(
-                "Condition met: reconcile_open_orders_applied",
-                extra={
-                    "event": "order_manager_reconcile_orders",
-                    "orders_updated": len(changed),
-                    "brackets_removed": len(stale_brackets),
-                },
-            )
+        except Exception as e:
+            self._logger.error(f"Failed to place bracket: {e}")
 
     def _publish_order_to_hub(
         self, order: OrderDetails, payload: Mapping[str, Any] | None = None
