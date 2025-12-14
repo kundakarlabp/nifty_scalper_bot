@@ -1025,3 +1025,29 @@ class IndicatorEngine:
         except Exception as e:
             self._logger.error(f"ATR Compute Failed: {e}")
             return None
+
+    def get_latest(self, symbol: str) -> dict[str, float | None]:
+        """Retrieve aggregated indicators for execution controllers (Dynamic TP)."""
+        try:
+            # 1. Fetch Indicators required by DynamicTPController
+            # Use getattr to be safe if methods are missing, defaulting to None
+            get_rsi = getattr(self, "get_rsi", None)
+            get_adx = getattr(self, "get_adx", None)
+            
+            rsi_val = get_rsi(symbol) if callable(get_rsi) else None
+            adx_val = get_adx(symbol) if callable(get_adx) else None
+            
+            # 2. Fetch ATR (Already implemented)
+            atr_snap = self.compute_atr(symbol)
+            atr_val = atr_snap.current_atr if atr_snap else None
+
+            return {
+                "rsi": rsi_val,
+                "adx": adx_val,
+                "atr": atr_val,
+                "ltp": self.get_latest_price(symbol)
+            }
+        except Exception as e:
+            # Prevent indicator calculation errors from crashing the Order Manager
+            self._logger.error(f"get_latest failed for {symbol}: {e}")
+            return {}
