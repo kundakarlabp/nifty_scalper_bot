@@ -3432,27 +3432,25 @@ class OrderManager:
         self._monitor_thread = None
 
     def _monitor_orders(self) -> None:
-        """Background thread that polls order status."""
-
+        """Background thread that polls order status efficiently."""
+        self._logger.info("Order monitoring thread started")
+        
         while not self._stop_event.wait(self.POLL_INTERVAL_SEC):
-            pending = self._pending_orders()
-            for order in pending:
-                try:
-                    self._refresh_order(order.order_id)
-                except RateLimitError:
-                    # Back off hard on rate limits
-                    time.sleep(self.POLL_INTERVAL_SEC * 10)
-                    break
-                except Exception as exc:
-                    # CRITICAL FIX: Check for fatal broker errors (401/403)
-                    error_str = str(exc).lower()
-                    if "401" in error_str or "403" in error_str or "access denied" in error_str:
-                        self._logger.critical("FATAL: Broker session expired during monitoring. Stopping monitor.")
-                        self._stop_event.set()
-                        return
-                    
-                    self._logger.error("Order poll failed for %s: %s", order.order_id, exc)
-                    time.sleep(1.0)
+            try:
+                # [OPTIMIZATION] Use bulk reconcile instead of looping individual orders
+                # This reduces API calls from N to 1
+                self.reconcile_open_orders_with_broker()
+                
+            except Exception as exc:
+                # CRITICAL FIX: Check for fatal broker errors
+                error_str = str(exc).lower()
+                if "401" in error_str or "403" in error_str or "access denied" in error_str:
+                    self._logger.critical("FATAL: Broker session expired. Stopping monitor.")
+                    self._stop_event.set()
+                    return
+                
+                self._logger.error(f"Monitor loop error: {exc}")
+                time.sleep(1.0)
 
     def _handle_order_filled(self, order: OrderDetails) -> None:
         """Callback when order is filled."""
