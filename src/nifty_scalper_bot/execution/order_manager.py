@@ -141,25 +141,34 @@ class OrderType(Enum):
     STOP_LOSS_MARKET = "stop_loss_market"
 
 
-@dataclass(slots=True)
+@dataclass
 class OrderDetails:
+    # ------------------------------------------------------------
+    # 1. Non-Default Fields (MUST COME FIRST)
+    # ------------------------------------------------------------
     order_id: str
     symbol: str
-    side: str
-    order_type: OrderType
-    status: OrderStatus
+    side: str          # <--- Critical: No default value
     quantity: int
-    price: float
-    stop_loss: Optional[float] = None   
-    take_profit: Optional[float] = None
-    timestamp: datetime
+    order_type: OrderType
+    status: OrderStatus # <--- Critical: No default value
+
+    # ------------------------------------------------------------
+    # 2. Default Fields (MUST COME AFTER)
+    # ------------------------------------------------------------
+    price: Optional[float] = None
+    stop_loss: Optional[float] = None    # <--- Added with default
+    take_profit: Optional[float] = None  # <--- Added with default
+    trigger_price: Optional[float] = None
+    average_price: float = 0.0
     filled_quantity: int = 0
-    fill_price: float | None = None
-    rejection_reason: str | None = None
+    pending_quantity: int = 0
+    message: str = ""
+    timestamp: float = field(default_factory=time.time)
+    tag: str | None = None
     parent_order_id: str | None = None
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
-
 
 @dataclass(slots=True)
 class ExitIntent:
