@@ -36,6 +36,7 @@ from nifty_scalper_bot.data.persistent_state import (
 from nifty_scalper_bot.execution import exceptions as execution_exceptions
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
+from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.exit_router import plan_and_send_exit
 from nifty_scalper_bot.execution.margin_engine import (
     MarginDecision,
@@ -619,6 +620,7 @@ class OrderManager:
         self._data_hub: DataHub | None = None
         self._instrument_resolver = instrument_resolver
         self._resolver = instrument_resolver
+        self._indicator_engine = indicator_engine
         self._trailing: dict[
             str, tuple[TrailingStopController, Callable[[dict[str, Any]], None]]
         ] = {}
@@ -1012,17 +1014,34 @@ class OrderManager:
                 order_id, quantity=qty, price=price, variety=var
             )
 
-        controller = TrailingStopController(
-            symbol=symbol,
-            side="LONG" if side == "BUY" else "SHORT",
-            entry=entry_price,
-            sl_order_id=sl_order_id,
-            variety=variety,
-            spec=spec,
-            get_ltp=_get_ltp,
-            modify_order=_modify,
-            journal=self._trailing_journal,
-        )
+        # [FIX] Choose Adaptive Controller if engine is available
+        if self._indicator_engine:
+            controller = AdaptiveTrailingController(
+                symbol=symbol,
+                side="LONG" if side == "BUY" else "SHORT",
+                entry=entry_price,
+                sl_order_id=sl_order_id,
+                variety=variety,
+                spec=spec,
+                get_ltp=_get_ltp,
+                modify_order=_modify,
+                # Pass the ATR computer
+                get_atr=lambda s: self._indicator_engine.compute_atr(s),
+                journal=self._trailing_journal,
+            )
+        else:
+            # Fallback to static
+            controller = TrailingStopController(
+                symbol=symbol,
+                side="LONG" if side == "BUY" else "SHORT",
+                entry=entry_price,
+                sl_order_id=sl_order_id,
+                variety=variety,
+                spec=spec,
+                get_ltp=_get_ltp,
+                modify_order=_modify,
+                journal=self._trailing_journal,
+            )
 
         def _listener(tick: dict[str, Any]) -> None:
             controller.on_tick(tick)
