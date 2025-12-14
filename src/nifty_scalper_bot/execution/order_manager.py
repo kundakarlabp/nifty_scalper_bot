@@ -148,17 +148,13 @@ class OrderDetails:
     # ------------------------------------------------------------
     order_id: str
     symbol: str
-    side: str          # <--- Critical: No default value
+    side: str        
     quantity: int
     order_type: OrderType
-    status: OrderStatus # <--- Critical: No default value
-
-    # ------------------------------------------------------------
-    # 2. Default Fields (MUST COME AFTER)
-    # ------------------------------------------------------------
+    status: OrderStatus
     price: Optional[float] = None
-    stop_loss: Optional[float] = None    # <--- Added with default
-    take_profit: Optional[float] = None  # <--- Added with default
+    stop_loss: Optional[float] = None    
+    take_profit: Optional[float] = None  
     trigger_price: Optional[float] = None
     average_price: float = 0.0
     filled_quantity: int = 0
@@ -1390,126 +1386,79 @@ class OrderManager:
         product: str = "MIS",
         variety: str = "regular",
         check_risk: bool = True,
+        # [FIX] Added SL/TP args
+        stop_loss: float | None = None, 
+        take_profit: float | None = None,
     ) -> str | None:
-        """Place an order with smart retry logic and risk checks.
-
-        Returns:
-            Order ID if successful, None otherwise.
-        """
+        """Place order and automatically register bracket state if SL/TP provided."""
         start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
         
         # 1. Trading Switch Guard
         if not trading_switch.can_trade_new():
-            self._logger.warning(
-                "Order blocked: Trading switch is OFF",
-                extra={"symbol": normalized_symbol}
-            )
+            self._logger.warning("Order blocked: Trading switch is OFF", extra={"symbol": normalized_symbol})
             return None
 
         # 2. Risk Checks
         if check_risk and self._risk_manager:
-            # [FIX] OrderSignal is now correctly imported
             signal = OrderSignal(
-                symbol=normalized_symbol,
-                side=side,
-                quantity=quantity,
-                price=price or 0.0,
-                stop_loss=None,
-                take_profit=None
+                symbol=normalized_symbol, side=side, quantity=quantity,
+                price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
-            # Check live/shadow status dynamically
             live = self._is_live_enabled() and not self._is_shadow_mode()
             allowed, reason = self._risk_manager.check_order(signal, live_enabled=live)
-            
             if not allowed:
-                self._logger.warning(
-                    f"Risk Manager Blocked Order: {reason}",
-                    extra={"symbol": normalized_symbol, "reason": reason}
-                )
-                if self.on_order_rejected:
-                    self.on_order_rejected(normalized_symbol, reason)
+                self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
                 return None
 
-        # 3. Execution with Retry Logic
+        # 3. Execution with Retry
         exchange = self._resolve_exchange(normalized_symbol)
         tradingsymbol = self._resolve_tradingsymbol(normalized_symbol)
-        
         params = {
-            "variety": variety,
-            "exchange": exchange,
-            "tradingsymbol": tradingsymbol,
-            "transaction_type": side,
-            "quantity": quantity,
-            "product": product,
-            "order_type": order_type.value,
-            "validity": "DAY"
+            "variety": variety, "exchange": exchange, "tradingsymbol": tradingsymbol,
+            "transaction_type": side, "quantity": quantity, "product": product,
+            "order_type": order_type.value, "validity": "DAY"
         }
-        if price and price > 0:
-            params["price"] = price
-        if trigger_price and trigger_price > 0:
-            params["trigger_price"] = trigger_price
-        if tag:
-            params["tag"] = tag
+        if price and price > 0: params["price"] = price
+        if trigger_price and trigger_price > 0: params["trigger_price"] = trigger_price
+        if tag: params["tag"] = tag
 
-        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol} @ {price or 'MKT'}")
+        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol}")
         
-        # [OPTIMIZATION] Retry loop for transient network errors
-        attempts = 3
-        last_exception = None
-        
-        for attempt in range(1, attempts + 1):
+        # Retry Loop
+        for attempt in range(1, 4):
             try:
-                # Blocking call to broker
                 order_id = self._broker.place_order(**params)
-                
                 if order_id:
                     # 4. Register Order Locally
                     details = OrderDetails(
-                        order_id=order_id,
-                        symbol=normalized_symbol,
-                        quantity=quantity,
-                        order_type=order_type,
-                        status=OrderStatus.PENDING,
-                        price=price,
-                        stop_loss=signal.stop_loss if signal else None, 
-                        take_profit=signal.take_profit if signal else None,
-                        trigger_price=trigger_price,
-                        tag=tag
+                        order_id=order_id, symbol=normalized_symbol, side=side,
+                        order_type=order_type, quantity=quantity, price=float(price or 0.0),
+                        status=OrderStatus.PENDING, timestamp=datetime.now(timezone.utc),
+                        stop_loss=stop_loss, take_profit=take_profit # [FIX] Store intent
                     )
                     self._register_order(details)
-                    
-                    # Metrics
-                    duration = time.monotonic() - start_time
-                    self._m_order_latency.observe(duration)
-                    self._m_orders_placed.labels(side=side, type=order_type.value, status="submitted").inc()
-                    
-                    self._logger.info(
-                        f"✅ Order Placed: {order_id} (Latency: {duration*1000:.2f}ms)",
-                        extra={"order_id": order_id}
-                    )
-                    return order_id
-                    
-            except Exception as e:
-                last_exception = e
-                # Only retry network-like errors (timeouts, 503s), not logic errors
-                error_str = str(e).lower()
-                if "network" in error_str or "timeout" in error_str or "503" in error_str:
-                    self._logger.warning(
-                        f"Order retry {attempt}/{attempts}: {e}",
-                        extra={"symbol": normalized_symbol}
-                    )
-                    time.sleep(0.1 * attempt) # Exponential backoff
-                    continue
-                else:
-                    # Logic error (e.g. Insufficient Funds) - Break immediately
-                    break
 
-        self._logger.error(
-            f"Broker execution failed after retries: {last_exception}", 
-            exc_info=True,
-            extra={"symbol": normalized_symbol}
-        )
+                    # 5. [CRITICAL FIX] Register Bracket State
+                    if stop_loss or take_profit:
+                        exit_side = "SELL" if side == "BUY" else "BUY"
+                        state = BracketState(
+                            entry_id=order_id, symbol=symbol, side=side, exit_side=exit_side,
+                            total_quantity=quantity, entry_price=float(price or 0.0),
+                            product=product, tag=tag, stop_order_id="", 
+                            stop_price=float(stop_loss) if stop_loss else 0.0,
+                            stop_order_type=OrderType.STOP_LOSS_MARKET,
+                            tp_primary_price=float(take_profit) if take_profit else None,
+                            tp_primary_qty=quantity if take_profit else 0
+                        )
+                        self._register_bracket_state(state)
+                        self._logger.info(f"🛡️ Auto-bracket registered for simple order {order_id}")
+
+                    return order_id
+            except Exception as e:
+                self._logger.warning(f"Retry {attempt}/3 failed: {e}")
+                time.sleep(0.2 * attempt)
+        
         return None
 
     def guard_existing_position(
