@@ -2983,11 +2983,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     paper_initial = bool((not live_possible) or paper_toggle_env or shadow_mode_env)
     broker_backend = robust_provider if not paper_initial else paper_engine
 
+    # 9. Initialize Execution
+    # [FIX] We inject indicator_engine here to enable Volatility-Adaptive Trailing
     order_manager = OrderManager(
-        broker_client=cast(Any, broker_backend),
+        broker_client=broker_client,
         position_manager=position_manager,
         rate_limiter=rate_limiter,
         instrument_resolver=instrument_resolver,
+        indicator_engine=indicator_engine,  # <--- THIS IS THE CRITICAL ADDITION
     )
     order_manager.set_market_data_manager(market_data_manager)
     order_manager.attach_data_hub(data_hub)
