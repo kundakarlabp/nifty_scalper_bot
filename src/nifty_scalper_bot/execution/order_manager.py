@@ -7296,7 +7296,7 @@ class OrderManager:
     def reconcile_open_orders_with_broker(self) -> None:
         """Sync local order state with broker and trigger brackets on fill."""
         
-        # 1. Identify local orders that need checking
+        # 1. Identify local orders that need checking to minimize work
         with self._lock:
             pending_ids = {
                 oid for oid, order in self._orders.items() 
@@ -7329,7 +7329,7 @@ class OrderManager:
             if not response:
                 return
 
-            # Normalize response to list of dicts
+            # Normalize response to list of dicts to handle various broker formats
             broker_orders = []
             if isinstance(response, Mapping):
                 broker_orders = [response]
@@ -7353,14 +7353,14 @@ class OrderManager:
                         
                     remote = broker_map.get(order_id)
                     # If remote missing, order might be closed/archived. 
-                    # We can't assume anything yet.
+                    # We can't assume anything yet unless we trust the broker returns ALL orders.
                     if not remote:
                         continue
 
                     # Capture old status to detect transitions
                     old_status = local_order.status
                     
-                    # Update Local State
+                    # Update Local State safely
                     raw_status = str(remote.get('status', '')).upper()
                     local_order.status = self._parse_status(raw_status)
                     
@@ -7368,19 +7368,20 @@ class OrderManager:
                     if filled is not None:
                         local_order.filled_quantity = filled
                         
-                    avg_price = self._coerce_float(remote.get('average_price'))
+                    avg_price_raw = remote.get('average_price') or remote.get('averagePrice')
+                    avg_price = self._coerce_float(avg_price_raw)
                     if avg_price is not None:
                         local_order.average_price = avg_price
                         
-                    msg = remote.get('status_message')
+                    msg = remote.get('status_message') or remote.get('message')
                     if msg:
                         local_order.message = str(msg)
 
-                    # 5. TRIGGER LOGIC
+                    # 5. TRIGGER LOGIC (The Brain)
                     # If order JUST finished, trigger the Bracket Handler
                     if local_order.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
-                        # If it wasn't filled before, log it
-                        if old_status != OrderStatus.FILLED:
+                        # Log significant state changes
+                        if old_status != local_order.status:
                             self._logger.info(
                                 f"✅ Order {order_id} update: {local_order.status.name} "
                                 f"({local_order.filled_quantity} qty @ {local_order.average_price})"
