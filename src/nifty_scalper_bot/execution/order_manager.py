@@ -595,6 +595,7 @@ class OrderManager:
         rate_limiter: RateLimiter,
         instrument_resolver: Any | None = None,
         history_path: str | Path | None = None,
+        indicator_engine: Any | None = None,
     ):
         """Initialize with broker client and position manager."""
 
