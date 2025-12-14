@@ -1052,6 +1052,60 @@ class OrderManager:
         controller.on_tick(None)
         return entry_order_id
 
+    def attach_dynamic_tp(
+        self,
+        *,
+        tp_order_id: str,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        initial_price: float,
+        parent_order_id: str,
+    ) -> None:
+        """Attach a dynamic Take Profit controller to an active target order."""
+        if not self._indicator_engine:
+            return  # Cannot optimize without indicators
+
+        # Lazy import to avoid circular dependency
+        try:
+            from nifty_scalper_bot.execution.dynamic_tp import DynamicTPController
+        except ImportError:
+            self._logger.warning("DynamicTP module not found. Skipping TP expansion.")
+            return
+
+        def _modify(order_id: str, price: float) -> bool:
+            return self.modify_order(order_id, new_price=price)
+
+        try:
+            controller = DynamicTPController(
+                tp_order_id=tp_order_id,
+                symbol=symbol,
+                side=side,
+                initial_price=initial_price,
+                get_indicators=lambda s: self._indicator_engine.get_latest(s),
+                modify_order=_modify,
+            )
+            
+            # Store controller (using a new dict similar to _trailing)
+            if not hasattr(self, "_tp_controllers"):
+                self._tp_controllers = {}
+            self._tp_controllers[tp_order_id] = controller
+            
+            # Subscribe to ticks
+            self._market_data.subscribe(symbol, controller.on_tick)
+            self._logger.info(f"🚀 Dynamic TP attached to {tp_order_id}")
+            
+        except Exception as e:
+            self._logger.error(f"Failed to attach Dynamic TP: {e}")
+
+    def stop_dynamic_tp(self, tp_order_id: str) -> None:
+        """Stop and remove a dynamic TP controller."""
+        if not hasattr(self, "_tp_controllers"):
+            return
+            
+        controller = self._tp_controllers.pop(tp_order_id, None)
+        if controller:
+            self._market_data.unsubscribe(controller.symbol, controller.on_tick)
+
     def stop_trailing(self, entry_order_id: str) -> bool:
         """Stop and remove a trailing stop controller if it exists."""
 
@@ -2891,30 +2945,16 @@ class OrderManager:
         _previous_status: OrderStatus,
         _payload: Mapping[str, Any] | None,
     ) -> None:
-        """Process bracket state transitions for updated order.
-
-        Args:
-            order: Updated order snapshot from the broker.
-            previous_status: Status before the latest update.
-            payload: Raw broker payload for additional context.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Process bracket state transitions for updated order."""
 
         # -------------------------------------------------------------------------
-        # 1. [FIX] LAZY INITIALIZATION (Auto-Bracket for Simple Orders)
+        # 1. LAZY INITIALIZATION (Auto-Bracket for Simple Orders)
         # -------------------------------------------------------------------------
         entry_id = self._bracket_index.get(order.order_id)
-        
-        # If not indexed, check if this IS the entry order for a known bracket
         if not entry_id and order.order_id in self._brackets:
             entry_id = order.order_id
 
-        # If still unknown, check if this is a filled "simple" entry that needs a bracket
+        # If this is a filled entry with SL/TP intent but no bracket orders yet
         if not entry_id and order.status == OrderStatus.FILLED and (order.stop_loss or order.take_profit):
             self._logger.info(
                 f"🛡️ Auto-initializing bracket for simple order {order.order_id}",
@@ -2923,15 +2963,14 @@ class OrderManager:
             
             exit_side: Literal["BUY", "SELL"] = "SELL" if order.side == "BUY" else "BUY"
             
-            # Create state on the fly
             state = BracketState(
                 entry_id=order.order_id,
                 symbol=order.symbol,
                 side=cast(Literal["BUY", "SELL"], order.side),
                 exit_side=exit_side,
-                total_quantity=order.filled_quantity, # Use actual filled qty
+                total_quantity=order.filled_quantity,
                 entry_price=order.fill_price or order.price,
-                product="MIS", # Default to MIS for safety if unknown
+                product="MIS",
                 tag=order.tag,
                 stop_order_id="",
                 stop_price=float(order.stop_loss) if order.stop_loss else 0.0,
@@ -2940,47 +2979,57 @@ class OrderManager:
                 tp_primary_qty=order.filled_quantity if order.take_profit else 0
             )
             
-            # Register it
             self._register_bracket_state(state)
             entry_id = order.order_id
             
-            # Place Stop Loss
+            # --- A. Place Stop Loss ---
             if state.stop_price > 0:
                 try:
                     stop = self._place_single_order(
-                        symbol=state.symbol,
-                        side=state.exit_side,
-                        quantity=state.total_quantity,
-                        order_type=OrderType.STOP_LOSS_MARKET,
-                        price=state.stop_price,
-                        product=state.product,
-                        tag="auto-stop",
-                        parent_order_id=entry_id
+                        symbol=state.symbol, side=state.exit_side, quantity=state.total_quantity,
+                        order_type=OrderType.STOP_LOSS_MARKET, price=state.stop_price,
+                        product=state.product, tag="auto-stop", parent_order_id=entry_id
                     )
                     state.stop_order_id = stop.order_id
                     self._bracket_index[stop.order_id] = entry_id
                     self._update_entry_children(entry_id, add=[stop.order_id])
+                    
+                    # [UPGRADE] Attach Adaptive Trailing to Auto-Stop
+                    if self._indicator_engine:
+                        self.attach_trailing_stop(
+                            entry_order_id=entry_id, sl_order_id=stop.order_id,
+                            symbol=state.symbol, side=state.side,
+                            entry_price=state.entry_price,
+                            spec=TrailingSpec(trail_by=10.0, step=2.0)
+                        )
                 except Exception as e:
-                    self._logger.error(f"Failed to place auto-stop: {e}")
+                    self._logger.error(
+                        "Failed to place auto-stop: %s", e, 
+                        extra={"event": "auto_bracket_stop_failed", "entry_id": entry_id}
+                    )
 
-            # Place Take Profit
+            # --- B. Place Take Profit ---
             if state.tp_primary_price and state.tp_primary_price > 0:
                 try:
                     tp = self._place_single_order(
-                        symbol=state.symbol,
-                        side=state.exit_side,
-                        quantity=state.total_quantity,
-                        order_type=OrderType.LIMIT,
-                        price=state.tp_primary_price,
-                        product=state.product,
-                        tag="auto-target",
-                        parent_order_id=entry_id
+                        symbol=state.symbol, side=state.exit_side, quantity=state.total_quantity,
+                        order_type=OrderType.LIMIT, price=state.tp_primary_price,
+                        product=state.product, tag="auto-target", parent_order_id=entry_id
                     )
                     state.tp_primary_id = tp.order_id
                     self._bracket_index[tp.order_id] = entry_id
                     self._update_entry_children(entry_id, add=[tp.order_id])
+                    
+                    # [UPGRADE] Attach Dynamic TP Expansion
+                    self.attach_dynamic_tp(
+                        tp_order_id=tp.order_id, symbol=state.symbol, side=state.exit_side,
+                        initial_price=state.tp_primary_price, parent_order_id=entry_id
+                    )
                 except Exception as e:
-                    self._logger.error(f"Failed to place auto-target: {e}")
+                    self._logger.error(
+                        "Failed to place auto-target: %s", e,
+                        extra={"event": "auto_bracket_tp_failed", "entry_id": entry_id}
+                    )
             
             self._persist_bracket_state(state)
             return
@@ -3005,7 +3054,7 @@ class OrderManager:
             },
         )
         
-        # Delegate to external bracket manager if attached
+        # Delegate to external manager if present
         if self._bracket_manager is not None:
             try:
                 self._bracket_manager.handle_bracket_update(
@@ -3024,9 +3073,12 @@ class OrderManager:
                     },
                     exc_info=exc,
                 )
-        
-        # Internal State Machine Logic
+
+        # -------------------------------------------------------------------------
+        # 3. STATE MACHINE (Wrapped in Original Try/Except)
+        # -------------------------------------------------------------------------
         try:
+            # Case 1: STOP LOSS UPDATE
             if order.order_id == state.stop_order_id:
                 state.stop_filled = order.filled_quantity
                 if order.status == OrderStatus.FILLED:
@@ -3039,6 +3091,9 @@ class OrderManager:
                         },
                     )
                     self._cancel_bracket_targets(state)
+                    # [FIX] Clean up dynamic controllers
+                    if state.tp_primary_id: self.stop_dynamic_tp(state.tp_primary_id)
+                    if state.tp_secondary_id: self.stop_dynamic_tp(state.tp_secondary_id)
                     self._cleanup_bracket_state(entry_id)
                 elif order.status == OrderStatus.PARTIALLY_FILLED:
                     self._logger.info(
@@ -3051,6 +3106,8 @@ class OrderManager:
                         },
                     )
                     self._rebalance_targets(state)
+
+            # Case 2: TP1 UPDATE
             elif state.tp_primary_id and order.order_id == state.tp_primary_id:
                 state.tp_primary_filled = order.filled_quantity
                 remaining = state.remaining_position()
@@ -3064,10 +3121,14 @@ class OrderManager:
                             "filled_quantity": order.filled_quantity,
                         },
                     )
+                    # [FIX] Stop Dynamic TP for this leg
+                    self.stop_dynamic_tp(order.order_id)
+                    
                     self._bracket_index.pop(order.order_id, None)
                     self._update_entry_children(state.entry_id, remove=[order.order_id])
                     state.tp_primary_id = None
                     state.tp_primary_qty = order.filled_quantity
+                    
                     if remaining <= 0:
                         self._cancel_stop_order(state)
                         self._cleanup_bracket_state(entry_id)
@@ -3086,6 +3147,8 @@ class OrderManager:
                         },
                     )
                     self._resize_stop_order(state, remaining)
+
+            # Case 3: TP2 UPDATE
             elif state.tp_secondary_id and order.order_id == state.tp_secondary_id:
                 state.tp_secondary_filled = order.filled_quantity
                 remaining = state.remaining_position()
@@ -3099,6 +3162,9 @@ class OrderManager:
                             "filled_quantity": order.filled_quantity,
                         },
                     )
+                    # [FIX] Stop Dynamic TP for this leg
+                    self.stop_dynamic_tp(order.order_id)
+                    
                     self._cancel_stop_order(state)
                     self._bracket_index.pop(order.order_id, None)
                     self._update_entry_children(state.entry_id, remove=[order.order_id])
@@ -3116,12 +3182,16 @@ class OrderManager:
                         },
                     )
                     self._resize_stop_order(state, remaining)
+
+        # -------------------------------------------------------------------------
+        # 4. ORIGINAL ERROR HANDLING (RESTORED)
+        # -------------------------------------------------------------------------
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _handle_bracket_update: %s",
                 exc,
                 extra={"event": "handle_bracket_update_failed", "entry_id": entry_id},
-            )    
+            )  
 
     def place_atomic_entry(
         self,
