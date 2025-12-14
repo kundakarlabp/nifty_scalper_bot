@@ -2885,13 +2885,88 @@ class OrderManager:
             None.
         """
 
+        # [FIX] Lazy Initialization: Check if this order needs a bracket but doesn't have one yet
         entry_id = self._bracket_index.get(order.order_id)
+        if not entry_id and order.order_id in self._brackets:
+            # This happens if we registered the bracket but didn't index the entry ID yet
+            entry_id = order.order_id
+        
+        # [FIX] Auto-Bracket Trigger for simple orders
+        # If this is a filled entry order that has SL/TP intent but no active bracket orders
+        if not entry_id and (order.stop_loss or order.take_profit) and order.status == OrderStatus.FILLED:
+            self._logger.info(f"🛡️ Auto-initializing bracket for simple order {order.order_id}")
+            
+            exit_side: Literal["BUY", "SELL"] = "SELL" if order.side == "BUY" else "BUY"
+            
+            # Create state on the fly
+            state = BracketState(
+                entry_id=order.order_id,
+                symbol=order.symbol,
+                side=cast(Literal["BUY", "SELL"], order.side),
+                exit_side=exit_side,
+                total_quantity=order.filled_quantity, # Use actual filled qty
+                entry_price=order.fill_price or order.price,
+                product="MIS", # Default to MIS for safety if unknown
+                tag=order.tag,
+                stop_order_id="",
+                stop_price=order.stop_loss or 0.0,
+                stop_order_type=OrderType.STOP_LOSS_MARKET,
+                tp_primary_price=order.take_profit,
+                tp_primary_qty=order.filled_quantity if order.take_profit else 0
+            )
+            
+            # Register it
+            self._register_bracket_state(state)
+            entry_id = order.order_id
+            
+            # Place the bracket orders immediately
+            if state.stop_price > 0:
+                try:
+                    stop = self._place_single_order(
+                        symbol=state.symbol,
+                        side=state.exit_side,
+                        quantity=state.total_quantity,
+                        order_type=OrderType.STOP_LOSS_MARKET,
+                        price=state.stop_price,
+                        product=state.product,
+                        tag="auto-stop",
+                        parent_order_id=entry_id
+                    )
+                    state.stop_order_id = stop.order_id
+                    self._bracket_index[stop.order_id] = entry_id
+                    self._update_entry_children(entry_id, add=[stop.order_id])
+                except Exception as e:
+                    self._logger.error(f"Failed to place auto-stop: {e}")
+
+            if state.tp_primary_price and state.tp_primary_price > 0:
+                try:
+                    tp = self._place_single_order(
+                        symbol=state.symbol,
+                        side=state.exit_side,
+                        quantity=state.total_quantity,
+                        order_type=OrderType.LIMIT,
+                        price=state.tp_primary_price,
+                        product=state.product,
+                        tag="auto-target",
+                        parent_order_id=entry_id
+                    )
+                    state.tp_primary_id = tp.order_id
+                    self._bracket_index[tp.order_id] = entry_id
+                    self._update_entry_children(entry_id, add=[tp.order_id])
+                except Exception as e:
+                    self._logger.error(f"Failed to place auto-target: {e}")
+            
+            self._persist_bracket_state(state)
+            return
+
+        # --- Normal Flow starts here ---
         if not entry_id:
             return
         state = self._brackets.get(entry_id)
         if state is None:
             self._bracket_index.pop(order.order_id, None)
             return
+            
         self._logger.debug(
             "Entered _handle_bracket_update",
             extra={
@@ -2901,6 +2976,8 @@ class OrderManager:
                 "status": order.status.value,
             },
         )
+        
+        # Delegate to external manager if exists
         if self._bracket_manager is not None:
             try:
                 self._bracket_manager.handle_bracket_update(
@@ -2919,6 +2996,8 @@ class OrderManager:
                     },
                     exc_info=exc,
                 )
+        
+        # State Machine Logic
         try:
             if order.order_id == state.stop_order_id:
                 state.stop_filled = order.filled_quantity
