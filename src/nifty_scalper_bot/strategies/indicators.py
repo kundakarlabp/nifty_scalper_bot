@@ -965,3 +965,63 @@ class IndicatorEngine:
     ) -> None:
         symbol_cache = self._cache.setdefault(symbol, {})
         symbol_cache[key] = (value, timestamp)
+
+    def compute_atr(self, symbol: str, period: int = 14) -> object | None:
+        """Compute ATR for volatility-adaptive trailing."""
+        # Lazy import to avoid circular dependency
+        from nifty_scalper_bot.execution.adaptive_trailing import ATRSnapshot
+        
+        hist = self._history.get(symbol)
+        if not hist or len(hist) < max(period + 5, 25):
+            return None
+            
+        try:
+            # Extract OHLC
+            closes = np.array([float(h.get("close", 0)) for h in hist[-period-20:]])
+            highs = np.array([float(h.get("high", 0)) for h in hist[-period-20:]])
+            lows = np.array([float(h.get("low", 0)) for h in hist[-period-20:]])
+            
+            if len(closes) < period:
+                return None
+
+            # Calculate True Range (TR)
+            # TR = Max(High-Low, Abs(High-PrevClose), Abs(Low-PrevClose))
+            tr_values = []
+            for i in range(1, len(closes)):
+                tr = max(
+                    highs[i] - lows[i],
+                    abs(highs[i] - closes[i-1]),
+                    abs(lows[i] - closes[i-1]),
+                )
+                tr_values.append(max(tr, 0.01))
+            
+            if not tr_values:
+                return None
+                
+            tr_array = np.array(tr_values)
+            
+            # Current ATR (Simple Moving Average of TR for robustness)
+            current_atr = float(np.mean(tr_array[-period:]))
+            
+            # Historical ATR (20-bar average of ATR itself)
+            # This serves as the "baseline" volatility
+            atr_history = []
+            for i in range(len(tr_array) - period, 0, -1):
+                window = tr_array[i : i + period]
+                if len(window) == period:
+                    atr_history.append(np.mean(window))
+                if len(atr_history) >= 20:
+                    break
+            
+            avg_atr_20 = float(np.mean(atr_history)) if atr_history else current_atr
+            atr_ratio = current_atr / avg_atr_20 if avg_atr_20 > 0.01 else 1.0
+            
+            return ATRSnapshot(
+                current_atr=current_atr,
+                avg_atr_20=avg_atr_20,
+                atr_ratio=atr_ratio
+            )
+            
+        except Exception as e:
+            self._logger.error(f"ATR Compute Failed: {e}")
+            return None
