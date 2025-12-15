@@ -168,8 +168,9 @@ class OrderDetails:
     client_order_id: str | None = None
 
     @property
-    def fill_price(self) -> float:
-        return self.average_price
+    def fill_price(self) -> float | None:
+        """Return average_price if valid (>0), else None to signal no fill."""
+        return self.average_price if self.average_price > 0 else None
 
 @dataclass(slots=True)
 class ExitIntent:
@@ -1488,15 +1489,6 @@ class OrderManager:
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
 
-    # [FIX] Add Missing Helper Methods to prevent crashes
-    def _resolve_exchange(self, symbol: str) -> str:
-        if ":" in symbol: return symbol.split(":")[0]
-        return "NFO"
-
-    def _resolve_tradingsymbol(self, symbol: str) -> str:
-        if ":" in symbol: return symbol.split(":")[1]
-        return symbol
-
     def place_order(
         self,
         symbol: str,
@@ -1608,15 +1600,20 @@ class OrderManager:
             extra={"event": "order_sending", "symbol": normalized_symbol}
         )
         
+       # ---------------------------------------------------------------------
+        # 5. EXECUTION LOOP (Fail-Fast & Idempotent)
         # ---------------------------------------------------------------------
-        # 5. EXECUTION LOOP (Fail-Fast)
-        # ---------------------------------------------------------------------
+        import uuid # Local import for ID generation
+        # Generate ID ONCE so retries use the same ID (preventing duplicates)
+        unique_client_id = f"bot_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
         for attempt in range(1, 4):
             try:
                 response = self._broker.place_order(
                     symbol=normalized_symbol, side=side, quantity=quantity, product=product,
                     order_type=final_order_type, price=price, trigger_price=trigger_price,
-                    tag=tag, variety=variety
+                    tag=tag, variety=variety,
+                    client_order_id=unique_client_id  # <--- CRITICAL FIX
                 )
                 
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
