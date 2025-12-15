@@ -1520,7 +1520,10 @@ class OrderManager:
         from nifty_scalper_bot.risk import OrderSignal 
 
         start_time = time.monotonic()
-        normalized_symbol = self._resolver.resolve_token(symbol) if self._resolver else symbol.strip().upper()
+        
+        # [FIX] CRITICAL CHANGE: Removed .resolve_token() call.
+        # We use the text symbol directly (e.g. "NFO:NIFTY...") which implies exchange.
+        normalized_symbol = symbol.strip().upper()
         
         # ---------------------------------------------------------------------
         # 1. TRADING SWITCH GUARD (Robust)
@@ -1569,7 +1572,6 @@ class OrderManager:
         for attempt in range(1, 4):
             try:
                 # [FIX] Simplified Call - Let ZerodhaClient handle the parsing
-                # We pass the raw symbol so the client can split it (NFO:...)
                 response = self._broker.place_order(
                     symbol=normalized_symbol,
                     side=side,
@@ -1625,7 +1627,6 @@ class OrderManager:
                 
         self._logger.error("❌ Order placement failed after retries.")
         return None
-
     def guard_existing_position(
         self,
         *,
