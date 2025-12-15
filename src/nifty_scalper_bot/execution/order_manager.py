@@ -5970,6 +5970,16 @@ class OrderManager:
             payload["tradingsymbol"] = tradingsymbol_hint
         payload["transaction_type"] = side
 
+        # [FIX] Map Internal Enums to Zerodha Strings (SL-M, SL)
+        # This fixes "Invalid order_type" errors globally.
+        type_str = str(order_type_value).upper()
+        zerodha_map = {
+            "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
+            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"
+        }
+        final_type = zerodha_map.get(type_str, type_str)
+        payload["order_type"] = final_type
+
         normalized_type = str(order_type_value).lower()
         if price is not None:
             price_value = float(price)
@@ -6049,7 +6059,8 @@ class OrderManager:
             except Exception:  # pragma: no cover - optional metrics
                 self._logger.debug("broker_order_attempt_metric_failed", exc_info=True)
             try:
-                response = self._call_broker(self._broker.place_order, payload)
+                # [FIX] Unpack payload so Broker Client receives named arguments
+                response = self._call_broker(self._broker.place_order, **payload)
             except RateLimitError as exc:
                 last_error = exc
                 break
@@ -7571,6 +7582,8 @@ class OrderManager:
 
         except Exception as e:
             self._logger.error(f"Reconcile failed: {e}", exc_info=True)
+        # [FIX] Add this line at the end of the method
+        self._reconcile_positions()
 
     def _trigger_bracket_order(self, order: OrderDetails) -> None:
         """Place Stop Loss and Target orders after entry fill."""
@@ -8015,6 +8028,61 @@ class OrderManager:
                 self._client_order_index.pop(str(order.client_order_id), None)
         self._publish_order_to_hub(order)
         self._sync_positions_to_hub()
+
+    def _reconcile_positions(self) -> None:
+        """
+        CRITICAL SYNC: Force local state to match Broker's Net Positions.
+        Auto-resolves ghosts and adopts orphans.
+        """
+        try:
+            # 1. Get Truth from Broker
+            if not hasattr(self._broker, "get_positions"): return
+            broker_pos_list = self._broker.get_positions() or []
+            
+            # Filter for ACTIVE positions only (qty != 0)
+            broker_map = {}
+            for p in broker_pos_list:
+                sym = p.get("tradingsymbol") or p.get("symbol")
+                qty = int(p.get("quantity") or p.get("net_quantity") or 0)
+                if sym and qty != 0:
+                    broker_map[DataHub.normalize(sym)] = {
+                        "qty": qty, "price": float(p.get("average_price") or 0.0), "raw_symbol": sym
+                    }
+
+            # 2. Iterate Broker Positions to find Orphans (Broker has it, Local doesn't)
+            for norm_sym, data in broker_map.items():
+                local_pos = self._positions.get_position(norm_sym)
+                local_qty = int(local_pos.quantity) if local_pos else 0
+                
+                # CASE: Orphan Adoption (Broker has it, we don't)
+                if local_qty == 0:
+                    self._logger.info(
+                        f"✅ Adopting Orphan Position: {data['raw_symbol']} (Qty: {data['qty']})",
+                        extra={"event": "orphan_position_adopted"}
+                    )
+                    # Create a synthetic Filled Order to inject into PositionManager
+                    fake_order_id = f"sync_{int(time.time())}_{abs(data['qty'])}"
+                    side = "BUY" if data['qty'] > 0 else "SELL"
+                    
+                    details = OrderDetails(
+                        order_id=fake_order_id,
+                        symbol=data['raw_symbol'],
+                        side=side,
+                        quantity=abs(data['qty']),
+                        order_type=OrderType.MARKET,
+                        status=OrderStatus.FILLED,
+                        timestamp=datetime.now(timezone.utc),
+                        price=data['price'],
+                        average_price=data['price'],
+                        filled_quantity=abs(data['qty']),
+                        tag="sync_adjustment"
+                    )
+                    self._register_order(details)
+                    # Force position update immediately
+                    self._positions.update_from_order(details)
+
+        except Exception as e:
+            self._logger.error(f"Reconciliation Error: {e}", exc_info=True)
 
 
 __all__ = [
