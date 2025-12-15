@@ -1515,6 +1515,10 @@ class OrderManager:
 
         start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
+        # [FIX] Generate Deterministic ID for Idempotency
+        # If this function is called again for the same logic, we might want to reuse it,
+        # but for now, ensuring one unique ID per function call is enough to stop retries from duplicating.
+        unique_client_id = f"bot_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         
         # ---------------------------------------------------------------------
         # 1. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
@@ -1600,7 +1604,7 @@ class OrderManager:
             extra={"event": "order_sending", "symbol": normalized_symbol}
         )
         
-       # ---------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 5. EXECUTION LOOP (Fail-Fast & Idempotent)
         # ---------------------------------------------------------------------
         import uuid # Local import for ID generation
