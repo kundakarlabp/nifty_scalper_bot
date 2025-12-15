@@ -7337,6 +7337,10 @@ class OrderManager:
             "tp_secondary_filled": state.tp_secondary_filled,
             "partial_fraction": state.partial_fraction,
             "second_target_price": state.second_target_price,
+            # [FIX] Persist Trailing Spec
+            "trailing_spec": (
+                asdict(state.trailing_spec) if state.trailing_spec else None
+            ),
         }
         return payload
 
@@ -7507,7 +7511,12 @@ class OrderManager:
                 if tp_secondary_filled_raw is not None
                 else 0
             ),
-            trailing_spec=None,
+            # [FIX] Restore Trailing Spec from Dictionary
+            trailing_spec=(
+                TrailingSpec(**payload["trailing_spec"])
+                if payload.get("trailing_spec")
+                else None
+            ),
             partial_fraction=(
                 float(partial_fraction_raw) if partial_fraction_raw is not None else 0.0
             ),
@@ -7750,8 +7759,11 @@ class OrderManager:
 
         except Exception as e:
             self._logger.error(f"Reconcile failed: {e}", exc_info=True)
-        # [FIX] Add this line at the end of the method
+        # [Existing code]
         self._reconcile_positions()
+        
+        # [NEW] Add this line:
+        self._resurrect_trailing_stops()
 
     def _trigger_bracket_order(self, order: OrderDetails) -> None:
         """Place Stop Loss and Target orders after entry fill."""
@@ -8196,6 +8208,38 @@ class OrderManager:
                 self._client_order_index.pop(str(order.client_order_id), None)
         self._publish_order_to_hub(order)
         self._sync_positions_to_hub()
+
+    def _resurrect_trailing_stops(self) -> None:
+        """
+        CRITICAL: Re-attach trailing controllers to open brackets after restart.
+        Without this, TSL becomes a static SL after any reboot.
+        """
+        self._logger.info("♻️ Resurrecting Trailing Stops...")
+        
+        with self._lock:
+            # Iterate all active brackets
+            for entry_id, state in self._brackets.items():
+                # Skip if already running or closed
+                if entry_id in self._trailing or state.remaining_position() <= 0:
+                    continue
+                
+                # Check if this bracket HAD a trailing spec
+                if not state.trailing_spec:
+                    continue
+
+                self._logger.info(f"⚡ Re-attaching TSL for {state.symbol} (Order {entry_id})")
+                
+                try:
+                    self.attach_trailing_stop(
+                        entry_order_id=state.entry_id,
+                        sl_order_id=state.stop_order_id,
+                        symbol=state.symbol,
+                        side=state.side,
+                        entry_price=state.entry_price,
+                        spec=state.trailing_spec
+                    )
+                except Exception as e:
+                    self._logger.error(f"Failed to resurrect TSL for {entry_id}: {e}")
 
     def _reconcile_positions(self) -> None:
         """
