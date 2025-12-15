@@ -478,7 +478,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         params["variety"] = variety
         
         # [FIX] Automatic Symbol Resolution
-        # If 'symbol' is passed (e.g., "NFO:NIFTY..."), split it for Kite
+        # Handles "NFO:NIFTY..." parsing internally so OrderManager doesn't need helpers
         if "symbol" in params:
             raw_sym = params.pop("symbol")
             if ":" in raw_sym:
@@ -486,18 +486,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 params["exchange"] = exch
                 params["tradingsymbol"] = sym
             else:
-                # Fallback: Assume NFO if not specified, or let Kite validate
                 params["exchange"] = params.get("exchange", "NFO")
                 params["tradingsymbol"] = raw_sym
 
-        # [FIX] Map 'side' to Kite Transaction Type
+        # [FIX] Use string literals "BUY"/"SELL" instead of self.kite constants
+        # This prevents AttributeError: 'ZerodhaKiteClient' object has no attribute 'kite'
         if "side" in params:
             side = params.pop("side").upper()
-            params["transaction_type"] = (
-                self.kite.TRANSACTION_TYPE_BUY 
-                if side == "BUY" 
-                else self.kite.TRANSACTION_TYPE_SELL
-            )
+            params["transaction_type"] = "BUY" if side == "BUY" else "SELL"
 
         # 2. Generate Safe Unique Tag (Idempotency Key)
         unique_id = uuid.uuid4().hex[:8]
@@ -506,10 +502,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
         final_tag = f"{safe_prefix}_{unique_id}"
         params["tag"] = final_tag
 
-        self._acquire_bucket(self._ORDER_BUCKET)
+        # Rate Limiting (Safe Check)
+        if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
+            self._acquire_bucket(self._ORDER_BUCKET)
         
         try:
-            # 3. Attempt Placement via Raw API (Access to full response)
+            # 3. Attempt Placement via Raw API
+            # This uses the underlying HTTP client, bypassing any 'kite' attribute issues
             response = self._ensure_json(
                 self._make_request(
                     "POST",
@@ -547,7 +546,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             except Exception as e:
                 self._logger.error(f"Failed to scan for ghost order: {e}")
             
-            # If not found, re-raise (It really failed)
             from nifty_scalper_bot.utils.errors import OrderPlacementError
             raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {final_tag}")
 
