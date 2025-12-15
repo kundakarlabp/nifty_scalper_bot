@@ -1513,29 +1513,72 @@ class OrderManager:
         take_profit: float | None = None,
     ) -> str | None:
         """
-        Place order with full safety checks, auto-retry, and bracket registration.
+        Execute order with Safe Trading Window (09:30-15:15), Risk Gating, and Auto-Recovery.
         """
         import time
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, time as dtime
+        from zoneinfo import ZoneInfo
         from nifty_scalper_bot.core.trading_switch import trading_switch
         from nifty_scalper_bot.risk import OrderSignal 
 
+        start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
         
-        # 1. Trading Switch Guard
+        # ---------------------------------------------------------------------
+        # 1. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
+        # ---------------------------------------------------------------------
+        # Only enforce for 'regular' orders (Allow AMOs if needed later)
+        if variety == "regular":
+            try:
+                ist = ZoneInfo("Asia/Kolkata")
+                now = datetime.now(ist).time()
+                
+                # DEFINED SAFE HOURS
+                safe_start = dtime(9, 30)  # Skip first 15 mins (Volatility)
+                safe_end = dtime(15, 15)   # Stop 15 mins before close (EOD Risk)
+                
+                # Hard Market Limits (Absolute Guardrails)
+                market_open = dtime(9, 15)
+                market_close = dtime(15, 30)
+
+                if not (safe_start <= now <= safe_end):
+                    # Determine specific reason for logs
+                    reason = "Market Closed"
+                    if market_open <= now < safe_start:
+                        reason = f"Opening Volatility Buffer (Wait until {safe_start.strftime('%H:%M')})"
+                    elif safe_end < now <= market_close:
+                        reason = f"EOD Safety Cutoff (No trades after {safe_end.strftime('%H:%M')})"
+                    
+                    self._logger.warning(
+                        f"🛑 Order Blocked: {reason}. Current Time: {now.strftime('%H:%M:%S')}", 
+                        extra={"symbol": normalized_symbol, "event": "time_guard_block"}
+                    )
+                    return None
+            except Exception as e:
+                self._logger.error(f"Time Guard Check Failed: {e}. Proceeding with caution.")
+
+        # ---------------------------------------------------------------------
+        # 2. TRADING SWITCH GUARD
+        # ---------------------------------------------------------------------
         switch_instance = trading_switch() if callable(trading_switch) else trading_switch
         checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
         
         if callable(checker) and not checker():
-            self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
+            self._logger.warning(
+                "Order blocked: Trading Switch is OFF", 
+                extra={"symbol": normalized_symbol, "event": "switch_block"}
+            )
             return None
 
-        # 2. Risk Checks
+        # ---------------------------------------------------------------------
+        # 3. RISK MANAGER VALIDATION
+        # ---------------------------------------------------------------------
         if check_risk and self._risk_manager:
             signal = OrderSignal(
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
+            
             is_live = False
             if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
                 is_live = self._enable_live_getter()
@@ -1544,10 +1587,15 @@ class OrderManager:
             
             allowed, reason = self._risk_manager.check_order(signal, live_enabled=is_live)
             if not allowed:
-                self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
+                self._logger.warning(
+                    f"Risk Block: {reason}", 
+                    extra={"symbol": normalized_symbol, "reason": reason, "event": "risk_block"}
+                )
                 return None
 
-        # 3. Order Type Mapping (Prevent 400 Errors)
+        # ---------------------------------------------------------------------
+        # 4. PAYLOAD OPTIMIZATION & MAPPING
+        # ---------------------------------------------------------------------
         raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
         zerodha_type_map = {
             "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
@@ -1555,9 +1603,14 @@ class OrderManager:
         }
         final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
 
-        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})")
+        self._logger.info(
+            f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})",
+            extra={"event": "order_sending", "symbol": normalized_symbol}
+        )
         
-        # 4. Execution Loop
+        # ---------------------------------------------------------------------
+        # 5. EXECUTION LOOP (Fail-Fast)
+        # ---------------------------------------------------------------------
         for attempt in range(1, 4):
             try:
                 response = self._broker.place_order(
@@ -1569,7 +1622,7 @@ class OrderManager:
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
                 
                 if order_id:
-                    # Register Order
+                    # A. Register Order Locally
                     details = OrderDetails(
                         order_id=order_id, symbol=normalized_symbol, side=side,
                         order_type=order_type, quantity=quantity, price=float(price or 0.0),
@@ -1579,7 +1632,7 @@ class OrderManager:
                     )
                     self._register_order(details)
 
-                    # Auto-Register Bracket
+                    # B. Auto-Register Bracket
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
                         state = BracketState(
@@ -1592,26 +1645,43 @@ class OrderManager:
                             tp_primary_qty=quantity if take_profit else 0
                         )
                         self._register_bracket_state(state)
-                        self._logger.info(f"🛡️ Auto-bracket registered for simple order {order_id}")
+                        self._logger.info(
+                            f"🛡️ Auto-bracket registered for {order_id}",
+                            extra={"event": "bracket_registered", "order_id": order_id}
+                        )
 
                     return order_id
                     
             except Exception as e:
                 msg = str(e).lower()
-                # [FIX] CRITICAL: Fail Fast on Internal Errors to prevent Duplicate Orders
-                if isinstance(e, (AttributeError, NameError, TypeError, ValueError)):
-                    self._logger.critical(f"🛑 Internal Error during placement: {e}. Aborting to prevent duplicates.")
+                error_type = type(e).__name__
+
+                # Fail Fast on Fatal Errors
+                if "400" in msg or "invalid" in msg or "market closed" in msg or "bad request" in msg:
+                    self._logger.critical(
+                        f"🛑 FATAL Payload Error: {e}. Aborting.", 
+                        extra={"symbol": normalized_symbol, "event": "fatal_order_error"}
+                    )
                     return None
                 
-                if "400" in msg or "invalid" in msg:
-                    self._logger.critical(f"🛑 FATAL Payload Error: {e}. Aborting.")
+                # Fail Fast on Internal Errors (No Duplicates)
+                if isinstance(e, (AttributeError, NameError, TypeError, ValueError, KeyError)):
+                    self._logger.critical(
+                        f"🛑 Internal Code Error: {e}. Aborting to prevent duplicates.",
+                        extra={"symbol": normalized_symbol, "event": "internal_code_error"}
+                    )
                     return None
 
-                self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
+                self._logger.warning(
+                    f"⚠️ Retry {attempt}/3 failed: {e}", 
+                    extra={"error": str(e), "attempt": attempt}
+                )
                 time.sleep(0.5 * attempt)
                 
         self._logger.error("❌ Order placement failed after retries.")
         return None
+
+    
     def guard_existing_position(
         self,
         *,
@@ -8130,60 +8200,66 @@ class OrderManager:
     def _reconcile_positions(self) -> None:
         """
         CRITICAL SYNC: Force local state to match Broker's Net Positions.
-        Auto-resolves ghosts and adopts orphans immediately.
+        Uses fuzzy matching to handle 'NFO:' prefix mismatches.
         """
         try:
-            # 1. Get Truth from Broker
             if not hasattr(self._broker, "get_positions"): return
             broker_pos_list = self._broker.get_positions() or []
             
-            # Filter for ACTIVE positions only (qty != 0)
+            # Map Clean Symbol -> Broker Data
+            # e.g., "NIFTY25DEC..." -> {qty: 75, ...}
             broker_map = {}
             for p in broker_pos_list:
-                # Handle both 'quantity' and 'net_quantity' (Zerodha specifics)
                 raw_qty = p.get("quantity") if p.get("quantity") is not None else p.get("net_quantity")
                 qty = int(raw_qty or 0)
-                sym = p.get("tradingsymbol") or p.get("symbol")
+                sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
                 
-                if sym and qty != 0:
-                    # Normalize symbol to ensure match
-                    # KEY FIX: Store both raw and normalized keys to catch mismatches
-                    norm = DataHub.normalize(sym) or sym.upper()
-                    broker_map[norm] = {
+                # We strip "NFO:" to create a common comparison key
+                clean_key = sym.replace("NFO:", "").strip().upper()
+                
+                if clean_key and qty != 0:
+                    broker_map[clean_key] = {
                         "qty": qty, 
                         "price": float(p.get("average_price") or 0.0), 
                         "raw_symbol": sym
                     }
-                    # Also map the raw symbol just in case
-                    broker_map[sym.upper()] = broker_map[norm]
 
-            # 2. Iterate Broker Positions to find Orphans (Broker has it, Local doesn't)
-            # Use a set to track what we've processed to avoid duplicates
-            processed_symbols = set()
+            # Check Local Positions against Broker Truth
+            # We iterate local positions and try to find them in broker map
+            all_local = list(self._positions.get_open_positions())
+            local_keys = set()
             
-            for data in broker_map.values():
-                raw_sym = data['raw_symbol']
-                if raw_sym in processed_symbols: continue
-                processed_symbols.add(raw_sym)
+            for pos in all_local:
+                local_sym = pos.symbol
+                local_clean = local_sym.replace("NFO:", "").strip().upper()
+                local_keys.add(local_clean)
                 
-                # Check if we have it locally using loose matching
-                norm_sym = DataHub.normalize(raw_sym) or raw_sym.upper()
-                local_pos = self._positions.get_position(norm_sym)
-                
-                # If get_position returns None, or quantity is 0, we need to ADOPT it
-                if not local_pos or local_pos.quantity == 0:
+                # If local exists but broker doesn't -> GHOST (Close it locally)
+                if local_clean not in broker_map:
+                    self._logger.warning(f"👻 Ghost Position: {local_sym}. Closing locally.")
+                    self._generate_adjustment_order(local_sym, -pos.quantity, 0.0)
+
+            # Check Broker Positions against Local
+            for clean_key, data in broker_map.items():
+                if clean_key not in local_keys:
+                    # ORPHAN DETECTED -> ADOPT IT
+                    # We use the raw symbol from broker to ensure compatibility, 
+                    # OR prepend NFO: if your system enforces it.
+                    adopt_sym = data['raw_symbol']
+                    if "NFO:" not in adopt_sym and "NIFTY" in adopt_sym:
+                        adopt_sym = f"NFO:{adopt_sym}" # Enforce NFO prefix for local consistency
+
                     self._logger.info(
-                        f"✅ Adopting Orphan Position: {raw_sym} (Qty: {data['qty']})",
+                        f"✅ Adopting Orphan Position: {adopt_sym} (Qty: {data['qty']})",
                         extra={"event": "orphan_position_adopted"}
                     )
                     
-                    # Create a synthetic Filled Order to inject into PositionManager
                     fake_order_id = f"sync_{int(time.time())}_{abs(data['qty'])}"
                     side = "BUY" if data['qty'] > 0 else "SELL"
                     
                     details = OrderDetails(
                         order_id=fake_order_id,
-                        symbol=norm_sym, # Use normalized for local tracking
+                        symbol=adopt_sym,
                         side=side,
                         quantity=abs(data['qty']),
                         order_type=OrderType.MARKET,
@@ -8195,11 +8271,33 @@ class OrderManager:
                         tag="sync_adjustment"
                     )
                     self._register_order(details)
-                    # Force position update immediately
                     self._positions.update_from_order(details)
 
         except Exception as e:
             self._logger.error(f"Reconciliation Error: {e}", exc_info=True)
+
+    def _generate_adjustment_order(self, symbol, qty, price=0.0):
+        """Helper to inject synthetic orders."""
+        if qty == 0: return
+        import time
+        from datetime import datetime, timezone
+        
+        side = "BUY" if qty > 0 else "SELL"
+        details = OrderDetails(
+            order_id=f"adj_{int(time.time())}",
+            symbol=symbol,
+            side=side,
+            quantity=abs(qty),
+            order_type=OrderType.MARKET,
+            status=OrderStatus.FILLED,
+            timestamp=datetime.now(timezone.utc),
+            price=float(price),
+            average_price=float(price),
+            filled_quantity=abs(qty),
+            tag="ghost_fix"
+        )
+        self._register_order(details)
+        self._positions.update_from_order(details)
 
 
 __all__ = [
