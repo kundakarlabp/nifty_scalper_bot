@@ -1466,6 +1466,24 @@ class OrderManager:
         # 3. Default fallback for this bot (mostly trades Options)
         return "NFO"
 
+    def _resolve_tradingsymbol(self, symbol: str) -> str:
+        """Resolve trading symbol string (e.g., 'NFO:NIFTY...' -> 'NIFTY...')."""
+        # 1. Parse from string if colon present (Fastest)
+        if ":" in symbol:
+            return symbol.split(":")[1]
+            
+        # 2. Try the instrument resolver if available
+        if self._resolver:
+            try:
+                info = self._resolver.resolve_by_symbol(symbol)
+                if info and "tradingsymbol" in info:
+                    return info["tradingsymbol"]
+            except Exception:
+                pass
+        
+        # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
+        return symbol
+
     def place_order(
         self,
         symbol: str,
