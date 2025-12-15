@@ -1510,49 +1510,28 @@ class OrderManager:
     ) -> str | None:
         """
         Place order with full safety checks, auto-retry, and bracket registration.
-        Acts as the central gateway for all execution.
         """
         import time
         from datetime import datetime, timezone
         from nifty_scalper_bot.core.trading_switch import trading_switch
-        
-        # [FIX] Local import to prevent Circular Import/NameError
         from nifty_scalper_bot.risk import OrderSignal 
 
-        start_time = time.monotonic()
-        
-        # [FIX] CRITICAL CHANGE: Removed .resolve_token() call.
-        # We use the text symbol directly (e.g. "NFO:NIFTY...") which implies exchange.
         normalized_symbol = symbol.strip().upper()
         
-        # ---------------------------------------------------------------------
-        # 1. TRADING SWITCH GUARD (Robust)
-        # ---------------------------------------------------------------------
-        # Handle both function and instance patterns safely
+        # 1. Trading Switch Guard
         switch_instance = trading_switch() if callable(trading_switch) else trading_switch
-        
-        # Check for .can_trade() safely to prevent AttributeError
         checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
         
-        if callable(checker):
-            if not checker():
-                self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
-                return None
-        else:
-            # If interface is completely broken, fail safe (block trade)
-            self._logger.error("CRITICAL: TradingSwitch interface mismatch. Blocking trade.", extra={"symbol": normalized_symbol})
+        if callable(checker) and not checker():
+            self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
             return None
 
-        # ---------------------------------------------------------------------
-        # 2. RISK MANAGER CHECKS
-        # ---------------------------------------------------------------------
+        # 2. Risk Checks
         if check_risk and self._risk_manager:
             signal = OrderSignal(
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
-            
-            # [FIX] Use correct helper names for Live Mode check
             is_live = False
             if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
                 is_live = self._enable_live_getter()
@@ -1564,44 +1543,39 @@ class OrderManager:
                 self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
                 return None
 
-        # ---------------------------------------------------------------------
-        # 3. EXECUTION WITH RETRY
-        # ---------------------------------------------------------------------
-        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol}")
+        # 3. Order Type Mapping (Prevent 400 Errors)
+        raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
+        zerodha_type_map = {
+            "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
+            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"
+        }
+        final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
+
+        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})")
         
+        # 4. Execution Loop
         for attempt in range(1, 4):
             try:
-                # [FIX] Simplified Call - Let ZerodhaClient handle the parsing
                 response = self._broker.place_order(
-                    symbol=normalized_symbol,
-                    side=side,
-                    quantity=quantity,
-                    product=product,
-                    order_type=order_type.value if hasattr(order_type, "value") else order_type,
-                    price=price,
-                    trigger_price=trigger_price,
-                    tag=tag,
-                    variety=variety
+                    symbol=normalized_symbol, side=side, quantity=quantity, product=product,
+                    order_type=final_order_type, price=price, trigger_price=trigger_price,
+                    tag=tag, variety=variety
                 )
                 
-                # [FIX] Handle both String (ID) and Dict return types
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
                 
                 if order_id:
-                    # -----------------------------------------------------------------
-                    # 4. REGISTER ORDER LOCALLY
-                    # -----------------------------------------------------------------
+                    # Register Order
                     details = OrderDetails(
                         order_id=order_id, symbol=normalized_symbol, side=side,
                         order_type=order_type, quantity=quantity, price=float(price or 0.0),
                         status=OrderStatus.PENDING, timestamp=datetime.now(timezone.utc),
-                        stop_loss=stop_loss, take_profit=take_profit, tag=tag
+                        stop_loss=stop_loss, take_profit=take_profit, tag=tag,
+                        average_price=0.0
                     )
                     self._register_order(details)
 
-                    # -----------------------------------------------------------------
-                    # 5. AUTO-REGISTER BRACKET STATE (If SL/TP provided)
-                    # -----------------------------------------------------------------
+                    # Auto-Register Bracket
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
                         state = BracketState(
@@ -1619,10 +1593,17 @@ class OrderManager:
                     return order_id
                     
             except Exception as e:
-                self._logger.warning(
-                    f"⚠️ Retry {attempt}/3 failed: {e}", 
-                    extra={"error": str(e), "symbol": normalized_symbol}
-                )
+                msg = str(e).lower()
+                # [FIX] CRITICAL: Fail Fast on Internal Errors to prevent Duplicate Orders
+                if isinstance(e, (AttributeError, NameError, TypeError, ValueError)):
+                    self._logger.critical(f"🛑 Internal Error during placement: {e}. Aborting to prevent duplicates.")
+                    return None
+                
+                if "400" in msg or "invalid" in msg:
+                    self._logger.critical(f"🛑 FATAL Payload Error: {e}. Aborting.")
+                    return None
+
+                self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
                 
         self._logger.error("❌ Order placement failed after retries.")
