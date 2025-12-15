@@ -3605,20 +3605,118 @@ class OrderManager:
             self._monitor_thread.join(timeout=self.POLL_INTERVAL_SEC * 2)
         self._monitor_thread = None
 
+    def _log_status_report(self) -> None:
+        """
+        Emit a rich, insightful 'Situation Room' report every 60 seconds.
+        Shows active positions, P&L, distance to stops, and current battle plan.
+        """
+        try:
+            # 1. Gather Active Positions
+            positions = list(self._positions.get_open_positions())
+            if not positions:
+                self._logger.info("💤 Status Report: Market is quiet. No active positions.")
+                return
+
+            report = ["\n📊 ------------------ SITUATION REPORT ------------------"]
+            
+            total_unrealized_pnl = 0.0
+            
+            for pos in positions:
+                symbol = pos.symbol
+                qty = pos.quantity
+                entry = float(pos.entry_price or 0.0)
+                side = pos.side  # "LONG" or "SHORT"
+                tag = getattr(pos, "tag", "Manual/Unknown")
+                
+                # Get Live Market Data
+                ltp = 0.0
+                if self._market_data:
+                    ltp = self._market_data.get_latest_price(symbol) or 0.0
+                
+                # Calculate P&L
+                raw_pnl = 0.0
+                if ltp > 0 and entry > 0:
+                    raw_pnl = (ltp - entry) * qty if side == "LONG" else (entry - ltp) * qty
+                    
+                status_icon = "✅" if raw_pnl > 0 else "🔻"
+                
+                # Match with Active Bracket (For SL/TP Context)
+                bracket = None
+                with self._lock:
+                    # Find the bracket managing this symbol
+                    for b in self._brackets.values():
+                        if b.symbol == symbol and b.remaining_position() > 0:
+                            bracket = b
+                            break
+                
+                sl_info = "NONE ⚠️"
+                tp_info = "Open"
+                insight = "Monitoring..."
+                
+                if bracket:
+                    sl_val = bracket.stop_price
+                    tp_val = bracket.tp_primary_price
+                    sl_info = f"{sl_val:.2f}"
+                    tp_info = f"{tp_val:.2f}" if tp_val else "Moon 🚀"
+                    
+                    # --- GENERATE INSIGHTS ---
+                    if ltp > 0:
+                        # 1. Distance Analysis
+                        dist_to_sl = abs(ltp - sl_val)
+                        risk_gap = abs(entry - sl_val)
+                        
+                        # 2. Determine "The Plan"
+                        if raw_pnl > 0:
+                            if tp_val and abs(tp_val - ltp) < (ltp * 0.001):
+                                insight = "🎯 Sniper Mode: Very close to Target!"
+                            else:
+                                insight = "🚀 Cruising: Trade is working. Holding for TP."
+                        else:
+                            if dist_to_sl < (risk_gap * 0.2):
+                                insight = "🚨 DANGER ZONE: Price is hammering the Stop Loss!"
+                            else:
+                                insight = "🛡️ Defending: Trade is against us, but structure holds."
+                else:
+                    insight = "⚠️ ORPHAN TRADE: No bracket found. Managing manually?"
+
+                # Format the Block
+                line = (
+                    f"{status_icon} {symbol} | {side} {qty} Qty | Strat: {tag}\n"
+                    f"   Entry: {entry:.2f} ➜ LTP: {ltp:.2f} ({raw_pnl:+.2f})\n"
+                    f"   🛑 SL: {sl_info} | 🎯 TP: {tp_info}\n"
+                    f"   🤖 Insight: {insight}"
+                )
+                report.append(line)
+                total_unrealized_pnl += raw_pnl
+
+            report.append(f"\n💰 Total Active P&L: {total_unrealized_pnl:+.2f}")
+            report.append("-------------------------------------------------------")
+            
+            self._logger.info("\n".join(report))
+
+        except Exception as e:
+            self._logger.error(f"Status Report Failed: {e}")
+
     def _monitor_orders(self) -> None:
-        """Background thread that polls order status efficiently."""
+        """Background thread: Polls status and emits Situation Reports."""
         self._logger.info("Order monitoring thread started")
+        
+        last_report_time = 0.0
         
         while not self._stop_event.wait(self.POLL_INTERVAL_SEC):
             try:
-                # [OPTIMIZATION] Use bulk reconcile instead of looping individual orders
-                # This reduces API calls from N to 1
+                # 1. Status Sync (Fast Loop - Every 2s)
                 self.reconcile_open_orders_with_broker()
                 
+                # 2. Situation Report (Slow Loop - Every 60s)
+                now = time.time()
+                if now - last_report_time > 60.0:
+                    self._log_status_report()
+                    last_report_time = now
+                
             except Exception as exc:
-                # CRITICAL FIX: Check for fatal broker errors
                 error_str = str(exc).lower()
-                if "401" in error_str or "403" in error_str or "access denied" in error_str:
+                if "401" in error_str or "403" in error_str:
                     self._logger.critical("FATAL: Broker session expired. Stopping monitor.")
                     self._stop_event.set()
                     return
