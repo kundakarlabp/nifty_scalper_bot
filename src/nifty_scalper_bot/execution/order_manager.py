@@ -3614,7 +3614,7 @@ class OrderManager:
             # 1. Gather Active Positions
             positions = list(self._positions.get_open_positions())
             if not positions:
-                self._logger.info("💤 Status Report: Market is quiet. No active positions.")
+                # self._logger.info("💤 Status Report: Market is quiet. No active positions.")
                 return
 
             report = ["\n📊 ------------------ SITUATION REPORT ------------------"]
@@ -3672,7 +3672,7 @@ class OrderManager:
                             else:
                                 insight = "🚀 Cruising: Trade is working. Holding for TP."
                         else:
-                            if dist_to_sl < (risk_gap * 0.2):
+                            if risk_gap > 0 and dist_to_sl < (risk_gap * 0.2):
                                 insight = "🚨 DANGER ZONE: Price is hammering the Stop Loss!"
                             else:
                                 insight = "🛡️ Defending: Trade is against us, but structure holds."
@@ -8140,11 +8140,18 @@ class OrderManager:
             # Filter for ACTIVE positions only (qty != 0)
             broker_map = {}
             for p in broker_pos_list:
+                # Handle both 'quantity' and 'net_quantity' (Zerodha specifics)
+                raw_qty = p.get("quantity") if p.get("quantity") is not None else p.get("net_quantity")
+                qty = int(raw_qty or 0)
                 sym = p.get("tradingsymbol") or p.get("symbol")
-                qty = int(p.get("quantity") or p.get("net_quantity") or 0)
+                
                 if sym and qty != 0:
-                    broker_map[DataHub.normalize(sym)] = {
-                        "qty": qty, "price": float(p.get("average_price") or 0.0), "raw_symbol": sym
+                    # Normalize symbol to ensure match
+                    norm = DataHub.normalize(sym) or sym.upper()
+                    broker_map[norm] = {
+                        "qty": qty, 
+                        "price": float(p.get("average_price") or 0.0), 
+                        "raw_symbol": sym
                     }
 
             # 2. Iterate Broker Positions to find Orphans (Broker has it, Local doesn't)
