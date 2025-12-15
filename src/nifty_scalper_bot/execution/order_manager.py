@@ -8130,7 +8130,7 @@ class OrderManager:
     def _reconcile_positions(self) -> None:
         """
         CRITICAL SYNC: Force local state to match Broker's Net Positions.
-        Auto-resolves ghosts and adopts orphans.
+        Auto-resolves ghosts and adopts orphans immediately.
         """
         try:
             # 1. Get Truth from Broker
@@ -8146,48 +8146,44 @@ class OrderManager:
                 sym = p.get("tradingsymbol") or p.get("symbol")
                 
                 if sym and qty != 0:
-                    # Normalize symbol to ensure match. Try both raw and normalized.
+                    # Normalize symbol to ensure match
+                    # KEY FIX: Store both raw and normalized keys to catch mismatches
                     norm = DataHub.normalize(sym) or sym.upper()
-                    # Store data keyed by normalized symbol
                     broker_map[norm] = {
                         "qty": qty, 
                         "price": float(p.get("average_price") or 0.0), 
                         "raw_symbol": sym
                     }
-                    # Also map the raw symbol to the same data to catch mismatches
-                    if sym.upper() != norm:
-                        broker_map[sym.upper()] = broker_map[norm]
+                    # Also map the raw symbol just in case
+                    broker_map[sym.upper()] = broker_map[norm]
 
             # 2. Iterate Broker Positions to find Orphans (Broker has it, Local doesn't)
-            # Use a set to track what we've processed to avoid duplicates from the double-mapping above
+            # Use a set to track what we've processed to avoid duplicates
             processed_symbols = set()
             
-            for key, data in broker_map.items():
-                if data['raw_symbol'] in processed_symbols:
-                    continue
+            for data in broker_map.values():
+                raw_sym = data['raw_symbol']
+                if raw_sym in processed_symbols: continue
+                processed_symbols.add(raw_sym)
                 
-                processed_symbols.add(data['raw_symbol'])
-                
-                # Check if we have it locally using the normalized key
-                # We assume the key in broker_map is the normalized one we want to use
-                norm_sym = key 
+                # Check if we have it locally using loose matching
+                norm_sym = DataHub.normalize(raw_sym) or raw_sym.upper()
                 local_pos = self._positions.get_position(norm_sym)
                 
-                # If get_position returns None, or quantity is 0, we need to adopt it
-                local_qty = int(local_pos.quantity) if local_pos else 0
-                
-                if local_qty == 0:
+                # If get_position returns None, or quantity is 0, we need to ADOPT it
+                if not local_pos or local_pos.quantity == 0:
                     self._logger.info(
-                        f"✅ Adopting Orphan Position: {data['raw_symbol']} (Qty: {data['qty']})",
+                        f"✅ Adopting Orphan Position: {raw_sym} (Qty: {data['qty']})",
                         extra={"event": "orphan_position_adopted"}
                     )
+                    
                     # Create a synthetic Filled Order to inject into PositionManager
                     fake_order_id = f"sync_{int(time.time())}_{abs(data['qty'])}"
                     side = "BUY" if data['qty'] > 0 else "SELL"
                     
                     details = OrderDetails(
                         order_id=fake_order_id,
-                        symbol=data['raw_symbol'], # Use the raw symbol from broker to ensure match
+                        symbol=norm_sym, # Use normalized for local tracking
                         side=side,
                         quantity=abs(data['qty']),
                         order_type=OrderType.MARKET,
