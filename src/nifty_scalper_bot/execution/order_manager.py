@@ -167,6 +167,10 @@ class OrderDetails:
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
 
+    @property
+    def fill_price(self) -> float:
+        return self.average_price
+
 @dataclass(slots=True)
 class ExitIntent:
     """Bound exit request to the originating entry instrument."""
