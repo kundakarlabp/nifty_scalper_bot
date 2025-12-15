@@ -463,94 +463,149 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     def place_order(
         self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        quantity: int,
+        order_type: OrderType = OrderType.MARKET,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        tag: str | None = None,
+        product: str = "MIS",
         variety: str = "regular",
-        tag: str = "",
-        **kwargs,
-    ) -> dict[str, Any]:
+        check_risk: bool = True,
+        stop_loss: float | None = None, 
+        take_profit: float | None = None,
+    ) -> str | None:
         """
-        Place order with Robust Idempotency & Symbol Parsing.
-        Automatically converts 'NFO:SYMBOL' -> exchange='NFO', tradingsymbol='SYMBOL'.
+        Place order with full safety checks, auto-retry, and bracket registration.
+        Acts as the central gateway for all execution.
         """
-        import uuid  # Ensure uuid is available
+        import time
+        from datetime import datetime, timezone
+        from nifty_scalper_bot.core.trading_switch import trading_switch
         
-        # 1. Construct Param Dictionary & Parse Symbol
-        params = kwargs.copy()
-        params["variety"] = variety
-        
-        # [FIX] Automatic Symbol Resolution
-        if "symbol" in params:
-            raw_sym = params.pop("symbol")
-            if ":" in raw_sym:
-                exch, sym = raw_sym.split(":", 1)
-                params["exchange"] = exch
-                params["tradingsymbol"] = sym
-            else:
-                params["exchange"] = params.get("exchange", "NFO")
-                params["tradingsymbol"] = raw_sym
+        # [FIX] Local import to prevent Circular Import/NameError
+        from nifty_scalper_bot.risk import OrderSignal 
 
-        # [FIX] Map 'side' to Kite Transaction Type
-        if "side" in params:
-            side = params.pop("side").upper()
-            params["transaction_type"] = "BUY" if side == "BUY" else "SELL"
-
-        # 2. Generate Safe Unique Tag (Idempotency Key)
-        unique_id = uuid.uuid4().hex[:8]
-        raw_tag = str(tag or "bot").strip()
-        safe_prefix = raw_tag[:11] 
-        final_tag = f"{safe_prefix}_{unique_id}"
-        params["tag"] = final_tag
-
-        # Rate Limiting
-        if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
-            self._acquire_bucket(self._ORDER_BUCKET)
+        start_time = time.monotonic()
         
-        # [CRITICAL FIX] Filter out None values. 
-        # Zerodha API fails if 'trigger_price' is sent as None/"" (empty string).
-        # We must remove keys with None values so they are omitted from the request.
-        clean_params = {k: v for k, v in params.items() if v is not None}
+        # [FIX] Normalized symbol parsing
+        normalized_symbol = symbol.strip().upper()
         
-        try:
-            # 3. Attempt Placement via Raw API
-            response = self._ensure_json(
-                self._make_request(
-                    "POST",
-                    f"/orders/{variety}",
-                    data=clean_params,  # Send cleaned params
-                    expect_order_response=True,
-                    operation_label="orders.place",
-                )
+        # ---------------------------------------------------------------------
+        # 1. TRADING SWITCH GUARD (Robust)
+        # ---------------------------------------------------------------------
+        switch_instance = trading_switch() if callable(trading_switch) else trading_switch
+        checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
+        
+        if callable(checker):
+            if not checker():
+                self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
+                return None
+        else:
+            self._logger.error("CRITICAL: TradingSwitch interface mismatch. Blocking trade.", extra={"symbol": normalized_symbol})
+            return None
+
+        # ---------------------------------------------------------------------
+        # 2. RISK MANAGER CHECKS
+        # ---------------------------------------------------------------------
+        if check_risk and self._risk_manager:
+            signal = OrderSignal(
+                symbol=normalized_symbol, side=side, quantity=quantity,
+                price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
             
-            data = response.get("data", {})
-            return {
-                "order_id": data.get("order_id"),
-                "status": response.get("status", "success"),
-                "message": response.get("message", ""),
-                "tag": final_tag
-            }
+            is_live = False
+            if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
+                is_live = self._enable_live_getter()
+            elif hasattr(self, "_resolve_enable_live"):
+                is_live = self._resolve_enable_live()
             
-        except (TimeoutError, httpx.TimeoutException, httpx.ReadTimeout):
-            # 4. Handle Timeout (Ghost Order Check)
-            self._logger.warning(f"⚠️ Order placement timed out. Scanning for tag: {final_tag}")
-            
-            try:
-                if hasattr(self, "get_orders"):
-                    all_orders = self.get_orders()
-                    for order in all_orders:
-                        if order.get("tag") == final_tag:
-                            self._logger.info(f"✅ Found ghost order {order['order_id']} after timeout.")
-                            return {    
-                                "order_id": order["order_id"],
-                                "status": order["status"],
-                                "message": "Recovered from timeout",
-                                "tag": final_tag
-                            }
-            except Exception as e:
-                self._logger.error(f"Failed to scan for ghost order: {e}")
-            
-            from nifty_scalper_bot.utils.errors import OrderPlacementError
-            raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {final_tag}")
+            allowed, reason = self._risk_manager.check_order(signal, live_enabled=is_live)
+            if not allowed:
+                self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
+                return None
 
+        # ---------------------------------------------------------------------
+        # 3. PREPARE PAYLOAD & MAP ORDER TYPES (CRITICAL FIX)
+        # ---------------------------------------------------------------------
+        # Map internal Enums (e.g. STOP_LOSS_MARKET) to Zerodha Strings (e.g. SL-M)
+        # This prevents 400 Bad Request errors.
+        raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
+        zerodha_type_map = {
+            "STOP_LOSS_MARKET": "SL-M",
+            "STOP_LOSS_LIMIT": "SL", 
+            "STOP_LOSS": "SL",
+            "MARKET": "MARKET",
+            "LIMIT": "LIMIT",
+            "SL": "SL",
+            "SL-M": "SL-M"
+        }
+        final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
+
+        self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})")
+        
+        # ---------------------------------------------------------------------
+        # 4. EXECUTION WITH RETRY
+        # ---------------------------------------------------------------------
+        for attempt in range(1, 4):
+            try:
+                response = self._broker.place_order(
+                    symbol=normalized_symbol,
+                    side=side,
+                    quantity=quantity,
+                    product=product,
+                    order_type=final_order_type, # Use the mapped type
+                    price=price,
+                    trigger_price=trigger_price,
+                    tag=tag,
+                    variety=variety
+                )
+                
+                order_id = response.get("order_id") if isinstance(response, dict) else str(response)
+                
+                if order_id:
+                    # Register Order Locally
+                    details = OrderDetails(
+                        order_id=order_id, symbol=normalized_symbol, side=side,
+                        order_type=order_type, quantity=quantity, price=float(price or 0.0),
+                        status=OrderStatus.PENDING, timestamp=datetime.now(timezone.utc),
+                        stop_loss=stop_loss, take_profit=take_profit, tag=tag
+                    )
+                    self._register_order(details)
+
+                    # Auto-Register Bracket State
+                    if stop_loss or take_profit:
+                        exit_side = "SELL" if side == "BUY" else "BUY"
+                        state = BracketState(
+                            entry_id=order_id, symbol=normalized_symbol, side=side, exit_side=exit_side,
+                            total_quantity=quantity, entry_price=float(price or 0.0),
+                            product=product, tag=tag, stop_order_id="", 
+                            stop_price=float(stop_loss) if stop_loss else 0.0,
+                            stop_order_type=OrderType.STOP_LOSS_MARKET,
+                            tp_primary_price=float(take_profit) if take_profit else None,
+                            tp_primary_qty=quantity if take_profit else 0
+                        )
+                        self._register_bracket_state(state)
+                        self._logger.info(f"🛡️ Auto-bracket registered for simple order {order_id}")
+
+                    return order_id
+                    
+            except Exception as e:
+                # [FIX] Fail Fast on 400 Errors (Invalid Payload) - Don't retry if data is bad
+                msg = str(e).lower()
+                if "400" in msg or "invalid" in msg or "bad request" in msg:
+                    self._logger.critical(f"🛑 FATAL Payload Error: {e}. Aborting retries.", extra={"symbol": normalized_symbol})
+                    return None
+                
+                self._logger.warning(
+                    f"⚠️ Retry {attempt}/3 failed: {e}", 
+                    extra={"error": str(e), "symbol": normalized_symbol}
+                )
+                time.sleep(0.5 * attempt)
+                
+        self._logger.error("❌ Order placement failed after retries.")
+        return None
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
         """Get last traded price for multiple symbols."""
