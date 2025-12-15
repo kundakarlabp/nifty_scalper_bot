@@ -1490,6 +1490,7 @@ class OrderManager:
 
         # 2. Risk Checks
         if check_risk and self._risk_manager:
+            from nifty_scalper_bot.risk import OrderSignal
             signal = OrderSignal(
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
