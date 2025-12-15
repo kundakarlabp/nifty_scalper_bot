@@ -8146,20 +8146,36 @@ class OrderManager:
                 sym = p.get("tradingsymbol") or p.get("symbol")
                 
                 if sym and qty != 0:
-                    # Normalize symbol to ensure match
+                    # Normalize symbol to ensure match. Try both raw and normalized.
                     norm = DataHub.normalize(sym) or sym.upper()
+                    # Store data keyed by normalized symbol
                     broker_map[norm] = {
                         "qty": qty, 
                         "price": float(p.get("average_price") or 0.0), 
                         "raw_symbol": sym
                     }
+                    # Also map the raw symbol to the same data to catch mismatches
+                    if sym.upper() != norm:
+                        broker_map[sym.upper()] = broker_map[norm]
 
             # 2. Iterate Broker Positions to find Orphans (Broker has it, Local doesn't)
-            for norm_sym, data in broker_map.items():
+            # Use a set to track what we've processed to avoid duplicates from the double-mapping above
+            processed_symbols = set()
+            
+            for key, data in broker_map.items():
+                if data['raw_symbol'] in processed_symbols:
+                    continue
+                
+                processed_symbols.add(data['raw_symbol'])
+                
+                # Check if we have it locally using the normalized key
+                # We assume the key in broker_map is the normalized one we want to use
+                norm_sym = key 
                 local_pos = self._positions.get_position(norm_sym)
+                
+                # If get_position returns None, or quantity is 0, we need to adopt it
                 local_qty = int(local_pos.quantity) if local_pos else 0
                 
-                # CASE: Orphan Adoption (Broker has it, we don't)
                 if local_qty == 0:
                     self._logger.info(
                         f"✅ Adopting Orphan Position: {data['raw_symbol']} (Qty: {data['qty']})",
@@ -8171,7 +8187,7 @@ class OrderManager:
                     
                     details = OrderDetails(
                         order_id=fake_order_id,
-                        symbol=data['raw_symbol'],
+                        symbol=data['raw_symbol'], # Use the raw symbol from broker to ensure match
                         side=side,
                         quantity=abs(data['qty']),
                         order_type=OrderType.MARKET,
