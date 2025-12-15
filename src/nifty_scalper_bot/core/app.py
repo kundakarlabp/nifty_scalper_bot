@@ -2529,6 +2529,29 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             None,
             resolver=instrument_resolver,
         )
+
+        # [FIX] Start Health Monitor (Watchdog) for Polling Mode
+        # This prevents "Zombie Mode" by killing the process if data stops for 3 mins
+        def _monitor_data_health():
+            import logging, time, os
+            logger = logging.getLogger("nifty_scalper_bot.watchdog")
+            logger.info("✅ Data Health Monitor Started (Polling Mode)")
+            
+            while True:
+                time.sleep(60) # Check every minute
+                
+                # Check if data is flowing
+                last_tick = getattr(market_data_manager, "last_tick_time", 0)
+                
+                # If we have received data before (>0) but it's now stale (>180s)
+                if last_tick > 0 and (time.time() - last_tick > 180): 
+                    logger.critical(f"🚨 FATAL: No data for {int(time.time() - last_tick)}s. Zombie Mode detected. Exiting.")
+                    os._exit(1) # Kill process -> Railway auto-restarts -> Connection restored
+                    
+        import threading
+        health_thread = threading.Thread(target=_monitor_data_health, daemon=True)
+        health_thread.start()
+
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
