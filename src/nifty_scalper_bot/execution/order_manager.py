@@ -89,7 +89,7 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_enhanced import (
         TelegramEnhancedNotifier,
     )
-    from nifty_scalper_bot.risk.risk_manager import RiskManager
+    from nifty_scalper_bot.risk.risk_manager import RiskManager, OrderSignal
 else:  # pragma: no cover - typing only
     MarketDataManager = Any
     BaseBrokerClient = Any
