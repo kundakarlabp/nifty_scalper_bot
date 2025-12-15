@@ -1469,10 +1469,12 @@ class OrderManager:
         normalized_symbol = symbol.strip().upper()
         
         # 1. Trading Switch Guard
-        # [FIX] Handle trading_switch safely whether it's a function or instance
-        switch_instance = trading_switch() if callable(trading_switch) else trading_switch
-        if not switch_instance.can_trade_new():
-            self._logger.warning("Order blocked: Trading switch is OFF", extra={"symbol": normalized_symbol})
+        # [FIX] Use correct method name 'can_trade' instead of 'can_trade_new'
+        if not trading_switch.can_trade():
+            self._logger.warning(
+                "Order blocked: Trading switch is OFF",
+                extra={"symbol": normalized_symbol}
+            )
             return None
 
         # 2. Risk Checks
