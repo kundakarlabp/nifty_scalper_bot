@@ -478,7 +478,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         params["variety"] = variety
         
         # [FIX] Automatic Symbol Resolution
-        # Handles "NFO:NIFTY..." parsing internally so OrderManager doesn't need helpers
         if "symbol" in params:
             raw_sym = params.pop("symbol")
             if ":" in raw_sym:
@@ -489,8 +488,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 params["exchange"] = params.get("exchange", "NFO")
                 params["tradingsymbol"] = raw_sym
 
-        # [FIX] Use string literals "BUY"/"SELL" instead of self.kite constants
-        # This prevents AttributeError: 'ZerodhaKiteClient' object has no attribute 'kite'
+        # [FIX] Map 'side' to Kite Transaction Type
         if "side" in params:
             side = params.pop("side").upper()
             params["transaction_type"] = "BUY" if side == "BUY" else "SELL"
@@ -502,18 +500,22 @@ class ZerodhaKiteClient(BaseBrokerClient):
         final_tag = f"{safe_prefix}_{unique_id}"
         params["tag"] = final_tag
 
-        # Rate Limiting (Safe Check)
+        # Rate Limiting
         if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
             self._acquire_bucket(self._ORDER_BUCKET)
         
+        # [CRITICAL FIX] Filter out None values. 
+        # Zerodha API fails if 'trigger_price' is sent as None/"" (empty string).
+        # We must remove keys with None values so they are omitted from the request.
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        
         try:
             # 3. Attempt Placement via Raw API
-            # This uses the underlying HTTP client, bypassing any 'kite' attribute issues
             response = self._ensure_json(
                 self._make_request(
                     "POST",
                     f"/orders/{variety}",
-                    data=params,
+                    data=clean_params,  # Send cleaned params
                     expect_order_response=True,
                     operation_label="orders.place",
                 )
