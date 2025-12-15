@@ -504,11 +504,20 @@ class ZerodhaKiteClient(BaseBrokerClient):
             }
             params["order_type"] = mapping.get(ot_str, ot_str)
 
-        # 2. Generate Safe Unique Tag
-        unique_id = uuid.uuid4().hex[:8]
-        raw_tag = str(tag or "bot").strip()
-        safe_prefix = raw_tag[:11] 
-        final_tag = f"{safe_prefix}_{unique_id}"
+        # 2. Generate Safe Unique Tag (Idempotency Key)
+        # [FIX] Use client_order_id if provided by OrderManager to ensure Retries don't duplicate
+        client_id = kwargs.get("client_order_id") or kwargs.get("tag")
+        
+        if client_id:
+            # Use the deterministic ID provided by the caller
+            final_tag = str(client_id)[:20] # Zerodha tag limit is 20 chars
+        else:
+            # Fallback to random if not provided (Legacy behavior)
+            unique_id = uuid.uuid4().hex[:8]
+            raw_tag = str(tag or "bot").strip()
+            safe_prefix = raw_tag[:11] 
+            final_tag = f"{safe_prefix}_{unique_id}"
+            
         params["tag"] = final_tag
 
         if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
