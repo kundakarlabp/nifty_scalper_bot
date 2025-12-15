@@ -1491,11 +1491,15 @@ class OrderManager:
         # 2. Risk Checks
         if check_risk and self._risk_manager:
             from nifty_scalper_bot.risk import OrderSignal
+            
             signal = OrderSignal(
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
-            live = self._is_live_enabled() and not self._is_shadow_mode()
+            
+            # [FIX] Use correct helper names: _resolve_enable_live / _resolve_shadow_mode
+            live = self._resolve_enable_live() and not self._resolve_shadow_mode()
+            
             allowed, reason = self._risk_manager.check_order(signal, live_enabled=live)
             if not allowed:
                 self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
