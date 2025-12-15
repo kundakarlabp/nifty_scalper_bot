@@ -468,43 +468,40 @@ class ZerodhaKiteClient(BaseBrokerClient):
         **kwargs,
     ) -> dict[str, Any]:
         """
-        Place order with Robust Idempotency (Ghost Order Protection).
-        Handles Zerodha's 20-char tag limit automatically.
-        
-        Args:
-            variety: Order variety (regular, amo, co, ice).
-            tag: User-defined tag (will be suffixed with UUID).
-            **kwargs: Standard order params (symbol, side, quantity, product, price, etc).
+        Place order with Robust Idempotency & Symbol Parsing.
+        Automatically converts 'NFO:SYMBOL' -> exchange='NFO', tradingsymbol='SYMBOL'.
         """
         import uuid  # Ensure uuid is available
         
-        # 1. Construct Param Dictionary
-        # We merge kwargs with variety/tag to create the payload expected by helpers
+        # 1. Construct Param Dictionary & Parse Symbol
         params = kwargs.copy()
         params["variety"] = variety
-        params["tag"] = tag
-
-        # Use internal helper to format keys (e.g. side="BUY" -> transaction_type="BUY")
-        # Ensure _build_kite_params exists, otherwise mapping is needed here.
-        if hasattr(self, "_build_kite_params"):
-            params = self._build_kite_params(params)
-        else:
-            # Fallback mapping if helper missing
-            if "symbol" in params:
-                exch, sym = params["symbol"].split(":") if ":" in params["symbol"] else ("NFO", params["symbol"])
+        
+        # [FIX] Automatic Symbol Resolution
+        # If 'symbol' is passed (e.g., "NFO:NIFTY..."), split it for Kite
+        if "symbol" in params:
+            raw_sym = params.pop("symbol")
+            if ":" in raw_sym:
+                exch, sym = raw_sym.split(":", 1)
                 params["exchange"] = exch
                 params["tradingsymbol"] = sym
-                del params["symbol"]
-            if "side" in params:
-                params["transaction_type"] = params.pop("side")
+            else:
+                # Fallback: Assume NFO if not specified, or let Kite validate
+                params["exchange"] = params.get("exchange", "NFO")
+                params["tradingsymbol"] = raw_sym
+
+        # [FIX] Map 'side' to Kite Transaction Type
+        if "side" in params:
+            side = params.pop("side").upper()
+            params["transaction_type"] = (
+                self.kite.TRANSACTION_TYPE_BUY 
+                if side == "BUY" 
+                else self.kite.TRANSACTION_TYPE_SELL
+            )
 
         # 2. Generate Safe Unique Tag (Idempotency Key)
-        # Zerodha Limit: 20 chars. We need 8 chars for UUID.
-        # Allowed for prefix: 11 chars + 1 underscore.
         unique_id = uuid.uuid4().hex[:8]
-        
-        raw_tag = str(params.get("tag") or "bot").strip()
-        # Truncate existing tag to 11 chars to make room for unique ID
+        raw_tag = str(tag or "bot").strip()
         safe_prefix = raw_tag[:11] 
         final_tag = f"{safe_prefix}_{unique_id}"
         params["tag"] = final_tag
@@ -512,8 +509,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._acquire_bucket(self._ORDER_BUCKET)
         
         try:
-            # 3. Attempt Placement
-            # We use raw request to get full response dict (status, message)
+            # 3. Attempt Placement via Raw API (Access to full response)
             response = self._ensure_json(
                 self._make_request(
                     "POST",
@@ -536,9 +532,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             # 4. Handle Timeout (Ghost Order Check)
             self._logger.warning(f"⚠️ Order placement timed out. Scanning for tag: {final_tag}")
             
-            # Scan order book for this specific unique tag
             try:
-                # Force fetch latest orders
                 if hasattr(self, "get_orders"):
                     all_orders = self.get_orders()
                     for order in all_orders:
