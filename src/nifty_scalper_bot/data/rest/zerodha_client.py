@@ -463,21 +463,22 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     def place_order(
         self,
-        variety: str = "regular",
+        variety: str = "regular",  # Ensure default is "regular"
         tag: str = "",
         **kwargs,
     ) -> dict[str, Any]:
         """
         Place order with Robust Idempotency, Symbol Parsing & Type Mapping.
-        Accepts raw strings or Enums via kwargs to prevent ImportErrors.
         """
-        import uuid  # Ensure uuid is available
+        import uuid
         
         # 1. Construct Param Dictionary
         params = kwargs.copy()
+        # [FIX] Ensure variety is never empty
+        variety = variety or "regular" 
         params["variety"] = variety
         
-        # [FIX] Automatic Symbol Resolution (NFO:SYMBOL -> exchange, tradingsymbol)
+        # [FIX] Automatic Symbol Resolution
         if "symbol" in params:
             raw_sym = params.pop("symbol")
             if ":" in raw_sym:
@@ -485,34 +486,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 params["exchange"] = exch
                 params["tradingsymbol"] = sym
             else:
-                # Default fallback
                 params["exchange"] = params.get("exchange", "NFO")
                 params["tradingsymbol"] = raw_sym
 
-        # [FIX] Map 'side' to Kite Transaction Type (String-based)
+        # [FIX] Map 'side' to Kite Transaction Type
         if "side" in params:
             side_val = str(params.pop("side")).upper()
-            # Handle Enum or String input for Side
-            if "BUY" in side_val:
-                params["transaction_type"] = "BUY"
-            else:
-                params["transaction_type"] = "SELL"
+            params["transaction_type"] = "BUY" if "BUY" in side_val else "SELL"
 
-        # [FIX] Robust Order Type Mapping (Enum -> Zerodha Code)
-        # Converts "STOP_LOSS_MARKET" -> "SL-M", "OrderType.MARKET" -> "MARKET"
+        # [FIX] Robust Order Type Mapping
         if "order_type" in params:
             raw_ot = params["order_type"]
-            # Extract value if it's an Enum (has .value attribute), else use string
             ot_str = getattr(raw_ot, "value", str(raw_ot)).upper()
-            
             mapping = {
-                "STOP_LOSS_MARKET": "SL-M",
-                "STOP_LOSS_LIMIT": "SL",
-                "STOP_LOSS": "SL",
-                "MARKET": "MARKET",
-                "LIMIT": "LIMIT",
-                "SL": "SL",
-                "SL-M": "SL-M"
+                "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
+                "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"
             }
             params["order_type"] = mapping.get(ot_str, ot_str)
 
@@ -523,24 +511,21 @@ class ZerodhaKiteClient(BaseBrokerClient):
         final_tag = f"{safe_prefix}_{unique_id}"
         params["tag"] = final_tag
 
-        # Rate Limiting
         if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
             self._acquire_bucket(self._ORDER_BUCKET)
         
-        # [CRITICAL FIX] Filter out None values to prevent API crashes
-        # 1. Remove None keys
+        # [FIX] Filter out None values
         clean_params = {k: v for k, v in params.items() if v is not None}
-        
-        # 2. Remove trigger_price for MARKET orders (Zerodha 400 Error Fix)
         if clean_params.get("order_type") == "MARKET":
             clean_params.pop("trigger_price", None)
 
         try:
-            # 3. Attempt Placement via Raw API
+            # 3. Attempt Placement
+            # [FIX] Ensure method is explicitly "POST"
             response = self._ensure_json(
                 self._make_request(
                     "POST",
-                    f"/orders/{variety}",
+                    f"/orders/{variety}",  # e.g. /orders/regular
                     data=clean_params,
                     expect_order_response=True,
                     operation_label="orders.place",
@@ -555,27 +540,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 "tag": final_tag
             }
             
-        except (TimeoutError, httpx.TimeoutException, httpx.ReadTimeout):
-            # 4. Handle Timeout (Ghost Order Check)
-            self._logger.warning(f"⚠️ Order placement timed out. Scanning for tag: {final_tag}")
+        except Exception as e:
+            # [FIX] Add specific logging for 405 errors
+            if "405" in str(e):
+                self._logger.critical(f"🛑 Zerodha 405 Error (Bad URL/Method). URL: /orders/{variety}, Method: POST")
             
-            try:
-                if hasattr(self, "get_orders"):
-                    all_orders = self.get_orders()
-                    for order in all_orders:
-                        if order.get("tag") == final_tag:
-                            self._logger.info(f"✅ Found ghost order {order['order_id']} after timeout.")
-                            return {    
-                                "order_id": order["order_id"],
-                                "status": order["status"],
-                                "message": "Recovered from timeout",
-                                "tag": final_tag
-                            }
-            except Exception as e:
-                self._logger.error(f"Failed to scan for ghost order: {e}")
-            
+            # [FIX] Fail Fast Logic
             from nifty_scalper_bot.utils.errors import OrderPlacementError
-            raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {final_tag}")
+            raise OrderPlacementError(f"Order placement failed: {e}")
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
         """Get last traded price for multiple symbols."""
