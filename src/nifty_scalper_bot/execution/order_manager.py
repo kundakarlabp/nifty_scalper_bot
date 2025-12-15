@@ -1484,6 +1484,15 @@ class OrderManager:
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
 
+    # [FIX] Add Missing Helper Methods to prevent crashes
+    def _resolve_exchange(self, symbol: str) -> str:
+        if ":" in symbol: return symbol.split(":")[0]
+        return "NFO"
+
+    def _resolve_tradingsymbol(self, symbol: str) -> str:
+        if ":" in symbol: return symbol.split(":")[1]
+        return symbol
+
     def place_order(
         self,
         symbol: str,
@@ -1496,84 +1505,105 @@ class OrderManager:
         product: str = "MIS",
         variety: str = "regular",
         check_risk: bool = True,
-        # [FIX] Added SL/TP args
         stop_loss: float | None = None, 
         take_profit: float | None = None,
     ) -> str | None:
-        """Place order and automatically register bracket state if SL/TP provided."""
-        start_time = time.monotonic()
-        normalized_symbol = symbol.strip().upper()
+        """
+        Place order with full safety checks, auto-retry, and bracket registration.
+        Acts as the central gateway for all execution.
+        """
+        import time
+        from datetime import datetime, timezone
+        from nifty_scalper_bot.core.trading_switch import trading_switch
         
-        # 1. Trading Switch Guard (Robust)
+        # [FIX] Local import to prevent Circular Import/NameError
+        from nifty_scalper_bot.risk import OrderSignal 
+
+        start_time = time.monotonic()
+        normalized_symbol = self._resolver.resolve_token(symbol) if self._resolver else symbol.strip().upper()
+        
+        # ---------------------------------------------------------------------
+        # 1. TRADING SWITCH GUARD (Robust)
+        # ---------------------------------------------------------------------
+        # Handle both function and instance patterns safely
         switch_instance = trading_switch() if callable(trading_switch) else trading_switch
         
-        # Check if the method exists dynamically (prevents AttributeError crash)
-        checker = getattr(switch_instance, "can_trade", None) 
-        if not checker:
-             checker = getattr(switch_instance, "can_trade_new", None)
-
+        # Check for .can_trade() safely to prevent AttributeError
+        checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
+        
         if callable(checker):
             if not checker():
                 self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
                 return None
         else:
-            # Fallback: If we can't find the switch method, assume SAFE (Block Trade) or LOG ERROR
-            self._logger.error(
-                "CRITICAL: TradingSwitch interface mismatch. Blocking trade for safety.", 
-                extra={"symbol": normalized_symbol}
-            )
+            # If interface is completely broken, fail safe (block trade)
+            self._logger.error("CRITICAL: TradingSwitch interface mismatch. Blocking trade.", extra={"symbol": normalized_symbol})
             return None
 
-        # 2. Risk Checks
+        # ---------------------------------------------------------------------
+        # 2. RISK MANAGER CHECKS
+        # ---------------------------------------------------------------------
         if check_risk and self._risk_manager:
-            from nifty_scalper_bot.risk import OrderSignal
-            
             signal = OrderSignal(
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
             
-            # [FIX] Use correct helper names: _resolve_enable_live / _resolve_shadow_mode
-            live = self._resolve_enable_live() and not self._resolve_shadow_mode()
+            # [FIX] Use correct helper names for Live Mode check
+            is_live = False
+            if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
+                is_live = self._enable_live_getter()
+            elif hasattr(self, "_resolve_enable_live"):
+                is_live = self._resolve_enable_live()
             
-            allowed, reason = self._risk_manager.check_order(signal, live_enabled=live)
+            allowed, reason = self._risk_manager.check_order(signal, live_enabled=is_live)
             if not allowed:
                 self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol})
                 return None
 
-        # 3. Execution with Retry
-        exchange = self._resolve_exchange(normalized_symbol)
-        tradingsymbol = self._resolve_tradingsymbol(normalized_symbol)
-        params = {
-            "variety": variety, "exchange": exchange, "tradingsymbol": tradingsymbol,
-            "transaction_type": side, "quantity": quantity, "product": product,
-            "order_type": order_type.value, "validity": "DAY"
-        }
-        if price and price > 0: params["price"] = price
-        if trigger_price and trigger_price > 0: params["trigger_price"] = trigger_price
-        if tag: params["tag"] = tag
-
+        # ---------------------------------------------------------------------
+        # 3. EXECUTION WITH RETRY
+        # ---------------------------------------------------------------------
         self._logger.info(f"🚀 Sending Order: {side} {quantity} {normalized_symbol}")
         
-        # Retry Loop
         for attempt in range(1, 4):
             try:
-                order_id = self._broker.place_order(**params)
+                # [FIX] Simplified Call - Let ZerodhaClient handle the parsing
+                # We pass the raw symbol so the client can split it (NFO:...)
+                response = self._broker.place_order(
+                    symbol=normalized_symbol,
+                    side=side,
+                    quantity=quantity,
+                    product=product,
+                    order_type=order_type.value if hasattr(order_type, "value") else order_type,
+                    price=price,
+                    trigger_price=trigger_price,
+                    tag=tag,
+                    variety=variety
+                )
+                
+                # [FIX] Handle both String (ID) and Dict return types
+                order_id = response.get("order_id") if isinstance(response, dict) else str(response)
+                
                 if order_id:
-                    # 4. Register Order Locally
+                    # -----------------------------------------------------------------
+                    # 4. REGISTER ORDER LOCALLY
+                    # -----------------------------------------------------------------
                     details = OrderDetails(
                         order_id=order_id, symbol=normalized_symbol, side=side,
                         order_type=order_type, quantity=quantity, price=float(price or 0.0),
                         status=OrderStatus.PENDING, timestamp=datetime.now(timezone.utc),
-                        stop_loss=stop_loss, take_profit=take_profit # [FIX] Store intent
+                        stop_loss=stop_loss, take_profit=take_profit, tag=tag
                     )
                     self._register_order(details)
 
-                    # 5. [CRITICAL FIX] Register Bracket State
+                    # -----------------------------------------------------------------
+                    # 5. AUTO-REGISTER BRACKET STATE (If SL/TP provided)
+                    # -----------------------------------------------------------------
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
                         state = BracketState(
-                            entry_id=order_id, symbol=symbol, side=side, exit_side=exit_side,
+                            entry_id=order_id, symbol=normalized_symbol, side=side, exit_side=exit_side,
                             total_quantity=quantity, entry_price=float(price or 0.0),
                             product=product, tag=tag, stop_order_id="", 
                             stop_price=float(stop_loss) if stop_loss else 0.0,
@@ -1585,10 +1615,15 @@ class OrderManager:
                         self._logger.info(f"🛡️ Auto-bracket registered for simple order {order_id}")
 
                     return order_id
+                    
             except Exception as e:
-                self._logger.warning(f"Retry {attempt}/3 failed: {e}")
-                time.sleep(0.2 * attempt)
-        
+                self._logger.warning(
+                    f"⚠️ Retry {attempt}/3 failed: {e}", 
+                    extra={"error": str(e), "symbol": normalized_symbol}
+                )
+                time.sleep(0.5 * attempt)
+                
+        self._logger.error("❌ Order placement failed after retries.")
         return None
 
     def guard_existing_position(
