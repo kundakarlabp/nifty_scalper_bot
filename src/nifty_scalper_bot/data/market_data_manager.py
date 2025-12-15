@@ -2289,6 +2289,7 @@ class MarketDataManager:
         """High-frequency batched polling loop (Production-Grade).
 
         Optimized for <500ms latency. Batches requests and uses smart sleep.
+        Includes self-healing logic for session expiry and rate limits.
         """
         # SCOUT CONFIGURATION: 0.5s target interval
         target_interval = 1.5
@@ -2300,6 +2301,7 @@ class MarketDataManager:
         # Move margin checks to a slower cadence (60s) to prevent blocking ticks
         last_margin_refresh = 0.0
         margin_interval = 60.0
+        consecutive_errors = 0
 
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
@@ -2337,38 +2339,58 @@ class MarketDataManager:
                             # CRITICAL: Inject local timestamp for Stale Data logic
                             data['_local_timestamp'] = arrival_time
                             self.ingest_rest_quote(symbol, data)
+                        
+                        # Success - Reset error counters
+                        consecutive_errors = 0
                             
                     except Exception as exc:
+                        # [FIX] Handle Batch-Level Failures
                         self._logger.warning(
                             f"Batch poll failed for {len(batch)} symbols: {exc}",
                             extra={"event": "scout_batch_fail"}
                         )
+                        raise # Re-raise to trigger main loop error handling logic below
 
             except Exception as exc:
-                # [FIX] Handle Rate Limits Gracefully
-                if "rate limit" in str(exc).lower() or "429" in str(exc):
+                error_msg = str(exc).lower()
+                consecutive_errors += 1
+                
+                # [FIX 1] DETECT FATAL SESSION ERRORS (Cure for Zombie Mode)
+                # If broker says "Forbidden", "Unauthorized", or "Access Denied", our session is dead.
+                # We must kill the process so Docker/Railway restarts it with a fresh session.
+                if "403" in error_msg or "401" in error_msg or "unauthorized" in error_msg or "access denied" in error_msg:
+                    self._logger.critical(
+                        "🚨 FATAL: Broker Session Expired. Killing process to force auto-restart.",
+                        extra={"event": "scout_session_expired", "error": str(exc)}
+                    )
+                    import os
+                    os._exit(1) # Hard exit to ensure restart
+
+                # [FIX 2] Handle Rate Limits Gracefully
+                elif "rate limit" in error_msg or "429" in error_msg:
                     self._logger.warning(
                         "⚠️ Rate Limit Hit! Cooling down Scout Poller...",
                         extra={"event": "scout_rate_limit"}
                     )
-                    time.sleep(5.0) # Hard wait for 5 seconds
+                    time.sleep(5.0) # Hard wait
                     target_interval = min(5.0, target_interval + 0.5) # Permanently slow down
+                
+                # [FIX 3] Exponential Backoff for Network Blips
                 else:
+                    backoff = min(30.0, 0.5 * (2 ** consecutive_errors))
                     self._logger.error(
-                        f"Scout Loop Critical Error: {exc}", 
+                        f"Scout Loop Error (Attempt {consecutive_errors}): {exc}", 
                         exc_info=True,
-                        extra={"event": "scout_critical_error"}
+                        extra={"event": "scout_critical_error", "backoff": backoff}
                     )
-                    time.sleep(1.0) # Safety backoff on crash
+                    time.sleep(backoff)
 
             # 4. Smart Sleep (Maintain Rhythm)
-            # Subtract processing time from interval to maintain steady heartbeat
             elapsed = time.time() - loop_start
             sleep_time = max(0.0, target_interval - elapsed)
             
             if self._rest_poll_stop.wait(sleep_time):
                 break
-
     def _symbols_for_poll(self) -> list[str]:
         """Derive poll candidates across subscribers, cache, and tracking.
 
