@@ -461,15 +461,44 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         return params
 
-    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def place_order(
+        self,
+        variety: str = "regular",
+        tag: str = "",
+        **kwargs,
+    ) -> dict[str, Any]:
         """
         Place order with Robust Idempotency (Ghost Order Protection).
         Handles Zerodha's 20-char tag limit automatically.
-        """
-        params = self._build_kite_params(payload)
-        variety = payload.get("variety", "regular")
         
-        # 1. Generate Safe Unique Tag
+        Args:
+            variety: Order variety (regular, amo, co, ice).
+            tag: User-defined tag (will be suffixed with UUID).
+            **kwargs: Standard order params (symbol, side, quantity, product, price, etc).
+        """
+        import uuid  # Ensure uuid is available
+        
+        # 1. Construct Param Dictionary
+        # We merge kwargs with variety/tag to create the payload expected by helpers
+        params = kwargs.copy()
+        params["variety"] = variety
+        params["tag"] = tag
+
+        # Use internal helper to format keys (e.g. side="BUY" -> transaction_type="BUY")
+        # Ensure _build_kite_params exists, otherwise mapping is needed here.
+        if hasattr(self, "_build_kite_params"):
+            params = self._build_kite_params(params)
+        else:
+            # Fallback mapping if helper missing
+            if "symbol" in params:
+                exch, sym = params["symbol"].split(":") if ":" in params["symbol"] else ("NFO", params["symbol"])
+                params["exchange"] = exch
+                params["tradingsymbol"] = sym
+                del params["symbol"]
+            if "side" in params:
+                params["transaction_type"] = params.pop("side")
+
+        # 2. Generate Safe Unique Tag (Idempotency Key)
         # Zerodha Limit: 20 chars. We need 8 chars for UUID.
         # Allowed for prefix: 11 chars + 1 underscore.
         unique_id = uuid.uuid4().hex[:8]
@@ -477,12 +506,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
         raw_tag = str(params.get("tag") or "bot").strip()
         # Truncate existing tag to 11 chars to make room for unique ID
         safe_prefix = raw_tag[:11] 
-        params["tag"] = f"{safe_prefix}_{unique_id}"
+        final_tag = f"{safe_prefix}_{unique_id}"
+        params["tag"] = final_tag
 
         self._acquire_bucket(self._ORDER_BUCKET)
         
         try:
-            # 2. Attempt Placement
+            # 3. Attempt Placement
+            # We use raw request to get full response dict (status, message)
             response = self._ensure_json(
                 self._make_request(
                     "POST",
@@ -492,37 +523,39 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     operation_label="orders.place",
                 )
             )
+            
             data = response.get("data", {})
             return {
                 "order_id": data.get("order_id"),
-                "status": response.get("status"),
-                "message": response.get("message"),
-                "tag": params["tag"]
+                "status": response.get("status", "success"),
+                "message": response.get("message", ""),
+                "tag": final_tag
             }
             
         except (TimeoutError, httpx.TimeoutException, httpx.ReadTimeout):
-            # 3. Handle Timeout (Ghost Order Check)
-            LOGGER.warning(f"⚠️ Order placement timed out. Scanning for tag: {params['tag']}")
+            # 4. Handle Timeout (Ghost Order Check)
+            self._logger.warning(f"⚠️ Order placement timed out. Scanning for tag: {final_tag}")
             
             # Scan order book for this specific unique tag
             try:
-                # Ensure get_orders exists (added in previous steps)
+                # Force fetch latest orders
                 if hasattr(self, "get_orders"):
                     all_orders = self.get_orders()
                     for order in all_orders:
-                        if order.get("tag") == params["tag"]:
-                            LOGGER.info(f"✅ Found ghost order {order['order_id']} after timeout.")
-                            return {
+                        if order.get("tag") == final_tag:
+                            self._logger.info(f"✅ Found ghost order {order['order_id']} after timeout.")
+                            return {    
                                 "order_id": order["order_id"],
                                 "status": order["status"],
                                 "message": "Recovered from timeout",
-                                "tag": params["tag"]
+                                "tag": final_tag
                             }
             except Exception as e:
-                LOGGER.error(f"Failed to scan for ghost order: {e}")
+                self._logger.error(f"Failed to scan for ghost order: {e}")
             
             # If not found, re-raise (It really failed)
-            raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {params['tag']}")
+            from nifty_scalper_bot.utils.errors import OrderPlacementError
+            raise OrderPlacementError(f"Order timed out and not found in order book. Tag: {final_tag}")
 
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
