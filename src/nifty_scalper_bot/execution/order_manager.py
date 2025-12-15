@@ -1506,8 +1506,10 @@ class OrderManager:
     ) -> str | None:
         """
         Execute order with Safe Trading Window (09:30-15:15), Risk Gating, and Auto-Recovery.
-        """
+        """    
         import time
+        import uuid
+        import hashlib
         from datetime import datetime, timezone, time as dtime
         from zoneinfo import ZoneInfo
         from nifty_scalper_bot.core.trading_switch import trading_switch
@@ -1515,10 +1517,13 @@ class OrderManager:
 
         start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
-        # [FIX] Generate Deterministic ID for Idempotency
-        # If this function is called again for the same logic, we might want to reuse it,
-        # but for now, ensuring one unique ID per function call is enough to stop retries from duplicating.
-        unique_client_id = f"bot_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        # [FIX] Generate Deterministic ID (Capital Protection)
+        # 1. Hashes the trade details + 1-minute time bucket.
+        # 2. If strategy fires twice in 1 min, ID is same -> Broker rejects duplicate.
+        # 3. Uses normalized_symbol to ensure consistency.
+        raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time() / 60)}" 
+        sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
+        unique_client_id = f"bot_{sig_hash}"
         
         # ---------------------------------------------------------------------
         # 1. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
@@ -1607,9 +1612,7 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 5. EXECUTION LOOP (Fail-Fast & Idempotent)
         # ---------------------------------------------------------------------
-        import uuid # Local import for ID generation
-        # Generate ID ONCE so retries use the same ID (preventing duplicates)
-        unique_client_id = f"bot_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
 
         for attempt in range(1, 4):
             try:
