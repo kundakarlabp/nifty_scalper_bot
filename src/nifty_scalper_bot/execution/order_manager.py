@@ -1468,11 +1468,22 @@ class OrderManager:
         start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
         
-        # 1. Trading Switch Guard
-        # [FIX] Use correct method name 'can_trade' instead of 'can_trade_new'
-        if not trading_switch.can_trade():
-            self._logger.warning(
-                "Order blocked: Trading switch is OFF",
+        # 1. Trading Switch Guard (Robust)
+        switch_instance = trading_switch() if callable(trading_switch) else trading_switch
+        
+        # Check if the method exists dynamically (prevents AttributeError crash)
+        checker = getattr(switch_instance, "can_trade", None) 
+        if not checker:
+             checker = getattr(switch_instance, "can_trade_new", None)
+
+        if callable(checker):
+            if not checker():
+                self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
+                return None
+        else:
+            # Fallback: If we can't find the switch method, assume SAFE (Block Trade) or LOG ERROR
+            self._logger.error(
+                "CRITICAL: TradingSwitch interface mismatch. Blocking trade for safety.", 
                 extra={"symbol": normalized_symbol}
             )
             return None
@@ -2986,7 +2997,9 @@ class OrderManager:
             self._register_bracket_state(state)
             entry_id = order.order_id
             
-            # --- A. Place Stop Loss ---
+            # --- A. Place Stop Loss (Critical Safety Check) ---
+            sl_successful = False  # Track success to gate TP placement
+            
             if state.stop_price > 0:
                 try:
                     stop = self._place_single_order(
@@ -2998,6 +3011,8 @@ class OrderManager:
                     self._bracket_index[stop.order_id] = entry_id
                     self._update_entry_children(entry_id, add=[stop.order_id])
                     
+                    sl_successful = True # ✅ Mark as successful
+                    
                     # [UPGRADE] Attach Adaptive Trailing to Auto-Stop
                     if self._indicator_engine:
                         self.attach_trailing_stop(
@@ -3007,13 +3022,16 @@ class OrderManager:
                             spec=TrailingSpec(trail_by=10.0, step=2.0)
                         )
                 except Exception as e:
-                    self._logger.error(
-                        "Failed to place auto-stop: %s", e, 
-                        extra={"event": "auto_bracket_stop_failed", "entry_id": entry_id}
+                    self._logger.critical(
+                        "CRITICAL: Failed to place STOP LOSS: %s. Aborting TP placement to prevent naked trade.", 
+                        e, extra={"event": "auto_bracket_stop_failed_critical", "entry_id": entry_id}
                     )
+            else:
+                # If no stop price requested, we proceed (user intentional)
+                sl_successful = True 
 
-            # --- B. Place Take Profit ---
-            if state.tp_primary_price and state.tp_primary_price > 0:
+            # --- B. Place Take Profit (ONLY IF SL WAS SUCCESSFUL) ---
+            if sl_successful and state.tp_primary_price and state.tp_primary_price > 0:
                 try:
                     tp = self._place_single_order(
                         symbol=state.symbol, side=state.exit_side, quantity=state.total_quantity,
