@@ -1448,6 +1448,24 @@ class OrderManager:
             historical_avg = sum(historical) / len(historical)
         return (average_price, slippage, historical_avg)
 
+    def _resolve_exchange(self, symbol: str) -> str:
+        """Resolve exchange segment from symbol string (e.g., 'NFO:...' -> 'NFO')."""
+        # 1. Try to parse from symbol prefix (Fastest)
+        if ":" in symbol:
+            return symbol.split(":")[0]
+            
+        # 2. Try the instrument resolver if available
+        if self._resolver:
+            try:
+                info = self._resolver.resolve_by_symbol(symbol)
+                if info and "exchange" in info:
+                    return info["exchange"]
+            except Exception:
+                pass
+        
+        # 3. Default fallback for this bot (mostly trades Options)
+        return "NFO"
+
     def place_order(
         self,
         symbol: str,
