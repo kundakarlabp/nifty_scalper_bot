@@ -1225,6 +1225,20 @@ class PositionManager:
         self.save_state()
         return position
 
+    def update_from_order(self, order) -> None:
+        """
+        CRITICAL FIX: Allows OrderManager to sync state without crashing.
+        Used by _adopt_orphan_position AND _generate_adjustment_order.
+        """
+        if order.status == "FILLED":
+            self.update_position(
+                symbol=order.symbol,
+                qty=order.filled_quantity,
+                price=order.average_price,
+                side=order.side,
+                product="MIS"  # Defaulting to MIS for safety
+            )
+
     def update_position_price(self, symbol: str, current_price: float) -> None:
         """Update the mark price of an open position."""
 
