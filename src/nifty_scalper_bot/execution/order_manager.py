@@ -166,6 +166,7 @@ class OrderDetails:
     parent_order_id: str | None = None
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
+    rejection_reason: str | None = None
 
     @property
     def fill_price(self) -> float | None:
