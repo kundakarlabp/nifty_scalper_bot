@@ -8268,94 +8268,188 @@ class OrderManager:
     def _reconcile_positions(self) -> None:
         """
         CRITICAL SYNC: Force local state to match Broker's Net Positions.
-        Auto-resolves ghosts (local-only) and adopts orphans (broker-only).
+        Handles Manual Exits (Ghosts) and Unmanaged Trades (Orphans).
         """
         try:
-            # 1. Get Truth from Broker
+            # 1. FETCH TRUTH (Broker State)
             # ------------------------------------------------------
-            if not hasattr(self._broker, "get_positions"): return
-            broker_pos_list = self._broker.get_positions() or []
+            if not hasattr(self._broker, "get_positions"): 
+                return
             
-            # Map Clean Symbol -> Broker Data
-            # Key: "NIFTY25DEC..." (No NFO prefix) for easy comparison
+            # Fetch DAY positions (net positions can be misleading for intraday bots)
+            broker_pos_payload = self._broker.get_positions()
+            broker_pos_list = broker_pos_payload if isinstance(broker_pos_payload, list) else []
+            
+            # Map: Normalized Symbol -> Position Data
             broker_map = {}
             for p in broker_pos_list:
-                # Handle Zerodha's specific field names
-                raw_qty = p.get("quantity") if p.get("quantity") is not None else p.get("net_quantity")
-                qty = int(raw_qty or 0)
-                sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
-                
-                # Create normalized key for comparison
-                clean_key = sym.replace("NFO:", "").strip().upper()
-                
-                if clean_key and qty != 0:
-                    broker_map[clean_key] = {
-                        "qty": qty, 
-                        "price": float(p.get("average_price") or 0.0), 
-                        "raw_symbol": sym
-                    }
+                qty = int(p.get("quantity") or p.get("net_quantity") or 0)
+                if qty == 0: continue # Skip closed positions
 
-            # 2. Find GHOSTS (Exist Locally, Missing at Broker)
+                raw_sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
+                exch = str(p.get("exchange") or "NFO")
+                
+                # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY25DEC...)
+                if ":" in raw_sym:
+                    clean_sym = raw_sym.upper()
+                else:
+                    clean_sym = f"{exch}:{raw_sym}".upper()
+
+                broker_map[clean_sym] = {
+                    "qty": qty, 
+                    "price": float(p.get("average_price") or p.get("buy_price") or 0.0),
+                    "product": p.get("product"),
+                    "raw_payload": p
+                }
+
+            # 2. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
             # ------------------------------------------------------
             all_local = list(self._positions.get_open_positions())
-            local_keys = set()
-            
+            local_map = {}
+
             for pos in all_local:
-                if not pos.symbol: continue
-                local_sym = str(pos.symbol)
-                local_clean = local_sym.replace("NFO:", "").strip().upper()
-                local_keys.add(local_clean)
+                # Normalize Local Symbol
+                lsym = str(pos.symbol).upper()
+                if ":" not in lsym:
+                    # Default to NFO if missing (safe assumption for this bot)
+                    lsym = f"NFO:{lsym}"
                 
-                # If local exists but broker map doesn't -> GHOST
-                if local_clean not in broker_map:
+                local_map[lsym] = pos
+
+                # Check divergence
+                if lsym not in broker_map:
                     self._logger.warning(
-                        f"👻 Ghost Position Detected: {local_sym} (Qty: {pos.quantity}). Closing locally.",
-                        extra={"event": "ghost_position_cleared", "symbol": local_sym}
+                        f"👻 Ghost Position Found: {lsym}. (User likely exited manually). Clearing local state.",
+                        extra={"event": "ghost_cleared", "symbol": lsym}
                     )
-                    # Close it out by determining the inverse quantity needed
-                    self._generate_adjustment_order(local_sym, -int(pos.quantity), 0.0)
+                    # A. Cancel any pending SL/TP orders tied to this symbol
+                    self.cancel_orders_for_symbol(lsym)
+                    
+                    # B. Force update local tracker to 0 qty
+                    self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0, "manual_exit_sync")
 
-            # 3. Find ORPHANS (Exist at Broker, Missing Locally)
-            # ------------------------------------------------------
-            import time
-            from datetime import datetime, timezone
-            
-            for clean_key, data in broker_map.items():
-                if clean_key not in local_keys:
-                    # Determine correct symbol format (Force NFO: prefix for consistency)
-                    adopt_sym = data['raw_symbol']
-                    if "NFO:" not in adopt_sym and "NIFTY" in adopt_sym:
-                        adopt_sym = f"NFO:{adopt_sym}"
-
+                elif broker_map[lsym]["qty"] != pos.quantity:
+                    # Quantity Mismatch (Partial Manual Exit)
+                    diff = broker_map[lsym]["qty"] - pos.quantity
                     self._logger.info(
-                        f"✅ Adopting Orphan Position: {adopt_sym} (Qty: {data['qty']})",
-                        extra={"event": "orphan_position_adopted", "symbol": adopt_sym}
+                        f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_map[lsym]['qty']}",
+                        extra={"event": "qty_sync", "symbol": lsym}
+                    )
+                    self._generate_adjustment_order(lsym, diff, 0.0, "qty_sync")
+
+            # 3. HANDLE ORPHANS (Broker Exists, Local Missing) -> Adopt & Protect
+            # ------------------------------------------------------
+            for broker_sym, data in broker_map.items():
+                if broker_sym not in local_map:
+                    self._logger.warning(
+                        f"⚠️ Orphan Position Found: {broker_sym} Qty: {data['qty']}. Adopting...",
+                        extra={"event": "orphan_adopted", "symbol": broker_sym}
                     )
                     
-                    # Generate Collision-Proof ID
-                    fake_order_id = f"sync_{clean_key}_{int(time.time())}"
-                    side = "BUY" if data['qty'] > 0 else "SELL"
+                    # A. Create Local Record
+                    self._adopt_orphan_position(broker_sym, data)
                     
-                    details = OrderDetails(
-                        order_id=fake_order_id,
-                        symbol=adopt_sym,
-                        side=side,
-                        quantity=abs(data['qty']),
-                        order_type=OrderType.MARKET,
-                        status=OrderStatus.FILLED,
-                        timestamp=datetime.now(timezone.utc),
-                        price=data['price'],
-                        average_price=data['price'],
-                        filled_quantity=abs(data['qty']),
-                        tag="sync_adjustment"
-                    )
-                    
-                    # Force Update
-                    self._register_order(details)
-                    self._positions.update_from_order(details)
+                    # B. CRITICAL: Check for Safety (Naked Position Check)
+                    # If we just adopted it, it likely has NO bracket.
+                    self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
         except Exception as e:
-            self._logger.error(f"Reconciliation Error: {e}", exc_info=True)
+            self._logger.error(f"Reconciliation Failed: {e}", exc_info=True)
+
+    def _adopt_orphan_position(self, symbol: str, data: dict) -> None:
+        """Creates a synthetic filled order to register the position locally."""
+        import time
+        from datetime import datetime, timezone
+        
+        side = "BUY" if data['qty'] > 0 else "SELL"
+        # Unique ID to prevent overwrites
+        order_id = f"sync_{int(time.time())}_{symbol.split(':')[-1]}"
+        
+        details = OrderDetails(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            quantity=abs(data['qty']),
+            order_type=OrderType.MARKET,
+            status=OrderStatus.FILLED,
+            timestamp=datetime.now(timezone.utc),
+            price=float(data['price']),
+            average_price=float(data['price']),
+            filled_quantity=abs(data['qty']),
+            tag="orphan_adoption"
+        )
+        
+        # Register in OrderManager and PositionManager
+        self._register_order(details)
+        self._positions.update_from_order(details)
+
+    def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
+        """
+        Checks if an open position has SL/TP. If not, places them.
+        """
+        # 1. Check if we already have a bracket for this symbol
+        with self._lock:
+            for b in self._brackets.values():
+                if b.symbol == symbol and b.remaining_position() > 0:
+                    return # Already protected
+
+        # 2. No Bracket Found -> Emergency Protect
+        self._logger.warning(
+            f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Emergency Safety Orders.",
+            extra={"event": "safety_bracket_trigger", "symbol": symbol}
+        )
+        
+        # Define Safety Margins (e.g., 20% SL, 40% TP - wider to avoid whipsaw on sync)
+        exit_side = "SELL" if quantity > 0 else "BUY"
+        sl_price = round(entry_price * 0.8, 2) if quantity > 0 else round(entry_price * 1.2, 2)
+        tp_price = round(entry_price * 1.4, 2) if quantity > 0 else round(entry_price * 0.6, 2)
+
+        # Place SL
+        try:
+            self.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=abs(quantity),
+                order_type=OrderType.STOP_LOSS_MARKET,
+                price=sl_price,
+                trigger_price=sl_price,
+                tag="safety_sl",
+                variety="regular"
+            )
+        except Exception as e:
+            self._logger.error(f"Failed to place Safety SL: {e}")
+
+        # Place TP
+        try:
+            self.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=abs(quantity),
+                order_type=OrderType.LIMIT,
+                price=tp_price,
+                tag="safety_tp",
+                variety="regular"
+            )
+        except Exception as e:
+            self._logger.error(f"Failed to place Safety TP: {e}")
+
+    def cancel_orders_for_symbol(self, symbol: str) -> None:
+        """Cancels all open orders for a specific symbol."""
+        pending = self._pending_orders()
+        for o in pending:
+            # Normalize check
+            o_sym = str(o.symbol).upper()
+            if ":" not in o_sym: o_sym = f"NFO:{o_sym}"
+            
+            target_sym = str(symbol).upper()
+            if ":" not in target_sym: target_sym = f"NFO:{target_sym}"
+
+            if o_sym == target_sym:
+                self._logger.info(f"🧹 Auto-canceling stale order {o.order_id} for {symbol}")
+                try:
+                    self.cancel_order(o.order_id)
+                except:
+                    pass
 
     def _generate_adjustment_order(self, symbol: str, qty: int, price: float = 0.0) -> None:
         """Helper to inject synthetic orders for state correction (Ghosts)."""
