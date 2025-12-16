@@ -1598,12 +1598,31 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 4. PAYLOAD OPTIMIZATION & MAPPING
         # ---------------------------------------------------------------------
+        # Order Type Mapping & SL-M Fix
         raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
+        
+        # [FIX] Zerodha blocks SL-M for Options. We must map to SL (Limit).
         zerodha_type_map = {
-            "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
-            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"
+            "STOP_LOSS_MARKET": "SL", # Force SL-M -> SL
+            "SL-M": "SL",             # Force SL-M -> SL
+            "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
+            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL"
         }
         final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
+
+        # [FIX] Calculate Limit Price for converted SL orders
+        # If we forced SL-M to SL, we need a Limit Price.
+        # We set it 3% beyond the trigger to ensure it executes like a Market order.
+        if final_order_type == "SL" and (price is None or price == 0.0) and trigger_price:
+            buffer_pct = 0.03 # 3% Buffer
+            if side == "BUY":
+                # Buy Stop Loss (Short Exit): Limit > Trigger
+                price = round(trigger_price * (1 + buffer_pct), 2)
+            else:
+                # Sell Stop Loss (Long Exit): Limit < Trigger
+                price = round(trigger_price * (1 - buffer_pct), 2)
+            
+            self._logger.info(f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}")
 
         self._logger.info(
             f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})",
