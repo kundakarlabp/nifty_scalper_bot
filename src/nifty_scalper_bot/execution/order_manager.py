@@ -8248,21 +8248,24 @@ class OrderManager:
     def _reconcile_positions(self) -> None:
         """
         CRITICAL SYNC: Force local state to match Broker's Net Positions.
-        Uses fuzzy matching to handle 'NFO:' prefix mismatches.
+        Auto-resolves ghosts (local-only) and adopts orphans (broker-only).
         """
         try:
+            # 1. Get Truth from Broker
+            # ------------------------------------------------------
             if not hasattr(self._broker, "get_positions"): return
             broker_pos_list = self._broker.get_positions() or []
             
             # Map Clean Symbol -> Broker Data
-            # e.g., "NIFTY25DEC..." -> {qty: 75, ...}
+            # Key: "NIFTY25DEC..." (No NFO prefix) for easy comparison
             broker_map = {}
             for p in broker_pos_list:
+                # Handle Zerodha's specific field names
                 raw_qty = p.get("quantity") if p.get("quantity") is not None else p.get("net_quantity")
                 qty = int(raw_qty or 0)
                 sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
                 
-                # We strip "NFO:" to create a common comparison key
+                # Create normalized key for comparison
                 clean_key = sym.replace("NFO:", "").strip().upper()
                 
                 if clean_key and qty != 0:
@@ -8272,37 +8275,45 @@ class OrderManager:
                         "raw_symbol": sym
                     }
 
-            # Check Local Positions against Broker Truth
-            # We iterate local positions and try to find them in broker map
+            # 2. Find GHOSTS (Exist Locally, Missing at Broker)
+            # ------------------------------------------------------
             all_local = list(self._positions.get_open_positions())
             local_keys = set()
             
             for pos in all_local:
-                local_sym = pos.symbol
+                if not pos.symbol: continue
+                local_sym = str(pos.symbol)
                 local_clean = local_sym.replace("NFO:", "").strip().upper()
                 local_keys.add(local_clean)
                 
-                # If local exists but broker doesn't -> GHOST (Close it locally)
+                # If local exists but broker map doesn't -> GHOST
                 if local_clean not in broker_map:
-                    self._logger.warning(f"👻 Ghost Position: {local_sym}. Closing locally.")
-                    self._generate_adjustment_order(local_sym, -pos.quantity, 0.0)
+                    self._logger.warning(
+                        f"👻 Ghost Position Detected: {local_sym} (Qty: {pos.quantity}). Closing locally.",
+                        extra={"event": "ghost_position_cleared", "symbol": local_sym}
+                    )
+                    # Close it out by determining the inverse quantity needed
+                    self._generate_adjustment_order(local_sym, -int(pos.quantity), 0.0)
 
-            # Check Broker Positions against Local
+            # 3. Find ORPHANS (Exist at Broker, Missing Locally)
+            # ------------------------------------------------------
+            import time
+            from datetime import datetime, timezone
+            
             for clean_key, data in broker_map.items():
                 if clean_key not in local_keys:
-                    # ORPHAN DETECTED -> ADOPT IT
-                    # We use the raw symbol from broker to ensure compatibility, 
-                    # OR prepend NFO: if your system enforces it.
+                    # Determine correct symbol format (Force NFO: prefix for consistency)
                     adopt_sym = data['raw_symbol']
                     if "NFO:" not in adopt_sym and "NIFTY" in adopt_sym:
-                        adopt_sym = f"NFO:{adopt_sym}" # Enforce NFO prefix for local consistency
+                        adopt_sym = f"NFO:{adopt_sym}"
 
                     self._logger.info(
                         f"✅ Adopting Orphan Position: {adopt_sym} (Qty: {data['qty']})",
-                        extra={"event": "orphan_position_adopted"}
+                        extra={"event": "orphan_position_adopted", "symbol": adopt_sym}
                     )
                     
-                    fake_order_id = f"sync_{int(time.time())}_{abs(data['qty'])}"
+                    # Generate Collision-Proof ID
+                    fake_order_id = f"sync_{clean_key}_{int(time.time())}"
                     side = "BUY" if data['qty'] > 0 else "SELL"
                     
                     details = OrderDetails(
@@ -8318,11 +8329,39 @@ class OrderManager:
                         filled_quantity=abs(data['qty']),
                         tag="sync_adjustment"
                     )
+                    
+                    # Force Update
                     self._register_order(details)
                     self._positions.update_from_order(details)
 
         except Exception as e:
             self._logger.error(f"Reconciliation Error: {e}", exc_info=True)
+
+    def _generate_adjustment_order(self, symbol: str, qty: int, price: float = 0.0) -> None:
+        """Helper to inject synthetic orders for state correction (Ghosts)."""
+        if qty == 0: return
+        import time
+        from datetime import datetime, timezone
+        
+        side = "BUY" if qty > 0 else "SELL"
+        # Unique ID to prevent overwrites
+        order_id = f"adj_{symbol.replace(':','')}_{int(time.time())}"
+        
+        details = OrderDetails(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            quantity=abs(qty),
+            order_type=OrderType.MARKET,
+            status=OrderStatus.FILLED,
+            timestamp=datetime.now(timezone.utc),
+            price=float(price),
+            average_price=float(price),
+            filled_quantity=abs(qty),
+            tag="ghost_fix"
+        )
+        self._register_order(details)
+        self._positions.update_from_order(details)
 
     def _generate_adjustment_order(self, symbol, qty, price=0.0):
         """Helper to inject synthetic orders."""
