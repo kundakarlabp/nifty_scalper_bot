@@ -8491,32 +8491,6 @@ class OrderManager:
                 except:
                     pass
 
-    def _generate_adjustment_order(self, symbol: str, qty: int, price: float = 0.0) -> None:
-        """Helper to inject synthetic orders for state correction (Ghosts)."""
-        if qty == 0: return
-        import time
-        from datetime import datetime, timezone
-        
-        side = "BUY" if qty > 0 else "SELL"
-        # Unique ID to prevent overwrites
-        order_id = f"adj_{symbol.replace(':','')}_{int(time.time())}"
-        
-        details = OrderDetails(
-            order_id=order_id,
-            symbol=symbol,
-            side=side,
-            quantity=abs(qty),
-            order_type=OrderType.MARKET,
-            status=OrderStatus.FILLED,
-            timestamp=datetime.now(timezone.utc),
-            price=float(price),
-            average_price=float(price),
-            filled_quantity=abs(qty),
-            tag="ghost_fix"
-        )
-        self._register_order(details)
-        self._positions.update_from_order(details)
-
     def _generate_adjustment_order(self, symbol, qty, price=0.0):
         """Helper to inject synthetic orders."""
         if qty == 0: return
@@ -8538,7 +8512,16 @@ class OrderManager:
             tag="ghost_fix"
         )
         self._register_order(details)
-        self._positions.update_from_order(details)
+        
+        # --- FIX: Check before calling update_from_order ---
+        if hasattr(self._positions, "update_from_order"):
+            self._positions.update_from_order(details)
+        elif hasattr(self._positions, "update_position"):
+            self._positions.update_position(
+                symbol=details.symbol, qty=details.quantity,
+                price=details.average_price, side=details.side, product="MIS"
+            )
+        # ---------------------------------------------------
 
 
 __all__ = [
