@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Tuple
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -32,18 +32,7 @@ class EliteSignal:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_payload(self) -> dict[str, Any]:
-        """Return serialisable representation of the signal.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, Any]: Payload describing the signal attributes.
-
-        Raises:
-            None.
-        """
-
+        """Return serialisable representation of the signal."""
         return {
             "symbol": self.symbol,
             "side": self.side,
@@ -53,250 +42,189 @@ class EliteSignal:
             "take_profit_1": self.take_profit_1,
             "take_profit_2": self.take_profit_2,
             "quantity": self.quantity,
-            "strategy_name": self.strategy_name,
-            "metadata": dict(self.metadata),
+            "strategy": self.strategy_name,
             "timestamp": self.timestamp.isoformat(),
+            "metadata": self.metadata,
         }
 
 
 class EliteStrategy(Strategy):
-    """Adapter bridging elite strategy logic with core manager contract."""
+    """Base class for high-probability elite setups."""
 
-    def __init__(self, name: str, config: EliteStrategyConfig) -> None:
-        """Initialise strategy with configuration.
+    def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
+        """Initialize the elite strategy base.
 
         Args:
-            name: Strategy identifier used in logs and telemetry.
-            config: Strongly typed configuration for the strategy.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
+            config: Validated configuration model.
+            indicator_engine: Provider for market data and indicators.
         """
-
-        LOGGER.debug(
-            "Entered EliteStrategy.__init__",
-            extra={"event": "elite_strategy_init", "strategy": name},
-        )
+        # Pass raw dict for compatibility with parent Strategy class
+        super().__init__(config=config.dict(), indicator_engine=indicator_engine)
         self._config = config
+        self._indicator_engine = indicator_engine
         self._last_signal_at: datetime | None = None
-        self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
-        self._logger = LOGGER
-        parameters = {
-            "min_confidence": config.min_confidence,
-            "enabled": config.enabled,
-            "cooldown_seconds": config.cooldown_seconds,
-        }
-        super().__init__(name=name, parameters=parameters)
+        self._signals_generated: int = 0
+        
+        # ⚙️ PRODUCTION SAFETY SETTINGS
+        # These guardrails apply to ALL elite strategies automatically
+        self.min_oi = 50000
+        self.max_spread_pct = 5.0
+        self.min_delta = 0.30
+        self.max_iv_percentile = 85.0
 
-    def get_required_indicators(self) -> list[str]:
-        """Return default indicator dependencies.
-
-        Args:
-            None.
-
-        Returns:
-            list[str]: Indicator names required for evaluation.
-
-        Raises:
-            None.
-        """
-
-        return [
-            "rsi",
-            "atr",
-            "vwap",
-            "bollinger_upper",
-            "bollinger_middle",
-            "bollinger_lower",
-            "ema",
-            "sma",
-            "macd",
-            "macd_signal",
-            "macd_histogram",
-            "volume",
-            "avg_volume",
-            "volume_spike_ratio",
-            "minutes_since_open",
-            "minutes_until_close",
-            "orb_high",
-            "orb_low",
-            "orb_ready",
-            "nr7",
-            "nr7_range",
-            "nr7_min_range",
-            "bar_range",
-        ]
-
-    def generate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Any | None,
-    ) -> Signal | None:
-        """Generate trading signal when conditions are satisfied.
-
-        Args:
-            symbol: Trading symbol under evaluation.
-            indicators: Indicator snapshot provided by engine.
-            current_price: Latest traded price.
-            position: Existing open position for the symbol, if any.
-
-        Returns:
-            Signal | None: Strategy signal when criteria met else ``None``.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered EliteStrategy.generate_signal",
-            extra={"event": "elite_generate", "strategy": self.name, "symbol": symbol},
-        )
-        try:
-            if not self._config.enabled:
-                return None
-            if not self._respect_cooldown():
-                return None
-            signal = self._evaluate_signal(symbol, indicators, current_price, position)
-            if signal is None:
-                return None
-            if signal.confidence < self._config.min_confidence:
-                return None
-            converted = self._convert_signal(signal)
-            self._update_state(signal)
-            self._logger.info(
-                "Condition met: elite_signal_generated",
-                extra={
-                    "event": "elite_signal_generated",
-                    "strategy": self.name,
-                    "symbol": symbol,
-                    "side": signal.side,
-                    "confidence": signal.confidence,
-                },
-            )
-            return converted
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in EliteStrategy.generate_signal: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "elite_generate_error", "strategy": self.name},
-            )
+    def generate_signal(self) -> Signal | None:
+        """Standard interface implementation bridging to elite logic."""
+        if not self._config.enabled:
             return None
 
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Any | None,
-    ) -> EliteSignal | None:
-        """Evaluate and return raw elite signal.
+        try:
+            # Delegate to specific implementation
+            elite_signal = self._evaluate_signal()
+            if elite_signal:
+                # 🛡️ SAFETY GATE: Validate Greeks/Liquidity before proceeding
+                if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
+                    LOGGER.info(f"⛔ Rejected {elite_signal.symbol}: Failed Safety Check")
+                    return None
 
-        Args:
-            symbol: Trading symbol under evaluation.
-            indicators: Indicator snapshot provided by engine.
-            current_price: Latest traded price.
-            position: Existing open position for the symbol, if any.
+                self._update_state(elite_signal)
+                return self._convert_to_core_signal(elite_signal)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(f"Strategy {self.name} failed evaluation: {exc}")
+            return None
+        return None
 
-        Returns:
-            EliteSignal | None: Raw signal when detected else ``None``.
+    def _evaluate_signal(self) -> EliteSignal | None:
+        """Internal hook for strategy-specific logic.
 
-        Raises:
-            NotImplementedError: When subclass omits implementation.
+        Must be implemented by subclasses.
         """
+        raise NotImplementedError("Subclasses must implement _evaluate_signal")
 
-        raise NotImplementedError
+    @property
+    def name(self) -> str:
+        """Return strategy identifier."""
+        return self.__class__.__name__
 
-    def _respect_cooldown(self) -> bool:
-        """Return ``True`` when cooldown has elapsed.
+    # ==========================================================================
+    # 🛡️ SAFETY & RISK ENGINE (World Class Implementation)
+    # ==========================================================================
 
-        Args:
-            None.
-
-        Returns:
-            bool: ``True`` if cooldown window satisfied.
-
-        Raises:
-            None.
+    def validate_option_health(self, symbol: str, direction: str) -> bool:
         """
-
-        if self._last_signal_at is None:
+        🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'.
+        Checks Liquidity, Spread, and Greeks.
+        """
+        # Skip validation for Futures/Spot (Focus on Options)
+        if "CE" not in symbol and "PE" not in symbol:
             return True
-        delta = datetime.now(timezone.utc) - self._last_signal_at
-        return delta.total_seconds() >= self._config.cooldown_seconds
 
-    def _convert_signal(self, signal: EliteSignal) -> Signal:
-        """Convert :class:`EliteSignal` into core :class:`Signal` type.
+        # 1. FETCH DATA
+        quote = self._indicator_engine.get_quote(symbol)
+        greeks = self._indicator_engine.get_indicators(symbol, ["delta", "theta", "iv_percentile"])
+        
+        if not quote:
+            # LOGGER.warning(f"⛔ {symbol}: No Quote Data.")
+            return False # Fail safe
 
-        Args:
-            signal: Elite signal emitted by subclass implementation.
+        # 2. 💧 LIQUIDITY CHECK
+        oi = quote.get('oi', 0) or 0
+        if oi < self.min_oi:
+            LOGGER.debug(f"⛔ {symbol}: Low Liquidity (OI: {oi}). Skip.")
+            return False
 
-        Returns:
-            Signal: Converted signal compatible with strategy manager.
+        # 3. 📉 SPREAD CHECK
+        bid = float(quote.get('bid', 0) or 0)
+        ask = float(quote.get('ask', 0) or 0)
+        if bid > 0:
+            spread_pct = ((ask - bid) / bid) * 100
+            if spread_pct > self.max_spread_pct:
+                LOGGER.debug(f"⛔ {symbol}: Spread wide ({spread_pct:.2f}%). Skip.")
+                return False
 
-        Raises:
-            None.
+        # 4. 📐 GREEKS CHECK
+        if greeks:
+            delta = abs(float(greeks.get('delta') or 0.5))
+            if delta < self.min_delta:
+                LOGGER.debug(f"⛔ {symbol}: Weak Delta ({delta:.2f}). Skip.")
+                return False
+                
+            theta = float(greeks.get('theta') or 0.0)
+            if direction == "BUY" and theta < -20.0: 
+                LOGGER.debug(f"⛔ {symbol}: High Theta Burn ({theta}). Skip.")
+                return False
+                
+            iv_p = float(greeks.get('iv_percentile') or 50.0)
+            if direction == "BUY" and iv_p > self.max_iv_percentile:
+                LOGGER.debug(f"⛔ {symbol}: IV Expensive ({iv_p}). Skip.")
+                return False
+
+        return True
+
+    def calculate_option_rr(self, premium: float, side: str = "BUY") -> Tuple[float, float]:
         """
+        💰 RISK LOGIC: Calculates SL/TP based on Premium %
+        """
+        # Standard Intraday Risk Profile
+        SL_PCT = 0.15 # Risk 15% of premium
+        TP_PCT = 0.30 # Target 30% gain
 
-        confidence = max(0.0, min(signal.confidence / 100.0, 1.0))
-        metadata = dict(signal.metadata)
-        metadata.update(
-            {
-                "strategy": self.name,
-                "elite_timestamp": signal.timestamp.isoformat(),
-                "elite_confidence": signal.confidence,
-            }
-        )
-        action: Literal["BUY", "SELL"] = (
-            "BUY" if signal.side.upper() == "BUY" else "SELL"
-        )
+        if side == "BUY":
+            sl_price = round(premium * (1 - SL_PCT), 1)
+            tp_price = round(premium * (1 + TP_PCT), 1)
+        else:
+            sl_price = round(premium * (1 + SL_PCT), 1)
+            tp_price = round(premium * (1 - TP_PCT), 1)
+            
+        # Sanity Check
+        sl_price = max(0.05, sl_price)
+        tp_price = max(0.05, tp_price)
+            
+        return sl_price, tp_price
+
+    # ==========================================================================
+    # HELPERS
+    # ==========================================================================
+
+    def _convert_to_core_signal(self, signal: EliteSignal) -> Signal:
+        """Adapter converting elite signal to core signal format."""
+        
+        # If strategy didn't set specific SL/TP, use our Premium Calculator
+        sl = signal.stop_loss
+        tp = signal.take_profit_1
+        
+        if not sl or not tp:
+            calc_sl, calc_tp = self.calculate_option_rr(signal.entry_price, signal.side)
+            if not sl: sl = calc_sl
+            if not tp: tp = calc_tp
+
+        metadata = signal.metadata.copy()
+        metadata.update({
+            "strategy": self.name,
+            "elite_version": "2.0",
+            "tp2": signal.take_profit_2,
+            "quantity": signal.quantity
+        })
+
         return Signal(
-            action=action,
+            action=signal.side, # type: ignore
             symbol=signal.symbol,
-            quantity=max(1, signal.quantity),
-            confidence=confidence,
-            reason=f"{self.name} elite setup",
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit_1,
+            confidence=signal.confidence,
+            price=signal.entry_price,
+            tag=f"{self.name} elite setup",
+            stop_loss=sl,
+            take_profit=tp,
             metadata=metadata,
         )
 
     def _update_state(self, signal: EliteSignal) -> None:
-        """Persist bookkeeping fields for telemetry.
-
-        Args:
-            signal: Signal that triggered state update.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Persist bookkeeping fields for telemetry."""
         self._last_signal_at = signal.timestamp
         self._last_signal = signal
         self._signals_generated += 1
 
     def get_stats(self) -> dict[str, Any]:
-        """Return diagnostic statistics for the strategy.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, Any]: Statistics describing recent activity.
-
-        Raises:
-            None.
-        """
-
+        """Return diagnostic statistics for the strategy."""
         last_payload: dict[str, Any] | None = None
         if self._last_signal is not None:
             last_payload = self._last_signal.to_payload()
@@ -309,18 +237,7 @@ class EliteStrategy(Strategy):
 
     @property
     def config(self) -> EliteStrategyConfig:
-        """Return strategy configuration reference.
-
-        Args:
-            None.
-
-        Returns:
-            EliteStrategyConfig: Configuration structure for strategy.
-
-        Raises:
-            None.
-        """
-
+        """Return strategy configuration reference."""
         return self._config
 
 
