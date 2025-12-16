@@ -3581,6 +3581,81 @@ class OrderManager:
                 extra={"event": "order_reconcile", "orders": reconciled},
             )
 
+    def exit_position(
+        self, 
+        symbol: str, 
+        quantity: int, 
+        tag: str = "exit", 
+        force: bool = False
+    ) -> str | None:
+        """
+        Executes the 'Soft Exit' (Market Order) and cleans up the 'Hard' Safety Net.
+        This completes the Hybrid Approach.
+        """
+        symbol = symbol.strip().upper()
+        
+        # 1. EXECUTE MARKET EXIT (The "Soft" Trigger)
+        self._logger.info(
+            f"⚡ Hybrid Exit Triggered for {symbol} (Qty: {quantity})",
+            extra={"event": "hybrid_exit_trigger", "symbol": symbol}
+        )
+        
+        try:
+            # Determine exit side based on quantity direction or passed arg
+            # Assuming positive quantity means we HOLD Long, so we need to SELL
+            # If quantity is passed as absolute, you might need to check self._positions
+            exit_side = "SELL" # Default for Long Exit
+            
+            # Send Market Order to Zerodha
+            # NOTE: We use place_order so it handles all the time/risk guards automatically
+            exit_id = self.place_order(
+                symbol=symbol,
+                side=exit_side, 
+                quantity=abs(quantity),
+                order_type=OrderType.MARKET,
+                tag=tag,
+                check_risk=not force
+            )
+            
+            if not exit_id:
+                self._logger.error(f"❌ Soft Exit Failed: place_order returned None")
+                return None
+                
+        except Exception as e:
+            self._logger.critical(f"❌ Soft Exit Failed: {e}", exc_info=True)
+            return None
+
+        # 2. CLEAN UP SAFETY NET (The "Hard" Cleanup)
+        # We must cancel the Hard SL and Wide TP we placed earlier
+        try:
+            with self._lock:
+                if symbol in self._brackets:
+                    bracket = self._brackets[symbol]
+                    
+                    # Cancel Hard SL
+                    if bracket.stop_order_id:
+                        self._logger.info(f"🗑️ Cancelling Safety SL: {bracket.stop_order_id}")
+                        try:
+                            self.cancel_order(bracket.stop_order_id)
+                        except Exception as e:
+                            self._logger.warning(f"Failed to cancel SL {bracket.stop_order_id}: {e}")
+                    
+                    # Cancel Wide TP
+                    if bracket.tp_primary_id:
+                        self._logger.info(f"🗑️ Cancelling Safety TP: {bracket.tp_primary_id}")
+                        try:
+                            self.cancel_order(bracket.tp_primary_id)
+                        except Exception as e:
+                            self._logger.warning(f"Failed to cancel TP {bracket.tp_primary_id}: {e}")
+                    
+                    # Remove local bracket state so we don't track dead orders
+                    del self._brackets[symbol]
+                    
+        except Exception as e:
+            self._logger.error(f"⚠️ Safety Net Cleanup Failed (Non-Critical): {e}")
+
+        return exit_id
+
     def modify_order(
         self,
         order_id: str,
