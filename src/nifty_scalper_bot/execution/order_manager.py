@@ -8272,24 +8272,30 @@ class OrderManager:
         """
         try:
             # 1. FETCH TRUTH (Broker State)
-            # ------------------------------------------------------
             if not hasattr(self._broker, "get_positions"): 
                 return
             
-            # Fetch DAY positions (net positions can be misleading for intraday bots)
-            broker_pos_payload = self._broker.get_positions()
+            # Fetch net positions (standard for most brokers)
+            try:
+                broker_pos_payload = self._broker.get_positions()
+            except Exception as e:
+                self._logger.error(f"Failed to fetch broker positions: {e}")
+                return
+
             broker_pos_list = broker_pos_payload if isinstance(broker_pos_payload, list) else []
             
             # Map: Normalized Symbol -> Position Data
             broker_map = {}
             for p in broker_pos_list:
+                # Handle different broker key names safely
                 qty = int(p.get("quantity") or p.get("net_quantity") or 0)
                 if qty == 0: continue # Skip closed positions
 
                 raw_sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
                 exch = str(p.get("exchange") or "NFO")
                 
-                # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY25DEC...)
+                # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY...)
+                # Zerodha sometimes returns "NIFTY..." without NFO:
                 if ":" in raw_sym:
                     clean_sym = raw_sym.upper()
                 else:
@@ -8302,43 +8308,16 @@ class OrderManager:
                     "raw_payload": p
                 }
 
-            # 2. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
+            # 2. HANDLE ORPHANS (Broker Exists, Local Missing) -> Adopt & Protect
             # ------------------------------------------------------
+            # We check orphans FIRST to ensure safety priority
             all_local = list(self._positions.get_open_positions())
             local_map = {}
-
             for pos in all_local:
-                # Normalize Local Symbol
                 lsym = str(pos.symbol).upper()
-                if ":" not in lsym:
-                    # Default to NFO if missing (safe assumption for this bot)
-                    lsym = f"NFO:{lsym}"
-                
+                if ":" not in lsym: lsym = f"NFO:{lsym}"
                 local_map[lsym] = pos
 
-                # Check divergence
-                if lsym not in broker_map:
-                    self._logger.warning(
-                        f"👻 Ghost Position Found: {lsym}. (User likely exited manually). Clearing local state.",
-                        extra={"event": "ghost_cleared", "symbol": lsym}
-                    )
-                    # A. Cancel any pending SL/TP orders tied to this symbol
-                    self.cancel_orders_for_symbol(lsym)
-                    
-                    # B. Force update local tracker to 0 qty
-                    self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0, "manual_exit_sync")
-
-                elif broker_map[lsym]["qty"] != pos.quantity:
-                    # Quantity Mismatch (Partial Manual Exit)
-                    diff = broker_map[lsym]["qty"] - pos.quantity
-                    self._logger.info(
-                        f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_map[lsym]['qty']}",
-                        extra={"event": "qty_sync", "symbol": lsym}
-                    )
-                    self._generate_adjustment_order(lsym, diff, 0.0, "qty_sync")
-
-            # 3. HANDLE ORPHANS (Broker Exists, Local Missing) -> Adopt & Protect
-            # ------------------------------------------------------
             for broker_sym, data in broker_map.items():
                 if broker_sym not in local_map:
                     self._logger.warning(
@@ -8346,12 +8325,38 @@ class OrderManager:
                         extra={"event": "orphan_adopted", "symbol": broker_sym}
                     )
                     
-                    # A. Create Local Record
-                    self._adopt_orphan_position(broker_sym, data)
-                    
-                    # B. CRITICAL: Check for Safety (Naked Position Check)
-                    # If we just adopted it, it likely has NO bracket.
+                    # A. Create Local Record (Swallow errors to ensure step B runs)
+                    try:
+                        self._adopt_orphan_position(broker_sym, data)
+                    except Exception as e:
+                        # LOG BUT DO NOT CRASH. We must proceed to safety check.
+                        self._logger.error(f"Adoption Error (Non-Critical): {e}", exc_info=True)
+
+                    # B. CRITICAL: Check for Safety Bracket
+                    # This runs even if Step A fails
                     self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
+
+            # 3. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
+            # ------------------------------------------------------
+            for lsym, pos in local_map.items():
+                if lsym not in broker_map:
+                    self._logger.warning(
+                        f"👻 Ghost Position Found: {lsym}. Clearing local state.",
+                        extra={"event": "ghost_cleared", "symbol": lsym}
+                    )
+                    # Cancel any stale pending orders for this symbol
+                    self.cancel_orders_for_symbol(lsym)
+                    # Force local quantity to 0
+                    self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
+
+                elif broker_map[lsym]["qty"] != pos.quantity:
+                    # Quantity mismatch (Partial exit)
+                    diff = broker_map[lsym]["qty"] - pos.quantity
+                    self._logger.info(
+                        f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_map[lsym]['qty']}",
+                        extra={"event": "qty_sync", "symbol": lsym}
+                    )
+                    self._generate_adjustment_order(lsym, diff, 0.0)
 
         except Exception as e:
             self._logger.error(f"Reconciliation Failed: {e}", exc_info=True)
@@ -8379,57 +8384,76 @@ class OrderManager:
             tag="orphan_adoption"
         )
         
-        # Register in OrderManager and PositionManager
+        # 1. Register in OrderManager
         self._register_order(details)
-        self._positions.update_from_order(details)
+        
+        # 2. Register in PositionManager (Defensive Coding)
+        pm = self._positions
+        
+        if hasattr(pm, "update_from_order"):
+            pm.update_from_order(details)
+        elif hasattr(pm, "update_position"):
+            # Fallback for standard PositionManager
+            pm.update_position(
+                symbol=details.symbol,
+                qty=details.quantity,
+                price=details.average_price,
+                side=details.side,
+                product="MIS" # Assume MIS for safety
+            )
+        elif hasattr(pm, "add_position"):
+             # Legacy fallback
+             pm.add_position(details)
+        else:
+            self._logger.error("CRITICAL: PositionManager has no known update method! Local state will be out of sync.")
 
     def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
         """
-        Checks if an open position has SL/TP. If not, places them.
+        Checks if an open position has SL/TP. If not, places them immediately.
         """
-        # 1. Check if we already have a bracket for this symbol
+        # 1. Check if we already have a functioning bracket
         with self._lock:
             for b in self._brackets.values():
+                # Check symbol match and ensure it's actually protecting quantity
                 if b.symbol == symbol and b.remaining_position() > 0:
                     return # Already protected
 
-        # 2. No Bracket Found -> Emergency Protect
         self._logger.warning(
             f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Emergency Safety Orders.",
             extra={"event": "safety_bracket_trigger", "symbol": symbol}
         )
         
-        # Define Safety Margins (e.g., 20% SL, 40% TP - wider to avoid whipsaw on sync)
+        # 2. Define Safety Margins
+        # SL = ~10% Risk, TP = ~20% Reward (Wider than usual to avoid immediate whip-out)
         exit_side = "SELL" if quantity > 0 else "BUY"
-        sl_price = round(entry_price * 0.8, 2) if quantity > 0 else round(entry_price * 1.2, 2)
-        tp_price = round(entry_price * 1.4, 2) if quantity > 0 else round(entry_price * 0.6, 2)
+        
+        # Calculate prices safely
+        if quantity > 0: # LONG
+            sl_price = round(entry_price * 0.90, 1) # 10% SL
+            tp_price = round(entry_price * 1.20, 1) # 20% TP
+        else: # SHORT
+            sl_price = round(entry_price * 1.10, 1)
+            tp_price = round(entry_price * 0.80, 1)
 
-        # Place SL
+        # 3. Place Orders (Silent Fail-Safe)
+        # We wrap each in try/except so one failure doesn't stop the other
         try:
             self.place_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=abs(quantity),
-                order_type=OrderType.STOP_LOSS_MARKET,
-                price=sl_price,
-                trigger_price=sl_price,
-                tag="safety_sl",
-                variety="regular"
+                symbol=symbol, side=exit_side, quantity=abs(quantity),
+                order_type=OrderType.STOP_LOSS_MARKET, price=sl_price, trigger_price=sl_price,
+                tag="safety_sl", variety="regular"
             )
+            self._logger.info(f"✅ Safety SL placed at {sl_price}")
         except Exception as e:
             self._logger.error(f"Failed to place Safety SL: {e}")
 
-        # Place TP
         try:
             self.place_order(
-                symbol=symbol,
-                side=exit_side,
-                quantity=abs(quantity),
-                order_type=OrderType.LIMIT,
-                price=tp_price,
-                tag="safety_tp",
-                variety="regular"
+                symbol=symbol, side=exit_side, quantity=abs(quantity),
+                order_type=OrderType.LIMIT, price=tp_price,
+                tag="safety_tp", variety="regular"
             )
+            self._logger.info(f"✅ Safety TP placed at {tp_price}")
         except Exception as e:
             self._logger.error(f"Failed to place Safety TP: {e}")
 
