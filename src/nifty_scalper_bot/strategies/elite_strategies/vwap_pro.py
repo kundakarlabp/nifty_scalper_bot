@@ -1,10 +1,12 @@
-"""VWAP Pro institutional-grade mean reversion strategy."""
+"""
+VWAP Pro Strategy.
+World-Class implementation with Trend Following Pullbacks and Greeks Validation.
+"""
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
-# ✅ FIX: Inherit from EliteStrategy to ensure 'generate_signal' exists
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -14,157 +16,156 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.utils.logging import get_logger
 
+# Initialize structured logger
 LOGGER = get_logger(__name__)
+
 
 class VWAPProStrategy(EliteStrategy):
     """
-    VWAP Pro: An institutional-grade intraday strategy.
-    
-    Logic:
-    1. Regime Filter: Trades in 'TRENDING' or 'VOLATILE' markets.
-    2. Trend Filter: Longs only above EMA. Shorts only below EMA.
-    3. Trigger: Price crosses/reverts to VWAP with volume confirmation.
+    Institutions trade at VWAP.
+    We look for 'Trend Pullbacks': Strong Trend -> Retrace to VWAP -> Bounce.
     """
 
-    def __init__(self, config: VWAPProStrategyConfig) -> None:
-        """Initialise strategy with configuration."""
-        # Pass config to parent EliteStrategy to handle basic setup
-        super().__init__(name="VWAP Pro", config=config)
+    def __init__(self, config: VWAPProStrategyConfig, indicator_engine: Any) -> None:
+        """
+        Initialize strategy with configuration and engine.
+        
+        Args:
+            config: Strategy configuration dataclass.
+            indicator_engine: Data provider.
+        """
+        # CRITICAL FIX: Correct init signature (removed 'name')
+        super().__init__(config=config, indicator_engine=indicator_engine)
         self._vwap_config = config
 
-    def get_required_indicators(self) -> list[str]:
-        """Return indicator keys required for VWAP evaluation."""
-        return [
-            "vwap",
-            "ema",
-            "volume",
-            "avg_volume",
-            "atr",
-            "rsi",
-        ]
-
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Any | None,
-    ) -> EliteSignal | None:
-        """Generate signal when price interacts with VWAP in direction of trend."""
-
-        self._logger.debug(
-            "Entered VWAPProStrategy._evaluate_signal",
-            extra={"event": "vwap_pro_evaluate", "symbol": symbol},
-        )
+    def _evaluate_signal(self) -> EliteSignal | None:
+        """
+        Core Logic:
+        1. Identify Trend (Price relative to EMA).
+        2. Identify Trigger (Price touches/nears VWAP).
+        3. Confirm Volume (Activity at value area).
+        4. Validate Physics (Greeks/Liquidity).
+        """
+        symbol = self._vwap_config.symbol
+        
+        # 1. Fetch Indicators
+        required_indicators = {
+            "ltp", "vwap", "ema", "atr", 
+            "volume", "avg_volume", "rsi",
+            "minutes_since_open"
+        }
+        
+        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
+        
         try:
-            # 1. Extract & Validate Indicators
-            vwap = float(indicators.get("vwap") or 0.0)
-            ema = float(indicators.get("ema") or 0.0)
-            atr = float(indicators.get("atr") or 0.0)
-            volume = float(indicators.get("volume") or 0.0)
-            avg_volume = float(indicators.get("avg_volume") or 0.0)
-            rsi = float(indicators.get("rsi") or 50.0)
-
-            if vwap <= 0 or ema <= 0 or atr <= 0:
-                return None
-
-            # 2. Volume Filter: Ignore moves with very low volume
-            if avg_volume > 0 and volume < (avg_volume * 0.6):
-                return None
-
-            # 3. Determine Trend Bias (EMA Filter)
-            trend_bias = "BULLISH" if current_price > ema else "BEARISH"
-
-            # 4. Detect VWAP Interaction (Mean Reversion / Pullback)
-            dist_to_vwap = current_price - vwap
-            # Price must be within 0.5 ATR of VWAP to be considered a valid interaction
-            is_near_vwap = abs(dist_to_vwap) < (atr * 0.5)
-
-            side = ""
-            if trend_bias == "BULLISH" and is_near_vwap:
-                # Buy Condition: Uptrend + Pullback to VWAP + RSI not overbought
-                if 40 <= rsi <= 65:
-                    side = "BUY"
+            ltp = float(indicators.get("ltp") or 0)
+            vwap = float(indicators.get("vwap") or 0)
+            ema = float(indicators.get("ema") or 0) # Usually EMA 20 or 50
+            atr = float(indicators.get("atr") or 0)
+            vol = float(indicators.get("volume") or 0)
+            avg_vol = float(indicators.get("avg_volume") or 1)
+            rsi = float(indicators.get("rsi") or 50)
+            mins_open = float(indicators.get("minutes_since_open") or 0)
             
-            elif trend_bias == "BEARISH" and is_near_vwap:
-                # Sell Condition: Downtrend + Rally to VWAP + RSI not oversold
-                if 35 <= rsi <= 60:
-                    side = "SELL"
-
-            if not side:
-                return None
-
-            # 5. Position Filter
-            if position and getattr(position, "side", "").upper() == (
-                "LONG" if side == "BUY" else "SHORT"
-            ):
-                return None
-
-            # --- FIX START: DERIVE OPTION TYPE ---
-            # The Selector requires explicit "CE" or "PE" instruction.
-            # "BUY" (Long Underlying) -> "CE" (Call Option)
-            # "SELL" (Short Underlying) -> "PE" (Put Option)
-            derived_option_type = "CE" if side == "BUY" else "PE"
-            # --- FIX END ---
-
-            # 6. Signal Construction
-            vol_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
-            confidence = self._vwap_config.min_confidence
-            confidence += min(15.0, (vol_ratio - 1.0) * 10.0)
-            
-            stop_buffer = atr * 0.5 
-            
-            if side == "BUY":
-                anchor = min(vwap, current_price)
-                stop_loss = anchor - stop_buffer
-                risk = current_price - stop_loss
-                tp1 = current_price + (risk * 2.0)
-                tp2 = current_price + (risk * 3.0)
-            else:
-                anchor = max(vwap, current_price)
-                stop_loss = anchor + stop_buffer
-                risk = stop_loss - current_price
-                tp1 = current_price - (risk * 2.0)
-                tp2 = current_price - (risk * 3.0)
-
-            self._logger.info(
-                "Condition met: vwap_pro_signal",
-                extra={
-                    "event": "vwap_pro_signal",
-                    "symbol": symbol,
-                    "side": side,
-                    "option_type": derived_option_type, # Log this for debugging
-                    "confidence": confidence,
-                    "trend": trend_bias
-                },
-            )
-
-            return EliteSignal(
-                symbol=symbol,
-                side=side,
-                confidence=min(confidence, 100.0),
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                take_profit_1=tp1,
-                take_profit_2=tp2,
-                quantity=1,
-                strategy_name=self.name,
-                metadata={
-                    # ✅ CRITICAL FIX: Pass option_type to the selector
-                    "option_type": derived_option_type,
-                    "vwap": vwap,
-                    "ema": ema,
-                    "atr": atr,
-                    "volume_ratio": vol_ratio,
-                    "trend_bias": trend_bias
-                },
-            )
-
-        except Exception as exc:
-            self._logger.error(
-                "Failure in VWAPProStrategy._evaluate_signal: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "vwap_pro_evaluate_error", "symbol": symbol},
-            )
+        except (ValueError, TypeError):
             return None
+
+        if ltp == 0 or vwap == 0:
+            return None
+
+        # 2. Time Filter
+        # VWAP takes time to stabilize. Don't trade it in first 15 mins.
+        if mins_open < 15:
+            return None
+
+        # 3. Setup Logic: Trend Pullback
+        # We want to trade WITH the trend (defined by EMA)
+        # Trigger is when price is close to VWAP (Value Area)
+        
+        # Distance to VWAP
+        dist_to_vwap = abs(ltp - vwap)
+        threshold = atr * 0.5 # Within 0.5 ATR of VWAP
+        
+        side: str | None = None
+        
+        # Bullish Setup:
+        # 1. Trend is Up (VWAP > EMA is a common proxy, or Price generally > EMA)
+        # 2. Price pulled back to near VWAP
+        # 3. RSI is not overbought (room to go)
+        if vwap > ema and dist_to_vwap < threshold and rsi < 60:
+            # Check for bounce (LTP slightly above VWAP is safer than below)
+            if ltp > vwap: 
+                side = "BUY"
+            
+        # Bearish Setup:
+        # 1. Trend is Down (VWAP < EMA)
+        # 2. Price rallied to near VWAP
+        # 3. RSI is not oversold
+        elif vwap < ema and dist_to_vwap < threshold and rsi > 40:
+            if ltp < vwap:
+                side = "SELL" # BaseStrategy handles PE mapping
+
+        if not side:
+            return None
+
+        # 4. Volume Confirmation
+        # Institutional defense of VWAP requires volume.
+        # Vol > 1.0x Avg
+        vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+        if vol_ratio < 1.0:
+            return None # No institutional interest
+
+        # 5. 🛡️ SAFETY GATE (Physics Check)
+        if not self.validate_option_health(symbol, side):
+            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
+            return None
+
+        # 6. Risk Management (ATR Based)
+        # Stop Loss: A clear break of VWAP invalidates the thesis
+        if atr == 0: atr = ltp * 0.01
+        
+        if side == "BUY":
+            stop_loss = vwap - (atr * 0.5) # Tight stop below VWAP
+            tp1 = ltp + (atr * 2.0)
+            tp2 = ltp + (atr * 4.0)
+        else:
+            stop_loss = vwap + (atr * 0.5)
+            tp1 = ltp - (atr * 2.0)
+            tp2 = ltp - (atr * 4.0)
+
+        # 7. Confidence Calculation
+        # High confidence for trend-aligned VWAP bounces
+        confidence = 0.85
+        if vol_ratio > 1.5: confidence += 0.10 # Strong defense
+        
+        # 8. Construct Signal
+        LOGGER.info(
+            f"🚀 VWAP Pullback: {symbol} {side} | Trend: {'Bull' if vwap > ema else 'Bear'} | Vol: {vol_ratio:.1f}x",
+            extra={
+                "event": "vwap_pro_signal",
+                "symbol": symbol,
+                "vwap": vwap,
+                "ema": ema
+            }
+        )
+
+        return EliteSignal(
+            symbol=symbol,
+            side=side,
+            confidence=min(confidence, 0.99),
+            entry_price=ltp,
+            stop_loss=stop_loss,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            quantity=self._vwap_config.quantity or 1,
+            strategy_name="VWAP_Pro",
+            metadata={
+                "trend_filter": "Bullish" if vwap > ema else "Bearish",
+                "dist_to_vwap": dist_to_vwap,
+                "volume_ratio": vol_ratio,
+                "atr": atr
+            }
+        )
+
+
+__all__ = ["VWAPProStrategy"]
