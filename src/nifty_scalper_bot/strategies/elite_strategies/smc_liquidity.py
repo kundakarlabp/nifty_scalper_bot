@@ -1,4 +1,7 @@
-"""Smart Money Concepts liquidity sweep strategy."""
+"""
+Smart Money Concepts (SMC) Liquidity Sweep Strategy.
+World-Class implementation with Sweep Detection, Volume Absorption, and Greeks Validation.
+"""
 
 from __future__ import annotations
 
@@ -11,120 +14,157 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     SMCStrategyConfig,
 )
+from nifty_scalper_bot.utils.logging import get_logger
+
+# Initialize structured logger
+LOGGER = get_logger(__name__)
 
 
 class SMCStrategy(EliteStrategy):
-    """Detect potential liquidity grabs using volatility and volume clues."""
+    """
+    Detects Liquidity Sweeps (Stop Hunts).
+    Enters on Rejection Candles where price pierces a level but closes back inside.
+    """
 
-    def __init__(self, config: SMCStrategyConfig) -> None:
-        """Initialise strategy with configuration.
-
+    def __init__(self, config: SMCStrategyConfig, indicator_engine: Any) -> None:
+        """
+        Initialize strategy with configuration and engine.
+        
         Args:
             config: Strategy configuration dataclass.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
+            indicator_engine: Data provider.
         """
-
-        super().__init__(name="SMC Liquidity", config=config)
+        # CRITICAL FIX: Correct init signature
+        super().__init__(config=config, indicator_engine=indicator_engine)
         self._smc_config = config
 
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Any | None,
-    ) -> EliteSignal | None:
-        """Return elite signal when price sweeps extremes with volume confirmation.
-
-        Args:
-            symbol: Trading symbol evaluated.
-            indicators: Indicator snapshot for symbol.
-            current_price: Latest traded price.
-            position: Existing open position when present.
-
-        Returns:
-            EliteSignal | None: Signal when setup detected else ``None``.
-
-        Raises:
-            None.
+    def _evaluate_signal(self) -> EliteSignal | None:
         """
-
-        self._logger.debug(
-            "Entered SMCStrategy._evaluate_signal",
-            extra={"event": "smc_evaluate", "symbol": symbol},
-        )
+        Core Logic:
+        1. Check Extremes (Bollinger Bands / Recent Highs).
+        2. Detect Sweep (High > Band but Close < Band).
+        3. Check Absorption (High Volume on Rejection).
+        4. Validate Physics (Greeks/Liquidity).
+        """
+        symbol = self._smc_config.symbol
+        
+        # 1. Fetch Indicators
+        required_indicators = {
+            "open", "high", "low", "close", "ltp",
+            "bb_upper", "bb_lower", "vwap",
+            "volume", "avg_volume", "atr"
+        }
+        
+        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
+        
         try:
-            atr = float(indicators.get("atr") or 0.0)
-            volume_ratio = float(indicators.get("volume_spike_ratio") or 0.0)
-            lower_band = float(indicators.get("bollinger_lower") or 0.0)
-            upper_band = float(indicators.get("bollinger_upper") or 0.0)
-            vwap = float(indicators.get("vwap") or 0.0)
-            if atr <= 0 or lower_band <= 0 or upper_band <= 0 or vwap <= 0:
-                return None
-            tolerance = atr * (self._smc_config.equal_level_tolerance_pct / 100.0)
-            if volume_ratio < self._smc_config.volume_spike_mult:
-                return None
-            side = ""
-            confidence = self._smc_config.min_confidence
-            if current_price < (lower_band - tolerance):
-                side = "BUY"
-                confidence += min(15.0, volume_ratio * 5.0)
-            elif current_price > (upper_band + tolerance):
-                side = "SELL"
-                confidence += min(15.0, volume_ratio * 5.0)
-            if not side:
-                return None
-            if position and getattr(position, "side", "").upper() == (
-                "LONG" if side == "BUY" else "SHORT"
-            ):
-                return None
-            stop_buffer = self._smc_config.sweep_distance_points
-            if side == "BUY":
-                stop_loss = current_price - max(atr, stop_buffer)
-                tp1 = current_price + atr * 1.5
-                tp2 = current_price + atr * 2.5
-            else:
-                stop_loss = current_price + max(atr, stop_buffer)
-                tp1 = current_price - atr * 1.5
-                tp2 = current_price - atr * 2.5
-            self._logger.info(
-                "Condition met: smc_liquidity_signal",
-                extra={
-                    "event": "smc_liquidity_signal",
-                    "symbol": symbol,
-                    "side": side,
-                    "confidence": confidence,
-                },
-            )
-            return EliteSignal(
-                symbol=symbol,
-                side=side,
-                confidence=min(confidence, 100.0),
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                take_profit_1=tp1,
-                take_profit_2=tp2,
-                quantity=1,
-                strategy_name=self.name,
-                metadata={
-                    "volume_ratio": volume_ratio,
-                    "vwap": vwap,
-                    "band_extreme": lower_band if side == "BUY" else upper_band,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in SMCStrategy._evaluate_signal: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "smc_evaluate_error", "symbol": symbol},
-            )
+            # Candle Data
+            close = float(indicators.get("close") or 0)
+            high = float(indicators.get("high") or 0)
+            low = float(indicators.get("low") or 0)
+            
+            # Context Data
+            upper = float(indicators.get("bb_upper") or 0)
+            lower = float(indicators.get("bb_lower") or 0)
+            vwap = float(indicators.get("vwap") or 0)
+            vol = float(indicators.get("volume") or 0)
+            avg_vol = float(indicators.get("avg_volume") or 1)
+            atr = float(indicators.get("atr") or 0)
+            
+        except (ValueError, TypeError):
             return None
+
+        if close == 0 or upper == 0:
+            return None
+
+        # 2. Sweep Detection (Turtle Soup Pattern)
+        # We look for a candle that poked OUTSIDE the bands but closed INSIDE.
+        side: str | None = None
+        sweep_level: float = 0.0
+        
+        # Bearish Sweep (Liquidity Grab at Highs)
+        # Price went above Upper Band, but Close is below Upper Band
+        # Ideally Close is also below Open (Red Candle) for stronger signal
+        if high > upper and close < upper:
+            side = "SELL" # Reversal Down
+            sweep_level = high
+            
+        # Bullish Sweep (Liquidity Grab at Lows)
+        # Price went below Lower Band, but Close is above Lower Band
+        elif low < lower and close > lower:
+            side = "BUY" # Reversal Up
+            sweep_level = low
+
+        if not side:
+            return None
+
+        # 3. Absorption Confirmation (Volume)
+        # A sweep needs effort. Volume should be significant (>1.2x Avg)
+        # This confirms "Smart Money" absorbed the stops.
+        vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+        if vol_ratio < 1.2:
+            return None # Weak rejection
+
+        # 4. Trend Context (Optional but recommended)
+        # Don't fade a super strong trend. 
+        # If we are selling, price should be extended far from VWAP.
+        # Simple Check: Is the reversion target (VWAP) worth it?
+        dist_to_vwap = abs(close - vwap)
+        if dist_to_vwap < (atr * 2):
+            return None # Not enough room to profit
+
+        # 5. 🛡️ SAFETY GATE (Physics Check)
+        if not self.validate_option_health(symbol, side):
+            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
+            return None
+
+        # 6. Risk Management (SMC Style)
+        # Stop Loss: Just beyond the Sweep Wick (The Liquidity Pool)
+        # Take Profit: VWAP (Liquidity Equilibrium) and Opposite Band
+        
+        buffer = atr * 0.2 # Tiny buffer above wick
+        
+        if side == "BUY":
+            stop_loss = low - buffer
+            tp1 = vwap
+            tp2 = upper
+        else:
+            stop_loss = high + buffer
+            tp1 = vwap
+            tp2 = lower
+
+        # 7. Confidence Calculation
+        # High confidence for high volume rejections
+        confidence = 0.75
+        if vol_ratio > 2.0: confidence += 0.15
+        
+        # 8. Construct Signal
+        LOGGER.info(
+            f"🚀 SMC Sweep Detected: {symbol} {side} | Vol: {vol_ratio:.1f}x | Wick: {sweep_level}",
+            extra={
+                "event": "smc_sweep_signal",
+                "symbol": symbol,
+                "sweep_level": sweep_level,
+                "vwap_target": vwap
+            }
+        )
+
+        return EliteSignal(
+            symbol=symbol,
+            side=side,
+            confidence=min(confidence, 0.99),
+            entry_price=close,
+            stop_loss=stop_loss,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            quantity=self._smc_config.quantity or 1,
+            strategy_name="SMC_Liquidity_Pro",
+            metadata={
+                "sweep_type": "Bollinger_Rejection",
+                "volume_ratio": vol_ratio,
+                "wick_size": high - close if side == "SELL" else close - low
+            }
+        )
 
 
 __all__ = ["SMCStrategy"]
