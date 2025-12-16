@@ -7370,10 +7370,8 @@ class OrderManager:
 
     def _order_from_dict(self, payload: Mapping[str, Any]) -> OrderDetails:
         """Convert persistent *payload* into :class:`OrderDetails`."""
-        self._logger.debug(
-            "Entered _order_from_dict",
-            extra={"event": "order_manager_order_from_dict"},
-        )
+        # self._logger.debug("Entered _order_from_dict", extra={"event": "order_manager_order_from_dict"})
+        
         try:
             order_id = str(payload["order_id"]).strip()
             symbol = str(payload["symbol"]).upper()
@@ -7412,19 +7410,17 @@ class OrderManager:
 
         filled_quantity = int(payload.get("filled_quantity", 0) or 0)
         
-        # --- CRITICAL FIX START ---
-        # Map legacy 'fill_price' or 'average_price' to the correct class field
+        # --- FIX: Map legacy fill_price to average_price ---
         average_price = 0.0
         if "average_price" in payload:
              try:
                 average_price = float(payload["average_price"] or 0.0)
              except: pass
         elif "fill_price" in payload:
-             # Backward compatibility for old history files
              try:
                  average_price = float(payload["fill_price"] or 0.0)
              except: pass
-        # --- CRITICAL FIX END ---
+        # ---------------------------------------------------
 
         rejection_reason = payload.get("rejection_reason")
         parent_order_id = payload.get("parent_order_id")
@@ -7437,7 +7433,6 @@ class OrderManager:
         
         tag = payload.get("tag")
         
-        # CORRECTED CONSTRUCTOR CALL
         return OrderDetails(
             order_id=order_id,
             symbol=symbol,
@@ -7448,8 +7443,7 @@ class OrderManager:
             status=status,
             timestamp=timestamp, 
             filled_quantity=filled_quantity,
-            average_price=average_price,  # Pass mapped value here
-            # REMOVED: fill_price=... (This caused the crash)
+            average_price=average_price,  # ✅ CORRECT FIELD
             rejection_reason=str(rejection_reason) if rejection_reason else None,
             parent_order_id=str(parent_order_id) if parent_order_id else None,
             child_order_ids=child_order_ids,
@@ -7457,6 +7451,7 @@ class OrderManager:
             tag=str(tag) if tag else None
         )
 
+    
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
         """Convert persistent *payload* into :class:`BracketState`.
 
@@ -8416,53 +8411,67 @@ class OrderManager:
 
     def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
         """
-        Checks if an open position has SL/TP. If not, places them immediately.
+        CRITICAL SAFETY NET: Places Hard SL/TP on the Broker.
+        ADAPTED FOR ZERODHA: Uses SL-LIMIT (fake SL-M) instead of blocked SL-M.
         """
-        # 1. Check if we already have a functioning bracket
+        # 1. Check if already protected
         with self._lock:
             for b in self._brackets.values():
-                # Check symbol match and ensure it's actually protecting quantity
                 if b.symbol == symbol and b.remaining_position() > 0:
-                    return # Already protected
+                    return 
 
         self._logger.warning(
-            f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Emergency Safety Orders.",
+            f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Compliant Safety Orders.",
             extra={"event": "safety_bracket_trigger", "symbol": symbol}
         )
         
-        # 2. Define Safety Margins
-        # SL = ~10% Risk, TP = ~20% Reward (Wider than usual to avoid immediate whip-out)
+        SL_PCT = 0.10  # 10% Max Risk (Hard Stop)
+        TP_PCT = 0.20  # 20% Target
+        BUFFER_PCT = 0.05 # 5% Buffer to ensure SL-Limit fills like Market
+
         exit_side = "SELL" if quantity > 0 else "BUY"
-        
-        # Calculate prices safely
+        qty = abs(quantity)
+
+        # Calculate Prices
         if quantity > 0: # LONG
-            sl_price = round(entry_price * 0.90, 1) # 10% SL
-            tp_price = round(entry_price * 1.20, 1) # 20% TP
+            trigger_price = round(entry_price * (1 - SL_PCT), 1)
+            limit_price = round(trigger_price * (1 - BUFFER_PCT), 1) # Sell lower than trigger
+            tp_price = round(entry_price * (1 + TP_PCT), 1)
         else: # SHORT
-            sl_price = round(entry_price * 1.10, 1)
-            tp_price = round(entry_price * 0.80, 1)
+            trigger_price = round(entry_price * (1 + SL_PCT), 1)
+            limit_price = round(trigger_price * (1 + BUFFER_PCT), 1) # Buy higher than trigger
+            tp_price = round(entry_price * (1 - TP_PCT), 1)
 
-        # 3. Place Orders (Silent Fail-Safe)
-        # We wrap each in try/except so one failure doesn't stop the other
+        # Place STOP LOSS (SL-LIMIT instead of SL-M)
         try:
             self.place_order(
-                symbol=symbol, side=exit_side, quantity=abs(quantity),
-                order_type=OrderType.STOP_LOSS_MARKET, price=sl_price, trigger_price=sl_price,
-                tag="safety_sl", variety="regular"
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                order_type=OrderType.STOP_LOSS, # ✅ Using SL-Limit
+                price=limit_price,              # ✅ Required for SL-Limit
+                trigger_price=trigger_price,
+                tag="safety_sl_hard",
+                variety="regular"
             )
-            self._logger.info(f"✅ Safety SL placed at {sl_price}")
+            self._logger.info(f"✅ Hard SL Placed: Trigger {trigger_price}, Limit {limit_price}")
         except Exception as e:
-            self._logger.error(f"Failed to place Safety SL: {e}")
+            self._logger.critical(f"⛔ FATAL: Failed to place Hard SL: {e}")
 
+        # Place TAKE PROFIT
         try:
             self.place_order(
-                symbol=symbol, side=exit_side, quantity=abs(quantity),
-                order_type=OrderType.LIMIT, price=tp_price,
-                tag="safety_tp", variety="regular"
+                symbol=symbol,
+                side=exit_side,
+                quantity=qty,
+                order_type=OrderType.LIMIT,
+                price=tp_price,
+                tag="safety_tp_wide",
+                variety="regular"
             )
-            self._logger.info(f"✅ Safety TP placed at {tp_price}")
+            self._logger.info(f"✅ Wide TP Placed: {tp_price}")
         except Exception as e:
-            self._logger.error(f"Failed to place Safety TP: {e}")
+            self._logger.error(f"Failed to place TP: {e}")
 
     def cancel_orders_for_symbol(self, symbol: str) -> None:
         """Cancels all open orders for a specific symbol."""
