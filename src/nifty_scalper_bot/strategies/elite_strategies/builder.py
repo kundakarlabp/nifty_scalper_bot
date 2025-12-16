@@ -1,9 +1,12 @@
-"""Elite institutional-grade trading strategies package."""
+"""
+Factory for building elite strategies dynamically.
+World-Class implementation: Safe Builders + Static Tag Resolution.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, List, Sequence, cast
+from typing import Any, Callable, List, Sequence, cast
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -46,155 +49,129 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
-class EliteStrategyPlan:
-    """Describe how to construct and categorise an elite strategy."""
-
+@dataclass(slots=True)
+class _StrategyPlan:
+    factory: Callable[..., EliteStrategy]
     config: EliteStrategyConfig
-    factory: type[EliteStrategy]
-    tags: tuple[str, ...]
-
-    def build(self) -> EliteStrategy | None:
-        """Instantiate the strategy when enabled else return ``None``."""
-
-        if not self.config.enabled:
-            return None
-        factory = cast(Callable[[EliteStrategyConfig], EliteStrategy], self.factory)
-        return factory(self.config)
+    tags: List[str]
 
 
-def _build_plan(settings: EliteStrategiesSettings) -> Sequence[EliteStrategyPlan]:
-    """Return the deterministic elite strategy build plan for *settings*."""
-
-    return (
-        EliteStrategyPlan(settings.smc, SMCStrategy, ("elite", "liquidity")),
-        EliteStrategyPlan(
-            settings.vwap,
-            VWAPProStrategy,
-            ("elite", "mean_reversion"),
-        ),
-        EliteStrategyPlan(
-            settings.oi_max_pain,
-            OIMaxPainStrategy,
-            ("elite", "structure"),
-        ),
-        EliteStrategyPlan(
-            settings.gamma,
-            GammaScalpingStrategy,
-            ("elite", "volatility"),
-        ),
-        EliteStrategyPlan(
-            settings.cpr,
-            CPRBreakoutStrategy,
-            ("elite", "momentum"),
-        ),
-        EliteStrategyPlan(
-            settings.order_flow,
-            OrderFlowStrategy,
-            ("elite", "orderflow"),
-        ),
-        EliteStrategyPlan(
-            settings.bb_squeeze,
-            BBSqueezeStrategy,
-            ("elite", "volatility"),
-        ),
-        EliteStrategyPlan(
-            settings.rsi_div,
-            RSIDivergenceStrategy,
-            ("elite", "mean_reversion"),
-        ),
-        EliteStrategyPlan(settings.orb, ORBProStrategy, ("elite", "opening")),
-        EliteStrategyPlan(
-            settings.straddle,
-            StraddleThetaStrategy,
-            ("elite", "income"),
-        ),
-    )
-
-
-def build_elite_strategies(settings: EliteStrategiesSettings) -> List[EliteStrategy]:
-    """Build elite strategies enabled by configuration.
-
-    Args:
-        settings: Aggregated elite strategy settings.
-
-    Returns:
-        List[EliteStrategy]: Instantiated strategies when enabled.
-
-    Raises:
-        None.
+def build_elite_strategies(
+    settings: EliteStrategiesSettings, indicator_engine: Any
+) -> Sequence[EliteStrategy]:
     """
-
-    LOGGER.debug(
-        "Entered build_elite_strategies",
-        extra={"event": "elite_build", "enabled": settings.enabled},
-    )
-    if not settings.enabled:
-        return []
+    Construct active elite strategy instances.
+    Safely injects configuration and indicator engine.
+    """
     strategies: list[EliteStrategy] = []
-    seen_names: set[str] = set()
-    for plan in _build_plan(settings):
+    plans: list[_StrategyPlan] = []
+
+    # Map settings to plans
+    if settings.smc.enabled:
+        plans.append(
+            _StrategyPlan(SMCStrategy, settings.smc, ["reversal", "liquidity"])
+        )
+    if settings.vwap.enabled:
+        plans.append(
+            _StrategyPlan(VWAPProStrategy, settings.vwap, ["trend", "intraday"])
+        )
+    if settings.oi_max_pain.enabled:
+        plans.append(
+            _StrategyPlan(OIMaxPainStrategy, settings.oi_max_pain, ["reversion", "oi"])
+        )
+    if settings.gamma_scalping.enabled:
+        plans.append(
+            _StrategyPlan(
+                GammaScalpingStrategy, settings.gamma_scalping, ["volatility", "gamma"]
+            )
+        )
+    if settings.cpr.enabled:
+        plans.append(
+            _StrategyPlan(CPRBreakoutStrategy, settings.cpr, ["breakout", "levels"])
+        )
+    if settings.order_flow.enabled:
+        plans.append(
+            _StrategyPlan(OrderFlowStrategy, settings.order_flow, ["scalp", "depth"])
+        )
+    if settings.bb_squeeze.enabled:
+        plans.append(
+            _StrategyPlan(BBSqueezeStrategy, settings.bb_squeeze, ["volatility", "breakout"])
+        )
+    if settings.rsi_div.enabled:
+        plans.append(
+            _StrategyPlan(RSIDivergenceStrategy, settings.rsi_div, ["reversal", "momentum"])
+        )
+    if settings.orb.enabled:
+        plans.append(
+            _StrategyPlan(ORBProStrategy, settings.orb, ["breakout", "opening"])
+        )
+    if settings.straddle.enabled:
+        plans.append(
+            _StrategyPlan(
+                StraddleThetaStrategy, settings.straddle, ["theta", "delta_neutral"]
+            )
+        )
+
+    # Build instances
+    for plan in plans:
         try:
-            strategy = plan.build()
+            # CRITICAL: We pass both config and engine here.
+            # This matches the new __init__ signatures we fixed.
+            strategy = plan.factory(config=plan.config, indicator_engine=indicator_engine)
+            strategies.append(strategy)
+            LOGGER.info("Built elite strategy: %s", strategy.name)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure building elite strategy %s: %s",
+                "Failed to build strategy %s: %s",
                 plan.factory.__name__,
                 exc,
                 exc_info=exc,
-                extra={"event": "elite_build_error", "strategy": plan.factory.__name__},
+                extra={"event": "strategy_build_failed"},
             )
-            continue
-        if strategy is None:
-            continue
-        if strategy.name in seen_names:
-            LOGGER.warning(
-                "Duplicate elite strategy detected: %s",
-                strategy.name,
-                extra={"event": "elite_duplicate", "strategy": strategy.name},
-            )
-            continue
-        seen_names.add(strategy.name)
-        strategies.append(strategy)
+
     return strategies
 
 
-def elite_strategy_tags(
-    settings: EliteStrategiesSettings,
-    strategies: Sequence[EliteStrategy] | None = None,
-) -> dict[str, tuple[str, ...]]:
-    """Return correlation tag mapping for enabled elite strategies."""
+def elite_strategy_tags(settings: EliteStrategiesSettings) -> dict[str, List[str]]:
+    """
+    Return map of strategy names to their capability tags.
+    Updated to use STATIC mapping to avoid instantiation crashes.
+    """
+    tags: dict[str, List[str]] = {}
+    
+    # We map the Factory Class -> The Hardcoded Name used in __init__
+    # This avoids creating the object (which requires engine) just to read the name.
+    
+    if settings.smc.enabled:
+        tags["SMC Liquidity"] = ["reversal", "liquidity"]
+        
+    if settings.vwap.enabled:
+        tags["VWAP Pro"] = ["trend", "intraday"]
+        
+    if settings.oi_max_pain.enabled:
+        tags["OI Max Pain"] = ["reversion", "oi"]
+        
+    if settings.gamma_scalping.enabled:
+        tags["Gamma Scalping"] = ["volatility", "gamma"]
+        
+    if settings.cpr.enabled:
+        tags["CPR Breakout"] = ["breakout", "levels"]
+        
+    if settings.order_flow.enabled:
+        tags["Order Flow Imbalance"] = ["scalp", "depth"]
+        
+    if settings.bb_squeeze.enabled:
+        tags["BB Squeeze"] = ["volatility", "breakout"]
+        
+    if settings.rsi_div.enabled:
+        tags["RSI Divergence"] = ["reversal", "momentum"]
+        
+    if settings.orb.enabled:
+        tags["ORB Pro"] = ["breakout", "opening"]
+        
+    if settings.straddle.enabled:
+        tags["ATM Straddle Theta"] = ["theta", "delta_neutral"]
 
-    tags: dict[str, tuple[str, ...]] = {}
-    if not settings.enabled:
-        return tags
-    indexed: dict[type[EliteStrategy], EliteStrategy] = {}
-    if strategies:
-        indexed = {type(strategy): strategy for strategy in strategies}
-    for plan in _build_plan(settings):
-        if not plan.config.enabled:
-            continue
-        strategy = indexed.get(cast(type[EliteStrategy], plan.factory))
-        if strategy is None:
-            try:
-                factory = cast(
-                    Callable[[EliteStrategyConfig], EliteStrategy],
-                    plan.factory,
-                )
-                strategy = factory(plan.config)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    "Failure resolving elite strategy tags for %s: %s",
-                    plan.factory.__name__,
-                    exc,
-                    exc_info=exc,
-                    extra={
-                        "event": "elite_tag_error",
-                        "strategy": plan.factory.__name__,
-                    },
-                )
-                continue
-        tags[strategy.name] = plan.tags
     return tags
 
 
