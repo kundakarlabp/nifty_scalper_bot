@@ -1248,9 +1248,8 @@ class StrategyManager:
         data_hub: Any | None = None,
         orchestrator: Any | None = None,
         futures_symbol: str | None = None,
-        config: dict[str, Any] | None = None
+        config: Any | None = None  # Changed type hint to Any to accept objects
     ):
-        """Initialize with enhanced safety modules."""
         self._strategies = strategies
         self._indicator_engine = indicator_engine
         self._position_manager = position_manager
@@ -1260,17 +1259,38 @@ class StrategyManager:
         self._futures_symbol = (futures_symbol or "NIFTY").strip().upper()
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
         
-        # Infer config (fallback to first strategy's config if not provided)
-        self._config = config if config else (strategies[0].config if strategies else {})
-        
-        # --- RISK SETTINGS (Loaded from Config) ---
-        self.sl_pct = float(self._config.get("OPTION_SL_PCT", 0.15))  # 15% Max Loss
-        self.tp_pct = float(self._config.get("OPTION_TP_PCT", 0.30))  # 30% Target
-        self.min_delta = float(self._config.get("DATA__MIN_DELTA", 0.30))
-        self.max_iv_percentile = float(self._config.get("DATA__MAX_IV_PERCENTILE", 85.0))
-        self.max_spread_pct = float(self._config.get("MAX_BID_ASK_SPREAD", 5.0))
+        # 1. Resolve Config Source
+        # Priority: Passed config -> First Strategy's config -> Empty dict
+        raw_config = config if config else (strategies[0].config if strategies else {})
+        self._config = raw_config # Store raw for debugging
 
-    # ... (Keep tracked_symbols logic if needed, omitted for brevity as it's standard) ...
+        # 2. Robust Config Getter Helper
+        def get_cfg(key: str, default: Any) -> Any:
+            # Try dictionary access
+            if isinstance(raw_config, dict):
+                return raw_config.get(key, default)
+            # Try attribute access (for Settings objects)
+            if hasattr(raw_config, key):
+                return getattr(raw_config, key)
+            # Try lowercase attribute
+            if hasattr(raw_config, key.lower()):
+                return getattr(raw_config, key.lower())
+            return default
+
+        # 3. Load Settings using Helper
+        try:
+            self.sl_pct = float(get_cfg("OPTION_SL_PCT", 0.15))
+            self.tp_pct = float(get_cfg("OPTION_TP_PCT", 0.30))
+            self.min_delta = float(get_cfg("DATA__MIN_DELTA", 0.30))
+            self.max_iv_percentile = float(get_cfg("DATA__MAX_IV_PERCENTILE", 85.0))
+            self.max_spread_pct = float(get_cfg("MAX_BID_ASK_SPREAD", 5.0))
+        except (ValueError, TypeError):
+            self.logger.warning("Failed to parse risk settings, using defaults.")
+            self.sl_pct = 0.15
+            self.tp_pct = 0.30
+            self.min_delta = 0.30
+            self.max_iv_percentile = 85.0
+            self.max_spread_pct = 5.0
 
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
         """
