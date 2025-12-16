@@ -2125,6 +2125,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
         error: Exception
         if status in {400, 404} and expect_order_response:
             error = OrderPlacementError(message)
+
+        if status == 400:
+        # LOG THE FULL PAYLOAD IF POSSIBLE
+            LOGGER.error(f"🛑 Zerodha 400 Bad Request: {message}")
         elif status == 401:
             error = ConfigurationError("Zerodha authentication failed")
         elif status == 403:
