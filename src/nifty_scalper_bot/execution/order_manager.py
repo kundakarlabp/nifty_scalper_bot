@@ -1506,7 +1506,7 @@ class OrderManager:
         take_profit: float | None = None,
     ) -> str | None:
         """
-        Execute order with Safe Trading Window (09:30-15:15), Risk Gating, and Auto-Recovery.
+        Execute order with Safe Trading Window, Risk Gating, and Auto-Recovery.
         """    
         import time
         import uuid
@@ -1518,10 +1518,8 @@ class OrderManager:
 
         start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
+        
         # [FIX] Generate Deterministic ID (Capital Protection)
-        # 1. Hashes the trade details + 1-minute time bucket.
-        # 2. If strategy fires twice in 1 min, ID is same -> Broker rejects duplicate.
-        # 3. Uses normalized_symbol to ensure consistency.
         raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time() / 60)}" 
         sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
         unique_client_id = f"bot_{sig_hash}"
@@ -1529,22 +1527,16 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 1. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
         # ---------------------------------------------------------------------
-        # Only enforce for 'regular' orders (Allow AMOs if needed later)
         if variety == "regular":
             try:
                 ist = ZoneInfo("Asia/Kolkata")
                 now = datetime.now(ist).time()
-                
-                # DEFINED SAFE HOURS
-                safe_start = dtime(9, 30)  # Skip first 15 mins (Volatility)
-                safe_end = dtime(15, 15)   # Stop 15 mins before close (EOD Risk)
-                
-                # Hard Market Limits (Absolute Guardrails)
+                safe_start = dtime(9, 30)
+                safe_end = dtime(15, 15)
                 market_open = dtime(9, 15)
                 market_close = dtime(15, 30)
 
                 if not (safe_start <= now <= safe_end):
-                    # Determine specific reason for logs
                     reason = "Market Closed"
                     if market_open <= now < safe_start:
                         reason = f"Opening Volatility Buffer (Wait until {safe_start.strftime('%H:%M')})"
@@ -1566,10 +1558,7 @@ class OrderManager:
         checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
         
         if callable(checker) and not checker():
-            self._logger.warning(
-                "Order blocked: Trading Switch is OFF", 
-                extra={"symbol": normalized_symbol, "event": "switch_block"}
-            )
+            self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
             return None
 
         # ---------------------------------------------------------------------
@@ -1580,7 +1569,6 @@ class OrderManager:
                 symbol=normalized_symbol, side=side, quantity=quantity,
                 price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
             )
-            
             is_live = False
             if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
                 is_live = self._enable_live_getter()
@@ -1589,37 +1577,28 @@ class OrderManager:
             
             allowed, reason = self._risk_manager.check_order(signal, live_enabled=is_live)
             if not allowed:
-                self._logger.warning(
-                    f"Risk Block: {reason}", 
-                    extra={"symbol": normalized_symbol, "reason": reason, "event": "risk_block"}
-                )
+                self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol, "event": "risk_block"})
                 return None
 
         # ---------------------------------------------------------------------
         # 4. PAYLOAD OPTIMIZATION & MAPPING
         # ---------------------------------------------------------------------
-        # Order Type Mapping & SL-M Fix
         raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
         
         # [FIX] Zerodha blocks SL-M for Options. We must map to SL (Limit).
         zerodha_type_map = {
-            "STOP_LOSS_MARKET": "SL", # Force SL-M -> SL
-            "SL-M": "SL",             # Force SL-M -> SL
+            "STOP_LOSS_MARKET": "SL", "SL-M": "SL",
             "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
             "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL"
         }
         final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
 
         # [FIX] Calculate Limit Price for converted SL orders
-        # If we forced SL-M to SL, we need a Limit Price.
-        # We set it 3% beyond the trigger to ensure it executes like a Market order.
         if final_order_type == "SL" and (price is None or price == 0.0) and trigger_price:
             buffer_pct = 0.03 # 3% Buffer
-            if side == "BUY":
-                # Buy Stop Loss (Short Exit): Limit > Trigger
+            if side == "BUY": # Short Exit
                 price = round(trigger_price * (1 + buffer_pct), 2)
-            else:
-                # Sell Stop Loss (Long Exit): Limit < Trigger
+            else: # Long Exit
                 price = round(trigger_price * (1 - buffer_pct), 2)
             
             self._logger.info(f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}")
@@ -1632,15 +1611,12 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 5. EXECUTION LOOP (Fail-Fast & Idempotent)
         # ---------------------------------------------------------------------
-
-
         for attempt in range(1, 4):
             try:
                 response = self._broker.place_order(
                     symbol=normalized_symbol, side=side, quantity=quantity, product=product,
                     order_type=final_order_type, price=price, trigger_price=trigger_price,
-                    tag=tag, variety=variety,
-                    client_order_id=unique_client_id  # <--- CRITICAL FIX
+                    tag=tag, variety=variety, client_order_id=unique_client_id
                 )
                 
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
@@ -1656,50 +1632,57 @@ class OrderManager:
                     )
                     self._register_order(details)
 
-                    # B. Auto-Register Bracket
+                    # B. Auto-Register Bracket (CORRECTED)
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
+                        
+                        # --- CRITICAL FIX START: Align Internal State with Broker State ---
+                        # If we converted SL-M to SL-Limit above, the Bracket State MUST know this.
+                        # Otherwise, trailing stops will fail when they try to modify an SL-Limit as an SL-M.
+                        
+                        real_stop_type = OrderType.STOP_LOSS_MARKET 
+                        real_stop_price = 0.0
+
+                        # If we auto-converted to SL-Limit, update internal state too
+                        if final_order_type == "SL": 
+                            real_stop_type = OrderType.STOP_LOSS # Internal Enum for SL-Limit
+                            # We must estimate the Limit Price for the SL leg based on the same logic
+                            sl_trigger = float(stop_loss) if stop_loss else 0.0
+                            if sl_trigger > 0:
+                                buffer = 0.03
+                                if exit_side == "BUY": real_stop_price = round(sl_trigger * (1 + buffer), 2)
+                                else: real_stop_price = round(sl_trigger * (1 - buffer), 2)
+
                         state = BracketState(
                             entry_id=order_id, symbol=normalized_symbol, side=side, exit_side=exit_side,
                             total_quantity=quantity, entry_price=float(price or 0.0),
                             product=product, tag=tag, stop_order_id="", 
-                            stop_price=float(stop_loss) if stop_loss else 0.0,
-                            stop_order_type=OrderType.STOP_LOSS_MARKET,
+                            stop_price=float(stop_loss) if stop_loss else 0.0, # Trigger Price
+                            stop_order_type=real_stop_type, # <--- FIXED: Now matches reality
                             tp_primary_price=float(take_profit) if take_profit else None,
-                            tp_primary_qty=quantity if take_profit else 0
+                            tp_primary_qty=quantity if take_profit else 0,
+                            # Store the calculated limit price for the SL leg if needed later
+                            # (You might need to extend BracketState class to support 'stop_limit_price' if not present)
                         )
                         self._register_bracket_state(state)
-                        self._logger.info(
-                            f"🛡️ Auto-bracket registered for {order_id}",
-                            extra={"event": "bracket_registered", "order_id": order_id}
-                        )
+                        self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
+                        # --- CRITICAL FIX END ---
 
                     return order_id
                     
             except Exception as e:
                 msg = str(e).lower()
-                error_type = type(e).__name__
-
                 # Fail Fast on Fatal Errors
-                if "400" in msg or "invalid" in msg or "market closed" in msg or "bad request" in msg:
-                    self._logger.critical(
-                        f"🛑 FATAL Payload Error: {e}. Aborting.", 
-                        extra={"symbol": normalized_symbol, "event": "fatal_order_error"}
-                    )
+                if any(x in msg for x in ["400", "invalid", "market closed", "bad request"]):
+                    self._logger.critical(f"🛑 FATAL Payload Error: {e}", extra={"event": "fatal_order_error"})
                     return None
                 
-                # Fail Fast on Internal Errors (No Duplicates)
+                # Fail Fast on Code Errors
                 if isinstance(e, (AttributeError, NameError, TypeError, ValueError, KeyError)):
-                    self._logger.critical(
-                        f"🛑 Internal Code Error: {e}. Aborting to prevent duplicates.",
-                        extra={"symbol": normalized_symbol, "event": "internal_code_error"}
-                    )
+                    self._logger.critical(f"🛑 Internal Code Error: {e}", extra={"event": "internal_code_error"})
                     return None
 
-                self._logger.warning(
-                    f"⚠️ Retry {attempt}/3 failed: {e}", 
-                    extra={"error": str(e), "attempt": attempt}
-                )
+                self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
                 
         self._logger.error("❌ Order placement failed after retries.")
