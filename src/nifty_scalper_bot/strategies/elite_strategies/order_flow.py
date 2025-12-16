@@ -1,8 +1,10 @@
-"""Order flow imbalance strategy."""
+"""
+Order Flow Imbalance Strategy.
+World-Class implementation with Depth Imbalance, Large Orders, and Greeks Validation.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
@@ -12,218 +14,178 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
 )
+from nifty_scalper_bot.utils.logging import get_logger
+
+# Initialize structured logger
+LOGGER = get_logger(__name__)
 
 
 class OrderFlowStrategy(EliteStrategy):
-    """Use top-of-book imbalance and large orders for confirmation."""
+    """
+    Trade based on L2 Market Depth (Level 2) Imbalances and Large Orders.
+    """
 
-    def __init__(self, config: OrderFlowStrategyConfig) -> None:
-        """Initialise strategy with configuration.
-
+    def __init__(self, config: OrderFlowStrategyConfig, indicator_engine: Any) -> None:
+        """
+        Initialize strategy with configuration and engine.
+        
         Args:
             config: Strategy configuration dataclass.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
+            indicator_engine: Data provider.
         """
-
-        super().__init__(name="Order Flow Imbalance", config=config)
+        # CRITICAL FIX: Correct init signature
+        super().__init__(config=config, indicator_engine=indicator_engine)
         self._of_config = config
-        self._last_signal_epoch: dict[str, float] = {}
 
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Any | None,
-    ) -> EliteSignal | None:
-        """Generate signal when depth imbalance persists with large orders.
-
-        Args:
-            symbol: Trading symbol evaluated.
-            indicators: Indicator snapshot for symbol.
-            current_price: Latest traded price.
-            position: Existing open position when present.
-
-        Returns:
-            EliteSignal | None: Signal when setup detected else ``None``.
-
-        Raises:
-            None.
+    def _evaluate_signal(self) -> EliteSignal | None:
         """
+        Core Logic:
+        1. Analyze Depth (Bid/Ask Imbalance).
+        2. Detect Large Orders (Icebergs/Walls).
+        3. Check VWAP Context.
+        4. Validate Physics (Greeks/Liquidity).
+        """
+        symbol = self._of_config.symbol
+        
+        # 1. Fetch Indicators
+        # We need Market Depth (L2), LTP, and Volume
+        required_indicators = {
+            "ltp", "market_depth", "vwap", 
+            "volume", "avg_volume", "atr"
+        }
+        
+        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
+        
+        try:
+            ltp = float(indicators.get("ltp") or 0)
+            depth = indicators.get("market_depth") or {}
+            vwap = float(indicators.get("vwap") or 0)
+            atr = float(indicators.get("atr") or 0)
+            
+        except (ValueError, TypeError):
+            return None
 
-        self._logger.debug(
-            "Entered OrderFlowStrategy._evaluate_signal",
-            extra={"event": "order_flow_evaluate", "symbol": symbol},
+        if ltp == 0 or not depth:
+            return None
+
+        # 2. Order Flow Analysis
+        # Calculate Imbalance Ratio from Top 5 levels
+        # Imbalance = (Bid Qty - Ask Qty) / (Bid Qty + Ask Qty)
+        
+        bids = depth.get("bids", []) # List of [price, qty]
+        asks = depth.get("asks", [])
+        
+        if not bids or not asks:
+            return None
+            
+        # Sum top 5 quantities
+        total_bid_qty = sum(q for _, q in bids[:5])
+        total_ask_qty = sum(q for _, q in asks[:5])
+        
+        if (total_bid_qty + total_ask_qty) == 0:
+            return None
+            
+        imbalance = (total_bid_qty - total_ask_qty) / (total_bid_qty + total_ask_qty)
+        
+        # Threshold: e.g., > 0.3 means Bids are 30% stronger than Asks
+        threshold = 0.3 
+        
+        side: str | None = None
+        
+        # Bullish Imbalance + Price > VWAP
+        if imbalance > threshold and ltp > vwap:
+            side = "BUY"
+            
+        # Bearish Imbalance + Price < VWAP
+        elif imbalance < -threshold and ltp < vwap:
+            side = "SELL" # BaseStrategy handles PE mapping
+
+        if not side:
+            return None
+
+        # 3. Large Order Confirmation
+        # Check if there is a dominant wall supporting the move
+        # e.g., for BUY, we want a huge Bid wall below LTP
+        has_support = self._has_large_order(depth, side)
+        if not has_support:
+            return None # Imbalance might be fleeting
+
+        # 4. 🛡️ SAFETY GATE (Physics Check)
+        if not self.validate_option_health(symbol, side):
+            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
+            return None
+
+        # 5. Risk Management (Scalp Style)
+        # Order flow edges are short-lived. Tight stops.
+        if atr == 0: atr = ltp * 0.01
+        
+        stop_buffer = atr * 0.8
+        
+        if side == "BUY":
+            stop_loss = ltp - stop_buffer
+            tp1 = ltp + (stop_buffer * 1.5)
+            tp2 = ltp + (stop_buffer * 3.0)
+        else:
+            stop_loss = ltp + stop_buffer
+            tp1 = ltp - (stop_buffer * 1.5)
+            tp2 = ltp - (stop_buffer * 3.0)
+
+        # 6. Confidence Calculation
+        confidence = 0.70
+        if abs(imbalance) > 0.5: confidence += 0.15 # Massive imbalance
+        
+        # 7. Construct Signal
+        LOGGER.info(
+            f"🚀 Order Flow Signal: {symbol} {side} | Imbal: {imbalance:.2f} | Bids: {total_bid_qty} vs Asks: {total_ask_qty}",
+            extra={
+                "event": "order_flow_signal",
+                "symbol": symbol,
+                "imbalance": imbalance,
+                "bid_qty": total_bid_qty,
+                "ask_qty": total_ask_qty
+            }
         )
+
+        return EliteSignal(
+            symbol=symbol,
+            side=side,
+            confidence=min(confidence, 0.99),
+            entry_price=ltp,
+            stop_loss=stop_loss,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            quantity=self._of_config.quantity or 1,
+            strategy_name="Order_Flow_Pro",
+            metadata={
+                "imbalance": imbalance,
+                "vwap": vwap
+            }
+        )
+
+    def _has_large_order(self, depth: Mapping[str, Any], side: str) -> bool:
+        """Check for single large orders (walls) on the supporting side."""
         try:
-            now = datetime.now(timezone.utc).timestamp()
-            last_epoch = self._last_signal_epoch.get(symbol, 0.0)
-            if now - last_epoch < self._of_config.persistence_seconds:
-                return None
-
-            depth_snapshot = indicators.get("market_depth")
-            imbalance = self._calculate_imbalance(depth_snapshot)
-            if imbalance is None:
-                return None
-            side, ratio = imbalance
-
-            if side == "BUY" and ratio < self._of_config.imbalance_ratio_buy:
-                return None
-            if side == "SELL" and ratio < self._of_config.imbalance_ratio_sell:
-                return None
-
-            if not self._has_large_order(depth_snapshot, side):
-                return None
-
-            if position and getattr(position, "side", "").upper() == (
-                "LONG" if side == "BUY" else "SHORT"
-            ):
-                return None
-
-            confidence = self._of_config.min_confidence
-            confidence += min(20.0, max(ratio - 1.0, 0.0) * 10.0)
-            stop_offset = 10.0
-            target_points = self._of_config.target_points
-            if side == "BUY":
-                stop_loss = current_price - stop_offset
-                tp1 = current_price + target_points
-                tp2 = current_price + target_points * 1.5
-            else:
-                stop_loss = current_price + stop_offset
-                tp1 = current_price - target_points
-                tp2 = current_price - target_points * 1.5
-
-            self._last_signal_epoch[symbol] = now
-            self._logger.info(
-                "Condition met: order_flow_signal",
-                extra={
-                    "event": "order_flow_signal",
-                    "symbol": symbol,
-                    "side": side,
-                    "confidence": confidence,
-                    "imbalance_ratio": ratio,
-                },
-            )
-            return EliteSignal(
-                symbol=symbol,
-                side=side,
-                confidence=min(confidence, 100.0),
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                take_profit_1=tp1,
-                take_profit_2=tp2,
-                quantity=1,
-                strategy_name=self.name,
-                metadata={
-                    "imbalance_ratio": ratio,
-                    "large_order_threshold": self._of_config.large_order_pct,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in OrderFlowStrategy._evaluate_signal: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "order_flow_evaluate_error", "symbol": symbol},
-            )
-            return None
-
-    def _calculate_imbalance(self, depth_snapshot: Any) -> tuple[str, float] | None:
-        """Return dominant side and ratio from *depth_snapshot*.
-
-        Args:
-            depth_snapshot: Market depth structure containing bids and asks.
-
-        Returns:
-            tuple[str, float] | None: Imbalance side and ratio when available.
-
-        Raises:
-            None.
-        """
-
-        try:
-            if not isinstance(depth_snapshot, Mapping):
-                return None
-            bids: Sequence[Sequence[float]] | None = depth_snapshot.get("bids")
-            asks: Sequence[Sequence[float]] | None = depth_snapshot.get("asks")
-            if not bids or not asks:
-                return None
-            bid_total = sum(float(level[1]) for level in bids[:5])
-            ask_total = sum(float(level[1]) for level in asks[:5])
-            if bid_total <= 0 or ask_total <= 0:
-                return None
-            if bid_total >= ask_total:
-                return "BUY", bid_total / ask_total
-            return "SELL", ask_total / bid_total
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in OrderFlowStrategy._calculate_imbalance: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "order_flow_imbalance_error"},
-            )
-            return None
-
-    def _has_large_order(self, depth_snapshot: Any, side: str) -> bool:
-        """Return ``True`` when side of book holds a large resting order.
-
-        Args:
-            depth_snapshot: Market depth structure containing bids and asks.
-            side: Trade side under evaluation (``BUY`` or ``SELL``).
-
-        Returns:
-            bool: ``True`` if large order detected else ``False``.
-
-        Raises:
-            None.
-        """
-
-        try:
-            if not isinstance(depth_snapshot, Mapping):
-                return False
+            # If Buying, we look for Large Bids (Support). If Selling, Large Asks (Resistance).
             book_key = "bids" if side == "BUY" else "asks"
-            levels: Sequence[Sequence[float]] | None = depth_snapshot.get(book_key)
-            if not levels:
-                return False
-            total_quantity = sum(float(level[1]) for level in levels[:5])
-            if total_quantity <= 0:
-                return False
-            threshold = self._of_config.large_order_pct
-            return any(
-                (float(level[1]) / total_quantity) * 100.0 >= threshold
-                for level in levels[:5]
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in OrderFlowStrategy._has_large_order: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "order_flow_large_order_error"},
-            )
+            levels = depth.get(book_key, [])
+            
+            if not levels: return False
+            
+            # Calculate average size of top 5 orders
+            avg_size = sum(q for _, q in levels[:5]) / len(levels[:5])
+            
+            # Is there any SINGLE order that is 3x the average?
+            # Or matches the config threshold?
+            threshold_pct = self._of_config.large_order_pct or 30.0 # e.g. 30% of total book
+            total_vol = sum(q for _, q in levels[:5])
+            
+            for _, qty in levels[:5]:
+                if (qty / total_vol) * 100 > threshold_pct:
+                    return True
             return False
-
-    def get_required_indicators(self) -> list[str]:
-        """Return indicator dependencies including market depth.
-
-        Args:
-            None.
-
-        Returns:
-            list[str]: Indicator names required for evaluation.
-
-        Raises:
-            None.
-        """
-
-        base_indicators = super().get_required_indicators()
-        if "market_depth" not in base_indicators:
-            base_indicators.append("market_depth")
-        return base_indicators
+            
+        except Exception:
+            return False
 
 
 __all__ = ["OrderFlowStrategy"]
