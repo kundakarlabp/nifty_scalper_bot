@@ -7369,18 +7369,7 @@ class OrderManager:
         return payload
 
     def _order_from_dict(self, payload: Mapping[str, Any]) -> OrderDetails:
-        """Convert persistent *payload* into :class:`OrderDetails`.
-
-        Args:
-            payload: Mapping sourced from persistence layer.
-
-        Returns:
-            OrderDetails reconstructed from the payload.
-
-        Raises:
-            ValueError: If required fields are missing or invalid.
-        """
-
+        """Convert persistent *payload* into :class:`OrderDetails`."""
         self._logger.debug(
             "Entered _order_from_dict",
             extra={"event": "order_manager_order_from_dict"},
@@ -7392,43 +7381,63 @@ class OrderManager:
             order_type_raw = payload.get("order_type", OrderType.MARKET.value)
             status_raw = payload.get("status", OrderStatus.SUBMITTED.value)
             quantity = int(payload.get("quantity", 0))
-            price = float(payload.get("price", 0.0))
+            price = float(payload.get("price", 0.0) or 0.0)
             timestamp_raw = payload.get("timestamp")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Invalid order payload") from exc
+        
         if not order_id or not symbol:
             raise ValueError("Order payload missing identifiers")
+            
         try:
             order_type = OrderType(order_type_raw)
-        except Exception:  # noqa: BLE001 - fallback to market
+        except Exception:
             order_type = OrderType.MARKET
+            
         try:
             status = OrderStatus(status_raw)
-        except Exception:  # noqa: BLE001 - fallback to submitted
+        except Exception:
             status = OrderStatus.SUBMITTED
-        try:
-            timestamp = (
-                datetime.fromisoformat(str(timestamp_raw))
-                if timestamp_raw
-                else datetime.now(timezone.utc)
-            )
-        except Exception:  # noqa: BLE001 - fallback to current time
-            timestamp = datetime.now(timezone.utc)
-        filled_quantity = int(payload.get("filled_quantity", 0) or 0)
-        fill_price = payload.get("fill_price")
-        if fill_price is not None:
+            
+        # Robust Timestamp Handling
+        timestamp = datetime.now(timezone.utc)
+        if timestamp_raw:
             try:
-                fill_price = float(fill_price)
-            except (TypeError, ValueError):
-                fill_price = None
+                if isinstance(timestamp_raw, str):
+                    timestamp = datetime.fromisoformat(timestamp_raw)
+                elif isinstance(timestamp_raw, (int, float)):
+                     timestamp = datetime.fromtimestamp(timestamp_raw, tz=timezone.utc)
+            except Exception:
+                pass
+
+        filled_quantity = int(payload.get("filled_quantity", 0) or 0)
+        
+        # --- CRITICAL FIX START ---
+        # Map legacy 'fill_price' or 'average_price' to the correct class field
+        average_price = 0.0
+        if "average_price" in payload:
+             try:
+                average_price = float(payload["average_price"] or 0.0)
+             except: pass
+        elif "fill_price" in payload:
+             # Backward compatibility for old history files
+             try:
+                 average_price = float(payload["fill_price"] or 0.0)
+             except: pass
+        # --- CRITICAL FIX END ---
+
         rejection_reason = payload.get("rejection_reason")
         parent_order_id = payload.get("parent_order_id")
+        
         child_ids_raw = payload.get("child_order_ids", [])
         child_order_ids = [str(item) for item in child_ids_raw] if child_ids_raw else []
+        
         client_order_id_raw = payload.get("client_order_id")
-        client_order_id = (
-            str(client_order_id_raw) if client_order_id_raw is not None else None
-        )
+        client_order_id = str(client_order_id_raw) if client_order_id_raw else None
+        
+        tag = payload.get("tag")
+        
+        # CORRECTED CONSTRUCTOR CALL
         return OrderDetails(
             order_id=order_id,
             symbol=symbol,
@@ -7437,17 +7446,15 @@ class OrderManager:
             quantity=quantity,
             price=price,
             status=status,
-            timestamp=timestamp,
+            timestamp=timestamp, 
             filled_quantity=filled_quantity,
-            fill_price=fill_price,
-            rejection_reason=(
-                str(rejection_reason) if rejection_reason is not None else None
-            ),
-            parent_order_id=(
-                str(parent_order_id) if parent_order_id is not None else None
-            ),
+            average_price=average_price,  # Pass mapped value here
+            # REMOVED: fill_price=... (This caused the crash)
+            rejection_reason=str(rejection_reason) if rejection_reason else None,
+            parent_order_id=str(parent_order_id) if parent_order_id else None,
             child_order_ids=child_order_ids,
             client_order_id=client_order_id,
+            tag=str(tag) if tag else None
         )
 
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
