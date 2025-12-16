@@ -1502,25 +1502,24 @@ class OrderManager:
         product: str = "MIS",
         variety: str = "regular",
         check_risk: bool = True,
-        stop_loss: float | None = None, 
+        stop_loss: float | None = None,
         take_profit: float | None = None,
     ) -> str | None:
         """
         Execute order with Safe Trading Window, Risk Gating, and Auto-Recovery.
-        """    
+        Includes Zerodha compliance fix for SL-M blocking.
+        """
         import time
-        import uuid
         import hashlib
         from datetime import datetime, timezone, time as dtime
         from zoneinfo import ZoneInfo
         from nifty_scalper_bot.core.trading_switch import trading_switch
-        from nifty_scalper_bot.risk import OrderSignal 
+        from nifty_scalper_bot.risk import OrderSignal
 
-        start_time = time.monotonic()
         normalized_symbol = symbol.strip().upper()
         
         # [FIX] Generate Deterministic ID (Capital Protection)
-        raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time() / 60)}" 
+        raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time() / 60)}"
         sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
         unique_client_id = f"bot_{sig_hash}"
         
@@ -1544,7 +1543,7 @@ class OrderManager:
                         reason = f"EOD Safety Cutoff (No trades after {safe_end.strftime('%H:%M')})"
                     
                     self._logger.warning(
-                        f"🛑 Order Blocked: {reason}. Current Time: {now.strftime('%H:%M:%S')}", 
+                        f"🛑 Order Blocked: {reason}. Current Time: {now.strftime('%H:%M:%S')}",
                         extra={"symbol": normalized_symbol, "event": "time_guard_block"}
                     )
                     return None
@@ -1596,9 +1595,9 @@ class OrderManager:
         # [FIX] Calculate Limit Price for converted SL orders
         if final_order_type == "SL" and (price is None or price == 0.0) and trigger_price:
             buffer_pct = 0.03 # 3% Buffer
-            if side == "BUY": # Short Exit
+            if side == "BUY": # Short Exit -> Buy higher
                 price = round(trigger_price * (1 + buffer_pct), 2)
-            else: # Long Exit
+            else: # Long Exit -> Sell lower
                 price = round(trigger_price * (1 - buffer_pct), 2)
             
             self._logger.info(f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}")
@@ -1637,32 +1636,20 @@ class OrderManager:
                         exit_side = "SELL" if side == "BUY" else "BUY"
                         
                         # --- CRITICAL FIX START: Align Internal State with Broker State ---
-                        # If we converted SL-M to SL-Limit above, the Bracket State MUST know this.
-                        # Otherwise, trailing stops will fail when they try to modify an SL-Limit as an SL-M.
-                        
                         real_stop_type = OrderType.STOP_LOSS_MARKET 
-                        real_stop_price = 0.0
-
+                        
                         # If we auto-converted to SL-Limit, update internal state too
                         if final_order_type == "SL": 
-                            real_stop_type = OrderType.STOP_LOSS # Internal Enum for SL-Limit
-                            # We must estimate the Limit Price for the SL leg based on the same logic
-                            sl_trigger = float(stop_loss) if stop_loss else 0.0
-                            if sl_trigger > 0:
-                                buffer = 0.03
-                                if exit_side == "BUY": real_stop_price = round(sl_trigger * (1 + buffer), 2)
-                                else: real_stop_price = round(sl_trigger * (1 - buffer), 2)
+                            real_stop_type = OrderType.STOP_LOSS
 
                         state = BracketState(
                             entry_id=order_id, symbol=normalized_symbol, side=side, exit_side=exit_side,
                             total_quantity=quantity, entry_price=float(price or 0.0),
                             product=product, tag=tag, stop_order_id="", 
-                            stop_price=float(stop_loss) if stop_loss else 0.0, # Trigger Price
-                            stop_order_type=real_stop_type, # <--- FIXED: Now matches reality
+                            stop_price=float(stop_loss) if stop_loss else 0.0,
+                            stop_order_type=real_stop_type, # Fixed to match reality
                             tp_primary_price=float(take_profit) if take_profit else None,
                             tp_primary_qty=quantity if take_profit else 0,
-                            # Store the calculated limit price for the SL leg if needed later
-                            # (You might need to extend BracketState class to support 'stop_limit_price' if not present)
                         )
                         self._register_bracket_state(state)
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
@@ -1687,7 +1674,6 @@ class OrderManager:
                 
         self._logger.error("❌ Order placement failed after retries.")
         return None
-
     
     def guard_existing_position(
         self,
@@ -3656,21 +3642,41 @@ class OrderManager:
 
         return exit_id
 
-    def modify_order(
-        self,
-        order_id: str,
-        new_quantity: int | None = None,
-        new_price: float | None = None,
-    ) -> bool:
-        """Modify an existing order."""
+    def modify_order(self, order_id: str, price: float = 0.0, trigger_price: float = 0.0, quantity: int = 0) -> bool:
+        """
+        Modify an existing order.
+        SMART FIX: If modifying a 'Fake SL-M' (SL-Limit), auto-adjust the limit price.
+        """
+        try:
+            # 1. Fetch Order Context
+            order = self.get_order(order_id)
+            if not order:
+                self._logger.error(f"Cannot modify unknown order {order_id}")
+                return False
 
-        modify = getattr(self._broker, "modify_order", None)
-        if modify is None:
-            raise NotImplementedError("Broker does not support order modifications")
-        response = self._call_broker(
-            modify, order_id, quantity=new_quantity, price=new_price
-        )
-        return bool(response)
+            # 2. Smart Limit Adjustment for SL Orders
+            # If user is only updating trigger_price, we must also update limit price
+            # to maintain the "Market Buffer".
+            if order.order_type == OrderType.STOP_LOSS and trigger_price > 0 and (price is None or price == 0):
+                buffer = 0.05 # 5%
+                if order.side == "SELL": # Long SL
+                    price = round(trigger_price * (1 - buffer), 1)
+                else: # Short SL
+                    price = round(trigger_price * (1 + buffer), 1)
+                self._logger.info(f"🔄 Auto-adjusting Limit Price to {price} for Trigger {trigger_price}")
+
+            # 3. Execute Modification
+            self._broker.modify_order(
+                order_id=order_id,
+                price=price,
+                trigger_price=trigger_price,
+                quantity=quantity,
+                variety="regular" # Zerodha default
+            )
+            return True
+        except Exception as e:
+            self._logger.error(f"Modification Failed: {e}")
+            return False
 
     def wait_for_fill(self, order_id: str, timeout_sec: float = 30.0) -> bool:
         """Wait for order to fill. Returns True if filled within timeout."""
@@ -7427,87 +7433,55 @@ class OrderManager:
         return payload
 
     def _order_from_dict(self, payload: Mapping[str, Any]) -> OrderDetails:
-        """Convert persistent *payload* into :class:`OrderDetails`."""
-        # self._logger.debug("Entered _order_from_dict", extra={"event": "order_manager_order_from_dict"})
-        
+        """Convert persistent payload into OrderDetails (Crash-Proof)."""
         try:
+            # Basic Fields
             order_id = str(payload["order_id"]).strip()
             symbol = str(payload["symbol"]).upper()
             side = str(payload["side"]).upper()
-            order_type_raw = payload.get("order_type", OrderType.MARKET.value)
-            status_raw = payload.get("status", OrderStatus.SUBMITTED.value)
             quantity = int(payload.get("quantity", 0))
             price = float(payload.get("price", 0.0) or 0.0)
-            timestamp_raw = payload.get("timestamp")
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Invalid order payload") from exc
-        
-        if not order_id or not symbol:
-            raise ValueError("Order payload missing identifiers")
             
-        try:
-            order_type = OrderType(order_type_raw)
-        except Exception:
-            order_type = OrderType.MARKET
-            
-        try:
-            status = OrderStatus(status_raw)
-        except Exception:
-            status = OrderStatus.SUBMITTED
-            
-        # Robust Timestamp Handling
-        timestamp = datetime.now(timezone.utc)
-        if timestamp_raw:
+            # Enums with Fallback
             try:
-                if isinstance(timestamp_raw, str):
-                    timestamp = datetime.fromisoformat(timestamp_raw)
-                elif isinstance(timestamp_raw, (int, float)):
-                     timestamp = datetime.fromtimestamp(timestamp_raw, tz=timezone.utc)
-            except Exception:
-                pass
+                order_type = OrderType(payload.get("order_type", OrderType.MARKET.value))
+            except: order_type = OrderType.MARKET
 
-        filled_quantity = int(payload.get("filled_quantity", 0) or 0)
-        
-        # --- FIX: Map legacy fill_price to average_price ---
-        average_price = 0.0
-        if "average_price" in payload:
-             try:
-                average_price = float(payload["average_price"] or 0.0)
-             except: pass
-        elif "fill_price" in payload:
-             try:
-                 average_price = float(payload["fill_price"] or 0.0)
-             except: pass
-        # ---------------------------------------------------
+            try:
+                status = OrderStatus(payload.get("status", OrderStatus.SUBMITTED.value))
+            except: status = OrderStatus.SUBMITTED
 
-        rejection_reason = payload.get("rejection_reason")
-        parent_order_id = payload.get("parent_order_id")
-        
-        child_ids_raw = payload.get("child_order_ids", [])
-        child_order_ids = [str(item) for item in child_ids_raw] if child_ids_raw else []
-        
-        client_order_id_raw = payload.get("client_order_id")
-        client_order_id = str(client_order_id_raw) if client_order_id_raw else None
-        
-        tag = payload.get("tag")
-        
-        return OrderDetails(
-            order_id=order_id,
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            status=status,
-            timestamp=timestamp, 
-            filled_quantity=filled_quantity,
-            average_price=average_price,  # ✅ CORRECT FIELD
-            rejection_reason=str(rejection_reason) if rejection_reason else None,
-            parent_order_id=str(parent_order_id) if parent_order_id else None,
-            child_order_ids=child_order_ids,
-            client_order_id=client_order_id,
-            tag=str(tag) if tag else None
-        )
+            # Robust Timestamp
+            ts_raw = payload.get("timestamp")
+            timestamp = datetime.now(timezone.utc)
+            if ts_raw:
+                with suppress(Exception):
+                    if isinstance(ts_raw, (int, float)):
+                        timestamp = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
+                    else:
+                        timestamp = datetime.fromisoformat(str(ts_raw))
+
+            # CRITICAL FIX: Map 'fill_price' to 'average_price'
+            avg_price = float(payload.get("average_price") or payload.get("fill_price") or 0.0)
+
+            return OrderDetails(
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                price=price,
+                status=status,
+                timestamp=timestamp,
+                filled_quantity=int(payload.get("filled_quantity", 0)),
+                average_price=avg_price, # Mapped correctly
+                tag=payload.get("tag"),
+                client_order_id=payload.get("client_order_id"),
+                rejection_reason=payload.get("rejection_reason")
+            )
+        except Exception as e:
+            self._logger.error(f"Failed to restore order: {e}")
+            raise ValueError("Invalid order payload") from e
 
     
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
