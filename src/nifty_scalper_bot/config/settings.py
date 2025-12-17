@@ -1002,7 +1002,7 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         smc=smc_cfg,
         vwap=vwap_cfg,
         oi_max_pain=oi_cfg,
-        gamma=gamma_cfg,
+        gamma_scalping=gamma_cfg,  # ✅ FIX: Updated argument name
         cpr=cpr_cfg,
         order_flow=order_flow_cfg,
         bb_squeeze=bb_cfg,
