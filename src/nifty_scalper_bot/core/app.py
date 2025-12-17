@@ -3175,8 +3175,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     session_guard.set_trading_window(trading_window_start, trading_window_end)
 
     elite_strategies: list[Any] = []
-    try:
-        elite_strategies = build_elite_strategies(settings.elite)
+try:
+    elite_strategies = build_elite_strategies(
+        settings.elite, 
+        indicator_engine  # ✅ Pass the already-initialized IndicatorEngine
+    )
+
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in build_elite_strategies: %s",
