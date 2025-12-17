@@ -1443,6 +1443,8 @@ class StrategyRunner:
                         quantity=1, # Quantity is sized by Risk Manager later
                         confidence=1.0,
                         reason="vwap_crossover",
+                        stop_loss=None, 
+                        take_profit=None,
                         metadata={
                             "strategy": "vwap_scalp",
                             "vwap": curr_vwap,
