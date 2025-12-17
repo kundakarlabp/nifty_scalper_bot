@@ -219,6 +219,7 @@ class MarketDataManager:
         self._margin_lock = threading.RLock()
         self._margin_snapshot: dict[str, Any] | None = None
         self._last_margin_refresh: float = 0.0
+        self.last_tick_time = 0.0
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
