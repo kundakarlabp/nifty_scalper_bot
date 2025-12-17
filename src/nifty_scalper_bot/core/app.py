@@ -2656,6 +2656,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # ------------------------------------------------------------------
     # Streamer Selection Logic (Polling vs WebSocket)
     # ------------------------------------------------------------------
+    use_websockets = os.getenv("USE_WEBSOCKETS", "false").lower() == "true"
     if use_websockets:
         LOGGER.info("Initializing WebSocket Streamer...")
         
