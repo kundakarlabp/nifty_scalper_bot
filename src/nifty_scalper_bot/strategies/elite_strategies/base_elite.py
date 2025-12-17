@@ -59,7 +59,10 @@ class EliteStrategy(Strategy):
         
         # ✅ FIX: Do NOT pass 'config' to the parent Strategy class.
         # The parent 'Strategy' only accepts 'indicator_engine'.
-        super().__init__(indicator_engine=indicator_engine)
+        super().__init__(
+            name=self.__class__.__name__, 
+            parameters={"enabled": config.enabled}
+        )
         
         # We store the config here in the child class instead
         self._config = config
