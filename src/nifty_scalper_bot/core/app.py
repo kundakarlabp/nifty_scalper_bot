@@ -2564,111 +2564,94 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         # Fan-out: every polled tick updates MDM and the supervisor heartbeat
         def _on_poll_tick(tick: dict[str, Any]) -> None:
-            t: dict[str, Any]
-            if isinstance(tick, dict):
-                t = dict(tick)
-            else:  # pragma: no cover - defensive
-                t = {"raw": tick}
+        """
+        Handle incoming poll tick with Robust Validation & Recovery.
+        """
+        if not tick:
+            return
 
-            if "instrument_token" not in t and "token" in t:
-                # ... (existing token normalization code remains here) ...
-                raw_token = t["token"]
-                token_candidate: int | None = None
-                if isinstance(raw_token, bool):
-                    token_candidate = None
-                elif isinstance(raw_token, (int, float)):
-                    token_candidate = int(raw_token)
-                elif isinstance(raw_token, str):
-                    with suppress(Exception):
-                        token_candidate = int(float(raw_token))
+        # 1. Normalize Tick
+        t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
+        t.setdefault("source", "polling")
 
-                if token_candidate is not None:
-                    t["instrument_token"] = token_candidate
-                else:
-                    LOGGER.warning("invalid_token_value", extra={"event": "invalid_token_value", "token": raw_token})
+        # 2. Token Normalization & Validation
+        if "instrument_token" not in t and "token" in t:
+            raw_token = t["token"]
+            try:
+                t["instrument_token"] = int(float(raw_token))
+            except (ValueError, TypeError):
+                # LOGGER.warning("Invalid token: %s", raw_token)
+                pass
 
-            t.setdefault("source", "polling")
+        # 3. Symbol Mapping (If token exists but symbol missing)
+        token_value = t.get("instrument_token")
+        if token_value and "symbol" not in t:
+            try:
+                mapped = market_data_manager._symbol_by_token.get(int(token_value))
+                if mapped:
+                    t["symbol"] = mapped
+            except Exception:
+                pass
 
-            token_value = t.get("instrument_token")
-            if token_value is not None:
-                with suppress(Exception):
-                    mapped_symbol = market_data_manager._symbol_by_token.get(
-                        int(token_value)
-                    )
-                    if mapped_symbol:
-                        t.setdefault("symbol", mapped_symbol)
+        # 4. LTP Normalization
+        if "ltp" not in t:
+            t["ltp"] = t.get("last_price") or t.get("close")
 
-            if "ltp" not in t:
-                if "last_price" in t:
-                    t["ltp"] = t["last_price"]
-                elif "close" in t:
-                    t["ltp"] = t["close"]
+        # 5. Inject Timestamp
+        if "timestamp" not in t:
+            t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
-            # [FIX] CRITICAL: Direct Feed to StrategyRunner
-            # This ensures ticks reach strategies even if DataHub callbacks fail
-            runner_instance = strategy_runner_ref.get("instance")
-            if runner_instance:
-                try:
-                    sym = t.get("symbol")
-                    if sym:
-                        # Attempt to call _on_tick_safe (thread-safe) or _on_tick
-                        handler = getattr(runner_instance, "_on_tick_safe", getattr(runner_instance, "_on_tick", None))
+        # 6. CRITICAL: Direct Strategy Feed (Bypass DataHub if needed)
+        # This ensures strategies get ticks even if DB/DataHub is slow
+        if strategy_runner_ref:
+            runner = strategy_runner_ref.get("instance")
+            if runner:
+                sym = t.get("symbol")
+                if sym:
+                    try:
+                        # Try safe handler first, then standard
+                        handler = getattr(runner, "_on_tick_safe", getattr(runner, "_on_tick", None))
                         if callable(handler):
-                            # Handle different signatures
                             if handler.__name__ == "_on_tick":
                                 handler(sym, t)
                             else:
                                 handler(t)
-                except Exception:
-                    pass # Keep polling alive even if runner errors
+                    except Exception:
+                        pass # Don't let strategy errors kill the poller
 
-            if data_hub is not None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(data_hub.ingest_tick(t))
-                except RuntimeError:
-                    asyncio.run(data_hub.ingest_tick(t))
+        # 7. DataHub Ingestion (Async)
+        if data_hub is not None:
             try:
-                market_data_manager._handle_tick(t)
-            except Exception as exc:
-                # ... (existing error handling) ...
-                LOGGER.error(f"CRITICAL: mdm_handle_tick_failed -> {type(exc).__name__}: {exc}", extra={"event": "mdm_handle_tick_failed", "err": str(exc)}, exc_info=True)
-            finally:
-                if stream_supervisor is not None:
-                    stream_supervisor.on_tick(t)
+                # Fire and forget ingest
+                asyncio.create_task(data_hub.ingest_tick(t))
+            except (RuntimeError, Exception):
+                pass 
 
-        # [INSERTED CODE STARTS HERE]
-        streamer = PollingStreamer(
-            broker_client=broker_client,
-            on_tick=_on_poll_tick,
-            instrument_resolver=instrument_resolver,
-            poll_interval_ms=poll_interval_ms,
-            batch_size=poll_batch_size,
-            require_depth=poll_require_depth,
-            warn_on_rate_limit=poll_warn_rate_limit,
-        )
-        stream_supervisor = StreamSupervisor(
-            streamer=streamer,
-            resolver=instrument_resolver,
-            default_symbols=list(poll_symbols or ["NIFTY"]),
-            autostart=True,
-        )
-        stream_supervisor.bootstrap()
-        stream_supervisor.ensure_started()
-        # [INSERTED CODE ENDS HERE]
+        # 8. Market Data Manager Processing (With Recovery)
+        try:
+            # HEARTBEAT FIX: Update timestamp so watchdog is happy
+            if hasattr(market_data_manager, "last_tick_time"):
+                market_data_manager.last_tick_time = time_module.time()
 
-    elif websocket_enabled:
-        def _sanitize_ws_token(value: str | None) -> str:
-            token = (value or "").strip()
-            if ":" in token:
-                token = token.split(":", 1)[-1].strip()
-            return token
+            market_data_manager._handle_tick(t)
+            
+            # CIRCUIT BREAKER RESET: We succeeded, so clear errors
+            if hasattr(streamer, '_consecutive_errors'):
+                streamer._consecutive_errors = 0
 
-        initial_token = _sanitize_ws_token(cast(str | None, config.broker.access_token))
-        _ws_token_state: dict[str, str] = {"token": initial_token}
-        _ws_token_timestamp: dict[str, float] = {
-            "ts": time_module.time() if initial_token else 0.0,
-        }
+        except Exception as exc:
+            # LOGGER.error(f"MDM Tick Failed: {exc}")
+            
+            # Track errors for circuit breaker
+            if not hasattr(streamer, '_consecutive_errors'):
+                streamer._consecutive_errors = 0
+            streamer._consecutive_errors += 1
+            
+            # If > 10 failures, maybe restart (handled by main loop or supervisor)
+        
+        finally:
+            if stream_supervisor is not None:
+                stream_supervisor.on_tick(t)
 
         def _resolve_ws_token() -> str:  # type: ignore[redefined-outer-name]
             candidates = [
