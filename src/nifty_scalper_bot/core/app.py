@@ -3289,7 +3289,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 extra={"event": "elite_fraction_default"},
             )
             elite_fraction = 0.01
-        tag_lookup = elite_strategy_tags(settings.elite, elite_strategies)
+        tag_lookup = elite_strategy_tags(settings.elite)
         # Optimization B: Dynamic Sizing based on Regime
         # Trend = Aggressive (100% size), Chop = Conservative (50% size)
         bias_candidates: dict[str, dict[str, float]] = {
