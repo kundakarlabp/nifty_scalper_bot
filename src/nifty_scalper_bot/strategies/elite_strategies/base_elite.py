@@ -1,6 +1,6 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Fixes parent class initialization (removes 'config' arg).
+Production-Grade: Fixed signature mismatch in generate_signal.
 """
 
 from __future__ import annotations
@@ -56,15 +56,9 @@ class EliteStrategy(Strategy):
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
         """Initialize the elite strategy base."""
+        # Call parent with NO arguments (Strategy class is abstract/empty)
+        super().__init__()
         
-        # ✅ FIX: Do NOT pass 'config' to the parent Strategy class.
-        # The parent 'Strategy' only accepts 'indicator_engine'.
-        super().__init__(
-            name=self.__class__.__name__, 
-            parameters={"enabled": config.enabled}
-        )
-        
-        # We store the config here in the child class instead
         self._config = config
         self._indicator_engine = indicator_engine
         
@@ -79,19 +73,25 @@ class EliteStrategy(Strategy):
         self.max_iv_percentile = 85.0
 
     def get_required_indicators(self) -> Set[str]:
-        """
-        Return the set of indicators required by this strategy.
-        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal.
-        """
+        """Return the set of indicators required by this strategy."""
         return set()
 
-    def generate_signal(self) -> Signal | None:
+    # ✅ FIX: Updated signature to accept arguments from StrategyManager
+    def generate_signal(
+        self, 
+        symbol: str, 
+        indicators: Mapping[str, Any], 
+        current_price: float, 
+        position: Any | None = None
+    ) -> Signal | None:
         """Standard interface implementation bridging to elite logic."""
         if not self._config.enabled:
             return None
 
         try:
-            elite_signal = self._evaluate_signal()
+            # ✅ FIX: Pass arguments down to the specific strategy logic
+            elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
+            
             if elite_signal:
                 # 🛡️ SAFETY GATE
                 if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
@@ -101,11 +101,18 @@ class EliteStrategy(Strategy):
                 self._update_state(elite_signal)
                 return self._convert_to_core_signal(elite_signal)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error(f"Strategy {self.name} failed evaluation: {exc}")
+            LOGGER.error(f"Strategy {self.name} failed evaluation: {exc}", exc_info=True)
             return None
         return None
 
-    def _evaluate_signal(self) -> EliteSignal | None:
+    # ✅ FIX: Updated abstract signature to match call site
+    def _evaluate_signal(
+        self, 
+        symbol: str, 
+        indicators: Mapping[str, Any], 
+        current_price: float, 
+        position: Any | None
+    ) -> EliteSignal | None:
         """Internal hook for strategy-specific logic."""
         raise NotImplementedError("Subclasses must implement _evaluate_signal")
 
@@ -120,7 +127,6 @@ class EliteStrategy(Strategy):
 
     def validate_option_health(self, symbol: str, direction: str) -> bool:
         """🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'."""
-        # Skip for Futures/Spot
         if "CE" not in symbol and "PE" not in symbol:
             return True
 
