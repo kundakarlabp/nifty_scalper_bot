@@ -3173,15 +3173,33 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         get_str("DATA__TIME_FILTER_END", default_close) or default_close
     )
     session_guard.set_trading_window(trading_window_start, trading_window_end)
-
+    
+    # ----------------------------------------------------------------------
+    # 6. Build Elite Strategies (Corrected)
+    # ----------------------------------------------------------------------
     elite_strategies: list[Any] = []
-try:
-    elite_strategies = build_elite_strategies(
-        settings.elite, 
-        indicator_engine  # ✅ Pass the already-initialized IndicatorEngine
-    )
+    try:
+        # ✅ FIX: Pass 'indicator_engine' to the builder
+        elite_strategies = build_elite_strategies(
+            settings.elite,  # Verify if this is settings.elite or settings.strategies in your config
+            indicator_engine
+        )
+
+        # Inject DataHub into strategies that need it (e.g. OrderFlow, Gamma)
+        if elite_strategies and data_hub:
+            for strategy in elite_strategies:
+                if hasattr(strategy, "set_data_hub"):
+                    try:
+                        strategy.set_data_hub(data_hub)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Failed to inject DataHub into %s: %s", 
+                            getattr(strategy, "name", "unknown"), 
+                            exc
+                        )
 
     except Exception as exc:  # noqa: BLE001
+        # ✅ FIX: Proper indentation for the except block
         LOGGER.error(
             "Failure in build_elite_strategies: %s",
             exc,
@@ -3189,6 +3207,7 @@ try:
             extra={"event": "elite_build_error"},
         )
     else:
+        # ✅ FIX: Logic to run only if NO exception occurred
         if elite_strategies:
             LOGGER.info(
                 "Condition met: elite_strategies_loaded",
@@ -3201,7 +3220,7 @@ try:
             LOGGER.warning(
                 "No elite strategies enabled; trading will be disabled",
                 extra={"event": "elite_strategies_missing"},
-            )
+                    )
 
         # Ensure DataHub is injected into strategies that need complex metrics (IV/Greeks)
         if elite_strategies and data_hub:
