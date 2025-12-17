@@ -1,6 +1,6 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Optimized Method Dispatch, Zero-Reflection Runtime, and Type Safety.
+Production-Grade: Optimized Dispatch (Zero-Reflection Runtime) & Type Safety.
 """
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ class EliteStrategy(Strategy):
         self.min_delta = 0.30
         self.max_iv_percentile = 85.0
 
-        # 🚀 PERFORMANCE OPTIMIZATION: Cache the dispatch decision once.
-        # We check the signature of _evaluate_signal here, avoiding reflection in the hot loop.
+        # 🚀 PERFORMANCE OPTIMIZATION: Cache the dispatch decision ONCE.
+        # We check the signature here so we don't slow down the trading loop later.
         sig = inspect.signature(self._evaluate_signal)
         # If it takes more than 0 params (excluding self), it's the new signature.
         self._is_legacy_signature = len(sig.parameters) == 0
@@ -112,7 +112,7 @@ class EliteStrategy(Strategy):
 
         try:
             # ✅ CONTEXT INJECTION: Inject symbol into config for legacy strategies
-            # We use object.__setattr__ to bypass potential frozen checks
+            # We use object.__setattr__ to bypass potential frozen/slots checks
             if hasattr(self._config, "symbol"):
                 object.__setattr__(self._config, "symbol", symbol)
 
