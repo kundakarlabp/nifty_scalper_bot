@@ -1,10 +1,13 @@
-"""Base abstractions and helpers for elite strategies."""
+"""
+Base abstractions and helpers for elite strategies.
+Production-Grade: Implements all abstract methods to fix instantiation crashes.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, Tuple
+from typing import Any, Literal, Mapping, Tuple, Set
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -72,6 +75,19 @@ class EliteStrategy(Strategy):
         self.max_spread_pct = 5.0
         self.min_delta = 0.30
         self.max_iv_percentile = 85.0
+
+    # --------------------------------------------------------------------------
+    # ✅ CRITICAL FIX: Implement Abstract Method from Parent Class
+    # --------------------------------------------------------------------------
+    def get_required_indicators(self) -> Set[str]:
+        """
+        Return the set of indicators required by this strategy.
+        
+        This satisfies the abstract method requirement from the base 'Strategy' class.
+        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal,
+        so we return an empty set here to tell StrategyManager "Don't pre-fetch anything for me".
+        """
+        return set()
 
     def generate_signal(self) -> Signal | None:
         """Standard interface implementation bridging to elite logic."""
