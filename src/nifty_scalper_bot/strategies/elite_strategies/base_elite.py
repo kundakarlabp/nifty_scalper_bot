@@ -89,26 +89,30 @@ class EliteStrategy(Strategy):
     ) -> Signal | None:
         """
         Standard interface implementation bridging to elite logic.
-        ✅ SMART DISPATCH: Automatically handles both legacy (0-arg) and new (4-arg) strategies.
+        ✅ SMART DISPATCH: Automatically handles both legacy and new strategies.
         """
         if not self._config.enabled:
             return None
 
         try:
+            # ✅ CONTEXT INJECTION: 
+            # Inject the current symbol into the config so legacy strategies 
+            # (like SMCStrategy) can access 'self._config.symbol' without crashing.
+            if hasattr(self._config, "symbol"):
+                # We use object.__setattr__ to bypass frozen/slots protections if necessary
+                object.__setattr__(self._config, "symbol", symbol)
+
             # -----------------------------------------------------------
             # 🧠 SMART DISPATCH LOGIC
-            # Check how many arguments the child's _evaluate_signal accepts
             # -----------------------------------------------------------
             sig = inspect.signature(self._evaluate_signal)
-            # Count parameters excluding 'self'
             param_count = len(sig.parameters)
 
             if param_count >= 4:
                 # The New Way: Pass everything
                 elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
             else:
-                # The Old Way: Pass nothing (Strategy fetches its own data)
-                # This PREVENTS the "takes 1 argument but 5 were given" crash
+                # The Old Way: Pass nothing (Strategy reads self._config.symbol)
                 elite_signal = self._evaluate_signal()
 
             if elite_signal:
