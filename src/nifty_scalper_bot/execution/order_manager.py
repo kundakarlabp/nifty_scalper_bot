@@ -158,6 +158,7 @@ class OrderDetails:
     take_profit: Optional[float] = None  
     trigger_price: Optional[float] = None
     average_price: float = 0.0
+    fill_price: float | None = None
     filled_quantity: int = 0
     pending_quantity: int = 0
     message: str = ""
@@ -167,11 +168,6 @@ class OrderDetails:
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
     rejection_reason: str | None = None
-
-    @property
-    def fill_price(self) -> float | None:
-        """Return average_price if valid (>0), else None to signal no fill."""
-        return self.average_price if self.average_price > 0 else None
 
 @dataclass(slots=True)
 class ExitIntent:
@@ -7792,6 +7788,8 @@ class OrderManager:
                     avg_price = self._coerce_float(avg_price_raw)
                     if avg_price is not None:
                         local_order.average_price = avg_price
+                        # ✅ FIX: Sync fill_price so Position Manager sees the price
+                        local_order.fill_price = avg_price
                         
                     msg = remote.get('status_message') or remote.get('message')
                     if msg:
@@ -8540,6 +8538,7 @@ class OrderManager:
             timestamp=datetime.now(timezone.utc),
             price=float(price),
             average_price=float(price),
+            fill_price=float(price),
             filled_quantity=abs(qty),
             tag="ghost_fix"
         )
