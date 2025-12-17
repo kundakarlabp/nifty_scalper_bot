@@ -1,14 +1,14 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Includes Smart Dispatcher to handle legacy and new strategies automatically.
+Production-Grade: Optimized Method Dispatch, Zero-Reflection Runtime, and Type Safety.
 """
 
 from __future__ import annotations
 
-import inspect  # ✅ KEY ADDITION for Smart Dispatch
-from dataclasses import asdict, dataclass, field
+import inspect
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, Tuple, Set
+from typing import Any, Mapping, Set, Tuple
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -56,16 +56,18 @@ class EliteStrategy(Strategy):
     """Base class for high-probability elite setups."""
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
-        """Initialize the elite strategy base."""
-        # Call parent with required args (name, parameters)
+        """Initialize the elite strategy base with optimized dispatch."""
+        
+        # Initialize parent with correct signature (name + parameters dict)
         super().__init__(
             name=self.__class__.__name__,
-            parameters=asdict(config)
+            parameters=asdict(config) if is_dataclass(config) else {}
         )
         
         self._config = config
         self._indicator_engine = indicator_engine
         
+        # State tracking
         self._last_signal_at: datetime | None = None
         self._last_signal: EliteSignal | None = None
         self._signals_generated: int = 0
@@ -76,8 +78,22 @@ class EliteStrategy(Strategy):
         self.min_delta = 0.30
         self.max_iv_percentile = 85.0
 
+        # 🚀 PERFORMANCE OPTIMIZATION: Cache the dispatch decision once.
+        # We check the signature of _evaluate_signal here, avoiding reflection in the hot loop.
+        sig = inspect.signature(self._evaluate_signal)
+        # If it takes more than 0 params (excluding self), it's the new signature.
+        self._is_legacy_signature = len(sig.parameters) == 0
+        
+        if self._is_legacy_signature:
+            LOGGER.debug(f"{self.name}: Detected Legacy Signature (0 args)")
+        else:
+            LOGGER.debug(f"{self.name}: Detected Modern Signature (4 args)")
+
     def get_required_indicators(self) -> Set[str]:
-        """Return required indicators (Empty set as elite strategies self-fetch)."""
+        """
+        Return the set of indicators required by this strategy.
+        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal.
+        """
         return set()
 
     def generate_signal(
@@ -89,34 +105,29 @@ class EliteStrategy(Strategy):
     ) -> Signal | None:
         """
         Standard interface implementation bridging to elite logic.
-        ✅ SMART DISPATCH: Automatically handles both legacy and new strategies.
+        Uses cached dispatch logic for maximum performance.
         """
         if not self._config.enabled:
             return None
 
         try:
-            # ✅ CONTEXT INJECTION: 
-            # Inject the current symbol into the config so legacy strategies 
-            # (like SMCStrategy) can access 'self._config.symbol' without crashing.
+            # ✅ CONTEXT INJECTION: Inject symbol into config for legacy strategies
+            # We use object.__setattr__ to bypass potential frozen checks
             if hasattr(self._config, "symbol"):
-                # We use object.__setattr__ to bypass frozen/slots protections if necessary
                 object.__setattr__(self._config, "symbol", symbol)
 
             # -----------------------------------------------------------
-            # 🧠 SMART DISPATCH LOGIC
+            # 🚀 OPTIMIZED DISPATCH (Zero Reflection)
             # -----------------------------------------------------------
-            sig = inspect.signature(self._evaluate_signal)
-            param_count = len(sig.parameters)
-
-            if param_count >= 4:
-                # The New Way: Pass everything
-                elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
-            else:
+            if self._is_legacy_signature:
                 # The Old Way: Pass nothing (Strategy reads self._config.symbol)
                 elite_signal = self._evaluate_signal()
+            else:
+                # The New Way: Pass arguments directly
+                elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
 
             if elite_signal:
-                # 🛡️ SAFETY GATE
+                # 🛡️ SAFETY GATE: Validate Trade Quality
                 if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
                     LOGGER.info(f"⛔ Rejected {elite_signal.symbol}: Failed Safety Check")
                     return None
@@ -144,6 +155,7 @@ class EliteStrategy(Strategy):
 
     def validate_option_health(self, symbol: str, direction: str) -> bool:
         """🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'."""
+        # Only validate Options contracts
         if "CE" not in symbol and "PE" not in symbol:
             return True
 
@@ -153,13 +165,13 @@ class EliteStrategy(Strategy):
         if not quote:
             return False
 
-        # LIQUIDITY CHECK
+        # 1. LIQUIDITY CHECK
         oi = quote.get('oi', 0) or 0
         if oi < self.min_oi:
             LOGGER.debug(f"⛔ {symbol}: Low Liquidity (OI: {oi}). Skip.")
             return False
 
-        # SPREAD CHECK
+        # 2. SPREAD CHECK
         bid = float(quote.get('bid', 0) or 0)
         ask = float(quote.get('ask', 0) or 0)
         if bid > 0:
@@ -168,7 +180,7 @@ class EliteStrategy(Strategy):
                 LOGGER.debug(f"⛔ {symbol}: Spread wide ({spread_pct:.2f}%). Skip.")
                 return False
 
-        # GREEKS CHECK
+        # 3. GREEKS CHECK
         if greeks:
             delta = abs(float(greeks.get('delta') or 0.5))
             if delta < self.min_delta:
@@ -188,7 +200,8 @@ class EliteStrategy(Strategy):
         return True
 
     def calculate_option_rr(self, premium: float, side: str = "BUY") -> Tuple[float, float]:
-        """💰 RISK LOGIC: Calculates SL/TP based on Premium %"""
+        """💰 RISK LOGIC: Calculates SL/TP based on Premium %."""
+        # Standard Risk Profile
         SL_PCT = 0.15 
         TP_PCT = 0.30 
 
@@ -199,6 +212,7 @@ class EliteStrategy(Strategy):
             sl_price = round(premium * (1 + SL_PCT), 1)
             tp_price = round(premium * (1 - TP_PCT), 1)
             
+        # Bounds Check
         sl_price = max(0.05, sl_price)
         tp_price = max(0.05, tp_price)
             
@@ -209,6 +223,7 @@ class EliteStrategy(Strategy):
         sl = signal.stop_loss
         tp = signal.take_profit_1
         
+        # Auto-calculate Risk/Reward if not provided by strategy
         if not sl or not tp:
             calc_sl, calc_tp = self.calculate_option_rr(signal.entry_price, signal.side)
             if not sl: sl = calc_sl
