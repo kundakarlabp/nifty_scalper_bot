@@ -12,6 +12,9 @@ class EliteStrategyConfig:
     enabled: bool = True
     min_confidence: float = 70.0
     cooldown_seconds: float = 60.0
+    
+    # ✅ FIX: Add this field so strategies can read self.config.symbol
+    symbol: str | None = None 
 
     def __post_init__(self) -> None:
         """Validate configuration values.
