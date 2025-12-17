@@ -22,17 +22,7 @@ class EliteStrategyConfig:
     quantity: int = 1
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
+        """Validate configuration values."""
         if self.min_confidence < 0 or self.min_confidence > 100:
             raise ValueError("min_confidence must be between 0 and 100")
         if self.cooldown_seconds < 0:
