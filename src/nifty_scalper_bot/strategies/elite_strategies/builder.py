@@ -1,6 +1,6 @@
 """
 Factory for building elite strategies dynamically.
-World-Class implementation: Safe Builders + Static Tag Resolution.
+World-Class implementation: Fault-Tolerant, Reflection-Based, and Safe.
 """
 
 from __future__ import annotations
@@ -8,25 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, List, Sequence, cast
 
+# --- Strategy Imports ---
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
 )
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    BBSqueezeStrategyConfig,
-    CPRBreakoutStrategyConfig,
-    EliteStrategiesSettings,
-    EliteStrategyConfig,
-    GammaScalpingStrategyConfig,
-    OIMaxPainStrategyConfig,
-    ORBProStrategyConfig,
-    OrderFlowStrategyConfig,
-    RSIDivergenceStrategyConfig,
-    SMCStrategyConfig,
-    StraddleThetaStrategyConfig,
-    VWAPProStrategyConfig,
-)
 from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import (
     CPRBreakoutStrategy,
 )
@@ -44,6 +31,22 @@ from nifty_scalper_bot.strategies.elite_strategies.straddle_theta import (
     StraddleThetaStrategy,
 )
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
+
+# --- Config Imports ---
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    BBSqueezeStrategyConfig,
+    CPRBreakoutStrategyConfig,
+    EliteStrategiesSettings,
+    EliteStrategyConfig,
+    GammaScalpingStrategyConfig,
+    OIMaxPainStrategyConfig,
+    ORBProStrategyConfig,
+    OrderFlowStrategyConfig,
+    RSIDivergenceStrategyConfig,
+    SMCStrategyConfig,
+    StraddleThetaStrategyConfig,
+    VWAPProStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -56,70 +59,64 @@ class _StrategyPlan:
     tags: List[str]
 
 
+# ------------------------------------------------------------------------------
+# CENTRAL DEFINITION MAP
+# Maps 'config_attribute_name' -> (StrategyClass, [Tags])
+# This single source of truth prevents code duplication and sync errors.
+# ------------------------------------------------------------------------------
+STRATEGY_MAP = {
+    "smc": (SMCStrategy, ["reversal", "liquidity"]),
+    "vwap": (VWAPProStrategy, ["trend", "intraday"]),
+    "oi_max_pain": (OIMaxPainStrategy, ["reversion", "oi"]),
+    "gamma_scalping": (GammaScalpingStrategy, ["volatility", "gamma"]),
+    "cpr": (CPRBreakoutStrategy, ["breakout", "levels"]),
+    "order_flow": (OrderFlowStrategy, ["scalp", "depth"]),
+    "bb_squeeze": (BBSqueezeStrategy, ["volatility", "breakout"]),
+    "rsi_div": (RSIDivergenceStrategy, ["reversal", "momentum"]),
+    "orb": (ORBProStrategy, ["breakout", "opening"]),
+    "straddle": (StraddleThetaStrategy, ["theta", "delta_neutral"]),
+}
+
+
 def build_elite_strategies(
     settings: EliteStrategiesSettings, indicator_engine: Any
 ) -> Sequence[EliteStrategy]:
     """
     Construct active elite strategy instances.
-    Safely injects configuration and indicator engine.
+    Safely injects configuration and indicator engine using reflection.
     """
     strategies: list[EliteStrategy] = []
     plans: list[_StrategyPlan] = []
 
-    # Map settings to plans
-    if settings.smc.enabled:
-        plans.append(
-            _StrategyPlan(SMCStrategy, settings.smc, ["reversal", "liquidity"])
-        )
-    if settings.vwap.enabled:
-        plans.append(
-            _StrategyPlan(VWAPProStrategy, settings.vwap, ["trend", "intraday"])
-        )
-    if settings.oi_max_pain.enabled:
-        plans.append(
-            _StrategyPlan(OIMaxPainStrategy, settings.oi_max_pain, ["reversion", "oi"])
-        )
-    if settings.gamma_scalping.enabled:
-        plans.append(
-            _StrategyPlan(
-                GammaScalpingStrategy, settings.gamma_scalping, ["volatility", "gamma"]
+    # 1. Plan Construction Loop (Fault Tolerant)
+    for attr_name, (factory_cls, tags) in STRATEGY_MAP.items():
+        # A. Safety Check: Does config actually have this field?
+        if not hasattr(settings, attr_name):
+            LOGGER.debug(
+                f"Skipping {attr_name}: Attribute missing in EliteStrategiesSettings."
             )
-        )
-    if settings.cpr.enabled:
-        plans.append(
-            _StrategyPlan(CPRBreakoutStrategy, settings.cpr, ["breakout", "levels"])
-        )
-    if settings.order_flow.enabled:
-        plans.append(
-            _StrategyPlan(OrderFlowStrategy, settings.order_flow, ["scalp", "depth"])
-        )
-    if settings.bb_squeeze.enabled:
-        plans.append(
-            _StrategyPlan(BBSqueezeStrategy, settings.bb_squeeze, ["volatility", "breakout"])
-        )
-    if settings.rsi_div.enabled:
-        plans.append(
-            _StrategyPlan(RSIDivergenceStrategy, settings.rsi_div, ["reversal", "momentum"])
-        )
-    if settings.orb.enabled:
-        plans.append(
-            _StrategyPlan(ORBProStrategy, settings.orb, ["breakout", "opening"])
-        )
-    if settings.straddle.enabled:
-        plans.append(
-            _StrategyPlan(
-                StraddleThetaStrategy, settings.straddle, ["theta", "delta_neutral"]
-            )
-        )
+            continue
 
-    # Build instances
+        # B. Retrieve Config Object
+        strategy_config = getattr(settings, attr_name)
+        
+        # C. Check Enabled Status (Handle None/Missing safely)
+        is_enabled = False
+        if strategy_config and hasattr(strategy_config, "enabled"):
+            is_enabled = bool(strategy_config.enabled)
+            
+        if is_enabled:
+            plans.append(_StrategyPlan(factory_cls, strategy_config, tags))
+
+    # 2. Instantiation Loop (Crash Proof)
     for plan in plans:
         try:
-            # CRITICAL: We pass both config and engine here.
-            # This matches the new __init__ signatures we fixed.
+            # D. Inject Dependencies (Standardized Constructor)
+            # This is where we ensure 'indicator_engine' is passed
             strategy = plan.factory(config=plan.config, indicator_engine=indicator_engine)
             strategies.append(strategy)
             LOGGER.info("Built elite strategy: %s", strategy.name)
+            
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "Failed to build strategy %s: %s",
@@ -135,44 +132,43 @@ def build_elite_strategies(
 def elite_strategy_tags(settings: EliteStrategiesSettings) -> dict[str, List[str]]:
     """
     Return map of strategy names to their capability tags.
-    Updated to use STATIC mapping to avoid instantiation crashes.
+    Uses static mapping to avoid instantiation overhead/crashes.
     """
     tags: dict[str, List[str]] = {}
     
-    # We map the Factory Class -> The Hardcoded Name used in __init__
-    # This avoids creating the object (which requires engine) just to read the name.
-    
-    if settings.smc.enabled:
-        tags["SMC Liquidity"] = ["reversal", "liquidity"]
-        
-    if settings.vwap.enabled:
-        tags["VWAP Pro"] = ["trend", "intraday"]
-        
-    if settings.oi_max_pain.enabled:
-        tags["OI Max Pain"] = ["reversion", "oi"]
-        
-    if settings.gamma_scalping.enabled:
-        tags["Gamma Scalping"] = ["volatility", "gamma"]
-        
-    if settings.cpr.enabled:
-        tags["CPR Breakout"] = ["breakout", "levels"]
-        
-    if settings.order_flow.enabled:
-        tags["Order Flow Imbalance"] = ["scalp", "depth"]
-        
-    if settings.bb_squeeze.enabled:
-        tags["BB Squeeze"] = ["volatility", "breakout"]
-        
-    if settings.rsi_div.enabled:
-        tags["RSI Divergence"] = ["reversal", "momentum"]
-        
-    if settings.orb.enabled:
-        tags["ORB Pro"] = ["breakout", "opening"]
-        
-    if settings.straddle.enabled:
-        tags["ATM Straddle Theta"] = ["theta", "delta_neutral"]
+    for attr_name, (factory_cls, tag_list) in STRATEGY_MAP.items():
+        # 1. Check existence
+        if not hasattr(settings, attr_name):
+            continue
+            
+        # 2. Check enabled
+        cfg = getattr(settings, attr_name)
+        if cfg and getattr(cfg, "enabled", False):
+            # We use a readable name key based on the class name or attribute
+            # E.g. "SMC Liquidity" or "smc"
+            # Using factory class name for consistency if needed, or a pretty name
+            # Here we map keys to match the previous implementation's style
+            pretty_name = _get_pretty_name(attr_name)
+            tags[pretty_name] = tag_list
 
     return tags
+
+
+def _get_pretty_name(attr_name: str) -> str:
+    """Helper to format attribute names into readable strategy titles."""
+    lookup = {
+        "smc": "SMC Liquidity",
+        "vwap": "VWAP Pro",
+        "oi_max_pain": "OI Max Pain",
+        "gamma_scalping": "Gamma Scalping",
+        "cpr": "CPR Breakout",
+        "order_flow": "Order Flow Imbalance",
+        "bb_squeeze": "BB Squeeze",
+        "rsi_div": "RSI Divergence",
+        "orb": "ORB Pro",
+        "straddle": "ATM Straddle Theta"
+    }
+    return lookup.get(attr_name, attr_name.replace("_", " ").title())
 
 
 __all__ = [
