@@ -8340,7 +8340,6 @@ class OrderManager:
 
             # 2. HANDLE ORPHANS (Broker Exists, Local Missing) -> Adopt & Protect
             # ------------------------------------------------------
-            # We check orphans FIRST to ensure safety priority
             all_local = list(self._positions.get_open_positions())
             local_map = {}
             for pos in all_local:
@@ -8350,20 +8349,42 @@ class OrderManager:
 
             for broker_sym, data in broker_map.items():
                 if broker_sym not in local_map:
+                    
+                    # [FIX] RACE CONDITION CHECK: 
+                    # Do not adopt if we have a pending or recently filled order for this symbol.
+                    # This prevents the Monitor from fighting the Strategy during entry.
+                    is_active_locally = False
+                    with self._lock:
+                        for order in self._orders.values():
+                            # Check for matching symbol
+                            if DataHub.normalize(order.symbol) == DataHub.normalize(broker_sym):
+                                # If Order is Pending/Submitted -> We are working on it -> SKIP
+                                if order.status not in self.FINAL_STATUSES:
+                                    is_active_locally = True
+                                    break
+                                # If Order was Filled < 15 seconds ago -> State is syncing -> SKIP
+                                time_since = time.time() - order.timestamp.timestamp()
+                                if order.status == OrderStatus.FILLED and time_since < 15.0:
+                                    is_active_locally = True
+                                    break
+                    
+                    if is_active_locally:
+                        self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Recent Activity Detected)")
+                        continue
+
+                    # If we get here, it's truly an orphan (old/manual trade)
                     self._logger.warning(
                         f"⚠️ Orphan Position Found: {broker_sym} Qty: {data['qty']}. Adopting...",
                         extra={"event": "orphan_adopted", "symbol": broker_sym}
                     )
                     
-                    # A. Create Local Record (Swallow errors to ensure step B runs)
+                    # A. Create Local Record
                     try:
                         self._adopt_orphan_position(broker_sym, data)
                     except Exception as e:
-                        # LOG BUT DO NOT CRASH. We must proceed to safety check.
                         self._logger.error(f"Adoption Error (Non-Critical): {e}", exc_info=True)
 
-                    # B. CRITICAL: Check for Safety Bracket
-                    # This runs even if Step A fails
+                    # B. Check for Safety Bracket
                     self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
             # 3. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
