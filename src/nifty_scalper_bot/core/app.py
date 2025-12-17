@@ -2602,7 +2602,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
         # 6. CRITICAL: Direct Strategy Feed (Bypass DataHub if needed)
-        # This ensures strategies get ticks even if DB/DataHub is slow
         if strategy_runner_ref:
             runner = strategy_runner_ref.get("instance")
             if runner:
@@ -2636,26 +2635,41 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
             market_data_manager._handle_tick(t)
             
-            # CIRCUIT BREAKER RESET: We succeeded, so clear errors
+            # CIRCUIT BREAKER RESET
             if hasattr(streamer, '_consecutive_errors'):
                 streamer._consecutive_errors = 0
 
         except Exception as exc:
-            # LOGGER.error(f"MDM Tick Failed: {exc}")
-            
             # Track errors for circuit breaker
             if not hasattr(streamer, '_consecutive_errors'):
                 streamer._consecutive_errors = 0
             streamer._consecutive_errors += 1
             
-            # If > 10 failures, maybe restart (handled by main loop or supervisor)
+            # If > 10 failures, log error
             if streamer._consecutive_errors > 10:
                  LOGGER.error(f"MDM Tick Failed (x{streamer._consecutive_errors}): {exc}")
         
         finally:
             if stream_supervisor is not None:
                 stream_supervisor.on_tick(t)
+
+    # ------------------------------------------------------------------
+    # Streamer Selection Logic (Polling vs WebSocket)
+    # ------------------------------------------------------------------
+    if use_websockets:
+        LOGGER.info("Initializing WebSocket Streamer...")
         
+        def _sanitize_ws_token(value: str | None) -> str:
+            token = (value or "").strip()
+            if ":" in token:
+                token = token.split(":", 1)[-1].strip()
+            return token
+
+        initial_token = _sanitize_ws_token(cast(str | None, config.broker.access_token))
+        _ws_token_state: dict[str, str] = {"token": initial_token}
+        _ws_token_timestamp: dict[str, float] = {
+            "ts": time_module.time() if initial_token else 0.0,
+        }
 
         def _resolve_ws_token() -> str:  # type: ignore[redefined-outer-name]
             candidates = [
@@ -2679,10 +2693,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         def _refresh_ws_session() -> None:  # type: ignore[redefined-outer-name]
             _resolve_ws_token()
 
-        def _ws_token_issued_at() -> float | None:  # type: ignore[redefined-outer-name]
-            ts = float(_ws_token_timestamp.get("ts", 0.0))
-            return ts if ts > 0.0 else None
-
         def _build_ws():
             token = _resolve_ws_token()
             return build_kite_ticker(
@@ -2701,8 +2711,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
         websocket_manager.set_client_factory(_build_ws)
 
-        streamer = ResilientStreamer(websocket_manager, broker_client, settings)
-
+        # Initialize WebSocket Streamer
+        from nifty_scalper_bot.streaming.websocket_streamer import WebSocketStreamer
+        streamer = WebSocketStreamer(
+            api_key=config.broker.api_key,
+            access_token_provider=_resolve_ws_token,
+            on_tick=lambda tick: None, # Handled via managers below
+            subscriptions=set(),
+            reconnect_interval=5.0,
+        )
+        
+        # Wire up WebSocket handlers
         market_data_manager = MarketDataManager(
             broker_client,
             websocket_manager,
@@ -2716,22 +2735,61 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
-        streamer.register_handler(market_data_manager._handle_tick)  # type: ignore[attr-defined]
+        
+        # Register Callbacks
+        websocket_manager.on_tick = market_data_manager._handle_tick
+        streamer.register_handler(market_data_manager._handle_tick) # Redundant but safe
         streamer.register_handler(lambda tick: asyncio.create_task(data_hub.ingest_tick(tick)))
-        websocket_manager.on_tick = streamer._handle_tick  # type: ignore[attr-defined]
+
     else:
-        raise ConfigurationError(
-            "Polling disabled while websocket transport is disabled; "
-            "no streamer available"
+        LOGGER.info("Initializing Polling Streamer...")
+        
+        # Initialize Polling Streamer
+        streamer = PollingStreamer(
+            broker_client=broker_client,
+            on_tick=_on_poll_tick,
+            instrument_resolver=instrument_resolver,
+            poll_interval_ms=int(poll_interval_sec * 1000),
+            batch_size=poll_batch_size,
+            require_depth=poll_require_depth,
+            warn_on_rate_limit=poll_warn_rate_limit,
+        )
+        
+        # Initialize Managers for Polling Mode
+        # Note: WebSocketManager is None in polling mode
+        market_data_manager = MarketDataManager(
+            broker_client,
+            None, 
+            settings=settings,
+            resolver=instrument_resolver,
+        )
+        data_hub = DataHub(
+            market_data_manager,
+            instrument_resolver,
+            options_only=True,
+            store=hub_store,
+            message_bus=message_bus,
         )
 
+    # ------------------------------------------------------------------
+    # Common Supervisor & Wiring Logic
+    # ------------------------------------------------------------------
     if data_hub is None:
         raise ConfigurationError("Data hub initialisation failed")
 
     LOGGER.info("DataHub initialized. Snapshot deferred to startup sequence.")
 
-    
+    # Initialize Supervisor
+    stream_supervisor = StreamSupervisor(
+        streamer=streamer,
+        resolver=instrument_resolver,
+        default_symbols=list(poll_symbols or ["NIFTY"]),
+        autostart=True,
+    )
+    stream_supervisor.bootstrap()
+    stream_supervisor.ensure_started()
 
+    # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()
     for env_key, env_default in (
         ("REGIME_MIN_CONFIDENCE", "0.40"),
@@ -2760,45 +2818,27 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "history_length": 1440,
         },
     )
+
+    # Wire Regime Detector to Stream
     try:
-        if hasattr(data_hub, "subscribe_ticks") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
+        if hasattr(data_hub, "subscribe_ticks") and hasattr(market_regime_detector, "ingest_tick"):
             callback = cast(
                 Callable[[dict[str, Any]], None],
                 market_regime_detector.ingest_tick,
             )
             data_hub.subscribe_ticks(regime_symbol, callback)
-            LOGGER.info(
-                "Condition met: regime_detector_subscribed",
-                extra={
-                    "event": "regime_detector_subscribed",
-                    "symbol": regime_symbol,
-                    "source": "data_hub",
-                },
-            )
-        elif hasattr(streamer, "register_handler") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
+            LOGGER.info(f"Regime detector subscribed via DataHub to {regime_symbol}")
+            
+        elif hasattr(streamer, "register_handler") and hasattr(market_regime_detector, "ingest_tick"):
             streamer.register_handler(market_regime_detector.ingest_tick)
-            LOGGER.info(
-                "Condition met: regime_detector_subscribed",
-                extra={
-                    "event": "regime_detector_subscribed",
-                    "symbol": regime_symbol,
-                    "source": "streamer",
-                },
-            )
-    except Exception as exc:  # noqa: BLE001 - defensive wiring
+            LOGGER.info(f"Regime detector subscribed via Streamer to {regime_symbol}")
+            
+    except Exception as exc:
         LOGGER.error(
-            "regime_detector_tick_subscribe_failed",
-            extra={
-                "event": "regime_detector_tick_subscribe_failed",
-                "symbol": regime_symbol,
-            },
+            "Regime detector tick subscription failed",
+            extra={"event": "regime_subscription_failed", "symbol": regime_symbol},
             exc_info=exc,
         )
-
     persistent_state = PersistentStateManager(base_path=Path("data"))
 
     heartbeat_interval = max(
