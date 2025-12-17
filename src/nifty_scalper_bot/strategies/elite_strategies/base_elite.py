@@ -5,7 +5,7 @@ Production-Grade: Implements all abstract methods to fix instantiation crashes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Tuple, Set
 
@@ -62,7 +62,8 @@ class EliteStrategy(Strategy):
             indicator_engine: Provider for market data and indicators.
         """
         # Pass raw dict for compatibility with parent Strategy class
-        super().__init__(config=config.dict(), indicator_engine=indicator_engine)
+        # ✅ FIX: Use 'asdict(config)' because config is a standard dataclass
+        super().__init__(config=asdict(config), indicator_engine=indicator_engine)
         self._config = config
         self._indicator_engine = indicator_engine
         self._last_signal_at: datetime | None = None
