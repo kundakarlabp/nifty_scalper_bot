@@ -2562,8 +2562,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # Explicitly mark WS disconnected in polling mode so health reflects polling
         market_data_manager.set_ws_connected(False)
 
-        # Fan-out: every polled tick updates MDM and the supervisor heartbeat
-        def _on_poll_tick(tick: dict[str, Any]) -> None:
+    # [FIX] Fan-out: every polled tick updates MDM and the supervisor heartbeat
+    def _on_poll_tick(tick: dict[str, Any]) -> None:
         """
         Handle incoming poll tick with Robust Validation & Recovery.
         """
@@ -2623,7 +2623,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if data_hub is not None:
             try:
                 # Fire and forget ingest
-                asyncio.create_task(data_hub.ingest_tick(t))
+                loop = asyncio.get_running_loop()
+                loop.create_task(data_hub.ingest_tick(t))
             except (RuntimeError, Exception):
                 pass 
 
@@ -2648,10 +2649,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             streamer._consecutive_errors += 1
             
             # If > 10 failures, maybe restart (handled by main loop or supervisor)
+            if streamer._consecutive_errors > 10:
+                 LOGGER.error(f"MDM Tick Failed (x{streamer._consecutive_errors}): {exc}")
         
         finally:
             if stream_supervisor is not None:
                 stream_supervisor.on_tick(t)
+        
 
         def _resolve_ws_token() -> str:  # type: ignore[redefined-outer-name]
             candidates = [
