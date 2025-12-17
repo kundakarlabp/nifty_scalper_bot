@@ -1,10 +1,11 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Correctly initializes parent Strategy with name and parameters.
+Production-Grade: Includes Smart Dispatcher to handle legacy and new strategies automatically.
 """
 
 from __future__ import annotations
 
+import inspect  # ✅ KEY ADDITION for Smart Dispatch
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Tuple, Set
@@ -56,15 +57,12 @@ class EliteStrategy(Strategy):
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
         """Initialize the elite strategy base."""
-        
-        # ✅ FIX: Pass the specific arguments the parent 'Strategy' class demands.
-        # It wants 'name' (str) and 'parameters' (dict).
+        # Call parent with required args (name, parameters)
         super().__init__(
-            name=self.__class__.__name__,  # Use class name (e.g., "SMCStrategy")
-            parameters=asdict(config)      # Convert dataclass config to dict
+            name=self.__class__.__name__,
+            parameters=asdict(config)
         )
         
-        # Store dependencies locally
         self._config = config
         self._indicator_engine = indicator_engine
         
@@ -79,10 +77,7 @@ class EliteStrategy(Strategy):
         self.max_iv_percentile = 85.0
 
     def get_required_indicators(self) -> Set[str]:
-        """
-        Return the set of indicators required by this strategy.
-        Required to satisfy abstract parent class.
-        """
+        """Return required indicators (Empty set as elite strategies self-fetch)."""
         return set()
 
     def generate_signal(
@@ -92,14 +87,30 @@ class EliteStrategy(Strategy):
         current_price: float, 
         position: Any | None = None
     ) -> Signal | None:
-        """Standard interface implementation bridging to elite logic."""
+        """
+        Standard interface implementation bridging to elite logic.
+        ✅ SMART DISPATCH: Automatically handles both legacy (0-arg) and new (4-arg) strategies.
+        """
         if not self._config.enabled:
             return None
 
         try:
-            # Pass arguments down to the specific strategy logic
-            elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
-            
+            # -----------------------------------------------------------
+            # 🧠 SMART DISPATCH LOGIC
+            # Check how many arguments the child's _evaluate_signal accepts
+            # -----------------------------------------------------------
+            sig = inspect.signature(self._evaluate_signal)
+            # Count parameters excluding 'self'
+            param_count = len(sig.parameters)
+
+            if param_count >= 4:
+                # The New Way: Pass everything
+                elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
+            else:
+                # The Old Way: Pass nothing (Strategy fetches its own data)
+                # This PREVENTS the "takes 1 argument but 5 were given" crash
+                elite_signal = self._evaluate_signal()
+
             if elite_signal:
                 # 🛡️ SAFETY GATE
                 if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
@@ -108,18 +119,13 @@ class EliteStrategy(Strategy):
 
                 self._update_state(elite_signal)
                 return self._convert_to_core_signal(elite_signal)
+                
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(f"Strategy {self.name} failed evaluation: {exc}", exc_info=True)
             return None
         return None
 
-    def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Mapping[str, Any], 
-        current_price: float, 
-        position: Any | None
-    ) -> EliteSignal | None:
+    def _evaluate_signal(self, *args, **kwargs) -> EliteSignal | None:
         """Internal hook for strategy-specific logic."""
         raise NotImplementedError("Subclasses must implement _evaluate_signal")
 
