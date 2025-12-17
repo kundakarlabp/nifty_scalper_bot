@@ -1,6 +1,6 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Fixed signature mismatch in generate_signal.
+Production-Grade: Correctly initializes parent Strategy with name and parameters.
 """
 
 from __future__ import annotations
@@ -56,9 +56,15 @@ class EliteStrategy(Strategy):
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
         """Initialize the elite strategy base."""
-        # Call parent with NO arguments (Strategy class is abstract/empty)
-        super().__init__()
         
+        # ✅ FIX: Pass the specific arguments the parent 'Strategy' class demands.
+        # It wants 'name' (str) and 'parameters' (dict).
+        super().__init__(
+            name=self.__class__.__name__,  # Use class name (e.g., "SMCStrategy")
+            parameters=asdict(config)      # Convert dataclass config to dict
+        )
+        
+        # Store dependencies locally
         self._config = config
         self._indicator_engine = indicator_engine
         
@@ -73,10 +79,12 @@ class EliteStrategy(Strategy):
         self.max_iv_percentile = 85.0
 
     def get_required_indicators(self) -> Set[str]:
-        """Return the set of indicators required by this strategy."""
+        """
+        Return the set of indicators required by this strategy.
+        Required to satisfy abstract parent class.
+        """
         return set()
 
-    # ✅ FIX: Updated signature to accept arguments from StrategyManager
     def generate_signal(
         self, 
         symbol: str, 
@@ -89,7 +97,7 @@ class EliteStrategy(Strategy):
             return None
 
         try:
-            # ✅ FIX: Pass arguments down to the specific strategy logic
+            # Pass arguments down to the specific strategy logic
             elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
             
             if elite_signal:
@@ -105,7 +113,6 @@ class EliteStrategy(Strategy):
             return None
         return None
 
-    # ✅ FIX: Updated abstract signature to match call site
     def _evaluate_signal(
         self, 
         symbol: str, 
