@@ -79,7 +79,7 @@ def validate_elite_config(elite: EliteStrategiesSettings) -> None:
                 f'OI_PCR_BULLISH ({bullish}) must be > OI_PCR_BEARISH ({bearish})'
             )
 
-        gamma_settings = elite.gamma
+        gamma_settings = elite.gamma_scalping
         delta_threshold = _resolve_numeric(
             gamma_settings, 'delta_threshold', 'gamma_delta_threshold'
         )
