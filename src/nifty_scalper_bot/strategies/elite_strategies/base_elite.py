@@ -1,6 +1,6 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Implements all abstract methods to fix instantiation crashes.
+Production-Grade: Fixes parent class initialization (removes 'config' arg).
 """
 
 from __future__ import annotations
@@ -55,38 +55,30 @@ class EliteStrategy(Strategy):
     """Base class for high-probability elite setups."""
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
-        """Initialize the elite strategy base.
-
-        Args:
-            config: Validated configuration model.
-            indicator_engine: Provider for market data and indicators.
-        """
-        # Pass raw dict for compatibility with parent Strategy class
-        # ✅ FIX: Use 'asdict(config)' because config is a standard dataclass
-        super().__init__(config=asdict(config), indicator_engine=indicator_engine)
+        """Initialize the elite strategy base."""
+        
+        # ✅ FIX: Do NOT pass 'config' to the parent Strategy class.
+        # The parent 'Strategy' only accepts 'indicator_engine'.
+        super().__init__(indicator_engine=indicator_engine)
+        
+        # We store the config here in the child class instead
         self._config = config
         self._indicator_engine = indicator_engine
+        
         self._last_signal_at: datetime | None = None
         self._last_signal: EliteSignal | None = None
         self._signals_generated: int = 0
         
         # ⚙️ PRODUCTION SAFETY SETTINGS
-        # These guardrails apply to ALL elite strategies automatically
         self.min_oi = 50000
         self.max_spread_pct = 5.0
         self.min_delta = 0.30
         self.max_iv_percentile = 85.0
 
-    # --------------------------------------------------------------------------
-    # ✅ CRITICAL FIX: Implement Abstract Method from Parent Class
-    # --------------------------------------------------------------------------
     def get_required_indicators(self) -> Set[str]:
         """
         Return the set of indicators required by this strategy.
-        
-        This satisfies the abstract method requirement from the base 'Strategy' class.
-        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal,
-        so we return an empty set here to tell StrategyManager "Don't pre-fetch anything for me".
+        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal.
         """
         return set()
 
@@ -96,10 +88,9 @@ class EliteStrategy(Strategy):
             return None
 
         try:
-            # Delegate to specific implementation
             elite_signal = self._evaluate_signal()
             if elite_signal:
-                # 🛡️ SAFETY GATE: Validate Greeks/Liquidity before proceeding
+                # 🛡️ SAFETY GATE
                 if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
                     LOGGER.info(f"⛔ Rejected {elite_signal.symbol}: Failed Safety Check")
                     return None
@@ -112,10 +103,7 @@ class EliteStrategy(Strategy):
         return None
 
     def _evaluate_signal(self) -> EliteSignal | None:
-        """Internal hook for strategy-specific logic.
-
-        Must be implemented by subclasses.
-        """
+        """Internal hook for strategy-specific logic."""
         raise NotImplementedError("Subclasses must implement _evaluate_signal")
 
     @property
@@ -124,33 +112,28 @@ class EliteStrategy(Strategy):
         return self.__class__.__name__
 
     # ==========================================================================
-    # 🛡️ SAFETY & RISK ENGINE (World Class Implementation)
+    # 🛡️ SAFETY & RISK ENGINE
     # ==========================================================================
 
     def validate_option_health(self, symbol: str, direction: str) -> bool:
-        """
-        🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'.
-        Checks Liquidity, Spread, and Greeks.
-        """
-        # Skip validation for Futures/Spot (Focus on Options)
+        """🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'."""
+        # Skip for Futures/Spot
         if "CE" not in symbol and "PE" not in symbol:
             return True
 
-        # 1. FETCH DATA
         quote = self._indicator_engine.get_quote(symbol)
         greeks = self._indicator_engine.get_indicators(symbol, ["delta", "theta", "iv_percentile"])
         
         if not quote:
-            # LOGGER.warning(f"⛔ {symbol}: No Quote Data.")
-            return False # Fail safe
+            return False
 
-        # 2. 💧 LIQUIDITY CHECK
+        # LIQUIDITY CHECK
         oi = quote.get('oi', 0) or 0
         if oi < self.min_oi:
             LOGGER.debug(f"⛔ {symbol}: Low Liquidity (OI: {oi}). Skip.")
             return False
 
-        # 3. 📉 SPREAD CHECK
+        # SPREAD CHECK
         bid = float(quote.get('bid', 0) or 0)
         ask = float(quote.get('ask', 0) or 0)
         if bid > 0:
@@ -159,7 +142,7 @@ class EliteStrategy(Strategy):
                 LOGGER.debug(f"⛔ {symbol}: Spread wide ({spread_pct:.2f}%). Skip.")
                 return False
 
-        # 4. 📐 GREEKS CHECK
+        # GREEKS CHECK
         if greeks:
             delta = abs(float(greeks.get('delta') or 0.5))
             if delta < self.min_delta:
@@ -179,12 +162,9 @@ class EliteStrategy(Strategy):
         return True
 
     def calculate_option_rr(self, premium: float, side: str = "BUY") -> Tuple[float, float]:
-        """
-        💰 RISK LOGIC: Calculates SL/TP based on Premium %
-        """
-        # Standard Intraday Risk Profile
-        SL_PCT = 0.15 # Risk 15% of premium
-        TP_PCT = 0.30 # Target 30% gain
+        """💰 RISK LOGIC: Calculates SL/TP based on Premium %"""
+        SL_PCT = 0.15 
+        TP_PCT = 0.30 
 
         if side == "BUY":
             sl_price = round(premium * (1 - SL_PCT), 1)
@@ -193,20 +173,13 @@ class EliteStrategy(Strategy):
             sl_price = round(premium * (1 + SL_PCT), 1)
             tp_price = round(premium * (1 - TP_PCT), 1)
             
-        # Sanity Check
         sl_price = max(0.05, sl_price)
         tp_price = max(0.05, tp_price)
             
         return sl_price, tp_price
 
-    # ==========================================================================
-    # HELPERS
-    # ==========================================================================
-
     def _convert_to_core_signal(self, signal: EliteSignal) -> Signal:
         """Adapter converting elite signal to core signal format."""
-        
-        # If strategy didn't set specific SL/TP, use our Premium Calculator
         sl = signal.stop_loss
         tp = signal.take_profit_1
         
