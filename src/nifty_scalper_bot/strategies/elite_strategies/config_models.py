@@ -1,4 +1,7 @@
-"""Configuration dataclasses for elite strategy package."""
+"""
+Configuration dataclasses for elite strategy package.
+Production-Grade: Full implementation with validation, slots, and context injection.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +16,10 @@ class EliteStrategyConfig:
     min_confidence: float = 70.0
     cooldown_seconds: float = 60.0
     
-    # ✅ FIX: Add this field so strategies can read self.config.symbol
+    # ✅ FIX: Context Injection Fields
+    # These are populated at runtime by the Strategy Engine, not config.yaml
     symbol: str | None = None 
+    quantity: int = 1
 
     def __post_init__(self) -> None:
         """Validate configuration values.
@@ -32,6 +37,9 @@ class EliteStrategyConfig:
             raise ValueError("min_confidence must be between 0 and 100")
         if self.cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must be non-negative")
+        if self.quantity <= 0:
+            # Auto-correct invalid quantity instead of crashing
+            self.quantity = 1
 
 
 @dataclass(slots=True)
@@ -44,18 +52,7 @@ class SMCStrategyConfig(EliteStrategyConfig):
     order_block_volume_mult: float = 1.5
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.equal_level_tolerance_pct < 0:
             raise ValueError("equal_level_tolerance_pct must be non-negative")
@@ -78,18 +75,7 @@ class VWAPProStrategyConfig(EliteStrategyConfig):
     max_holding_minutes: float = 15.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.stddev_mult <= 0:
             raise ValueError("stddev_mult must be positive")
@@ -114,18 +100,7 @@ class OIMaxPainStrategyConfig(EliteStrategyConfig):
     exit_time_minutes: float = 900.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.fetch_interval_min < 0:
             raise ValueError("fetch_interval_min must be non-negative")
@@ -146,18 +121,7 @@ class GammaScalpingStrategyConfig(EliteStrategyConfig):
     exit_time_minutes: float = 840.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.hedge_trigger_points < 0:
             raise ValueError("hedge_trigger_points must be non-negative")
@@ -182,18 +146,7 @@ class CPRBreakoutStrategyConfig(EliteStrategyConfig):
     breakout_window_end: float = 10 * 60
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.narrow_threshold_pct < 0:
             raise ValueError("narrow_threshold_pct must be non-negative")
@@ -216,18 +169,7 @@ class OrderFlowStrategyConfig(EliteStrategyConfig):
     target_points: float = 25.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.imbalance_ratio_buy < 0:
             raise ValueError("imbalance_ratio_buy must be non-negative")
@@ -252,18 +194,7 @@ class BBSqueezeStrategyConfig(EliteStrategyConfig):
     volume_breakout: float = 2.5
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.period <= 0:
             raise ValueError("period must be positive")
@@ -288,18 +219,7 @@ class RSIDivergenceStrategyConfig(EliteStrategyConfig):
     swing_lookback: int = 10
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.period <= 0:
             raise ValueError("period must be positive")
@@ -324,18 +244,7 @@ class ORBProStrategyConfig(EliteStrategyConfig):
     invalid_time_minutes: float = 690.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.duration_min < 0:
             raise ValueError("duration_min must be non-negative")
@@ -360,18 +269,7 @@ class StraddleThetaStrategyConfig(EliteStrategyConfig):
     exit_time_minutes: float = 900.0
 
     def __post_init__(self) -> None:
-        """Validate configuration values.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
-
+        """Validate configuration values."""
         EliteStrategyConfig.__post_init__(self)
         if self.vix_threshold < 0:
             raise ValueError("vix_threshold must be non-negative")
@@ -392,12 +290,15 @@ class EliteStrategiesSettings:
     enabled: bool = True
     max_concurrent_strategies: int = 3
     position_size_pct: float = 2.0
+    
+    # Strategy Configs
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
     oi_max_pain: OIMaxPainStrategyConfig = field(
         default_factory=OIMaxPainStrategyConfig
     )
-    gamma: GammaScalpingStrategyConfig = field(
+    # ✅ FIX: Renamed 'gamma' to 'gamma_scalping' to match Builder/Settings conventions
+    gamma_scalping: GammaScalpingStrategyConfig = field(
         default_factory=GammaScalpingStrategyConfig
     )
     cpr: CPRBreakoutStrategyConfig = field(default_factory=CPRBreakoutStrategyConfig)
@@ -412,17 +313,7 @@ class EliteStrategiesSettings:
     )
 
     def __post_init__(self) -> None:
-        """Validate aggregate settings.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If any configuration value is outside expected bounds.
-        """
+        """Validate aggregate settings."""
         if self.max_concurrent_strategies <= 0:
             raise ValueError("max_concurrent_strategies must be positive")
         if self.position_size_pct < 0:
