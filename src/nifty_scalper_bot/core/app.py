@@ -3075,8 +3075,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 extra={"event": "init.bracket_manager.enter"},
             )
             bracket_manager = BracketManager(
-                order_manager=order_manager),
-                logger=LOGGER,
+                order_manager=order_manager
             )
             # Use the BracketManager's internal toggle to avoid shadowing the flag.
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
