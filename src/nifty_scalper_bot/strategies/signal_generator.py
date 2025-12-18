@@ -77,6 +77,21 @@ class Signal:
             take_profit=self.take_profit,
             metadata=merged,
         )
+    @property
+    def deterministic_id(self) -> str:
+        """
+        Generate a restart-safe ID. 
+        Signals for the same symbol/strategy within the same minute get the SAME ID.
+        """
+        # Round time to nearest minute string (e.g. 20251217_1430)
+        # Assuming self.metadata['timestamp'] exists or using current time bucket
+        ts = datetime.now().strftime("%Y%m%d%H%M") 
+        
+        # Combine core fields
+        raw_str = f"{self.tag}:{self.symbol}:{self.action}:{ts}"
+        
+        # Create hash
+        return hashlib.md5(raw_str.encode()).hexdigest()[:16]
 
 
 class Strategy(ABC):
