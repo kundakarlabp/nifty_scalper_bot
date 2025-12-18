@@ -81,6 +81,8 @@ class BracketManager:
     def __init__(self, order_manager: Any):
         self.order_manager = order_manager
         self._brackets: Dict[str, BracketState] = {}
+        # ✅ FIX: Initialize Reverse Index
+        self._order_to_entry: Dict[str, str] = {}
         self._lock = threading.RLock()
         self._running = True
         
@@ -155,12 +157,18 @@ class BracketManager:
                 tag=tag
             )
             self._brackets[order_id] = state
+            
+            # ✅ FIX: Populate Reverse Index
             self._order_to_entry[order_id] = order_id
             
             LOGGER.info(
                 f"🛡️ Bracket Active for {symbol} (Qty: {qty}): "
                 f"Entry={price} | SL={sl} | TP={tp} (Virtual Mode)"
             )
+
+            # Record metric
+            if METRICS_AVAILABLE and METRICS:
+                METRICS.brackets_created.inc()
 
     # --------------------------------------------------------------------------
     # 2. EXECUTION LOGIC (The "Sniper")
@@ -239,6 +247,10 @@ class BracketManager:
                 product="MIS"
             )
             
+            # Metrics
+            if METRICS_AVAILABLE and METRICS:
+                METRICS.brackets_triggered.inc()
+                
             # Cleanup
             self.unregister_bracket(bracket.entry_order_id)
 
@@ -285,6 +297,9 @@ class BracketManager:
         with self._lock:
             if entry_id in self._brackets:
                 del self._brackets[entry_id]
+            # Cleanup reverse index
+            if entry_id in self._order_to_entry:
+                del self._order_to_entry[entry_id]
 
     def cleanup_stale_brackets(self, max_age_seconds: int = 86400) -> int:
         """Remove old inactive brackets."""
@@ -295,7 +310,10 @@ class BracketManager:
                 if (now - b.created_at) > max_age_seconds
             ]
             for eid in to_remove:
-                del self._brackets[eid]
+                self.unregister_bracket(eid)
+            
+            if to_remove:
+                LOGGER.info(f"🧹 Cleaned up {len(to_remove)} stale brackets.")
             return len(to_remove)
 
     def get_stats(self) -> dict[str, Any]:
@@ -304,4 +322,5 @@ class BracketManager:
             return {
                 "active_brackets": len(self._brackets),
                 "symbols_managed": len({b.symbol for b in self._brackets.values()}),
+                "reverse_index_size": len(self._order_to_entry),
             }
