@@ -2626,25 +2626,22 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 loop.create_task(data_hub.ingest_tick(t))
             except (RuntimeError, Exception):
                 pass 
-
-        # ------------------------------------------------------------------
-        # ✅ FIX #1: Feed BracketManager (Virtual Stops)
-        # ------------------------------------------------------------------
-        # We access 'bracket_manager' from the outer scope (locals or ctx)
-        bm_ref = locals().get("bracket_manager") or getattr(ctx, "bracket_manager", None)
+                
+        # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
+        # INSERT THIS HERE. 't' is defined in this function scope.
+        _bm_ref = locals().get("bracket_manager") or getattr(ctx, "bracket_manager", None)
         
-        if bm_ref is not None:
-            sym = t.get("symbol")
-            ltp = t.get("ltp") or t.get("last_price")
+        if _bm_ref is not None:
+            _sym = t.get("symbol")
+            _ltp = t.get("ltp") or t.get("last_price")
             
-            if sym and ltp:
+            if _sym and _ltp:
                 try:
-                    # Fire the sniper logic
-                    bm_ref.on_tick(str(sym), float(ltp))
+                    # Fire the "Sniper" logic
+                    _bm_ref.on_tick(str(_sym), float(_ltp))
                 except Exception:
-                    # Never let a bracket error kill the tick loop
                     pass
-
+                    
         # 8. Market Data Manager Processing (With Recovery)
         try:
             # HEARTBEAT FIX: Update timestamp so watchdog is happy
