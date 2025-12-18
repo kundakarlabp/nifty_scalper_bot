@@ -2642,7 +2642,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 except Exception:
                     pass
                     
-        # 8. Market Data Manager Processing (With Recovery)
+        # 9. Market Data Manager Processing (With Recovery)
         try:
             # HEARTBEAT FIX: Update timestamp so watchdog is happy
             if hasattr(market_data_manager, "last_tick_time"):
