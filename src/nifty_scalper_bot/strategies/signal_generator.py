@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -80,18 +81,34 @@ class Signal:
     @property
     def deterministic_id(self) -> str:
         """
-        Generate a restart-safe ID. 
-        Signals for the same symbol/strategy within the same minute get the SAME ID.
+        Generate a stable, restart-safe ID for this signal.
+        Logic: HASH(Strategy + Symbol + Action + MinuteTimestamp)
         """
-        # Round time to nearest minute string (e.g. 20251217_1430)
-        # Assuming self.metadata['timestamp'] exists or using current time bucket
-        ts = datetime.now().strftime("%Y%m%d%H%M") 
+        # 1. Extract Stable Timestamp (Resolution: 1 Minute)
+        ts_raw = self.metadata.get("timestamp")
         
-        # Combine core fields
-        raw_str = f"{self.tag}:{self.symbol}:{self.action}:{ts}"
+        if isinstance(ts_raw, str):
+            # If ISO string "2025-12-18T10:00:05", grab "2025-12-18T10:00"
+            ts_str = ts_raw[:16] 
+        elif isinstance(ts_raw, (int, float)):
+            # If Unix epoch, round to nearest 60s
+            ts_str = str(int(ts_raw / 60)) 
+        elif isinstance(ts_raw, datetime):
+            # If datetime object, format to minute
+            ts_str = ts_raw.strftime("%Y%m%d%H%M")
+        else:
+            # Fallback: Use current system time rounded to minute
+            now = datetime.now()
+            ts_str = now.strftime("%Y%m%d%H%M")
+
+        # 2. Extract Strategy Name
+        strategy = self.metadata.get("strategy", "manual")
+
+        # 3. Build Unique String
+        raw_sig = f"{strategy}:{self.symbol}:{self.action}:{ts_str}"
         
-        # Create hash
-        return hashlib.md5(raw_str.encode()).hexdigest()[:16]
+        # 4. Return Short Hash
+        return hashlib.md5(raw_sig.encode()).hexdigest()[:16]
 
 
 class Strategy(ABC):
