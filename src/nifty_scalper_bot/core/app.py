@@ -2629,7 +2629,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 
         # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
         # INSERT THIS HERE. 't' is defined in this function scope.
-        _bm_ref = locals().get("bracket_manager") or getattr(ctx, "bracket_manager", None)
+        _bm_ref = getattr(ctx.order_manager, "_bracket_manager", None) if ctx.order_manager else None
         
         if _bm_ref is not None:
             _sym = t.get("symbol")
