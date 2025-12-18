@@ -3075,7 +3075,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 extra={"event": "init.bracket_manager.enter"},
             )
             bracket_manager = BracketManager(
-                broker_client=cast(SupportsCancelOrder, broker_client),
+                order_manager=order_manager),
                 logger=LOGGER,
             )
             # Use the BracketManager's internal toggle to avoid shadowing the flag.
