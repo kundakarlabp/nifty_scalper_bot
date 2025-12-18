@@ -15425,33 +15425,31 @@ class TelegramWebhookServer:
         return self._app
 
     async def start(self) -> None:
-        if self._task is not None:
+        """Start the bot polling loop properly."""
+        if self._running:
             return
-        config = uvicorn.Config(
-            self._app,
-            host=self._host,
-            port=self._port,
-            log_config=None,
-            access_log=False,
-            loop="asyncio",
-        )
-        server = uvicorn.Server(config)
-        self._server = server
-        self._task = asyncio.create_task(server.serve(), name="telegram-webhook-server")
-        started_event = getattr(server, "started", None)
-        if started_event is not None:
-            try:
-                await asyncio.wait_for(started_event.wait(), timeout=5.0)
-            except asyncio.TimeoutError as exc:  # pragma: no cover - defensive
-                server.should_exit = True
-                self._task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._task
-                self._task = None
-                self._server = None
-                raise RuntimeError("Telegram webhook server failed to start") from exc
-        else:  # pragma: no cover - fallback for older uvicorn
-            await asyncio.sleep(0.1)
+
+        LOGGER.info("Starting Telegram Controller...")
+        try:
+            # 1. Initialize & Start App
+            if not self.application.running:
+                await self.application.initialize()
+                await self.application.start()
+
+            # 2. FORCE START POLLING (Critical Fix)
+            # This ensures the bot actually listens to /commands
+            if self.application.updater:
+                await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+                LOGGER.info("✅ Telegram Polling Started Successfully")
+            else:
+                LOGGER.error("❌ Telegram Updater missing! Commands will not work.")
+
+            # 3. Register Menu
+            await self._set_commands()
+            self._running = True
+            
+        except Exception as e:
+            LOGGER.error(f"Failed to start Telegram Controller: {e}", exc_info=True)
 
     async def stop(self) -> None:
         if self._server is None:
