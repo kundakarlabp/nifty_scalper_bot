@@ -5437,9 +5437,24 @@ class NiftyScalperApp:
                         "telegram_application_started",
                         extra={"event": "telegram_application_started"},
                     )
-        elif self._ctx.telegram_bot is not None:
-            LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
-            self._telegram_task = asyncio.create_task(
+    # ------------------------------------------------------------------
+    # FIXED: Initialize Telegram App before Polling
+    # ------------------------------------------------------------------
+    elif self._ctx.telegram_bot is not None:
+        LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
+        
+        # ✅ 1. Initialize the Application/Updater
+        await self._ctx.telegram_bot.start() 
+        
+        # ✅ 2. Send the Startup Notification
+        if getattr(self._ctx, "telegram_notifier", None):
+             await self._ctx.telegram_notifier.notify_startup("Nifty Scalper", self._settings.version)
+
+        # ✅ 3. Keep the background task if needed (for other loop duties)
+        # If 'start()' handles everything, you might not need this task anymore, 
+        # but keeping it is safe if 'run()' does additional maintenance.
+        if hasattr(self._ctx.telegram_bot, "run"):
+             self._telegram_task = asyncio.create_task(
                 self._ctx.telegram_bot.run(),
                 name="telegram-console",
             )
