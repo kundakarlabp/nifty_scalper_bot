@@ -2627,6 +2627,24 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except (RuntimeError, Exception):
                 pass 
 
+        # ------------------------------------------------------------------
+        # ✅ FIX #1: Feed BracketManager (Virtual Stops)
+        # ------------------------------------------------------------------
+        # We access 'bracket_manager' from the outer scope (locals or ctx)
+        bm_ref = locals().get("bracket_manager") or getattr(ctx, "bracket_manager", None)
+        
+        if bm_ref is not None:
+            sym = t.get("symbol")
+            ltp = t.get("ltp") or t.get("last_price")
+            
+            if sym and ltp:
+                try:
+                    # Fire the sniper logic
+                    bm_ref.on_tick(str(sym), float(ltp))
+                except Exception:
+                    # Never let a bracket error kill the tick loop
+                    pass
+
         # 8. Market Data Manager Processing (With Recovery)
         try:
             # HEARTBEAT FIX: Update timestamp so watchdog is happy
