@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Awaitable, cast, Iterable
 # 💡 FIX 1: Import json for safe serialization of complex objects in logging
 import json
@@ -50,6 +51,7 @@ class PostFillMonitor:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._mismatch_count = 0
+        self._startup_time = time.time()
 
     async def start(self) -> None:
         """Start the background reconciliation loop.
@@ -125,6 +127,8 @@ class PostFillMonitor:
         Raises:
             None. Exceptions are logged for diagnostics.
         """
+        if time.time() - self._startup_time < 30.0:
+            return
 
         self._logger.debug(
             "Entered PostFillMonitor.reconcile",
