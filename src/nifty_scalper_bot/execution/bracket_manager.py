@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.infra.metrics import MetricsCollector
 
 # --------------------------------------------------------------------------
-# METRICS INTEGRATION (Preserved)
+# METRICS INTEGRATION
 # --------------------------------------------------------------------------
 try:
     from nifty_scalper_bot.infra.metrics import METRICS as GLOBAL_METRICS
@@ -29,11 +29,27 @@ LOGGER = get_logger(__name__)
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 
 
+# --------------------------------------------------------------------------
+# ✅ CRITICAL RESTORE: Protocols required by app.py
+# --------------------------------------------------------------------------
+@runtime_checkable
+class SupportsCancelOrder(Protocol):
+    """Protocol representing broker cancel capability."""
+    def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+@runtime_checkable
+class SupportsModifyOrder(Protocol):
+    """Protocol representing broker order modification capability."""
+    def modify_order(self, order_id: str, **kwargs: Any) -> Any:
+        ...
+
+
 @dataclass
 class BracketState:
     """
     State container for a managed trade exit.
-    Held in memory; survives restarts if persisted via TradeStore (separate layer).
+    Held in memory; survives restarts if persisted via TradeStore.
     """
     entry_order_id: str
     symbol: str
@@ -59,8 +75,7 @@ class BracketState:
 class BracketManager:
     """
     The 'Sniper' Engine.
-    Instead of placing pending orders at the broker (which blocks margin/fails),
-    this manager watches every tick and fires immediate MARKET exits when levels are hit.
+    Monitors LTP internally and fires immediate MARKET exits when levels are hit.
     """
 
     def __init__(self, order_manager: Any):
@@ -93,7 +108,7 @@ class BracketManager:
         Internally converts request to a Virtual Bracket.
         """
         if not entry_order_id:
-            # Generate a synthetic ID if caller didn't provide one (e.g. manual trade)
+            # Generate a synthetic ID if caller didn't provide one
             entry_order_id = f"virt_{int(time.time())}_{symbol}"
 
         self.register_virtual_bracket(
@@ -142,13 +157,9 @@ class BracketManager:
             self._brackets[order_id] = state
             
             LOGGER.info(
-                f"🛡️ Bracket Active for {symbol}: "
-                f"SL={sl} | TP={tp} | Qty={qty} (Virtual Mode)"
+                f"🛡️ Bracket Active for {symbol} (Qty: {qty}): "
+                f"Entry={price} | SL={sl} | TP={tp} (Virtual Mode)"
             )
-
-            # Record metric
-            if METRICS_AVAILABLE and METRICS:
-                METRICS.brackets_created.inc()
 
     # --------------------------------------------------------------------------
     # 2. EXECUTION LOGIC (The "Sniper")
@@ -156,14 +167,14 @@ class BracketManager:
 
     def on_tick(self, symbol: str, ltp: float) -> None:
         """
-        Called by StrategyRunner/Streamer on every price update.
-        Evaluates triggers and executes exits.
+        CRITICAL: The Heartbeat of Virtual Execution.
+        Checks every incoming tick against active Virtual Levels.
         """
-        # Quick check without lock for speed
+        # Fast check without lock
         if not self._brackets:
             return
 
-        # Snapshot active brackets for this symbol to minimize lock time
+        # Snapshot active brackets for this symbol
         with self._lock:
             candidates = [
                 b for b in self._brackets.values() 
@@ -188,7 +199,7 @@ class BracketManager:
                 fire_exit = True
                 reason = f"SL Hit ({ltp} >= {bracket.sl_trigger_price})"
 
-        # 2. TAKE PROFIT CHECK (Only if SL not hit)
+        # 2. TAKE PROFIT CHECK
         if not fire_exit and bracket.tp_trigger_price > 0:
             if bracket.side == "BUY":
                 if ltp >= bracket.tp_trigger_price:
@@ -207,7 +218,7 @@ class BracketManager:
         """Send Market Order to Broker."""
         with self._lock:
             if not bracket.active: 
-                return # Already fired by another thread/tick
+                return # Already fired
             bracket.active = False
 
         LOGGER.warning(f"⚡ EXECUTING EXIT: {bracket.symbol} | Reason: {reason}")
@@ -227,19 +238,14 @@ class BracketManager:
                 product="MIS"
             )
             
-            # Metrics
-            if METRICS_AVAILABLE and METRICS:
-                METRICS.brackets_triggered.inc()
-                
             # Cleanup
             self.unregister_bracket(bracket.entry_order_id)
 
         except Exception as e:
             LOGGER.critical(f"🛑 EXIT FAILED for {bracket.symbol}: {e}", exc_info=True)
-            # Re-enable bracket so we retry on next tick?
-            # Dangerous if it causes loop. Better to alert hard.
+            # Re-activate to retry on next tick?
             with self._lock:
-                bracket.active = True # Retry logic could be added here
+                bracket.active = True 
 
     # --------------------------------------------------------------------------
     # 3. DYNAMIC UPDATES (Trailing)
@@ -251,7 +257,6 @@ class BracketManager:
             targets = [b for b in self._brackets.values() if b.symbol == symbol and b.active]
             
             for bracket in targets:
-                # Ratchet Logic: Never move SL in losing direction
                 updated = False
                 if bracket.side == "BUY":
                     if new_sl > bracket.sl_trigger_price:
@@ -290,9 +295,6 @@ class BracketManager:
             ]
             for eid in to_remove:
                 del self._brackets[eid]
-            
-            if to_remove:
-                LOGGER.info(f"🧹 Cleaned up {len(to_remove)} stale brackets.")
             return len(to_remove)
 
     def get_stats(self) -> dict[str, Any]:
