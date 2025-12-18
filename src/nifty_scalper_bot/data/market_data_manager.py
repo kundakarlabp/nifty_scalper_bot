@@ -2657,31 +2657,36 @@ class MarketDataManager:
             return []
 
     def _seed_quote_from_broker(self, symbol: str) -> bool:
-        """Fetch a single REST quote for *symbol* and seed the cache.
+        """
+        Fetch a single REST quote for *symbol* and seed the cache.
+        Includes robust fallback to LTP if full depth data is unavailable.
 
         Args:
             symbol: Trading symbol identifier to seed.
 
         Returns:
             ``True`` when a quote was seeded successfully, else ``False``.
-
-        Raises:
-            None.
         """
-
         self._logger.debug(
             "Entered _seed_quote_from_broker",
             extra={"event": "mdm_seed_quote_enter", "symbol": symbol},
         )
         outcome = "failure"
+
         try:
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False
+
+            # ------------------------------------------------------------------
+            # STRATEGY 1: Full Quote (Depth) - Preferred
+            # ------------------------------------------------------------------
             candidates = self._candidate_quote_keys(symbol)
             if not candidates:
                 candidates = [str(symbol or "").upper()]
+
             quote: Mapping[str, Any] | None = None
+
             for candidate in candidates:
                 try:
                     self._logger.info(
@@ -2692,7 +2697,8 @@ class MarketDataManager:
                             "candidate": candidate,
                         },
                     )
-                    payload = broker.get_quote([candidate])  # type: ignore[call-arg]
+                    # Attempt to fetch full market depth
+                    payload = broker.get_quote([candidate])
                 except Exception as broker_exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in _seed_quote_from_broker broker call: %s",
@@ -2705,13 +2711,19 @@ class MarketDataManager:
                         exc_info=broker_exc,
                     )
                     continue
+
                 if not isinstance(payload, Mapping) or not payload:
                     continue
+
+                # Extract the specific symbol data
                 quote_candidate = payload.get(candidate) or payload.get(symbol)
-                if not isinstance(quote_candidate, Mapping):
+                
+                # Handle cases where API returns just the values without keys
+                if not isinstance(quote_candidate, Mapping) and payload:
                     first_value = next(iter(payload.values()), None)
                     if isinstance(first_value, Mapping):
                         quote_candidate = first_value
+
                 if isinstance(quote_candidate, Mapping):
                     quote = quote_candidate
                     self._logger.info(
@@ -2723,8 +2735,105 @@ class MarketDataManager:
                         },
                     )
                     break
+
+            # ------------------------------------------------------------------
+            # STRATEGY 2: LTP Fallback (If Depth Failed)
+            # ------------------------------------------------------------------
             if not isinstance(quote, Mapping):
+                try:
+                    if hasattr(broker, "get_ltp"):
+                        self._logger.warning(
+                            "Condition met: mdm_seed_ltp_fallback_attempt",
+                            extra={
+                                "event": "mdm_seed_ltp_fallback_attempt",
+                                "symbol": symbol,
+                            },
+                        )
+                        ltp_payload = broker.get_ltp([symbol])
+                        
+                        if isinstance(ltp_payload, Mapping) and ltp_payload:
+                            raw = ltp_payload.get(symbol)
+                            if isinstance(raw, Mapping):
+                                ltp_value = _coerce_positive_float(
+                                    raw.get("last_price") or raw.get("ltp")
+                                )
+                                
+                                if ltp_value and ltp_value > 0:
+                                    # Extract token if available
+                                    token_value: int | None = None
+                                    for field in ("instrument_token", "token", "tradingsymbol_token"):
+                                        value = raw.get(field)
+                                        if value is None: continue
+                                        try:
+                                            token_value = int(value)
+                                            break
+                                        except (ValueError, TypeError): 
+                                            continue
+                                    
+                                    # Upsert to resolver if available
+                                    resolver_obj = getattr(self, "_resolver", None)
+                                    if token_value and resolver_obj is not None:
+                                        upsert_fn = getattr(resolver_obj, "upsert", None)
+                                        if callable(upsert_fn):
+                                            try:
+                                                upsert_fn(symbol, token_value)
+                                                self._logger.info(
+                                                    "Condition met: mdm_resolver_upsert_ltp",
+                                                    extra={
+                                                        "event": "mdm_resolver_upsert_ltp",
+                                                        "symbol": symbol,
+                                                        "token": int(token_value),
+                                                    },
+                                                )
+                                            except Exception as resolver_exc:
+                                                self._logger.error(
+                                                    "Failure in resolver upsert during LTP seed: %s",
+                                                    resolver_exc,
+                                                    extra={
+                                                        "event": "mdm_resolver_upsert_error_ltp",
+                                                        "symbol": symbol,
+                                                    },
+                                                    exc_info=resolver_exc,
+                                                )
+
+                                    # Create Synthetic Tick (Bid/Ask = LTP)
+                                    ts = float(time.time())
+                                    tick = {
+                                        "symbol": symbol,
+                                        "ltp": ltp_value,
+                                        "bid": ltp_value,  # Fallback
+                                        "ask": ltp_value,  # Fallback
+                                        "timestamp": ts,
+                                        "_source": "ltp_fallback"
+                                    }
+                                    
+                                    with self._lock:
+                                        self._latest_ticks[symbol] = tick
+                                        self._last_tick_source[symbol] = "rest_ltp"
+                                    
+                                    self._notify_unified_manager(symbol, tick)
+                                    
+                                    self._logger.info(
+                                        "Condition met: mdm_seed_ltp_success",
+                                        extra={
+                                            "event": "mdm_seed_ltp_success",
+                                            "symbol": symbol,
+                                        },
+                                    )
+                                    outcome = "success"
+                                    return True
+                except Exception as ltp_exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in LTP fallback: %s",
+                        ltp_exc,
+                        extra={"event": "mdm_seed_ltp_error", "symbol": symbol},
+                        exc_info=ltp_exc,
+                    )
                 return False
+
+            # ------------------------------------------------------------------
+            # PROCESSING FULL QUOTE (If Strategy 1 Succeeded)
+            # ------------------------------------------------------------------
             ltp = _coerce_positive_float(
                 quote.get("last_price")
                 or quote.get("ltp")
@@ -2732,6 +2841,8 @@ class MarketDataManager:
             )
             bid = _coerce_positive_float(quote.get("bid"))
             ask = _coerce_positive_float(quote.get("ask"))
+
+            # Update Resolver if token present
             token_value: int | None = None
             for field in ("instrument_token", "token", "tradingsymbol_token"):
                 value = quote.get(field)
@@ -2740,8 +2851,9 @@ class MarketDataManager:
                 try:
                     token_value = int(value)
                     break
-                except Exception:  # noqa: BLE001
+                except (ValueError, TypeError):
                     continue
+
             resolver_obj = getattr(self, "_resolver", None)
             if token_value and resolver_obj is not None:
                 upsert_fn = getattr(resolver_obj, "upsert", None)
@@ -2766,6 +2878,7 @@ class MarketDataManager:
                             },
                             exc_info=resolver_exc,
                         )
+
             ts = float(time.time())
             tick = {
                 "symbol": symbol,
@@ -2774,12 +2887,15 @@ class MarketDataManager:
                 "ask": ask,
                 "timestamp": ts,
             }
+
             with self._lock:
                 self._latest_ticks[symbol] = tick
                 self._last_tick_source[symbol] = "rest"
+
             self._notify_unified_manager(symbol, tick)
             outcome = "success"
             return True
+
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _seed_quote_from_broker: %s",
@@ -2789,6 +2905,7 @@ class MarketDataManager:
             )
             return False
         finally:
+            # Consistent Metrics Reporting
             try:
                 METRICS.record_mdm_rest_seed(symbol=symbol, outcome=outcome)
             except Exception as metric_exc:  # noqa: BLE001
