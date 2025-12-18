@@ -851,25 +851,45 @@ class TelegramBot:
     async def _guard(self, update: Update) -> t.Any | None:
         """Return the authorized chat or ``None`` if access should be denied."""
         chat = update.effective_chat
+        user = update.effective_user
+        
         if chat is None:
             log.warning("Received Telegram update without chat context")
             return None
-        allowed = int(self.deps.chat_id)
-        if int(chat.id) != allowed:
+            
+        chat_id = int(chat.id)
+        user_id = int(user.id) if user else "Unknown"
+        username = user.username if user else "Unknown"
+        
+        # 1. Resolve Allowed ID (Primary Owner)
+        allowed_primary = int(self.deps.chat_id)
+        
+        # 2. Check Authorization (Primary OR Admin List)
+        is_allowed = (chat_id == allowed_primary) or (chat_id in self._admin_allowlist)
+        
+        if not is_allowed:
+            # --- DEBUG LOGGING (So you can see your ID) ---
+            log.warning(
+                f"⛔ Blocked Access: Chat ID {chat_id} (User: {username}, ID: {user_id}). "
+                f"Allowed Primary: {allowed_primary}, Admins: {self._admin_allowlist}"
+            )
+            
             with suppress(Exception):
-                bot = getattr(chat, "bot", None) or (
-                    self._app.bot if self._app else None
-                )
+                # Reply to user so they know they are connected but blocked
+                bot = getattr(chat, "bot", None) or (self._app.bot if self._app else None)
                 messenger = self._ensure_messenger(None, chat, bot_override=bot)
                 await messenger.send_text(
-                    int(chat.id),
-                    "403 – Not allowed.",
+                    chat_id,
+                    f"⛔ 403 Forbidden.\nYour ID: <code>{chat_id}</code>",
                     disable_web_page_preview=True,
+                    parse_mode=ParseMode.HTML
                 )
-            log.warning("Rejected message from chat_id=%s", chat.id)
             return None
+
+        # 3. Metrics & Wrapping
         if self._fallback_active:
             self._metrics.polling_updates += 1
+            
         if isinstance(chat, Chat):
             outer = self
 
