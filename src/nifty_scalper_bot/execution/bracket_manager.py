@@ -155,6 +155,7 @@ class BracketManager:
                 tag=tag
             )
             self._brackets[order_id] = state
+            self._order_to_entry[order_id] = order_id
             
             LOGGER.info(
                 f"🛡️ Bracket Active for {symbol} (Qty: {qty}): "
