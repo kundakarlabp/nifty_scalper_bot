@@ -3234,21 +3234,57 @@ class OrderManager:
             },
         )
         
-        # Delegate to external manager if present
-        if self._bracket_manager is not None:
+        # -----------------------------------------------------------------------
+        # ✅ NEW: Register with Virtual Sniper (Replaces handle_bracket_update)
+        # -----------------------------------------------------------------------
+        if self._bracket_manager is not None and order.status in (OrderStatus.FILLED, OrderStatus.COMPLETE):
             try:
-                self._bracket_manager.handle_bracket_update(
-                    order_id=order.order_id,
-                    status=order.status.name,
-                    filled_quantity=order.filled_quantity,
-                )
-            except Exception as exc:  # noqa: BLE001
+                # 1. Get Entry Price & Quantity
+                entry_price = float(order.average_price or order.price or 0.0)
+                qty = int(order.filled_quantity or order.quantity)
+                
+                if entry_price > 0 and qty > 0:
+                    # 2. Determine SL/TP (Use provided args or Auto-Calculate Defaults)
+                    sl_price = float(order.stop_loss or 0.0)
+                    tp_price = float(order.take_profit or 0.0)
+                    
+                    # Default Safety Net: 10% Stop, 20% Target if not specified
+                    if sl_price <= 0:
+                        if order.side == "BUY":
+                            sl_price = round(entry_price * 0.90, 1)
+                        else:
+                            sl_price = round(entry_price * 1.10, 1)
+
+                    if tp_price <= 0:
+                        if order.side == "BUY":
+                            tp_price = round(entry_price * 1.20, 1)
+                        else:
+                            tp_price = round(entry_price * 0.80, 1)
+
+                    # 3. Handover to the Sniper Engine
+                    self._bracket_manager.register_virtual_bracket(
+                        order_id=order.order_id,
+                        symbol=order.symbol,
+                        side=order.side,
+                        qty=qty,
+                        price=entry_price,
+                        sl=sl_price,
+                        tp=tp_price,
+                        tag=order.tag
+                    )
+                    self._logger.info(
+                        f"✅ Handed off {order.symbol} to Virtual Sniper (SL: {sl_price}, TP: {tp_price})",
+                        extra={"event": "virtual_bracket_registered", "order_id": order.order_id}
+                    )
+
+            except AttributeError as e:
+                self._logger.warning(f"⚠️ Virtual bracket registration unavailable: {e}")
+            except Exception as exc:
                 self._logger.error(
-                    "Failure in external bracket update delegate: %s",
+                    "Failure in virtual bracket registration: %s",
                     exc,
                     extra={
-                        "event": "handle_bracket_update_delegate_failed",
-                        "entry_id": entry_id,
+                        "event": "virtual_bracket_registration_failed",
                         "order_id": order.order_id,
                     },
                     exc_info=exc,
