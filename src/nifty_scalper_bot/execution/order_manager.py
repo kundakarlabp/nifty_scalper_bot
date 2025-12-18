@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
 from nifty_scalper_bot.data.data_hub import DataHub
+from nifty_scalper_bot.data.trade_store import TradeStore, TradeIntent
 from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
@@ -604,6 +605,7 @@ class OrderManager:
         self._broker = broker_client
         self._positions = position_manager
         self._limiter = rate_limiter
+        self.trade_store = TradeStore()
         self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
         self._history_path = Path(history_path or Path("data") / "order_history.json")
@@ -1500,10 +1502,12 @@ class OrderManager:
         check_risk: bool = True,
         stop_loss: float | None = None,
         take_profit: float | None = None,
+        # ✅ NEW: Idempotency Arguments
+        signal_id: str | None = None,
+        strategy_name: str = "manual",
     ) -> str | None:
         """
-        Execute order with Safe Trading Window, Risk Gating, and Auto-Recovery.
-        Includes Zerodha compliance fix for SL-M blocking.
+        Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
         import time
         import hashlib
@@ -1511,16 +1515,27 @@ class OrderManager:
         from zoneinfo import ZoneInfo
         from nifty_scalper_bot.core.trading_switch import trading_switch
         from nifty_scalper_bot.risk import OrderSignal
+        
+        # Lazy load TradeStore to avoid circular imports during init
+        if not hasattr(self, "trade_store"):
+            from nifty_scalper_bot.data.trade_store import TradeStore
+            self.trade_store = TradeStore()
+        from nifty_scalper_bot.data.trade_store import TradeIntent
 
         normalized_symbol = symbol.strip().upper()
-        
-        # [FIX] Generate Deterministic ID (Capital Protection)
-        raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time() / 60)}"
-        sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
-        unique_client_id = f"bot_{sig_hash}"
-        
+
         # ---------------------------------------------------------------------
-        # 1. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
+        # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
+        # ---------------------------------------------------------------------
+        if signal_id and self.trade_store.exists_by_signal(signal_id):
+            self._logger.warning(
+                f"🛑 DUPLICATE BLOCKED: Signal {signal_id} already traded.",
+                extra={"symbol": normalized_symbol, "event": "duplicate_block"}
+            )
+            return None
+
+        # ---------------------------------------------------------------------
+        # 2. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
         # ---------------------------------------------------------------------
         if variety == "regular":
             try:
@@ -1547,7 +1562,7 @@ class OrderManager:
                 self._logger.error(f"Time Guard Check Failed: {e}. Proceeding with caution.")
 
         # ---------------------------------------------------------------------
-        # 2. TRADING SWITCH GUARD
+        # 3. TRADING SWITCH GUARD
         # ---------------------------------------------------------------------
         switch_instance = trading_switch() if callable(trading_switch) else trading_switch
         checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
@@ -1557,7 +1572,7 @@ class OrderManager:
             return None
 
         # ---------------------------------------------------------------------
-        # 3. RISK MANAGER VALIDATION
+        # 4. RISK MANAGER VALIDATION
         # ---------------------------------------------------------------------
         if check_risk and self._risk_manager:
             signal = OrderSignal(
@@ -1576,7 +1591,32 @@ class OrderManager:
                 return None
 
         # ---------------------------------------------------------------------
-        # 4. PAYLOAD OPTIMIZATION & MAPPING
+        # 5. STATE PERSISTENCE (Save Intent BEFORE Execution)
+        # ---------------------------------------------------------------------
+        # Generate ID if manual
+        if not signal_id:
+            raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time())}"
+            sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
+            signal_id = f"manual_{sig_hash}"
+            
+        trade_id = f"TRD_{signal_id}"
+        unique_client_id = f"bot_{signal_id[-12:]}" # Max 20 chars usually
+
+        # Persist Intent to Disk
+        intent = TradeIntent(
+            trade_id=trade_id,
+            symbol=normalized_symbol,
+            signal_id=signal_id,
+            strategy=strategy_name,
+            side=side,
+            qty=quantity,
+            timestamp=time.time(),
+            status="SUBMITTED"
+        )
+        self.trade_store.add_trade(intent)
+
+        # ---------------------------------------------------------------------
+        # 6. PAYLOAD OPTIMIZATION (SL-M Fix)
         # ---------------------------------------------------------------------
         raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
         
@@ -1600,11 +1640,11 @@ class OrderManager:
 
         self._logger.info(
             f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})",
-            extra={"event": "order_sending", "symbol": normalized_symbol}
+            extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
         )
         
         # ---------------------------------------------------------------------
-        # 5. EXECUTION LOOP (Fail-Fast & Idempotent)
+        # 7. EXECUTION LOOP
         # ---------------------------------------------------------------------
         for attempt in range(1, 4):
             try:
@@ -1617,7 +1657,10 @@ class OrderManager:
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
                 
                 if order_id:
-                    # A. Register Order Locally
+                    # A. Update Trade Store (Critical for Restart Safety)
+                    self.trade_store.update_status(trade_id, "FILLED", order_id)
+
+                    # B. Register Order Locally
                     details = OrderDetails(
                         order_id=order_id, symbol=normalized_symbol, side=side,
                         order_type=order_type, quantity=quantity, price=float(price or 0.0),
@@ -1627,14 +1670,12 @@ class OrderManager:
                     )
                     self._register_order(details)
 
-                    # B. Auto-Register Bracket (CORRECTED)
+                    # C. Auto-Register Bracket
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
                         
-                        # --- CRITICAL FIX START: Align Internal State with Broker State ---
+                        # Sync internal type with actual type used
                         real_stop_type = OrderType.STOP_LOSS_MARKET 
-                        
-                        # If we auto-converted to SL-Limit, update internal state too
                         if final_order_type == "SL": 
                             real_stop_type = OrderType.STOP_LOSS
 
@@ -1643,28 +1684,24 @@ class OrderManager:
                             total_quantity=quantity, entry_price=float(price or 0.0),
                             product=product, tag=tag, stop_order_id="", 
                             stop_price=float(stop_loss) if stop_loss else 0.0,
-                            stop_order_type=real_stop_type, # Fixed to match reality
+                            stop_order_type=real_stop_type,
                             tp_primary_price=float(take_profit) if take_profit else None,
                             tp_primary_qty=quantity if take_profit else 0,
                         )
                         self._register_bracket_state(state)
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
-                        # --- CRITICAL FIX END ---
 
                     return order_id
                     
             except Exception as e:
                 msg = str(e).lower()
-                # Fail Fast on Fatal Errors
+                # Fail Fast logic
                 if any(x in msg for x in ["400", "invalid", "market closed", "bad request"]):
                     self._logger.critical(f"🛑 FATAL Payload Error: {e}", extra={"event": "fatal_order_error"})
+                    # Update Store as Rejected
+                    self.trade_store.update_status(trade_id, "REJECTED_FATAL")
                     return None
                 
-                # Fail Fast on Code Errors
-                if isinstance(e, (AttributeError, NameError, TypeError, ValueError, KeyError)):
-                    self._logger.critical(f"🛑 Internal Code Error: {e}", extra={"event": "internal_code_error"})
-                    return None
-
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
                 
@@ -8350,41 +8387,42 @@ class OrderManager:
             for broker_sym, data in broker_map.items():
                 if broker_sym not in local_map:
                     
-                    # [FIX] RACE CONDITION CHECK: 
-                    # Do not adopt if we have a pending or recently filled order for this symbol.
-                    # This prevents the Monitor from fighting the Strategy during entry.
+                    # [FIX 1] RACE CONDITION GUARD: 
+                    # Check if we have touched this symbol recently (Pending Orders or Recent Fills).
+                    # This stops the "Infinite Rescue Loop".
                     is_active_locally = False
                     with self._lock:
                         for order in self._orders.values():
-                            # Check for matching symbol
+                            # Normalize symbol check
                             if DataHub.normalize(order.symbol) == DataHub.normalize(broker_sym):
-                                # If Order is Pending/Submitted -> We are working on it -> SKIP
+                                # 1. If we are currently working on an order -> SKIP
                                 if order.status not in self.FINAL_STATUSES:
                                     is_active_locally = True
                                     break
-                                # If Order was Filled < 15 seconds ago -> State is syncing -> SKIP
-                                time_since = time.time() - order.timestamp.timestamp()
-                                if order.status == OrderStatus.FILLED and time_since < 15.0:
-                                    is_active_locally = True
-                                    break
+                                # 2. If we finished an order < 15s ago -> SKIP (Give time to sync)
+                                if order.timestamp:
+                                    ts = order.timestamp.timestamp() if hasattr(order.timestamp, 'timestamp') else time.time()
+                                    if time.time() - ts < 15.0:
+                                        is_active_locally = True
+                                        break
                     
                     if is_active_locally:
-                        self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Recent Activity Detected)")
+                        # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")
                         continue
 
-                    # If we get here, it's truly an orphan (old/manual trade)
+                    # If we get here, it is a TRUE Orphan (Manual/Old trade)
                     self._logger.warning(
                         f"⚠️ Orphan Position Found: {broker_sym} Qty: {data['qty']}. Adopting...",
                         extra={"event": "orphan_adopted", "symbol": broker_sym}
                     )
                     
-                    # A. Create Local Record
+                    # A. Create Local Record (Swallow errors to ensure safety check runs)
                     try:
                         self._adopt_orphan_position(broker_sym, data)
                     except Exception as e:
-                        self._logger.error(f"Adoption Error (Non-Critical): {e}", exc_info=True)
+                        self._logger.error(f"Adoption Error: {e}")
 
-                    # B. Check for Safety Bracket
+                    # B. Check/Place Safety Bracket
                     self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
             # 3. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
