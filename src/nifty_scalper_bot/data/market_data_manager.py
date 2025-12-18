@@ -3278,7 +3278,7 @@ class MarketDataManager:
                 "candidates": candidates,
                 "trace_id": trace_id,
             },
-            exec_info=true
+            exec_info=True
         )
         return None
 
