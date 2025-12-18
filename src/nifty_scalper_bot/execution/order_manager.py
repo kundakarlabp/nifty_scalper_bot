@@ -8385,6 +8385,10 @@ class OrderManager:
                 local_map[lsym] = pos
 
             for broker_sym, data in broker_map.items():
+                # ✅ FIX: Ignore positions that are already closed (Qty 0)
+                if data['qty'] == 0:
+                    continue
+
                 if broker_sym not in local_map:
                     
                     # [FIX 1] RACE CONDITION GUARD: 
