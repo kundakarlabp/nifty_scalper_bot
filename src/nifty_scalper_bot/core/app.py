@@ -5409,8 +5409,13 @@ class NiftyScalperApp:
                 self._self_test_loop(),
                 name="core-runtime-selftest",
             )
+        # ------------------------------------------------------------------
+        # Telegram Service Initialization (Webhook vs Polling)
+        # ------------------------------------------------------------------
         application = self._ctx.telegram_application
         controller = _HTTP_CONTROLLER
+        
+        # 1. Webhook Mode (Existing Logic)
         if application is not None:
             if controller is None:
                 LOGGER.warning(
@@ -5437,28 +5442,13 @@ class NiftyScalperApp:
                         "telegram_application_started",
                         extra={"event": "telegram_application_started"},
                     )
-    # ------------------------------------------------------------------
-    # FIXED: Initialize Telegram App before Polling
-    # ------------------------------------------------------------------
-    elif self._ctx.telegram_bot is not None:
-        LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
-        
-        # ✅ 1. Initialize the Application/Updater
-        await self._ctx.telegram_bot.start() 
-        
-        # ✅ 2. Send the Startup Notification
-        if getattr(self._ctx, "telegram_notifier", None):
-             await self._ctx.telegram_notifier.notify_startup("Nifty Scalper", self._settings.version)
 
-        # ✅ 3. Keep the background task if needed (for other loop duties)
-        # If 'start()' handles everything, you might not need this task anymore, 
-        # but keeping it is safe if 'run()' does additional maintenance.
-        if hasattr(self._ctx.telegram_bot, "run"):
-             self._telegram_task = asyncio.create_task(
-                self._ctx.telegram_bot.run(),
-                name="telegram-console",
-            )
-            LOGGER.info("Telegram task scheduled.")
+        # 2. Polling Mode (FIXED)
+        # Replaces the broken 'elif' block causing SyntaxError
+        elif self._ctx.telegram_bot is not None:
+            LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
+            # Calls the start() method we added to TelegramBot
+            await self._ctx.telegram_bot.start()
 
     async def stop(self) -> None:
         """Stop the trading stack gracefully."""
