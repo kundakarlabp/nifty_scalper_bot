@@ -3659,6 +3659,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ctx_refresh_task = None
 
     if bracket_manager is not None:
+        sym = t.get("symbol")
+        ltp = t.get("ltp")
+        if sym and ltp:
+            try:
+                bracket_manager.on_tick(sym, float(ltp))
+            except Exception:
+                pass  # Don't let bracket errors kill the poller
 
         async def cleanup_stale_brackets_task() -> None:
             """Periodically remove stale bracket state entries.
