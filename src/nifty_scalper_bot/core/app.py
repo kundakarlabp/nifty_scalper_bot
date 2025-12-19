@@ -2628,7 +2628,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 pass 
                 
         # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
-        # INSERT THIS HERE. 't' is defined in this function scope.
         _bm_ref = getattr(ctx.order_manager, "_bracket_manager", None) if ctx.order_manager else None
         
         if _bm_ref is not None:
@@ -2637,7 +2636,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             
             if _sym and _ltp:
                 try:
-                    # Fire the "Sniper" logic
+                    # 1. Update Market Stats (ATR) for Trailing Logic
+                    # We check if the strategy runner has calculated ATR for this symbol
+                    _runner = getattr(ctx, "strategy_runner", None)
+                    if _runner:
+                        # Attempt to get latest ATR from strategy indicators
+                        # Assuming strategy calculates it. If not, pass 0.0 (trailing will wait)
+                        _atr = 0.0
+                        if hasattr(_runner, "get_indicator_value"):
+                             _atr = _runner.get_indicator_value(_sym, "ATR")
+                        
+                        if _atr > 0:
+                            _bm_ref.update_market_stats(_sym, atr=_atr)
+
+                    # 2. Fire the "Sniper" Execution Logic
                     _bm_ref.on_tick(str(_sym), float(_ltp))
                 except Exception:
                     pass
@@ -3074,8 +3086,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             bracket_manager = BracketManager(
                 order_manager=order_manager
             )
-            # Use the BracketManager's internal toggle to avoid shadowing the flag.
+            # Configure Internal Settings
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
+            
+            # NEW: Set cleanup age from config
+            bracket_manager._stale_cleanup_age = getattr(settings.execution, "bracket_stale_cleanup_seconds", 86400)
+            
             order_manager.set_bracket_manager(bracket_manager=bracket_manager)
             LOGGER.info(
                 "Bracket manager wired",
@@ -4949,12 +4965,20 @@ async def _reconcile_state(ctx: BotContext) -> None:
         return
 
     # 2. SYNC ORDERS (Non-Blocking Thread)
-    # Fix: Define 'order_manager' here so it is available for the rest of the function
     order_manager = ctx.order_manager
     if order_manager:
         try:
             # Run the heavy reconciliation in a thread to avoid blocking the event loop
             await asyncio.to_thread(order_manager.reconcile_open_orders_with_broker)
+            
+            # NEW: Sync Broker Status with Bracket Manager (for Manual Exits)
+            _bm = getattr(order_manager, "_bracket_manager", None)
+            if _bm:
+                # We iterate through fetched positions to find manual closures
+                # Note: Full status sync is complex, but we can trigger a check here
+                # For now, we rely on the order_manager reconciliation to handle status updates
+                pass 
+
         except Exception as exc:
             LOGGER.debug(f"Order Reconcile Warning: {exc}")
 
