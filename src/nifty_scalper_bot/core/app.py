@@ -4944,10 +4944,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
     Syncs local state with Broker (Orders & Positions).
     Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
     """
-    # LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
-
     # 1. SYNC ORDERS (Non-Blocking Thread)
-    # We reconcile orders first to ensure recent fills are processed
     if ctx.order_manager:
         try:
             await asyncio.to_thread(ctx.order_manager.reconcile_open_orders_with_broker)
@@ -4957,19 +4954,19 @@ async def _reconcile_state(ctx: BotContext) -> None:
     # 2. SYNC POSITIONS & AUTO-GUARD ORPHANS
     if ctx.position_manager:
         try:
-            # A. Sync Broker Positions (Updates internal PositionManager state from API)
-            # This replaces the manual fetching loop you had before
+            # A. Sync Broker Positions
+            # Updates internal PositionManager state from API (Handling all parsing internally)
             await asyncio.to_thread(ctx.position_manager.synchronize_with_broker)
 
             # B. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
             if ctx.order_manager and ctx.order_manager._bracket_manager:
                 om = ctx.order_manager
                 bm = ctx.order_manager._bracket_manager
-
-                # Import normalization helper locally to avoid circular imports
+                
+                # Import locally to avoid circular imports
                 from nifty_scalper_bot.data.data_hub import DataHub
 
-                # Iterate through the freshly synced positions
+                # Iterate through FRESHLY synced open positions
                 for pos in ctx.position_manager.get_open_positions():
                     if pos.quantity == 0: 
                         continue
@@ -4978,7 +4975,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
                     raw_symbol = pos.symbol
                     norm_symbol = DataHub.normalize(raw_symbol) or raw_symbol
                     
-                    # 2. Check if this symbol is actively managed by BracketManager
+                    # 2. Check if this symbol is actively managed
                     is_managed = bm.is_symbol_managed(norm_symbol)
                     
                     # 3. If NOT managed, it is an Orphan -> Guard it!
@@ -4991,7 +4988,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         # Get a valid reference price
                         avg_price = float(pos.average_price or pos.last_price or 0.0)
 
-                        # Call the Master Guard Method (Accounting + Protection + Data)
+                        # Call the Master Guard Method
                         om.guard_orphan_position(
                             symbol=norm_symbol,
                             quantity=pos.quantity,
@@ -5002,153 +4999,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
             LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
 
     # 3. SITUATION REPORT
-    # Logs the "Situation Report" (P&L, SL/TP status) to console
     if ctx.order_manager:
         ctx.order_manager._log_status_report()
-    # Helper functions for parsing (Embedded to ensure self-containment)
-    def _extract_symbol(payload: Mapping[str, Any]) -> str:
-        symbol_raw = payload.get("tradingsymbol") or payload.get("symbol") or ""
-        symbol = str(symbol_raw).strip().upper()
-        if ":" in symbol:
-            return symbol.split(":", maxsplit=1)[-1].upper()
-        return symbol
-
-    def _extract_int(payload: Mapping[str, Any], *keys: str) -> int:
-        for key in keys:
-            value = payload.get(key)
-            if value is not None:
-                try: return int(float(value))
-                except: continue
-        return 0
-
-    def _extract_float(payload: Mapping[str, Any], *keys: str) -> float:
-        for key in keys:
-            value = payload.get(key)
-            if value is not None:
-                try: return float(value)
-                except: continue
-        return 0.0
-
-    def _derive_underlying(symbol: str) -> str:
-        token = symbol.split(":", maxsplit=1)[-1]
-        prefix = []
-        for char in token:
-            if char.isdigit(): break
-            prefix.append(char)
-        return "".join(prefix).strip().upper()
-    
-    def _option_kind(symbol: str, payload: Mapping[str, Any]) -> str:
-        suffix = symbol[-2:].upper()
-        if suffix in {"CE", "PE"}:
-            return suffix
-        opt_raw = payload.get("option_type") or payload.get("type")
-        if isinstance(opt_raw, str) and opt_raw.upper() in {"CE", "PE"}:
-            return opt_raw.upper()
-        return suffix if suffix in {"CE", "PE"} else ""
-
-    def _parse_expiry(payload: Mapping[str, Any]) -> datetime:
-        raw = payload.get("expiry") or payload.get("expiry_date")
-        if isinstance(raw, datetime):
-            return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-        if isinstance(raw, str):
-            text = raw.strip()
-            if text:
-                for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d-%b-%Y", "%d-%m-%Y"):
-                    try:
-                        parsed = datetime.strptime(text, fmt)
-                        return parsed.replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        continue
-                try:
-                    parsed = datetime.fromisoformat(text)
-                    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    pass
-        return datetime.now(timezone.utc)
-
-    # Process Each Broker Position
-    for entry in broker_positions:
-        symbol = _extract_symbol(entry)
-        if not symbol: continue
-        
-        net_qty = _extract_int(entry, "quantity", "net_quantity", "net", "net_qty")
-        
-        # Handle Closed/Flat Positions
-        if net_qty == 0:
-            try:
-                underlying = _derive_underlying(symbol)
-                existing_contract = position_manager.get_active_contract(underlying) if underlying else None
-                if existing_contract and (existing_contract.symbol == symbol or position_manager.is_flat(existing_contract.symbol)):
-                     position_manager.clear_active_contract_by_symbol(existing_contract.symbol)
-                
-                if order_manager:
-                    order_manager.clear_guard_pair(symbol)
-            except Exception: pass
-            continue
-
-        # Handle Open Positions
-        product_code = str(entry.get("product") or "MIS")
-        avg_price = _extract_float(entry, "average_price", "avg_price", "buy_price")
-        last_price = _extract_float(entry, "last_price", "ltp", "close")
-        strike = _extract_float(entry, "strike", "strike_price")
-        expiry_dt = _parse_expiry(entry)
-        underlying = _derive_underlying(symbol)
-        option_type = _option_kind(symbol, entry)
-        
-        existing_position = position_manager.get_position(symbol)
-        should_guard = symbol in missing_locally
-
-        # A. Restore missing position
-        if existing_position is None and should_guard:
-            entry_price = avg_price or last_price or 0.0
-            try:
-                position_manager.open_position(
-                    symbol=symbol,
-                    side="LONG" if net_qty > 0 else "SHORT",
-                    quantity=abs(net_qty),
-                    entry_price=entry_price,
-                )
-                LOGGER.info(f"Recovered broker position: {symbol} Qty: {net_qty}")
-            except Exception as e:
-                LOGGER.error(f"Failed to hydrate position {symbol}: {e}")
-                continue
-
-        # B. Update prices
-        elif existing_position is not None and last_price > 0:
-            with suppress(Exception):
-                position_manager.update_position_price(symbol, last_price)
-        
-        # C. Update Active Contract (if needed)
-        if underlying:
-            try:
-                cached = position_manager.get_active_contract(underlying)
-                if not cached or cached.symbol != symbol:
-                    # Reconstruct contract details
-                    from nifty_scalper_bot.execution.position_manager import ActiveContract
-                    contract = ActiveContract(
-                        underlying=underlying,
-                        symbol=symbol,
-                        option_type=option_type or ("CE" if net_qty > 0 else "PE"),
-                        strike=strike if strike > 0 else 0.0,
-                        expiry=expiry_dt
-                    )
-                    position_manager.set_active_contract(underlying, contract)
-            except Exception: pass
-
-        # D. Restore Guards (StopLoss/Target)
-        if should_guard and order_manager:
-            try:
-                if not order_manager.has_guard_pair(symbol):
-                    order_manager.guard_existing_position(
-                        symbol=symbol,
-                        side="LONG" if net_qty > 0 else "SHORT",
-                        quantity=abs(net_qty),
-                        average_price=avg_price or last_price or 0.0,
-                        last_price=last_price if last_price > 0 else None,
-                        product=product_code,
-                    )
-            except Exception as e:
-                LOGGER.error(f"Guard restore failed for {symbol}: {e}")
 
 def _close_all_positions(ctx: BotContext, *, reason: str) -> None:
     position_manager = _require_component(ctx.position_manager, "position_manager")
