@@ -12,6 +12,21 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, cast, run
 
 from nifty_scalper_bot.utils.logging import get_logger
 
+# --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
+try:
+    from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
+    # Assuming TrailingSpec is defined in adaptive_trailing or we define a local fallback
+    from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController, TrailingSpec
+except ImportError:
+    SafeATRProvider = None
+    AdaptiveTrailingController = None
+    # Fallback definition if import fails
+    @dataclass
+    class TrailingSpec:
+        trail_by: float
+        step: float
+        activation: float
+
 if TYPE_CHECKING:
     from nifty_scalper_bot.infra.metrics import MetricsCollector
 
@@ -85,10 +100,12 @@ class BracketState:
     active: bool = True  # If False, waits for confirmation or is finished
     trailing_enabled: bool = True
     trailing_config: Dict[str, Any] = field(default_factory=dict) # e.g. {'mode': 'ATR', 'mult': 1.5}
+    virtual_sl_id: str = "" # ID for the Adaptive Controller
     
     # Market Data Tracking (NEW)
     highest_ltp: float = 0.0  # High water mark since entry (for BUY)
     lowest_ltp: float = float('inf')  # Low water mark since entry (for SELL)
+    last_ltp: float = 0.0 # Latest price seen
     
     # Metadata
     tag: str | None = None
@@ -107,6 +124,10 @@ class BracketState:
         if self.lowest_ltp == float('inf') or self.lowest_ltp > self.entry_price:
             self.lowest_ltp = self.entry_price
 
+# Mock Journal for Adaptive Controller (In-Memory)
+class MockJournal:
+    def set(self, key, value): pass
+    def get(self, key): return None
 
 class BracketManager:
     """
@@ -115,14 +136,24 @@ class BracketManager:
     Supports TP1/TP2 scaling, ATR-based Trailing, and Broker Sync.
     """
 
-    def __init__(self, order_manager: Any):
+    def __init__(self, order_manager: Any, indicator_engine: Any = None):
         self.order_manager = order_manager
         self._brackets: Dict[str, BracketState] = {}
         # Reverse Index: Map broker order IDs/Symbol to entry IDs
         self._order_to_entry: Dict[str, str] = {}
         self._symbol_map: Dict[str, List[str]] = {}  # Fast lookup: Symbol -> [Entry IDs]
         
-        # Real-time Data Cache (NEW)
+        # --- ATR & Trailing Setup ---
+        self._indicator_engine = indicator_engine
+        self._atr_provider = None
+        if SafeATRProvider and indicator_engine:
+            # Initialize Safe Provider with 60s cache validity
+            self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
+            
+        # Store active trailing controllers: {entry_order_id: Controller}
+        self._trailing_controllers: Dict[str, Any] = {}
+        
+        # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
         
         self._lock = threading.RLock()
@@ -229,7 +260,8 @@ class BracketManager:
                 is_virtual=True,
                 active=activate_immediately,
                 tag=tag,
-                trailing_config=t_config
+                trailing_config=t_config,
+                virtual_sl_id=f"vsl_{order_id}"
             )
             
             self._brackets[order_id] = state
@@ -240,6 +272,35 @@ class BracketManager:
                 self._symbol_map[symbol] = []
             self._symbol_map[symbol].append(order_id)
             
+            # --- INITIALIZE ADAPTIVE CONTROLLER (The "Brain") ---
+            if trailing_atr_mult and self._atr_provider and AdaptiveTrailingController:
+                try:
+                    spec = TrailingSpec(
+                        trail_by=20.0, # Fallback
+                        step=1.0,      # Update on every 1pt move
+                        activation=0.1 # Activate immediately (0.1%)
+                    )
+                    
+                    # We pass a lambda that returns the latest price from the bracket state
+                    ctrl = AdaptiveTrailingController(
+                        symbol=symbol,
+                        side="LONG" if side == "BUY" else "SHORT",
+                        entry=price,
+                        sl_order_id=state.virtual_sl_id,
+                        variety="virtual",
+                        spec=spec,
+                        get_ltp=lambda s: state.last_ltp, 
+                        modify_order=self._virtual_modify_sl,
+                        atr_provider=self._atr_provider,
+                        journal=MockJournal(),
+                        atr_multiplier=trailing_atr_mult
+                    )
+                    self._trailing_controllers[order_id] = ctrl
+                    LOGGER.info(f"🧠 Adaptive Controller Attached to {symbol} (Mult: {trailing_atr_mult}x)")
+                    
+                except Exception as e:
+                    LOGGER.error(f"Failed to attach Adaptive Controller: {e}")
+
             trail_msg = f"| Trail={t_config.get('mode', 'None')}"
             LOGGER.info(
                 f"🛡️ Bracket Active for {symbol} (Qty: {qty}): "
@@ -272,8 +333,33 @@ class BracketManager:
     def update_market_stats(self, symbol: str, atr: float = 0.0, volume: float = 0.0) -> None:
         """Feed external calculations (ATR) into the manager."""
         if atr > 0:
-            # No lock needed for simple dict assignment in Python (atomic-ish)
+            # Update Legacy Cache
             self._current_atr[symbol] = atr
+            # Feed Safe Provider if available
+            if self._atr_provider and hasattr(self._atr_provider, 'feed_manual'):
+                self._atr_provider.feed_manual(symbol, atr)
+
+    def feed_atr_updates(self, symbol: str, atr: float) -> None:
+        """Alias for update_market_stats."""
+        self.update_market_stats(symbol, atr=atr)
+
+    def _virtual_modify_sl(self, order_id: str, price: float) -> bool:
+        """Callback for AdaptiveController to update Virtual SL."""
+        # Find bracket by iterating (Safety lookup)
+        target_bracket = None
+        with self._lock:
+            for b in self._brackets.values():
+                if b.virtual_sl_id == order_id:
+                    target_bracket = b
+                    break
+            
+            if target_bracket:
+                old_sl = target_bracket.sl_trigger_price
+                target_bracket.sl_trigger_price = price
+                target_bracket.updated_at = time.time()
+                LOGGER.info(f"🔄 Dynamic ATR Trail: {target_bracket.symbol} SL {old_sl} -> {price}")
+                return True
+        return False
 
     # --------------------------------------------------------------------------
     # 3. EXECUTION LOGIC (The "Sniper")
@@ -299,6 +385,7 @@ class BracketManager:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
                 if b and b.active:
+                    b.last_ltp = ltp # Update LTP for controller
                     candidates.append(b)
 
         # Process without holding lock for too long (logic only)
@@ -323,18 +410,28 @@ class BracketManager:
 
     def _process_trailing_logic(self, bracket: BracketState, ltp: float) -> None:
         """Updates High/Low marks and adjusts SL if Trailing is enabled."""
+        
         # A. Update Water Marks
         if bracket.side == "BUY":
             if ltp > bracket.highest_ltp:
                 bracket.highest_ltp = ltp
-                self._apply_trailing_math(bracket)
         else: # SELL
             if ltp < bracket.lowest_ltp:
                 bracket.lowest_ltp = ltp
-                self._apply_trailing_math(bracket)
+
+        # B. Delegate to World-Class Controller (If attached)
+        if bracket.entry_order_id in self._trailing_controllers:
+            ctrl = self._trailing_controllers[bracket.entry_order_id]
+            # The controller calculates using ATR and calls _virtual_modify_sl if needed
+            # We updated bracket.last_ltp in on_tick, so controller reads fresh data
+            ctrl.on_tick(None) 
+            return
+
+        # C. Fallback Legacy Logic
+        self._apply_trailing_math(bracket)
 
     def _apply_trailing_math(self, bracket: BracketState) -> None:
-        """Calculates new SL based on ATR or Fixed points."""
+        """Calculates new SL based on ATR or Fixed points (Legacy)."""
         if not bracket.trailing_config:
             return
             
@@ -342,24 +439,33 @@ class BracketManager:
         
         # ATR Trailing
         if mode == 'ATR':
-            atr = self._current_atr.get(bracket.symbol, 0.0)
-            if atr <= 0: return # No ATR available yet
+            # Try Safe Provider first
+            atr_val = 0.0
+            if self._atr_provider:
+                snapshot = self._atr_provider.get_atr(bracket.symbol)
+                if snapshot: atr_val = snapshot.value
+            
+            # Fallback to local cache
+            if atr_val <= 0:
+                atr_val = self._current_atr.get(bracket.symbol, 0.0)
+                
+            if atr_val <= 0: return # No ATR available yet
             
             mult = bracket.trailing_config.get('mult', 1.5)
-            buffer = atr * mult
+            buffer = atr_val * mult
             
             with self._lock:
                 if bracket.side == "BUY":
                     potential_sl = bracket.highest_ltp - buffer
                     # Ratchet UP only
                     if potential_sl > bracket.sl_trigger_price:
-                        bracket.sl_trigger_price = potential_sl
+                        bracket.sl_trigger_price = round(potential_sl, 1)
                         LOGGER.debug(f"📈 ATR Trail {bracket.symbol}: SL -> {potential_sl:.2f}")
                 else: # SELL
                     potential_sl = bracket.lowest_ltp + buffer
                     # Ratchet DOWN only
                     if potential_sl < bracket.sl_trigger_price:
-                        bracket.sl_trigger_price = potential_sl
+                        bracket.sl_trigger_price = round(potential_sl, 1)
                         LOGGER.debug(f"📉 ATR Trail {bracket.symbol}: SL -> {potential_sl:.2f}")
 
     def _check_stop_loss(self, bracket: BracketState, ltp: float) -> bool:
@@ -587,7 +693,7 @@ class BracketManager:
                     return True
             
             return False
-            
+
     def get_bracket(self, entry_id: str) -> Optional[BracketState]:
         with self._lock:
             return self._brackets.get(entry_id)
@@ -608,6 +714,10 @@ class BracketManager:
                         self._symbol_map[symbol].remove(entry_id)
                     if not self._symbol_map[symbol]:
                         del self._symbol_map[symbol]
+                        
+                # Cleanup Controller
+                if entry_id in self._trailing_controllers:
+                    del self._trailing_controllers[entry_id]
 
             # Cleanup reverse index
             if entry_id in self._order_to_entry:
@@ -635,4 +745,5 @@ class BracketManager:
                 "active_brackets": len(self._brackets),
                 "symbols_managed": len(self._symbol_map),
                 "atr_tracked_symbols": len(self._current_atr),
+                "adaptive_controllers": len(self._trailing_controllers)
             }
