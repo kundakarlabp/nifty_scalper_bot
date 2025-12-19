@@ -567,6 +567,27 @@ class BracketManager:
     # 6. HOUSEKEEPING & UTILS
     # --------------------------------------------------------------------------
 
+    def is_symbol_managed(self, symbol: str) -> bool:
+        """
+        Check if symbol has active bracket protection.
+        Used during position reconciliation to avoid duplicate brackets.
+        """
+        with self._lock:
+            # 1. Fast check: symbol not in tracking map
+            if symbol not in self._symbol_map:
+                return False
+            
+            # 2. Deep check: Are any linked brackets actually active?
+            # We iterate through all order IDs associated with this symbol
+            entry_ids = self._symbol_map.get(symbol, [])
+            for eid in entry_ids:
+                bracket = self._brackets.get(eid)
+                # It's managed if at least one bracket is Active and has Quantity remaining
+                if bracket and bracket.active and bracket.remaining_quantity > 0:
+                    return True
+            
+            return False
+            
     def get_bracket(self, entry_id: str) -> Optional[BracketState]:
         with self._lock:
             return self._brackets.get(entry_id)
