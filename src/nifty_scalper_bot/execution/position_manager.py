@@ -81,8 +81,10 @@ def _normalize_status(value: str) -> OrderStatus:
         raise ValueError(f"Unsupported status '{value}'")
     return cast(OrderStatus, normalized)
 
-
 def _to_int(value: object) -> int:
+    """Robust integer conversion handling None and strings."""
+    if value is None:
+        return 0
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -90,7 +92,13 @@ def _to_int(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str):
-        return int(value)
+        if not value.strip():
+            return 0
+        try:
+            # Handle "100.0" strings which int() rejects directly
+            return int(float(value))
+        except (ValueError, TypeError):
+            pass
     raise TypeError(f"Unable to convert value {value!r} to int")
 
 
