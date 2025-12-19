@@ -4940,70 +4940,71 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     LOGGER.info("Bot shutdown complete")
 
 async def _reconcile_state(ctx: BotContext) -> None:
-    """Syncs local state with Broker (Orders & Positions). Optimized & Non-Blocking."""
+    """
+    Syncs local state with Broker (Orders & Positions).
+    Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
+    """
     # LOGGER.debug("Entered state reconciliation", extra={"event": "state_reconcile_enter"})
-    
-    # 1. FETCH POSITIONS (Async)
-    broker_positions: list[Mapping[str, Any]] = []
-    try:
-        # Fetch raw data
-        raw_data = await ctx.broker_client.get_positions()
-        
-        # Normalize
-        if isinstance(raw_data, list):
-            for item in raw_data:
-                if isinstance(item, Mapping):
-                    broker_positions.append(item)
-        elif isinstance(raw_data, Mapping):
-            # Handle 'net'/'day' wrapper structure
-            if "net" in raw_data and isinstance(raw_data["net"], list):
-                 broker_positions.extend([p for p in raw_data["net"] if isinstance(p, Mapping)])
-            else:
-                 broker_positions.append(raw_data)
-    except Exception as exc:
-        LOGGER.error(f"state_reconcile_fetch_failed: {exc}", exc_info=True)
-        return
 
-    # 2. SYNC ORDERS (Non-Blocking Thread)
-    order_manager = ctx.order_manager
-    if order_manager:
+    # 1. SYNC ORDERS (Non-Blocking Thread)
+    # We reconcile orders first to ensure recent fills are processed
+    if ctx.order_manager:
         try:
-            # Run the heavy reconciliation in a thread to avoid blocking the event loop
-            await asyncio.to_thread(order_manager.reconcile_open_orders_with_broker)
-            
-            # NEW: Sync Broker Status with Bracket Manager (for Manual Exits)
-            _bm = getattr(order_manager, "_bracket_manager", None)
-            if _bm:
-                # We iterate through fetched positions to find manual closures
-                # Note: Full status sync is complex, but we can trigger a check here
-                # For now, we rely on the order_manager reconciliation to handle status updates
-                pass 
-
+            await asyncio.to_thread(ctx.order_manager.reconcile_open_orders_with_broker)
         except Exception as exc:
             LOGGER.debug(f"Order Reconcile Warning: {exc}")
 
-    # 3. SYNC POSITIONS (Restored Logic)
-    position_manager = ctx.position_manager
-    if not position_manager:
-        return
+    # 2. SYNC POSITIONS & AUTO-GUARD ORPHANS
+    if ctx.position_manager:
+        try:
+            # A. Sync Broker Positions (Updates internal PositionManager state from API)
+            # This replaces the manual fetching loop you had before
+            await asyncio.to_thread(ctx.position_manager.synchronize_with_broker)
 
-    local_positions = position_manager.get_all_positions()
+            # B. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
+            if ctx.order_manager and ctx.order_manager._bracket_manager:
+                om = ctx.order_manager
+                bm = ctx.order_manager._bracket_manager
 
-    # Identify Mismatches
-    broker_symbols = {
-        str(pos.get("tradingsymbol") or pos.get("symbol") or "")
-        for pos in broker_positions
-    }
-    local_symbols = {pos.symbol for pos in local_positions}
+                # Import normalization helper locally to avoid circular imports
+                from nifty_scalper_bot.data.data_hub import DataHub
 
-    missing_locally = broker_symbols - local_symbols
-    if missing_locally:
-        LOGGER.warning(f"Positions missing locally: {', '.join(sorted(missing_locally))}")
+                # Iterate through the freshly synced positions
+                for pos in ctx.position_manager.get_open_positions():
+                    if pos.quantity == 0: 
+                        continue
 
-    extra_locally = local_symbols - broker_symbols
-    if extra_locally:
-        LOGGER.warning(f"Positions missing at broker: {', '.join(sorted(extra_locally))}")
+                    # 1. Normalize Symbol (Fixes 'NFO:' vs 'NIFTY' mismatches)
+                    raw_symbol = pos.symbol
+                    norm_symbol = DataHub.normalize(raw_symbol) or raw_symbol
+                    
+                    # 2. Check if this symbol is actively managed by BracketManager
+                    is_managed = bm.is_symbol_managed(norm_symbol)
+                    
+                    # 3. If NOT managed, it is an Orphan -> Guard it!
+                    if not is_managed:
+                        LOGGER.warning(
+                            f"⚠️ ORPHAN DETECTED: {norm_symbol} (Qty: {pos.quantity}). Auto-Guarding...",
+                            extra={"event": "orphan_detected", "symbol": norm_symbol}
+                        )
+                        
+                        # Get a valid reference price
+                        avg_price = float(pos.average_price or pos.last_price or 0.0)
 
+                        # Call the Master Guard Method (Accounting + Protection + Data)
+                        om.guard_orphan_position(
+                            symbol=norm_symbol,
+                            quantity=pos.quantity,
+                            average_price=avg_price
+                        )
+
+        except Exception as exc:
+            LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
+
+    # 3. SITUATION REPORT
+    # Logs the "Situation Report" (P&L, SL/TP status) to console
+    if ctx.order_manager:
+        ctx.order_manager._log_status_report()
     # Helper functions for parsing (Embedded to ensure self-containment)
     def _extract_symbol(payload: Mapping[str, Any]) -> str:
         symbol_raw = payload.get("tradingsymbol") or payload.get("symbol") or ""
