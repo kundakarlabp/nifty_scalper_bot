@@ -2636,20 +2636,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             
             if _sym and _ltp:
                 try:
-                    # 1. Update Market Stats (ATR) for Trailing Logic
-                    # We check if the strategy runner has calculated ATR for this symbol
-                    _runner = getattr(ctx, "strategy_runner", None)
-                    if _runner:
-                        # Attempt to get latest ATR from strategy indicators
-                        # Assuming strategy calculates it. If not, pass 0.0 (trailing will wait)
-                        _atr = 0.0
-                        if hasattr(_runner, "get_indicator_value"):
-                             _atr = _runner.get_indicator_value(_sym, "ATR")
-                        
-                        if _atr > 0:
-                            _bm_ref.update_market_stats(_sym, atr=_atr)
-
-                    # 2. Fire the "Sniper" Execution Logic
+                    # Fire the "Sniper" Logic
+                    # This now triggers the AdaptiveTrailingController internally
                     _bm_ref.on_tick(str(_sym), float(_ltp))
                 except Exception:
                     pass
@@ -3083,16 +3071,36 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 "Entered initialize_components bracket manager wiring",
                 extra={"event": "init.bracket_manager.enter"},
             )
+            
+            # ✅ FIX 1: Pass IndicatorEngine and MarketDataManager
             bracket_manager = BracketManager(
-                order_manager=order_manager
+                order_manager=order_manager,
+                indicator_engine=indicator_engine,
+                market_data=market_data_manager
             )
-            # Configure Internal Settings
+            
+            # Use the BracketManager's internal toggle to avoid shadowing the flag.
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
             
             # NEW: Set cleanup age from config
             bracket_manager._stale_cleanup_age = getattr(settings.execution, "bracket_stale_cleanup_seconds", 86400)
             
             order_manager.set_bracket_manager(bracket_manager=bracket_manager)
+            # ✅ FIX 2: Wire up ATR Feedback Loop
+            # This ensures BracketManager always has the latest ATR for fallback calculations
+            if indicator_engine and hasattr(indicator_engine, "register_callback"):
+                
+                def _feed_atr_to_manager(symbol: str, indicators: dict) -> None:
+                    atr = indicators.get("ATR")
+                    if atr and atr > 0:
+                        bracket_manager.feed_atr_updates(symbol, float(atr))
+
+                # Register this listener with the engine
+                try:
+                    indicator_engine.register_callback(_feed_atr_to_manager)
+                    LOGGER.info("✅ Wired IndicatorEngine -> BracketManager ATR feed")
+                except AttributeError:
+                    LOGGER.debug("IndicatorEngine does not support callbacks (skipping feed wiring)")
             LOGGER.info(
                 "Bracket manager wired",
                 extra={
