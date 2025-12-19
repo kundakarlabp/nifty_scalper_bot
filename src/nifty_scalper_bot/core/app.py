@@ -4954,24 +4954,38 @@ async def _reconcile_state(ctx: BotContext) -> None:
     # 2. SYNC POSITIONS & AUTO-GUARD ORPHANS
     if ctx.position_manager:
         try:
-            # A. Sync Broker Positions
-            # Updates internal PositionManager state from API (Handling all parsing internally)
-            await asyncio.to_thread(ctx.position_manager.synchronize_with_broker)
+            # A. Fetch Broker Positions (REQUIRED STEP)
+            raw_data = await ctx.broker_client.get_positions()
+            broker_positions = []
+            
+            # Robust Parsing of Broker Data
+            if isinstance(raw_data, list):
+                broker_positions = [p for p in raw_data if isinstance(p, Mapping)]
+            elif isinstance(raw_data, Mapping):
+                # Handle 'net' or 'day' keys common in broker APIs
+                src = raw_data.get("net", raw_data)
+                if isinstance(src, list):
+                    broker_positions = [p for p in src if isinstance(p, Mapping)]
+                else:
+                    broker_positions = [src]
 
-            # B. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
+            # B. Sync Broker Positions (Pass data to Manager)
+            # We run this in a thread to keep the bot responsive
+            await asyncio.to_thread(ctx.position_manager.synchronize_with_broker, broker_positions)
+
+            # C. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
             if ctx.order_manager and ctx.order_manager._bracket_manager:
                 om = ctx.order_manager
                 bm = ctx.order_manager._bracket_manager
                 
-                # Import locally to avoid circular imports
                 from nifty_scalper_bot.data.data_hub import DataHub
 
-                # Iterate through FRESHLY synced open positions
+                # Iterate through the FRESHLY synced open positions
                 for pos in ctx.position_manager.get_open_positions():
                     if pos.quantity == 0: 
                         continue
 
-                    # 1. Normalize Symbol (Fixes 'NFO:' vs 'NIFTY' mismatches)
+                    # 1. Normalize Symbol
                     raw_symbol = pos.symbol
                     norm_symbol = DataHub.normalize(raw_symbol) or raw_symbol
                     
@@ -4985,7 +4999,6 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             extra={"event": "orphan_detected", "symbol": norm_symbol}
                         )
                         
-                        # Get a valid reference price
                         avg_price = float(pos.average_price or pos.last_price or 0.0)
 
                         # Call the Master Guard Method
