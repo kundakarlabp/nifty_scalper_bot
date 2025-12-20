@@ -4870,6 +4870,31 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
 
+    # ===== GREEKS MONITORING (NEW) =====
+    # Logs portfolio Greeks every 5 minutes (Delta/Theta exposure)
+    if strategy_runner_ref and "instance" in strategy_runner_ref:
+        runner = strategy_runner_ref["instance"]
+        if hasattr(runner, 'calculate_portfolio_greeks'):
+            
+            def _log_greeks_periodically():
+                while not ctx.shutdown_event.is_set():
+                    try:
+                        time_module.sleep(300) # 5 minutes
+                        greeks = runner.calculate_portfolio_greeks()
+                        
+                        # Only log if there is significant exposure
+                        if abs(greeks.get("net_delta", 0)) > 1.0:
+                            LOGGER.info(
+                                f"📊 Greeks: Delta={greeks['net_delta']:.1f} Theta={greeks['net_theta']:.1f}", 
+                                extra={"event": "greeks_monitor"}
+                            )
+                    except Exception as exc:
+                        LOGGER.debug(f"Greeks monitor error: {exc}")
+            
+            # Start background thread
+            threading.Thread(target=_log_greeks_periodically, daemon=True).start()
+            LOGGER.info("✅ Portfolio Greeks monitoring enabled")
+
     await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
 
 
