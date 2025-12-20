@@ -145,6 +145,7 @@ class BracketManager:
         
         # --- ATR & Trailing Setup ---
         self._indicator_engine = indicator_engine
+        self._market_data = market_data
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
             # Initialize Safe Provider with 60s cache validity
@@ -155,6 +156,7 @@ class BracketManager:
         
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
+        self._last_price_cache: Dict[str, float] = {}
         
         self._lock = threading.RLock()
         self._running = True
