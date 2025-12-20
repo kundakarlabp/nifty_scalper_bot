@@ -136,7 +136,7 @@ class BracketManager:
     Supports TP1/TP2 scaling, ATR-based Trailing, and Broker Sync.
     """
 
-    def __init__(self, order_manager: Any, indicator_engine: Any = None):
+    def __init__(self, order_manager: Any, indicator_engine: Any = None, market_data: Any = None):
         self.order_manager = order_manager
         self._brackets: Dict[str, BracketState] = {}
         # Reverse Index: Map broker order IDs/Symbol to entry IDs
