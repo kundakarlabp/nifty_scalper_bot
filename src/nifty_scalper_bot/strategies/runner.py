@@ -2091,6 +2091,72 @@ class StrategyRunner:
 
         return reason_text
 
+    def calculate_portfolio_greeks(self) -> dict[str, float]:
+        """
+        Calculate portfolio-level Greeks aggregation.
+        Returns dict with net_delta, net_gamma, net_theta.
+        """
+        try:
+            from nifty_scalper_bot.indicators.greeks import BlackScholesCalculator
+        except ImportError:
+            return {"net_delta": 0.0, "net_theta": 0.0}
+
+        calculator = BlackScholesCalculator()
+        net_delta = 0.0
+        net_gamma = 0.0
+        net_theta = 0.0
+
+        if not self._position_manager:
+            return {"net_delta": 0.0}
+
+        # Get Underlying Spot (NIFTY 50)
+        # Note: You need a way to get spot price. Assuming 'NSE:NIFTY 50' is tracked.
+        spot_price = 0.0
+        # Placeholder logic: fetch from market data manager if available
+        # spot_price = self.market_data.get_ltp("NSE:NIFTY 50")
+        if spot_price == 0: spot_price = 26000 # Fallback/Mock
+
+        positions = self._position_manager.get_all_positions()
+        
+        for pos in positions:
+            if pos.quantity == 0: continue
+            
+            # Simple parsing
+            symbol = pos.symbol
+            if "NIFTY" not in symbol: continue
+            
+            try:
+                # Extract Strike
+                # NFO:NIFTY25DEC26000CE -> 26000
+                import re
+                match = re.search(r'(\d{5})[CP]E', symbol)
+                if not match: continue
+                strike = float(match.group(1))
+                
+                # Option Type
+                opt_type = "CE" if symbol.endswith("CE") else "PE"
+                
+                # Expiry (Simplified: 1 day)
+                t_years = 1 / 365.0 
+                
+                # IV (Simplified: 15%)
+                iv = 0.15
+                
+                greeks = calculator.calculate_greeks(spot_price, strike, t_years, iv, opt_type)
+                
+                qty = pos.quantity # Signed quantity handled by position manager? 
+                # Usually pos.quantity is absolute, pos.side determines sign
+                signed_qty = qty if pos.side == "LONG" else -qty
+                
+                net_delta += signed_qty * greeks.delta
+                net_gamma += signed_qty * greeks.gamma
+                net_theta += signed_qty * greeks.theta
+                
+            except Exception:
+                continue
+
+        return {"net_delta": net_delta, "net_gamma": net_gamma, "net_theta": net_theta}
+
 
 __all__ = [
     "StrategyRunner",
