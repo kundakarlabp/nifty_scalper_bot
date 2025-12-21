@@ -4870,10 +4870,37 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
 
-    # ===== GREEKS MONITORING (NEW) =====
+    # ===== GREEKS MONITORING (FIXED) =====
     # Logs portfolio Greeks every 5 minutes to track Delta/Theta exposure
-    if strategy_runner_ref and "instance" in strategy_runner_ref:
-        runner = strategy_runner_ref["instance"]
+    # ✅ FIX: Use ctx.strategy_runner instead of undefined strategy_runner_ref
+    if ctx.strategy_runner and hasattr(ctx.strategy_runner, 'calculate_portfolio_greeks'):
+        runner = ctx.strategy_runner
+        
+        def _log_greeks_periodically():
+            """Background thread to monitor portfolio Greeks"""
+            time_module.sleep(60) 
+            
+            while not ctx.shutdown_event.is_set():
+                try:
+                    greeks = runner.calculate_portfolio_greeks()
+                    
+                    if abs(greeks.get("net_delta", 0)) > 1.0 or greeks.get("net_theta", 0) < -1.0:
+                        LOGGER.info(
+                            f"📊 Greeks: Delta={greeks['net_delta']:.1f} Theta={greeks['net_theta']:.1f}/day", 
+                            extra={"event": "greeks_monitor"}
+                        )
+                    
+                    for _ in range(300):
+                        if ctx.shutdown_event.is_set(): break
+                        time_module.sleep(1)
+                        
+                except Exception as exc:
+                    LOGGER.debug(f"Greeks monitor error: {exc}")
+                    time_module.sleep(60)
+        
+        import threading
+        threading.Thread(target=_log_greeks_periodically, daemon=True).start()
+        LOGGER.info("✅ Portfolio Greeks monitoring enabled")
         if hasattr(runner, 'calculate_portfolio_greeks'):
             
             def _log_greeks_periodically():
