@@ -1548,23 +1548,28 @@ class StrategyRunner:
         Factors: Trend (Slope), Momentum (RSI), Level (VWAP).
         """
         score = 0.0
-        max_score = 3.0
+        max_possible = 3.0 
         
         try:
             # 1. Slope Check (Velocity)
-            slope = self._indicator_engine.calculate_slope(symbol, "close", 5)
-            if side == "LONG":
-                if slope > 15.0: score += 1.0
-                elif slope < -5.0: score -= 5.0 # Veto
-            else: # SHORT
-                if slope < -15.0: score += 1.0
-                elif slope > 5.0: score -= 5.0 # Veto
+            # This requires calculate_slope to be present in IndicatorEngine
+            if hasattr(self._indicator_engine, 'calculate_slope'):
+                slope = self._indicator_engine.calculate_slope(symbol, "close", 5)
+                
+                if side == "LONG":
+                    if slope > 15.0: score += 1.0
+                    elif slope < -5.0: score -= 5.0 # Veto
+                else: # SHORT
+                    if slope < -15.0: score += 1.0
+                    elif slope > 5.0: score -= 5.0 # Veto
 
             # 2. VWAP Check (Level)
-            # Need to fetch VWAP from engine (assuming get_indicators works)
-            inds = self._indicator_engine.get_latest(symbol)
-            vwap = inds.get("vwap", 0.0) # You might need to ensure get_latest returns VWAP
-            if vwap > 0:
+            # Safe fetch using getattr to avoid crashes if method missing
+            get_latest = getattr(self._indicator_engine, 'get_latest', lambda s: {})
+            inds = get_latest(symbol)
+            
+            vwap = inds.get("vwap", 0.0)
+            if vwap and vwap > 0:
                 if side == "LONG" and price > vwap: score += 1.0
                 elif side == "SHORT" and price < vwap: score += 1.0
 
@@ -1575,9 +1580,9 @@ class StrategyRunner:
                 elif side == "SHORT" and 30 < rsi < 45: score += 1.0
 
         except Exception:
-            return 0.0 # Fail safe
+            return 0.0 
 
-        return max(0.0, score / max_score)
+        return max(0.0, score / max_possible)
 
     def _handle_entry_signal(
         self,
