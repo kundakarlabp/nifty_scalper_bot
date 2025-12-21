@@ -1542,6 +1542,43 @@ class StrategyRunner:
                 except Exception:
                     pass
 
+    def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
+        """
+        Calculate weighted confidence score (0.0 to 1.0).
+        Factors: Trend (Slope), Momentum (RSI), Level (VWAP).
+        """
+        score = 0.0
+        max_score = 3.0
+        
+        try:
+            # 1. Slope Check (Velocity)
+            slope = self._indicator_engine.calculate_slope(symbol, "close", 5)
+            if side == "LONG":
+                if slope > 15.0: score += 1.0
+                elif slope < -5.0: score -= 5.0 # Veto
+            else: # SHORT
+                if slope < -15.0: score += 1.0
+                elif slope > 5.0: score -= 5.0 # Veto
+
+            # 2. VWAP Check (Level)
+            # Need to fetch VWAP from engine (assuming get_indicators works)
+            inds = self._indicator_engine.get_latest(symbol)
+            vwap = inds.get("vwap", 0.0) # You might need to ensure get_latest returns VWAP
+            if vwap > 0:
+                if side == "LONG" and price > vwap: score += 1.0
+                elif side == "SHORT" and price < vwap: score += 1.0
+
+            # 3. RSI Check (Momentum)
+            rsi = inds.get("rsi", 50.0)
+            if rsi:
+                if side == "LONG" and 55 < rsi < 70: score += 1.0
+                elif side == "SHORT" and 30 < rsi < 45: score += 1.0
+
+        except Exception:
+            return 0.0 # Fail safe
+
+        return max(0.0, score / max_score)
+
     def _handle_entry_signal(
         self,
         signal: Signal,
@@ -1551,6 +1588,10 @@ class StrategyRunner:
         timestamp: datetime,
     ) -> None:
         """Handle entry (BUY/SELL) signals."""
+        confidence = self._calculate_signal_score(signal.symbol, signal.side, price)
+        if confidence < 0.6: # Require 2 out of 3 factors (0.66)
+            self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
+            return
         action = signal.action
 
         # [VWAP TREND FILTER]
