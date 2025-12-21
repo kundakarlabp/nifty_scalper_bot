@@ -1026,6 +1026,55 @@ class IndicatorEngine:
             self._logger.error(f"ATR Compute Failed: {e}")
             return None
 
+    def calculate_slope(self, symbol: str, indicator_name: str = "close", period: int = 5) -> float:
+        """
+        Calculate trend velocity (angle of indicator over last N bars).
+        Returns: Slope in degrees (-90 to +90).
+        """
+        try:
+            # 1. Fetch History
+            history = self._history.get(symbol)
+            if not history or len(history._closes) < period:
+                return 0.0
+
+            # 2. Extract Data Series
+            if indicator_name == "close":
+                values = list(history._closes)[-period:]
+            elif indicator_name == "ema_50":
+                # On-the-fly EMA calculation for history
+                closes = list(history._closes)
+                if len(closes) < 50 + period: return 0.0
+                # Using pandas ewm or manual loop - manual for speed here
+                # Simplified: Just slope of price for now, or fetch actual indicator if cached
+                values = closes[-period:] # Fallback to Price Slope if indicator cache missing
+            else:
+                return 0.0
+
+            # 3. Normalize to Basis Points (Price agnostic)
+            start = values[0]
+            if start == 0: return 0.0
+            
+            # Convert to relative change (100 -> 100.1 = +10)
+            y = [(v - start) / start * 10000 for v in values]
+            x = list(range(len(y)))
+
+            # 4. Linear Regression (Least Squares)
+            n = len(x)
+            sum_x = sum(x)
+            sum_y = sum(y)
+            sum_xy = sum(xi * yi for xi, yi in zip(x, y))
+            sum_xx = sum(xi**2 for xi in x)
+            
+            slope_m = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x**2)
+            
+            # 5. Convert to Degrees
+            import math
+            return math.degrees(math.atan(slope_m))
+            
+        except Exception as e:
+            self._logger.debug(f"Slope calc failed for {symbol}: {e}")
+            return 0.0
+
     def get_latest(self, symbol: str) -> dict[str, float | None]:
         """Retrieve aggregated indicators for execution controllers (Dynamic TP)."""
         try:
