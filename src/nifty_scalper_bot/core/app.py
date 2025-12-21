@@ -4872,24 +4872,27 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     # ===== GREEKS MONITORING (FIXED) =====
     # Logs portfolio Greeks every 5 minutes to track Delta/Theta exposure
-    # ✅ FIX: Use ctx.strategy_runner instead of undefined strategy_runner_ref
     if ctx.strategy_runner and hasattr(ctx.strategy_runner, 'calculate_portfolio_greeks'):
+        # ✅ FIX: Use ctx.strategy_runner, NOT strategy_runner_ref
         runner = ctx.strategy_runner
         
         def _log_greeks_periodically():
             """Background thread to monitor portfolio Greeks"""
+            # Wait for main loop to be active
             time_module.sleep(60) 
             
             while not ctx.shutdown_event.is_set():
                 try:
                     greeks = runner.calculate_portfolio_greeks()
                     
+                    # Only log if there is significant exposure
                     if abs(greeks.get("net_delta", 0)) > 1.0 or greeks.get("net_theta", 0) < -1.0:
                         LOGGER.info(
                             f"📊 Greeks: Delta={greeks['net_delta']:.1f} Theta={greeks['net_theta']:.1f}/day", 
                             extra={"event": "greeks_monitor"}
                         )
                     
+                    # Sleep for 5 minutes (300s)
                     for _ in range(300):
                         if ctx.shutdown_event.is_set(): break
                         time_module.sleep(1)
@@ -4898,39 +4901,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                     LOGGER.debug(f"Greeks monitor error: {exc}")
                     time_module.sleep(60)
         
+        # Start background thread
         import threading
         threading.Thread(target=_log_greeks_periodically, daemon=True).start()
         LOGGER.info("✅ Portfolio Greeks monitoring enabled")
-        if hasattr(runner, 'calculate_portfolio_greeks'):
-            
-            def _log_greeks_periodically():
-                """Background thread to monitor portfolio Greeks"""
-                # Wait for main loop to be active
-                time_module.sleep(60) 
-                
-                while not ctx.shutdown_event.is_set():
-                    try:
-                        greeks = runner.calculate_portfolio_greeks()
-                        
-                        # Only log if there is significant exposure (Delta > 1 or Theta < -1)
-                        if abs(greeks.get("net_delta", 0)) > 1.0 or greeks.get("net_theta", 0) < -1.0:
-                            LOGGER.info(
-                                f"📊 Greeks: Delta={greeks['net_delta']:.1f} Theta={greeks['net_theta']:.1f}/day", 
-                                extra={"event": "greeks_monitor"}
-                            )
-                        
-                        # Sleep for 5 minutes (300s)
-                        for _ in range(300):
-                            if ctx.shutdown_event.is_set(): break
-                            time_module.sleep(1)
-                            
-                    except Exception as exc:
-                        LOGGER.debug(f"Greeks monitor error: {exc}")
-                        time_module.sleep(60)
-            
-            # Start background thread
-            threading.Thread(target=_log_greeks_periodically, daemon=True).start()
-            LOGGER.info("✅ Portfolio Greeks monitoring enabled")
 
     await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
 
