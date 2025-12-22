@@ -3058,19 +3058,22 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     order_manager.attach_persistent_state(persistent_state)
 
     bracket_manager: BracketManager | None = None
-    if settings.execution.enable_bracket_manager:
-        try:
-            LOGGER.debug(
-                "Entered initialize_components bracket manager wiring",
-                extra={"event": "init.bracket_manager.enter"},
-            )
+    #if settings.execution.enable_bracket_manager:
+        #try:
+            #LOGGER.debug(
+                #"Entered initialize_components bracket manager wiring",
+                #extra={"event": "init.bracket_manager.enter"},
+            #)
             
             # ✅ FIX 1: Pass IndicatorEngine and MarketDataManager
-            bracket_manager = BracketManager(
-                order_manager=order_manager,
-                indicator_engine=indicator_engine,
-                market_data=market_data_manager
-            )
+            #bracket_manager = BracketManager(
+                #order_manager=order_manager,
+                #indicator_engine=indicator_engine,
+                #market_data=market_data_manager
+            #)
+# ✅ FORCE DISABLE (Temporary Safety)
+LOGGER.warning("BracketManager temporarily disabled due to threading scope issue")
+bracket_manager = None
             
             # Use the BracketManager's internal toggle to avoid shadowing the flag.
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
