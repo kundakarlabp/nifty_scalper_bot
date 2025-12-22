@@ -1444,9 +1444,9 @@ class StrategyRunner:
                 # This ensures we ALWAYS calculate the logic, removing the "0.05%" blindfold
                 # 🔇 SILENCED: Logic is working, we don't need to see this anymore
                 # self._logger.debug(
-                    f"👀 VWAP CHECK: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | "
-                    f"CrossUp={is_cross_up}"
-                )
+                #    f"👀 VWAP CHECK: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | "
+                #    f"CrossUp={is_cross_up}"
+                #)
 
                 # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
                 if is_cross_up:
