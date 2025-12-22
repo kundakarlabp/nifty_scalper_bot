@@ -4912,7 +4912,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                     
                     # Sleep for 5 minutes (300s)
                     for _ in range(300):
-                        if ctx.shutdown_event.is_set(): break
+                        # ✅ FIX: Use the safe 'stop_event' variable defined above
+                        if stop_event and stop_event.is_set(): break
                         time_module.sleep(1)
                         
                 except Exception as exc:
