@@ -2310,6 +2310,7 @@ def _setup_telegram(ctx: BotContext) -> None:
         
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
+    import threading
 
     ensure_multiproc_dir(clear_stale=True)
     settings = settings or get_settings()
