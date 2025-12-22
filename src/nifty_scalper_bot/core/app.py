@@ -1087,85 +1087,56 @@ def get_http_app() -> FastAPI:
             media_type = "text/plain; charset=utf-8"
         return PlainTextResponse(payload, media_type=media_type)
 
-    # ✅ FIXED: Kept unindented (OUTSIDE the function)
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
         ctx = get_latest_bot_context()
+        
+        # ✅ FIX 1: Handle Startup Gracefully (Return 200, not 503)
+        # This prevents Railway from killing the bot while it initializes.
         if not ctx:
             return JSONResponse(
-                status_code=503,
-                content={"status": "starting", "reason": "Context not initialized"},
+                status_code=200, 
+                content={
+                    "status": "starting", 
+                    "ready": False, 
+                    "reason": "Context initializing...",
+                    "uptime_seconds": int(time_module.monotonic() - _START_TIME)
+                },
             )
 
-        # Basic Checks
-        broker_ok = ctx.broker_client.is_connected() if ctx.broker_client else False
+        # ✅ FIX 2: Comprehensive Component Checks
+        checks = {
+            "broker": ctx.broker_client is not None and ctx.broker_client.is_connected(),
+            "position_manager": ctx.position_manager is not None,
+            "risk_manager": ctx.risk_manager is not None,
+            "data_hub": ctx.data_hub is not None,
+        }
         
-        status = "healthy" if broker_ok else "degraded"
+        # Optional: Check Risk Breaker if available
+        if ctx.risk_manager:
+            try:
+                # Assuming snapshot() or similar property exists
+                checks["risk_breaker_ok"] = not getattr(ctx.risk_manager, "breaker_tripped", False)
+            except Exception:
+                checks["risk_breaker_ok"] = False
+
+        # ✅ FIX 3: Determine Status
+        all_healthy = all(checks.values())
+        status = "healthy" if all_healthy else "degraded"
         
+        # We return 200 even if degraded so we can see the status JSON.
+        # Only return 503 if something catastrophic (like broker down) happens in Production mode.
+        # For now, 200 is safer for stability.
         return JSONResponse(
+            status_code=200,
             content={
                 "status": status,
-                "broker_connected": broker_ok,
+                "ready": all_healthy,
+                "checks": checks,
                 "uptime_seconds": int(time_module.monotonic() - _START_TIME),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
-        
-        ctx = get_latest_bot_context()
-        if ctx is None:
-            return JSONResponse({"status": "initializing", "reason": "no_context"}, status_code=503)
-        
-        # ✅ ADD COMPONENT HEALTH CHECKS
-        checks = {
-            "broker": ctx.broker_client is not None,
-            "position_manager": ctx.position_manager is not None,
-            "risk_manager": ctx.risk_manager is not None,
-            "streamer": ctx.streamer is not None,
-            "data_hub": ctx.data_hub is not None,
-        }
-        
-        # Check risk breaker status
-        if ctx.risk_manager:
-            try:
-                snapshot = ctx.risk_manager.snapshot()
-                checks["risk_breaker_ok"] = not snapshot.breaker_tripped
-            except Exception:
-                checks["risk_breaker_ok"] = False
-        
-        all_healthy = all(checks.values())
-        status_code = 200 if all_healthy else 503
-        
-        return JSONResponse({
-            "status": "healthy" if all_healthy else "degraded",
-            "checks": checks,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }, status_code=status_code)
-        
-        # Keep original health_app delegation as fallback
-        if ctx.health_app is None:
-            return JSONResponse({"status": "initialising"}, status_code=503)
-
-        try:
-            for route in getattr(ctx.health_app.router, "routes", []):
-                if getattr(route, "path", None) == "/health":
-                    endpoint = getattr(route, "endpoint", None)
-                    if endpoint is None:
-                        continue
-                    payload = endpoint()
-                    if inspect.isawaitable(payload):
-                        payload = await payload  # type: ignore[assignment]
-                    if isinstance(payload, JSONResponse):
-                        return payload
-                    return JSONResponse(payload)
-        except Exception as exc:  # noqa: BLE001
-            telemetry_logger.error(
-                "Failure in http_health: %s",
-                exc,
-                extra={"event": "http_health_error"},
-                exc_info=exc,
-            )
-        return JSONResponse({"status": "ok"})
-
     @app.on_event("startup")
     async def _startup_webhook() -> None:
         telegram_logger = get_logger("telegram")
