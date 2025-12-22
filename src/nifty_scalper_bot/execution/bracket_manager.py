@@ -6,6 +6,7 @@ Enhanced with ATR Trailing, Multi-Target (TP1/TP2), Partial Scaling, and Orphan 
 from __future__ import annotations
 
 import threading
+from threading import RLock
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, cast, runtime_checkable
@@ -158,7 +159,7 @@ class BracketManager:
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
         
-        self._lock = threading.RLock()
+        self._lock = RLock()
         self._running = True
         
         # Configuration
