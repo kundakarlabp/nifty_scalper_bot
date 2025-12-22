@@ -1093,6 +1093,7 @@ def get_http_app() -> FastAPI:
         
         # ✅ FIX 1: Handle Startup Gracefully (Return 200, not 503)
         # This prevents Railway from killing the bot while it initializes.
+        # ✅ FIX: Return 200 during startup
         if not ctx:
             return JSONResponse(
                 status_code=200, 
@@ -1100,7 +1101,6 @@ def get_http_app() -> FastAPI:
                     "status": "starting", 
                     "ready": False, 
                     "reason": "Context initializing...",
-                    "uptime_seconds": int(time_module.monotonic() - _START_TIME)
                 },
             )
 
@@ -2551,7 +2551,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         """
         Handle incoming poll tick with Robust Validation & Recovery.
         """
-        if not tick:
+        if not tick or not isinstance(tick, dict):
             return
 
         # 1. Normalize Tick
@@ -2785,6 +2785,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         resolver=instrument_resolver,
         default_symbols=list(poll_symbols or ["NIFTY"]),
         autostart=True,
+        monitor_interval_s=300.0,
     )
     stream_supervisor.bootstrap()
     stream_supervisor.ensure_started()
