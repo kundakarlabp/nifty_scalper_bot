@@ -4881,7 +4881,10 @@ async def startup_sequence(ctx: BotContext) -> None:
             # Wait for main loop to be active
             time_module.sleep(60) 
             
-            while not ctx.shutdown_event.is_set():
+            stop_event = getattr(ctx, "shutdown_event", None)
+            while True:
+                if stop_event and stop_event.is_set(): break
+                if not threading.main_thread().is_alive(): break
                 try:
                     greeks = runner.calculate_portfolio_greeks()
                     
