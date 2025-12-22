@@ -51,7 +51,7 @@ class StreamSupervisor:
         resolver: Any,
         default_symbols: Sequence[str] | None = None,
         autostart: bool = True,
-        monitor_interval_s: float = 5.0,
+        monitor_interval_s: float = 300.0,
     ) -> None:
         self.streamer = streamer
         self.resolver = resolver
