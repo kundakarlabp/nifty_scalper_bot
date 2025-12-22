@@ -1427,7 +1427,7 @@ class StrategyRunner:
             if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
                  # Use DEBUG level so it doesn't flood logs unless enabled, 
                  # but ensures we can verify data when needed.
-                 self._logger.info(
+                 self._logger.debug(
                     f"🔎 TICK: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f} | Vol={volume}",
                     extra={
                         "event": "tick_audit",
@@ -1626,9 +1626,11 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
-        """Handle entry (BUY/SELL) signals."""
-        confidence = self._calculate_signal_score(signal.symbol, signal.side, price)
-        if confidence < 0.6: # Require 2 out of 3 factors (0.66)
+        # ✅ FIX: Define side and use 'trade_price' instead of 'price'
+        side = "LONG" if signal.action == "BUY" else "SHORT"
+        confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
+
+        if confidence < 0.6:
             self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
             return
         action = signal.action
@@ -2090,7 +2092,7 @@ class StrategyRunner:
         spot = 26000.0 # Default fallback
         
         # ✅ FIX: Try both attribute names to be safe
-        mdm = getattr(self, "_market_data_manager", getattr(self, "market_data_manager", None))
+        mdm = self._market_data
         
         if mdm:
             # Try getting LTP
@@ -2200,6 +2202,11 @@ class StrategyRunner:
         if not normalized:
             msg = "symbol must not be empty"
             raise ValueError(msg)
+        
+        # ✅ FIX: Strip 'NFO:' or 'NSE:' prefix if present
+        if ":" in normalized:
+            normalized = normalized.split(":", 1)[1]
+            
         return normalized
 
     def _update_last_signal_selection(
