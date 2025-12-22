@@ -386,7 +386,9 @@ def _try_warm_instruments(
 
 _HTTP_APP: FastAPI | None = None
 _HTTP_NOTIFIER: TelegramEnhancedNotifier | None = None
+_HTTP_NOTIFIER: TelegramController | None = None
 _HTTP_CONTROLLER: TelegramWebhookController | None = None
+_http_app_lock = threading.Lock()
 _LATEST_CTX: "BotContext | None" = None
 
 
@@ -1002,8 +1004,6 @@ def _resolve_session_reason(
         and reason in SOFT
     )
     return reason if reason else "OK", soft_override
-
-_http_app_lock = threading.Lock()  # Add this at top with other globals around line 370
 
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
