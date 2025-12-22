@@ -1422,21 +1422,14 @@ class StrategyRunner:
             if broker_vwap and broker_vwap > 0:
                 state.vwap = broker_vwap
             
-            # C. PRODUCTION DEBUG LOGGING (The "Why isn't it trading?" Fix)
+            # C. PRODUCTION HEARTBEAT (Throttled)
             # We log this for Futures/Options to verify volume/vwap are flowing
             if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
-                 # Use DEBUG level so it doesn't flood logs unless enabled, 
-                 # but ensures we can verify data when needed.
-                 self._logger.debug(
-                    f"🔎 TICK: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f} | Vol={volume}",
-                    extra={
-                        "event": "tick_audit",
-                        "symbol": symbol,
-                        "ltp": price,
-                        "vwap": state.vwap,
-                        "vol": volume
-                    }
-                )
+                 # ✅ FIX: Log only once every ~10 seconds per symbol (using timestamp modulus)
+                 if int(timestamp.timestamp()) % 10 == 0:
+                     self._logger.info(
+                        f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}"
+                     )
 
             # D. VWAP Crossover Strategy Logic
             generated_signal = None
@@ -1444,16 +1437,18 @@ class StrategyRunner:
             curr_vwap = state.vwap
 
             if prev_ltp and curr_vwap and price > 0:
-                # [DIAGNOSTIC] Log Logic State
-                # Only log every 60 seconds OR if close to crossover (0.05%) to reduce spam
-                dist_pct = abs(price - curr_vwap) / curr_vwap * 100
-                if dist_pct < 0.05:
-                    self._logger.info(
-                        f"👀 VWAP WATCH: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | Cross? {prev_ltp < curr_vwap and price > curr_vwap}"
-                    )
+                # ✅ FIX: Calculate crossover booleans first
+                is_cross_up = (prev_ltp < curr_vwap and price > curr_vwap)
+                
+                # Log state at DEBUG so we can audit later without spamming INFO
+                # This ensures we ALWAYS calculate the logic, removing the "0.05%" blindfold
+                self._logger.debug(
+                    f"👀 VWAP CHECK: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | "
+                    f"CrossUp={is_cross_up}"
+                )
 
                 # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
-                if prev_ltp < curr_vwap and price > curr_vwap:
+                if is_cross_up:
                     self._logger.info(
                         f"⚡ VWAP CROSSOVER DETECTED: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
                         extra={"event": "vwap_crossover", "symbol": symbol}
