@@ -1574,45 +1574,39 @@ class StrategyRunner:
 
     def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
         """
-        Calculate weighted confidence score (0.0 to 1.0).
-        Factors: Trend (Slope), Momentum (RSI), Level (VWAP).
+        Calculate confidence using INSTANT metrics (No history required).
+        Prevents 'Cold Start' rejection while still filtering bad trades.
         """
-        score = 0.0
-        max_possible = 3.0 
+        score = 0.5  # Base score for a valid VWAP cross
         
-        try:
-            # 1. Slope Check (Velocity)
-            # This requires calculate_slope to be present in IndicatorEngine
-            if hasattr(self._indicator_engine, 'calculate_slope'):
-                slope = self._indicator_engine.calculate_slope(symbol, "close", 5)
-                
-                if side == "LONG":
-                    if slope > 15.0: score += 1.0
-                    elif slope < -5.0: score -= 5.0 # Veto
-                else: # SHORT
-                    if slope < -15.0: score += 1.0
-                    elif slope > 5.0: score -= 5.0 # Veto
-
-            # 2. VWAP Check (Level)
-            # Safe fetch using getattr to avoid crashes if method missing
-            get_latest = getattr(self._indicator_engine, 'get_latest', lambda s: {})
-            inds = get_latest(symbol)
+        with self._lock:
+            state = self._symbol_state.get(symbol)
+            if not state:
+                return 1.0 # Fail-open if state missing (trust the signal)
             
-            vwap = inds.get("vwap", 0.0)
-            if vwap and vwap > 0:
-                if side == "LONG" and price > vwap: score += 1.0
-                elif side == "SHORT" and price < vwap: score += 1.0
+            # 1. VWAP Proximity (Don't chase!)
+            # If price is within 0.5% of VWAP, it's a high-quality entry.
+            if state.vwap and state.vwap > 0:
+                dist_pct = abs(price - state.vwap) / state.vwap
+                if dist_pct < 0.005:  # Super tight entry (<0.5%)
+                    score += 0.3
+                elif dist_pct < 0.01: # Decent entry (<1.0%)
+                    score += 0.1
+                elif dist_pct > 0.03: # Too far extended (>3%)
+                    score -= 0.3      # Penalty for chasing
 
-            # 3. RSI Check (Momentum)
-            rsi = inds.get("rsi", 50.0)
-            if rsi:
-                if side == "LONG" and 55 < rsi < 70: score += 1.0
-                elif side == "SHORT" and 30 < rsi < 45: score += 1.0
-
-        except Exception:
-            return 0.0 
-
-        return max(0.0, score / max_possible)
+            # 2. Volume Check (Liquidity)
+            # If the current tick has volume, it's real trading.
+            if state.last_tick:
+                vol = float(state.last_tick.get('volume', 0))
+                if vol > 50000:  # Healthy volume
+                    score += 0.2
+        
+        # Result: 
+        # - Perfect entry (close + vol) = 0.5 + 0.3 + 0.2 = 1.0
+        # - Late entry (far + vol)      = 0.5 - 0.3 + 0.2 = 0.4 (FILTERED)
+        
+        return min(1.0, max(0.0, score))
 
     def _handle_entry_signal(
         self,
