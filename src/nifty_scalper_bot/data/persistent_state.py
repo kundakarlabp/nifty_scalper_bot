@@ -71,15 +71,39 @@ class PersistentStateDB:
     def __init__(self, db_path: Path) -> None:
         self._logger = get_logger(__name__)
         self._lock = RLock()
-        self._path = Path(db_path)
+        
+        # ✅ FIX 1: Auto-create directory (Prevents [Errno 2] crash)
+        self._path = Path(db_path).resolve()
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._logger.critical("Failed to create DB directory: %s", exc)
+            raise RuntimeError(f"Cannot create DB directory: {exc}") from exc
+
         if sqlite3 is None:
             raise RuntimeError("SQLite unavailable for persistent storage")
+
         try:
-            self._conn = sqlite3.connect(self._path, check_same_thread=False)
+            # ✅ FIX 2: Add timeout to prevent "Database Locked" in threads
+            self._conn = sqlite3.connect(
+                str(self._path), 
+                check_same_thread=False, 
+                timeout=30.0
+            )
+            
+            # ✅ FIX 3: Performance Tuning for Scalping
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            
             self._create_tables()
+            
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in PersistentStateDB.__init__: %s", exc)
+            # Cleanup connection if init failed
+            if hasattr(self, '_conn'):
+                with suppress(Exception):
+                    self._conn.close()
             raise RuntimeError("Failed to initialise persistent database") from exc
 
     def _create_tables(self) -> None:
