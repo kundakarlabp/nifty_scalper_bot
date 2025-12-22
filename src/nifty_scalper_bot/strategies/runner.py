@@ -2088,9 +2088,15 @@ class StrategyRunner:
 
         # Fetch Spot Price (Simplified for robustness)
         spot = 26000.0 # Default fallback
-        if self._market_data_manager:
-            ltp = self._market_data_manager.get_latest_price("NSE:NIFTY 50")
-            if ltp and ltp > 0: spot = ltp
+        
+        # ✅ FIX: Try both attribute names to be safe
+        mdm = getattr(self, "_market_data_manager", getattr(self, "market_data_manager", None))
+        
+        if mdm:
+            # Try getting LTP
+            ltp = mdm.get_latest_price("NSE:NIFTY 50")
+            if ltp and ltp > 0: 
+                spot = ltp
 
         for pos in self._position_manager.get_all_positions():
             if pos.quantity == 0 or "NIFTY" not in pos.symbol: continue
