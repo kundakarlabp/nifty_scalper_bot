@@ -40,16 +40,38 @@ class TradeStore:
             os.makedirs(directory)
 
     def _load(self):
-        """Load trades from disk."""
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, 'r') as f:
-                    data = json.load(f)
+        """Load trades from disk safely."""
+        if not os.path.exists(self.filepath):
+            return
+
+        try:
+            with open(self.filepath, 'r') as f:
+                content = f.read().strip()
+                if not content:
+                    self._trades = {}
+                    return
+                
+                data = json.loads(content)
+
+                # ✅ FIX 1: Handle List (Legacy/Corrupted)
+                if isinstance(data, list):
+                    LOGGER.warning("Trade store found as list. Resetting to empty dict to prevent crash.")
+                    self._trades = {} 
+                    return
+
+                # ✅ FIX 2: Handle Dict (Normal)
+                if isinstance(data, dict):
                     self._trades = {k: TradeIntent.from_dict(v) for k, v in data.items()}
-                LOGGER.info(f"✅ Loaded {len(self._trades)} trades from persistence.")
-            except Exception as e:
-                LOGGER.error(f"Failed to load trade store: {e}")
-                self._trades = {}
+                else:
+                    LOGGER.warning(f"Unknown trade store format: {type(data)}. Resetting.")
+                    self._trades = {}
+
+            LOGGER.info(f"Loaded {len(self._trades)} trades from store.")
+
+        except Exception as e:
+            LOGGER.error(f"Failed to load trade store: {e}")
+            # Fallback to empty to ensure bot starts even if file is bad
+            self._trades = {}
 
     def save(self):
         """Atomic save to disk."""
