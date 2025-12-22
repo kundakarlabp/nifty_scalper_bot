@@ -200,9 +200,9 @@ class SymbolState:
     last_trade_at: datetime | None = None
     cooldown_until: datetime | None = None
     strategy_data: dict[str, Any] = field(default_factory=dict)
-    vwap: float | None = None  # <--- [INSERT THIS LINE] Add VWAP storage
+    vwap: float | None = None
+    _last_strategy_eval: datetime | None = None # [FIX] For Throttling strategy calls
     trade_history: Deque[TradeRecord] = field(init=False)
-
     def __post_init__(self) -> None:
         self.trade_history = deque(maxlen=self.history_limit)
 
@@ -1343,6 +1343,18 @@ class StrategyRunner:
             interval_sec=60.0
         )
         now = datetime.now(timezone.utc)
+        
+        # [FIX] Extract Timestamp & Freshness Validation
+        timestamp = _extract_timestamp(tick, now)
+        tick_age = (now - timestamp).total_seconds()
+        
+        if tick_age > 5.0:
+            log_throttled(
+                self._logger, f"stale_tick_{symbol}",
+                f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old)",
+                interval_sec=30.0, level="warning"
+            )
+            return  # Stop processing stale ticks
 
         # 1. Extract Critical Market Data
         # We prioritize 'average_price' (Broker VWAP) as it is authoritative for the trading day.
@@ -1356,8 +1368,18 @@ class StrategyRunner:
             
         # [FIX] Log Warning but ALLOW processing (so strategies can at least try)
         if volume is None or volume <= 0:
-             self._logger.debug(f"⚠️ Low-quality tick for {symbol} (Vol=0). Proceeding cautiously.")
-             # return  <-- COMMENT THIS OUT. Let the strategy decide if it needs volume.
+            # Options/Futures often show zero volume initially - Allow processing but flag it
+            if symbol.endswith(("FUT", "CE", "PE")):
+                self._logger.debug(f"⚠️ Zero volume for {symbol}, allowing indicator updates")
+                volume = 0 
+            else:
+                # Spot/Index: Require valid volume
+                log_throttled(
+                    self._logger, f"no_vol_{symbol}",
+                    f"❌ No volume for {symbol}, skipping",
+                    interval_sec=60.0, level="warning"
+                )
+                return
 
         timestamp = _extract_timestamp(tick, now)
 
@@ -1470,10 +1492,22 @@ class StrategyRunner:
         
         # Fallback: If no local signal, check Strategy Manager (RSI/Supertrend/etc)
         if signal is None and self._config.min_indicator_bars:
-            is_ready = self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars)
+            # CRITICAL FIX: Throttle strategy manager calls
+            should_evaluate = False
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if state:
+                    last_eval = state._last_strategy_eval
+                    if last_eval and (now - last_eval).total_seconds() < 0.5:
+                        return # Skip if evaluated < 500ms ago
+                    state._last_strategy_eval = now
+                    should_evaluate = True
             
-            if is_ready:
-                signal = self._strategy_manager.generate_signal(symbol, price)
+            if should_evaluate:
+                is_ready = self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars)
+                
+                if is_ready:
+                    signal = self._strategy_manager.generate_signal(symbol, price)
                 # [DIAGNOSTIC] Log if strategy checked but returned nothing
                 if signal is None:
                     # Log mostly at debug, but force INFO occasionally to prove it's running
