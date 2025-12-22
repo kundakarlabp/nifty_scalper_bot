@@ -2563,7 +2563,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     logger.critical(f"🚨 FATAL: No data for {int(time.time() - last_tick)}s. Zombie Mode detected. Exiting.")
                     os._exit(1) # Kill process -> Railway auto-restarts -> Connection restored
                     
-        import threading
         health_thread = threading.Thread(target=_monitor_data_health, daemon=True)
         health_thread.start()
 
