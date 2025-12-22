@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
+from nifty_scalper_bot.infra.watchdog import start_watchdog
 from collections import OrderedDict
 import random
 import pytz
@@ -2343,6 +2344,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
+    start_watchdog(market_data_manager)
     robust_provider = RobustDataProvider(
         broker_client=broker_client,
         circuit_config=CircuitBreakerConfig(
