@@ -1425,8 +1425,8 @@ class StrategyRunner:
             # C. PRODUCTION HEARTBEAT (Throttled)
             # We log this for Futures/Options to verify volume/vwap are flowing
             if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
-                 # ✅ FIX: Log only once every ~10 seconds per symbol (using timestamp modulus)
-                 if int(timestamp.timestamp()) % 10 == 0:
+                 # ✅ FIX: Log only once every ~60 seconds per symbol (using timestamp modulus)
+                 if int(timestamp.timestamp()) % 60 == 0:
                      self._logger.info(
                         f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}"
                      )
