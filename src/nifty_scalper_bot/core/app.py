@@ -2344,7 +2344,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         api_secret=config.broker.api_secret,
         access_token=config.broker.access_token,
     )
-    start_watchdog(market_data_manager)
+
     robust_provider = RobustDataProvider(
         broker_client=broker_client,
         circuit_config=CircuitBreakerConfig(
@@ -2516,7 +2516,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             None,
             resolver=instrument_resolver,
         )
-
+        
         # [FIX] Start Health Monitor (Watchdog) for Polling Mode
         # This prevents "Zombie Mode" by killing the process if data stops for 3 mins
         def _monitor_data_health():
@@ -2537,7 +2537,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     
         health_thread = threading.Thread(target=_monitor_data_health, daemon=True)
         health_thread.start()
-
+        try:
+            start_watchdog(market_data_manager)
+            LOGGER.info("✅ Data Health Monitor (Watchdog) started")
+        except Exception as exc:
+            LOGGER.warning(f"Failed to start watchdog: {exc}")
+            
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
