@@ -1644,20 +1644,51 @@ class OrderManager:
         )
         
         # ---------------------------------------------------------------------
-        # 7. EXECUTION LOOP
+        # 7. EXECUTION LOOP (With Anti-Zombie Timeout)
         # ---------------------------------------------------------------------
+        # Helper for threaded execution
+        def _broker_call(kwargs):
+            try:
+                return self._broker.place_order(**kwargs)
+            except Exception as exc:
+                return exc
+
         for attempt in range(1, 4):
             try:
-                response = self._broker.place_order(
-                    symbol=normalized_symbol, side=side, quantity=quantity, product=product,
-                    order_type=final_order_type, price=price, trigger_price=trigger_price,
-                    tag=tag, variety=variety, client_order_id=unique_client_id
-                )
+                # Prepare arguments for the call
+                call_args = {
+                    "symbol": normalized_symbol, "side": side, "quantity": quantity, 
+                    "product": product, "order_type": final_order_type, 
+                    "price": price, "trigger_price": trigger_price,
+                    "tag": tag, "variety": variety, "client_order_id": unique_client_id
+                }
+
+                # ✅ FIX: Run in thread with 3s timeout to prevent hanging
+                result_holder = {"resp": None}
                 
+                def target():
+                    result_holder["resp"] = _broker_call(call_args)
+
+                # We use the 'Thread' class already imported at top of file
+                t = Thread(target=target, name=f"ord_{unique_client_id}", daemon=True)
+                t.start()
+                t.join(timeout=3.0) # Strict 3s timeout
+
+                if t.is_alive():
+                    self._logger.critical(f"🚨 Broker API hung on attempt {attempt}! Timeout forced.")
+                    raise TimeoutError("Broker API call timed out (3s)")
+
+                response = result_holder["resp"]
+                
+                # Re-raise exceptions captured in thread
+                if isinstance(response, Exception):
+                    raise response
+
+                # --- Success Logic ---
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
                 
                 if order_id:
-                    # A. Update Trade Store (Critical for Restart Safety)
+                    # A. Update Trade Store
                     self.trade_store.update_status(trade_id, "FILLED", order_id)
 
                     # B. Register Order Locally
@@ -1673,8 +1704,6 @@ class OrderManager:
                     # C. Auto-Register Bracket
                     if stop_loss or take_profit:
                         exit_side = "SELL" if side == "BUY" else "BUY"
-                        
-                        # Sync internal type with actual type used
                         real_stop_type = OrderType.STOP_LOSS_MARKET 
                         if final_order_type == "SL": 
                             real_stop_type = OrderType.STOP_LOSS
@@ -1698,7 +1727,6 @@ class OrderManager:
                 # Fail Fast logic
                 if any(x in msg for x in ["400", "invalid", "market closed", "bad request"]):
                     self._logger.critical(f"🛑 FATAL Payload Error: {e}", extra={"event": "fatal_order_error"})
-                    # Update Store as Rejected
                     self.trade_store.update_status(trade_id, "REJECTED_FATAL")
                     return None
                 
