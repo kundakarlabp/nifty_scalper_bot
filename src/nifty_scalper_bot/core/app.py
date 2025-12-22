@@ -9,6 +9,7 @@ TLS certificate.
 
 from __future__ import annotations
 
+import threading
 import asyncio  # Required for startup reconciliation and background tasks
 from contextlib import suppress
 from dataclasses import dataclass, field, asdict, replace
@@ -22,7 +23,6 @@ from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_reso
 from collections import OrderedDict
 import random
 import pytz
-import threading
 import sqlite3
 import time as time_module
 from typing import (
