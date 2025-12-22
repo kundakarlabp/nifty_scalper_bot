@@ -2520,7 +2520,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # [FIX] Start Health Monitor (Watchdog) for Polling Mode
         # This prevents "Zombie Mode" by killing the process if data stops for 3 mins
         def _monitor_data_health():
-            import logging, time, os
+            import logging, time, os, threading
             logger = logging.getLogger("nifty_scalper_bot.watchdog")
             logger.info("✅ Data Health Monitor Started (Polling Mode)")
             
