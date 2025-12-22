@@ -1086,16 +1086,31 @@ def get_http_app() -> FastAPI:
             )
             payload = "# prometheus_metrics_render_error\n"
             media_type = "text/plain; charset=utf-8"
-        return PlainTextResponse(payload, media_type=media_type)
+    return PlainTextResponse(payload, media_type=media_type)
 
-        @app.get("/health", response_class=JSONResponse)
-        async def http_health() -> JSONResponse:  # [FIX] Aligned with decorator
-            """Serve a lightweight health snapshot for infrastructure probes."""
-            telemetry_logger.debug(
-                "Entered http_health",
-                extra={"event": "http_health_enter"},
+    # ✅ FIXED: Unindented to match the function above
+    @app.get("/health", response_class=JSONResponse)
+    async def http_health() -> JSONResponse:
+        ctx = get_latest_bot_context()
+        if not ctx:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "starting", "reason": "Context not initialized"},
             )
-            # ... rest of function
+
+        # Basic Checks
+        broker_ok = ctx.broker_client.is_connected() if ctx.broker_client else False
+        
+        status = "healthy" if broker_ok else "degraded"
+        
+        return JSONResponse(
+            content={
+                "status": status,
+                "broker_connected": broker_ok,
+                "uptime_seconds": int(time_module.monotonic() - _START_TIME),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         
         ctx = get_latest_bot_context()
         if ctx is None:
