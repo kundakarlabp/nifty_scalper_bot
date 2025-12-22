@@ -4912,7 +4912,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     
                     # Sleep for 5 minutes (300s)
                     for _ in range(300):
-                        # ✅ FIX: Use the safe 'stop_event' variable defined above
+                        # ✅ FIX: Use the safe 'stop_event' local variable
                         if stop_event and stop_event.is_set(): break
                         time_module.sleep(1)
                         
