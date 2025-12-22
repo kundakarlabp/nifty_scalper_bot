@@ -210,76 +210,109 @@ class PollingStreamer:
             self._stop.wait(sleep_for)
 
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
-        """Fetch ticks for a batch, prioritizing Quotes to ensure Volume data."""
-        timestamp_ms = int(time.time() * 1000)
+        """
+        Fetch ticks for a batch with strict 3s timeout to prevent 'Zombie Mode'.
+        Wraps existing logic in a thread to unblock the main loop if Broker API hangs.
+        """
+        if not batch:
+            return []
+
+        # Container to capture results from the thread
+        result_holder = {"ticks": []}
+
+        # 1. Define the logic wrapper (Preserving your EXACT existing flow)
+        def _fetch_logic():
+            try:
+                timestamp_ms = int(time.time() * 1000)
+                
+                # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
+                ticks = self._try_quote_bulk(batch, timestamp_ms)
+                if ticks:
+                    log_throttled(
+                        LOGGER, 
+                        "quote_fetch_success", 
+                        f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
+                        interval_sec=60.0
+                    )
+                    result_holder["ticks"] = ticks
+                    return
+
+                # --- FALLBACK: TRY LTP BULK (Price Only) ---
+                log_throttled(
+                    LOGGER,
+                    "poll_fallback_ltp",
+                    "[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)",
+                    level=30, # WARNING
+                    interval_sec=10.0
+                )
+                
+                ticks = self._try_ltp_bulk(batch, timestamp_ms)
+                if ticks:
+                    result_holder["ticks"] = ticks
+                    return
+
+                # --- LAST RESORT: SINGLE QUOTE ---
+                get_quote_single = getattr(self._broker, "get_quote_by_token", None)
+                ticks = []
+                if callable(get_quote_single):
+                    for token in batch:
+                        try:
+                            quote = get_quote_single(int(token))
+                        except Exception: 
+                            continue
+                        
+                        lp = float(quote.get("last_price", 0.0) or 0.0)
+                        if lp <= 0: continue
+                        
+                        vol = quote.get("volume", 0)
+                        avg_price = quote.get("average_price", 0.0)
+                        
+                        tick = {
+                            "instrument_token": int(token),
+                            "last_price": lp,
+                            "timestamp": timestamp_ms,
+                            "volume": vol,
+                            "average_price": avg_price
+                        }
+                        depth = quote.get("depth")
+                        if isinstance(depth, dict):
+                            tick["depth"] = depth
+                        ticks.append(tick)
+                    
+                    result_holder["ticks"] = ticks
+                    return
+
+                log_throttled(
+                    LOGGER,
+                    "poll_all_failed",
+                    "[POLL-ERR] All polling methods failed for batch",
+                    level=40, # ERROR
+                    interval_sec=5.0
+                )
+            except Exception as e:
+                # Catch internal logic errors so thread finishes cleanly
+                LOGGER.debug(f"[POLL-THREAD] Logic error: {e}")
+
+        # 2. Execute with Timeout
+        # Daemon=True ensures this thread doesn't block app shutdown
+        t = threading.Thread(target=_fetch_logic, name="poll_safe_fetch", daemon=True)
+        t.start()
         
-        # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
-        # We ignore self._require_depth check to prioritize Strategy Data Quality.
-        ticks = self._try_quote_bulk(batch, timestamp_ms)
-        if ticks:
-            # [FIX] Throttled logging: Show success heartbeat only once every 60 seconds
+        # ✅ THE FIX: Wait max 3.0 seconds. If it hangs, we move on.
+        t.join(timeout=3.0)
+
+        # 3. Check for Hang
+        if t.is_alive():
             log_throttled(
-                LOGGER, 
-                "quote_fetch_success", 
-                f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
-                interval_sec=60.0
+                LOGGER,
+                "poll_timeout_crit",
+                "🚨 CRITICAL: Broker Polling Hung! Timeout enforced (3s). Skipping batch.",
+                level=50, # CRITICAL
+                interval_sec=5.0
             )
-            return ticks
+            return []
 
-        # --- FALLBACK: TRY LTP BULK (Price Only) ---
-        # If Quote fetch failed (e.g. rate limit, 503), fall back to LTP.
-        # Log this as a warning so operators know data quality is degraded.
-        log_throttled(
-            LOGGER,
-            "poll_fallback_ltp",
-            "[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)",
-            level=30, # WARNING
-            interval_sec=10.0
-        )
-        
-        ticks = self._try_ltp_bulk(batch, timestamp_ms)
-        if ticks:
-            return ticks
-
-        # --- LAST RESORT: SINGLE QUOTE ---
-        # Very slow, used only if bulk endpoints are down.
-        get_quote_single = getattr(self._broker, "get_quote_by_token", None)
-        ticks = []
-        if callable(get_quote_single):
-            for token in batch:
-                try:
-                    quote = get_quote_single(int(token))
-                except Exception:  # noqa: BLE001
-                    LOGGER.debug("[POLL-ERR] Single quote lookup failed for token %s", int(token))
-                    continue
-                lp = float(quote.get("last_price", 0.0) or 0.0)
-                if lp <= 0:
-                    continue
-                
-                vol = quote.get("volume", 0)
-                avg_price = quote.get("average_price", 0.0)
-                
-                tick: dict[str, Any] = {
-                    "instrument_token": int(token),
-                    "last_price": lp,
-                    "timestamp": timestamp_ms,
-                    "volume": vol,
-                    "average_price": avg_price
-                }
-                depth = quote.get("depth")
-                if isinstance(depth, dict):
-                    tick["depth"] = depth
-                ticks.append(tick)
-            return ticks
-
-        log_throttled(
-            LOGGER,
-            "poll_all_failed",
-            "[POLL-ERR] All polling methods failed for batch",
-            level=40, # ERROR
-            interval_sec=5.0
-        )
-        return []
+        return result_holder["ticks"]
 
     def _try_ltp_bulk(
         self, batch: list[int], timestamp_ms: int
