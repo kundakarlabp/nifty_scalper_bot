@@ -110,6 +110,42 @@ class Signal:
         # 4. Return Short Hash
         return hashlib.md5(raw_sig.encode()).hexdigest()[:16]
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        result = {
+            "action": str(self.action),
+            "symbol": str(self.symbol),
+            "quantity": int(self.quantity),
+            "confidence": float(self.confidence),
+            "reason": str(self.reason) if self.reason else None,
+        }
+        
+        if self.stop_loss is not None:
+            result["stop_loss"] = float(self.stop_loss)
+        if self.take_profit is not None:
+            result["take_profit"] = float(self.take_profit)
+            
+        if self.metadata:
+            result["metadata"] = self._sanitize_for_json(self.metadata)
+            
+        return result
+
+    @staticmethod
+    def _sanitize_for_json(data: Any) -> Any:
+        """Recursively sanitize data for JSON serialization."""
+        if data is None: return None
+        if isinstance(data, (str, int, float, bool)): return data
+        if isinstance(data, datetime): return data.isoformat()
+        if isinstance(data, (np.integer, np.floating)): return float(data)
+        if isinstance(data, dict):
+            return {str(k): Signal._sanitize_for_json(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [Signal._sanitize_for_json(item) for item in data]
+        try:
+            return str(data)
+        except:
+            return "<unserializable>"
+
 
 class Strategy(ABC):
     """Abstract base class for trading strategies."""
