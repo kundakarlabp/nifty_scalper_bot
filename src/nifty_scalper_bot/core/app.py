@@ -1086,9 +1086,9 @@ def get_http_app() -> FastAPI:
             )
             payload = "# prometheus_metrics_render_error\n"
             media_type = "text/plain; charset=utf-8"
-    return PlainTextResponse(payload, media_type=media_type)
+        return PlainTextResponse(payload, media_type=media_type)
 
-    # ✅ FIXED: Unindented to match the function above
+    # ✅ FIXED: Kept unindented (OUTSIDE the function)
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
         ctx = get_latest_bot_context()
