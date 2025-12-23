@@ -4126,9 +4126,12 @@ class OrderManager:
             
             with self._lock:
                 for oid, d in data.items():
-                    # Restore Enums
-                    if 'status' in d: d['status'] = OrderStatus[d['status']]
-                    if 'order_type' in d: d['order_type'] = OrderType[d['order_type']]
+                    # ✅ FIX: Handle Case Sensitivity (Force Upper)
+                    if 'status' in d: 
+                        d['status'] = OrderStatus[str(d['status']).upper()]
+                    
+                    if 'order_type' in d: 
+                        d['order_type'] = OrderType[str(d['order_type']).upper()]
                     
                     # Clean up fields that shouldn't be loaded directly if they changed in code
                     # (Optional safety, usually OrderDetails **d works fine)
