@@ -781,8 +781,10 @@ class BracketManager:
                     "stop_loss": b.stop_loss,
                     "take_profit": b.take_profit,
                     "trailing_enabled": b.trailing_enabled,
-                    "status": b.status,
+                    "status": "ACTIVE" if b.active else "INACTIVE",
                     "created_at": b.created_at
+                    "highest_ltp": b.highest_ltp,
+                    "lowest_ltp": b.lowest_ltp
                 }
         
         try:
