@@ -4378,60 +4378,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         shadow_trader.disable_live_callback = _force_shadow
 
-    
-
-
-def _validate_config(config: AppConfig) -> None:
-    if not config.broker.api_key or not config.broker.api_secret:
-        raise ValueError("Broker credentials are required")
-    if not config.broker.access_token:
-        raise ValueError("Broker access token is required")
-    if config.ratelimit.orders.capacity <= 0:
-        raise ValueError("Order rate limit capacity must be positive")
-    LOGGER.debug("Configuration validated successfully")
-def force_enable_trading_override() -> str:
-    """
-    Emergency override to force enable trading by resetting all guards.
-    Usage: Call from Telegram or REPL.
-    """
-    ctx = get_latest_bot_context()
-    if not ctx:
-        return "❌ No Bot Context found."
-
-    logs = []
-    
-    # 1. Force Session Valid
-    if ctx.session_guard:
-        ctx.session_guard.mark_session_valid()
-        ctx.session_guard.set_allow_out_of_hours(True)
-        ctx.out_of_hours_override = True
-        logs.append("✅ Session Guard Force-Validated (Out-of-hours allowed)")
-
-    # 2. Reset Risk Breaker
-    if ctx.risk_manager:
-        ctx.risk_manager.reset_on_start(override=True)
-        # Manually clear flags if needed
-        if hasattr(ctx.risk_manager, "_breaker_tripped"):
-            ctx.risk_manager._breaker_tripped = False
-        logs.append("✅ Risk Manager Reset")
-
-    # 3. Enable Live Orders
-    if ctx.safe_order_manager:
-        ctx.safe_order_manager.set_live_enabled(True)
-        ctx.shadow_mode_enabled = False
-        logs.append("✅ Live Trading Enabled (Shadow Mode OFF)")
-
-    LOGGER.critical(f"🚨 MANUAL OVERRIDE ACTIVATED: {', '.join(logs)}")
-    return "\n".join(logs)
-
-async def startup_sequence(ctx: BotContext) -> None:
-    """Execute startup sequence with Smart Hydration and Option-Only Trading."""
-    config = ctx.config 
-    settings = ctx.settings
-
-    LOGGER.info("Starting Nifty Scalper Bot...")
-
-    telegram_cfg = getattr(ctx.config, "telegram", None)
+    telegram_cfg = getattr(config, "telegram", None)
     ctx.telegram_bot = None
     controller = _HTTP_CONTROLLER
     telegram_bot_instance: TelegramBot | None = None
@@ -4694,7 +4641,55 @@ async def startup_sequence(ctx: BotContext) -> None:
         LOGGER.info("Telegram enabled for chat_id=%s", telegram_chat_id)
 
     return ctx
+
+
+def _validate_config(config: AppConfig) -> None:
+    if not config.broker.api_key or not config.broker.api_secret:
+        raise ValueError("Broker credentials are required")
+    if not config.broker.access_token:
+        raise ValueError("Broker access token is required")
+    if config.ratelimit.orders.capacity <= 0:
+        raise ValueError("Order rate limit capacity must be positive")
+    LOGGER.debug("Configuration validated successfully")
+def force_enable_trading_override() -> str:
+    """
+    Emergency override to force enable trading by resetting all guards.
+    Usage: Call from Telegram or REPL.
+    """
+    ctx = get_latest_bot_context()
+    if not ctx:
+        return "❌ No Bot Context found."
+
+    logs = []
     
+    # 1. Force Session Valid
+    if ctx.session_guard:
+        ctx.session_guard.mark_session_valid()
+        ctx.session_guard.set_allow_out_of_hours(True)
+        ctx.out_of_hours_override = True
+        logs.append("✅ Session Guard Force-Validated (Out-of-hours allowed)")
+
+    # 2. Reset Risk Breaker
+    if ctx.risk_manager:
+        ctx.risk_manager.reset_on_start(override=True)
+        # Manually clear flags if needed
+        if hasattr(ctx.risk_manager, "_breaker_tripped"):
+            ctx.risk_manager._breaker_tripped = False
+        logs.append("✅ Risk Manager Reset")
+
+    # 3. Enable Live Orders
+    if ctx.safe_order_manager:
+        ctx.safe_order_manager.set_live_enabled(True)
+        ctx.shadow_mode_enabled = False
+        logs.append("✅ Live Trading Enabled (Shadow Mode OFF)")
+
+    LOGGER.critical(f"🚨 MANUAL OVERRIDE ACTIVATED: {', '.join(logs)}")
+    return "\n".join(logs)
+
+async def startup_sequence(ctx: BotContext) -> None:
+    """Execute startup sequence with Smart Hydration and Option-Only Trading."""
+
+    LOGGER.info("Starting Nifty Scalper Bot...")
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
