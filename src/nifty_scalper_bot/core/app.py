@@ -1012,12 +1012,10 @@ def get_http_app() -> FastAPI:
     if _HTTP_APP is not None:
         return _HTTP_APP
     
-    with _http_app_lock:
-        # Double-check after acquiring lock
-        if _HTTP_APP is not None:
+    if _HTTP_APP is not None:
             return _HTTP_APP
         
-        settings = get_settings()
+    settings = get_settings()
 
     telemetry_logger = get_logger("telegram.bootstrap")
 
