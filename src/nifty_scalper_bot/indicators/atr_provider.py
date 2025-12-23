@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from time import time
 import threading
 import math
+from nifty_scalper_bot.utils.logging import get_logger
 
 @dataclass
 class ATRSnapshot:
