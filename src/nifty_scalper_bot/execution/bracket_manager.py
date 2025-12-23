@@ -8,6 +8,8 @@ from __future__ import annotations
 import threading
 from threading import RLock
 import time
+_THREADING_MODULE = threading
+_RLOCK_CLASS = RLock
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, cast, runtime_checkable
 
@@ -159,7 +161,7 @@ class BracketManager:
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
         
-        self._lock = RLock()
+        self._lock = _RLOCK_CLASS()
         self._running = True
         
         # Configuration
