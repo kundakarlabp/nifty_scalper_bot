@@ -29,6 +29,7 @@ class SafeATRProvider:
         self._max_age = max_cache_age
         self._cache: dict[str, ATRSnapshot] = {}
         self._lock = threading.RLock()
+        self._logger = get_logger(__name__)
     
     def get_atr(self, symbol: str, *, fallback: float | None = None) -> ATRSnapshot | None:
         """
