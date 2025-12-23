@@ -4426,6 +4426,8 @@ def force_enable_trading_override() -> str:
 
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
+    config = ctx.config 
+    settings = ctx.settings
 
     LOGGER.info("Starting Nifty Scalper Bot...")
 
