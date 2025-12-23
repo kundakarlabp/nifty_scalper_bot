@@ -3276,13 +3276,16 @@ class OrderManager:
             self._bracket_index.pop(order.order_id, None)
             return
             
+        # ✅ FIX: Safe Status Access (Handle String vs Enum)
+        status_val = order.status.value if hasattr(order.status, "value") else str(order.status)
+
         self._logger.debug(
             "Entered _handle_bracket_update",
             extra={
                 "event": "handle_bracket_update",
                 "entry_id": entry_id,
                 "order_id": order.order_id,
-                "status": order.status.value,
+                "status": status_val,
             },
         )
         
@@ -3895,7 +3898,7 @@ class OrderManager:
                 "order_id": order.order_id,
                 "symbol": order.symbol,
                 "side": order.side,
-                "status": order.status.value,
+                "status": order.status.value if hasattr(order.status, "value") else str(order.status),
                 "quantity": order.quantity,
                 "filled_quantity": order.filled_quantity,
                 "price": order.price,
