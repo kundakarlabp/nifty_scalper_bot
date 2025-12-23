@@ -818,7 +818,20 @@ class BracketManager:
                         created_at=d.get("created_at", time.time()),
                         status=d.get("status", "ACTIVE")
                     )
-                    self.register_bracket(b)
+                    # ✅ FIX: Use the correct method name and mapping logic
+                    with self._lock:
+                        self._brackets[eid] = b
+                        if b.symbol not in self._symbol_map:
+                            self._symbol_map[b.symbol] = []
+                        self._symbol_map[b.symbol].append(eid)
+                        
+                        # Initialize trailing controller if needed
+                        if b.trailing_enabled and AdaptiveTrailingController:
+                             self._trailing_controllers[eid] = AdaptiveTrailingController(
+                                entry_price=b.entry_price,
+                                side=b.side,
+                                tick_size=0.05
+                            )
             LOGGER.info(f"♻️ Restored {len(data)} virtual brackets from disk.")
         except Exception as e:
             LOGGER.error(f"Failed to load bracket state: {e}")
