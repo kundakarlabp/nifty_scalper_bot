@@ -3071,9 +3071,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 indicator_engine=indicator_engine,
                 market_data=market_data_manager
             )
-# ✅ FORCE DISABLE (Temporary Safety)
-LOGGER.warning("BracketManager temporarily disabled due to threading scope issue")
-bracket_manager = None
             
             # Use the BracketManager's internal toggle to avoid shadowing the flag.
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
