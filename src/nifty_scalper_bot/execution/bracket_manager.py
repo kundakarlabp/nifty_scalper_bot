@@ -328,6 +328,8 @@ class BracketManager:
                     # Reset high/low water marks to fill price
                     bracket.highest_ltp = fill_price
                     bracket.lowest_ltp = fill_price
+                # ✅ FIX: Persist activation
+                self.save_state()
 
     # --------------------------------------------------------------------------
     # 2. MARKET DATA INGESTION (NEW)
@@ -361,6 +363,8 @@ class BracketManager:
                 target_bracket.sl_trigger_price = price
                 target_bracket.updated_at = time.time()
                 LOGGER.info(f"🔄 Dynamic ATR Trail: {target_bracket.symbol} SL {old_sl} -> {price}")
+                # ✅ FIX: Persist trailing update
+                self.save_state()
                 return True
         return False
 
@@ -425,6 +429,10 @@ class BracketManager:
         # B. Delegate to World-Class Controller (If attached)
         if bracket.entry_order_id in self._trailing_controllers:
             ctrl = self._trailing_controllers[bracket.entry_order_id]
+            # ✅ FIX: Inject dynamic ATR from feed
+            current_atr = self._current_atr.get(bracket.symbol)
+            if current_atr and hasattr(ctrl, "update_atr"):
+                ctrl.update_atr(current_atr)
             # The controller calculates using ATR and calls _virtual_modify_sl if needed
             # We updated bracket.last_ltp in on_tick, so controller reads fresh data
             ctrl.on_tick(None) 
@@ -563,6 +571,8 @@ class BracketManager:
             
             if not is_partial or bracket.remaining_quantity <= 0:
                 bracket.active = False # Deactivate monitoring
+            # ✅ FIX: Persist exit state
+            self.save_state()
             
         LOGGER.warning(f"⚡ EXECUTING EXIT: {bracket.symbol} | Qty: {qty} | Reason: {reason}")
 
@@ -721,6 +731,8 @@ class BracketManager:
                 # Cleanup Controller
                 if entry_id in self._trailing_controllers:
                     del self._trailing_controllers[entry_id]
+            # ✅ FIX: Persist removal
+            self.save_state()
 
             # Cleanup reverse index
             if entry_id in self._order_to_entry:
