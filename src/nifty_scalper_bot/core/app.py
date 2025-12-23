@@ -4429,7 +4429,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     LOGGER.info("Starting Nifty Scalper Bot...")
 
-    telegram_cfg = getattr(config, "telegram", None)
+    telegram_cfg = getattr(ctx.config, "telegram", None)
     ctx.telegram_bot = None
     controller = _HTTP_CONTROLLER
     telegram_bot_instance: TelegramBot | None = None
