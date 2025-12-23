@@ -806,7 +806,7 @@ class BracketManager:
             with self._lock:
                 for eid, d in data.items():
                     # Reconstruct BracketOrder object
-                    b = BracketOrder(
+                    b = BracketState(
                         entry_id=eid,
                         symbol=d["symbol"],
                         quantity=d["quantity"],
