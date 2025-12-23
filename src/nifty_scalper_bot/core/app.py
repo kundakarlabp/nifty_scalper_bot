@@ -388,7 +388,6 @@ def _try_warm_instruments(
 _HTTP_APP: FastAPI | None = None
 _HTTP_NOTIFIER: TelegramEnhancedNotifier | None = None
 _HTTP_CONTROLLER: TelegramWebhookController | None = None
-_http_app_lock = threading.Lock()
 _LATEST_CTX: "BotContext | None" = None
 
 
