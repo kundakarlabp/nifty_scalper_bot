@@ -3624,7 +3624,13 @@ class OrderManager:
                 self._logger.info(f"🗑️ Cancelling Virtual Bracket {order_id}")
                 self._bracket_manager.unregister_bracket(order_id)
                 # We continue to cancel the physical order just in case it's still OPEN at broker
-
+        # ✅ OPTIMIZATION: Don't cancel if already finished
+        with self._lock:
+            order = self._orders.get(order_id)
+            if order and order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]:
+                self._logger.info(f"⏭️ Skipping cancel for {order_id}: Already {order.status.name}")
+                return True
+                
         # 2. Standard Broker Cancel
         cancel = getattr(self._broker, "cancel_order", None)
         if cancel is None:
@@ -4088,6 +4094,37 @@ class OrderManager:
         except Exception as e:
             self._logger.debug(f"Bulk poll failed: {e}")
 
+    def _check_zombie_orders(self) -> None:
+        """
+        🛡️ SAFETY: Auto-cancel orders stuck in PENDING for too long (> 45s).
+        Prevents margin blockage and 'ghost' fills.
+        """
+        now = time.time()
+        ZOMBIE_TIMEOUT = 45.0 # Seconds
+        
+        zombies = []
+        with self._lock:
+            for oid, order in self._orders.items():
+                if order.status == OrderStatus.PENDING:
+                    # Check age
+                    age = now - order.timestamp.timestamp()
+                    if age > ZOMBIE_TIMEOUT:
+                        zombies.append(oid)
+        
+        if not zombies:
+            return
+
+        self._logger.warning(
+            f"🧟 Found {len(zombies)} ZOMBIE orders (> {ZOMBIE_TIMEOUT}s). Killing...",
+            extra={"event": "zombie_cleanup", "orders": zombies}
+        )
+        
+        for oid in zombies:
+            try:
+                self.cancel_order(oid)
+            except Exception:
+                pass
+
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Crash Recovery)
     # ----------------------------------------------------------------
@@ -4161,6 +4198,8 @@ class OrderManager:
                 # CRITICAL: Fast Poll for Fills (Every 2 seconds)
                 if now - last_poll_time >= 2.0:
                     self._poll_pending_orders()
+                    # ✅ FIX: Kill stuck orders
+                    self._check_zombie_orders()
                     last_poll_time = now
                 
                 # Slow Status Report (Every 60 seconds)
