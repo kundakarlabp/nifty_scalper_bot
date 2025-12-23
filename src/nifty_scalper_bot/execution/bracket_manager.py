@@ -8,6 +8,9 @@ from __future__ import annotations
 import threading
 from threading import RLock
 import time
+import json
+import os
+from pathlib import Path
 _THREADING_MODULE = threading
 _RLOCK_CLASS = RLock
 from dataclasses import dataclass, field
@@ -747,3 +750,63 @@ class BracketManager:
                 "atr_tracked_symbols": len(self._current_atr),
                 "adaptive_controllers": len(self._trailing_controllers)
             }
+    # ----------------------------------------------------------------
+    # 💾 PERSISTENCE LAYER (Add to BracketManager)
+    # ----------------------------------------------------------------
+    def _get_storage_path(self) -> Path:
+        return Path("data/virtual_brackets.json")
+
+    def save_state(self) -> None:
+        """Persist active brackets to disk."""
+        data = {}
+        with self._lock:
+            for eid, b in self._brackets.items():
+                data[eid] = {
+                    "symbol": b.symbol,
+                    "quantity": b.quantity,
+                    "entry_price": b.entry_price,
+                    "side": b.side,
+                    "stop_loss": b.stop_loss,
+                    "take_profit": b.take_profit,
+                    "trailing_enabled": b.trailing_enabled,
+                    "status": b.status,
+                    "created_at": b.created_at
+                }
+        
+        try:
+            path = self._get_storage_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            LOGGER.error(f"Failed to save bracket state: {e}")
+
+    def load_state(self) -> None:
+        """Restore brackets from disk on startup."""
+        path = self._get_storage_path()
+        if not path.exists():
+            return
+
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            
+            with self._lock:
+                for eid, d in data.items():
+                    # Reconstruct BracketOrder object
+                    b = BracketOrder(
+                        entry_id=eid,
+                        symbol=d["symbol"],
+                        quantity=d["quantity"],
+                        entry_price=d["entry_price"],
+                        side=d["side"],
+                        stop_loss=d["stop_loss"],
+                        take_profit=d["take_profit"],
+                        trailing_enabled=d.get("trailing_enabled", False),
+                        created_at=d.get("created_at", time.time()),
+                        status=d.get("status", "ACTIVE")
+                    )
+                    self.register_bracket(b)
+            LOGGER.info(f"♻️ Restored {len(data)} virtual brackets from disk.")
+        except Exception as e:
+            LOGGER.error(f"Failed to load bracket state: {e}")
