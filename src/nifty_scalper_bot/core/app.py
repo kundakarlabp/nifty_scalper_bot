@@ -3985,6 +3985,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     global _LATEST_CTX
     _LATEST_CTX = ctx
+    # Initialize Telegram Bot with all components wired
+    try:
+        _setup_telegram(ctx)
+        LOGGER.info("✅ Telegram Bot initialized", extra={"event": "telegram_ready"})
+    except Exception as telegram_exc:
+        LOGGER.error(f"❌ Telegram initialization failed: {telegram_exc}", exc_info=True)
+
     if _HTTP_APP is not None:
         try:
             _HTTP_APP.state.bot_context = ctx
