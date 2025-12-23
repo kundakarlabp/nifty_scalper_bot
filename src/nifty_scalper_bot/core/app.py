@@ -5039,7 +5039,12 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             extra={"event": "orphan_detected", "symbol": norm_symbol}
                         )
                         
-                        avg_price = float(pos.average_price or pos.last_price or 0.0)
+                        avg_price = float(
+                            getattr(pos, "average_price", 0.0) or 
+                            getattr(pos, "buy_price", 0.0) or 
+                            getattr(pos, "last_price", 0.0) or 
+                            0.0
+                        )
 
                         # Call the Master Guard Method
                         om.guard_orphan_position(
