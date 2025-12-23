@@ -782,7 +782,7 @@ class BracketManager:
                     "take_profit": b.take_profit,
                     "trailing_enabled": b.trailing_enabled,
                     "status": "ACTIVE" if b.active else "INACTIVE",
-                    "created_at": b.created_at
+                    "created_at": b.created_at,
                     "highest_ltp": b.highest_ltp,
                     "lowest_ltp": b.lowest_ltp
                 }
