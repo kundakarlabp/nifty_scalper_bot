@@ -3093,23 +3093,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 except AttributeError:
                     LOGGER.debug("IndicatorEngine does not support callbacks (skipping feed wiring)")
 
-            # 2. Tick Feed (Updates every 700ms)
-            if market_data_manager:
-                # We reuse the polling callback system if available
-                # Note: Your polling loop (startup_sequence) already calls _on_poll_tick -> bm.on_tick
-                # So explicit wiring here might be redundant if _on_poll_tick handles it.
-                # However, adding a direct callback ensures robustness.
-                
-                if hasattr(market_data_manager, "register_tick_callback"):
-                    def _feed_ticks_to_bracket(tick: dict) -> None:
-                        symbol = tick.get("symbol")
-                        ltp = tick.get("ltp") or tick.get("last_price")
-                        if symbol and ltp:
-                            # Forward directly to the Sniper Engine
-                            bracket_manager.on_tick(str(symbol), float(ltp))
-                            
-                    market_data_manager.register_tick_callback(_feed_ticks_to_bracket)
-                    LOGGER.info("✅ Tick Feed: MarketDataManager -> BracketManager")
             LOGGER.info(
                 "Bracket manager wired",
                 extra={
