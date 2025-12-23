@@ -8763,117 +8763,123 @@ class OrderManager:
     def guard_orphan_position(self, symbol: str, quantity: int, average_price: float) -> bool:
         """
         Master method to Adopt AND Protect a naked position.
-        1. Creates Order Record (Accounting) - Reuses existing internal method
+        1. Creates Order Record (Accounting)
         2. Creates Virtual Bracket (Protection)
         3. Subscribes to Ticks (Data)
         """
         if not self._bracket_manager or quantity == 0:
             return False
 
-        # --- STEP 1: Fix Accounting (Reuse your existing code) ---
-        # We ensure the OrderManager has a record of this trade
+        # --- Helper: Round to nearest 0.05 (Exchange Tick Size) ---
+        def round_tick(price: float) -> float:
+            return round(price * 20) / 20
+
+        # --- STEP 1: Fix Accounting (Reuse existing code) ---
         try:
-            # Construct the dict expected by your existing _adopt_orphan_position
-            orphan_data = {
-                'qty': quantity,
-                'price': average_price
-            }
-            # Call the existing internal method to register the order locally
+            orphan_data = {'qty': quantity, 'price': average_price}
             self._adopt_orphan_position(symbol, orphan_data)
         except Exception as e:
             self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
 
         # --- STEP 2: Fix Protection (The Sniper Logic) ---
-        import time
-        # Sanitize symbol for ID
-        safe_symbol = symbol.replace(':', '_')
-        synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
-        
-        side = "BUY" if quantity > 0 else "SELL"
-        abs_qty = abs(quantity)
-        
-        # Calculate Levels (Dynamic ATR -> Fallback Fixed %)
-        sl_price, tp_price = 0.0, 0.0
-        used_atr = False
-        
-        # Attempt ATR Calculation
-        if hasattr(self, '_indicator_engine') and self._indicator_engine:
-            try:
-                atr = self._indicator_engine.compute_atr(symbol)
-                if atr and atr > 0:
-                    sl_dist = atr * 2.0
-                    tp_dist = atr * 3.0
-                    if side == "BUY":
-                        sl_price = round(average_price - sl_dist, 1)
-                        tp_price = round(average_price + tp_dist, 1)
-                    else:
-                        sl_price = round(average_price + sl_dist, 1)
-                        tp_price = round(average_price - tp_dist, 1)
-                    used_atr = True
-            except Exception:
-                pass
-
-        # Fallback to Fixed % (10% SL, 20% TP)
-        if sl_price <= 0:
-            sl_pct = 0.10
-            tp_pct = 0.20
-            if side == "BUY":
-                sl_price = round(average_price * (1 - sl_pct), 1)
-                tp_price = round(average_price * (1 + tp_pct), 1)
-            else:
-                sl_price = round(average_price * (1 + sl_pct), 1)
-                tp_price = round(average_price * (1 - tp_pct), 1)
-
-        strategy_tag = "auto_guard_atr" if used_atr else "auto_guard_fixed"
-
-        self._logger.warning(
-            f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
-            f"SL: {sl_price} | TP: {tp_price} | Mode: {strategy_tag.upper()}",
-            extra={"event": "orphan_guarding", "symbol": symbol}
-        )
-
-        # Register with Sniper Engine
-        self._bracket_manager.register_virtual_bracket(
-            order_id=synthetic_id,
-            symbol=symbol,
-            side=side,
-            qty=abs_qty,
-            price=average_price,
-            sl=sl_price,
-            tp=tp_price,
-            tag=strategy_tag,
-            activate_immediately=True
-        )
-        
-        # --- STEP 3: Fix Data (Tick Subscription) ---
-        if self._market_data:
-            # Initialize set if missing
-            if not hasattr(self, '_bracket_tick_subscriptions'):
-                self._bracket_tick_subscriptions = set()
+        try:
+            import time
+            safe_symbol = symbol.replace(':', '_')
+            synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
             
-            # Only subscribe if not already subscribed
-            if symbol not in self._bracket_tick_subscriptions:
-                
-                # Define the Bridge Function
-                def bracket_tick_handler(tick_data: dict) -> None:
-                    try:
-                        ltp = (tick_data.get('ltp') or 
-                               tick_data.get('last_price') or 
-                               tick_data.get('price'))
-                        
-                        if ltp and float(ltp) > 0:
-                            self._bracket_manager.on_tick(symbol, float(ltp))
-                    except Exception:
-                        pass 
-
+            side = "BUY" if quantity > 0 else "SELL"
+            abs_qty = abs(quantity)
+            
+            # Calculate Levels (Dynamic ATR -> Fallback Fixed %)
+            sl_price, tp_price = 0.0, 0.0
+            used_atr = False
+            
+            # Attempt ATR Calculation
+            if hasattr(self, '_indicator_engine') and self._indicator_engine:
                 try:
-                    # Subscribe passing BOTH symbol AND callback
-                    self._market_data.subscribe(symbol, bracket_tick_handler)
-                    self._bracket_tick_subscriptions.add(symbol)
+                    atr = self._indicator_engine.compute_atr(symbol)
+                    if atr and isinstance(atr, (int, float)) and atr > 0:
+                        sl_dist = atr * 2.0
+                        tp_dist = atr * 3.0
+                        if side == "BUY":
+                            sl_price = round_tick(average_price - sl_dist)
+                            tp_price = round_tick(average_price + tp_dist)
+                        else:
+                            sl_price = round_tick(average_price + sl_dist)
+                            tp_price = round_tick(average_price - tp_dist)
+                        used_atr = True
+                except Exception:
+                    pass
+
+            # Fallback to Fixed % (10% SL, 20% TP)
+            if sl_price <= 0:
+                sl_pct = 0.10
+                tp_pct = 0.20
+                if side == "BUY":
+                    sl_price = round_tick(average_price * (1 - sl_pct))
+                    tp_price = round_tick(average_price * (1 + tp_pct))
+                else:
+                    sl_price = round_tick(average_price * (1 + sl_pct))
+                    tp_price = round_tick(average_price * (1 - tp_pct))
+
+            strategy_tag = "auto_guard_atr" if used_atr else "auto_guard_fixed"
+
+            self._logger.info(
+                f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
+                f"SL: {sl_price} | TP: {tp_price} | Mode: {strategy_tag.upper()}",
+                extra={"event": "orphan_guarding", "symbol": symbol}
+            )
+
+            # Register with Sniper Engine
+            self._bracket_manager.register_virtual_bracket(
+                order_id=synthetic_id,
+                symbol=symbol,
+                side=side,
+                qty=abs_qty,
+                price=average_price,
+                sl=sl_price,
+                tp=tp_price,
+                tag=strategy_tag,
+                activate_immediately=True
+            )
+            
+            # ✅ CRITICAL: Force Confirmation & Persistence
+            self._bracket_manager.confirm_entry_fill(synthetic_id, average_price)
+            
+        except Exception as e:
+            self._logger.error(f"Failed to create guard bracket: {e}")
+            return False
+
+        # --- STEP 3: Fix Data (Tick Subscription) ---
+        try:
+            if self._market_data:
+                # Lazy Init of Subscription Set
+                if not hasattr(self, '_bracket_tick_subscriptions'):
+                    self._bracket_tick_subscriptions = set()
+                
+                # Subscribe only if needed
+                if symbol not in self._bracket_tick_subscriptions:
                     
-                    self._logger.info(f"🔔 BracketManager subscribed to {symbol}")
-                except Exception as e:
-                    self._logger.error(f"Failed to subscribe bracket ticks: {e}")
+                    def bracket_tick_handler(tick_data: dict) -> None:
+                        try:
+                            ltp = (tick_data.get('ltp') or 
+                                   tick_data.get('last_price') or 
+                                   tick_data.get('price'))
+                            if ltp and float(ltp) > 0:
+                                self._bracket_manager.on_tick(symbol, float(ltp))
+                        except Exception:
+                            pass 
+
+                    if hasattr(self._market_data, 'subscribe'):
+                        self._market_data.subscribe(symbol, bracket_tick_handler)
+                        self._bracket_tick_subscriptions.add(symbol)
+                        self._logger.info(f"🔔 BracketManager subscribed to {symbol}")
+                    else:
+                        self._logger.warning("MarketDataManager missing 'subscribe' method.")
+
+        except Exception as e:
+            self._logger.error(f"Failed to subscribe bracket ticks: {e}")
+            # We don't return False here as bracket is already created
 
         return True
 
