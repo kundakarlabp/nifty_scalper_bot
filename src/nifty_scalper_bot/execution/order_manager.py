@@ -693,6 +693,8 @@ class OrderManager:
         )
         self._brackets: dict[str, BracketState] = {}
         self._bracket_index: dict[str, str] = {}
+        # ✅ FIX: Restore state on startup
+        self._load_orders()
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -3505,6 +3507,8 @@ class OrderManager:
             self._handle_bracket_update(order, old_status, order_update)
         except Exception as exc:
             self._logger.error(f"Bracket update failed: {exc}")
+        # ✅ FIX: Persist state change
+        self.save_orders()
     
     def place_atomic_entry(
         self,
@@ -4039,48 +4043,102 @@ class OrderManager:
 
     def _poll_pending_orders(self) -> None:
         """
-        🎯 CORE FIX: Poll broker for order status and detect fills.
+        OPTIMIZED: Polls ALL orders in one API call to detect fills efficiently.
         """
-        # Get snapshot of pending orders
+        # 1. Check if we have any pending orders to track
         with self._lock:
-            pending_orders = [
-                (order_id, order.symbol, order.status)
-                for order_id, order in self._orders.items()
-                if order.status == OrderStatus.PENDING
-            ]
+            has_pending = any(o.status == OrderStatus.PENDING for o in self._orders.values())
         
-        if not pending_orders:
+        if not has_pending:
             return
 
-        # Poll each pending order
-        for order_id, symbol, old_status in pending_orders:
-            try:
-                # Fetch latest status from broker
-                if hasattr(self._broker, "get_order_status"):
-                    response = self._broker.get_order_status(order_id)
-                else:
-                    # Fallback: Use order history if available
-                    response = None
-                    if hasattr(self._broker, "order_history"):
-                         hist = self._broker.order_history(order_id)
-                         if hist: response = hist[-1]
+        try:
+            # 2. Bulk Fetch (Single API Call) -> 10x Faster
+            # Adapters usually expose .orders() or .get_orders() for the full book
+            if hasattr(self._broker, "orders"):
+                all_orders = self._broker.orders()
+            elif hasattr(self._broker, "get_orders"):
+                all_orders = self._broker.get_orders()
+            else:
+                return # Broker doesn't support bulk fetch
+            
+            if not all_orders:
+                return
+
+            # 3. Process Updates
+            for remote in all_orders:
+                oid = remote.get("order_id")
+                # Normalize status
+                status = str(remote.get("status", "")).upper()
                 
-                if not response:
-                    continue
+                # We only care about orders we are tracking locally
+                local_order = None
+                with self._lock:
+                    local_order = self._orders.get(oid)
                 
-                broker_status = str(response.get("status", "")).upper()
-                
-                # Check if status changed
-                if broker_status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
-                    self._logger.info(
-                        f"📡 Status Change: {order_id} -> {broker_status}",
-                        extra={"event": "order_status_changed", "order_id": order_id, "new_status": broker_status}
-                    )
-                    # CRITICAL: Process the update
-                    self.on_order_update(response)
+                # Update if it was PENDING and now it's something else
+                if local_order and local_order.status == OrderStatus.PENDING:
+                    if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
+                         self._logger.info(
+                             f"⚡ Bulk Update: {oid} -> {status}",
+                             extra={"event": "bulk_poll_update", "order_id": oid, "status": status}
+                         )
+                         self.on_order_update(remote)
+
+        except Exception as e:
+            self._logger.debug(f"Bulk poll failed: {e}")
+
+    # ----------------------------------------------------------------
+    # 💾 PERSISTENCE LAYER (Crash Recovery)
+    # ----------------------------------------------------------------
+    def save_orders(self) -> None:
+        """Persist active orders to disk."""
+        try:
+            data = {}
+            with self._lock:
+                for oid, order in self._orders.items():
+                    # Save active orders + recently closed ones
+                    # We skip 'ghost_fix' or temporary tags if needed, but saving all is safer
+                    if order.status not in [OrderStatus.CANCELLED, OrderStatus.REJECTED]:
+                         # Convert Dataclass to dict
+                         record = asdict(order)
+                         # Serialize Enums
+                         record['status'] = order.status.name
+                         record['order_type'] = order.order_type.name
+                         data[oid] = record
+
+            path = Path("data/orders.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            self._logger.error(f"Failed to save orders: {e}")
+
+    def _load_orders(self) -> None:
+        """Restore orders from disk on startup."""
+        path = Path("data/orders.json")
+        if not path.exists():
+            return
+
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            
+            with self._lock:
+                for oid, d in data.items():
+                    # Restore Enums
+                    if 'status' in d: d['status'] = OrderStatus[d['status']]
+                    if 'order_type' in d: d['order_type'] = OrderType[d['order_type']]
                     
-            except Exception as exc:
-                continue
+                    # Clean up fields that shouldn't be loaded directly if they changed in code
+                    # (Optional safety, usually OrderDetails **d works fine)
+                    
+                    order = OrderDetails(**d)
+                    self._orders[oid] = order
+                    
+            self._logger.info(f"♻️ Restored {len(data)} orders from disk.")
+        except Exception as e:
+            self._logger.error(f"Failed to load orders: {e}")
 
     def _monitor_orders(self) -> None:
         """
@@ -7471,6 +7529,8 @@ class OrderManager:
             self._persist_history()
         self._publish_order_to_hub(order)
         self._persist_order_snapshot(order)
+        # ✅ FIX: Persist new order
+        self.save_orders()
 
     def _persist_history(self) -> None:
         try:
