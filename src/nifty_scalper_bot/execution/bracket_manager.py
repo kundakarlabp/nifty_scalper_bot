@@ -36,13 +36,8 @@ if TYPE_CHECKING:
 # --------------------------------------------------------------------------
 # METRICS INTEGRATION
 # --------------------------------------------------------------------------
-try:
-    from nifty_scalper_bot.infra.metrics import METRICS as GLOBAL_METRICS
-    METRICS_AVAILABLE = True
-    METRICS = cast("MetricsCollector | None", GLOBAL_METRICS)
-except ImportError:
-    METRICS_AVAILABLE = False
-    METRICS = cast("MetricsCollector | None", None)
+METRICS_AVAILABLE = False
+METRICS = None
 
 LOGGER = get_logger(__name__)
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
