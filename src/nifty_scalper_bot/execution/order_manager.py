@@ -3465,34 +3465,46 @@ class OrderManager:
             )  
 
     def on_order_update(self, order_update: dict) -> None:
-        """
-        Central Hub for Broker Updates. Syncs Brackets & Orphans.
-        Called by WebSocket or Polling loop to keep state 'World Class' sync.
-        """
+        """🎯 CRITICAL: Central hub for broker order updates."""
         order_id = order_update.get("order_id")
-        status = order_update.get("status")
-        
         if not order_id: return
-
-        # 1. VIRTUAL BRACKET SYNC
-        if self._bracket_manager:
-            # A. Confirm Entry Fill (Activates the Sniper)
-            if status in ["FILLED", "COMPLETE"]:
-                fill_price = float(order_update.get("average_price") or order_update.get("price") or 0.0)
-                self._bracket_manager.confirm_entry_fill(order_id, fill_price)
+        
+        status = str(order_update.get("status", "")).upper()
+        
+        with self._lock:
+            order = self._orders.get(order_id)
+            if not order: return
             
-            # B. Check for Manual Exits (Orphan Cleanup)
-            # If we see a COMPLETED order that isn't our entry, it might be a manual exit.
-            # We assume position_manager updates are happening in parallel, 
-            # so we trigger a sync check based on symbol.
-            symbol = order_update.get("tradingsymbol") or order_update.get("instrument_token")
-            if symbol and self._positions:
-                # Resolve pure symbol name if token was passed
-                # (You might need a helper here depending on your broker, 
-                # but let's assume 'tradingsymbol' is available or passed)
-                pass 
-                # Note: The BracketManager's own on_tick loop handles most cleanup, 
-                # but explicit sync can be added here if needed.
+            old_status = order.status
+            # ✅ FIX: Handle String vs Enum safely
+            order.status = self._parse_status(status)
+            order.filled_quantity = int(order_update.get("filled_quantity", 0))
+            
+            avg_price = order_update.get("average_price")
+            if avg_price:
+                order.fill_price = float(avg_price)
+            elif not order.fill_price:
+                order.fill_price = float(order_update.get("price", 0))
+        
+        # FILL DETECTION -> BRACKET ACTIVATION
+        if status in ["COMPLETE", "FILLED"]:
+            self._logger.info(f"✅ FILL DETECTED: {order_id} @ {order.fill_price}")
+            
+            # A. Activate Virtual Bracket
+            if self._bracket_manager:
+                try:
+                    self._bracket_manager.confirm_entry_fill(order_id, order.fill_price)
+                    self._logger.info(f"🎯 BRACKET ACTIVATED: {order.symbol}")
+                except Exception as exc:
+                    self._logger.error(f"Bracket activation failed: {exc}")
+            else:
+                self._logger.warning("BracketManager not initialized!")
+
+        # B. Standard Update
+        try:
+            self._handle_bracket_update(order, old_status, order_update)
+        except Exception as exc:
+            self._logger.error(f"Bracket update failed: {exc}")
     
     def place_atomic_entry(
         self,
@@ -4025,32 +4037,80 @@ class OrderManager:
         except Exception as e:
             self._logger.error(f"Status Report Failed: {e}")
 
+    def _poll_pending_orders(self) -> None:
+        """
+        🎯 CORE FIX: Poll broker for order status and detect fills.
+        """
+        # Get snapshot of pending orders
+        with self._lock:
+            pending_orders = [
+                (order_id, order.symbol, order.status)
+                for order_id, order in self._orders.items()
+                if order.status == OrderStatus.PENDING
+            ]
+        
+        if not pending_orders:
+            return
+
+        # Poll each pending order
+        for order_id, symbol, old_status in pending_orders:
+            try:
+                # Fetch latest status from broker
+                if hasattr(self._broker, "get_order_status"):
+                    response = self._broker.get_order_status(order_id)
+                else:
+                    # Fallback: Use order history if available
+                    response = None
+                    if hasattr(self._broker, "order_history"):
+                         hist = self._broker.order_history(order_id)
+                         if hist: response = hist[-1]
+                
+                if not response:
+                    continue
+                
+                broker_status = str(response.get("status", "")).upper()
+                
+                # Check if status changed
+                if broker_status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
+                    self._logger.info(
+                        f"📡 Status Change: {order_id} -> {broker_status}",
+                        extra={"event": "order_status_changed", "order_id": order_id, "new_status": broker_status}
+                    )
+                    # CRITICAL: Process the update
+                    self.on_order_update(response)
+                    
+            except Exception as exc:
+                continue
+
     def _monitor_orders(self) -> None:
-        """Background thread: Polls status and emits Situation Reports."""
-        self._logger.info("Order monitoring thread started")
+        """
+        🔥 CRITICAL FIX: Active Fill Detection via Polling
+        1. Polls broker for order status every 2 seconds
+        2. Detects fills and triggers bracket activation
+        """
+        self._logger.info("🚀 Order monitoring thread started (POLLING MODE)")
         
         last_report_time = 0.0
+        last_poll_time = 0.0
         
-        while not self._stop_event.wait(self.POLL_INTERVAL_SEC):
+        while not self._stop_event.wait(0.5):  # Wake up every 500ms
             try:
-                # 1. Status Sync (Fast Loop - Every 2s)
-                self.reconcile_open_orders_with_broker()
-                
-                # 2. Situation Report (Slow Loop - Every 60s)
                 now = time.time()
-                if now - last_report_time > 60.0:
+                
+                # CRITICAL: Fast Poll for Fills (Every 2 seconds)
+                if now - last_poll_time >= 2.0:
+                    self._poll_pending_orders()
+                    last_poll_time = now
+                
+                # Slow Status Report (Every 60 seconds)
+                if now - last_report_time >= 60.0:
                     self._log_status_report()
                     last_report_time = now
                 
             except Exception as exc:
-                error_str = str(exc).lower()
-                if "401" in error_str or "403" in error_str:
-                    self._logger.critical("FATAL: Broker session expired. Stopping monitor.")
-                    self._stop_event.set()
-                    return
-                
-                self._logger.error(f"Monitor loop error: {exc}")
+                self._logger.error(f"Monitor loop error: {exc}", exc_info=True)
                 time.sleep(1.0)
+        self._logger.info("Order monitoring thread stopped")
 
     def _handle_order_filled(self, order: OrderDetails) -> None:
         """Callback when order is filled."""
