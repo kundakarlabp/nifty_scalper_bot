@@ -1525,6 +1525,28 @@ class OrderManager:
         from nifty_scalper_bot.data.trade_store import TradeIntent
 
         normalized_symbol = symbol.strip().upper()
+        # ---------------------------------------------------------------------
+        # 🛑 FIX 1: Smart Idempotency with Timeout
+        # ---------------------------------------------------------------------
+        with self._lock:
+            current_time = time.time()
+            # Check for any pending orders on this symbol same side
+            pending_orders = [
+                o for o in self._orders.values()
+                if o.symbol == normalized_symbol 
+                and o.side == side
+                and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
+                # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
+                # This prevents getting stuck forever if an order is lost in limbo
+                and (current_time - o.timestamp.timestamp() < 45)
+            ]
+            
+            if pending_orders:
+                self._logger.warning(
+                    f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
+                    extra={"event": "duplicate_block", "symbol": normalized_symbol}
+                )
+                return None
 
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
@@ -1644,6 +1666,8 @@ class OrderManager:
             f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})",
             extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
         )
+
+        
         
         # ---------------------------------------------------------------------
         # 7. EXECUTION LOOP (With Anti-Zombie Timeout)
@@ -1737,6 +1761,19 @@ class OrderManager:
                 
         self._logger.error("❌ Order placement failed after retries.")
         return None
+        # ---------------------------------------------------------------------
+        # 🛑 FIX 3: Safe Instant Sync (0.5s Delay)
+        # ---------------------------------------------------------------------
+        try:
+            time.sleep(0.5) # Wait for Broker Latency
+            if hasattr(self._broker, "get_order_status"):
+                status_update = self._broker.get_order_status(order_id)
+                if status_update:
+                    self.on_order_update(status_update)
+        except Exception:
+            pass
+            
+        return order_id
     
     def guard_existing_position(
         self,
