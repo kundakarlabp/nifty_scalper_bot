@@ -482,9 +482,13 @@ class BracketManager:
                         LOGGER.debug(f"📉 ATR Trail {bracket.symbol}: SL -> {potential_sl:.2f}")
 
     def _check_stop_loss(self, bracket: BracketState, ltp: float) -> bool:
-        """Returns True if SL hit and exit fired."""
+        """Returns True if SL hit and exit fired (Safe against 0.0)."""
         triggered = False
         reason = ""
+
+        # 🛑 SAFETY: Ignore if SL is 0.0 (Disabled/Unset)
+        if bracket.sl_trigger_price <= 0:
+            return False
 
         if bracket.side == "BUY":
             if ltp <= bracket.sl_trigger_price:
@@ -530,7 +534,11 @@ class BracketManager:
                         self._move_sl_to_breakeven(bracket)
 
     def _check_final_target(self, bracket: BracketState, ltp: float) -> None:
-        """Checks Final TP."""
+        """Checks Final TP (Safe against 0.0)."""
+        # 🛑 SAFETY: Ignore if TP is 0.0 (Disabled/Unset)
+        if bracket.tp_trigger_price <= 0:
+            return
+
         triggered = False
         if bracket.side == "BUY":
             if ltp >= bracket.tp_trigger_price:
