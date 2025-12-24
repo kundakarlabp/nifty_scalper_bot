@@ -225,33 +225,52 @@ class BracketManager:
         trailing_atr_mult: float | None = None,
         activate_immediately: bool = True
     ) -> None:
-        """Register a position for monitoring with full logic."""
+        """
+        Register a position for monitoring with full logic.
+        Includes defensive checks for 0.0 SL/TP to prevent 'Suicide Exits'.
+        """
         with self._lock:
-            # Deduplication
+            # 1. Deduplication: Update existing if found
             if order_id in self._brackets:
                 LOGGER.warning(f"Bracket {order_id} exists. Updating triggers.")
                 existing = self._brackets[order_id]
-                existing.sl_trigger_price = sl
-                existing.tp_trigger_price = tp
-                # Reset quantity if re-registering
-                existing.quantity = qty
-                existing.remaining_quantity = qty
+                # Only update non-zero values to avoid overwriting with bad data
+                if sl > 0: existing.sl_trigger_price = sl
+                if tp > 0: existing.tp_trigger_price = tp
+                # Reset quantity if re-registering (e.g. scale-in)
+                existing.quantity = abs(qty)
+                existing.remaining_quantity = abs(qty)
+                self.save_state() # Persist updates
                 return
 
-            # Setup Trailing Config
+            # 2. Setup Trailing Config
             t_config = {}
             if trailing_atr_mult:
                 t_config = {'mode': 'ATR', 'mult': trailing_atr_mult}
             elif self._auto_reduce_sl:
-                 # Default logic if enabled but no explicit ATR
-                 t_config = {'mode': 'STANDARD'}
+                # Default logic if enabled but no explicit ATR
+                t_config = {'mode': 'STANDARD'}
 
-            # Setup TP Levels (Partial Exits)
+            # 3. Setup TP Levels (Partial Exits)
             targets = []
-            if tp1_price and tp1_qty and tp1_qty < qty:
+            if tp1_price and tp1_qty and tp1_qty < abs(qty):
                 targets.append(TargetLevel(price=tp1_price, quantity=tp1_qty, name="TP1"))
                 LOGGER.info(f"🔹 Configured TP1 for {symbol}: {tp1_price} (Qty: {tp1_qty})")
 
+            # 4. ORPHAN SAFETY CHECK (CRITICAL)
+            # If SL or TP are 0.0 (invalid/missing), we MUST NOT enable active exiting.
+            # This prevents the bot from seeing LTP > 0 as "Target Hit".
+            status_mode = "ACTIVE" if activate_immediately else "INACTIVE"
+            if sl <= 0 or tp <= 0:
+                LOGGER.warning(
+                    f"⚠️ Bracket {symbol} has zero SL/TP (SL={sl}, TP={tp}). "
+                    "Setting MONITORING_ONLY mode to prevent suicide exit."
+                )
+                # Force inactive so it monitors but doesn't fire
+                status_mode = "MONITORING_ONLY"
+                activate_immediately = False 
+
+            # 5. Create State Object
             state = BracketState(
                 entry_order_id=order_id,
                 symbol=symbol,
@@ -271,13 +290,13 @@ class BracketManager:
             
             self._brackets[order_id] = state
             
-            # Populate Indices
+            # 6. Populate Indices
             self._order_to_entry[order_id] = order_id
             if symbol not in self._symbol_map:
                 self._symbol_map[symbol] = []
             self._symbol_map[symbol].append(order_id)
             
-            # --- INITIALIZE ADAPTIVE CONTROLLER (The "Brain") ---
+            # 7. Initialize Adaptive Controller (The "Brain")
             if trailing_atr_mult and self._atr_provider and AdaptiveTrailingController:
                 try:
                     spec = TrailingSpec(
@@ -308,13 +327,18 @@ class BracketManager:
 
             trail_msg = f"| Trail={t_config.get('mode', 'None')}"
             LOGGER.info(
-                f"🛡️ Bracket Active for {symbol} (Qty: {qty}): "
-                f"Entry={price} | SL={sl} | TP={tp} {trail_msg}"
+                f"🛡️ Bracket Registered for {symbol} (Qty: {qty}): "
+                f"Entry={price} | SL={sl} | TP={tp} {trail_msg} | Mode={status_mode}"
             )
 
-            # Record metric
+            # 8. Record metric & Persist
             if METRICS_AVAILABLE and METRICS:
-                METRICS.brackets_created.inc()
+                try:
+                    METRICS.brackets_created.inc()
+                except Exception: pass
+            
+            # ✅ FIX: Persist immediately so we don't lose this if we crash now
+            self.save_state()
 
     def confirm_entry_fill(self, order_id: str, fill_price: float = 0.0) -> None:
         """Called externally when the entry order fills."""
