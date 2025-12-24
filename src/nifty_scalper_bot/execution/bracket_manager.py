@@ -776,18 +776,31 @@ class BracketManager:
         with self._lock:
             for eid, b in self._brackets.items():
                 data[eid] = {
+                    "entry_order_id": eid,                       # ← ADD THIS
                     "symbol": b.symbol,
                     "quantity": b.quantity,
+                    "remaining_quantity": b.remaining_quantity,
                     "entry_price": b.entry_price,
                     "side": b.side,
                     "sl_trigger_price": b.sl_trigger_price,
                     "tp_trigger_price": b.tp_trigger_price,
                     "trailing_enabled": b.trailing_enabled,
+                    "trailing_config": b.trailing_config,        # ← ADD THIS
                     "active": b.active,
-                    "remaining_quantity": b.remaining_quantity,
                     "created_at": b.created_at,
+                    "updated_at": b.updated_at,                  # ← ADD THIS
                     "highest_ltp": b.highest_ltp,
-                    "lowest_ltp": b.lowest_ltp
+                    "lowest_ltp": b.lowest_ltp,
+                    "last_ltp": b.last_ltp,                      # ← ADD THIS
+                    "tp_levels": [                               # ← ADD THIS
+                        {
+                            "price": tl.price,
+                            "quantity": tl.quantity,
+                            "executed": tl.executed,
+                            "name": tl.name
+                        } for tl in b.tp_levels
+                    ],
+                    "tag": b.tag                                 # ← ADD THIS
                 }
         
         try:
@@ -797,6 +810,7 @@ class BracketManager:
                 json.dump(data, f, indent=2)
         except Exception as e:
             LOGGER.error(f"Failed to save bracket state: {e}")
+
 
     def load_state(self) -> None:
         """Restore brackets from disk on startup."""
