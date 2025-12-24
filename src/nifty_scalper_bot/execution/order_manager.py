@@ -3781,8 +3781,11 @@ class OrderManager:
                 continue
             self._register_order(details)
             try:
+                # ✅ FIX: Safe Enum Access
+                status_str = details.status.name if hasattr(details.status, "name") else str(details.status)
+                
                 self._positions.update_order_status(
-                    details.order_id, details.status.name, details.fill_price
+                    details.order_id, status_str, details.fill_price
                 )
             except Exception:  # pragma: no cover - defensive
                 self._logger.debug("position_status_update_failed", exc_info=True)
@@ -8991,6 +8994,17 @@ class OrderManager:
                 extra={"event": "orphan_guarding", "symbol": symbol}
             )
 
+            # 🛑 FIX: Validate prices before registering
+            if sl_price <= 0 or tp_price <= 0:
+                self._logger.warning(
+                    f"⚠️ Invalid protection levels for {symbol}: SL={sl_price}, TP={tp_price}. Setting MONITOR mode.",
+                    extra={"event": "orphan_guard_monitor_only"}
+                )
+                # Set dummy values that won't trigger (SL=0, TP=999999) or disable logic
+                # Better approach: Don't activate immediate triggers if 0
+                sl_price = 0.0
+                tp_price = 0.0 
+            
             # Register with Sniper Engine
             self._bracket_manager.register_virtual_bracket(
                 order_id=synthetic_id,
