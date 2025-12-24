@@ -4165,26 +4165,50 @@ class OrderManager:
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Crash Recovery)
     # ----------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # 💾 PERSISTENCE LAYER (Crash Recovery)
+    # ----------------------------------------------------------------
     def save_orders(self) -> None:
-        """Persist active orders to disk."""
+        """Persist active orders to disk (Crash-Proof Version)."""
         try:
             data = {}
             with self._lock:
                 for oid, order in self._orders.items():
-                    # Save active orders + recently closed ones
-                    # We skip 'ghost_fix' or temporary tags if needed, but saving all is safer
-                    if order.status not in [OrderStatus.CANCELLED, OrderStatus.REJECTED]:
-                         # Convert Dataclass to dict
-                         record = asdict(order)
-                         # Serialize Enums
-                         record['status'] = order.status.name
-                         record['order_type'] = order.order_type.name
-                         data[oid] = record
+                    # Skip completely dead orders to keep file size manageable
+                    if order.status in [OrderStatus.CANCELLED, OrderStatus.REJECTED]:
+                        continue
 
+                    # 1. Convert Dataclass to dict
+                    record = asdict(order)
+
+                    # 2. SAFE ENUM SERIALIZATION (The Critical Fix)
+                    # Handle 'status' (Enum vs String)
+                    if hasattr(order.status, "name"):
+                        record['status'] = order.status.name
+                    else:
+                        record['status'] = str(order.status).upper()
+
+                    # Handle 'order_type' (Enum vs String)
+                    if hasattr(order.order_type, "name"):
+                        record['order_type'] = order.order_type.name
+                    else:
+                        record['order_type'] = str(order.order_type).upper()
+
+                    data[oid] = record
+
+            # 3. Write to disk safely
             path = Path("data/orders.json")
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
+            
+            # Atomic Write: Write to temp file first, then rename
+            # This prevents "half-written" files if power is cut
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2, default=str)
+            
+            # Atomic replacement
+            os.replace(tmp_path, path)
+
         except Exception as e:
             self._logger.error(f"Failed to save orders: {e}")
 
