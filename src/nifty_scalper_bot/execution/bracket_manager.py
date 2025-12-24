@@ -10,6 +10,8 @@ from threading import RLock
 import time
 import json
 import os
+from datetime import datetime, timezone 
+import math 
 from pathlib import Path
 _THREADING_MODULE = threading
 _RLOCK_CLASS = RLock
@@ -731,8 +733,8 @@ class BracketManager:
                 # Cleanup Controller
                 if entry_id in self._trailing_controllers:
                     del self._trailing_controllers[entry_id]
-            # ✅ FIX: Persist removal
-            self.save_state()
+                # ✅ FIX: Persist removal
+                self.save_state()
 
             # Cleanup reverse index
             if entry_id in self._order_to_entry:
@@ -778,10 +780,11 @@ class BracketManager:
                     "quantity": b.quantity,
                     "entry_price": b.entry_price,
                     "side": b.side,
-                    "stop_loss": b.stop_loss,
-                    "take_profit": b.take_profit,
+                    "sl_trigger_price": b.sl_trigger_price,
+                    "tp_trigger_price": b.tp_trigger_price,
                     "trailing_enabled": b.trailing_enabled,
-                    "status": "ACTIVE" if b.active else "INACTIVE",
+                    "active": b.active,
+                    "remaining_quantity": b.remaining_quantity,
                     "created_at": b.created_at,
                     "highest_ltp": b.highest_ltp,
                     "lowest_ltp": b.lowest_ltp
@@ -799,41 +802,133 @@ class BracketManager:
         """Restore brackets from disk on startup."""
         path = self._get_storage_path()
         if not path.exists():
+            LOGGER.info("No bracket state file found - starting fresh")
             return
 
         try:
             with open(path, "r") as f:
                 data = json.load(f)
             
+            restored_count = 0
             with self._lock:
                 for eid, d in data.items():
-                    # Reconstruct BracketOrder object
-                    b = BracketState(
-                        entry_id=eid,
-                        symbol=d["symbol"],
-                        quantity=d["quantity"],
-                        entry_price=d["entry_price"],
-                        side=d["side"],
-                        stop_loss=d["stop_loss"],
-                        take_profit=d["take_profit"],
-                        trailing_enabled=d.get("trailing_enabled", False),
-                        created_at=d.get("created_at", time.time()),
-                        status=d.get("status", "ACTIVE")
-                    )
-                    # ✅ FIX: Use the correct method name and mapping logic
-                    with self._lock:
+                    try:
+                        # Restore TargetLevels
+                        tp_levels = []
+                        for tl_data in d.get("tp_levels", []):
+                            tp_levels.append(TargetLevel(
+                                price=tl_data["price"],
+                                quantity=tl_data["quantity"],
+                                executed=tl_data.get("executed", False),
+                                name=tl_data.get("name", "TP")
+                            ))
+                        
+                        # Reconstruct BracketState with CORRECT parameters
+                        b = BracketState(
+                            entry_order_id=eid,                                    # ✅ FIXED: was entry_id
+                            symbol=d["symbol"],
+                            quantity=d["quantity"],
+                            entry_price=d["entry_price"],
+                            side=d["side"],
+                            sl_trigger_price=d["sl_trigger_price"],                # ✅ FIXED: was stop_loss
+                            tp_trigger_price=d["tp_trigger_price"],                # ✅ FIXED: was take_profit
+                            remaining_quantity=d.get("remaining_quantity", d["quantity"]),
+                            tp_levels=tp_levels,
+                            trailing_enabled=d.get("trailing_enabled", False),
+                            trailing_config=d.get("trailing_config", {}),
+                            created_at=d.get("created_at", time.time()),
+                            updated_at=d.get("updated_at", time.time()),
+                            highest_ltp=d.get("highest_ltp", d["entry_price"]),
+                            lowest_ltp=d.get("lowest_ltp", d["entry_price"]),
+                            last_ltp=d.get("last_ltp", d["entry_price"]),
+                            tag=d.get("tag")
+                        )
+                        
+                        # Set active state AFTER construction
+                        b.active = d.get("active", True)
+                        b.virtual_sl_id = f"vsl_{eid}"
+                        
+                        # Register bracket
                         self._brackets[eid] = b
+                        self._order_to_entry[eid] = eid
+                        
+                        # Update symbol map
                         if b.symbol not in self._symbol_map:
                             self._symbol_map[b.symbol] = []
                         self._symbol_map[b.symbol].append(eid)
                         
-                        # Initialize trailing controller if needed
-                        if b.trailing_enabled and AdaptiveTrailingController:
-                             self._trailing_controllers[eid] = AdaptiveTrailingController(
-                                entry_price=b.entry_price,
-                                side=b.side,
-                                tick_size=0.05
-                            )
-            LOGGER.info(f"♻️ Restored {len(data)} virtual brackets from disk.")
+                        # Restore trailing controller if needed
+                        if b.trailing_enabled and b.trailing_config.get("mode") == "ATR":
+                            if self._atr_provider and AdaptiveTrailingController:
+                                try:
+                                    mult = b.trailing_config.get("mult", 1.5)
+                                    spec = TrailingSpec(
+                                        trail_by=20.0,
+                                        step=1.0,
+                                        activation=0.1
+                                    )
+                                    ctrl = AdaptiveTrailingController(
+                                        symbol=b.symbol,
+                                        side="LONG" if b.side == "BUY" else "SHORT",
+                                        entry=b.entry_price,
+                                        sl_order_id=b.virtual_sl_id,
+                                        variety="virtual",
+                                        spec=spec,
+                                        get_ltp=lambda s: b.last_ltp,
+                                        modify_order=self._virtual_modify_sl,
+                                        atr_provider=self._atr_provider,
+                                        journal=MockJournal(),
+                                        atr_multiplier=mult
+                                    )
+                                    self._trailing_controllers[eid] = ctrl
+                                    LOGGER.debug(f"🧠 Restored controller for {b.symbol}")
+                                except Exception as e:
+                                    LOGGER.warning(f"Failed to restore controller for {b.symbol}: {e}")
+                        
+                        restored_count += 1
+                        
+                    except Exception as e:
+                        LOGGER.error(f"Failed to restore bracket {eid}: {e}")
+                        continue
+            
+            LOGGER.info(f"♻️ Restored {restored_count} virtual brackets from disk")
+            
+            # ✅ CRITICAL: Resubscribe to market data
+            self._resubscribe_restored_brackets()
+            
         except Exception as e:
-            LOGGER.error(f"Failed to load bracket state: {e}")
+            LOGGER.error(f"Failed to load bracket state: {e}", exc_info=True)
+
+
+    def _resubscribe_restored_brackets(self) -> None:
+        """Resubscribe to market data for all restored brackets."""
+        if not self._market_data:
+            LOGGER.warning("Cannot resubscribe: MarketDataManager not available")
+            return
+        
+        unique_symbols = set()
+        with self._lock:
+            for bracket in self._brackets.values():
+                if bracket.active and bracket.remaining_quantity > 0:
+                    unique_symbols.add(bracket.symbol)
+        
+        for symbol in unique_symbols:
+            try:
+                # Create callback closure for this symbol
+                def tick_callback(sym=symbol, ltp=None):
+                    if ltp is not None:
+                        self.on_tick(sym, ltp)
+                
+                # Register with market data manager
+                if hasattr(self._market_data, 'subscribe'):
+                    self._market_data.subscribe(symbol, tick_callback)
+                elif hasattr(self._market_data, 'register_callback'):
+                    self._market_data.register_callback(symbol, tick_callback)
+                
+                LOGGER.info(f"🔔 Resubscribed {symbol} to market data feed")
+                
+            except Exception as e:
+                LOGGER.error(f"Failed to resubscribe {symbol}: {e}")
+        
+        if unique_symbols:
+            LOGGER.info(f"✅ Resubscribed {len(unique_symbols)} symbols to market data")
