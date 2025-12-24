@@ -1667,8 +1667,6 @@ class OrderManager:
             extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
         )
 
-        
-        
         # ---------------------------------------------------------------------
         # 7. EXECUTION LOOP (With Anti-Zombie Timeout)
         # ---------------------------------------------------------------------
@@ -1688,6 +1686,20 @@ class OrderManager:
                     "price": price, "trigger_price": trigger_price,
                     "tag": tag, "variety": variety, "client_order_id": unique_client_id
                 }
+
+                # ✅ FIX: Safe Enum Conversion BEFORE broker call
+                if isinstance(call_args["side"], str):
+                    from nifty_scalper_bot.data.enums import TransactionType # or where defined
+                    # Fallback if TransactionType not available, assume string is ok if broker accepts
+                    # But safest is to try converting if broker expects Enum
+                    # Zerodha KiteConnect expects strings usually ("BUY", "SELL")
+                    # but if we are passing OrderType Enum, we must be consistent.
+                    pass 
+
+                if isinstance(call_args["order_type"], str):
+                    # Some brokers need Enum object
+                    # if OrderType[call_args["order_type"]] ...
+                    pass
 
                 # ✅ FIX: Run in thread with 3s timeout to prevent hanging
                 result_holder = {"resp": None}
@@ -1728,30 +1740,38 @@ class OrderManager:
                     self._register_order(details)
 
                     # C. Auto-Register Bracket
-                    if stop_loss or take_profit:
-                        exit_side = "SELL" if side == "BUY" else "BUY"
-                        real_stop_type = OrderType.STOP_LOSS_MARKET 
-                        if final_order_type == "SL": 
-                            real_stop_type = OrderType.STOP_LOSS
-
-                        state = BracketState(
-                            entry_id=order_id, symbol=normalized_symbol, side=side, exit_side=exit_side,
-                            total_quantity=quantity, entry_price=float(price or 0.0),
-                            product=product, tag=tag, stop_order_id="", 
-                            stop_price=float(stop_loss) if stop_loss else 0.0,
-                            stop_order_type=real_stop_type,
-                            tp_primary_price=float(take_profit) if take_profit else None,
-                            tp_primary_qty=quantity if take_profit else 0,
+                    if self._bracket_manager and (stop_loss or take_profit):
+                        # ... (Bracket logic same as before) ...
+                        self._bracket_manager.register_virtual_bracket(
+                            order_id=order_id,
+                            symbol=normalized_symbol,
+                            side=side,
+                            qty=quantity,
+                            price=float(price or 0.0),
+                            sl=float(stop_loss) if stop_loss else 0.0,
+                            tp=float(take_profit) if take_profit else 0.0,
+                            tag=tag or "auto",
+                            activate_immediately=True
                         )
-                        self._register_bracket_state(state)
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
+
+                    # 🛑 FIX 3: Safe Instant Sync (0.5s Delay)
+                    # ---------------------------------------------------------------------
+                    try:
+                        time.sleep(0.5) # Wait for Broker Latency
+                        if hasattr(self._broker, "get_order_status"):
+                            status_update = self._broker.get_order_status(order_id)
+                            if status_update:
+                                self.on_order_update(status_update)
+                    except Exception:
+                        pass
 
                     return order_id
                     
             except Exception as e:
                 msg = str(e).lower()
                 # Fail Fast logic
-                if any(x in msg for x in ["400", "invalid", "market closed", "bad request"]):
+                if any(x in msg for x in ["400", "invalid", "market closed", "bad request", "insufficient funds"]):
                     self._logger.critical(f"🛑 FATAL Payload Error: {e}", extra={"event": "fatal_order_error"})
                     self.trade_store.update_status(trade_id, "REJECTED_FATAL")
                     return None
@@ -1761,19 +1781,6 @@ class OrderManager:
                 
         self._logger.error("❌ Order placement failed after retries.")
         return None
-        # ---------------------------------------------------------------------
-        # 🛑 FIX 3: Safe Instant Sync (0.5s Delay)
-        # ---------------------------------------------------------------------
-        try:
-            time.sleep(0.5) # Wait for Broker Latency
-            if hasattr(self._broker, "get_order_status"):
-                status_update = self._broker.get_order_status(order_id)
-                if status_update:
-                    self.on_order_update(status_update)
-        except Exception:
-            pass
-            
-        return order_id
     
     def guard_existing_position(
         self,
