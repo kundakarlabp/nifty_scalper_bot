@@ -3763,6 +3763,7 @@ class OrderManager:
             return
         if response is None:
             return
+        
         raw_orders: list[Mapping[str, Any]] = []
         if isinstance(response, Mapping):
             raw_orders = [cast(Mapping[str, Any], response)]
@@ -3774,31 +3775,38 @@ class OrderManager:
             ]
         else:
             return
+            
         reconciled: list[str] = []
         for raw in raw_orders:
             details = self._coerce_broker_open_order(raw)
             if details is None:
                 continue
+            
             self._register_order(details)
+            
             try:
-                # ✅ FIX: Safe Enum Access
-                status_str = details.status.name if hasattr(details.status, "name") else str(details.status)
+                # ✅ FIX: Safe Enum Access (Handle String vs Enum)
+                # This prevents 'str object has no attribute name' crashes
+                status_val = details.status
+                status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
                 
                 self._positions.update_order_status(
                     details.order_id, status_str, details.fill_price
                 )
             except Exception:  # pragma: no cover - defensive
                 self._logger.debug("position_status_update_failed", exc_info=True)
+            
             if details.client_order_id and details.status in self.FINAL_STATUSES:
                 self._client_order_index.pop(details.client_order_id, None)
+            
             reconciled.append(details.order_id)
+            
         if reconciled:
             self._sync_positions_to_hub()
             self._logger.info(
                 "order_reconcile_complete",
                 extra={"event": "order_reconcile", "orders": reconciled},
             )
-
     def exit_position(
         self, 
         symbol: str, 
