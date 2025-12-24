@@ -4214,8 +4214,69 @@ class OrderManager:
                     self._orders[oid] = order
                     
             self._logger.info(f"♻️ Restored {len(data)} orders from disk.")
+            self._verify_restored_orders()
         except Exception as e:
             self._logger.error(f"Failed to load orders: {e}")
+
+    def _verify_restored_orders(self) -> None:
+        """
+        Startup Hygiene: Verify all 'PENDING' restored orders against Broker.
+        Uses BULK FETCH to avoid API rate limits and clean up 'Phantom' orders.
+        """
+        # 1. Identify what needs verification (Non-Final states)
+        with self._lock:
+            to_verify = [
+                oid for oid, o in self._orders.items()
+                if o.status not in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED]
+            ]
+
+        if not to_verify:
+            return
+
+        self._logger.info(f"🔍 Verifying {len(to_verify)} restored orders with broker...")
+
+        try:
+            # 2. BULK FETCH (One API Call) - Safe & Fast
+            all_remote = []
+            if hasattr(self._broker, "orders"):
+                all_remote = self._broker.orders()
+            elif hasattr(self._broker, "get_orders"):
+                all_remote = self._broker.get_orders()
+            else:
+                self._logger.warning("Broker does not support bulk verify. Skipping.")
+                return
+
+            if not all_remote:
+                # If broker returns empty list, ALL pending orders are ghosts.
+                # But we must be careful. Let's assume connection is good.
+                pass
+
+            # Map remote orders for O(1) lookup
+            remote_map = {str(o.get('order_id')): o for o in all_remote}
+
+            # 3. Reconcile
+            verified_count = 0
+            stale_count = 0
+
+            for oid in to_verify:
+                if oid in remote_map:
+                    # Order exists on broker -> Update local state
+                    self.on_order_update(remote_map[oid])
+                    verified_count += 1
+                else:
+                    # Order MISSING on broker -> It is a Phantom/Ghost. Kill it.
+                    with self._lock:
+                        if oid in self._orders:
+                            self._orders[oid].status = OrderStatus.CANCELLED
+                            self._orders[oid].rejection_reason = "Stale/Phantom Order cleaned on startup"
+                    stale_count += 1
+
+            self._logger.info(f"✅ Verification Complete: {verified_count} synced, {stale_count} phantoms cleaned.")
+            # Save the cleaned state immediately
+            self.save_orders()
+
+        except Exception as e:
+            self._logger.error(f"❌ Failed to verify restored orders: {e}")
 
     def _monitor_orders(self) -> None:
         """
