@@ -160,7 +160,7 @@ class BracketManager:
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
-        
+        self._exit_cooldowns: Dict[str, float] = {}
         self._lock = _RLOCK_CLASS()
         self._running = True
         
@@ -557,23 +557,35 @@ class BracketManager:
 
     def _execute_exit(self, bracket: BracketState, qty: int, reason: str, is_partial: bool) -> bool:
         """
-        Send Market Order to Broker.
+        Send Market Order to Broker with Cooldown & Double-Fire Protection.
         Returns True if successful.
         """
         if qty <= 0:
             return False
 
+        now = time.time()
+
         with self._lock:
-            # Double check if we still have quantity
+            # 🛑 1. COOLDOWN CHECK (Prevent Rapid Firing)
+            last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0)
+            if now - last_attempt < 10.0:
+                LOGGER.info(f"⏳ Exit Cooldown Active for {bracket.symbol}. Skipping duplicate fire.")
+                return False
+
+            # Double check if we still have quantity or are active
             if bracket.remaining_quantity <= 0 or not bracket.active:
                 return False
             
-            # State Update *Before* Order to prevent double firing
+            # Set Cooldown IMMEDIATELY
+            self._exit_cooldowns[bracket.entry_order_id] = now
+            
+            # 🛑 2. STATE LOCKING (Update *Before* Order)
             bracket.remaining_quantity -= qty
             
             if not is_partial or bracket.remaining_quantity <= 0:
                 bracket.active = False # Deactivate monitoring
-            # ✅ FIX: Persist exit state
+            
+            # ✅ FIX: Persist exit state to disk
             self.save_state()
             
         LOGGER.warning(f"⚡ EXECUTING EXIT: {bracket.symbol} | Qty: {qty} | Reason: {reason}")
@@ -587,14 +599,17 @@ class BracketManager:
                 side=exit_side,
                 quantity=qty,
                 order_type="MARKET", 
-                tag=f"virt_exit_{bracket.tag[:5]}",
+                tag=f"virt_exit_{bracket.tag[:5] if bracket.tag else 'auto'}",
                 check_risk=False, # Force exit
                 product="MIS"
             )
             
             # Metrics
             if METRICS_AVAILABLE and METRICS:
-                METRICS.brackets_triggered.inc()
+                try:
+                    METRICS.brackets_triggered.inc()
+                except Exception:
+                    pass
                 
             # Cleanup if full exit
             if not is_partial and bracket.remaining_quantity <= 0:
@@ -604,13 +619,16 @@ class BracketManager:
 
         except Exception as e:
             LOGGER.critical(f"🛑 EXIT FAILED for {bracket.symbol}: {e}", exc_info=True)
-            # Revert State on Failure
+            
+            # 🛑 3. REVERT STATE ON FAILURE
             with self._lock:
                 bracket.remaining_quantity += qty
                 if not is_partial:
-                    bracket.active = True 
+                    bracket.active = True
+                # Note: We do NOT clear cooldown here. We force a wait to prevent API spam.
+                self.save_state()
+                
             return False
-
     # --------------------------------------------------------------------------
     # 4. SYNC & MANUAL INTERVENTION (World Class)
     # --------------------------------------------------------------------------
@@ -733,13 +751,18 @@ class BracketManager:
                 # Cleanup Controller
                 if entry_id in self._trailing_controllers:
                     del self._trailing_controllers[entry_id]
-                # ✅ FIX: Persist removal
+
+                # ✅ NEW: Cleanup Exit Cooldown
+                if entry_id in self._exit_cooldowns:
+                    del self._exit_cooldowns[entry_id]
+
+                # ✅ FIX: Persist removal immediately
                 self.save_state()
 
-            # Cleanup reverse index
+            # Cleanup reverse index (outside main check if orphaned)
             if entry_id in self._order_to_entry:
                 del self._order_to_entry[entry_id]
-
+                
     def cleanup_stale_brackets(self, max_age_seconds: int = 86400) -> int:
         """Remove old inactive brackets."""
         now = time.time()
