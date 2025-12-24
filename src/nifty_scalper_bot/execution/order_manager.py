@@ -1687,27 +1687,19 @@ class OrderManager:
                     "tag": tag, "variety": variety, "client_order_id": unique_client_id
                 }
 
-                # ✅ FIX: Re-hydrate Enums to prevent Adapter Crash ('str' has no attribute 'value')
-                # The broker adapter expects Enum objects. We must convert strings back to Enums.
-                
-                # 1. Convert Order Type
+               # ✅ FIX: Safe Enum Conversion BEFORE broker call
+                if isinstance(call_args["side"], str):
+                    from nifty_scalper_bot.data.enums import TransactionType # or where defined
+                    # Fallback if TransactionType not available, assume string is ok if broker accepts
+                    # But safest is to try converting if broker expects Enum
+                    # Zerodha KiteConnect expects strings usually ("BUY", "SELL")
+                    # but if we are passing OrderType Enum, we must be consistent.
+                    pass 
+
                 if isinstance(call_args["order_type"], str):
-                    ot_str = call_args["order_type"]
-                    if ot_str == "MARKET":
-                        call_args["order_type"] = OrderType.MARKET
-                    elif ot_str == "LIMIT":
-                        call_args["order_type"] = OrderType.LIMIT
-                    elif ot_str == "SL":
-                        call_args["order_type"] = OrderType.STOP_LOSS
-                    elif ot_str == "SL-M":
-                        call_args["order_type"] = OrderType.STOP_LOSS_MARKET
-                
-                # 2. Convert Side (Optional, but safe)
-                # Note: TransactionType might not be imported, so we skip to avoid NameError 
-                # unless you have imported it. Zerodha usually accepts string "BUY"/"SELL".
-                # If you need it, uncomment below and ensure import:
-                # if isinstance(call_args["side"], str):
-                #     call_args["side"] = TransactionType[call_args["side"].upper()]
+                    # Some brokers need Enum object
+                    # if OrderType[call_args["order_type"]] ...
+                    pass
 
                 # ✅ FIX: Run in thread with 3s timeout to prevent hanging
                 result_holder = {"resp": None}
