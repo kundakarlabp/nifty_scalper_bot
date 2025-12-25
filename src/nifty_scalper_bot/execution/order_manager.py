@@ -1639,31 +1639,86 @@ class OrderManager:
         )
         self.trade_store.add_trade(intent)
 
+# ---------------------------------------------------------------------
+        # 6. PAYLOAD OPTIMIZATION (SL-M Fix) - CORRECTED
         # ---------------------------------------------------------------------
-        # 6. PAYLOAD OPTIMIZATION (SL-M Fix)
-        # ---------------------------------------------------------------------
-        raw_type = order_type.value if hasattr(order_type, "value") else str(order_type)
         
-        # [FIX] Zerodha blocks SL-M for Options. We must map to SL (Limit).
-        zerodha_type_map = {
-            "STOP_LOSS_MARKET": "SL", "SL-M": "SL",
-            "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
-            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL"
-        }
-        final_order_type = zerodha_type_map.get(raw_type.upper(), raw_type)
+        # ✅ HELPER: Normalize OrderType to Zerodha string BEFORE any broker call
+        def _normalize_order_type(ot: Any) -> str:
+            """Convert OrderType Enum to Zerodha-compatible string."""
+            # Fast path: Already a valid Zerodha string
+            if isinstance(ot, str):
+                ot_upper = ot.strip().upper()
+                if ot_upper in {"MARKET", "LIMIT", "SL", "SL-M"}:
+                    return ot_upper
+            
+            # Enum path: Extract name
+            if isinstance(ot, OrderType):
+                ot_name = ot.name.upper()
+            elif hasattr(ot, "name"):
+                ot_name = str(ot.name).upper()
+            elif hasattr(ot, "value"):
+                ot_name = str(ot.value).upper()
+            else:
+                ot_name = str(ot).upper()
+            
+            # Map to Zerodha format
+            zerodha_map = {
+                "MARKET": "MARKET",
+                "LIMIT": "LIMIT",
+                "STOP_LOSS": "SL",
+                "STOPLOSS": "SL",
+                "STOP_LOSS_MARKET": "SL-M",
+                "STOPLOSSMARKET": "SL-M",
+                "SL-M": "SL-M",
+                "SL": "SL",
+                "STOP_LOSS_LIMIT": "SL",
+                "STOPLOSSLIMIT": "SL"
+            }
+            return zerodha_map.get(ot_name, "MARKET")
 
-        # [FIX] Calculate Limit Price for converted SL orders
-        if final_order_type == "SL" and (price is None or price == 0.0) and trigger_price:
-            buffer_pct = 0.03 # 3% Buffer
-            if side == "BUY": # Short Exit -> Buy higher
+        # ✅ HELPER: Normalize side to Zerodha string
+        def _normalize_side(s: Any) -> str:
+            """Convert TransactionType Enum to 'BUY' or 'SELL'."""
+            if isinstance(s, str):
+                s_upper = s.strip().upper()
+                if s_upper in {"BUY", "SELL"}:
+                    return s_upper
+                if s_upper == "LONG":
+                    return "BUY"
+                if s_upper == "SHORT":
+                    return "SELL"
+            
+            if hasattr(s, "name"):
+                s_name = str(s.name).upper()
+            elif hasattr(s, "value"):
+                s_name = str(s.value).upper()
+            else:
+                s_name = str(s).upper()
+            
+            side_map = {"BUY": "BUY", "SELL": "SELL", "LONG": "BUY", "SHORT": "SELL"}
+            return side_map.get(s_name, "BUY")
+
+        # ✅ CRITICAL: Normalize BEFORE any retry attempt
+        final_order_type = _normalize_order_type(order_type)
+        normalized_side = _normalize_side(side)
+
+        # [FIX] Zerodha blocks SL-M for Options -> Convert to SL with limit price
+        if final_order_type in {"SL", "SL-M"} and (price is None or price <= 0.0) and trigger_price:
+            buffer_pct = 0.03  # 3% Buffer
+            if normalized_side == "BUY":  # Short Exit -> Buy higher
                 price = round(trigger_price * (1 + buffer_pct), 2)
-            else: # Long Exit -> Sell lower
+            else:  # Long Exit -> Sell lower
                 price = round(trigger_price * (1 - buffer_pct), 2)
             
-            self._logger.info(f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}")
+            self._logger.info(
+                f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}",
+                extra={"event": "order.slm_to_sl_conversion", "trigger": trigger_price, "limit": price}
+            )
+            final_order_type = "SL"  # Force SL (not SL-M)
 
         self._logger.info(
-            f"🚀 Sending Order: {side} {quantity} {normalized_symbol} ({final_order_type})",
+            f"🚀 Sending Order: {normalized_side} {quantity} {normalized_symbol} ({final_order_type})",
             extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
         )
 
@@ -1680,28 +1735,21 @@ class OrderManager:
         for attempt in range(1, 4):
             try:
                 # Prepare arguments for the call
+                # ✅ CORRECTED: Use normalized strings (converted before loop)
                 call_args = {
-                    "symbol": normalized_symbol, "side": side, "quantity": quantity, 
-                    "product": product, "order_type": final_order_type, 
-                    "price": price, "trigger_price": trigger_price,
-                    "tag": tag, "variety": variety, "client_order_id": unique_client_id
+                    "symbol": normalized_symbol, 
+                    "side": normalized_side,  # ✅ Already normalized String
+                    "quantity": quantity, 
+                    "product": product, 
+                    "order_type": final_order_type, # ✅ Already normalized String
+                    "price": price, 
+                    "trigger_price": trigger_price,
+                    "tag": tag, 
+                    "variety": variety, 
+                    "client_order_id": unique_client_id
                 }
 
-               # ✅ FIX: Safe Enum Conversion BEFORE broker call
-                if isinstance(call_args["side"], str):
-                    from nifty_scalper_bot.data.enums import TransactionType # or where defined
-                    # Fallback if TransactionType not available, assume string is ok if broker accepts
-                    # But safest is to try converting if broker expects Enum
-                    # Zerodha KiteConnect expects strings usually ("BUY", "SELL")
-                    # but if we are passing OrderType Enum, we must be consistent.
-                    pass 
-
-                if isinstance(call_args["order_type"], str):
-                    # Some brokers need Enum object
-                    # if OrderType[call_args["order_type"]] ...
-                    pass
-
-                # ✅ FIX: Run in thread with 3s timeout to prevent hanging
+                # ✅ Run in thread with 3s timeout to prevent hanging
                 result_holder = {"resp": None}
                 
                 def target():
@@ -1745,7 +1793,7 @@ class OrderManager:
                         self._bracket_manager.register_virtual_bracket(
                             order_id=order_id,
                             symbol=normalized_symbol,
-                            side=side,
+                            side=normalized_side, # Use string side
                             qty=quantity,
                             price=float(price or 0.0),
                             sl=float(stop_loss) if stop_loss else 0.0,
@@ -1756,7 +1804,6 @@ class OrderManager:
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
 
                     # 🛑 FIX 3: Safe Instant Sync (0.5s Delay)
-                    # ---------------------------------------------------------------------
                     try:
                         time.sleep(0.5) # Wait for Broker Latency
                         if hasattr(self._broker, "get_order_status"):
