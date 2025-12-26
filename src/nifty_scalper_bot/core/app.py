@@ -1279,6 +1279,7 @@ class BotContext:
     risk_manager: RiskManager | None = None
     persistent_state: PersistentStateManager | None = None
     order_manager: OrderManager | None = None
+    bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
     order_queue: OrderQueue | None = None
@@ -3077,6 +3078,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             bracket_manager._stale_cleanup_age = getattr(settings.execution, "bracket_stale_cleanup_seconds", 86400)
             
             order_manager.set_bracket_manager(bracket_manager=bracket_manager)
+            ctx.bracket_manager = bracket_manager
             # ✅ FIX 2: Wire up ATR Feedback Loop
             # This ensures BracketManager always has the latest ATR for fallback calculations
             if indicator_engine and hasattr(indicator_engine, "register_callback"):
@@ -3908,6 +3910,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_manager=risk_manager,
         persistent_state=persistent_state,
         order_manager=order_manager,
+        bracket_manager=bracket_manager,
         paper_engine=paper_engine,
         safe_order_manager=safe_order_manager,
         order_queue=order_queue,
