@@ -1733,6 +1733,17 @@ class OrderManager:
                 return exc
 
         for attempt in range(1, 4):
+            # -----------------------------------------------------------------
+            # ✅ FIX: Re-hydrate Enums to prevent Adapter Crash
+            # The broker adapter expects Enum objects (e.g. OrderType.MARKET).
+            # If we pass a string "MARKET", it crashes on .value access.
+            # -----------------------------------------------------------------
+            if isinstance(call_args["order_type"], str):
+                ot_str = call_args["order_type"]
+                if ot_str == "MARKET": call_args["order_type"] = OrderType.MARKET
+                elif ot_str == "LIMIT": call_args["order_type"] = OrderType.LIMIT
+                elif ot_str == "SL": call_args["order_type"] = OrderType.STOP_LOSS
+                elif ot_str == "SL-M": call_args["order_type"] = OrderType.STOP_LOSS_MARKET
             try:
                 # Prepare arguments for the call
                 # ✅ CORRECTED: Use normalized strings (converted before loop)
