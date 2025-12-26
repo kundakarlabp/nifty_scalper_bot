@@ -3081,14 +3081,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
   
-    # ----------------------------------------------------------------
+   # ----------------------------------------------------------------
     # 2. Wire & Start BracketManager Services (Safe Zone)
     # ----------------------------------------------------------------
-    # 👇 NOTICE THE INDENTATION (4 spaces) 👇
     if ctx.bracket_manager:
         LOGGER.info("🔌 Wiring BracketManager Feeds...")
 
-        # A. Wire ATR Feed
+        # A. Wire ATR Feed (Moved from Init)
         if ctx.indicator_engine and hasattr(ctx.indicator_engine, "register_callback"):
             def _feed_atr_to_manager(symbol: str, indicators: dict) -> None:
                 atr = indicators.get("ATR")
@@ -3101,7 +3100,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception as e:
                 LOGGER.warning(f"Failed to wire ATR feed: {e}")
 
-        # B. Wire DataHub Ticks
+        # B. Wire DataHub Ticks (Prevent Zombie Mode)
         if ctx.market_data and hasattr(ctx.market_data, "data_hub"):
             def _feed_ticks_to_bracket_safe(sym, tick):
                 ltp = tick.get("ltp")
@@ -3114,22 +3113,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception as e:
                 LOGGER.error(f"Failed to wire ticks: {e}")
 
-        # C. Restore State
+        # C. Restore State & Start Tasks
         try:
             await asyncio.to_thread(ctx.bracket_manager.load_state)
-            stats = ctx.bracket_manager.get_stats()
-            LOGGER.info(f"♻️ Restored virtual brackets: {stats}")
+            LOGGER.info(f"♻️ Restored virtual brackets: {ctx.bracket_manager.get_stats()}")
         except Exception as e:
             LOGGER.error(f"Failed to restore brackets: {e}")
 
-        # D. Start Background ATR Feed Task
-        # Check if helper exists before calling
+        # Start the background feed task (if you added the helper function)
+        # asyncio.create_task(_run_atr_feed_task(ctx))
         if "_run_atr_feed_task" in globals():
-            loop = asyncio.get_running_loop()
-            loop.create_task(_run_atr_feed_task(ctx))
-            LOGGER.info("✅ Started background ATR feed task")
-        
-    LOGGER.info("✅ Startup sequence fully complete.")
+             loop = asyncio.get_running_loop()
+             loop.create_task(_run_atr_feed_task(ctx))
     
     
 
