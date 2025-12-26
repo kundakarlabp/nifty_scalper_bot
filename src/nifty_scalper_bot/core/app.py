@@ -4893,6 +4893,35 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
 
+    # ----------------------------------------------------------------
+    # ✅ FIX: Enable Persistence & Background Services
+    # ----------------------------------------------------------------
+    LOGGER.info("⚙️ Finalizing Startup: Restoring State & Services...")
+
+    # 1. Restore Brackets from Disk (Critical for Restarts)
+    if ctx.bracket_manager:
+        try:
+            # Run in thread to avoid blocking the event loop during file I/O
+            await asyncio.to_thread(ctx.bracket_manager.load_state)
+            stats = ctx.bracket_manager.get_stats()
+            LOGGER.info(f"♻️ Restored virtual brackets: {stats}")
+        except Exception as e:
+            LOGGER.error(f"Failed to restore brackets: {e}")
+
+    # 2. Start the ATR Feed Task (Fire and Forget)
+    loop = asyncio.get_running_loop()
+    loop.create_task(_run_atr_feed_task(ctx))
+
+    # 3. Reconcile Open Orders (Sync with Broker)
+    if ctx.order_manager:
+        LOGGER.info("🔍 Running Startup Reconciliation...")
+        try:
+            await asyncio.to_thread(ctx.order_manager.reconcile_open_orders)
+        except Exception as e:
+            LOGGER.error(f"Reconciliation failed: {e}")
+            
+    LOGGER.info("✅ Startup sequence fully complete.")
+
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
     """Execute graceful shutdown."""
@@ -5632,6 +5661,27 @@ class NiftyScalperApp:
                     last_heavy = now
                 continue
             break
+
+# ----------------------------------------------------------------
+# ✅ NEW HELPER: Background ATR Feed
+# ----------------------------------------------------------------
+async def _run_atr_feed_task(ctx: BotContext) -> None:
+    """Periodically pushes fresh ATR data to the Bracket Manager."""
+    LOGGER.info("🚀 Starting ATR Feed to BracketManager...")
+    while True:
+        try:
+            if ctx.bracket_manager and ctx.indicator_engine:
+                # Access protected member safely for internal core logic
+                active_symbols = list(ctx.bracket_manager._symbol_map.keys())
+                for symbol in active_symbols:
+                    atr = ctx.indicator_engine.compute_atr(symbol, period=14)
+                    if atr and atr > 0:
+                        ctx.bracket_manager.update_market_stats(symbol, atr=atr)
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(5)
 
 
 __all__ = [
