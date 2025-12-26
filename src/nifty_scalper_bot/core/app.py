@@ -3116,7 +3116,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # C. Restore State & Start Tasks
         try:
             # THIS LINE CAUSED THE ERROR - IT MUST BE INDENTED 12 SPACES
-            await asyncio.to_thread(ctx.bracket_manager.load_state)
+            ctx.bracket_manager.load_state()
             stats = ctx.bracket_manager.get_stats()
             LOGGER.info(f"♻️ Restored virtual brackets: {stats}")
         except Exception as e:
