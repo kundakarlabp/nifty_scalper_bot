@@ -418,11 +418,29 @@ class BracketManager:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
                 if b and b.active:
-                    b.last_ltp = ltp # Update LTP for controller
+                    b.last_ltp = ltp  # Update LTP for state
                     candidates.append(b)
 
         # Process without holding lock for too long (logic only)
         for bracket in candidates:
+            # -----------------------------------------------------------
+            # ✅ FIX: Update Adaptive Trailing Controller
+            # -----------------------------------------------------------
+            entry_id = bracket.entry_order_id
+            if entry_id in self._trailing_controllers:
+                ctrl = self._trailing_controllers[entry_id]
+                
+                # 1. Inject fresh ATR (Critical for dynamic trailing)
+                current_atr = self._current_atr.get(bracket.symbol)
+                if current_atr and current_atr > 0 and hasattr(ctrl, 'update_atr'):
+                    ctrl.update_atr(current_atr)
+                
+                # 2. Run controller logic (Moves the SL if conditions met)
+                ctrl.on_tick(ltp)
+            
+            # -----------------------------------------------------------
+            # ✅ Check Exits (SL/TP) using the potentially updated levels
+            # -----------------------------------------------------------
             self._check_and_fire(bracket, ltp)
 
     def _check_and_fire(self, bracket: BracketState, ltp: float) -> None:
